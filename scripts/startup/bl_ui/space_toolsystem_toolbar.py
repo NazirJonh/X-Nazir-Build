@@ -2361,6 +2361,7 @@ class _defs_sculpt:
             layout.separator()
             layout.prop(sculpt, "transform_all_objects", text="Affect All Objects")
             layout.prop(sculpt, "transform_origin_correct", text="Correct Origin")
+            layout.popover(panel="VIEW3D_PT_sculpt_cursor_gizmo", text="Gizmo Overlay", icon='OVERLAY')
 
         return dict(
             idname="builtin.sculpt_cursor",

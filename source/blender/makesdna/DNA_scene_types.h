@@ -1949,8 +1949,20 @@ enum eSculptCursorFlag : int8_t {
   SCULPT_CURSOR_PROPORTIONAL = (1 << 3),
   /** Measure the proportional falloff in the view plane instead of in world space. */
   SCULPT_CURSOR_PROJECTED = (1 << 4),
+  /** Hide the screen-space move frame. Stored inverted so files predating it show the frame. */
+  SCULPT_CURSOR_HIDE_FRAME = (1 << 5),
+  /** Hide the viewport buttons above the gizmo. Stored inverted like #SCULPT_CURSOR_HIDE_FRAME. */
+  SCULPT_CURSOR_HIDE_BUTTONS = (1 << 6),
 };
 ENUM_OPERATORS(eSculptCursorFlag)
+
+/** #Sculpt::sculpt_cursor_size_mode */
+enum eSculptCursorSizeMode : int8_t {
+  /** The gizmo keeps a constant size on screen, like the other viewport gizmos. */
+  SCULPT_CURSOR_SIZE_SCREEN = 0,
+  /** The gizmo has a fixed size in the world, relative to the sculpted object. */
+  SCULPT_CURSOR_SIZE_WORLD = 1,
+};
 
 /** #Sculpt::sculpt_cursor_mode */
 enum eSculptCursorMode : int8_t {
@@ -2089,7 +2101,14 @@ struct Sculpt {
   int8_t sculpt_cursor_mode = SCULPT_CURSOR_MODE_SET;
   /** #eSculptSymmetryCursorSource */
   int8_t symmetry_cursor_source = SCULPT_SYMM_CURSOR_OBJECT;
-  char _pad_sculpt_cursor[5] = {};
+  /**
+   * Gizmo size in percent. Zero (files predating the member) means 100, see
+   * #sculpt_paint::cursor::gizmo_size_get.
+   */
+  uint8_t sculpt_cursor_gizmo_size = 100;
+  /** #eSculptCursorSizeMode */
+  int8_t sculpt_cursor_size_mode = SCULPT_CURSOR_SIZE_SCREEN;
+  char _pad_sculpt_cursor[3] = {};
 
   /* Curve gradient settings (`SCULPT_GRADIENT_CURVE`). Appended at the end for the same layout
    * reason as the other gradient members above; old files get the defaults below in

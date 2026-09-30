@@ -56,6 +56,7 @@ struct rcti;
 struct wmEvent;
 struct wmGizmo;
 struct wmGizmoGroupType;
+struct wmGizmoType;
 struct wmKeyMapItem;
 struct wmOperator;
 struct wmWindow;
@@ -1465,6 +1466,8 @@ namespace ed::view3d {
 
 void VIEW3D_GGT_sculpt_cursor(wmGizmoGroupType *gzgt);
 void VIEW3D_GGT_sculpt_cursor_buttons(wmGizmoGroupType *gzgt);
+/** Billboard frame with 90-degree corner brackets: moves the sculpt cursor in screen space. */
+void VIEW3D_GT_sculpt_cursor_screen_frame(wmGizmoType *gzt);
 
 }  // namespace ed::view3d
 

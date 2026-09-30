@@ -38,6 +38,10 @@
 
 #include "DNA_workspace_types.h"
 
+#include "GPU_immediate.hh"
+#include "GPU_matrix.hh"
+#include "GPU_state.hh"
+
 #include "ED_gizmo_library.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
@@ -51,6 +55,7 @@
 #include "WM_message.hh"
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
+#include "wm_cursors.hh"
 
 #include "RNA_access.hh"
 
@@ -58,6 +63,16 @@ namespace blender::ed::view3d {
 
 /** Scale of the two-axis planes (inside rotation dials). */
 #define SCULPT_CURSOR_SCALE_PLANE_SCALE 0.5f
+
+/**
+ * Scale of the screen-space move frame (see #VIEW3D_GT_sculpt_cursor_screen_frame). The frame is
+ * drawn at a half-size of 1.0 in gizmo units, so this is its half-size in gizmo units: just inside
+ * the translate arrows, which end at 1.415 (see #gizmo_line_range).
+ */
+#define SCULPT_CURSOR_SCREEN_FRAME_SCALE 1.35f
+
+/** Opacity factor of the screen-space move frame, so it stays unobtrusive. */
+#define SCULPT_CURSOR_SCREEN_FRAME_ALPHA 0.65f
 
 /* Axis indices. Ranges are kept contiguous per axis type. */
 enum SculptCursorAxis {
@@ -76,6 +91,9 @@ enum SculptCursorAxis {
   SCULPT_CURSOR_TRANS_Y,
   SCULPT_CURSOR_TRANS_Z,
   SCULPT_CURSOR_TRANS_C,
+  /** Billboard frame around the gizmo: moves the cursor in screen space (see the
+   * #VIEW3D_GT_sculpt_cursor_screen_frame section). */
+  SCULPT_CURSOR_TRANS_SCREEN,
   SCULPT_CURSOR_AXIS_LEN,
 };
 
@@ -103,6 +121,9 @@ struct SculptCursorGizmoGroup {
   float drag_pivot_rot_init[4];
   /** View rotation of the last refresh, to re-align a view-oriented gizmo when orbiting. */
   float prev_viewinv[3][3];
+  /** `scale_basis` of each handle as set by #gizmo_setup_draw, before the user size is applied in
+   * #gizmogroup_draw_prepare. */
+  float base_scale[SCULPT_CURSOR_AXIS_LEN];
 };
 
 /* Threshold for hiding translate axes pointing towards the view. */
@@ -116,7 +137,9 @@ static const struct {
 
 static SculptCursorAxisType sculpt_cursor_axis_type_get(const int axis_idx)
 {
-  if (axis_idx >= SCULPT_CURSOR_TRANS_X && axis_idx <= SCULPT_CURSOR_TRANS_C) {
+  if ((axis_idx >= SCULPT_CURSOR_TRANS_X && axis_idx <= SCULPT_CURSOR_TRANS_C) ||
+      axis_idx == SCULPT_CURSOR_TRANS_SCREEN)
+  {
     return SCULPT_CURSOR_AXES_TRANSLATE;
   }
   if (axis_idx >= SCULPT_CURSOR_ROT_X && axis_idx <= SCULPT_CURSOR_ROT_C) {
@@ -346,6 +369,12 @@ static void gizmo_setup_draw(wmGizmo *axis, const int axis_idx)
       /* Prevent axis gizmos overlapping the center point (see #transform_gizmo_3d.cc #63744). */
       axis->select_bias = 2.0f;
       break;
+    case SCULPT_CURSOR_TRANS_SCREEN:
+      /* Billboard frame around the whole gizmo, see #VIEW3D_GT_sculpt_cursor_screen_frame. The
+       * geometry is drawn at a half-size of 1.0, so the scale is the frame's gizmo-space size. */
+      WM_gizmo_set_scale(axis, SCULPT_CURSOR_SCREEN_FRAME_SCALE);
+      WM_gizmo_set_line_width(axis, 2.0f);
+      break;
     default:
       break;
   }
@@ -428,7 +457,9 @@ static void gizmo_refresh_from_matrix(wmGizmo *axis,
       break;
     case SCULPT_CURSOR_ROT_C:
     case SCULPT_CURSOR_TRANS_C:
-      /* Screen-aligned widgets: only their location follows the cursor. */
+    case SCULPT_CURSOR_TRANS_SCREEN:
+      /* Screen-aligned widgets: only their location follows the cursor. The frame faces the view
+       * by itself (see #gizmo_screen_frame_draw_intern), so it needs no rotation here. */
       WM_gizmo_set_matrix_location(axis, mat[3]);
       break;
     default:
@@ -507,6 +538,7 @@ static void gizmo_get_axis_color(const int axis_idx,
     case SCULPT_CURSOR_SCALE_C:
     case SCULPT_CURSOR_ROT_C:
     case SCULPT_CURSOR_TRANS_C:
+    case SCULPT_CURSOR_TRANS_SCREEN:
       ui::theme::get_color_4fv(TH_GIZMO_VIEW_ALIGN, r_col);
       break;
     default:
@@ -609,6 +641,159 @@ static wmOperatorStatus sculpt_cursor_gizmo_modal(bContext *C,
   }
 
   return OPERATOR_RUNNING_MODAL;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Screen-Space Move Frame Gizmo
+ *
+ * A square frame with four 90-degree corner brackets, drawn around the whole gizmo and always
+ * facing the view (billboarded like the `ALIGN_VIEW` option of `GIZMO_GT_move_3d`). Dragging it
+ * moves the sculpt cursor parallel to the viewport (screen space), without having to aim for the
+ * translate arrows.
+ *
+ * Only #wmGizmoType::test_select is implemented (no #wmGizmoType::draw_select): the frame is
+ * created first in the group, and the pick list is built in reverse creation order (see
+ * #wm_gizmogroup_intersectable_gizmos_to_list), so its exact 2D hit-test is only consulted after
+ * all the axis handles -- which are picked by depth -- had the chance to claim the click first (see
+ * #gizmo_find_intersected_3d in `wm_gizmo_map.cc`).
+ * \{ */
+
+/** Hit-test band around the frame lines, in frame-size units (see #SCULPT_CURSOR_SCREEN_FRAME_SCALE
+ * and #gizmo_screen_frame_geom_draw). */
+#define SCULPT_CURSOR_SCREEN_FRAME_HIT_BAND_MIN 0.8f
+#define SCULPT_CURSOR_SCREEN_FRAME_HIT_BAND_MAX 1.3f
+
+/** Length of the corner bracket arms, as a fraction of the frame half-size. */
+#define SCULPT_CURSOR_SCREEN_FRAME_CORNER_ARM 0.2f
+
+static void gizmo_screen_frame_geom_draw(const wmGizmo *gz, const float color[4])
+{
+  /* The geometry is a unit frame; #SCULPT_CURSOR_SCREEN_FRAME_SCALE sizes it in gizmo units. */
+  const float half = 1.0f;
+  const float arm = half * SCULPT_CURSOR_SCREEN_FRAME_CORNER_ARM;
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+
+  float viewport[4];
+  GPU_viewport_size_get_f(viewport);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_POLYLINE_UNIFORM_COLOR);
+  immUniform2fv("viewportSize", &viewport[2]);
+  immUniformColor4fv(color);
+
+  /* Corner brackets only: the 90-degree angle marks, without connecting sides. */
+  immUniform1f("lineWidth", gz->line_width * U.pixelsize);
+  immBegin(GPU_PRIM_LINES, 16);
+  for (int corner_i = 0; corner_i < 4; corner_i++) {
+    const float sx = (corner_i & 1) ? 1.0f : -1.0f;
+    const float sy = (corner_i & 2) ? 1.0f : -1.0f;
+    immVertex3f(pos, sx, sy, 0.0f);
+    immVertex3f(pos, sx * (half - arm), sy, 0.0f);
+    immVertex3f(pos, sx, sy, 0.0f);
+    immVertex3f(pos, sx, sy * (half - arm), 0.0f);
+  }
+  immEnd();
+
+  immUnbindProgram();
+}
+
+static void gizmo_screen_frame_draw_intern(const bContext *C, wmGizmo *gz, const bool highlight)
+{
+  float color[4];
+  copy_v4_v4(color, highlight ? gz->color_hi : gz->color);
+
+  float matrix_final[4][4];
+  WM_gizmo_calc_matrix_final(gz, matrix_final);
+
+  GPU_matrix_push();
+  GPU_matrix_mul(matrix_final);
+
+  /* Billboard the frame: cancel the view rotation, same as #ED_GIZMO_MOVE_DRAW_FLAG_ALIGN_VIEW of
+   * `GIZMO_GT_move_3d` (#move3d_draw_intern). */
+  if (const RegionView3D *rv3d = CTX_wm_region_view3d(C)) {
+    float matrix_final_unit[4][4];
+    normalize_m4_m4(matrix_final_unit, matrix_final);
+    float matrix_align[4][4];
+    mul_m4_m4m4(matrix_align, rv3d->viewmat, matrix_final_unit);
+    zero_v3(matrix_align[3]);
+    transpose_m4(matrix_align);
+    GPU_matrix_mul(matrix_align);
+  }
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  gizmo_screen_frame_geom_draw(gz, color);
+  GPU_blend(GPU_BLEND_NONE);
+
+  GPU_matrix_pop();
+}
+
+static void gizmo_screen_frame_draw(const bContext *C, wmGizmo *gz)
+{
+  const bool is_highlight = (gz->state & WM_GIZMO_STATE_HIGHLIGHT) != 0;
+  gizmo_screen_frame_draw_intern(C, gz, is_highlight);
+}
+
+static int gizmo_screen_frame_test_select(bContext *C, wmGizmo *gz, const int mval[2])
+{
+  const ARegion *region = CTX_wm_region(C);
+  const RegionView3D *rv3d = region ? static_cast<const RegionView3D *>(region->regiondata) :
+                                      nullptr;
+  if (!region || !rv3d) {
+    return -1;
+  }
+
+  /* The frame is drawn parallel to the view through its own location, so hit-test against that
+   * view-parallel plane. */
+  const float mval_fl[2] = {float(mval[0]), float(mval[1])};
+  float plane[4];
+  plane_from_point_normal_v3(plane, gz->matrix_basis[3], rv3d->viewinv[2]);
+  float co[3];
+  if (!ED_view3d_win_to_3d_on_plane(region, plane, mval_fl, false, co)) {
+    return -1;
+  }
+  sub_v3_v3(co, gz->matrix_basis[3]);
+
+  /* Local frame coordinates along the view axes, normalized to frame-size units. */
+  float local_xy[2];
+  local_xy[0] = dot_v3v3(co, rv3d->viewinv[0]);
+  local_xy[1] = dot_v3v3(co, rv3d->viewinv[1]);
+  mul_v2_fl(local_xy, 1.0f / gz->scale_final);
+
+  /* A band around the frame lines: grabbing the sides or the corner brackets works. Overlaps with
+   * the axis handles are resolved by the pick order, see this section's comment. */
+  const float square_dist = max_ff(fabsf(local_xy[0]), fabsf(local_xy[1]));
+  if (square_dist < SCULPT_CURSOR_SCREEN_FRAME_HIT_BAND_MIN ||
+      square_dist > SCULPT_CURSOR_SCREEN_FRAME_HIT_BAND_MAX)
+  {
+    return -1;
+  }
+  /* Only the corner brackets are drawn, so the middle of the sides is not grabbable. */
+  const float corner_dist = min_ff(fabsf(local_xy[0]), fabsf(local_xy[1]));
+  if (corner_dist < 1.0f - SCULPT_CURSOR_SCREEN_FRAME_CORNER_ARM - 0.1f) {
+    return -1;
+  }
+  return 0;
+}
+
+static int gizmo_screen_frame_cursor_get(wmGizmo * /*gz*/)
+{
+  return WM_CURSOR_NSEW_SCROLL;
+}
+
+void VIEW3D_GT_sculpt_cursor_screen_frame(wmGizmoType *gzt)
+{
+  /* identifiers */
+  gzt->idname = "VIEW3D_GT_sculpt_cursor_screen_frame";
+
+  /* API callbacks. */
+  gzt->draw = gizmo_screen_frame_draw;
+  gzt->test_select = gizmo_screen_frame_test_select;
+  gzt->cursor_get = gizmo_screen_frame_cursor_get;
+
+  gzt->struct_size = sizeof(wmGizmo);
 }
 
 /** \} */
@@ -980,8 +1165,8 @@ static void gizmo_invoke_prepare(const bContext *C,
   copy_m3_m4(cursor_rot, sculpt_paint::cursor::world_matrix_get(*scene, *ob).ptr());
   mat3_normalized_to_quat(ggd->drag_pivot_rot_init, cursor_rot);
 
-  /* The screen-aligned ring always uses the view orientation. */
-  if (axis_idx == SCULPT_CURSOR_ROT_C) {
+  /* The screen-aligned ring and the screen-space move frame always use the view orientation. */
+  if (ELEM(axis_idx, SCULPT_CURSOR_ROT_C, SCULPT_CURSOR_TRANS_SCREEN)) {
     RNA_enum_set(&gzop->ptr, "orient_type", V3D_ORIENT_VIEW);
     if (PropertyRNA *prop = RNA_struct_find_property(&gzop->ptr, "orient_matrix")) {
       RNA_property_unset(&gzop->ptr, prop);
@@ -1030,6 +1215,9 @@ static void gizmogroup_setup(const bContext *C, wmGizmoGroup *gzgroup)
   gzgroup->customdata = ggd;
   ggd->bound_mode = -1;
   ggd->show_flag = SCULPT_CURSOR_SHOW_ALL;
+  for (float &base_scale : ggd->base_scale) {
+    base_scale = 1.0f;
+  }
   unit_m3(ggd->drag_orient);
   unit_qt(ggd->drag_pivot_rot_init);
   unit_m3(ggd->prev_viewinv);
@@ -1037,6 +1225,13 @@ static void gizmogroup_setup(const bContext *C, wmGizmoGroup *gzgroup)
   const wmGizmoType *gzt_arrow = WM_gizmotype_find("GIZMO_GT_arrow_3d", true);
   const wmGizmoType *gzt_dial = WM_gizmotype_find("GIZMO_GT_dial_3d", true);
   const wmGizmoType *gzt_prim = WM_gizmotype_find("GIZMO_GT_primitive_3d", true);
+  const wmGizmoType *gzt_frame = WM_gizmotype_find("VIEW3D_GT_sculpt_cursor_screen_frame", true);
+
+  /* Created first: both the pick and the draw lists are built in reverse creation order (see
+   * #wm_gizmogroup_intersectable_gizmos_to_list and #gizmo_prepare_drawing), so the frame is
+   * hit-tested after every axis handle (which may claim overlapping clicks by depth) and drawn on
+   * top (see the #VIEW3D_GT_sculpt_cursor_screen_frame section). */
+  ggd->gizmos[SCULPT_CURSOR_TRANS_SCREEN] = WM_gizmo_new_ptr(gzt_frame, gzgroup, nullptr);
 
   /* Order matches #transform_gizmo_3d.cc for correct depth sorting. */
   ggd->gizmos[SCULPT_CURSOR_SCALE_C] = WM_gizmo_new_ptr(gzt_prim, gzgroup, nullptr);
@@ -1061,6 +1256,7 @@ static void gizmogroup_setup(const bContext *C, wmGizmoGroup *gzgroup)
       continue;
     }
     gizmo_setup_draw(gz, i);
+    ggd->base_scale[i] = gz->scale_basis;
     gizmo_axis_color_set(gz, i);
     WM_gizmo_set_fn_custom_modal(gz, sculpt_cursor_gizmo_modal);
   }
@@ -1156,6 +1352,9 @@ static void gizmogroup_refresh(const bContext *C, wmGizmoGroup *gzgroup)
     {
       hide = true;
     }
+    if (i == SCULPT_CURSOR_TRANS_SCREEN && !sculpt_paint::cursor::frame_visible_get(*scene)) {
+      hide = true;
+    }
     /* Inside a transform tool only that tool's handles are shown, like its own gizmo. */
     if (!(show_flag & (1 << sculpt_cursor_axis_type_get(i)))) {
       hide = true;
@@ -1170,6 +1369,32 @@ static void gizmogroup_refresh(const bContext *C, wmGizmoGroup *gzgroup)
       }
     }
   }
+}
+
+/**
+ * Factor applied to every handle's `scale_basis`: the user size, and in world size mode also the
+ * compensation for the view distance that keeps the gizmo a fixed fraction of the object.
+ * \param co: World location of the gizmo.
+ */
+static float gizmo_size_factor_get(const Scene &scene,
+                                   const Object &ob,
+                                   const RegionView3D &rv3d,
+                                   const float co[3])
+{
+  const float size = sculpt_paint::cursor::gizmo_size_get(scene);
+  if (!sculpt_paint::cursor::gizmo_size_is_world(scene)) {
+    return size;
+  }
+
+  /* World units per gizmo unit, so the handles stay in proportion to the object. */
+  float dims[3];
+  BKE_object_dimensions_eval_cached_get(&ob, dims);
+  const float world_unit = max_ff(max_ff(dims[0], max_ff(dims[1], dims[2])), 1e-4f) * 0.15f;
+
+  /* Undo the screen-space scale of #wm_gizmo_calculate_scale. */
+  const float screen_unit = UI_SCALE_FAC * float(U.gizmo_size) *
+                            ED_view3d_pixel_size_no_ui_scale(&rv3d, co);
+  return size * world_unit / max_ff(screen_unit, 1e-8f);
 }
 
 static void gizmogroup_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
@@ -1219,6 +1444,17 @@ static void gizmogroup_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
 
   const bool is_modal = WM_gizmo_group_is_modal(gzgroup);
 
+  /* The per-handle `scale_basis` values are set once in #gizmo_setup_draw, so apply the user size
+   * as a relative change to keep them. Hidden handles are included so they stay in sync. */
+  const wmGizmo *center_gz = ggd->gizmos[SCULPT_CURSOR_TRANS_C];
+  const float size_factor = gizmo_size_factor_get(
+      *scene, *ob, *rv3d, center_gz ? center_gz->matrix_basis[3] : world_mat[3]);
+  for (int i = 0; i < SCULPT_CURSOR_AXIS_LEN; i++) {
+    if (wmGizmo *gz = ggd->gizmos[i]) {
+      gz->scale_basis = ggd->base_scale[i] * size_factor;
+    }
+  }
+
   for (int i = 0; i < SCULPT_CURSOR_AXIS_LEN; i++) {
     wmGizmo *gz = ggd->gizmos[i];
     if (!gz) {
@@ -1230,10 +1466,14 @@ static void gizmogroup_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
 
     /* Orbiting the view does not trigger a refresh, so the screen-aligned widgets are re-aligned
      * on every draw, as in #WIDGETGROUP_gizmo_draw_prepare. While dragging, the modal callback owns
-     * their matrices. */
-    if (!is_modal && ELEM(i, SCULPT_CURSOR_ROT_C, SCULPT_CURSOR_TRANS_C)) {
+     * their matrices. The frame billboards itself, so only its location is re-applied. */
+    if (!is_modal &&
+        ELEM(i, SCULPT_CURSOR_ROT_C, SCULPT_CURSOR_TRANS_C, SCULPT_CURSOR_TRANS_SCREEN))
+    {
       WM_gizmo_set_matrix_location(gz, world_mat[3]);
-      WM_gizmo_set_matrix_rotation_from_z_axis(gz, rv3d->viewinv[2]);
+      if (i != SCULPT_CURSOR_TRANS_SCREEN) {
+        WM_gizmo_set_matrix_rotation_from_z_axis(gz, rv3d->viewinv[2]);
+      }
     }
 
     float color[4], color_hi[4];
@@ -1242,6 +1482,9 @@ static void gizmogroup_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
       /* Dim the disabled cursor, but keep the hover highlight at full strength so the widget
        * reads as interactive and a handle click can enable it. */
       color[3] *= 0.25f;
+    }
+    if (i == SCULPT_CURSOR_TRANS_SCREEN) {
+      color[3] *= SCULPT_CURSOR_SCREEN_FRAME_ALPHA;
     }
     WM_gizmo_set_color(gz, color);
     WM_gizmo_set_color_highlight(gz, color_hi);
@@ -1275,6 +1518,12 @@ static void gizmogroup_message_subscribe(const bContext *C,
       mbus, Sculpt, use_sculpt_cursor_proportional, &msg_sub_value_gz_tag_refresh);
   WM_msg_subscribe_rna_anon_prop(
       mbus, Sculpt, use_sculpt_cursor_projected, &msg_sub_value_gz_tag_refresh);
+  WM_msg_subscribe_rna_anon_prop(
+      mbus, Sculpt, use_sculpt_cursor_frame, &msg_sub_value_gz_tag_refresh);
+  WM_msg_subscribe_rna_anon_prop(
+      mbus, Sculpt, sculpt_cursor_gizmo_size, &msg_sub_value_gz_tag_refresh);
+  WM_msg_subscribe_rna_anon_prop(
+      mbus, Sculpt, sculpt_cursor_size_mode, &msg_sub_value_gz_tag_refresh);
 }
 
 void VIEW3D_GGT_sculpt_cursor(wmGizmoGroupType *gzgt)
@@ -1487,7 +1736,11 @@ static void sculpt_cursor_buttons_draw_prepare(const bContext *C, wmGizmoGroup *
     return;
   }
 
-  if (!sculpt_paint::cursor::is_enabled(*scene)) {
+  /* Checked here rather than in the poll: a poll is not re-run when the setting changes, so the
+   * buttons would never come back. */
+  if (!sculpt_paint::cursor::is_enabled(*scene) ||
+      !sculpt_paint::cursor::buttons_visible_get(*scene))
+  {
     hide();
     return;
   }
@@ -1538,7 +1791,10 @@ static void sculpt_cursor_buttons_draw_prepare(const bContext *C, wmGizmoGroup *
   /* A single row of buttons above the gizmo: [mode] [pin] [shared]. The cursor gizmo handles
    * extend roughly `U.gizmo_size` UI pixels from the center, so keep the row above them. */
   const float spacing = 34.0f * UI_SCALE_FAC;
-  const float y_off = (max_ff(float(U.gizmo_size), 1.0f) * 1.6f + 18.0f) * UI_SCALE_FAC;
+  const RegionView3D *rv3d = static_cast<const RegionView3D *>(region->regiondata);
+  const float gizmo_size = rv3d ? gizmo_size_factor_get(*scene, *ob, *rv3d, world_mat[3]) : 1.0f;
+  const float y_off = (max_ff(float(U.gizmo_size), 1.0f) * gizmo_size * 1.6f + 18.0f) *
+                      UI_SCALE_FAC;
   for (int i = 0; i < 3; i++) {
     const float x = co[0] + (float(i) - 1.0f) * spacing;
     const float y = co[1] + y_off;

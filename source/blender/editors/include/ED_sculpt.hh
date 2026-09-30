@@ -104,6 +104,18 @@ bool pin_get(const Scene &scene);
 /** True when the cursor follows the shared scene 3D cursor instead of the object's own. */
 bool is_shared(const Scene &scene);
 
+/** True when the screen-space move frame of the cursor gizmo is shown. */
+bool frame_visible_get(const Scene &scene);
+
+/** True when the viewport buttons above the cursor gizmo are shown. */
+bool buttons_visible_get(const Scene &scene);
+
+/** True when the cursor gizmo has a fixed world size instead of a constant screen size. */
+bool gizmo_size_is_world(const Scene &scene);
+
+/** Size factor of the cursor gizmo (1.0 is the default size). */
+float gizmo_size_get(const Scene &scene);
+
 /**
  * Read \a ob's sculpt cursor in object space. When the ToolSettings "shared cursor" flag is set,
  * both the location and the rotation follow the shared scene 3D cursor (#Scene::cursor) instead of

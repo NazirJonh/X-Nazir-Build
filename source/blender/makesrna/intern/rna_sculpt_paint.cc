@@ -1422,6 +1422,19 @@ static void rna_Sculpt_sculpt_cursor_gizmo_set(PointerRNA *ptr, int value)
   SET_FLAG_FROM_TEST(sd->sculpt_cursor_flag, value != 0, SCULPT_CURSOR_ENABLED);
 }
 
+static float rna_Sculpt_sculpt_cursor_gizmo_size_get(PointerRNA *ptr)
+{
+  const Sculpt *sd = static_cast<const Sculpt *>(ptr->data);
+  /* Zero comes from files saved before the size existed. */
+  return (sd->sculpt_cursor_gizmo_size == 0) ? 1.0f : float(sd->sculpt_cursor_gizmo_size) / 100.0f;
+}
+
+static void rna_Sculpt_sculpt_cursor_gizmo_size_set(PointerRNA *ptr, float value)
+{
+  Sculpt *sd = static_cast<Sculpt *>(ptr->data);
+  sd->sculpt_cursor_gizmo_size = uint8_t(clamp_i(int(roundf(value * 100.0f)), 25, 200));
+}
+
 }  // namespace blender
 
 #else
@@ -2705,6 +2718,51 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_PIN);
   RNA_def_property_ui_text(
       prop, "Pin Cursor", "Keep the sculpt cursor in place after deforming the mesh");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_sculpt_cursor_frame", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_HIDE_FRAME);
+  RNA_def_property_ui_text(prop,
+                           "Move Frame",
+                           "Show the corner frame around the gizmo that moves the cursor in "
+                           "screen space");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_sculpt_cursor_buttons", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_HIDE_BUTTONS);
+  RNA_def_property_ui_text(
+      prop, "Buttons", "Show the mode, pin and shared cursor buttons above the gizmo");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  static const EnumPropertyItem sculpt_cursor_size_mode_items[] = {
+      {SCULPT_CURSOR_SIZE_SCREEN,
+       "SCREEN",
+       0,
+       "Screen",
+       "The gizmo keeps a constant size on screen"},
+      {SCULPT_CURSOR_SIZE_WORLD,
+       "WORLD",
+       0,
+       "World",
+       "The gizmo has a fixed size in the world, relative to the object"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_cursor_size_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_cursor_size_mode");
+  RNA_def_property_enum_items(prop, sculpt_cursor_size_mode_items);
+  RNA_def_property_ui_text(prop, "Size Mode", "How the size of the 3D cursor gizmo is determined");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_cursor_gizmo_size", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_Sculpt_sculpt_cursor_gizmo_size_get",
+                               "rna_Sculpt_sculpt_cursor_gizmo_size_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.25f, 2.0f);
+  RNA_def_property_ui_range(prop, 0.25f, 2.0f, 1, 2);
+  RNA_def_property_ui_text(prop, "Size", "Size of the 3D cursor gizmo");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "use_sculpt_cursor_proportional", PROP_BOOLEAN, PROP_NONE);

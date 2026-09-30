@@ -145,6 +145,34 @@ bool is_shared(const Scene &scene)
   return sculpt && (sculpt->sculpt_cursor_flag & SCULPT_CURSOR_SHARED);
 }
 
+bool frame_visible_get(const Scene &scene)
+{
+  const Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
+  return !sculpt || !(sculpt->sculpt_cursor_flag & SCULPT_CURSOR_HIDE_FRAME);
+}
+
+bool buttons_visible_get(const Scene &scene)
+{
+  const Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
+  return !sculpt || !(sculpt->sculpt_cursor_flag & SCULPT_CURSOR_HIDE_BUTTONS);
+}
+
+bool gizmo_size_is_world(const Scene &scene)
+{
+  const Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
+  return sculpt && sculpt->sculpt_cursor_size_mode == SCULPT_CURSOR_SIZE_WORLD;
+}
+
+float gizmo_size_get(const Scene &scene)
+{
+  const Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
+  /* Zero comes from files saved before the size existed. */
+  if (!sculpt || sculpt->sculpt_cursor_gizmo_size == 0) {
+    return 1.0f;
+  }
+  return float(sculpt->sculpt_cursor_gizmo_size) / 100.0f;
+}
+
 CursorState state_get(const Scene &scene, const Object &ob)
 {
   CursorState state;

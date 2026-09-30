@@ -9386,6 +9386,23 @@ class VIEW3D_PT_sculpt_cursor_proportional(Panel):
         col.prop(tool_settings, "proportional_distance")
 
 
+class VIEW3D_PT_sculpt_cursor_gizmo(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_label = "3D Cursor Gizmo"
+    bl_ui_units_x = 8
+
+    def draw(self, context):
+        layout = self.layout
+        sculpt = context.tool_settings.sculpt
+        col = layout.column()
+        col.row().prop(sculpt, "sculpt_cursor_size_mode", expand=True)
+        col.prop(sculpt, "sculpt_cursor_gizmo_size", slider=True)
+        col.separator()
+        col.prop(sculpt, "use_sculpt_cursor_frame")
+        col.prop(sculpt, "use_sculpt_cursor_buttons")
+
+
 class VIEW3D_PT_transform_orientations(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -11090,6 +11107,7 @@ classes = (
     VIEW3D_PT_sculpt_snapping,
     VIEW3D_PT_proportional_edit,
     VIEW3D_PT_sculpt_cursor_proportional,
+    VIEW3D_PT_sculpt_cursor_gizmo,
     VIEW3D_PT_grease_pencil_origin,
     VIEW3D_PT_grease_pencil_lock,
     VIEW3D_PT_grease_pencil_guide,

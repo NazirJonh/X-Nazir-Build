@@ -535,6 +535,7 @@ static void view3d_widgets()
 
   /* Linked after the navigation gizmo: groups linked later are drawn earlier and tested for
    * selection later, so the cursor's viewport buttons stay underneath the navigation widgets. */
+  WM_gizmotype_append(ed::view3d::VIEW3D_GT_sculpt_cursor_screen_frame);
   WM_gizmogrouptype_append_and_link(gzmap_type, ed::view3d::VIEW3D_GGT_sculpt_cursor);
   WM_gizmogrouptype_append_and_link(gzmap_type, ed::view3d::VIEW3D_GGT_sculpt_cursor_buttons);
 }

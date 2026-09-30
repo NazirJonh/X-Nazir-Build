@@ -12,6 +12,7 @@
 #include "BLI_compiler_attrs.h"
 #include "BLI_function_ref.hh"
 #include "BLI_map.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_mutex.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
@@ -711,6 +712,11 @@ ImageTile *BKE_image_get_tile_from_iuser(Image *ima, const ImageUser *iuser);
 
 int BKE_image_get_tile_from_pos(Image *ima, const float uv[2], float r_uv[2], float r_ofs[2]);
 void BKE_image_get_tile_uv(const Image *ima, const int tile_number, float r_uv[2]);
+/**
+ * Bottom-left UV corner of the UDIM tile \a tile_number. Unlike #BKE_image_get_tile_uv it needs no
+ * image, and the legacy single-image numbers (below 1001) map to the UV origin.
+ */
+blender::float2 BKE_image_get_tile_uv_origin(int tile_number);
 
 /**
  * Return the tile_number for the closest UDIM tile to `co`.

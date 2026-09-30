@@ -149,8 +149,7 @@ inline int2 image_select_udim_tile_col_row(int tile_number)
 /** Bottom-left UV corner of a UDIM tile (its column/row in whole-tile UV units). */
 inline float2 image_select_udim_tile_uv_origin(int tile_number)
 {
-  const int2 col_row = image_select_udim_tile_col_row(tile_number);
-  return float2(float(col_row.x), float(col_row.y));
+  return BKE_image_get_tile_uv_origin(tile_number);
 }
 
 /**

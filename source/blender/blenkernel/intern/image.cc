@@ -1008,6 +1008,14 @@ void BKE_image_get_tile_uv(const Image *ima, const int tile_number, float r_uv[2
   }
 }
 
+blender::float2 BKE_image_get_tile_uv_origin(const int tile_number)
+{
+  /* UDIM tile numbers are `1001 + 10 * row + column`. The first tile, including the legacy
+   * single-image numbers, sits at the UV origin. */
+  const int tile_index = (tile_number > 1001) ? (tile_number - 1001) : 0;
+  return blender::float2(float(tile_index % 10), float(tile_index / 10));
+}
+
 /** Linear distance between #x and the unit interval. */
 static float distance_to_unit_interval(float x)
 {

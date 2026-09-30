@@ -23,11 +23,16 @@
 
 #include "DNA_lightprobe_types.h"
 #include "DNA_modifier_types.h"
+#include "DNA_scene_types.h"
+
+#include "DRW_engine.hh"
 
 #include "ED_screen.hh"
 #include "ED_view3d.hh"
+#include "GPU_capabilities.hh"
 #include "GPU_context.hh"
 #include "GPU_pass.hh"
+#include "GPU_shader.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "RE_pipeline.h"
@@ -547,7 +552,19 @@ void Instance::render_sample()
   /* Motion blur may need to do re-sync after a certain number of sample. */
   if (!is_viewport() && sampling.do_render_sync()) {
     render_sync();
+    /* Preview jobs share the draw lock with window drawing, so holding the context while waiting
+     * for shader compilation (up to seconds) freezes the UI. Compile workers own their contexts,
+     * so waiting needs neither the lock nor the context. Limited to preview renders to keep F12
+     * behavior unchanged. See the disabled release pattern in #Instance::render_frame. */
+    const bool release_context = render != nullptr && (scene->r.scemode & R_BUTS_PREVIEW) &&
+                                 !GPU_use_main_context_workaround();
     while (materials.queued_shaders_count > 0 || materials.queued_textures_count > 0) {
+      if (release_context) {
+        DRW_render_context_disable(render->re);
+        GPU_shader_compiler_wait_for_all();
+        DRW_render_context_enable(render->re);
+      }
+      /* With the context released this only runs the cache update, which needs the context. */
       GPU_pass_cache_wait_for_all();
       /** WORKAROUND: Re-sync now that all shaders are compiled. */
       /* This may need to happen more than once, since actual materials may require more passes

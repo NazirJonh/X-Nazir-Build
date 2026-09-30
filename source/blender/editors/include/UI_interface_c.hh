@@ -2846,6 +2846,16 @@ std::optional<StringRefNull> button_asset_shelf_type_idname_get(const Button *bu
 
 /* templates */
 void template_header(Layout *layout, bContext *C);
+/**
+ * A menu button for an enum property with a fixed width that does not follow the current
+ * item's name. With \a wrap false, Ctrl-Wheel stepping stops at the first and last item
+ * instead of cycling around.
+ */
+void template_enum_menu(Layout *layout,
+                        PointerRNA *ptr,
+                        StringRefNull propname,
+                        float width_units,
+                        bool wrap);
 void template_id(Layout *layout,
                  const bContext *C,
                  PointerRNA *ptr,

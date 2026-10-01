@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include "../paint_shape_edit.hh"
+#include "../shapes/paint_shape_edit.hh"
 
 #include <algorithm>
 #include <cmath>

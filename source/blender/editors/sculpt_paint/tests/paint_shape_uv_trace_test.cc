@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include "../paint_shape_uv_trace.hh"
+#include "../shapes/paint_shape_uv_trace.hh"
 
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"

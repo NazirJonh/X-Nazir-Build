@@ -39,9 +39,9 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
-#include "../paint_shape_edit.hh"
-#include "../paint_shape_uv_trace.hh"
-#include "../paint_vector_editor.hh"
+#include "../shapes/paint_shape_edit.hh"
+#include "../shapes/paint_shape_uv_trace.hh"
+#include "../shapes/paint_vector_editor.hh"
 #include "paint_image_shape_composite.hh"
 #include "paint_shape_gizmo.hh"
 #include "paint_shape_vector_3d.hh"

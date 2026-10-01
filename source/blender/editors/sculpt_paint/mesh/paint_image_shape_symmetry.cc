@@ -26,7 +26,7 @@
 #include "UI_view2d.hh"
 
 #include "paint_image_shape_composite.hh"
-#include "../paint_shape.hh"
+#include "../shapes/paint_shape.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 

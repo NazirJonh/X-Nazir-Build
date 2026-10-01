@@ -60,7 +60,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../paint_shape_render.hh"
+#include "../shapes/paint_shape_render.hh"
 #include "paint_material_blend.hh"
 /* #image_select_undo_session_step_get only. */
 #include "paint_image_select_fragment.hh"

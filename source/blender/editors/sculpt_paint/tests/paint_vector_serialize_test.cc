@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include "../paint_vector_document.hh"
+#include "../shapes/paint_vector_document.hh"
 
 #include "DNA_paint_vector_types.h"
 #include "DNA_screen_types.h"

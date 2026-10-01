@@ -46,7 +46,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../paint_bezier_input.hh"
+#include "../shapes/paint_bezier_input.hh"
 #include "paint_image_select_gesture.hh"
 #include "paint_image_select_intern.hh"
 /* #image_select_move_delegate_to_move_operator only. */

@@ -30,8 +30,8 @@
 
 #include "paint_image_shape_composite.hh"
 #include "paint_shape_gizmo.hh"
-#include "../paint_shape_edit.hh"
-#include "../paint_vector_editor.hh"
+#include "../shapes/paint_shape_edit.hh"
+#include "../shapes/paint_vector_editor.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 

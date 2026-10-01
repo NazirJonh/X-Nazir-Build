@@ -37,8 +37,8 @@
 
 #include "DNA_image_types.h"
 
-#include "../paint_shape_target.hh"
-#include "../paint_vector_editor.hh"
+#include "../shapes/paint_shape_target.hh"
+#include "../shapes/paint_vector_editor.hh"
 #include "paint_image_select_floating.hh"
 
 namespace blender {

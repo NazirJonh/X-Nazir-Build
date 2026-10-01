@@ -58,19 +58,19 @@ set(SRC
   paint_gradient_core.cc
   paint_gradient_curve.cc
   paint_ops.cc
-  paint_bezier_input.cc
-  paint_shape_blend.cc
-  paint_shape_create.cc
-  paint_shape_edit.cc
-  paint_shape_geom.cc
-  paint_shape_op_props.cc
-  paint_shape_raster.cc
-  paint_shape_shade.cc
-  paint_shape_space.cc
-  paint_shape_uv_trace.cc
+  shapes/paint_bezier_input.cc
+  shapes/paint_shape_blend.cc
+  shapes/paint_shape_create.cc
+  shapes/paint_shape_edit.cc
+  shapes/paint_shape_geom.cc
+  shapes/paint_shape_op_props.cc
+  shapes/paint_shape_raster.cc
+  shapes/paint_shape_shade.cc
+  shapes/paint_shape_space.cc
+  shapes/paint_shape_uv_trace.cc
   paint_texture_ops.cc
-  paint_vector_document.cc
-  paint_vector_editor.cc
+  shapes/paint_vector_document.cc
+  shapes/paint_vector_editor.cc
   paint_sample_color.cc
   paint_stroke.cc
   paint_stroke_roll.cc
@@ -239,17 +239,17 @@ paint_intern.hh
   paint_image_curve_patch_raster.hh
   paint_image_curve_patch_edit.hh
 
-  paint_bezier_input.hh
-  paint_shape.hh
-  paint_shape_create.hh
-  paint_shape_edit.hh
-  paint_shape_op_props.hh
-  paint_shape_render.hh
-  paint_shape_space.hh
-  paint_shape_uv_trace.hh
-  paint_shape_target.hh
-  paint_vector_document.hh
-  paint_vector_editor.hh
+  shapes/paint_bezier_input.hh
+  shapes/paint_shape.hh
+  shapes/paint_shape_create.hh
+  shapes/paint_shape_edit.hh
+  shapes/paint_shape_op_props.hh
+  shapes/paint_shape_render.hh
+  shapes/paint_shape_space.hh
+  shapes/paint_shape_uv_trace.hh
+  shapes/paint_shape_target.hh
+  shapes/paint_vector_document.hh
+  shapes/paint_vector_editor.hh
 
   curves/sculpt_intern.hh
   curves/sculpt_multi_object.hh

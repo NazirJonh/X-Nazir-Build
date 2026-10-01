@@ -28,9 +28,9 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../paint_shape.hh"
-#include "../paint_shape_edit.hh"
-#include "../paint_vector_editor.hh"
+#include "../shapes/paint_shape.hh"
+#include "../shapes/paint_shape_edit.hh"
+#include "../shapes/paint_vector_editor.hh"
 #include "paint_shape_gizmo.hh"
 #include "paint_shape_vector_3d.hh"
 

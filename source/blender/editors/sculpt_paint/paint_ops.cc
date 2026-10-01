@@ -96,7 +96,7 @@
 #include "paint_clone_source.hh"
 #include "paint_image_curve_patch_edit.hh"
 #include "paint_intern.hh"
-#include "paint_shape_op_props.hh"
+#include "shapes/paint_shape_op_props.hh"
 
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"

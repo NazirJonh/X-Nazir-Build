@@ -4,7 +4,7 @@
 
 #include <cmath>
 
-#include "../paint_shape_render.hh"
+#include "../shapes/paint_shape_render.hh"
 
 #include "BLI_math_base.hh"
 #include "BLI_math_vector.hh"

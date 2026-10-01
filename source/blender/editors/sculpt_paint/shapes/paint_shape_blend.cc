@@ -19,7 +19,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_utildefines.h"
 
-#include "mesh/paint_material_blend.hh"
+#include "../mesh/paint_material_blend.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 

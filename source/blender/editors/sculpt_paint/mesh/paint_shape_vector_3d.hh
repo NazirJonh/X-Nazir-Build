@@ -22,8 +22,8 @@
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 
-#include "../paint_shape.hh"
-#include "../paint_shape_space.hh"
+#include "../shapes/paint_shape.hh"
+#include "../shapes/paint_shape_space.hh"
 
 namespace blender {
 /* Every type below lives in `blender`; the header may be included before the DNA / BKE headers, so

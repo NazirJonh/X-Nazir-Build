@@ -80,11 +80,11 @@
 
 #include "paint_image_select_intern.hh"
 #include "paint_shape_vector_3d.hh"
-#include "../paint_shape_target.hh"
-#include "../paint_shape_edit.hh"
-#include "../paint_shape_render.hh"
-#include "../paint_vector_editor.hh"
-#include "../paint_vector_document.hh"
+#include "../shapes/paint_shape_target.hh"
+#include "../shapes/paint_shape_edit.hh"
+#include "../shapes/paint_shape_render.hh"
+#include "../shapes/paint_vector_editor.hh"
+#include "../shapes/paint_vector_document.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 

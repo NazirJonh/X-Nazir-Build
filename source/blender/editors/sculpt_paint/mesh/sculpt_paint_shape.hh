@@ -18,9 +18,9 @@
 
 #include "BLI_span.hh"
 
-#include "../paint_shape.hh"
-#include "../paint_shape_space.hh"
-#include "../paint_shape_target.hh"
+#include "../shapes/paint_shape.hh"
+#include "../shapes/paint_shape_space.hh"
+#include "../shapes/paint_shape_target.hh"
 
 namespace blender {
 

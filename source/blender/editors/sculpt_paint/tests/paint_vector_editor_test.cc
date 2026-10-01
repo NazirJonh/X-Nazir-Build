@@ -2,12 +2,12 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include "../paint_vector_editor.hh"
+#include "../shapes/paint_vector_editor.hh"
 
 #include "BLI_math_base.hh"
 #include "BLI_math_vector_types.hh"
 
-#include "../paint_shape_op_props.hh" /* PAINT_SHAPE_MODAL_* */
+#include "../shapes/paint_shape_op_props.hh" /* PAINT_SHAPE_MODAL_* */
 
 #include "WM_types.hh" /* wmEvent, KM_PRESS, LEFTMOUSE, EVT_MODAL_MAP */
 

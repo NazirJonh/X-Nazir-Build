@@ -4203,6 +4203,28 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
   return true;
 }
 
+/**
+ * Whether a stroke of the brush's \a channel may write the active row of \a target. The brush can
+ * carry a whole PBR set, but the row only takes the channels it has: a record of its own. A row
+ * with no records yet (a fresh correction) takes a single channel, the first one the brush writes,
+ * tracked in \a r_fallback_channel; once that stroke grew a record the row is restricted to it.
+ */
+static bool paint_layers_row_takes_channel(const PaintLayersTarget &target,
+                                           const int channel,
+                                           int &r_fallback_channel)
+{
+  if (target.layer == nullptr) {
+    return false;
+  }
+  if (target.layer->channels_num > 0) {
+    return target.channel_record != nullptr;
+  }
+  if (r_fallback_channel < 0) {
+    r_fallback_channel = channel;
+  }
+  return r_fallback_channel == channel;
+}
+
 PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     Main &bmain,
     Object &ob,
@@ -4239,6 +4261,7 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     /* The channels the brush writes and that have no map yet. Any frozen target refuses the whole
      * stroke before anything is created, so C-1 never leaves a half-grown layer. */
     Vector<int> channels;
+    int fallback_channel = -1;
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
       if (!info.supports_image_paint) {
         continue;
@@ -4255,6 +4278,9 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
       /* Frozen, or the content of a Fill (a colour, changed only through a Correction). */
       if (BKE_paint_layers_target_refusal(target) != nullptr) {
         return result;
+      }
+      if (!paint_layers_row_takes_channel(target, info.channel, fallback_channel)) {
+        continue;
       }
       if (BKE_paint_layers_target_image(target) == nullptr) {
         channels.append(info.channel);
@@ -4357,6 +4383,7 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     if (brush_paint == nullptr) {
       return targets;
     }
+    int fallback_channel = -1;
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
       if (!info.supports_image_paint) {
         continue;
@@ -4370,6 +4397,9 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
       if (!BKE_paint_layers_target_get(ob, -1, info.channel, mode_settings, target)) {
         /* No active row: nothing to paint into. */
         return targets;
+      }
+      if (!paint_layers_row_takes_channel(target, info.channel, fallback_channel)) {
+        continue;
       }
       Image *image = BKE_paint_layers_target_image(target);
       if (image == nullptr) {

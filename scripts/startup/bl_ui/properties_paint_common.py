@@ -2148,6 +2148,55 @@ def material_paint_writable_channels(brush, paint, paint_mode_settings):
     return writable
 
 
+def _draw_layer_target_status(layout, context, paint_mode):
+    """Show which Stack Layers row a stroke would land in, and whether it can be painted on.
+
+    Mirrors ``BKE_paint_layers_target_refusal``: the content of a Fill, Material or Mesh Map row is
+    not painted directly (a Correction on top or the row's mask takes the stroke).
+    """
+    ob = context.object
+    material = ob.active_material if ob is not None else None
+    if material is None or not material.is_layered:
+        return
+    layer = material.paint_layers.active
+    if layer is None:
+        layout.label(text="No active layer: select a row in the Outliner", icon='INFO')
+        return
+
+    if layer.role == 'EFFECT':
+        kind = iface_("Fill Correction") if layer.source == 'CONSTANT' else iface_("Correction")
+    elif layer.role == 'MASK_ITEM':
+        kind = iface_("Mask")
+    else:
+        kind = {
+            'IMAGE': iface_("Paint Layer"),
+            'CONSTANT': iface_("Fill Layer"),
+            'MATERIAL': iface_("Material Layer"),
+            'NODE_GROUP': iface_("Node Group Layer"),
+            'STACK': iface_("Folder"),
+            'MESH_MAP': iface_("Mesh Map Layer"),
+        }.get(layer.source, iface_("Layer"))
+
+    mask_target = layer.role == 'MASK_ITEM' or (
+        paint_mode is not None and paint_mode.layer_target_mode == 'MASK')
+    reason = None
+    if layer.source == 'STACK' and layer.role == 'LAYER':
+        reason = iface_("A folder holds no maps: select a layer inside it")
+    elif not mask_target and layer.source == 'CONSTANT':
+        reason = iface_("A Fill is a color: add a Correction to paint on it, or paint its mask")
+    elif not mask_target and layer.source in {'MATERIAL', 'MESH_MAP'}:
+        reason = iface_("Add a Correction to paint on it, or paint its mask")
+
+    box = layout.box()
+    row = box.row()
+    row.label(text="{}: {}".format(kind, layer.name), icon='RENDERLAYERS')
+    if reason is None:
+        box.label(text="Painting writes to the {}".format(
+            iface_("mask") if mask_target else iface_("layer content")), icon='CHECKMARK')
+    else:
+        box.label(text=reason, icon='ERROR')
+
+
 def draw_material_paint_channels(
         context, layout, brush, paint, paint_mode, *, show_custom):
     """Draw Material / Material Paint channel enable + value rows.
@@ -2167,6 +2216,9 @@ def draw_material_paint_channels(
     if brush is None:
         layout.label(text="No active brush", icon='INFO')
         return
+
+    if not show_custom:
+        _draw_layer_target_status(layout, context, paint_mode)
 
     material_paint = brush.material_paint
     if material_paint is None:
@@ -2284,7 +2336,12 @@ def draw_material_paint_channels(
     _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
 
     # Image maps: resolution only matters while at least one enabled channel still needs a map.
-    if not show_custom and paint_mode is not None:
+    # A layered material grows the active row's maps on the first stroke, and the Principled-graph
+    # check below knows nothing of its rows, so the button would always be offered for it.
+    active_ob = getattr(context, "active_object", None)
+    active_material = active_ob.active_material if active_ob is not None else None
+    is_layered = active_material is not None and active_material.is_layered
+    if not show_custom and paint_mode is not None and not is_layered:
         missing_maps = material_paint_missing_map_channels(
             getattr(context, "active_object", None), brush, paint, paint_mode,
         )

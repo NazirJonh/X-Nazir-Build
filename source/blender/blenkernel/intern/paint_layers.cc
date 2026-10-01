@@ -1364,6 +1364,48 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
   return layer;
 }
 
+/**
+ * Let go of every data-block \a layer and what hangs off it (folder children, effects, mask items)
+ * holds a user on. The row's free routine never does, so without this a removed mask's map keeps a
+ * user and is written into the file as if it were still in use. The data-blocks themselves stay in
+ * `Main`: an undo step restores the row, and a map's unsaved pixels live only in memory, so freeing
+ * it here would bring the row back with the painting gone. A map left with no user is an orphan,
+ * dropped on save or purge like any other.
+ */
+static void paint_layer_release_users(MaterialPaintLayer &layer)
+{
+  for (MaterialPaintLayer &child : layer.children) {
+    paint_layer_release_users(child);
+  }
+  for (MaterialPaintLayer &effect : layer.effects) {
+    paint_layer_release_users(effect);
+  }
+  for (MaterialPaintLayer &item : layer.mask_stack) {
+    paint_layer_release_users(item);
+  }
+  for (int i = 0; i < layer.channels_num; i++) {
+    if (layer.channels[i].image != nullptr) {
+      id_us_min(&layer.channels[i].image->id);
+    }
+  }
+  if (layer.bake != nullptr) {
+    for (Image *image : layer.bake->images) {
+      if (image != nullptr) {
+        id_us_min(&image->id);
+      }
+    }
+    if (layer.bake->coverage != nullptr) {
+      id_us_min(&layer.bake->coverage->id);
+    }
+  }
+  if (layer.material != nullptr) {
+    id_us_min(&layer.material->id);
+  }
+  if (layer.custom_group != nullptr) {
+    id_us_min(&layer.custom_group->id);
+  }
+}
+
 bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
 {
   if (layer == nullptr) {
@@ -1383,6 +1425,7 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
                                        paint_layer_correction_owner(ma.paint_layers, *layer) :
                                        nullptr;
 
+  paint_layer_release_users(*layer);
   BLI_remlink(owner, layer);
   BKE_material_paint_layer_free(layer);
 
@@ -2079,7 +2122,8 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
                                                     int role,
                                                     int source,
-                                                    const char *name)
+                                                    const char *name,
+                                                    MaterialPaintLayer *after)
 {
   if (owner == nullptr || paint_layer_owner_list(&ma.paint_layers, owner) == nullptr) {
     return nullptr;
@@ -2111,7 +2155,13 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   correction->role = int8_t(role);
   ListBase *destination = (role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? &owner->mask_stack :
                                                                     &owner->effects;
-  BLI_addtail(destination, correction);
+  if (after != nullptr && BLI_findindex(destination, after) != -1) {
+    /* Lands right behind the correction the user added from, rather than behind the whole list. */
+    BLI_insertlinkafter(destination, after, correction);
+  }
+  else {
+    BLI_addtail(destination, correction);
+  }
   paint_layer_mark_owned(ma);
   return correction;
 }

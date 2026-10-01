@@ -763,6 +763,40 @@ wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op)
     }
     selected.append(active_ordinal);
   }
+  /* A layer or folder whose Mask section is the one showing is working on its mask: the key then
+   * takes the mask with every correction over it, not the row. The Content section and a
+   * correction row still remove the whole row. */
+  if (selected.size() == 1) {
+    const int target_ordinal = selected.first();
+    const StackRow *target_row = outliner_stack_row_find(*space_outliner, target_ordinal);
+    const bool is_active = target_ordinal == outliner_stack_active_ordinal_get(
+                                                 outliner_stack_read_context(*C), *space_outliner);
+    if (is_active && target_row != nullptr && target_row->parent_section_id.empty() &&
+        outliner_stack_row_active_section_get(*space_outliner, *target_row) == "MASK")
+    {
+      const bool mask_removed = stack_mutate(
+          *C,
+          *space_outliner,
+          false,
+          [&](const StackSource & /*source*/,
+              const StackEditor &editor,
+              const StackFocus &focus,
+              ID &owner,
+              int & /*r_select_ordinal*/) {
+            const StackGroupingEditor *grouping = editor.grouping();
+            return grouping != nullptr &&
+                   grouping->row_mask_set(*C, focus, owner, target_ordinal, false, nullptr);
+          });
+      if (mask_removed) {
+        /* The row is still there, with nothing left to switch to: show its content again. */
+        /* The mutation rebuilt the rows, so the row is looked up again. */
+        if (const StackRow *rebuilt = outliner_stack_row_find(*space_outliner, target_ordinal)) {
+          outliner_stack_row_active_section_set(*space_outliner, *rebuilt, "CHANNELS");
+        }
+        return OPERATOR_FINISHED;
+      }
+    }
+  }
   bool removed_any = false;
   for (int64_t index = selected.size() - 1; index >= 0; index--) {
     removed_any |= outliner_stack_row_remove(C, *space_outliner, selected[index]);

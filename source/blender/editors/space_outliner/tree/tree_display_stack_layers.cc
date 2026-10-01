@@ -13,6 +13,7 @@
 
 #include "BKE_layer.hh"
 
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_map.hh"
 #include "BLI_set.hh"
@@ -214,6 +215,8 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
    * parent got its element in the first pass. They land after the parent's sub-rows and show
    * whenever their section is active: #SO_SL_HIDE_ITEMS hides a row's *content*, not rows of the
    * stack itself. */
+  /* Each folder's first content element, by folder element: see the insertion below. */
+  Map<TreeElement *, TreeElement *> first_content_by_parent;
   for (const StackAttachedPlacement &placement : outliner_stack_attached_rows_plan(
            runtime.stack_rows,
            [&](const StackRow &stack_row) {
@@ -228,6 +231,18 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
        * first pass drops a plain child of it. */
       continue;
     }
+    /* A folder's own corrections read as a head to its contents, so they sit above the layers it
+     * holds; the first of those is remembered before any attached row is added. */
+    TreeElement *first_content = nullptr;
+    if (parent_row.can_hold_children) {
+      if (TreeElement *const *found_first = first_content_by_parent.lookup_ptr(*parent_element)) {
+        first_content = *found_first;
+      }
+      else {
+        first_content = static_cast<TreeElement *>((*parent_element)->subtree.first);
+        first_content_by_parent.add(*parent_element, first_content);
+      }
+    }
     TreeElement *layer = add_element(&(*parent_element)->subtree,
                                      owner,
                                      &row,
@@ -237,6 +252,10 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
                                      false);
     if (layer == nullptr) {
       continue;
+    }
+    if (first_content != nullptr) {
+      BLI_remlink(&(*parent_element)->subtree, layer);
+      BLI_insertlinkbefore(&(*parent_element)->subtree, first_content, layer);
     }
     stack_row_ui_state_apply(runtime, seen, layer, row);
   }

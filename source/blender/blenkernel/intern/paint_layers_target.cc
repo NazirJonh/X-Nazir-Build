@@ -455,6 +455,9 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
       BKE_id_free(&bmain, image);
       return nullptr;
     }
+    /* The channel took its own user; the one the new image was born with was only ever the first
+     * reference's, so it goes, or the map could never become an orphan once its row is removed. */
+    id_us_min(&image->id);
     /* A constant item now reads its map; switch the effect so the generator uses it. */
     if (fill_effect) {
       BKE_paint_layers_correction_source_set(*target.material, item, MA_PAINT_LAYER_SOURCE_IMAGE);
@@ -520,6 +523,8 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
     BKE_id_free(&bmain, image);
     return nullptr;
   }
+  /* See the mask case: the creation user is dropped once the channel holds its own. */
+  id_us_min(&image->id);
   return record->image;
 }
 

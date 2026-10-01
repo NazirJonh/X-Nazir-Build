@@ -541,7 +541,8 @@ bool BKE_paint_layers_source_change(Material &ma, MaterialPaintLayer *layer, int
 /**
  * Add a correction row under \a owner: a row carrying \a role (Effect or MaskItem) and \a source
  * (Image or Constant), linked into the owner's #MaterialPaintLayer::effects or #mask_stack list to
- * match. \a name may be null, in which case "Correction" is used.
+ * match. \a name may be null, in which case "Correction" is used. When \a after is a row of the
+ * list the new row joins, it is linked right behind it instead of at the end of the list.
  *
  * \return the new row, or null when \a owner is null or not part of \a ma, or \a role or \a source
  * is out of range.
@@ -550,7 +551,8 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
                                                     int role,
                                                     int source,
-                                                    const char *name);
+                                                    const char *name,
+                                                    MaterialPaintLayer *after = nullptr);
 
 /**
  * Set the role (#PaintLayerRole, Effect or MaskItem) of \a correction, moving it between its

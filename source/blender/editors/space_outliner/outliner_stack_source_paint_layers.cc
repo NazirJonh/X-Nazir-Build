@@ -18,10 +18,12 @@
  * registers.
  */
 
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <functional>
 #include <optional>
+#include <string>
 
 #include <fmt/format.h>
 
@@ -528,7 +530,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
             row.icon = ICON_MESH_DATA;
             break;
           default:
-            row.icon = ICON_IMAGE_RGB;
+            row.icon = ICON_SCULPTMODE_HLT;
             break;
         }
         /* A compact row draws no preview slots, so a refused source is shown by the icon itself. */
@@ -637,24 +639,34 @@ void paint_stack_rows_from_description_impl(const Material &material,
             StackContentSection channels;
             channels.identifier = "CHANNELS";
             channels.name = IFACE_("Channel Textures");
-            for (int c = 0; c < layer.channels_num; c++) {
-              const MaterialPaintLayerChannel &record = layer.channels[c];
-              if (record.image == nullptr || record.channel >= STACK_ROW_SUB_ROW_STRIDE) {
-                continue;
-              }
-              StackSubRow sub;
-              sub.role = record.channel;
-              sub.name = record.image->id.name + 2;
-              sub.id = &record.image->id;
-              sub.icon = paint_channel_icon(record.channel);
-              sub.inactive = record.state == MA_PAINT_LAYER_CHANNEL_DISABLED;
-              channels.sub_rows.append(std::move(sub));
-            }
+            /* The channel maps are the layer's hidden internals, not rows of the stack: the
+             * section stays so the corrections attach to it and the brush can switch to the
+             * content, but it lists no map sub-rows. */
             row.content_sections.append(std::move(channels));
           }
 
+          if (folder) {
+            /* A folder's content is the layers it holds and the corrections hung on it: its own
+             * section, so a mask can be switched to and back, and the corrections attached to it
+             * have a section to be listed under. */
+            StackContentSection content;
+            content.identifier = "CHANNELS";
+            content.name = IFACE_("Content");
+            row.content_sections.append(std::move(content));
+          }
+
           if (has_mask) {
-            row.preview_slots.append(paint_mask_slot_build(folder, row.mask_enabled));
+            if (folder) {
+              /* The slot that switches back to the content, ahead of the mask's. The folder icon
+               * stays in front of it, as it does for a folder with only a mask. */
+              StackRowPreview content_slot;
+              content_slot.section_id = "CHANNELS";
+              content_slot.icon = ICON_BRUSHES_ALL;
+              content_slot.keeps_row_icon = true;
+              content_slot.label = IFACE_("Content");
+              row.preview_slots.append(std::move(content_slot));
+            }
+            row.preview_slots.append(paint_mask_slot_build(false, row.mask_enabled));
             /* After Channel Textures: the mask section is what a click switches the brush to. */
             row.content_sections.append(paint_mask_section_build(material, layer));
           }
@@ -702,6 +714,43 @@ void paint_stack_rows_from_description_impl(const Material &material,
  * tested: each one performs the BKE edit and reports what it did. The verbs add the reports and
  * notifiers on top.
  * \{ */
+
+/** Highest N among the rows named `"<base> N"` in \a list and everything nested under it. */
+static int paint_layer_name_number_max(const ListBaseT<MaterialPaintLayer> &list,
+                                       const StringRef base)
+{
+  int highest = 0;
+  for (const MaterialPaintLayer &layer : list) {
+    const StringRef name = layer.name;
+    if (name.startswith(base) && name.size() > base.size() + 1 && name[base.size()] == ' ') {
+      const StringRef digits = name.drop_prefix(base.size() + 1);
+      int number = 0;
+      bool all_digits = true;
+      for (const char c : digits) {
+        all_digits &= (c >= '0' && c <= '9');
+        number = (number < 100000) ? number * 10 + (c - '0') : number;
+      }
+      if (all_digits) {
+        highest = std::max(highest, number);
+      }
+    }
+    highest = std::max(highest, paint_layer_name_number_max(layer.children, base));
+    highest = std::max(highest, paint_layer_name_number_max(layer.effects, base));
+    highest = std::max(highest, paint_layer_name_number_max(layer.mask_stack, base));
+  }
+  return highest;
+}
+
+/**
+ * The next default name for a new row: `"<base> N"`, one past the highest N in use. Rows are
+ * identified by their marker, never by name, so this only keeps the list readable and two rows
+ * sharing a name (after a rename or a paste) is fine.
+ */
+static std::string paint_layer_next_name(const Material &material, const StringRef base)
+{
+  const int next = paint_layer_name_number_max(material.paint_layers, base) + 1;
+  return std::string(base) + " " + std::to_string(next);
+}
 
 int paint_layers_edit_add(Material &material,
                           const int kind,
@@ -777,7 +826,8 @@ int paint_layers_edit_add(Material &material,
                                               mask_section ? MA_PAINT_LAYER_ROLE_MASK_ITEM :
                                                              MA_PAINT_LAYER_ROLE_EFFECT,
                                               source,
-                                              "Correction");
+                                              "Correction",
+                                              anchor);
     /* Material and Node Group take their source the same way #PAINT_STACK_ADD_MATERIAL does
      * (#StackAddArgs::source), but unlike a Layer row this is not an eager bake: the correction is
      * left empty when no source is given (or the wrong ID type is), pickable afterward through the
@@ -818,13 +868,17 @@ int paint_layers_edit_add(Material &material,
       return (created != nullptr) ? layers_ordinal_of(material, created) : -1;
     }
     eMaterialPaintLayerSource layer_source = MA_PAINT_LAYER_SOURCE_IMAGE;
+    const char *name_base = "Layer";
     if (kind == PAINT_STACK_ADD_FILL) {
       layer_source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+      name_base = "Fill";
     }
     else if (kind == PAINT_STACK_ADD_FOLDER) {
       layer_source = MA_PAINT_LAYER_SOURCE_STACK;
+      name_base = "Folder";
     }
-    created = BKE_paint_layers_add(material, layer_source, nullptr, anchor, place);
+    const std::string name = paint_layer_next_name(material, name_base);
+    created = BKE_paint_layers_add(material, layer_source, name.c_str(), anchor, place);
     if (created != nullptr) {
       /* The default channel set is a policy of its own (see the BKE helper); the Add only places
        * the row. */
@@ -1034,8 +1088,9 @@ int paint_layers_edit_group_add(Material &material, const int ordinal)
   if (ordinal >= 0 && anchor == nullptr) {
     return -1;
   }
+  const std::string name = paint_layer_next_name(material, "Folder");
   MaterialPaintLayer *folder = BKE_paint_layers_add(
-      material, MA_PAINT_LAYER_SOURCE_STACK, "Folder", anchor, PaintLayerPlace::Above);
+      material, MA_PAINT_LAYER_SOURCE_STACK, name.c_str(), anchor, PaintLayerPlace::Above);
   return (folder != nullptr) ? layers_ordinal_of(material, folder) : -1;
 }
 

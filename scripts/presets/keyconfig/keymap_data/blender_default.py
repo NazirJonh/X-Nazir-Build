@@ -1483,6 +1483,10 @@ def km_outliner(params):
         ("outliner.drivers_add_selected", {"type": 'D', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.drivers_delete_selected", {"type": 'D', "value": 'PRESS', "ctrl": True, "alt": True}, None),
         ("outliner.collection_new", {"type": 'C', "value": 'PRESS'}, None),
+        # Before `outliner.delete`: the first entry that polls wins, and the data-block delete also
+        # accepts a Stack Layers outliner. The Stack Layers one polls false in every other mode.
+        ("outliner.stack_layer_remove", {"type": 'X', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_remove", {"type": 'DEL', "value": 'PRESS'}, None),
         ("outliner.delete", {"type": 'X', "value": 'PRESS'}, None),
         ("outliner.delete", {"type": 'DEL', "value": 'PRESS'}, None),
         op_menu("OBJECT_MT_move_to_collection", {"type": 'M', "value": 'PRESS'}),
@@ -1497,8 +1501,6 @@ def km_outliner(params):
         # data-block bindings above rather than shadowing them.
         ("outliner.stack_layer_rename", {"type": 'F2', "value": 'PRESS'}, None),
         ("outliner.stack_layer_duplicate", {"type": 'D', "value": 'PRESS', "shift": True}, None),
-        ("outliner.stack_layer_remove", {"type": 'X', "value": 'PRESS'}, None),
-        ("outliner.stack_layer_remove", {"type": 'DEL', "value": 'PRESS'}, None),
         ("outliner.stack_layer_move", {"type": 'UP_ARROW', "value": 'PRESS', "ctrl": True},
          {"properties": [("direction", 'UP')]}),
         ("outliner.stack_layer_move", {"type": 'DOWN_ARROW', "value": 'PRESS', "ctrl": True},

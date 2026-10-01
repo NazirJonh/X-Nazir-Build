@@ -2354,6 +2354,52 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
                                       const TreeStoreElem *tselem);
 
 /**
+ * The x a child of a Stack Layers row is drawn at. A correction or mask row hangs off its layer
+ * rather than nesting under it, so it keeps the layer's own indent: the one column the hierarchy
+ * would add only left empty space beside its visibility toggle.
+ */
+static int stack_child_start_x(const SpaceOutliner &space_outliner,
+                               const TreeElement &child,
+                               const int parent_startx)
+{
+  const TreeStoreElem *tselem = TREESTORE(&child);
+  if (tselem->type == TSE_STACK_LAYER) {
+    const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+    if (row != nullptr && !row->parent_section_id.empty()) {
+      /* A mask item lines up under the parent's Mask preview: its toggle, one unit in from its
+       * start, then sits right below that button. Without previews there is nothing to line up
+       * with. */
+      if (row->parent_section_id == "MASK" && child.parent != nullptr &&
+          (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) != 0)
+      {
+        const TreeStoreElem *parent_tselem = TREESTORE(child.parent);
+        const StackRow *parent_row = (parent_tselem->type == TSE_STACK_LAYER) ?
+                                         outliner_stack_row_find(space_outliner,
+                                                                 parent_tselem->nr) :
+                                         nullptr;
+        if (parent_row != nullptr && !parent_row->compact) {
+          for (const int slot_index : parent_row->preview_slots.index_range()) {
+            if (parent_row->preview_slots[slot_index].section_id == "MASK") {
+              const rctf mask_rect = outliner_stack_row_preview_rect(
+                  *parent_row, float(parent_startx), 0.0f, slot_index);
+              return int(mask_rect.xmin) - int(UI_UNIT_X);
+            }
+          }
+        }
+      }
+      return parent_startx;
+    }
+  }
+  return parent_startx + int(UI_UNIT_X);
+}
+
+/** Whether \a row's visibility toggle sits before its icon rather than in a column. */
+static bool stack_row_has_inline_toggle(const StackRow *row)
+{
+  return row != nullptr && row->compact && row->supported && !row->is_bare_base;
+}
+
+/**
  * The per-row toggles that sit right after a stack row's name.
  *
  * Drawn as a pass of its own rather than from #outliner_draw_tree_element, so that the buttons all
@@ -2426,6 +2472,9 @@ static void outliner_draw_stack_row_icons(ui::Block *block,
     /* Before the name or in the columns, whichever the user asked for. On the left it goes in the
      * column reserved before the tree, so the toggles of nested rows line up with the ones above
      * them without overlapping the hierarchy. */
+    /* A correction's toggle is in the row, in the slot #outliner_draw_tree_element keeps free
+     * between the expand arrow and the icon. */
+    const bool inline_toggle = stack_row_has_inline_toggle(row);
     ui::Button *but = uiDefIconButO(block,
                                     ui::ButtonType::ButToggle,
                                     "OUTLINER_OT_stack_layer_visibility_toggle",
@@ -2433,9 +2482,11 @@ static void outliner_draw_stack_row_icons(ui::Block *block,
                                     row->enabled ? ICON_HIDE_OFF : ICON_HIDE_ON,
                                      /* Shifted slightly toward the hierarchy within the dedicated
                                       * column, with its right edge meeting the tree. */
+                                     inline_toggle ? te->xs + int(UI_UNIT_X) :
                                      visibility_left ? first_column_x + int(column_left_inset) :
                                                        icons_x,
                                      content_y,
+                                     inline_toggle ? int(UI_UNIT_X) :
                                      visibility_left ? UI_UNIT_X - int(column_left_inset) :
                                                        UI_UNIT_X,
                                      UI_UNIT_Y,
@@ -4592,11 +4643,19 @@ static void outliner_draw_tree_element(ui::Block *block,
       }
     }
 
+    /* A correction or mask row has its visibility toggle right before its icon, instead of in the
+     * left column with the layers' own; the space is reserved here so the icon, name and active
+     * indicator all move past it. #outliner_draw_stack_row_icons places the button itself. */
+    const StackRow *toggle_row = (tselem->type == TSE_STACK_LAYER) ?
+                                     outliner_stack_row_find(*space_outliner, tselem->nr) :
+                                     nullptr;
+    const int inline_toggle_width = stack_row_has_inline_toggle(toggle_row) ? int(UI_UNIT_X) : 0;
+
     /* Active circle. */
     if (active != OL_DRAWSEL_NONE) {
-      outliner_draw_active_indicator(float(startx) + offsx + UI_UNIT_X,
+      outliner_draw_active_indicator(float(startx) + offsx + UI_UNIT_X + inline_toggle_width,
                                      float(*starty),
-                                     float(startx) + offsx + 2.0f * UI_UNIT_X,
+                                     float(startx) + offsx + 2.0f * UI_UNIT_X + inline_toggle_width,
                                      float(*starty) + UI_UNIT_Y,
                                      icon_bgcolor,
                                      icon_border);
@@ -4621,7 +4680,7 @@ static void outliner_draw_tree_element(ui::Block *block,
             float(icon_x) + 2 * ufac, float(*starty) + 1 * ufac, ICON_RIGHTARROW, alpha_fac);
       }
     }
-    offsx += UI_UNIT_X;
+    offsx += UI_UNIT_X + inline_toggle_width;
 
     /* Data-type icon. A stack layer row with a preview available shows that instead, filling
      * more of its two-unit-tall row than a unit icon would. */
@@ -4916,7 +4975,7 @@ static void outliner_draw_tree_element(ui::Block *block,
                                  space_outliner,
                                  &ten,
                                  draw_children_grayed_out,
-                                 startx + UI_UNIT_X,
+                                 stack_child_start_x(*space_outliner, ten, startx),
                                  starty,
                                  restrict_column_width,
                                  te_edit,
@@ -5289,10 +5348,53 @@ static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
                float(start_y + row_height));
     }
 
+    /* Corrections and mask items hang off their layer the way channel maps do, and need the same
+     * rule: one above the first row of the run and one below the last, so the group reads as a
+     * block apart from the layer's own rows. */
+    const auto is_attached_row = [&](const TreeElement *element) {
+      if (element == nullptr || TREESTORE(element)->type != TSE_STACK_LAYER) {
+        return false;
+      }
+      const StackRow *attached = outliner_stack_row_find(*space_outliner,
+                                                         TREESTORE(element)->nr);
+      return attached != nullptr && !attached->parent_section_id.empty();
+    };
+    const bool attached = is_attached_row(&te);
+    /* Attached rows are drawn one indent to the left, see #stack_child_start_x. */
+    const int row_startx = attached ? stack_child_start_x(*space_outliner, te, startx - int(UI_UNIT_X)) :
+                                      startx;
+    if (attached) {
+      /* On every attached row, so the rule falls between the rows as well as above the first. */
+      immUniformColor4fv(col_divider);
+      immRectf(pos,
+               float(row_startx),
+               float(start_y + row_height) - U.pixelsize,
+               float(region->v2d.cur.xmax),
+               float(start_y + row_height));
+    }
+    const bool attached_run_ends = attached && !is_attached_row(te.next);
+    /* Drawn once the row's own subtree is listed, so the rule sits under a folder correction's
+     * children and not between it and them. */
+    const auto draw_run_end_rule = [&]() {
+      if (!attached_run_ends) {
+        return;
+      }
+      /* The next row's top edge; the rule takes the last pixel row above it so that row's own band
+       * cannot paint over it. */
+      const float edge_y = float(*io_start_y + UI_UNIT_Y);
+      immUniformColor4fv(col_divider);
+      immRectf(pos,
+               float(row_startx),
+               edge_y,
+               float(region->v2d.cur.xmax),
+               edge_y + U.pixelsize);
+    };
+
     (*stripe_index)++;
     *io_start_y -= row_height;
 
     if (!TSELEM_OPEN(tselem, space_outliner)) {
+      draw_run_end_rule();
       continue;
     }
 
@@ -5336,6 +5438,7 @@ static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
           *io_start_y -= channel_row_height;
         }
         *stripe_index = channel_stripe_index + (channel_count + 1) / 2;
+        draw_run_end_rule();
         continue;
       }
     }
@@ -5347,9 +5450,10 @@ static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
                                             pos,
                                             col_alternate,
                                             col_divider,
-                                            startx + UI_UNIT_X,
+                                            row_startx + UI_UNIT_X,
                                             stripe_index,
                                             io_start_y);
+    draw_run_end_rule();
   }
 }
 

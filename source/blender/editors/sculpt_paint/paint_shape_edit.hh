@@ -24,6 +24,8 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_userdef_types.h" /* UI_SCALE_FAC */
+
 #include "paint_shape.hh"
 #include "paint_vector_document.hh"
 
@@ -33,6 +35,13 @@ namespace blender::ed::sculpt_paint::shape {
  * #UI_SCALE_FAC before passing it down, so the tolerance follows the interface scale while the
  * session itself stays UI-agnostic. */
 constexpr float SHAPE_HIT_TOLERANCE_PX = 4.0f;
+
+/** Contour / handle grab tolerance of a live Vector session in session pixels, scaled by the
+ * interface scale (shared by the Image Editor and 3D viewport frontends). */
+inline float hit_tolerance_px()
+{
+  return SHAPE_HIT_TOLERANCE_PX * UI_SCALE_FAC;
+}
 
 /** Control points are small targets, so they are grabbed from a wider ring than the contour
  * (which is matched against the drawn stroke); the larger radius keeps a near-miss from falling

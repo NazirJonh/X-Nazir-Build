@@ -11,7 +11,7 @@
  *   distance gradient the profile/height/normal compositing samples.
  * - Shade: pure geometry-to-color math shared by the 2D compositor and the 3D Sculpt PBR
  *   backends. No ImBuf, no mesh, no undo here; the callers own the targets.
- * - Blend: the single per-pixel blend core of the 2D Image compositor (float and byte tiles).
+ * - Blend: the single per-pixel blend core of the 2D Image compositor (float and byte tiles) and the 3D Sculpt backends.
  *
  * Color mixing, profile application and the selection mask belong to the compositor
  * (`paint_image_shape_composite.hh`).
@@ -349,20 +349,33 @@ float4 shade_fill_gradient(const ShapeStyle &style,
 /* -------------------------------------------------------------------- */
 /** \name Blend
  *
- * There is no ImBuf or undo here. The destination is in the caller's working space: scene linear
- * for float buffers, the buffer's own colorspace for byte tiles whose style the 2D compositor has
- * already converted. Keeping the colorspace decision with the caller is what lets the same
- * arithmetic serve every target unchanged.
+ * There is no ImBuf, mesh or undo here. The destination is in the caller's working space: scene
+ * linear for float buffers and the 3D backends, the buffer's own colorspace for byte tiles whose
+ * style the 2D compositor has already converted. Keeping the colorspace decision with the caller
+ * is what lets the same arithmetic serve every target unchanged.
  * \{ */
 
 
 /**
  * Fill bounding box in shape space for the gradient fill path. The 2D compositor builds it per
- * shape.
+ * shape; the 3D image backend uses the union bounds of the shapes it rasterizes.
  */
 struct ShapeFillGradient {
   float2 bbox_lo;
   float2 bbox_hi;
+};
+
+/**
+ * The decal-space -> tangent-space frame a Normal channel write is expressed in. The defaults
+ * are the identity, which is what the 2D compositor uses: its detail normal already lives in the
+ * map's tangent space, so no reorientation is applied.
+ */
+struct NormalWriteBasis {
+  float3 t_screen = float3(1.0f, 0.0f, 0.0f);
+  float3 b_screen = float3(0.0f, 1.0f, 0.0f);
+  float3 n_m = float3(0.0f, 0.0f, 1.0f);
+  float3 t_m = float3(1.0f, 0.0f, 0.0f);
+  float3 b_m = float3(0.0f, 1.0f, 0.0f);
 };
 
 /** Everything #shape_blend_pixel needs beyond the sample itself. */
@@ -373,13 +386,15 @@ struct ShapeBlendContext {
   /** Whether the Alpha channel masks the other channels this bake. Computed once per bake, never
    * per pixel. */
   bool alpha_active = false;
+  /** Normal write basis; null means the identity (the 2D compositor). */
+  const NormalWriteBasis *normal_basis = nullptr;
   /** Fill gradient box; null keeps the solid / ramp #shade_canvas fill. */
   const ShapeFillGradient *fill_gradient = nullptr;
 };
 
 /**
- * Blend one #ShapeSample into \a dst. \a factor is the backend's own mask (e.g. selection) and
- * scales every write's alpha.
+ * Blend one #ShapeSample into \a dst. \a factor is the backend's own mask (selection, sculpt
+ * mask, face sets) and scales every write's alpha.
  *
  * \param dst: destination pixel in the caller's working space (see the file comment).
  * \param p_shape: shape-space position of the pixel; used by the gradient fill.

@@ -151,6 +151,15 @@ TEST(ShapeBlend, FlatNormalKeepsEncodedFlat)
   EXPECT_NEAR(dst.x, 0.5f, 1e-5f);
   EXPECT_NEAR(dst.y, 0.5f, 1e-5f);
   EXPECT_NEAR(dst.z, 1.0f, 1e-5f);
+
+  /* An explicit identity basis must not change the result. */
+  const NormalWriteBasis identity;
+  ctx.normal_basis = &identity;
+  float4 with_basis(0.5f, 0.5f, 1.0f, 1.0f);
+  shape_blend_pixel(with_basis, ctx, ShapeSample{.fill = 1.0f}, 1.0f, float2(0.0f));
+  EXPECT_NEAR(with_basis.x, 0.5f, 1e-5f);
+  EXPECT_NEAR(with_basis.y, 0.5f, 1e-5f);
+  EXPECT_NEAR(with_basis.z, 1.0f, 1e-5f);
 }
 
 }  // namespace blender::ed::sculpt_paint::shape

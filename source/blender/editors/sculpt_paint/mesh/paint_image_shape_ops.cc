@@ -108,10 +108,7 @@ constexpr char SHAPE_UNDO_NAME[] = "Paint Shape";
 
 static float2 image_shape_event_uv(const ARegion *region, const wmEvent *event)
 {
-  float uv[2];
-  ui::view2d_region_to_view(
-      &region->v2d, float(event->mval[0]), float(event->mval[1]), &uv[0], &uv[1]);
-  return float2(uv[0], uv[1]);
+  return shape::image_region_to_uv(*region, float2(event->mval[0], event->mval[1]));
 }
 
 /** Shape-space (reference-tile) pixel position of \a event for shapes anchored at \a ref_tile. */
@@ -124,36 +121,15 @@ static float2 image_shape_event_to_px(const ARegion *region,
   return (uv - shape::tile_uv_origin(ref_tile)) * float2(ref_tile_size);
 }
 
-/** Shape-space pixels to Image Editor region pixels, for the overlay. */
-static float2 image_shape_px_to_region(const ARegion *region,
-                                       const shape::CanvasTile &tile,
-                                       const float2 &px)
-{
-  const float2 uv = shape::shape_px_to_uv(tile, px);
-  float2 region_px;
-  ui::view2d_view_to_region_fl(&region->v2d, uv.x, uv.y, &region_px.x, &region_px.y);
-  return region_px;
-}
-
 /** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Bézier input mapping (UV space, like Select Curve)
  * \{ */
 
-static float2 image_shape_input_to_region(const ARegion &region, const float2 &uv)
-{
-  float region_px[2];
-  ui::view2d_view_to_region_fl(&region.v2d, uv.x, uv.y, &region_px[0], &region_px[1]);
-  return float2(region_px[0], region_px[1]);
-}
-
 static float2 image_shape_input_event_to_user(const ARegion &region, const wmEvent &event)
 {
-  float uv[2];
-  ui::view2d_region_to_view(
-      &region.v2d, float(event.mval[0]), float(event.mval[1]), &uv[0], &uv[1]);
-  return float2(uv[0], uv[1]);
+  return shape::image_region_to_uv(region, float2(event.mval[0], event.mval[1]));
 }
 
 /** \} */
@@ -242,7 +218,7 @@ static void image_shape_draw_drag(const bContext *C, ARegion *region, void *arg)
   shape::shape_draw_creation_preview(
       shape,
       SHAPE_PREVIEW_ERROR_PX,
-      [&](const float2 &p) { return image_shape_px_to_region(region, tile, p); },
+      [&](const float2 &p) { return shape::shape_px_to_region(*region, tile, p); },
       show_width ? &state->create->style() : nullptr);
 }
 
@@ -255,7 +231,7 @@ static void image_shape_draw_input(const bContext *C, ARegion *region, void *arg
   if (CTX_wm_space_image(C) != state->owner_sima) {
     return;
   }
-  const bezier_input::Mapping mapping = {image_shape_input_to_region,
+  const bezier_input::Mapping mapping = {shape::image_uv_to_region,
                                         image_shape_input_event_to_user};
   state->create->input().draw(*region, mapping, bezier_input::DrawStyle());
 }
@@ -315,13 +291,6 @@ static void image_shape_status_set_gesture(bContext *C,
 /* -------------------------------------------------------------------- */
 /** \name Vector session gestures
  * \{ */
-
-/** Grab tolerance in session pixels, scaled by the interface scale. */
-static float image_shape_hit_tolerance_px()
-{
-  return shape::SHAPE_HIT_TOLERANCE_PX * UI_SCALE_FAC;
-}
-
 
 /** \} */
 
@@ -452,7 +421,7 @@ static wmOperatorStatus image_shape_draw_invoke(bContext *C,
         return OPERATOR_CANCELLED;
       }
       std::unique_ptr<shape::VectorEditHost> host = shape::image_shape_vector_host_create(
-          *C, *session, image_shape_hit_tolerance_px());
+          *C, *session, shape::hit_tolerance_px());
       const float2 press_px = image_shape_event_to_px(
           region, event, host->ref_tile(), host->ref_tile_size());
 
@@ -512,7 +481,7 @@ static wmOperatorStatus image_shape_draw_invoke(bContext *C,
 
   state->create.emplace(ePaintShapeType(type),
                         style,
-                        bezier_input::Mapping{image_shape_input_to_region,
+                        bezier_input::Mapping{shape::image_uv_to_region,
                                               image_shape_input_event_to_user});
   const float2 start_uv = image_shape_event_uv(region, event);
   const float2 screen_start = float2(event->mval[0], event->mval[1]);
@@ -586,7 +555,7 @@ static wmOperatorStatus image_shape_draw_modal(bContext *C,
     const bool in_owner_region = (sima == state->owner_sima &&
                                   region->regiontype == RGN_TYPE_WINDOW);
     std::unique_ptr<shape::VectorEditHost> host = shape::image_shape_vector_host_create(
-        *C, *session, image_shape_hit_tolerance_px());
+        *C, *session, shape::hit_tolerance_px());
     const float2 event_px =
         in_owner_region ? image_shape_event_to_px(
                               region, event, host->ref_tile(), host->ref_tile_size()) :
@@ -863,6 +832,8 @@ wmKeyMap *paint_shape_modal_keymap(wmKeyConfig *keyconf)
    * has drifted from Python on modifiers. */
 
   WM_modalkeymap_assign(keymap, "PAINT_OT_image_shape_draw");
+  /* The 3D Viewport frontend shares the map (same confirm, cancel and undo items). */
+  WM_modalkeymap_assign(keymap, "SCULPT_OT_paint_shape_draw");
 
   return keymap;
 }
@@ -883,6 +854,13 @@ static wmOperatorStatus shape_colors_swap_exec(bContext *C, wmOperator * /*op*/)
    * Editor edits that copy and must not touch the shared global block. */
   SpaceImage *sima = CTX_wm_space_image(C);
   PaintShapeSettings *shape_ptr = ED_image_shape_session_settings_get(sima);
+  if (shape_ptr == nullptr && CTX_wm_view3d(C) != nullptr) {
+    /* The Sculpt Mode Vector session owns a settings copy too (the shared block is not what its
+     * preview reads), so a swap from the 3D Viewport must edit that copy. */
+    if (Object *ob = CTX_data_active_object(C)) {
+      shape_ptr = ED_paint_shape_session_settings_get(*ob);
+    }
+  }
   if (shape_ptr == nullptr) {
     shape_ptr = &BKE_paint_shape_settings_get(*scene->toolsettings);
   }

@@ -7847,6 +7847,12 @@ def _template_items_image_paint_shape(params, shape_type):
         ("paint.image_shape_vector_cancel",
          {"type": 'ESC', "value": 'PRESS'},
          None),
+        # Ctrl+Z steps the shape session's own undo. The Image Vector modal handles it while it
+        # runs; for a linked 3D Sculpt session this keymap is what keeps it off the global stack
+        # (a global undo would cancel the session).
+        ("paint.image_shape_vector_undo",
+         {"type": 'Z', "value": 'PRESS', "ctrl": True},
+         None),
     ]
 
 
@@ -7898,6 +7904,8 @@ def km_image_paint_shape_modal_map(_params):
         ("CONFIRM", {"type": 'RET', "value": 'PRESS', "any": True}, None),
         ("CONFIRM", {"type": 'NUMPAD_ENTER', "value": 'PRESS', "any": True}, None),
         ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+        # Ctrl+RMB is the contour cut of a live Vector shape, so it must reach the modal untranslated
+        # (a plain, Shift or Alt RMB still cancels).
         ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
         ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
         ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS', "alt": True}, None),
@@ -9003,6 +9011,39 @@ def km_3d_view_tool_sculpt_color_gradient(params):
     )
 
 
+def _km_3d_view_tool_sculpt_paint_shape(keymap_name, shape_type, params):
+    return (
+        keymap_name,
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.paint_shape_draw",
+             {"type": params.tool_mouse, "value": 'PRESS'},
+             {"properties": [("type", shape_type)]}),
+            # Ctrl+RMB cuts the contour of a live Vector shape (inserts a point), like the Curve
+            # stroke method.
+            ("sculpt.paint_shape_draw",
+             {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True},
+             {"properties": [("type", shape_type)]}),
+            # F is the stroke width in region pixels (the 3D shape is built in region pixels, so
+            # the radial circle matches the painted width); Shift+F is the brush strength, which
+            # the shape uses as its overall opacity. The tool key-map is consulted before the mode
+            # key-map, so the Sculpt brush size on F stays untouched while a shape tool is active.
+            # A live Vector session edits its own width first (the operator passes the key through
+            # when there is none, so the radial control below serves Pixel mode).
+            ("sculpt.paint_shape_draw", {"type": 'F', "value": 'PRESS'},
+             {"properties": [("type", shape_type)]}),
+            ("wm.radial_control", {"type": 'F', "value": 'PRESS'},
+             {"properties": [("data_path_primary",
+                             "tool_settings.image_paint.shape.stroke_width")]}),
+            ("wm.radial_control", {"type": 'F', "value": 'PRESS', "shift": True},
+             radial_control_properties("sculpt", "strength",
+                                       secondary_prop="use_unified_strength")),
+            # X swaps the shape's own Stroke / Fill colors.
+            ("paint.shape_colors_swap", {"type": 'X', "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_mask_by_color(params):
     return (
         "3D View Tool: Sculpt, Mask by Color",
@@ -9895,6 +9936,14 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_color_gradient(params),
+        *(_km_3d_view_tool_sculpt_paint_shape("3D View Tool: Sculpt, Shape " + name, shape_type, params)
+          for name, shape_type in (
+              ("Line", 'LINE'),
+              ("Polyline", 'POLYLINE'),
+              ("Rectangle", 'RECTANGLE'),
+              ("Ellipse", 'ELLIPSE'),
+              ("Curve", 'CURVE'),
+          )),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_mask_by_topology_island(params),
         km_3d_view_tool_sculpt_face_set_edit(params),

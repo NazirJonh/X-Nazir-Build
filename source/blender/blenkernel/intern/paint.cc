@@ -2680,6 +2680,12 @@ void BKE_sculptsession_free(Object *ob)
       ss->free_curve_patch_session(*ob);
     }
 
+    /* Same editor-owned teardown for a live Vector shape session: restore the preview (the tile
+     * backups) and free it before the PBVH goes away. No-op when already committed/cancelled. */
+    if (ss->paint_shape_session && ss->free_paint_shape_session) {
+      ss->free_paint_shape_session(*ob);
+    }
+
     if (ss->bm) {
       BKE_sculptsession_bm_to_me(ob);
       BM_mesh_free(ss->bm);

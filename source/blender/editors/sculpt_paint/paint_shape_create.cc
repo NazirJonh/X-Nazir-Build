@@ -29,6 +29,7 @@
 #include "WM_types.hh"
 
 #include "paint_intern.hh"
+#include "paint_shape_op_props.hh"
 #include "paint_shape_edit.hh"
 
 namespace blender::ed::sculpt_paint::shape {

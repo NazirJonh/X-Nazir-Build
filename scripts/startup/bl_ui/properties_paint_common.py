@@ -3169,6 +3169,33 @@ def draw_shape_color_row(layout, shape, *, header=False, show_swap=False):
     return row
 
 
+def paint_shape_linked_3d_object(context):
+    """The object whose live 3D Sculpt Paint Shape session this Image Editor shows, or None.
+
+    Single source of truth for "this Image Editor is linked to a 3D session" (mirrors the C++
+    #image3d_linked_session): the current space must be an Image Editor in Paint/View mode without
+    a Vector session of its own, showing a non-UDIM image that the active object's live session
+    draws to. Everything else (the shared settings, the Transform button, the cage) keys off
+    this."""
+    space = getattr(context, "space_data", None)
+    if space is None or space.type != 'IMAGE_EDITOR':
+        return None
+    if getattr(space, "mode", None) not in ('PAINT', 'VIEW'):
+        return None
+    # An Image Editor with its own Vector session takes priority.
+    if getattr(space, "paint_shape_session_settings", None) is not None:
+        return None
+    image = getattr(space, "image", None)
+    if image is None or image.source == 'TILED':
+        return None
+    ob = getattr(context, "object", None)
+    if ob is None:
+        return None
+    if not ob.paint_shape_session_shows_image(image):
+        return None
+    return ob
+
+
 def paint_shape_tool_flags(context):
     """(is_line, is_rect, is_sized) for the active Shape tool, derived from the active tool so the
     settings UI does not read the operator-only ``shape.type``."""
@@ -3199,11 +3226,22 @@ def paint_shape_settings(context):
 
     A live Image Vector session owns a private copy of the settings, exposed on its ``SpaceImage``
     as ``paint_shape_session_settings``; the UI of that space edits the copy, so settings changes in
-    other spaces never reach the session. Every other space uses the shared
-    ``tool_settings.image_paint.shape``."""
+    other spaces never reach the session. An Image Editor linked to a live 3D Sculpt shape session
+    (no Vector session of its own, target image shown) instead edits that session's copy, exposed on
+    the owner object as ``paint_shape_session_settings``. Every other space (other Image Editors,
+    the 3D Viewport) uses the shared ``tool_settings.image_paint.shape``."""
     space = getattr(context, "space_data", None)
     if space is not None and space.type == 'IMAGE_EDITOR':
         session_settings = getattr(space, "paint_shape_session_settings", None)
+        if session_settings is not None:
+            return session_settings
+        ob = paint_shape_linked_3d_object(context)
+        if ob is not None:
+            return ob.paint_shape_session_settings
+    elif context.mode == 'SCULPT':
+        ob = getattr(context, "object", None)
+        session_settings = (getattr(ob, "paint_shape_session_settings", None)
+                            if ob is not None else None)
         if session_settings is not None:
             return session_settings
     return context.tool_settings.image_paint.shape

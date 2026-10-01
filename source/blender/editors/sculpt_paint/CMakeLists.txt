@@ -61,17 +61,16 @@ set(SRC
   paint_bezier_input.cc
   paint_shape_blend.cc
   paint_shape_create.cc
-  paint_shape_draw.cc
   paint_shape_edit.cc
   paint_shape_geom.cc
   paint_shape_op_props.cc
   paint_shape_raster.cc
   paint_shape_shade.cc
   paint_shape_space.cc
+  paint_shape_uv_trace.cc
   paint_texture_ops.cc
   paint_vector_document.cc
   paint_vector_editor.cc
-  paint_vector_serialize.cc
   paint_sample_color.cc
   paint_stroke.cc
   paint_stroke_roll.cc
@@ -192,7 +191,15 @@ set(SRC
   mesh/sculpt_paint_color.cc
   mesh/sculpt_paint_image.cc
   mesh/sculpt_paint_material.cc
+  mesh/sculpt_paint_shape.cc
+  mesh/sculpt_paint_shape_attr.cc
+  mesh/sculpt_paint_shape_ops.cc
+  mesh/sculpt_paint_shape_pixels.cc
+  mesh/sculpt_paint_shape_sample.cc
+  mesh/paint_shape_vector_3d.cc
   mesh/paint_shape_gizmo.cc
+  mesh/paint_shape_gizmo_view3d.cc
+  mesh/paint_shape_image_3d.cc
   mesh/sculpt_pose.cc
   mesh/sculpt_project.cc
   mesh/sculpt_smooth.cc
@@ -239,6 +246,7 @@ paint_intern.hh
   paint_shape_op_props.hh
   paint_shape_render.hh
   paint_shape_space.hh
+  paint_shape_uv_trace.hh
   paint_shape_target.hh
   paint_vector_document.hh
   paint_vector_editor.hh
@@ -278,6 +286,9 @@ paint_intern.hh
   mesh/sculpt_islands.hh
   mesh/sculpt_multi_object.hh
   mesh/sculpt_paint_material.hh
+  mesh/sculpt_paint_shape.hh
+  mesh/sculpt_paint_shape_intern.hh
+  mesh/paint_shape_vector_3d.hh
   mesh/paint_shape_gizmo.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
@@ -372,6 +383,7 @@ if(WITH_GTESTS)
     tests/paint_shape_edit_test.cc
     tests/paint_shape_raster_test.cc
     tests/paint_shape_shade_test.cc
+    tests/paint_shape_uv_trace_test.cc
     tests/paint_vector_editor_test.cc
     tests/paint_vector_serialize_test.cc
     tests/roll_spline_test.cc

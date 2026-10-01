@@ -17,10 +17,13 @@
 #include "BLI_utildefines.h"
 
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
 
 #include "BKE_image.hh"
 
 #include "ED_image_paint_symmetry.hh"
+
+#include "UI_view2d.hh"
 
 #include "paint_image_shape_composite.hh"
 #include "../paint_shape.hh"
@@ -46,6 +49,25 @@ float2 shape_uv_to_px(const CanvasTile &tile, const float2 &uv)
 {
   const float2 size = float2(tile.ref_tile_size);
   return (uv - tile_uv_origin(tile.ref_tile)) * size;
+}
+
+float2 image_uv_to_region(const ARegion &region, const float2 &uv)
+{
+  float2 region_px;
+  ui::view2d_view_to_region_fl(&region.v2d, uv.x, uv.y, &region_px.x, &region_px.y);
+  return region_px;
+}
+
+float2 image_region_to_uv(const ARegion &region, const float2 &region_px)
+{
+  float2 uv;
+  ui::view2d_region_to_view(&region.v2d, region_px.x, region_px.y, &uv.x, &uv.y);
+  return uv;
+}
+
+float2 shape_px_to_region(const ARegion &region, const CanvasTile &tile, const float2 &px)
+{
+  return image_uv_to_region(region, shape_px_to_uv(tile, px));
 }
 
 /** \} */

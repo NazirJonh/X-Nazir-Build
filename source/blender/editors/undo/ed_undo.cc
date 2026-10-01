@@ -224,7 +224,9 @@ static bool ed_undo_step_pre(bContext *C,
   /* Both cancels must always run: each one owns a different kind of floating session. They are
    * evaluated unconditionally and combined afterwards so the second cannot be short-circuited
    * away by the first returning true. */
-  const bool shape_cancelled = ED_image_paint_shape_sessions_cancel_all(C);
+  const bool shape_cancelled_image = ED_image_paint_shape_sessions_cancel_all(C);
+  const bool shape_cancelled_vector = ED_paint_shape_sessions_cancel_all(C);
+  const bool shape_cancelled = shape_cancelled_image || shape_cancelled_vector;
   ED_image_paint_select_sessions_cancel_all(C);
   /* Only an undo is consumed; a redo cancels the session and then steps the stack as usual. */
   return undo_dir == STEP_REDO || !shape_cancelled;

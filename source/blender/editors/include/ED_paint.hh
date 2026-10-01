@@ -27,6 +27,7 @@ struct CurvePatchParams;
 enum class PaintMode : int8_t;
 struct ARegion;
 struct bContext;
+struct ARegionType;
 struct Brush;
 struct bToolRef;
 struct Depsgraph;
@@ -493,8 +494,41 @@ void ED_image_shape_transform_gizmo_setup(wmGizmoGroupType *gzgt);
  * operator's modal yields LEFTMOUSE to the gizmo when this returns true. */
 bool ED_image_shape_transform_gizmo_hit(const bContext *C, const int mval[2]);
 
-/** Runtime "Transform" mode of the live Vector session in \a sima (Polygon/Star/Arc cage). */
+/** Runtime "Transform" mode of the live Vector session in \a sima (cage of a parametric shape without an analytic SDF). */
 bool ED_image_shape_transform_is_active(SpaceImage *sima);
+
+/* `paint_shape_gizmo_view3d.cc` */
+
+/** Register the 3D Viewport gizmo group that draws the live Sculpt Vector session's cage. */
+void ED_view3d_shape_transform_gizmo_setup(wmGizmoGroupType *gzgt);
+
+/** True when \a mval is over the live Sculpt shape session's cage handles or interior. */
+bool ED_view3d_shape_transform_gizmo_hit(const bContext *C, const int mval[2]);
+
+/* `paint_shape_image_3d.cc` */
+
+/** Register the Image Editor gizmo group that displays a live 3D Sculpt shape session's cage in
+ * the editor's UV space. */
+void ED_image_paint_shape3d_gizmo_setup(wmGizmoGroupType *gzgt);
+
+/** Add the draw callback that shows a live 3D Sculpt shape session's contour in every Image Editor
+ * displaying one of its target images. Called once from the Image Editor's main region type
+ * setup. */
+void ED_image_paint_shape3d_draw_register(ARegionType *art);
+
+/** True while any live 3D Sculpt shape session exists (cheap guard for listeners and draws). */
+bool ED_paint_shape_sessions_alive();
+
+/* `paint_shape_image_3d.cc`: the linked Image Editor edits the same 3D session. */
+
+/** True when the Image Editor of the current context shows a live 3D Sculpt shape session (one of
+ * its target images, without an Image Vector session of its own). */
+bool ED_image_paint_shape3d_session_linked(const bContext *C);
+
+/** Apply (bake) / cancel the 3D session shown by the Image Editor of the current context. False
+ * when this editor is not linked to one. */
+bool ED_image_paint_shape3d_session_apply(bContext *C);
+bool ED_image_paint_shape3d_session_cancel(bContext *C);
 
 /* `paint_image_select_move.cc` */
 
@@ -588,5 +622,31 @@ void ED_paint_shape_brush_update(const Main *bmain, const Scene *scene, const Br
  * session and the shared settings stay untouched.
  */
 PaintShapeSettings *ED_image_shape_session_settings_get(SpaceImage *sima);
+
+/* `paint_shape_vector_3d.cc` — live Vector shape session of Sculpt Mode (Image canvas) */
+
+namespace ed::sculpt_paint::shape {
+struct PaintShapeSession;
+}
+
+/** The live Vector shape session of \a ob, or null. */
+ed::sculpt_paint::shape::PaintShapeSession *ED_paint_shape_session_get(Object &ob);
+bool ED_paint_shape_session_active(const Object &ob);
+/** Cancel every live Vector session in \a bmain; called from the undo/redo pre-step. Returns true
+ * when at least one session was cancelled, so the caller can consume the undo step (the session's
+ * uncommitted preview takes the first undo, like its Esc). */
+bool ED_paint_shape_sessions_cancel_all(bContext *C);
+/** Context-less teardown: restore the preview and free (object deletion, mode exit). */
+void ED_paint_shape_session_discard_on_session_end(Object &ob);
+/** The live 3D session's own #PaintShapeSettings copy, or null. Edited by the Sculpt shape UI. */
+PaintShapeSettings *ED_paint_shape_session_settings_get(Object &ob);
+/** Runtime "Transform" flag of the live 3D session (cage of a parametric shape without an analytic SDF). */
+bool ED_paint_shape_transform_is_active(const Object &ob);
+/** True when \a ob owns a live 3D shape session whose write targets include \a image: an Image
+ * Editor showing that image is "linked" to the session. */
+bool ED_paint_shape_session_shows_image(const Object &ob, const Image &image);
+/** True when the live session's active shape supports the Transform cage (a generated
+ * parametric shape without an analytic SDF). */
+bool ED_paint_shape_transform_is_available(const Object &ob);
 
 }  // namespace blender

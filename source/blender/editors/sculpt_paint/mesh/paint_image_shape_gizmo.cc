@@ -79,8 +79,7 @@ static bool image_gizmo_event_to_shape_px(const bContext *C,
                                           const wmEvent &event,
                                           float2 &r_px)
 {
-  float2 uv;
-  ui::view2d_region_to_view(&region.v2d, float(event.mval[0]), float(event.mval[1]), &uv.x, &uv.y);
+  const float2 uv = image_region_to_uv(region, float2(event.mval[0], event.mval[1]));
   const ShapeEditSession *edit = image_gizmo_edit(C);
   r_px = shape_uv_to_px(edit != nullptr ? edit->canvas_tile() : CanvasTile{}, uv);
   return true;
@@ -93,11 +92,7 @@ static float2 image_gizmo_shape_px_to_region(const bContext *C,
                                              const float2 &px)
 {
   const ShapeEditSession *edit = image_gizmo_edit(C);
-  const float2 uv = shape_px_to_uv(edit != nullptr ? edit->canvas_tile() : CanvasTile{}, px);
-  float sx = 0.0f;
-  float sy = 0.0f;
-  ui::view2d_view_to_region_fl(&region.v2d, uv.x, uv.y, &sx, &sy);
-  return float2(sx, sy);
+  return shape_px_to_region(region, edit != nullptr ? edit->canvas_tile() : CanvasTile{}, px);
 }
 
 static bool image_gizmo_poll(const bContext *C)

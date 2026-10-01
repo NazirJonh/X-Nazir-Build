@@ -7,7 +7,7 @@
 #include "BLI_math_base.hh"
 #include "BLI_math_vector_types.hh"
 
-#include "../paint_intern.hh" /* PAINT_SHAPE_MODAL_* */
+#include "../paint_shape_op_props.hh" /* PAINT_SHAPE_MODAL_* */
 
 #include "WM_types.hh" /* wmEvent, KM_PRESS, LEFTMOUSE, EVT_MODAL_MAP */
 

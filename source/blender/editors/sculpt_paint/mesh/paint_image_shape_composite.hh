@@ -43,6 +43,7 @@
 
 namespace blender {
 
+struct ARegion;
 struct bContext;
 struct Image;
 struct ImageUser;
@@ -317,6 +318,12 @@ float2 tile_uv_origin(int tile);
 /** Reference-tile pixels <-> UV. */
 float2 shape_px_to_uv(const CanvasTile &tile, const float2 &px);
 float2 shape_uv_to_px(const CanvasTile &tile, const float2 &uv);
+
+/** Image Editor View2D mapping: UV -> region pixels, region pixels -> UV, and reference-tile
+ * pixels -> region pixels (through UV). */
+float2 image_uv_to_region(const ARegion &region, const float2 &uv);
+float2 image_region_to_uv(const ARegion &region, const float2 &region_px);
+float2 shape_px_to_region(const ARegion &region, const CanvasTile &tile, const float2 &px);
 
 /** \} */
 

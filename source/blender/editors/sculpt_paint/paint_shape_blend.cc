@@ -7,7 +7,8 @@
  *
  * Implementation of the shared shape pixel blend core; see #paint_shape_render.hh.
  *
- * The per-pixel arithmetic the 2D compositor's `tile_composite_pbr` / `tile_composite` share.
+ * The per-pixel arithmetic shared by the 2D compositor and the 3D Sculpt backends: it mirrors the
+ * former `tile_composite_pbr` / `tile_composite` channel for channel.
  */
 
 #include "paint_shape_render.hh"
@@ -70,7 +71,8 @@ void shape_blend_pixel(float4 &dst,
   const ShapeStyle &style = *ctx.style;
 
   if (ctx.channel < 0) {
-    /* Plain Image canvas: the colors #shade_canvas yields for the ImBuf compositor. */
+    /* Plain Image canvas: the same colors #shade_canvas yields for the color attribute / ImBuf
+     * compositor. */
     const bool fill_pass = style.use_fill();
     const bool stroke_pass = style.use_stroke() && style.stroke_width > 0.0f;
     for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
@@ -121,7 +123,12 @@ void shape_blend_pixel(float4 &dst,
       if (alpha <= 0.0f) {
         continue;
       }
-      const float3 detail = float3(write.value.x, write.value.y, write.value.z);
+      float3 detail = float3(write.value.x, write.value.y, write.value.z);
+      if (ctx.normal_basis != nullptr) {
+        const NormalWriteBasis &basis = *ctx.normal_basis;
+        detail = material::remap_decal_normal_to_tangent(
+            detail, basis.t_screen, basis.b_screen, basis.n_m, basis.t_m, basis.b_m);
+      }
       result = material::blend_normal_rnm(result, detail, alpha);
     }
     const float3 encoded = result * 0.5f + float3(0.5f);

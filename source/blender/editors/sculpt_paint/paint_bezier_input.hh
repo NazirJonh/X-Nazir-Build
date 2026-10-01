@@ -89,6 +89,10 @@ struct Mapping {
   float2 (*event_to_user)(const ARegion &region, const wmEvent &event);
 };
 
+/** Identity mapping: control points live directly in region pixels (the 3D viewport frontends,
+ * which project the shape onto the mesh only when it is written). */
+Mapping region_pixel_mapping();
+
 /** Overlay colors (and dash length) the input draws itself with. */
 struct DrawStyle {
   /** Animated dashed outline, alternating between the two colors. */

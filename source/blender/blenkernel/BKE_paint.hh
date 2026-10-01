@@ -84,6 +84,9 @@ struct VDMStampData {
   float4x4 symm_rot_mat_inv;
 };
 struct CurvePatchSession;
+namespace shape {
+struct PaintShapeSession;
+}
 }  // namespace ed::sculpt_paint
 struct GHash;
 struct GridPaintMask;
@@ -832,6 +835,14 @@ struct SculptSession : NonCopyable, NonMovable {
    */
   void (*free_curve_patch_session)(Object &ob) = nullptr;
 
+  /**
+   * Live Vector shape session (Sculpt Mode, Image canvas). Owned here exactly like
+   * #curve_patch_session; the editor publishes it and registers #free_paint_shape_session so
+   * object deletion restores the preview and frees it.
+   */
+  ed::sculpt_paint::shape::PaintShapeSession *paint_shape_session = nullptr;
+  void (*free_paint_shape_session)(Object &ob) = nullptr;
+
   /* Cursor data and active vertex for tools */
   std::optional<int> active_face_index;
   std::optional<int> active_grid_index;
@@ -1346,8 +1357,8 @@ enum class eShapeTargetKind : int8_t {
  * The bit mask of #eMaterialPaintChannel the shape bake will write for \a kind: a channel writes
  * when the active brush writes it (#BKE_paint_material_channel_writes_to_target), or when the
  * shape channel override is on, either part of the shape enables the channel, and the channel is
- * visible. This is the single source of that rule: the 2D compositor and the Python tool UI
- * (through RNA) resolve their target set here.
+ * visible. This is the single source of that rule: the 2D compositor, the 3D attribute backend and
+ * the Python tool UI (through RNA) all resolve their target set here.
  */
 uint32_t BKE_paint_shape_target_channels(const Paint &paint,
                                           const PaintModeSettings &mode_settings,
@@ -1356,7 +1367,7 @@ uint32_t BKE_paint_shape_target_channels(const Paint &paint,
 
 /**
  * Returns whether the enabled Alpha channel should mask other channels' writes this stroke
- * (#BrushMaterialPaint.use_alpha_stroke_mask).
+ * (#BrushMaterialPaint::use_alpha_stroke_mask).
  */
 bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
                                               const PaintModeSettings &mode_settings,

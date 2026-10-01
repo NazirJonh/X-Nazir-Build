@@ -538,6 +538,13 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
           }
           break;
         }
+        case ND_DRAW:
+          /* A live 3D Sculpt shape session updates its Image Editor contour / cage through this
+           * notifier (gestures, settings, sculpt strokes); keep it cheap otherwise. */
+          if (ED_paint_shape_sessions_alive()) {
+            ED_area_tag_redraw(area);
+          }
+          break;
       }
 
       break;
@@ -752,6 +759,11 @@ static void IMAGE_GGT_paint_shape_transform(wmGizmoGroupType *gzgt)
   ED_image_shape_transform_gizmo_setup(gzgt);
 }
 
+static void IMAGE_GGT_paint_shape_transform_3d(wmGizmoGroupType *gzgt)
+{
+  ED_image_paint_shape3d_gizmo_setup(gzgt);
+}
+
 static void image_widgets()
 {
   const wmGizmoMapType_Params params{SPACE_IMAGE, RGN_TYPE_WINDOW};
@@ -772,6 +784,7 @@ static void image_widgets()
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_split);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_select_transform);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_shape_transform);
+  WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_shape_transform_3d);
 }
 
 /************************** main region ***************************/
@@ -1720,6 +1733,7 @@ void ED_spacetype_image()
   art->listener = image_main_region_listener;
   art->lock = REGION_DRAW_LOCK_BAKING;
   BLI_addhead(&st->regiontypes, art);
+  ED_image_paint_shape3d_draw_register(art);
 
   /* regions: list-view/buttons/scopes */
   art = MEM_new_zeroed<ARegionType>("spacetype image region");

@@ -13,6 +13,7 @@
 #include <cmath>
 #include <climits>
 #include <cstdint>
+#include <cstring>
 
 #include "BLI_math_vector_types.hh"
 
@@ -425,6 +426,301 @@ void style_op_properties_register(wmOperatorType *ot)
   prop = RNA_def_float_color(
       ot->srna, "fill_color", 4, nullptr, 0.0f, FLT_MAX, "Fill Color", "", 0.0f, 1.0f);
   RNA_def_property_subtype(prop, PROP_COLOR_GAMMA);
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Space serialization
+ *
+ * The 3D shape's frozen view (its #ShapeSpaceDesc) is stored with the operator so `exec` and
+ * Redo (F9) rebuild the exact same projection instead of reading the live viewport. The matrices
+ * are flat float arrays in the #float4x4 memory order (column-major).
+ * \{ */
+
+void space_to_op_props(wmOperator *op, const ShapeSpaceDesc &desc)
+{
+  RNA_int_set(op->ptr, "space_type", int(desc.type));
+  RNA_int_set(op->ptr, "space_ref_tile", desc.ref_tile);
+  const int ref_tile_size[2] = {desc.ref_tile_size.x, desc.ref_tile_size.y};
+  RNA_int_set_array(op->ptr, "space_ref_tile_size", ref_tile_size);
+  RNA_boolean_set(op->ptr, "space_is_persp", desc.is_persp);
+  const int win_size[2] = {desc.win_size.x, desc.win_size.y};
+  RNA_int_set_array(op->ptr, "space_win_size", win_size);
+  RNA_float_set(op->ptr, "space_clip_start", desc.clip_start);
+  RNA_float_set(op->ptr, "space_clip_end", desc.clip_end);
+  float persmat[16];
+  memcpy(persmat, desc.persmat.ptr(), sizeof(persmat));
+  RNA_float_set_array(op->ptr, "space_persmat", persmat);
+  float viewinv[16];
+  memcpy(viewinv, desc.viewinv.ptr(), sizeof(viewinv));
+  RNA_float_set_array(op->ptr, "space_viewinv", viewinv);
+
+  /* SurfaceAnchored space. */
+  const float anchor_co[3] = {desc.anchor.co.x, desc.anchor.co.y, desc.anchor.co.z};
+  RNA_float_set_array(op->ptr, "space_anchor_co", anchor_co);
+  const float anchor_normal[3] = {
+      desc.anchor.normal.x, desc.anchor.normal.y, desc.anchor.normal.z};
+  RNA_float_set_array(op->ptr, "space_anchor_normal", anchor_normal);
+  const float anchor_tangent[3] = {
+      desc.anchor.tangent.x, desc.anchor.tangent.y, desc.anchor.tangent.z};
+  RNA_float_set_array(op->ptr, "space_anchor_tangent", anchor_tangent);
+  const float anchor_uv[2] = {desc.anchor.surface_uv.x, desc.anchor.surface_uv.y};
+  RNA_float_set_array(op->ptr, "space_anchor_surface_uv", anchor_uv);
+  RNA_int_set(op->ptr, "space_anchor_tri", desc.anchor.tri);
+  /* The exact restore cache (Redo / F9): the triangle's corner indices and the barycentric weights
+   * of the anchor on it. `tri` alone cannot restore (the corner check would fail after a
+   * replay), and the UV fallback is ambiguous on mirrored / overlapping UVs. */
+  const int anchor_tri_corners[3] = {
+      desc.anchor.tri_corners.x, desc.anchor.tri_corners.y, desc.anchor.tri_corners.z};
+  RNA_int_set_array(op->ptr, "space_anchor_tri_corners", anchor_tri_corners);
+  const float anchor_bary[3] = {desc.anchor.bary.x, desc.anchor.bary.y, desc.anchor.bary.z};
+  RNA_float_set_array(op->ptr, "space_anchor_bary", anchor_bary);
+  RNA_boolean_set(op->ptr, "space_anchor_has_uv", desc.anchor.has_surface_uv);
+  RNA_float_set(op->ptr, "space_anchor_px_per_unit", desc.anchor.px_per_unit);
+  RNA_float_set(op->ptr, "space_anchor_max_depth", desc.anchor.max_depth);
+  RNA_string_set(op->ptr, "space_surface_uv_map", desc.anchor.surface_uv_map);
+}
+
+bool space_from_op_props(wmOperator *op, ShapeSpaceDesc &r_desc)
+{
+  const int type = RNA_int_get(op->ptr, "space_type");
+  if (type < 0) {
+    return false;
+  }
+  r_desc.type = ShapeSpaceType(type);
+  r_desc.ref_tile = RNA_int_get(op->ptr, "space_ref_tile");
+  int ref_tile_size[2];
+  RNA_int_get_array(op->ptr, "space_ref_tile_size", ref_tile_size);
+  if (ref_tile_size[0] <= 0 || ref_tile_size[1] <= 0) {
+    /* A zero size would divide the tile's UV <-> pixel mapping by zero. */
+    return false;
+  }
+  r_desc.ref_tile_size = int2(ref_tile_size[0], ref_tile_size[1]);
+  int win_size[2];
+  RNA_int_get_array(op->ptr, "space_win_size", win_size);
+  r_desc.win_size = int2(win_size[0], win_size[1]);
+  r_desc.is_persp = RNA_boolean_get(op->ptr, "space_is_persp");
+  r_desc.clip_start = RNA_float_get(op->ptr, "space_clip_start");
+  r_desc.clip_end = RNA_float_get(op->ptr, "space_clip_end");
+  float persmat[16];
+  RNA_float_get_array(op->ptr, "space_persmat", persmat);
+  memcpy(r_desc.persmat.ptr(), persmat, sizeof(persmat));
+  float viewinv[16];
+  RNA_float_get_array(op->ptr, "space_viewinv", viewinv);
+  memcpy(r_desc.viewinv.ptr(), viewinv, sizeof(viewinv));
+
+  /* SurfaceAnchored space. */
+  float anchor_co[3];
+  RNA_float_get_array(op->ptr, "space_anchor_co", anchor_co);
+  r_desc.anchor.co = float3(anchor_co[0], anchor_co[1], anchor_co[2]);
+  float anchor_normal[3];
+  RNA_float_get_array(op->ptr, "space_anchor_normal", anchor_normal);
+  r_desc.anchor.normal = float3(anchor_normal[0], anchor_normal[1], anchor_normal[2]);
+  float anchor_tangent[3];
+  RNA_float_get_array(op->ptr, "space_anchor_tangent", anchor_tangent);
+  r_desc.anchor.tangent = float3(anchor_tangent[0], anchor_tangent[1], anchor_tangent[2]);
+  float anchor_uv[2];
+  RNA_float_get_array(op->ptr, "space_anchor_surface_uv", anchor_uv);
+  r_desc.anchor.surface_uv = float2(anchor_uv[0], anchor_uv[1]);
+  r_desc.anchor.tri = RNA_int_get(op->ptr, "space_anchor_tri");
+  int anchor_tri_corners[3];
+  RNA_int_get_array(op->ptr, "space_anchor_tri_corners", anchor_tri_corners);
+  r_desc.anchor.tri_corners = int3(anchor_tri_corners[0], anchor_tri_corners[1], anchor_tri_corners[2]);
+  float anchor_bary[3];
+  RNA_float_get_array(op->ptr, "space_anchor_bary", anchor_bary);
+  r_desc.anchor.bary = float3(anchor_bary[0], anchor_bary[1], anchor_bary[2]);
+  r_desc.anchor.has_surface_uv = RNA_boolean_get(op->ptr, "space_anchor_has_uv");
+  r_desc.anchor.px_per_unit = RNA_float_get(op->ptr, "space_anchor_px_per_unit");
+  r_desc.anchor.max_depth = RNA_float_get(op->ptr, "space_anchor_max_depth");
+  RNA_string_get(op->ptr, "space_surface_uv_map", r_desc.anchor.surface_uv_map);
+  return true;
+}
+
+void space_op_properties_register(wmOperatorType *ot)
+{
+  PropertyRNA *prop;
+
+  /* Presence marker: a -1 default means a fresh invocation has no stored space. */
+  prop = RNA_def_int(ot->srna,
+                     "space_type",
+                     -1,
+                     -1,
+                     int(ShapeSpaceType::SurfaceAnchored),
+                     "Space Type",
+                     "",
+                     -1,
+                     int(ShapeSpaceType::SurfaceAnchored));
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_int(
+      ot->srna, "space_ref_tile", 1001, 1001, 2000, "Space Reference Tile", "", 1001, 2000);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  /* Matches the #ShapeSpaceDesc default, so a stored space never reads back a zero tile. */
+  static const int default_ref_tile_size[2] = {1024, 1024};
+  prop = RNA_def_int_array(ot->srna,
+                           "space_ref_tile_size",
+                           2,
+                           default_ref_tile_size,
+                           1,
+                           65536,
+                           "Space Reference Tile Size",
+                           "",
+                           1,
+                           65536);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_boolean(ot->srna, "space_is_persp", false, "Space Perspective", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_int_array(
+      ot->srna, "space_win_size", 2, nullptr, 0, 65536, "Space Window Size", "", 0, 65536);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_float(ot->srna,
+                       "space_clip_start",
+                       0.0f,
+                       -FLT_MAX,
+                       FLT_MAX,
+                       "Space Clip Start",
+                       "",
+                       -FLT_MAX,
+                       FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_float(ot->srna,
+                       "space_clip_end",
+                       1000.0f,
+                       -FLT_MAX,
+                       FLT_MAX,
+                       "Space Clip End",
+                       "",
+                       -FLT_MAX,
+                       FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_float_array(ot->srna,
+                             "space_persmat",
+                             16,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Space Projection Matrix",
+                             "",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_float_array(ot->srna,
+                             "space_viewinv",
+                             16,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Space View Inverse",
+                             "",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  /* SurfaceAnchored anchor. */
+  prop = RNA_def_float_array(ot->srna,
+                             "space_anchor_co",
+                             3,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Anchor Point",
+                             "",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_float_array(ot->srna,
+                             "space_anchor_normal",
+                             3,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Anchor Normal",
+                             "",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_float_array(ot->srna,
+                             "space_anchor_tangent",
+                             3,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Anchor Tangent",
+                             "",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_float_array(ot->srna,
+                             "space_anchor_surface_uv",
+                             2,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Anchor Surface UV",
+                             "",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_int(
+      ot->srna, "space_anchor_tri", -1, -1, INT_MAX, "Anchor Triangle", "", -1, INT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_int_array(ot->srna,
+                           "space_anchor_tri_corners",
+                           3,
+                           nullptr,
+                           -1,
+                           INT_MAX,
+                           "Anchor Triangle Corners",
+                           "",
+                           -1,
+                           INT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_float_array(ot->srna,
+                             "space_anchor_bary",
+                             3,
+                             nullptr,
+                             -FLT_MAX,
+                             FLT_MAX,
+                             "Anchor Barycentric",
+                             "",
+                             -FLT_MAX,
+                             FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_boolean(ot->srna, "space_anchor_has_uv", false, "Anchor Has UV", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_float(ot->srna,
+                       "space_anchor_px_per_unit",
+                       1.0f,
+                       1e-6f,
+                       FLT_MAX,
+                       "Anchor Pixels Per Unit",
+                       "",
+                       1e-6f,
+                       FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_float(ot->srna,
+                       "space_anchor_max_depth",
+                       0.0f,
+                       0.0f,
+                       FLT_MAX,
+                       "Anchor Max Depth",
+                       "",
+                       0.0f,
+                       FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_string(ot->srna,
+                        "space_surface_uv_map",
+                        nullptr,
+                        64,
+                        "Anchor UV Map",
+                        "UV map the anchor was sampled through (empty: active)");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
 }
 
 /** \} */

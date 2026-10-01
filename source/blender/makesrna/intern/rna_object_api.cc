@@ -24,6 +24,7 @@
 #include "DNA_scene_types.h"
 
 #include "ED_outliner.hh"
+#include "ED_paint.hh"
 
 #include "rna_internal.hh" /* own include */
 
@@ -840,6 +841,12 @@ static bool rna_Object_principled_paint_channel_has_image(Object *ob, int channe
       *ob, eMaterialPaintChannel(channel), &image, &iuser);
 }
 
+static bool rna_Object_paint_shape_session_shows_image(Object *ob, Image *image)
+{
+  return (ob != nullptr) && (image != nullptr) &&
+         ED_paint_shape_session_shows_image(*ob, *image);
+}
+
 }  // namespace blender
 
 #else /* RNA_RUNTIME */
@@ -965,6 +972,19 @@ void RNA_api_object(StructRNA *srna)
   parm = RNA_def_pointer(func, "viewport", "SpaceView3D", "", "Viewport in local collections");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
   parm = RNA_def_boolean(func, "result", false, "", "Object viewport visibility");
+  RNA_def_function_return(func, parm);
+
+  /* Live Paint Shape session of this object (Sculpt Mode). */
+  func = RNA_def_function(
+      srna, "paint_shape_session_shows_image", "rna_Object_paint_shape_session_shows_image");
+  RNA_def_function_ui_description(
+      func,
+      "Test whether this object's live 3D Sculpt Paint Shape session draws to the given image "
+      "(an Image Editor showing it is linked to the session)");
+  parm = RNA_def_pointer(
+      func, "image", "Image", "", "Image to test against the session's write targets");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "The session draws to the image");
   RNA_def_function_return(func, parm);
 
   /* Matrix space conversion */

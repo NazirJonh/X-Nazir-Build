@@ -562,4 +562,25 @@ void BezierInput::draw(const ARegion &region, const Mapping &mapping, const Draw
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Region pixel mapping
+ * \{ */
+
+static float2 region_pixel_to_region(const ARegion & /*region*/, const float2 &co)
+{
+  return co;
+}
+
+static float2 region_pixel_event_to_user(const ARegion & /*region*/, const wmEvent &event)
+{
+  return float2(event.mval[0], event.mval[1]);
+}
+
+Mapping region_pixel_mapping()
+{
+  return {region_pixel_to_region, region_pixel_event_to_user};
+}
+
+/** \} */
+
 }  // namespace blender::ed::sculpt_paint::bezier_input

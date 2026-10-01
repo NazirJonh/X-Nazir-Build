@@ -63,6 +63,7 @@
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
 #include "paint_mask.hh"
+#include "paint_shape_vector_3d.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 #include "sculpt_dyntopo.hh"
@@ -629,6 +630,12 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
    * Object deletion never reaches this function; #BKE_sculptsession_free invokes the same discard
    * via `SculptSession::free_curve_patch_session`. */
   curve_patch_discard_on_session_end(ob);
+
+  /* Same last-resort for a live Vector shape session: `SCULPT_OT_paint_shape_draw` owns it but is
+   * not consulted on mode exit, so restore its preview and free it here, while the PBVH and image
+   * are still alive. No-op when it already committed/cancelled. Object deletion goes through
+   * `SculptSession::free_paint_shape_session` instead. */
+  shape::paint_shape_session_discard_on_session_end(ob);
 
   mesh->runtime->corner_tris_cache.unfreeze();
 
@@ -2183,6 +2190,9 @@ void operatortypes_sculpt()
   WM_operatortype_append(color::SCULPT_OT_color_filter);
   WM_operatortype_append(color::SCULPT_OT_color_gradient);
   WM_operatortype_append(color::SCULPT_OT_color_gradient_colors_flip);
+  WM_operatortype_append(SCULPT_OT_paint_shape_draw);
+  WM_operatortype_append(SCULPT_OT_paint_shape_transform_toggle);
+  WM_operatortype_append(SCULPT_OT_paint_shape_flush_preview);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_color);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_topology_island);
   WM_operatortype_append(dyntopo::SCULPT_OT_dyntopo_detail_size_edit);

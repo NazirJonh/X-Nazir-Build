@@ -19,15 +19,17 @@
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
+namespace blender {
 struct ARegion;
 struct Brush;
-struct Paint;
 struct BrushMaterialPaint;
 struct ImagePool;
 struct ImBuf;
 struct Object;
+struct Paint;
 struct PaintModeSettings;
 struct SculptSession;
+}  // namespace blender
 
 namespace blender::ocio {
 class ColorSpace;
@@ -567,5 +569,25 @@ void build_normal_write_basis(const float3 &tri_tangent,
                               float3 &r_n_m,
                               float3 &r_t_m,
                               float3 &r_b_m);
+
+/**
+ * Same, but the screen basis is derived from a saved region size instead of a live #ARegion: the
+ * frozen-projector path (Paint Shape) carries no region. \a win_size is in pixels; a non-positive
+ * size means "no view", so the \a view_right fallback is used throughout.
+ */
+void build_normal_write_basis(const float3 &tri_tangent,
+                              float tri_bitangent_sign,
+                              Span<float3> tri_positions,
+                              const float3 &view_right,
+                              const int2 &win_size,
+                              const float4x4 &projection_mat,
+                              float3 &r_t_screen,
+                              float3 &r_b_screen,
+                              float3 &r_n_m,
+                              float3 &r_t_m,
+                              float3 &r_b_m);
+
+/* #remap_decal_normal_to_tangent now lives in paint_material_blend.hh (pure math, shared with
+ * the shape blend core). */
 
 }  // namespace blender::ed::sculpt_paint::material

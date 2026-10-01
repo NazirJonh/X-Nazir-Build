@@ -192,6 +192,29 @@ inline float3 blend_normal_rnm(const float3 &base, const float3 &detail, const f
 }
 
 /**
+ * Express a decal-space normal \a n_d in the texel's tangent space (#t_m, #b_m, #n_m), given the
+ * decal frame's screen axes carried onto the surface (#t_screen, #b_screen) and the surface normal
+ * \a n_m. Returns a unit tangent normal (unencoded).
+ *
+ * This is pure math and lives here (next to #blend_normal_rnm) so the shape blend core does not
+ * have to reach up into the mesh layer for it; the brush's brush-mapped normal source and the
+ * shape tools' screen-space shape normal share it.
+ */
+inline float3 remap_decal_normal_to_tangent(const float3 &n_d,
+                                            const float3 &t_screen,
+                                            const float3 &b_screen,
+                                            const float3 &n_m,
+                                            const float3 &t_m,
+                                            const float3 &b_m)
+{
+  const float3 n_local = n_d.x * t_screen + n_d.y * b_screen + n_d.z * n_m;
+  float3 n_t(math::dot(n_local, t_m), math::dot(n_local, b_m), math::dot(n_local, n_m));
+  const float n_t_len = math::length(n_t);
+  n_t = n_t_len > 1e-6f ? n_t / n_t_len : float3(0.0f, 0.0f, 1.0f);
+  return n_t;
+}
+
+/**
  * Encode a scene-linear Canvas color for an image buffer: data buffers and normal maps keep
  * their values, everything else converts to the buffer's colorspace. Shared by the 2D paint
  * paths so brush strokes and shape bakes encode identically.

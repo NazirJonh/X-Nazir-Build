@@ -20,6 +20,10 @@
 #include "IMB_imbuf_types.hh"
 #include "IMB_interp.hh"
 
+#include <cfloat>
+
+#include "DNA_screen_types.h"
+
 #include "BLI_assert.h"
 #include "BLI_index_range.hh"
 #include "BLI_math_color.h"
@@ -42,6 +46,7 @@
 #include "../paint_intern.hh"
 /* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
 #include "paint_debug.hh"
+#include "paint_material_blend.hh"
 #include "paint_material_source.hh"
 #include "sculpt_intern.hh"
 
@@ -1416,17 +1421,19 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
   }
 }
 
-void build_normal_write_basis(const float3 &tri_tangent,
-                              const float tri_bitangent_sign,
-                              const Span<float3> tri_positions,
-                              const float3 &view_right,
-                              const ARegion *region,
-                              const float4x4 &projection_mat,
-                              float3 &r_t_screen,
-                              float3 &r_b_screen,
-                              float3 &r_n_m,
-                              float3 &r_t_m,
-                              float3 &r_b_m)
+/** Shared body: the screen basis is derived from \a win_size; a non-positive size means "no
+ * view", so the \a view_right fallback is used. */
+static void build_normal_write_basis_impl(const float3 &tri_tangent,
+                                          const float tri_bitangent_sign,
+                                          const Span<float3> tri_positions,
+                                          const float3 &view_right,
+                                          const int2 &win_size,
+                                          const float4x4 &projection_mat,
+                                          float3 &r_t_screen,
+                                          float3 &r_b_screen,
+                                          float3 &r_n_m,
+                                          float3 &r_t_m,
+                                          float3 &r_b_m)
 {
   BLI_assert(tri_positions.size() == 3);
   const float3 edge1 = tri_positions[1] - tri_positions[0];
@@ -1436,10 +1443,22 @@ void build_normal_write_basis(const float3 &tri_tangent,
   /* Screen right/up carried onto the surface, obtained from how the primitive's own screen
    * projection relates to its object-space edges. */
   bool screen_basis_ready = false;
-  if (region != nullptr) {
-    const float2 screen0 = ED_view3d_project_float_v2_m4(region, tri_positions[0], projection_mat);
-    const float2 screen1 = ED_view3d_project_float_v2_m4(region, tri_positions[1], projection_mat);
-    const float2 screen2 = ED_view3d_project_float_v2_m4(region, tri_positions[2], projection_mat);
+  if (win_size.x > 0 && win_size.y > 0) {
+    /* The same object-space projection #ED_view3d_project_float_v2_m4 applies, but from a saved
+     * region size instead of a live #ARegion. */
+    const auto project = [&](const float3 &co) -> float2 {
+      float vec4[4] = {co.x, co.y, co.z, 1.0f};
+      mul_m4_v4(projection_mat.ptr(), vec4);
+      if (vec4[3] > FLT_EPSILON) {
+        const float hx = float(win_size.x) / 2.0f;
+        const float hy = float(win_size.y) / 2.0f;
+        return float2(hx + hx * vec4[0] / vec4[3], hy + hy * vec4[1] / vec4[3]);
+      }
+      return float2(0.0f);
+    };
+    const float2 screen0 = project(tri_positions[0]);
+    const float2 screen1 = project(tri_positions[1]);
+    const float2 screen2 = project(tri_positions[2]);
     const float2 sx = screen1 - screen0;
     const float2 sy = screen2 - screen0;
     const float det = sx.x * sy.y - sx.y * sy.x;
@@ -1491,6 +1510,57 @@ void build_normal_write_basis(const float3 &tri_tangent,
   r_b_m = math::cross(r_n_m, r_t_m) * tri_bitangent_sign;
 }
 
+void build_normal_write_basis(const float3 &tri_tangent,
+                              const float tri_bitangent_sign,
+                              const Span<float3> tri_positions,
+                              const float3 &view_right,
+                              const ARegion *region,
+                              const float4x4 &projection_mat,
+                              float3 &r_t_screen,
+                              float3 &r_b_screen,
+                              float3 &r_n_m,
+                              float3 &r_t_m,
+                              float3 &r_b_m)
+{
+  const int2 win_size = region != nullptr ? int2(region->winx, region->winy) : int2(0);
+  build_normal_write_basis_impl(tri_tangent,
+                                tri_bitangent_sign,
+                                tri_positions,
+                                view_right,
+                                win_size,
+                                projection_mat,
+                                r_t_screen,
+                                r_b_screen,
+                                r_n_m,
+                                r_t_m,
+                                r_b_m);
+}
+
+void build_normal_write_basis(const float3 &tri_tangent,
+                              const float tri_bitangent_sign,
+                              const Span<float3> tri_positions,
+                              const float3 &view_right,
+                              const int2 &win_size,
+                              const float4x4 &projection_mat,
+                              float3 &r_t_screen,
+                              float3 &r_b_screen,
+                              float3 &r_n_m,
+                              float3 &r_t_m,
+                              float3 &r_b_m)
+{
+  build_normal_write_basis_impl(tri_tangent,
+                                tri_bitangent_sign,
+                                tri_positions,
+                                view_right,
+                                win_size,
+                                projection_mat,
+                                r_t_screen,
+                                r_b_screen,
+                                r_n_m,
+                                r_t_m,
+                                r_b_m);
+}
+
 static float3 remap_decal_normal_to_packed_tangent(const float3 &n_d,
                                                    const float3 &t_screen,
                                                    const float3 &b_screen,
@@ -1498,10 +1568,8 @@ static float3 remap_decal_normal_to_packed_tangent(const float3 &n_d,
                                                    const float3 &t_m,
                                                    const float3 &b_m)
 {
-  const float3 n_local = n_d.x * t_screen + n_d.y * b_screen + n_d.z * n_m;
-  float3 n_t(math::dot(n_local, t_m), math::dot(n_local, b_m), math::dot(n_local, n_m));
-  const float n_t_len = math::length(n_t);
-  n_t = n_t_len > 1e-6f ? n_t / n_t_len : float3(0.0f, 0.0f, 1.0f);
+  const float3 n_t = remap_decal_normal_to_tangent(
+      n_d, t_screen, b_screen, n_m, t_m, b_m);
   float packed[3];
   BKE_pbr_normal_pack(n_t, false, packed);
   return float3(packed[0], packed[1], packed[2]);

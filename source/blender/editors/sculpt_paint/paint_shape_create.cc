@@ -36,6 +36,18 @@ namespace blender::ed::sculpt_paint::shape {
 /** Cursor travel (UI-scaled pixels) past which a press counts as a drag rather than a click. */
 constexpr float SHAPE_CLICK_DRAG_THRESHOLD = 3.0f;
 
+static float2 snap_line_direction(const float2 &delta)
+{
+  const float length = math::length(delta);
+  if (length < 1e-6f) {
+    return delta;
+  }
+  /* Shift snaps the line direction to 15-degree steps. */
+  const float angle = math::atan2(delta.y, delta.x);
+  const float snapped = math::round(angle / (M_PI / 12.0f)) * (M_PI / 12.0f);
+  return float2(math::cos(snapped), math::sin(snapped)) * length;
+}
+
 ShapeCreateGesture::ShapeCreateGesture(const ePaintShapeType type, const ShapeStyle &style)
     : type_(type), style_(style)
 {
@@ -106,7 +118,7 @@ void ShapeCreateGesture::update_drag(const bool modifier_shift,
 {
   const float2 delta = cursor_p_ - press_p_;
   const float2 p0 = use_drag_axes_ ? float2(0.0f) : press_p_;
-  const float2 p1 = use_drag_axes_ ?
+  float2 p1 = use_drag_axes_ ?
                   p0 + float2(math::dot(delta, drag_axis_x_), math::dot(delta, drag_axis_y_)) :
                   cursor_p_;
   const bool from_center = modifier_alt || style_.use_from_center();
@@ -116,6 +128,12 @@ void ShapeCreateGesture::update_drag(const bool modifier_shift,
                            style_.use_keep_aspect();
 
   switch (type_) {
+    case PAINT_SHAPE_LINE:
+      if (modifier_shift) {
+        p1 = p0 + snap_line_direction(p1 - p0);
+      }
+      shape_ = shape_line(p0, p1);
+      break;
     case PAINT_SHAPE_RECT:
       shape_ = shape_rect_from_drag(p0, p1, from_center, keep_aspect, style_);
       break;
@@ -128,9 +146,26 @@ void ShapeCreateGesture::update_drag(const bool modifier_shift,
   if (use_drag_axes_) {
     const float c = drag_axis_x_.x;
     const float s = drag_axis_x_.y;
-    shape_.center = press_p_ + float2(c * shape_.center.x - s * shape_.center.y,
-                                      s * shape_.center.x + c * shape_.center.y);
-    shape_.rotation += drag_rotation_;
+    if (shape_.is_parametric()) {
+      shape_.center = press_p_ + float2(c * shape_.center.x - s * shape_.center.y,
+                                        s * shape_.center.x + c * shape_.center.y);
+      shape_.rotation += drag_rotation_;
+    }
+    else {
+      /* Spline shapes carry their orientation in the points: the rasterizer, flattening and the
+       * Vector rotate gesture never read #PaintShape::rotation for them, so rotating the points
+       * here is the whole rotation (adding it to `shape_.rotation` too would be dead state). */
+      for (ShapeSpline &spline : shape_.splines) {
+        for (ShapePoint &point : spline.points) {
+          point.co = press_p_ + float2(c * point.co.x - s * point.co.y,
+                                       s * point.co.x + c * point.co.y);
+          point.handle_left = press_p_ + float2(c * point.handle_left.x - s * point.handle_left.y,
+                                               s * point.handle_left.x + c * point.handle_left.y);
+          point.handle_right = press_p_ + float2(c * point.handle_right.x - s * point.handle_right.y,
+                                                s * point.handle_right.x + c * point.handle_right.y);
+        }
+      }
+    }
   }
   has_shape_ = true;
 }
@@ -196,6 +231,10 @@ ShapeCreateResult ShapeCreateGesture::handle_event(const wmEvent &event, const f
           return ShapeCreateResult::None;
         }
         if (!moved_) {
+          if (type_ == PAINT_SHAPE_LINE) {
+            /* A zero-length line draws nothing. */
+            return ShapeCreateResult::Cancelled;
+          }
           /* A click without a drag draws the default-size shape at the click point. */
           shape_ = shape_at_center(press_p_);
         }

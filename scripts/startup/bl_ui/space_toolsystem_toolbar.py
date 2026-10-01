@@ -2721,6 +2721,8 @@ class _defs_image_paint_select:
 # The shape tools of the Image Editor.
 # (attribute name, tool idname, label, icon, keymap suffix)
 _PAINT_SHAPE_TOOLS = (
+    ("line", "builtin.paint_shape_line", "Shape Line",
+     "ops.gpencil.primitive_line", "Shape Line"),
     ("rect", "builtin.paint_shape_rect", "Shape Rectangle",
      "ops.gpencil.primitive_box", "Shape Rectangle"),
     ("ellipse", "builtin.paint_shape_ellipse", "Shape Ellipse",
@@ -2803,7 +2805,7 @@ class _defs_image_paint_shape:
     def draw_shape_settings(context, layout, _tool):
         imapaint = context.tool_settings.image_paint
         shape = paint_shape_settings(context)
-        is_rect = paint_shape_tool_flags(context)
+        is_line, is_rect, _is_sized = paint_shape_tool_flags(context)
 
         # Material (PBR) canvas mode bakes into the active object's material channel maps
         # instead of the image open in this editor; say so and show the targeted channel count.
@@ -2829,14 +2831,15 @@ class _defs_image_paint_shape:
             layout.prop(shape, "stroke_width", text="Width", slider=True)
             layout.separator()
             _paint_shape_strength_prop(layout, context, brush, text="Strength", header=True)
-            layout.separator()
-            row = layout.row(align=True)
-            row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
-            row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
-            layout.separator()
-            layout.prop(shape, "stroke_align", text="")
-            # Corner shape of the stroke outline (Round / Bevel / Miter = sharp).
-            layout.prop(shape, "join_type", text="")
+            if not is_line:
+                layout.separator()
+                row = layout.row(align=True)
+                row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+                row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+                layout.separator()
+                layout.prop(shape, "stroke_align", text="")
+                # Corner shape of the stroke outline (Round / Bevel / Miter = sharp).
+                layout.prop(shape, "join_type", text="")
             if is_rect and shape.use_fill:
                 layout.separator()
                 layout.prop(shape, "corner_radius", index=0, text="Corner Radius")
@@ -2849,9 +2852,10 @@ class _defs_image_paint_shape:
         # The fields are drawn directly into the property-split layout (no nested column).
         draw_shape_color_row(layout, shape)
         layout.prop(shape, "stroke_width", text="Width", slider=True)
-        row = layout.row(align=True)
-        row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
-        row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+        if not is_line:
+            row = layout.row(align=True)
+            row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+            row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
         layout.prop(shape, "rotation", text="Angle")
         draw_paint_shape_extra_options(context, layout, shape)
 
@@ -4362,6 +4366,9 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             (
                 _defs_image_paint_shape.rect,
                 _defs_image_paint_shape.ellipse,
+            ),
+            (
+                _defs_image_paint_shape.line,
             ),
             *_tools_image_paint_select,
             # Standalone tool (not part of the selection group above): it writes the 3D Viewport

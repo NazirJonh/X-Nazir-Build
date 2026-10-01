@@ -484,6 +484,25 @@ rctf shape_bounds_calc(const PaintShape &shape, const ShapeStyle &style)
 /** \name Builders
  * \{ */
 
+PaintShape shape_line(const float2 &p0, const float2 &p1)
+{
+  PaintShape shape;
+  shape.type = PAINT_SHAPE_LINE;
+  ShapeSpline spline;
+  spline.is_bezier = false;
+  spline.cyclic = false;
+  ShapePoint a;
+  a.co = p0;
+  a.auto_handles = false;
+  spline.points.append(a);
+  ShapePoint b;
+  b.co = p1;
+  b.auto_handles = false;
+  spline.points.append(b);
+  shape.splines.append(std::move(spline));
+  return shape;
+}
+
 static void drag_extents(const float2 &p0,
                          const float2 &p1,
                          const bool from_center,

@@ -7843,6 +7843,11 @@ def _km_image_editor_tool_paint_shape(params, fallback, keymap_name, shape_type)
     )
 
 
+def km_image_editor_tool_paint_shape_line(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Line", 'LINE')
+
+
 def km_image_editor_tool_paint_shape_rect(params, *, fallback):
     return _km_image_editor_tool_paint_shape(
         params, fallback, "Image Editor Tool: Paint, Shape Rectangle", 'RECTANGLE')
@@ -9774,6 +9779,7 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_gradient(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_line(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_rect(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_ellipse(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select(params, fallback=fallback) for fallback in (False, True)),

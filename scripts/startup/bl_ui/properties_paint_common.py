@@ -3160,12 +3160,15 @@ def draw_shape_color_row(layout, shape, *, header=False):
 
 
 def paint_shape_tool_flags(context):
-    """True when the active Shape tool is the Rectangle, derived from the active tool so the
+    """(is_line, is_rect, is_sized) for the active Shape tool, derived from the active tool so the
     settings UI does not read the operator-only ``shape.type``."""
     from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
     tool = ToolSelectPanelHelper.tool_active_from_context(context)
     tool_id = tool.idname if tool else ""
-    return tool_id in ("", "builtin.paint_shape_rect")
+    is_line = tool_id == "builtin.paint_shape_line"
+    is_rect = tool_id in ("", "builtin.paint_shape_rect")
+    is_sized = tool_id in ("", "builtin.paint_shape_rect", "builtin.paint_shape_ellipse")
+    return is_line, is_rect, is_sized
 
 
 def paint_shape_settings(context):
@@ -3178,9 +3181,11 @@ def draw_paint_shape_extra_options(context, layout, shape):
     """The rarer Shape settings, shown in the Shape tool's popover and (all of them) in the
     N-panel: the rectangle/ellipse default size, the stroke alignment and the non-uniform corner
     radii. The tool header shows only the main fields."""
-    is_rect = paint_shape_tool_flags(context)
-    layout.prop(shape, "size")
-    layout.prop(shape, "stroke_align", text="Align")
+    is_line, is_rect, is_sized = paint_shape_tool_flags(context)
+    if is_sized:
+        layout.prop(shape, "size")
+    if not is_line:
+        layout.prop(shape, "stroke_align", text="Align")
     if is_rect and shape.use_fill:
         if not shape.use_uniform_corners:
             sub = layout.column(align=True)

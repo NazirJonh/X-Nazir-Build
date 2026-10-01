@@ -15,7 +15,6 @@
 #include <cstdint>
 
 #include "BLI_math_vector_types.hh"
-#include "BLI_utildefines.h"
 
 #include "DNA_scene_types.h"
 #include "DNA_windowmanager_types.h"
@@ -73,7 +72,7 @@ void shape_to_op_props(wmOperator *op, const PaintShape &shape)
 std::optional<PaintShape> shape_from_op_props(wmOperator *op)
 {
   const int type = RNA_int_get(op->ptr, "shape_type");
-  if (!ELEM(type, PAINT_SHAPE_RECT, PAINT_SHAPE_ELLIPSE)) {
+  if (type < PAINT_SHAPE_LINE || type > PAINT_SHAPE_ELLIPSE) {
     return std::nullopt;
   }
   PaintShape shape;

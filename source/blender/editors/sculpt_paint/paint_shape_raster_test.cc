@@ -96,8 +96,7 @@ TEST(ShapeRaster, EllipseFillArea)
 TEST(ShapeRaster, DashCoverageHalf)
 {
   PaintShape shape;
-  /* A spline shape, like a symmetry copy of a Rect: it keeps the source type. */
-  shape.type = PAINT_SHAPE_RECT;
+  shape.type = PAINT_SHAPE_LINE;
   ShapeSpline spline;
   spline.is_bezier = false;
   spline.points.append(ShapePoint{float2(20.0f, 60.0f), float2(0), float2(0), false, 1.0f, false});
@@ -128,8 +127,7 @@ TEST(ShapeRaster, DashCoverageHalf)
 TEST(ShapeRaster, StrokeCenterlineTZero)
 {
   PaintShape shape;
-  /* A spline shape, like a symmetry copy of a Rect: it keeps the source type. */
-  shape.type = PAINT_SHAPE_RECT;
+  shape.type = PAINT_SHAPE_LINE;
   ShapeSpline spline;
   spline.is_bezier = false;
   spline.points.append(ShapePoint{float2(10.0f, 50.0f), float2(0), float2(0), false, 1.0f, false});
@@ -315,11 +313,10 @@ TEST(ShapeRaster, SubsetOutputsLeaveUnrequestedBuffersEmpty)
   }
 }
 
-TEST(ShapeRaster, SplineStrokeSMonotone)
+TEST(ShapeRaster, LineStrokeSMonotone)
 {
   PaintShape shape;
-  /* A spline shape, like a symmetry copy of a Rect: it keeps the source type. */
-  shape.type = PAINT_SHAPE_RECT;
+  shape.type = PAINT_SHAPE_LINE;
   ShapeSpline spline;
   spline.is_bezier = false;
   spline.points.append(ShapePoint{float2(10.0f, 50.0f), float2(0), float2(0), false, 1.0f, false});
@@ -337,7 +334,7 @@ TEST(ShapeRaster, SplineStrokeSMonotone)
       Span<PaintShape>(&shape, 1), style, rect, float2(0.0f), outputs);
 
   /* Along the centerline the along-stroke coordinate grows with x and equals the distance from
-   * the spline start. */
+   * the line start. */
   float prev_s = -1.0f;
   for (int x = 15; x <= 105; x += 10) {
     const int64_t idx = cov.index(x, 50);

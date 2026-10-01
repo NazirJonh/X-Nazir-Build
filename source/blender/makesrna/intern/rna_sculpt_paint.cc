@@ -3418,6 +3418,7 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
   FunctionRNA *func;
 
   static const EnumPropertyItem shape_type_items[] = {
+      {PAINT_SHAPE_LINE, "LINE", ICON_LINE_DATA, "Line", "Straight line"},
       {PAINT_SHAPE_RECT, "RECTANGLE", ICON_MESH_PLANE, "Rectangle", "Rectangle with rounded corners"},
       {PAINT_SHAPE_ELLIPSE,
        "ELLIPSE",

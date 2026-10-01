@@ -1493,6 +1493,7 @@ enum eImagePaint_SelectionExpand : int8_t {
 
 /** #PaintShapeSettings::type */
 enum ePaintShapeType : int8_t {
+  PAINT_SHAPE_LINE = 0,
   PAINT_SHAPE_RECT = 2,
   PAINT_SHAPE_ELLIPSE = 3,
 };

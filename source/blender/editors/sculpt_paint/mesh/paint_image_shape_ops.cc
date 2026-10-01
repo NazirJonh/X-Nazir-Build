@@ -588,6 +588,7 @@ void PAINT_OT_image_shape_draw(wmOperatorType *ot)
 
   static const EnumPropertyItem type_items[] = {
       {-1, "DEFAULT", 0, "Default", "Use the type from the tool settings"},
+      {PAINT_SHAPE_LINE, "LINE", 0, "Line", "Straight line"},
       {PAINT_SHAPE_RECT, "RECTANGLE", 0, "Rectangle", "Rectangle with rounded corners"},
       {PAINT_SHAPE_ELLIPSE, "ELLIPSE", 0, "Ellipse", "Ellipse"},
       {0, nullptr, 0, nullptr, nullptr},

@@ -95,6 +95,8 @@ struct ShapeTypeTraits {
 constexpr ShapeTypeTraits shape_type_traits(const ePaintShapeType type)
 {
   switch (type) {
+    case PAINT_SHAPE_LINE:
+      return {false, false, true};
     case PAINT_SHAPE_RECT:
       return {true, true, false};
     case PAINT_SHAPE_ELLIPSE:
@@ -320,6 +322,9 @@ rctf shape_bounds_calc(const PaintShape &shape, const ShapeStyle &style);
 /* -------------------------------------------------------------------- */
 /** \name Builders
  * \{ */
+
+/** Straight line from \a p0 to \a p1. */
+PaintShape shape_line(const float2 &p0, const float2 &p1);
 
 /** Axis-aligned rectangle from two drag corners (or center + corner with \a from_center). */
 PaintShape shape_rect_from_drag(const float2 &p0,

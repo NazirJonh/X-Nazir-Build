@@ -1098,6 +1098,12 @@ void PAINT_OT_image_select_invert(wmOperatorType *ot);
 /* paint_image_shape_ops.cc */
 void PAINT_OT_image_shape_draw(wmOperatorType *ot);
 void PAINT_OT_shape_colors_swap(wmOperatorType *ot);
+/* paint_image_shape_vector.cc */
+void PAINT_OT_image_shape_vector_apply(wmOperatorType *ot);
+void PAINT_OT_image_shape_vector_cancel(wmOperatorType *ot);
+void PAINT_OT_image_shape_transform_toggle(wmOperatorType *ot);
+void PAINT_OT_vector_save(wmOperatorType *ot);
+void PAINT_OT_vector_edit(wmOperatorType *ot);
 
 /** Item ids of the "Image Paint Shape Modal" keymap (the name is kept for user keyconfigs). */
 enum {

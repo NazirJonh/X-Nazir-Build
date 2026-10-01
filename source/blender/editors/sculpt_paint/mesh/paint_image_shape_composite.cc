@@ -27,6 +27,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_task.hh"
+#include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
@@ -40,8 +41,10 @@
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_report.hh"
 
 #include "BLT_translation.hh"
 
@@ -57,13 +60,10 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../paint_shape_raster.hh"
+#include "../paint_shape_render.hh"
 #include "paint_material_blend.hh"
 /* #image_select_undo_session_step_get only. */
 #include "paint_image_select_fragment.hh"
-
-#include "../paint_shape_blend.hh"
-#include "../paint_shape_shade.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 
@@ -96,9 +96,9 @@ Vector<ShapeTarget> composite_targets_get(bContext *C,
   Scene *scene = CTX_data_scene(C);
   ToolSettings *toolsettings = scene ? scene->toolsettings : nullptr;
 
-  /* PBR Paint targets: the active object's material channel maps (used when the
-   * material canvas source is active). Resolution only: the maps are created by
-   * #composite_targets_ensure_writable when a draw starts, so a bake never
+  /* PBR Paint targets: the active object's material channel maps (Image Editor and 3D share
+   * this when the material canvas source is active). Resolution only: the maps are created by
+   * #composite_targets_ensure_writable when a draw or a session starts, so a bake never
    * allocates images as a side effect.
    *
    * Material mode NEVER falls back to the Image Editor image or the canvas image: a missing map
@@ -112,7 +112,8 @@ Vector<ShapeTarget> composite_targets_get(bContext *C,
         return targets;
       }
       /* The channel set comes from the shared resolver, and the maps from the shared target
-       * resolver. `_for_channels` (K1) keeps the shape's override channels, which the brush-only resolver would drop. */
+       * resolver, so the image backends (2D and 3D) cannot drift apart on either. `_for_channels`
+       * keeps the shape's override channels, which the brush-only resolver would drop. */
       const uint32_t channels = BKE_paint_shape_target_channels(
           paint, mode_settings, settings, eShapeTargetKind::ImageMaps);
       for (const PaintMaterialImageTarget &target :
@@ -156,7 +157,7 @@ const char *shape_targets_refusal_message(bContext *C, Object *ob)
   if (ob == nullptr) {
     return RPT_("Paint Shape: no active object for the Material canvas");
   }
-  /* Stack Layers  replace this with their specific reason; the generic text matches the
+  /* Stack Layers replace this with their specific reason; the generic text matches the
    * operator's existing "no enabled image channel to paint" wording. */
   return RPT_("Paint Shape: the active material has no writable PBR channel map");
 }
@@ -190,7 +191,8 @@ void composite_targets_ensure_writable(bContext *C,
  * brush values, with per-part overrides only under #PAINT_SHAPE_CHANNELS_OVERRIDE). No-op in
  * override mode or without a material-paint brush: the shape's own channel values stand.
  * Strengths stay on the shape (the brush has no counterpart). Both write paths apply it - the
- * Pixel bake applies it right before compositing.
+ * Pixel bake right before compositing, the Vector session on every style refresh - so the
+ * preview shows exactly what the commit will write.
  */
 void style_channels_from_brush(Paint &paint, ShapeStyle &style)
 {
@@ -255,6 +257,30 @@ void style_brush_values_from_brush(Paint &paint, ShapeStyle &style)
    * #style_channels_from_brush). */
   style.stroke_blend = brush->blend;
   style.fill_blend = brush->blend;
+}
+
+static bool shape_channel_value_equal(const PaintShapeChannelValue &a,
+                                      const PaintShapeChannelValue &b)
+{
+  return a.use == b.use && a.blend == b.blend && a.value == b.value && a.strength == b.strength &&
+         a.color[0] == b.color[0] && a.color[1] == b.color[1] && a.color[2] == b.color[2];
+}
+
+bool shape_brush_style_equal(const ShapeStyle &a, const ShapeStyle &b)
+{
+  if (a.stroke_opacity != b.stroke_opacity || a.fill_opacity != b.fill_opacity ||
+      a.stroke_blend != b.stroke_blend || a.fill_blend != b.fill_blend)
+  {
+    return false;
+  }
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (!shape_channel_value_equal(a.stroke_channels[i], b.stroke_channels[i]) ||
+        !shape_channel_value_equal(a.fill_channels[i], b.fill_channels[i]))
+    {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** \} */
@@ -378,12 +404,12 @@ static bool tile_region_calc(Span<PaintShape> shapes,
   return true;
 }
 
-rcti composite_tile_region_get(Image *image,
-                               const ImageUser *owner_iuser,
-                               const int tile_number,
-                               const Span<PaintShape> shapes,
-                               const CanvasTile &tile,
-                               const ShapeStyle &style)
+static rcti composite_tile_region_get(Image *image,
+                                      const ImageUser *owner_iuser,
+                                      const int tile_number,
+                                      const Span<PaintShape> shapes,
+                                      const CanvasTile &tile,
+                                      const ShapeStyle &style)
 {
   rcti region;
   BLI_rcti_init(&region, 0, 0, 0, 0);
@@ -410,11 +436,11 @@ rcti composite_tile_region_get(Image *image,
   return region;
 }
 
-Vector<int> composite_affected_tiles_get(Image *image,
-                                         const ImageUser *owner_iuser,
-                                         const Span<PaintShape> shapes,
-                                         const CanvasTile &tile,
-                                         const ShapeStyle &style)
+static Vector<int> composite_affected_tiles_get(Image *image,
+                                                const ImageUser *owner_iuser,
+                                                const Span<PaintShape> shapes,
+                                                const CanvasTile &tile,
+                                                const ShapeStyle &style)
 {
   Vector<int> tiles;
   if (!image || shapes.is_empty()) {
@@ -470,8 +496,27 @@ ImBuf *shape_tile_backup_init(Image *image, const ImageUser *owner_iuser, int ti
   return backup;
 }
 
+/** Copy \a region (half-open, tile pixels) of \a backup into the tile buffer. */
+static void backup_copy_region(ImBuf *ibuf, const ImBuf &backup, const rcti &region)
+{
+  BLI_assert(ibuf->x == backup.x && ibuf->y == backup.y);
+  if (BLI_rcti_is_empty(&region) || ibuf->x != backup.x || ibuf->y != backup.y) {
+    return;
+  }
+  const int2 pos(region.xmin, region.ymin);
+  const int2 size(region.xmax - region.xmin, region.ymax - region.ymin);
+  if (ibuf->float_buffer.data && backup.float_buffer.data) {
+    IMB_copy_rect(ibuf, &backup, pos, pos, size);
+  }
+  else if (ibuf->byte_buffer.data && backup.byte_buffer.data) {
+    IMB_copy_rect(ibuf, &backup, pos, pos, size);
+  }
+}
+
 /** Mark a restored / written region for redraw. Safe without a context (uses the global
- * notifier, like the RNA update paths). \a commit also flags the image as modified. */
+ * notifier, like the RNA update paths). \a commit also flags the image as modified; the live
+ * Vector preview and the restore paths must not, or a cancelled session would leave the image
+ * looking unsaved. */
 static void tile_mark_region(Image *image,
                              const ImageUser *owner_iuser,
                              const int tile_number,
@@ -496,6 +541,63 @@ static void tile_mark_region(Image *image,
   }
   BKE_image_release_ibuf(image, ibuf, lock);
   WM_main_add_notifier(NC_IMAGE | NA_EDITED, image);
+}
+
+static void tile_restore(Image *image,
+                         const ImageUser *owner_iuser,
+                         const int tile_number,
+                         const ImBuf &backup,
+                         const rcti &region)
+{
+  if (!image || BLI_rcti_is_empty(&region)) {
+    return;
+  }
+  ImageUser iuser;
+  if (owner_iuser) {
+    iuser = *owner_iuser;
+  }
+  iuser.tile = tile_number;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
+  if (!ibuf) {
+    return;
+  }
+  backup_copy_region(ibuf, backup, region);
+  BKE_image_release_ibuf(image, ibuf, lock);
+  DEG_id_tag_update(&image->id, 0);
+  tile_mark_region(image, owner_iuser, tile_number, region, false);
+}
+
+void shape_tile_backup_restore(Image *image,
+                               const ImageUser *owner_iuser,
+                               const int tile_number,
+                               const ImBuf &backup)
+{
+  if (!image) {
+    return;
+  }
+  ImageUser iuser;
+  if (owner_iuser) {
+    iuser = *owner_iuser;
+  }
+  iuser.tile = tile_number;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
+  if (!ibuf) {
+    return;
+  }
+  const rcti whole{0, ibuf->x, 0, ibuf->y};
+  BKE_image_release_ibuf(image, ibuf, lock);
+  tile_restore(image, owner_iuser, tile_number, backup, whole);
+}
+
+void shape_tile_backup_restore_region(Image *image,
+                                      const ImageUser *owner_iuser,
+                                      const int tile_number,
+                                      const ImBuf &backup,
+                                      const rcti &region)
+{
+  tile_restore(image, owner_iuser, tile_number, backup, region);
 }
 
 /** \} */
@@ -638,8 +740,10 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
   if (shapes.is_empty()) {
     return false;
   }
+  /* An open shape draws only through its stroke; force it on (see #style_resolve_for_shapes) so
+   * the 2D bake matches the 3D backends for a Line / Polyline / open Curve. */
   const ShapeStyle style = style_resolve_for_shapes(shapes, style_in);
-  /* \a shapes are already symmetry-expanded (see #shape_bake); all tiles
+  /* \a shapes are already symmetry-expanded (see #shape_bake and the Vector session); all tiles
    * and regions below are derived from them, so copies outside the original's bounds are never
    * cut. */
   /* Whether Alpha masks the other channels is a property of the bake, not of a tile; the shared
@@ -683,7 +787,8 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
       if (!affected) {
         continue;
       }
-      /* The backups only feed the undo step. */
+      /* The backups only feed the undo step; the preview path (the Vector session) keeps its
+       * own long-lived ones and skips this per-write duplicate. */
       ImBuf *backup = push_undo ?
                           shape_tile_backup_init(target.image, target.iuser, itile->tile_number) :
                           nullptr;
@@ -974,8 +1079,11 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
    * the next redraw -- the pattern of every other pixel-writing tool in this fork (see
    * paint_image_select_gradient.cc). */
   for (const TileWrite &write : writes) {
-    tile_mark_region(
-        write.target.image, write.target.iuser, write.tile_number, write.region, push_undo);
+    tile_mark_region(write.target.image,
+                     write.target.iuser,
+                     write.tile_number,
+                     write.region,
+                     push_undo);
   }
   for (const ShapeTarget &target : targets) {
     if (!target.image) {
@@ -985,7 +1093,9 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
       BKE_image_free_gputextures(target.image);
     }
     if (target.channel >= 0) {
-      /* Material maps feed the 3D Viewport shading; the committed bake tags the shading graph. */
+      /* Material maps feed the 3D Viewport shading. The committed bake tags the shading graph
+       * here; the Vector preview tags its images with a throttle of its own (see the Vector
+       * session's refresh), so a drag does not re-evaluate the shading per mouse move. */
       if (push_undo) {
         DEG_id_tag_update(&target.image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
       }
@@ -1041,6 +1151,216 @@ bool shape_bake(bContext *C,
   const Vector<PaintShape> all_shapes = shapes_expand_symmetry(shapes, tile, *scene->toolsettings);
   /* The object tag for the material maps is #shape_composite_into's commit-time job. */
   return shape_composite_into(targets, all_shapes, tile, bake_style, push_undo, undo_name, ob);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Image tile write target
+ * \{ */
+
+ImageTilesBackend::ImageTilesBackend(const PaintShapeSettings &settings, const CanvasTile &tile)
+    : settings_(settings), tile_(tile)
+{
+}
+
+ImageTilesBackend::~ImageTilesBackend()
+{
+  for (TileBackup &backup : backups_) {
+    if (backup.orig) {
+      IMB_freeImBuf(backup.orig);
+      backup.orig = nullptr;
+    }
+  }
+}
+
+bool ImageTilesBackend::begin(bContext &C, ReportList *reports)
+{
+  Scene *scene = CTX_data_scene(&C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return false;
+  }
+  Object *ob = CTX_data_active_object(&C);
+  /* The one map-creation call of the session runs before the resolution, so a preview write
+   * never allocates images (it would run outside any undo step that records the creation). */
+  Paint &paint = scene->toolsettings->imapaint.paint;
+  composite_targets_ensure_writable(&C, ob, paint, settings_);
+  targets_ = composite_targets_get(&C, ob, paint, settings_);
+  if (targets_.is_empty()) {
+    /* No fallback to the editor image: in Material mode an empty resolution is a refusal, and
+     * the reason is reported to the caller. Image canvases always resolve an image. */
+    if (const char *reason = shape_targets_refusal_message(&C, ob)) {
+      if (reports != nullptr) {
+        BKE_report(reports, RPT_WARNING, reason);
+      }
+    }
+    return false;
+  }
+  /* Own the ImageUsers by value: a material-node cache the resolution pointed into can be freed
+   * by a material edit or an undo while the session is live. The vector is reserved to its final
+   * size first, so the pointers fixed below stay stable. The session_uid snapshot is what lets a
+   * later write tell whether the Image is still the one this session resolved. */
+  target_iusers_.reserve(targets_.size());
+  for (ShapeTarget &target : targets_) {
+    target.image_session_uid = target.image ? target.image->id.session_uid : 0;
+    target_iusers_.append(target.iuser ? *target.iuser : ImageUser());
+  }
+  for (const int i : targets_.index_range()) {
+    targets_[i].iuser = &target_iusers_[i];
+  }
+  ob_ = ob;
+  /* Keep the Main so a later liveness check can look the Image up by session_uid without ever
+   * touching the (possibly freed) stored pointer. */
+  bmain_ = CTX_data_main(&C);
+  return true;
+}
+
+bool ImageTilesBackend::target_alive(const ShapeTarget &target) const
+{
+  if (target.image == nullptr) {
+    return true;
+  }
+  if (bmain_ == nullptr) {
+    /* No Main to validate against (a test backend): trust the resolution. */
+    return true;
+  }
+  /* The stored `target.image` may already be dangling, so never dereference it: find the ID that
+   * currently owns this session_uid and compare its address with the stored pointer (IDs are
+   * unique per session, and the freed Image's uid is not reused). */
+  ID *found = BKE_libblock_find_session_uid(bmain_, ID_IM, target.image_session_uid);
+  return found == id_cast<ID *>(target.image);
+}
+
+bool ImageTilesBackend::targets_alive() const
+{
+  for (const ShapeTarget &target : targets_) {
+    if (!this->target_alive(target)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+ImageTilesBackend::TileBackup *ImageTilesBackend::backups_find(const int target_index,
+                                                               const int tile_number)
+{
+  for (TileBackup &backup : backups_) {
+    if (backup.target_index == target_index && backup.tile_number == tile_number) {
+      return &backup;
+    }
+  }
+  return nullptr;
+}
+
+bool ImageTilesBackend::preview(bContext * /*C*/,
+                                ReportList * /*reports*/,
+                                const Span<PaintShape> shapes,
+                                const ShapeStyle &style_in)
+{
+  if (targets_.is_empty() || shapes.is_empty()) {
+    return false;
+  }
+  /* The write below resolves the style (an open shape forces its stroke on); the tile / dirty
+   * regions must use the same style, or the stroke fringe lands outside the restored rect and
+   * piles up on every refresh. */
+  const ShapeStyle style = style_resolve_for_shapes(shapes, style_in);
+  /* A target Image freed by an undo / material edit must not be written through. */
+  if (!this->targets_alive()) {
+    return false;
+  }
+
+  /* Lazy backups: tiles the shape moved onto are backed up before the first write into them,
+   * per target (each channel image is backed up on its own). */
+  for (const int target_index : targets_.index_range()) {
+    const ShapeTarget &target = targets_[target_index];
+    const Vector<int> affected = composite_affected_tiles_get(
+        target.image, target.iuser, shapes, tile_, style);
+    for (const int tile_number : affected) {
+      if (backups_find(target_index, tile_number)) {
+        continue;
+      }
+      ImBuf *orig = shape_tile_backup_init(target.image, target.iuser, tile_number);
+      if (orig) {
+        backups_.append(TileBackup{target_index, tile_number, orig, rcti{0, 0, 0, 0}});
+      }
+    }
+  }
+
+  /* Restore what the previous preview painted (plus what this one will paint), then composite the
+   * new regions — no full-tile restore per mouse move. */
+  for (TileBackup &backup : backups_) {
+    const ShapeTarget &target = targets_[backup.target_index];
+    const rcti new_dirty = composite_tile_region_get(
+        target.image, target.iuser, backup.tile_number, shapes, tile_, style);
+    rcti restore_rect = backup.dirty;
+    if (BLI_rcti_is_empty(&restore_rect)) {
+      restore_rect = new_dirty;
+    }
+    else {
+      shape_region_union(restore_rect, new_dirty);
+    }
+    if (!BLI_rcti_is_empty(&restore_rect)) {
+      shape_tile_backup_restore_region(
+          target.image, target.iuser, backup.tile_number, *backup.orig, restore_rect);
+    }
+    backup.dirty = new_dirty;
+  }
+
+  if (backups_.is_empty()) {
+    return false;
+  }
+  shape_composite_into(targets_, shapes, tile_, style, false, "", nullptr);
+
+  /* The 3D Viewport's live PBR preview only follows a shading-relevant image tag (the 2D brush
+   * sends one per redraw), but tagging per mouse move re-evaluates the shading constantly, so the
+   * preview throttles the tag instead of dropping it. The commit tags fully. */
+  const double now = BLI_time_now_seconds();
+  if (now - last_shading_tag_ >= SHAPE_PREVIEW_SHADING_TAG_INTERVAL) {
+    last_shading_tag_ = now;
+    for (const ShapeTarget &target : targets_) {
+      if (target.channel >= 0 && target.image) {
+        DEG_id_tag_update(&target.image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
+      }
+    }
+  }
+  return true;
+}
+
+void ImageTilesBackend::restore_all()
+{
+  for (const TileBackup &backup : backups_) {
+    const ShapeTarget &target = targets_[backup.target_index];
+    /* A target freed by an undo cannot be restored; restoring the others is all that is left. */
+    if (!this->target_alive(target)) {
+      continue;
+    }
+    shape_tile_backup_restore(target.image, target.iuser, backup.tile_number, *backup.orig);
+  }
+}
+
+bool ImageTilesBackend::commit(bContext * /*C*/,
+                               ReportList * /*reports*/,
+                               const Span<PaintShape> shapes,
+                               const ShapeStyle &style,
+                               const char *undo_name)
+{
+  /* The preview already wrote into these tiles; restore them first so the commit's undo step
+   * captures the pre-session pixels (and so a bail-out leaves no preview trace), then bake once. */
+  restore_all();
+  if (targets_.is_empty() || shapes.is_empty()) {
+    return false;
+  }
+  /* Do not bake into a target an undo / material edit has already replaced. The commit
+   * failing here is what makes the Vector session cancel with a report instead of writing. */
+  if (!this->targets_alive()) {
+    return false;
+  }
+  return shape_composite_into(targets_, shapes, tile_, style, true, undo_name, ob_);
+}
+
+void ImageTilesBackend::cancel()
+{
+  restore_all();
 }
 
 /** \} */

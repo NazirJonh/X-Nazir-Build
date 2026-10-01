@@ -7459,8 +7459,14 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
   }
   else if (data->state == BUTTON_STATE_WAIT_DRAG) {
 
+    /* A swatch routed to a tool color is only ever clicked. Starting a color drag from it would
+     * let a slightly moving fast click be dropped on the canvas below the popover, which
+     * bucket-fills the whole image with the swatch color. */
+    const bool is_target_swatch = color_but->is_pallete_color &&
+                                  color_but->palette_target_prop != nullptr;
+
     /* this function also ends state */
-    if (but_drag_init(C, but, data, event)) {
+    if (!is_target_swatch && but_drag_init(C, but, data, event)) {
       return WM_UI_HANDLER_BREAK;
     }
 
@@ -7479,6 +7485,28 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
            * to the brush/unified color only happens to match when the picker edits that same
            * color; for an unrelated color like the PBR Paint base color it would leave the edited
            * property untouched (and its brush-color sync would then copy a stale value). */
+          if (color_but->palette_target_prop != nullptr) {
+            /* The template owner asked for the swatch to go to its own color property (e.g. a
+             * tool color) rather than the brush. Shift selects the alternative property. */
+            PropertyRNA *target_prop = color_but->palette_target_prop;
+            if ((event->modifier & KM_SHIFT) && color_but->palette_target_alt_prop != nullptr) {
+              target_prop = color_but->palette_target_alt_prop;
+            }
+            PointerRNA *target_ptr = &color_but->palette_target_ptr;
+            float rgb[3];
+            RNA_property_float_get_array_at_most(&but->rnapoin, but->rnaprop, rgb, 3);
+            if (but->rnaprop && RNA_property_subtype(but->rnaprop) == PROP_COLOR_GAMMA) {
+              IMB_colormanagement_srgb_to_scene_linear_v3(rgb, rgb);
+            }
+            if (RNA_property_subtype(target_prop) == PROP_COLOR_GAMMA) {
+              IMB_colormanagement_scene_linear_to_srgb_v3(rgb, rgb);
+            }
+            RNA_property_float_set_array_at_most(target_ptr, target_prop, rgb, 3);
+            RNA_property_update(C, target_ptr, target_prop);
+            button_activate_state(C, but, BUTTON_STATE_EXIT);
+            return WM_UI_HANDLER_BREAK;
+          }
+
           ColorPicker *cpicker = static_cast<ColorPicker *>(but->block->color_pickers.list.first);
           Button *picker_but = nullptr;
           if (cpicker != nullptr) {

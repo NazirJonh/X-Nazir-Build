@@ -233,7 +233,10 @@ void template_palette(Layout *layout,
                       PointerRNA *ptr,
                       const StringRefNull propname,
                       const bool show_empty_message,
-                      const bool show_sort_buttons)
+                      const bool show_sort_buttons,
+                      PointerRNA *target_ptr,
+                      const char *target_propname,
+                      const char *target_alt_propname)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
   Button *but = nullptr;
@@ -256,6 +259,26 @@ void template_palette(Layout *layout,
   Block *block = layout->block();
 
   Palette *palette = static_cast<Palette *>(cptr.data);
+
+  /* Resolve the optional swatch target once; an unresolved target keeps the brush behavior. */
+  PropertyRNA *target_prop = nullptr;
+  PropertyRNA *target_alt_prop = nullptr;
+  if (target_ptr && target_ptr->data && target_propname && target_propname[0]) {
+    target_prop = RNA_struct_find_property(target_ptr, target_propname);
+    if (target_prop && !(RNA_property_type(target_prop) == PROP_FLOAT &&
+                         RNA_property_array_length(target_ptr, target_prop) >= 3))
+    {
+      target_prop = nullptr;
+    }
+    if (target_prop && target_alt_propname && target_alt_propname[0]) {
+      target_alt_prop = RNA_struct_find_property(target_ptr, target_alt_propname);
+      if (target_alt_prop && !(RNA_property_type(target_alt_prop) == PROP_FLOAT &&
+                               RNA_property_array_length(target_ptr, target_alt_prop) >= 3))
+      {
+        target_alt_prop = nullptr;
+      }
+    }
+  }
 
   Layout *col = &layout->column(true);
   /* Row with buttons on left, size toggle on right. */
@@ -387,6 +410,11 @@ void template_palette(Layout *layout,
                                                                     ""));
       color_but->is_pallete_color = true;
       color_but->palette_color_index = col_id;
+      if (target_prop) {
+        color_but->palette_target_ptr = *target_ptr;
+        color_but->palette_target_prop = target_prop;
+        color_but->palette_target_alt_prop = target_alt_prop;
+      }
       row_cols++;
       col_id++;
     }

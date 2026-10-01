@@ -5,7 +5,7 @@
 /** \file
  * \ingroup edsculpt
  *
- * Implementation of the shape SDF rasterizer; see #paint_shape_raster.hh.
+ * Implementation of the shape SDF rasterizer; see #paint_shape_render.hh.
  *
  * Spline shapes are flattened into dense polylines and turned into a segment list with an
  * acceleration grid (#BUCKET_SIZE pixel cells). Per pixel, the distance to the nearest segment
@@ -15,7 +15,7 @@
  * their analytic SDF directly.
  */
 
-#include "paint_shape_raster.hh"
+#include "paint_shape_render.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -122,8 +122,9 @@ struct NearestHit {
 };
 
 struct ShapeGeom {
-  /** The shape evaluates its analytic SDF and skips the segment machinery (the parametric
-   * Rect/Ellipse). */
+  /** The shape evaluates its analytic SDF and skips the segment machinery. This is the
+   * parametric Rect/Ellipse only; a parametric Polygon is flattened to the polylines
+   * below like any other outline. */
   bool is_parametric = false;
   PaintShape parametric_shape;
   /** #ShapeRasterOutputs::ShapeUV comes from the parametric frame (rotated, normalized by
@@ -172,11 +173,14 @@ static ShapeGeom shape_geometry_build(const PaintShape &shape,
 {
   ShapeGeom geom;
 
-  /* The analytic SDF carries no arc length, so StrokeS forces a parametric Rect/Ellipse through
-   * the flattened-polyline path (StrokeS is opt-in, so the coverage stays analytic otherwise). */
-  const bool force_polyline =
-      shape.has_analytic_sdf() &&
-      (uint8_t(outputs) & uint8_t(ShapeRasterOutputs::StrokeS)) != 0;
+  /* The analytic SDF carries no arc length and always rounds corners, so StrokeS, a Miter / Bevel
+   * join or a dash force a parametric Rect/Ellipse through the flattened-polyline path (all are
+   * opt-in, so the coverage stays analytic otherwise). */
+  const bool needs_path_stroke = style.use_stroke() &&
+                                 (style.join_type != PAINT_SHAPE_JOIN_ROUND || style.use_dash());
+  const bool force_polyline = shape.has_analytic_sdf() &&
+                              ((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::StrokeS)) != 0 ||
+                               needs_path_stroke);
   if (shape.has_analytic_sdf()) {
     /* ShapeUV keeps using the parametric frame even when StrokeS densifies the coverage. */
     geom.parametric_shape = shape;
@@ -495,8 +499,8 @@ struct PixelCoverage {
 /**
  * Evaluate one shape at \a p.
  *
- * \param inside: winding at \a p (tracked by the caller's per-row sweep), only read for shapes
- * with closed loops.
+ * \param inside: winding at \a p (tracked by the caller's per-row sweep, or ray-cast by the
+ * point evaluator), only read for shapes with closed loops.
  * \param want: which quantities to compute (decoded from the #ShapeRasterOutputs mask once, by
  * the caller); unrequested distance/direction fields stay zero, and the base coverage they
  * derive from needs its own flag (#Fill for #FillD/#FillDir, #Stroke for #StrokeT/#StrokeDir).
@@ -669,13 +673,36 @@ static void shape_eval_pixel(const ShapeGeom &geom,
   }
 
   if (!poly.cyclic) {
-    /* Cap handling at the two path ends, keyed off the nearest point's arc length. */
-    const float length = poly.length;
+    /* Cap handling at the two path ends. The cut is keyed off the projection onto the end
+     * segment's tangent, not the clamped arc length: past an end the nearest point stays on the
+     * end point, so `s` would never leave the cap and the cut would not apply. */
+    const float2 tangent = math::normalize(b - a);
+    const float along = geom.seg_s0[hit.seg] + math::dot(p - a, tangent);
+    const float to_end = poly.length - along;
+    const bool open_start = geom.seg_prev[hit.seg] < 0;
+    const bool open_end = geom.seg_next[hit.seg] < 0;
     if (style.cap_type == PAINT_SHAPE_CAP_BUTT) {
-      cov *= aa_coverage(s, PATH_AA) * aa_coverage(length - s, PATH_AA);
+      if (open_start) {
+        cov *= aa_coverage(along, PATH_AA);
+      }
+      if (open_end) {
+        cov *= aa_coverage(to_end, PATH_AA);
+      }
     }
     else if (style.cap_type == PAINT_SHAPE_CAP_SQUARE) {
-      cov *= aa_coverage(s + halfw, PATH_AA) * aa_coverage(length + halfw - s, PATH_AA);
+      const bool past_start = open_start && along < 0.0f;
+      const bool past_end = open_end && to_end < 0.0f;
+      if (past_start || past_end) {
+        /* The distance field rounds the end; a square cap uses the distance to the line instead. */
+        const float line_d = tangent.x * (p.y - a.y) - tangent.y * (p.x - a.x);
+        cov = aa_coverage(halfw - math::abs(line_d + shift), style.feather);
+      }
+      if (open_start) {
+        cov *= aa_coverage(along + halfw, PATH_AA);
+      }
+      if (open_end) {
+        cov *= aa_coverage(to_end + halfw, PATH_AA);
+      }
     }
     /* PAINT_SHAPE_CAP_ROUND: the segment SDF already rounds the ends. */
   }
@@ -756,6 +783,24 @@ static bool winding_inside(const int winding, const ePaintShapeFillRule fill_rul
     return (std::abs(winding) % 2) != 0;
   }
   return winding != 0;
+}
+
+/** Inside test of the shape-space point \a p by ray-casting against the closed segments. */
+static bool ray_inside(const ShapeGeom &geom, const float2 &p, const ePaintShapeFillRule fill_rule)
+{
+  int winding = 0;
+  for (const int si : geom.closed_segs) {
+    const float2 &a = geom.seg_a[si];
+    const float2 &b = geom.seg_b[si];
+    if ((a.y <= p.y) == (b.y <= p.y)) {
+      continue;
+    }
+    const float x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+    if (x <= p.x) {
+      winding += (b.y > a.y) ? 1 : -1;
+    }
+  }
+  return winding_inside(winding, fill_rule);
 }
 
 /** \} */
@@ -951,6 +996,95 @@ ShapeCoverage shape_rasterize(const Span<PaintShape> shapes,
 {
   ShapeRasterizer rasterizer(shapes, style, rect, tile_offset_px, outputs);
   return rasterizer.rasterize(rect);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Point evaluation
+ * \{ */
+
+struct ShapeEvaluator::State {
+  Vector<ShapeGeom> geoms;
+  /* A copy: the caller-owned style may not outlive a cached evaluator. */
+  ShapeStyle style;
+  ShapeRasterOutputs outputs = SHAPE_RASTER_OUTPUTS_ALL;
+  /** The mask above, decoded once (see #ShapeRasterWants). */
+  ShapeRasterWants wants;
+};
+
+ShapeEvaluator::ShapeEvaluator(const Span<PaintShape> shapes,
+                               const ShapeStyle &style,
+                               const rctf &domain,
+                               const ShapeRasterOutputs outputs)
+{
+  state_ = std::make_unique<State>();
+  state_->style = style;
+  state_->outputs = outputs;
+  state_->wants = ShapeRasterWants(outputs);
+  for (const PaintShape &shape : shapes) {
+    if (shape.is_empty()) {
+      continue;
+    }
+    state_->geoms.append(shape_geometry_build(shape, style, domain, outputs));
+  }
+}
+
+ShapeEvaluator::~ShapeEvaluator() = default;
+ShapeEvaluator::ShapeEvaluator(ShapeEvaluator &&other) noexcept = default;
+ShapeEvaluator &ShapeEvaluator::operator=(ShapeEvaluator &&other) noexcept = default;
+
+ShapeSample ShapeEvaluator::sample(const float2 &p) const
+{
+  ShapeSample acc;
+  float shape_uv_weight = -1.0f;
+  for (const ShapeGeom &geom : state_->geoms) {
+    /* Outside the evaluation bounds nothing is covered (#shape_eval_pixel bails out on the same
+     * test). Checked first because the winding ray cast below walks every closed segment: a mesh
+     * bake samples every vertex of every candidate node, and most of them are far from the shape. */
+    if (!BLI_rctf_isect_pt_v(&geom.bounds, p)) {
+      continue;
+    }
+    bool inside = true;
+    if (!geom.is_parametric && geom.has_closed) {
+      inside = ray_inside(geom, p, state_->style.fill_rule);
+    }
+    else if (!geom.is_parametric) {
+      inside = false;
+    }
+    PixelCoverage part;
+    shape_eval_pixel(geom, state_->style, p, inside, part, state_->wants);
+    /* Same max-combining as the grid rasterizer. */
+    if (part.fill > acc.fill) {
+      acc.fill = part.fill;
+      acc.fill_d = part.fill_d;
+      acc.fill_dir = part.fill_dir;
+    }
+    if (part.stroke > acc.stroke) {
+      acc.stroke = part.stroke;
+      acc.stroke_t = part.stroke_t;
+      acc.stroke_dir = part.stroke_dir;
+      acc.stroke_s = part.stroke_s;
+      acc.stroke_len = part.stroke_len;
+    }
+    const float part_w = std::max(part.fill, part.stroke);
+    if (part_w > shape_uv_weight) {
+      shape_uv_weight = part_w;
+      acc.shape_uv = part.shape_uv;
+    }
+  }
+  return acc;
+}
+
+void ShapeEvaluator::sample_many(const Span<float2> points,
+                                 const MutableSpan<ShapeSample> r_samples) const
+{
+  BLI_assert(points.size() == r_samples.size());
+  threading::parallel_for(points.index_range(), 1024, [&](const IndexRange range) {
+    for (const int i : range) {
+      r_samples[i] = this->sample(points[i]);
+    }
+  });
 }
 
 /** \} */

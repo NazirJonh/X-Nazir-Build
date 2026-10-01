@@ -153,20 +153,15 @@ struct PaintVectorItem {
   float origin[2] = {0.0f, 0.0f};
   /** #PaintVectorItemFlag. */
   short flag = 0;
-  /** #ePaintShapeArcMode of an Arc item (0 = OPEN). */
-  short arc_mode = 0;
+  /* Explicit padding (keeps the parametric block 4-byte aligned). */
+  short _pad = 0;
 
-  /* Parametric data of Rect/Ellipse/Polygon/Star/Arc, used when `splines_num == 0`. */
+  /* Parametric data of Rect/Ellipse/Polygon, used when `splines_num == 0`. */
   float center[2] = {0.0f, 0.0f};
   float half_size[2] = {0.0f, 0.0f};
   float rotation = 0.0f;
   float corner_radius[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   int polygon_sides = 6;
-  float star_inner_ratio = 0.5f;
-  float arc_start = 0.0f;
-  float arc_end = 6.2831853f;
-  /** Curve Patch bake radius; unused by Shape items. */
-  float bake_radius = 0.0f;
 
   /** Embedded style snapshot: the item is self-contained across reload / undo. Owns its
    * profiles (`stroke_profile` / `fill_profile` / `stroke_ramp`) and references the curve source

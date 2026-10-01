@@ -3144,17 +3144,27 @@ def draw_color_settings(context, layout, brush, color_type=False):
                 col.prop(brush, "grad_spacing")
 
 
-def draw_shape_color_row(layout, shape, *, header=False):
-    """Draw the shape tool's own colors: Color = stroke, Secondary Color = fill. No swap button;
-    X (``paint.shape_colors_swap``) swaps them.
+def paint_shape_color_props(_shape):
+    """Ordered (primary, secondary) color property names of the shape tool. The color row draws its
+    swatches in this order and the palette targets the same pair, so a palette click always sets
+    the first swatch (Shift: the second)."""
+    return "stroke_color", "fill_color"
 
-    ``header`` keeps the two swatches and their separator in the brush tool header's fixed
-    4-UI-unit row so the shape colors match the brush color swatch width."""
+
+def draw_shape_color_row(layout, shape, *, header=False, show_swap=False):
+    """Draw the shape tool's own colors in the ``paint_shape_color_props`` order, optionally
+    followed by a compact swap button (``paint.shape_colors_swap``, also bound to X).
+
+    ``header`` keeps the swatches in a fixed-width row so they match the brush color swatch
+    width (a little wider when the swap button is shown)."""
+    primary, secondary = paint_shape_color_props(shape)
     row = layout.row(align=True)
     if header:
-        row.ui_units_x = 4
-    row.prop(shape, "stroke_color", text="")
-    row.prop(shape, "fill_color", text="")
+        row.ui_units_x = 5 if show_swap else 4
+    row.prop(shape, primary, text="")
+    row.prop(shape, secondary, text="")
+    if show_swap:
+        row.operator("paint.shape_colors_swap", text="", icon='ARROW_LEFTRIGHT')
     row.separator()
     return row
 
@@ -3171,9 +3181,31 @@ def paint_shape_tool_flags(context):
     return is_line, is_rect, is_sized
 
 
+def paint_shape_tool_has_angle(context):
+    """Whether the active Shape tool has a meaningful Angle: the drawn-by-points tools (Line,
+    Polyline, Curve Patch) carry their orientation in the points."""
+    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+    tool = ToolSelectPanelHelper.tool_active_from_context(context)
+    tool_id = tool.idname if tool else ""
+    return tool_id not in (
+        "builtin.paint_shape_line",
+        "builtin.paint_shape_polyline",
+        "builtin.paint_shape_curve",
+    )
+
+
 def paint_shape_settings(context):
-    """The ``PaintShapeSettings`` the shape UI should edit: the shared
+    """The ``PaintShapeSettings`` the shape UI should edit.
+
+    A live Image Vector session owns a private copy of the settings, exposed on its ``SpaceImage``
+    as ``paint_shape_session_settings``; the UI of that space edits the copy, so settings changes in
+    other spaces never reach the session. Every other space uses the shared
     ``tool_settings.image_paint.shape``."""
+    space = getattr(context, "space_data", None)
+    if space is not None and space.type == 'IMAGE_EDITOR':
+        session_settings = getattr(space, "paint_shape_session_settings", None)
+        if session_settings is not None:
+            return session_settings
     return context.tool_settings.image_paint.shape
 
 
@@ -3183,10 +3215,12 @@ def draw_paint_shape_extra_options(context, layout, shape):
     radii. The tool header shows only the main fields."""
     is_line, is_rect, is_sized = paint_shape_tool_flags(context)
     if is_sized:
-        layout.prop(shape, "size")
+        sub = layout.column(align=True)
+        sub.prop(shape, "size", index=0, text="Size X")
+        sub.prop(shape, "size", index=1, text="Size Y")
     if not is_line:
         layout.prop(shape, "stroke_align", text="Align")
-    if is_rect and shape.use_fill:
+    if is_rect:
         if not shape.use_uniform_corners:
             sub = layout.column(align=True)
             sub.prop(shape, "corner_radius", index=0, text="Top Left")

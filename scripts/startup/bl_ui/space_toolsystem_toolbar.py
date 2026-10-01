@@ -36,6 +36,7 @@ from bl_ui.properties_paint_common import (
     draw_paint_shape_extra_options,
     draw_shape_color_row,
     paint_shape_settings,
+    paint_shape_tool_has_angle,
     paint_shape_tool_flags,
 )
 
@@ -2809,7 +2810,7 @@ class _defs_image_paint_shape:
     def draw_shape_settings(context, layout, _tool):
         imapaint = context.tool_settings.image_paint
         shape = paint_shape_settings(context)
-        is_line, is_rect, _is_sized = paint_shape_tool_flags(context)
+        is_line, is_rect, is_sized = paint_shape_tool_flags(context)
 
         # Material (PBR) canvas mode bakes into the active object's material channel maps
         # instead of the image open in this editor; say so and show the targeted channel count.
@@ -2823,9 +2824,12 @@ class _defs_image_paint_shape:
 
         if region_is_header:
             # A flat horizontal row with separators: a column wraps the items of a tool header.
-            # Order: colors -> Blend -> Width -> Strength -> Fill/Stroke -> Corner Radius ->
-            # Angle -> options popover.
-            draw_shape_color_row(layout, shape, header=True)
+            # Order: Draw Mode -> colors -> Blend -> Width -> Strength -> Fill/Stroke ->
+            # Corner Radius -> Angle -> options popover.
+            row = layout.row(align=True)
+            row.prop(shape, "draw_mode", text="", expand=True)
+            layout.separator()
+            draw_shape_color_row(layout, shape, header=True, show_swap=not is_line)
             layout.separator()
             if brush is not None:
                 blend_row = layout.row(align=True)
@@ -2844,23 +2848,40 @@ class _defs_image_paint_shape:
                 layout.prop(shape, "stroke_align", text="")
                 # Corner shape of the stroke outline (Round / Bevel / Miter = sharp).
                 layout.prop(shape, "join_type", text="")
-            if is_rect and shape.use_fill:
+            if is_rect:
                 layout.separator()
                 layout.prop(shape, "corner_radius", index=0, text="Corner Radius")
-            layout.separator()
-            layout.prop(shape, "rotation", text="Angle")
+            if is_sized:
+                # Default size of a click without a drag (and the Vector session's new shape).
+                layout.separator()
+                layout.prop(shape, "size", index=0, text="Size X")
+                layout.prop(shape, "size", index=1, text="Size Y")
+            if paint_shape_tool_has_angle(context):
+                layout.separator()
+                layout.prop(shape, "rotation", text="Angle")
             layout.separator()
             layout.popover(panel="IMAGE_PT_tools_shape_options", text="Options")
+            # Confirm / cancel while the Image Editor owns a live Vector session.
+            if bpy.ops.paint.image_shape_vector_apply.poll():
+                layout.separator()
+                row = layout.row(align=True)
+                row.operator("paint.image_shape_vector_apply", text="Apply", icon='CHECKMARK')
+                row.operator("paint.image_shape_vector_cancel", text="Cancel", icon='X')
             return
 
-        # The fields are drawn directly into the property-split layout (no nested column).
-        draw_shape_color_row(layout, shape)
+        # Match the Sculpt Mode Active Tool layout: a single full-width Draw Mode row, then the
+        # remaining fields drawn directly into the property-split layout (no nested column).
+        row = layout.row(align=True)
+        row.use_property_split = False
+        row.prop(shape, "draw_mode", text="", expand=True)
+        draw_shape_color_row(layout, shape, show_swap=not is_line)
         layout.prop(shape, "stroke_width", text="Width", slider=True)
         if not is_line:
             row = layout.row(align=True)
             row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
             row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
-        layout.prop(shape, "rotation", text="Angle")
+        if paint_shape_tool_has_angle(context):
+            layout.prop(shape, "rotation", text="Angle")
         draw_paint_shape_extra_options(context, layout, shape)
 
 

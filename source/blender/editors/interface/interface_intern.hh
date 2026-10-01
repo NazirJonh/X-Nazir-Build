@@ -497,6 +497,13 @@ struct ButtonNumberSlider : public Button {
 struct ButtonColor : public Button {
   bool is_pallete_color = false;
   int palette_color_index = -1;
+  /**
+   * Optional color property that receives the swatch instead of the brush color (see
+   * #template_palette). The alternative one is used with Shift held.
+   */
+  PointerRNA palette_target_ptr = PointerRNA_NULL;
+  PropertyRNA *palette_target_prop = nullptr;
+  PropertyRNA *palette_target_alt_prop = nullptr;
 };
 
 /** Derived struct for #ButtonType::Tab */

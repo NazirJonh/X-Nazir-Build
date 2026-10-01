@@ -72,6 +72,16 @@ static void toolsystem_ref_set_by_id_pending(Main *bmain,
                                              bToolRef *tref,
                                              const char *idname_pending);
 
+/** The tool-change observer (see #WM_toolsystem_tool_change_callback_set). Single slot: the
+ * observers are main-thread, user-paced (a toolbar click / keymap tool switch), and the only
+ * current use guards one feature's state. */
+static wmToolChangeCallbackFn g_tool_change_callback = nullptr;
+
+void WM_toolsystem_tool_change_callback_set(wmToolChangeCallbackFn callback)
+{
+  g_tool_change_callback = callback;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Tool Reference API
  * \{ */
@@ -661,6 +671,10 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
 {
   Main *bmain = CTX_data_main(C);
 
+  /* Whether this call actually switches the tool: the observers (editors with state tied to the
+   * active tool) must not run for a re-setup of the same tool (mode re-init, undo, startup). */
+  const bool idname_changed = !STREQ(tref->idname, idname);
+
   if (tref->runtime) {
     toolsystem_unlink_ref(C, workspace, tref);
   }
@@ -716,6 +730,12 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
   {
     wmMsgBus *mbus = CTX_wm_message_bus(C);
     WM_msg_publish_rna_prop(mbus, &workspace->id, workspace, WorkSpace, tools);
+  }
+
+  /* Run after #toolsystem_refresh_screen_from_active_tool, so an observer comparing a saved tool
+   * against an area's current active tool sees the new one. */
+  if (idname_changed && g_tool_change_callback != nullptr) {
+    g_tool_change_callback(*C, *tref);
   }
 }
 

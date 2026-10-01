@@ -120,7 +120,7 @@ TEST_F(PaintVectorTest, NeedsRebakeTracksRevision)
 TEST_F(PaintVectorTest, WasBakedFlagIsExplicit)
 {
   /* Until Stack Layers, re-editing an already baked PaintVector writes only the document; the
-   * decision is the explicit DNA flag, not the revision counters (O45). */
+   * decision is the explicit DNA flag, not the revision counters. */
   PaintVector *pv = make_two_item_vector(bmain, "PVBaked");
   EXPECT_FALSE(BKE_paint_vector_was_baked(*pv));
   BKE_paint_vector_tag_changed(*pv);
@@ -151,8 +151,7 @@ TEST_F(PaintVectorTest, StyleSnapshotDeepCopyRoundTrip)
   EXPECT_NE(copy.stroke_profile, original.stroke_profile);
   EXPECT_NE(copy.stroke_ramp, original.stroke_ramp);
 
-  /* The copy is independent: the session edits its own block, leaving the original untouched
-   * (Variant A isolation). */
+  /* The copy is independent: the session edits its own block, leaving the original untouched. */
   copy.stroke_width = 99.0f;
   copy.stroke_channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].color[0] = 0.9f;
   EXPECT_FLOAT_EQ(original.stroke_width, 5.0f);

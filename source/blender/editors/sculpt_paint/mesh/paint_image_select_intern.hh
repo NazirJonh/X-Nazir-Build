@@ -119,8 +119,6 @@ inline void selection_tile_fragments_free(Vector<SelectionTileFragment> &fragmen
   fragments.clear();
 }
 
-void paint_select_session_free(PaintSelectSession &session);
-
 bool image_paint_selection_poll(bContext *C);
 int image_paint_selection_resolve_tile(Image *ima, const SpaceImage *sima, int preferred_tile);
 

@@ -48,7 +48,10 @@ CanvasTile canvas_tile_from_op_props(wmOperator *op)
   tile.ref_tile = RNA_int_get(op->ptr, "shape_ref_tile");
   int tile_size[2];
   RNA_int_get_array(op->ptr, "shape_ref_tile_size", tile_size);
-  tile.ref_tile_size = int2(tile_size[0], tile_size[1]);
+  /* A hand-edited or stale redo may carry a non-positive size; keep the default then. */
+  if (tile_size[0] > 0 && tile_size[1] > 0) {
+    tile.ref_tile_size = int2(tile_size[0], tile_size[1]);
+  }
   return tile;
 }
 
@@ -127,6 +130,7 @@ std::optional<PaintShape> shape_from_op_props(wmOperator *op)
     return std::nullopt;
   }
 
+  const int points_num = RNA_collection_length(op->ptr, "shape_points");
   RNA_PROP_BEGIN (op->ptr, itemptr, prop) {
     ShapePoint point;
     float co[2], handle_left[2], handle_right[2];
@@ -141,6 +145,11 @@ std::optional<PaintShape> shape_from_op_props(wmOperator *op)
     point.auto_handles = false;
 
     const int spline_index = RNA_int_get(&itemptr, "spline");
+    /* Every spline owns at least one point, so a valid index is below the point count; this keeps a
+     * corrupt value from allocating an unbounded spline list. */
+    if (spline_index < 0 || spline_index >= points_num) {
+      continue;
+    }
     while (shape.splines.size() <= spline_index) {
       shape.splines.append(ShapeSpline{});
     }
@@ -263,21 +272,22 @@ void shape_op_properties_register(wmOperatorType *ot)
                      "shape_type",
                      int(PAINT_SHAPE_RECT),
                      0,
-                     int(PAINT_SHAPE_ELLIPSE),
+                     int(PAINT_SHAPE_CURVE),
                      "Shape Type",
                      "",
                      0,
-                     int(PAINT_SHAPE_ELLIPSE));
+                     int(PAINT_SHAPE_CURVE));
   RNA_def_property_flag(prop, PROP_HIDDEN);
 
   /* Upper bound matches UDIM (`IMA_UDIM_MAX`): rows beyond the first ten are valid. */
   prop = RNA_def_int(ot->srna, "shape_ref_tile", 1001, 1001, 2000, "Reference Tile", "", 1001, 2000);
   RNA_def_property_flag(prop, PROP_HIDDEN);
 
+  static const int default_tile_size[2] = {1024, 1024};
   prop = RNA_def_int_array(ot->srna,
                            "shape_ref_tile_size",
                            2,
-                           nullptr,
+                           default_tile_size,
                            1,
                            65536,
                            "Reference Tile Size",
@@ -349,7 +359,7 @@ void shape_op_properties_register(wmOperatorType *ot)
   RNA_def_property_flag(prop, PROP_HIDDEN);
 
   prop = RNA_def_collection_runtime(ot->srna, "shape_points", RNA_OperatorShapePoint, "Points", "");
-  RNA_def_property_flag(prop, PROP_HIDDEN);
+  RNA_def_property_flag(prop, PropertyFlag(PROP_HIDDEN | PROP_SKIP_SAVE));
 }
 
 void style_op_properties_register(wmOperatorType *ot)

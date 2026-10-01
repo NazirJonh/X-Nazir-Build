@@ -7823,12 +7823,30 @@ def _template_items_image_paint_shape(params, shape_type):
         # brush size/strength).
         ("wm.radial_control", {"type": 'F', "value": 'PRESS'},
          {"properties": [("data_path_primary",
-                         "tool_settings.image_paint.shape.stroke_width")]}),
+                         "space_data.paint_shape_active_settings.stroke_width"),
+                         # Scale the width preview with the editor zoom (image pixels to screen).
+                         ("zoom_path", "space_data.zoom")]}),
         ("wm.radial_control", {"type": 'F', "value": 'PRESS', "shift": True},
          radial_control_properties("image_paint", "strength",
                                    secondary_prop="use_unified_strength")),
         # X swaps the shape's own Stroke / Fill colors.
         ("paint.shape_colors_swap", {"type": 'X', "value": 'PRESS'}, None),
+        # Right-click settings popover. The modal draw operator handles RMB (cancel) itself while a
+        # gesture or Vector session is running, so this only applies outside of one.
+        # Keep the popover open on clicks (Fill/Stroke toggles, palette management); it still closes
+        # when the mouse leaves it or on Esc.
+        op_panel("IMAGE_PT_paint_shape_context_menu", {"type": 'RIGHTMOUSE', "value": 'PRESS'},
+                 [("keep_open", True)]),
+        # Confirm / cancel of a live Vector shape session.
+        ("paint.image_shape_vector_apply",
+         {"type": 'RET', "value": 'PRESS'},
+         None),
+        ("paint.image_shape_vector_apply",
+         {"type": 'NUMPAD_ENTER', "value": 'PRESS'},
+         None),
+        ("paint.image_shape_vector_cancel",
+         {"type": 'ESC', "value": 'PRESS'},
+         None),
     ]
 
 

@@ -11,6 +11,7 @@
 #include <limits>
 
 #include "DNA_gpencil_legacy_types.h"
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_mask_types.h"
 #include "DNA_material_types.h"
@@ -418,6 +419,11 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
         case ND_OB_SELECT:
           ED_area_tag_redraw(area);
           break;
+        case ND_TOOLSETTINGS:
+          /* Unified paint strength and the symmetry feeder change the live Vector shape preview;
+           * re-composite it (the shape settings themselves stay isolated). */
+          ED_paint_shape_brush_update(params->bmain, params->scene, nullptr);
+          break;
         case ND_MODE:
           ED_paint_cursor_start(&params->scene->toolsettings->imapaint.paint,
                                 ED_image_tools_paint_poll);
@@ -438,6 +444,15 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
           const ARegion *region = BKE_area_find_region_type(area, RGN_TYPE_WINDOW);
           WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
           break;
+      }
+      break;
+    case NC_BRUSH:
+      if (wmn->action == NA_EDITED) {
+        /* Strength / blend of the active brush feed a live Vector shape preview
+         * (#style_brush_values_from_brush); re-composite so the preview matches the commit. The
+         * shape settings stay isolated: only the brush is re-read. */
+        ED_paint_shape_brush_update(
+            params->bmain, params->scene, static_cast<const Brush *>(wmn->reference));
       }
       break;
     case NC_IMAGE:
@@ -537,12 +552,15 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
       if (wmn->data == ND_UNDO) {
         ED_area_tag_redraw(area);
         ED_area_tag_refresh(area);
-        /* Discard every floating session. Undo/redo has already rewritten the canvas, so
-         * restoring fragments would paint stale pixels on top. Hiding the preview avoids a
-         * gizmo over the restored image. No image undo step can be open here to clean up: none
-         * is ever left open across an operator boundary (see
-         * #image_select_fragment_commit_with_undo). */
-        ED_image_paint_select_session_free(sima);
+        /* A live floating session's preview must not survive an undo/redo: the stack transition
+         * has already rewritten the canvas, so the session's own tile backups (the pre-preview
+         * pixels) are the only way to take the preview out of the live buffers. Cancel restores
+         * them, matching Esc. #ed_undo_step_pre runs the same cancel over every session reachable
+         * from the active screens BEFORE the transition, so normally the slot is already empty
+         * here and this cannot overwrite the undo result; it stays as the fallback for a session
+         * that survived (e.g. on a screen the pre-step pass did not visit). No context is
+         * available to a notifier listener. */
+        ED_image_paint_select_session_cancel(nullptr, sima);
       }
       break;
   }
@@ -729,6 +747,11 @@ static void IMAGE_GGT_paint_select_transform(wmGizmoGroupType *gzgt)
   ED_image_paint_select_transform_gizmo_setup(gzgt);
 }
 
+static void IMAGE_GGT_paint_shape_transform(wmGizmoGroupType *gzgt)
+{
+  ED_image_shape_transform_gizmo_setup(gzgt);
+}
+
 static void image_widgets()
 {
   const wmGizmoMapType_Params params{SPACE_IMAGE, RGN_TYPE_WINDOW};
@@ -748,6 +771,7 @@ static void image_widgets()
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_ellipse_mask);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_compositor_split);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_select_transform);
+  WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_shape_transform);
 }
 
 /************************** main region ***************************/

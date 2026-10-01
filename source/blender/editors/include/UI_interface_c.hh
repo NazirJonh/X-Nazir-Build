@@ -3311,7 +3311,10 @@ void template_palette(Layout *layout,
                       PointerRNA *ptr,
                       StringRefNull propname,
                       bool show_empty_message,
-                      bool show_sort_buttons);
+                      bool show_sort_buttons,
+                      PointerRNA *target_ptr = nullptr,
+                      const char *target_propname = nullptr,
+                      const char *target_alt_propname = nullptr);
 void template_crypto_picker(Layout *layout, PointerRNA *ptr, StringRefNull propname, int icon);
 /**
  * TODO: for now, grouping of layers is determined by dividing up the length of

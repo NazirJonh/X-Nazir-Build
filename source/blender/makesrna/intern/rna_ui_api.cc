@@ -3049,6 +3049,23 @@ void RNA_api_ui_layout(StructRNA *srna)
                   true,
                   "Show Sort Buttons",
                   "Show buttons for moving and sorting colors in the palette");
+  parm = RNA_def_pointer(func,
+                         "target_data",
+                         "AnyType",
+                         "",
+                         "Data owning the color property that receives a clicked swatch instead of "
+                         "the brush color (optional)");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  parm = RNA_def_string(
+      func, "target_property", nullptr, 0, "", "Identifier of the color property in target_data");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), ParameterFlag(0));
+  parm = RNA_def_string(func,
+                        "target_alt_property",
+                        nullptr,
+                        0,
+                        "",
+                        "Identifier of the color property used when Shift is held");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), ParameterFlag(0));
 
   func = RNA_def_function(srna, "template_image_layers", "uiTemplateImageLayers");
   RNA_def_function_flag(func, FUNC_USE_CONTEXT);

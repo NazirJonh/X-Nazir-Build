@@ -4,7 +4,7 @@
 
 #include <cmath>
 
-#include "paint_shape_raster.hh"
+#include "../paint_shape_render.hh"
 
 #include "BLI_math_base.hh"
 #include "BLI_math_vector.hh"
@@ -278,6 +278,78 @@ TEST(ShapeRaster, OffsetRegionMatchesOriginRegion)
   EXPECT_NEAR(area, expected, expected * 0.01);
 }
 
+TEST(ShapeEvaluator, MatchesRasterAtPixelCenters)
+{
+  /* The point evaluator must agree with the grid rasterizer at pixel centers. */
+  PaintShape shape;
+  shape.type = PAINT_SHAPE_ELLIPSE;
+  shape.center = float2(60.0f, 60.0f);
+  shape.half_size = float2(30.0f, 18.0f);
+
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_FILL | PAINT_SHAPE_USE_STROKE;
+  style.stroke_width = 8.0f;
+
+  rcti rect;
+  BLI_rcti_init(&rect, 20, 100, 20, 100);
+  const ShapeCoverage cov = rasterize(shape, style, rect);
+
+  rctf domain;
+  BLI_rctf_init(&domain, 20.0f, 100.0f, 20.0f, 100.0f);
+  const ShapeEvaluator evaluator(Span<PaintShape>(&shape, 1), style, domain);
+  for (const int y : IndexRange(rect.ymin, rect.ymax - rect.ymin)) {
+    for (const int x : IndexRange(rect.xmin, rect.xmax - rect.xmin)) {
+      const ShapeSample sample = evaluator.sample(float2(x + 0.5f, y + 0.5f));
+      const int64_t idx = cov.index(x, y);
+      EXPECT_NEAR(sample.fill, cov.fill[idx], 1e-4) << "fill at (" << x << ", " << y << ")";
+      EXPECT_NEAR(sample.stroke, cov.stroke[idx], 1e-4) << "stroke at (" << x << ", " << y << ")";
+      EXPECT_NEAR(sample.stroke_t, cov.stroke_t[idx], 1e-4) << "t at (" << x << ", " << y << ")";
+      EXPECT_NEAR(sample.fill_d, cov.fill_d[idx], 1e-4) << "fill_d at (" << x << ", " << y << ")";
+    }
+  }
+}
+
+TEST(ShapeEvaluator, EvenOddHole)
+{
+  /* Outer square plus inner square: non-zero fills both, even-odd leaves a hole. */
+  auto square_spline = [](const float2 &lo, const float2 &hi) {
+    ShapeSpline spline;
+    spline.is_bezier = false;
+    spline.cyclic = true;
+    for (const float2 &co : {lo, float2(hi.x, lo.y), hi, float2(lo.x, hi.y)}) {
+      ShapePoint point;
+      point.co = co;
+      point.corner = true;
+      point.auto_handles = false;
+      spline.points.append(point);
+    }
+    return spline;
+  };
+  PaintShape shape;
+  shape.type = PAINT_SHAPE_POLYLINE;
+  shape.splines.append(square_spline(float2(10.0f, 10.0f), float2(90.0f, 90.0f)));
+  shape.splines.append(square_spline(float2(30.0f, 30.0f), float2(70.0f, 70.0f)));
+
+  rctf domain;
+  BLI_rctf_init(&domain, 0.0f, 100.0f, 0.0f, 100.0f);
+  const PaintShape shapes[] = {shape};
+
+  ShapeStyle nonzero = flat_style();
+  nonzero.flag = PAINT_SHAPE_USE_FILL;
+  nonzero.fill_rule = PAINT_SHAPE_FILL_NONZERO;
+  const ShapeEvaluator eval_nonzero(Span<PaintShape>(shapes, 1), nonzero, domain);
+  EXPECT_GT(eval_nonzero.sample(float2(50.0f, 50.0f)).fill, 0.9f);
+  EXPECT_GT(eval_nonzero.sample(float2(20.0f, 20.0f)).fill, 0.9f);
+  EXPECT_LT(eval_nonzero.sample(float2(5.0f, 5.0f)).fill, 0.1f);
+
+  ShapeStyle evenodd = flat_style();
+  evenodd.flag = PAINT_SHAPE_USE_FILL;
+  evenodd.fill_rule = PAINT_SHAPE_FILL_EVENODD;
+  const ShapeEvaluator eval_evenodd(Span<PaintShape>(shapes, 1), evenodd, domain);
+  EXPECT_LT(eval_evenodd.sample(float2(50.0f, 50.0f)).fill, 0.1f);
+  EXPECT_GT(eval_evenodd.sample(float2(20.0f, 20.0f)).fill, 0.9f);
+}
+
 TEST(ShapeGeom, AutoHandlesResolveMatchesFlatten)
 {
   /* Serialization resolves auto handles to explicit ones (`shape_to_op_props`): the resolved
@@ -414,6 +486,42 @@ TEST(ShapeRaster, LineStrokeSMonotone)
   EXPECT_NEAR(cov.stroke_len[mid], 100.0f, 1e-3f);
 }
 
+TEST(ShapeRaster, EllipseStrokeSMonotoneAndLength)
+{
+  PaintShape shape;
+  shape.type = PAINT_SHAPE_ELLIPSE;
+  shape.center = float2(0.0f, 0.0f);
+  shape.half_size = float2(50.0f, 40.0f);
+
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_STROKE;
+  style.stroke_width = 6.0f;
+
+  rctf domain;
+  BLI_rctf_init(&domain, -70.0f, 70.0f, -70.0f, 70.0f);
+  const ShapeRasterOutputs outputs = ShapeRasterOutputs::Stroke | ShapeRasterOutputs::StrokeS;
+  const ShapeEvaluator eval(Span<PaintShape>(&shape, 1), style, domain, outputs);
+
+  /* The ellipse is densified for StrokeS; the coordinate grows with the parameter angle (the
+   * flatten starts at the +x axis, counter-clockwise) and the full length is the perimeter. */
+  const float a = 50.0f;
+  const float b = 40.0f;
+  float prev_s = -1.0f;
+  float len = 0.0f;
+  for (int i = 1; i <= 30; i++) {
+    const float angle = 2.0f * float(M_PI) * (float(i) / 32.0f);
+    const float2 p(a * math::cos(angle), b * math::sin(angle));
+    const ShapeSample sample = eval.sample(p);
+    EXPECT_GT(sample.stroke, 0.0f);
+    EXPECT_GE(sample.stroke_s, prev_s - 0.01f);
+    prev_s = sample.stroke_s;
+    len = sample.stroke_len;
+  }
+  const float perimeter = float(M_PI) *
+                          (3.0f * (a + b) - math::sqrt((3.0f * a + b) * (a + 3.0f * b)));
+  EXPECT_NEAR(len, perimeter, perimeter * 0.01f);
+}
+
 TEST(ShapeRaster, RectShapeUVCornersAndRotation)
 {
   PaintShape shape;
@@ -424,32 +532,29 @@ TEST(ShapeRaster, RectShapeUVCornersAndRotation)
   ShapeStyle style = flat_style();
   style.flag = PAINT_SHAPE_USE_FILL;
 
-  rcti rect;
-  BLI_rcti_init(&rect, 0, 100, 0, 100);
+  rctf domain;
+  BLI_rctf_init(&domain, -100.0f, 100.0f, -100.0f, 100.0f);
   const ShapeRasterOutputs outputs = ShapeRasterOutputs::Fill | ShapeRasterOutputs::ShapeUV;
 
-  /* The parametric frame corners map to (0,0) and (1,1); the pixel next to a corner is within
-   * half a pixel of it. */
-  const ShapeCoverage cov = shape_rasterize(
-      Span<PaintShape>(&shape, 1), style, rect, float2(0.0f), outputs);
-  const float2 lo = cov.shape_uv[cov.index(10, 20)];
-  const float2 hi = cov.shape_uv[cov.index(89, 79)];
-  EXPECT_NEAR(lo.x, 0.0f, 0.02);
-  EXPECT_NEAR(lo.y, 0.0f, 0.02);
-  EXPECT_NEAR(hi.x, 1.0f, 0.02);
-  EXPECT_NEAR(hi.y, 1.0f, 0.02);
+  /* The parametric frame corners map to (0,0) and (1,1). */
+  const ShapeEvaluator eval(Span<PaintShape>(&shape, 1), style, domain, outputs);
+  const ShapeSample lo = eval.sample(float2(10.0f, 20.0f));
+  const ShapeSample hi = eval.sample(float2(90.0f, 80.0f));
+  EXPECT_NEAR(lo.shape_uv.x, 0.0f, 1e-4);
+  EXPECT_NEAR(lo.shape_uv.y, 0.0f, 1e-4);
+  EXPECT_NEAR(hi.shape_uv.x, 1.0f, 1e-4);
+  EXPECT_NEAR(hi.shape_uv.y, 1.0f, 1e-4);
 
   /* A quarter turn folds into the local frame: the local top-right corner (40, 30) lands at
    * world (20, 90) and the bottom-left (-40, -30) at (80, 10). */
   shape.rotation = float(M_PI) / 2.0f;
-  const ShapeCoverage cov_rot = shape_rasterize(
-      Span<PaintShape>(&shape, 1), style, rect, float2(0.0f), outputs);
-  const float2 tr = cov_rot.shape_uv[cov_rot.index(20, 89)];
-  const float2 bl = cov_rot.shape_uv[cov_rot.index(79, 10)];
-  EXPECT_NEAR(tr.x, 1.0f, 0.02);
-  EXPECT_NEAR(tr.y, 1.0f, 0.02);
-  EXPECT_NEAR(bl.x, 0.0f, 0.02);
-  EXPECT_NEAR(bl.y, 0.0f, 0.02);
+  const ShapeEvaluator eval_rot(Span<PaintShape>(&shape, 1), style, domain, outputs);
+  const ShapeSample tr = eval_rot.sample(float2(20.0f, 90.0f));
+  EXPECT_NEAR(tr.shape_uv.x, 1.0f, 1e-3);
+  EXPECT_NEAR(tr.shape_uv.y, 1.0f, 1e-3);
+  const ShapeSample bl = eval_rot.sample(float2(80.0f, 10.0f));
+  EXPECT_NEAR(bl.shape_uv.x, 0.0f, 1e-3);
+  EXPECT_NEAR(bl.shape_uv.y, 0.0f, 1e-3);
 }
 
 TEST(ShapeRaster, UnrequestedStrokeSAndShapeUVAreEmpty)

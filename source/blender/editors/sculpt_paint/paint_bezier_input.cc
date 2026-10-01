@@ -317,6 +317,12 @@ Result BezierInput::handle_event(const ARegion &region,
           last_press_added_point_ = false;
           handle_drag_active_ = false;
           move_point_active_ = false;
+          if (flag_is_set(flags_, Flag::AllowOpen) && points_.size() >= 2) {
+            /* An open-capable input ends the path where it is instead of dropping the points. */
+            closed_ = false;
+            closed_straight_ = false;
+            return Result::Confirmed;
+          }
           if (points_.size() >= 3) {
             closed_ = true;
             /* A double-click close never draws the closing segment straight. */

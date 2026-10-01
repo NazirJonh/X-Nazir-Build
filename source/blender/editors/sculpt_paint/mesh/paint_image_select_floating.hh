@@ -61,6 +61,8 @@ struct ImageSelectMoveState;
 struct ImageSelectTransformState;
 struct ImageSelectGradientState;
 struct ImageSelectWarpState;
+/* ImageShapeVectorState is declared in blender::ed::sculpt_paint::shape (see
+ * paint_image_shape_composite.hh). */
 
 /* -------------------------------------------------------------------- */
 /** \name Shared floating session
@@ -78,6 +80,7 @@ enum class PaintSelectTool {
   Transform,
   Gradient,
   Warp,
+  Shape,
 };
 
 /**

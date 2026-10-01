@@ -62,11 +62,16 @@ set(SRC
   paint_shape_blend.cc
   paint_shape_create.cc
   paint_shape_draw.cc
+  paint_shape_edit.cc
   paint_shape_geom.cc
   paint_shape_op_props.cc
   paint_shape_raster.cc
   paint_shape_shade.cc
+  paint_shape_space.cc
   paint_texture_ops.cc
+  paint_vector_document.cc
+  paint_vector_editor.cc
+  paint_vector_serialize.cc
   paint_sample_color.cc
   paint_stroke.cc
   paint_stroke_roll.cc
@@ -137,6 +142,8 @@ set(SRC
   mesh/paint_image_shape_symmetry.cc
   mesh/paint_image_shape_composite.cc
   mesh/paint_image_shape_ops.cc
+  mesh/paint_image_shape_vector.cc
+  mesh/paint_image_shape_gizmo.cc
   mesh/paint_image_select_fragment.cc
   mesh/paint_image_select_floating.cc
   mesh/paint_image_select_move.cc
@@ -185,6 +192,7 @@ set(SRC
   mesh/sculpt_paint_color.cc
   mesh/sculpt_paint_image.cc
   mesh/sculpt_paint_material.cc
+  mesh/paint_shape_gizmo.cc
   mesh/sculpt_pose.cc
   mesh/sculpt_project.cc
   mesh/sculpt_smooth.cc
@@ -226,12 +234,14 @@ paint_intern.hh
 
   paint_bezier_input.hh
   paint_shape.hh
-  paint_shape_blend.hh
   paint_shape_create.hh
-  paint_shape_draw.hh
+  paint_shape_edit.hh
   paint_shape_op_props.hh
-  paint_shape_raster.hh
-  paint_shape_shade.hh
+  paint_shape_render.hh
+  paint_shape_space.hh
+  paint_shape_target.hh
+  paint_vector_document.hh
+  paint_vector_editor.hh
 
   curves/sculpt_intern.hh
   curves/sculpt_multi_object.hh
@@ -246,7 +256,6 @@ paint_intern.hh
   mesh/paint_material_attribute.hh
   mesh/paint_material_blend.hh
   mesh/paint_material_source.hh
-  mesh/paint_image_shape.hh
   mesh/paint_image_shape_composite.hh
   mesh/paint_image_uv_geom.hh
   mesh/paint_image_uv_symmetry.hh
@@ -269,6 +278,7 @@ paint_intern.hh
   mesh/sculpt_islands.hh
   mesh/sculpt_multi_object.hh
   mesh/sculpt_paint_material.hh
+  mesh/paint_shape_gizmo.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh
@@ -345,7 +355,6 @@ if(WITH_GTESTS)
     paint_gradient_curve_test.cc
     mesh/paint_test.cc
     mesh/paint_image_select_warp_tests.cc
-    paint_shape_raster_test.cc
     mesh/paint_image_uv_geom_tests.cc
     mesh/paint_image_uv_symmetry_tests.cc
     mesh/sculpt_boundary_tests.cc
@@ -357,11 +366,15 @@ if(WITH_GTESTS)
     mesh/sculpt_undo_test.cc
     paint_curve_geometry_test.cc
     paint_curve_patch_sampler_test.cc
-    paint_shape_shade_test.cc
-    paint_shape_blend_test.cc
     paint_image_curve_patch_raster_test.cc
     paint_curve_patch_session_test.cc
-    roll_spline_test.cc
+    tests/paint_shape_blend_test.cc
+    tests/paint_shape_edit_test.cc
+    tests/paint_shape_raster_test.cc
+    tests/paint_shape_shade_test.cc
+    tests/paint_vector_editor_test.cc
+    tests/paint_vector_serialize_test.cc
+    tests/roll_spline_test.cc
   )
   set(TEST_INC
   )

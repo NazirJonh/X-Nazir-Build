@@ -2,12 +2,12 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
-#include "paint_shape_shade.hh"
+#include "../paint_shape_render.hh"
 
 #include "BLI_math_base.hh"
 #include "BLI_math_vector.hh"
 
-#include "mesh/paint_material_blend.hh"
+#include "../mesh/paint_material_blend.hh"
 
 #include "testing/testing.h"
 

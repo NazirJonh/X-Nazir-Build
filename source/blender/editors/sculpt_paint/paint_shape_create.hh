@@ -5,8 +5,8 @@
 /** \file
  * \ingroup edsculpt
  *
- * Shared creation machine of the shape drawing tools: the drag builders (Line / Rect / Ellipse /
- * Polygon / Star / Arc) and the Bézier input (Polyline / Curve Patch), used by both the Image
+ * Shared creation machine of the shape drawing tools: the drag builders (Line / Rect / Ellipse)
+ * and the Bézier input (Polyline / Curve Patch), used by both the Image
  * Editor and the 3D Viewport frontends.
  *
  * The gesture only turns presses, drags and modifiers into a #PaintShape; the frontend owns the

@@ -10,7 +10,7 @@
  * A #PaintShape is the serializable description of what to paint; a #ShapeStyle is the
  * pointer-free snapshot of #PaintShapeSettings that controls how. The pipeline is: build a
  * #PaintShape (from a drag, a click or Python), evaluate it into dense outlines
- * (#shape_flatten), rasterize (`paint_shape_raster.hh`) and composite into the canvas/PBR
+ * (#shape_flatten), rasterize (`paint_shape_render.hh`) and composite into the canvas/PBR
  * targets (`paint_image_shape_composite.hh`).
  *
  * Coordinates are pixels of the reference UDIM tile of the shapes' canvas (#CanvasTile), so stroke
@@ -18,8 +18,8 @@
  * offset, and a target tile of another resolution gets the shapes scaled (#shapes_scale_to_target).
  *
  * This header is pure geometry: the image-side helpers (canvas symmetry, UV/tile mapping) live
- * in `mesh/paint_image_shape.hh`, the rasterizer in `paint_shape_raster.hh` and the operator
- * property serialization in `paint_shape_op_props.hh`.
+ * in `mesh/paint_image_shape_composite.hh`, the rasterizer in `paint_shape_render.hh` and the
+ * operator property serialization in `paint_shape_op_props.hh`.
  */
 
 #pragma once
@@ -127,13 +127,20 @@ struct PaintShape {
   float rotation = 0.0f;
   /** Corner radii: top-left, top-right, bottom-right, bottom-left. */
   float4 corner_radius = float4(0.0f);
+  /** Side count of a Polygon outline. No shape type generates it yet; it is kept (and persisted
+   * with the item) so the Polygon type can be added without a file format change. */
+  int polygon_sides = 6;
 
   /** Spline data of symmetry copies that cannot stay parametric. */
   Vector<ShapeSpline> splines;
 
   /**
-   * Custom pivot of the shape, in reference-tile pixels. Only meaningful while #origin_is_custom
-   * is true; it moves and scales with the shape.
+   * Pivot of the whole-shape Move/Rotate/Scale gestures, in reference-tile pixels.
+   *
+   * Only meaningful while #origin_is_custom is true; otherwise the effective origin is
+   * recomputed on demand by #shape_effective_origin (the mean of the control points, or
+   * #center for a parametric shape), so editing the points moves it automatically. Move/Rotate/
+   * Scale keep a custom origin with the shape.
    */
   float2 origin = float2(0.0f);
   bool origin_is_custom = false;
@@ -166,6 +173,8 @@ enum class ShapeStrokeSource : int8_t {
   Ramp = 1,
   /** A brush/asset texture mapped along the stroke (TODO). */
   Texture = 2,
+  /** A Curve Patch pattern mapped along the stroke (TODO). */
+  CurvePattern = 3,
 };
 
 /** Fill color source (Texture is TODO). */
@@ -183,6 +192,7 @@ struct ShapeStyle {
   static constexpr int PROFILE_TABLE_SIZE = 256;
 
   int flag = PAINT_SHAPE_USE_FILL;
+  ePaintShapeDrawMode draw_mode = PAINT_SHAPE_DRAW_PIXEL;
   ePaintShapeStrokeAlign stroke_align = PAINT_SHAPE_STROKE_ALIGN_CENTER;
   ePaintShapeCap cap_type = PAINT_SHAPE_CAP_ROUND;
   ePaintShapeJoin join_type = PAINT_SHAPE_JOIN_ROUND;
@@ -231,7 +241,7 @@ struct ShapeStyle {
 
   /** Which source feeds each part's color. Derived from the flags above by
    * #style_from_settings / #style_from_op_props; model-only (not DNA), the shader has one switch
-   * over it, and D4 fills the Texture branches. */
+   * over it; the Texture branches are filled when texture sourcing lands. */
   ShapeStrokeSource stroke_source = ShapeStrokeSource::Solid;
   ShapeFillSource fill_source = ShapeFillSource::Solid;
 
@@ -267,10 +277,6 @@ struct ShapeStyle {
   {
     return (flag & PAINT_SHAPE_NORMAL_FLIP_Y) != 0;
   }
-  bool use_stroke_screen_space() const
-  {
-    return (flag & PAINT_SHAPE_STROKE_SCREEN_SPACE) != 0;
-  }
   bool use_channels_override() const
   {
     return (flag & PAINT_SHAPE_CHANNELS_OVERRIDE) != 0;
@@ -297,6 +303,20 @@ struct ShapeStyle {
   /** Linear sample of the fill gradient at \a t in [0, 1]. */
   float4 fill_gradient_sample(float t) const;
 };
+
+/**
+ * True when \a ptr lies inside the \a settings block: the routing test of an RNA update to the
+ * settings copy (a live session's own one, or the shared one) that was written. Address
+ * containment, not equality, because the channel-value setters pass the address of one array
+ * element. The comparison goes through #uintptr_t: relational comparison of unrelated pointers is
+ * unspecified, casting both to integers is not.
+ */
+inline bool shape_settings_contains(const PaintShapeSettings &settings, const void *ptr)
+{
+  const uintptr_t addr = uintptr_t(ptr);
+  const uintptr_t start = uintptr_t(&settings);
+  return addr >= start && addr < start + sizeof(PaintShapeSettings);
+}
 
 /** Evaluate the DNA settings into a pointer-free snapshot. Main thread only (it evaluates the
  * profile curves into tables). */
@@ -386,6 +406,24 @@ void shape_set_size(PaintShape &shape, const float2 &size);
  * The single clamp rule shared by the builders and #shape_set_size. A no-op for any other shape
  * type. */
 void shape_clamp_corner_radius(PaintShape &shape);
+
+/**
+ * Bake a parametric Polygon into a plain spline shape: generate its outline into
+ * #PaintShape::splines and clear the generator parameters, so the result behaves like a
+ * hand-authored spline (no own Angle, Transform edits points). Rect/Ellipse and already-spline
+ * shapes are left untouched.
+ */
+void shape_convert_to_spline(PaintShape &shape);
+
+/**
+ * Default origin of \a shape: the arithmetic mean of its control points (Blender's Median
+ * Point), or #PaintShape::center for a parametric shape.
+ */
+float2 shape_origin_default(const PaintShape &shape);
+
+/** The pivot of Move/Rotate/Scale: #PaintShape::origin when custom, else #shape_origin_default
+ * (recomputed on demand, so editing the points moves it). */
+float2 shape_effective_origin(const PaintShape &shape);
 
 /* -------------------------------------------------------------------- */
 /** \name Target resolution

@@ -5,10 +5,10 @@
 /** \file
  * \ingroup edsculpt
  *
- * Implementation of the shape shader; see #paint_shape_shade.hh.
+ * Implementation of the shape shader; see #paint_shape_render.hh.
  */
 
-#include "paint_shape_shade.hh"
+#include "paint_shape_render.hh"
 
 #include <algorithm>
 
@@ -37,8 +37,9 @@ float4 shade_source(const ShapeStyle &style,
         }
         return solid;
       case ShapeStrokeSource::Texture:
-        /* TODO: sample a brush/asset texture.
-         * When D4 wires the UI to these sources, replace the assert with the real sampling --
+      case ShapeStrokeSource::CurvePattern:
+        /* TODO: sample a brush/asset texture or a Curve Patch pattern.
+         * When the UI is wired to these sources, replace the assert with the real sampling --
          * otherwise a Debug build aborts as soon as the user picks that source. */
         BLI_assert_unreachable();
         return solid;
@@ -52,7 +53,7 @@ float4 shade_source(const ShapeStyle &style,
       return solid;
     case ShapeFillSource::Texture:
       /* TODO: sample a brush/asset texture over the shape.
-       * When D4 maps PAINT_SHAPE_FILL_BRUSH_TEXTURE to ShapeFillSource::Texture, replace the
+       * When the UI maps PAINT_SHAPE_FILL_BRUSH_TEXTURE to ShapeFillSource::Texture, replace the
        * assert with the real sampling -- otherwise a Debug build aborts on pick in the UI. */
       BLI_assert_unreachable();
       return solid;

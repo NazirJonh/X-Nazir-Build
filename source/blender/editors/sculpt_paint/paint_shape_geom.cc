@@ -48,6 +48,7 @@ ShapeStyle style_from_settings(const PaintShapeSettings &settings)
 {
   ShapeStyle style;
   style.flag = settings.flag;
+  style.draw_mode = ePaintShapeDrawMode(settings.draw_mode);
   style.stroke_align = ePaintShapeStrokeAlign(settings.stroke_align);
   style.cap_type = ePaintShapeCap(settings.cap_type);
   style.join_type = ePaintShapeJoin(settings.join_type);
@@ -128,7 +129,7 @@ ShapeStyle style_from_settings(const PaintShapeSettings &settings)
     style.fill_gradient_table.fill(style.fill_color);
   }
 
-  /* Record the selected color source so the shader dispatches once (Texture sources are D4; the
+  /* Record the selected color source so the shader dispatches once (the Texture sources are not wired yet; the
    * flags above stay the source of truth for now). */
   style.stroke_source = style.use_stroke_ramp ? ShapeStrokeSource::Ramp :
                                                 ShapeStrokeSource::Solid;
@@ -678,11 +679,72 @@ void shape_clamp_corner_radius(PaintShape &shape)
 
 void shape_set_size(PaintShape &shape, const float2 &size)
 {
+  /* The Size setting is the Rect/Ellipse default only; a Polygon is scaled through the
+   * cage (its half size is the radius per local axis). */
   if (!shape.has_analytic_sdf()) {
     return;
   }
   shape.half_size = float2(std::max(size.x, 1.0f), std::max(size.y, 1.0f)) * 0.5f;
   shape_clamp_corner_radius(shape);
+}
+
+void shape_convert_to_spline(PaintShape &shape)
+{
+  if (!shape.is_parametric() || shape.has_analytic_sdf()) {
+    return;
+  }
+  const Vector<ShapePolyline> outlines = shape_flatten(shape, 0.5f);
+  shape.splines.clear();
+  for (const ShapePolyline &outline : outlines) {
+    ShapeSpline spline;
+    spline.is_bezier = false;
+    spline.cyclic = outline.cyclic;
+    for (const int i : outline.points.index_range()) {
+      ShapePoint point;
+      point.co = outline.points[i];
+      point.width_factor = outline.width[i];
+      point.auto_handles = false;
+      point.corner = true;
+      spline.points.append(point);
+    }
+    if (spline.points.size() >= 2) {
+      shape.splines.append(std::move(spline));
+    }
+  }
+  /* The generated outline already carries the rotation and the half size; reset the parametric
+   * fields so the result reads as a plain spline (no own Angle). */
+  shape.rotation = 0.0f;
+  shape.half_size = float2(0.0f);
+  shape.corner_radius = float4(0.0f);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Origin
+ * \{ */
+
+float2 shape_origin_default(const PaintShape &shape)
+{
+  if (shape.is_parametric()) {
+    return shape.center;
+  }
+  /* The arithmetic mean of the control points, matching Blender's Median Point. Bezier handles
+   * are not points and a cyclic spline's points are not duplicated. */
+  float2 sum(0.0f);
+  int count = 0;
+  for (const ShapeSpline &spline : shape.splines) {
+    for (const ShapePoint &point : spline.points) {
+      sum += point.co;
+      count++;
+    }
+  }
+  return count > 0 ? sum / float(count) : float2(0.0f);
+}
+
+float2 shape_effective_origin(const PaintShape &shape)
+{
+  return shape.origin_is_custom ? shape.origin : shape_origin_default(shape);
 }
 
 /** \} */
@@ -752,7 +814,7 @@ ShapeStyle style_scale_to_target(const ShapeStyle &style, const float2 &scale)
   scaled.stroke_width *= scale_avg;
   /* AA needs a band of at least a pixel to stay smooth: never scale the feather below one,
    * while a deliberately smaller user value keeps its choice. */
-  scaled.feather = std::max(scaled.feather, std::min(style.feather, 1.0f));
+  scaled.feather = std::max(style.feather * scale_avg, std::min(style.feather, 1.0f));
   scaled.dash_length *= scale_avg;
   scaled.gap_length *= scale_avg;
   scaled.dash_offset *= scale_avg;
@@ -797,6 +859,9 @@ ShapeStyle style_resolve_for_shapes(const Span<PaintShape> shapes, ShapeStyle st
    * it on (with a minimum width) even when the user turned Stroke off, so it is never invisible.
    * Closed shapes keep the user's fill-only choice. */
   style.flag |= PAINT_SHAPE_USE_STROKE;
+  /* Inside / Outside alignment of an open path has no closed side to offset to, and the end caps
+   * are cut for the centerline band only. */
+  style.stroke_align = PAINT_SHAPE_STROKE_ALIGN_CENTER;
   if (style.stroke_width <= 0.0f) {
     style.stroke_width = 1.0f;
   }

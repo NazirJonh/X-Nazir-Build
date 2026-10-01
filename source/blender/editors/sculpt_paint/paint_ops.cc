@@ -2584,6 +2584,11 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_curve);
   WM_operatortype_append(PAINT_OT_image_shape_draw);
   WM_operatortype_append(PAINT_OT_shape_colors_swap);
+  WM_operatortype_append(PAINT_OT_image_shape_vector_apply);
+  WM_operatortype_append(PAINT_OT_image_shape_vector_cancel);
+  WM_operatortype_append(PAINT_OT_image_shape_transform_toggle);
+  WM_operatortype_append(PAINT_OT_vector_save);
+  WM_operatortype_append(PAINT_OT_vector_edit);
   WM_operatortype_append(PAINT_OT_image_select_invert);
   /* Canvas-space symmetry line widget for the Image Editor. */
   WM_operatortype_append(PAINT_OT_image_symmetry_edit);

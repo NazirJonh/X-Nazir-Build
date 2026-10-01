@@ -6,7 +6,7 @@
  * \ingroup edsculpt
  *
  * Image-side implementation of the shape drawing tools' canvas-space symmetry and the UDIM
- * tile <-> UV <-> reference-tile-pixel coordinate mapping; see #mesh/paint_image_shape.hh.
+ * tile <-> UV <-> reference-tile-pixel coordinate mapping; see #mesh/paint_image_shape_composite.hh.
  */
 
 #include <algorithm>
@@ -22,7 +22,7 @@
 
 #include "ED_image_paint_symmetry.hh"
 
-#include "paint_image_shape.hh"
+#include "paint_image_shape_composite.hh"
 #include "../paint_shape.hh"
 
 namespace blender::ed::sculpt_paint::shape {

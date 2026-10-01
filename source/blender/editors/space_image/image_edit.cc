@@ -39,6 +39,7 @@
 #include "ED_image.hh" /* own include */
 #include "ED_material_combined.hh"
 #include "ED_mesh.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_uvedit.hh"
 
@@ -62,6 +63,20 @@ void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automati
   /* Automatically pin image when manually assigned, otherwise it follows object. */
   if (!automatic && sima->image != ima && sima->mode == SI_MODE_UV) {
     sima->pin = true;
+  }
+
+  if (sima->image != ima) {
+    /* An image swap under a floating session invalidates its backups, targets and preview:
+     * settle it before the slot changes. A manual change cancels -- the user leaves the image,
+     * which is restored to its pre-session pixels. An automatic one (the image follows the
+     * active object or material) commits -- the user did not act, so the in-progress edit is
+     * kept, the takeover semantics. */
+    if (automatic) {
+      ED_image_paint_select_session_settle(nullptr, sima);
+    }
+    else {
+      ED_image_paint_select_session_cancel(nullptr, sima);
+    }
   }
 
   sima->image = ima;

@@ -29,7 +29,7 @@
 #include "WM_types.hh"
 
 #include "paint_intern.hh"
-#include "paint_shape_draw.hh"
+#include "paint_shape_edit.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 
@@ -44,7 +44,7 @@ static float2 snap_line_direction(const float2 &delta)
   }
   /* Shift snaps the line direction to 15-degree steps. */
   const float angle = math::atan2(delta.y, delta.x);
-  const float snapped = math::round(angle / (M_PI / 12.0f)) * (M_PI / 12.0f);
+  const float snapped = math::round(angle / (float(M_PI) / 12.0f)) * (float(M_PI) / 12.0f);
   return float2(math::cos(snapped), math::sin(snapped)) * length;
 }
 
@@ -59,9 +59,10 @@ ShapeCreateGesture::ShapeCreateGesture(const ePaintShapeType type,
     if (type_ == PAINT_SHAPE_POLYLINE) {
       flags |= bezier_input::Flag::AllowOpen | bezier_input::Flag::ForceStraight;
     }
-    else if (style_.use_stroke()) {
-      /* A Curve Patch with Stroke keeps drawing as an open curve when it is not closed on the
-       * first point; without Stroke an open curve would draw nothing, so it still closes. */
+    else if (style_.use_stroke() && !style_.use_fill()) {
+      /* A Curve Patch with Stroke only keeps drawing as an open curve when it is not closed on the
+       * first point; an open curve has no interior, so with Fill (or without Stroke, where it would
+       * draw nothing) it still closes and the fill is never silently dropped. */
       flags |= bezier_input::Flag::AllowOpen;
     }
     input_ = bezier_input::BezierInput(flags);
@@ -200,8 +201,14 @@ PaintShape ShapeCreateGesture::shape_at_center(const float2 &center) const
     case PAINT_SHAPE_RECT:
       shape = shape_rect_at_center(center, style_);
       break;
-    default:
+    case PAINT_SHAPE_ELLIPSE:
       shape = shape_ellipse_at_center(center, style_);
+      break;
+    case PAINT_SHAPE_LINE:
+    case PAINT_SHAPE_POLYLINE:
+    case PAINT_SHAPE_CURVE:
+      /* Built by the drag / the Bézier input, never from a bare click. */
+      BLI_assert_unreachable();
       break;
   }
   return shape;
@@ -308,6 +315,14 @@ ShapeCreateResult ShapeCreateGesture::handle_event(const wmEvent &event,
           }
           /* A click without a drag draws the default-size shape at the click point. */
           shape_ = shape_at_center(press_p_);
+        }
+        else if (type_ == PAINT_SHAPE_LINE && !shape_.splines.is_empty() &&
+                 shape_.splines[0].points.size() >= 2 &&
+                 math::distance(shape_.splines[0].points[0].co,
+                                shape_.splines[0].points[1].co) < 0.5f)
+        {
+          /* Dragged away and back to the press point: still a zero-length line. */
+          return ShapeCreateResult::Cancelled;
         }
         return ShapeCreateResult::Confirmed;
       }

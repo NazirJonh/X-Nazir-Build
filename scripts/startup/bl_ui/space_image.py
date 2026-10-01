@@ -2534,7 +2534,69 @@ class IMAGE_PT_tools_shape_options(Panel, ImagePaintPanel):
         draw_paint_shape_extra_options(context, layout.column(), shape)
 
 
+class IMAGE_PT_paint_shape_context_menu(Panel):
+    """Right-click popover of the Shape tools: colors, blend, width, strength and the palette.
+    Angle and Size are left to the tool header and the Options popover."""
+    # Only for popover, these are dummy values.
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'WINDOW'
+    bl_label = "Shape Settings"
+    bl_ui_units_x = 14
+
+    @classmethod
+    def poll(cls, context):
+        space = context.space_data
+        if space is None or space.type != 'IMAGE_EDITOR' or space.mode != 'PAINT':
+            return False
+        from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+        tool = ToolSelectPanelHelper.tool_active_from_context(context)
+        return tool is not None and tool.idname.startswith("builtin.paint_shape_")
+
+    def draw(self, context):
+        from bl_ui.properties_paint_common import (
+            draw_shape_color_row,
+            paint_shape_color_props,
+            paint_shape_settings,
+            paint_shape_tool_flags,
+        )
+        from bl_ui.space_toolsystem_toolbar import _paint_shape_strength_prop
+
+        layout = self.layout
+        imapaint = context.tool_settings.image_paint
+        shape = paint_shape_settings(context)
+        brush = imapaint.brush
+        is_line = paint_shape_tool_flags(context)[0]
+
+        draw_shape_color_row(layout, shape, show_swap=not is_line)
+
+        if brush is not None:
+            blend_row = layout.row()
+            blend_row.active = context.tool_settings.paint_mode.canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+            blend_row.prop(brush, "blend", text="")
+
+        layout.prop(shape, "stroke_width", text="Width", slider=True)
+        _paint_shape_strength_prop(layout, context, brush, text="Strength", header=False)
+
+        if not is_line:
+            row = layout.row(align=True)
+            row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+            row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+
+        # The palette is shown open: this popover exists to pick colors quickly.
+        layout.separator()
+        layout.template_ID(imapaint, "palette", new="palette.new")
+        if imapaint.palette:
+            # A swatch sets the shape color (Shift: the fill one) instead of the brush color.
+            # `shape` is the live session copy in Vector mode, so the preview follows.
+            primary, alternative = paint_shape_color_props(shape)
+            layout.template_palette(
+                imapaint, "palette", show_empty_message=True, show_sort_buttons=True,
+                target_data=shape, target_property=primary, target_alt_property=alternative,
+            )
+
+
 classes = (
+    IMAGE_PT_paint_shape_context_menu,
     IMAGE_MT_view,
     IMAGE_MT_view_zoom,
     IMAGE_MT_view_rotation,

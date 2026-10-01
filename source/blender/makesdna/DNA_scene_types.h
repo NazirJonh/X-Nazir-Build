@@ -1501,6 +1501,14 @@ enum ePaintShapeType : int8_t {
   PAINT_SHAPE_CURVE = 4,
 };
 
+/** #PaintShapeSettings::draw_mode */
+enum ePaintShapeDrawMode : int8_t {
+  /** Parameters are set up front; the draw action bakes straight into the texture. */
+  PAINT_SHAPE_DRAW_PIXEL = 0,
+  /** A floating session: the shape is moved with a live preview, baked when the session ends. */
+  PAINT_SHAPE_DRAW_VECTOR = 1,
+};
+
 /** #PaintShapeSettings::flag */
 enum ePaintShapeFlag : int {
   PAINT_SHAPE_USE_FILL = (1 << 0),
@@ -1516,9 +1524,9 @@ enum ePaintShapeFlag : int {
   PAINT_SHAPE_USE_PROFILE = (1 << 6),
   /** Normal map is DirectX style (invert Y), as opposed to the default OpenGL. */
   PAINT_SHAPE_NORMAL_FLIP_Y = (1 << 7),
-  /** Rect/Ellipse shapes without fill or stroke outlines: fill the closed interior. */
+  /** Reserved (unused; was the RNA `closed` flag). Keep the bit so old files stay compatible. */
   PAINT_SHAPE_CLOSED = (1 << 8),
-  /** Stroke width is in screen pixels, not canvas pixels. */
+  /** Reserved (unused; was the RNA `use_stroke_screen_space` flag). Keep the bit. */
   PAINT_SHAPE_STROKE_SCREEN_SPACE = (1 << 9),
   /** PBR channels come from #PaintShapeSettings::stroke_channels/#fill_channels, not the brush. */
   PAINT_SHAPE_CHANNELS_OVERRIDE = (1 << 10),
@@ -1564,6 +1572,7 @@ enum ePaintShapeProfileMode : int8_t {
 enum ePaintShapeFillType : int8_t {
   PAINT_SHAPE_FILL_SOLID = 0,
   PAINT_SHAPE_FILL_GRADIENT = 1,
+  /** Reserved: no longer exposed in RNA; kept so stored values stay valid. */
   PAINT_SHAPE_FILL_BRUSH_TEXTURE = 2,
 };
 
@@ -1637,6 +1646,8 @@ struct PaintShapeChannelValue {
 struct PaintShapeSettings {
   /** #ePaintShapeType */
   char type = PAINT_SHAPE_RECT;
+  /** #ePaintShapeDrawMode */
+  char draw_mode = PAINT_SHAPE_DRAW_PIXEL;
   /** #ePaintShapeStrokeAlign */
   char stroke_align = PAINT_SHAPE_STROKE_ALIGN_CENTER;
   /** #ePaintShapeCap */
@@ -1645,7 +1656,7 @@ struct PaintShapeSettings {
   char join_type = PAINT_SHAPE_JOIN_ROUND;
   /** #ePaintShapeProfileMode */
   char profile_mode = PAINT_SHAPE_PROFILE_COVERAGE;
-  char _pad[3] = {};
+  char _pad[2] = {};
 
   /** #ePaintShapeFlag */
   int flag = PAINT_SHAPE_USE_FILL | PAINT_SHAPE_CORNER_UNIFORM;

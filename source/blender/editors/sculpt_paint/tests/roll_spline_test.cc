@@ -4,7 +4,7 @@
 
 #include "testing/testing.h"
 
-#include "paint_intern.hh"
+#include "../paint_intern.hh"
 
 namespace blender::ed::sculpt_paint::tests {
 

@@ -1445,10 +1445,11 @@ static void rna_Sculpt_sculpt_cursor_gizmo_size_set(PointerRNA *ptr, float value
  * the ImagePaintSettings owner chain.
  * \{ */
 
-static void rna_PaintShapeSettings_update(Main * /*bmain*/,
-                                          Scene * /*scene*/,
-                                          PointerRNA * /*ptr*/)
+static void rna_PaintShapeSettings_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
+  /* Route by the block the setter wrote: a live Vector session's own copy refreshes only that
+   * session, while a change to the shared global block is ignored by live sessions. */
+  ED_paint_shape_settings_update(bmain, scene, static_cast<PaintShapeSettings *>(ptr->data));
 }
 
 static std::optional<std::string> rna_PaintShapeSettings_path(const PointerRNA *ptr)
@@ -1457,7 +1458,7 @@ static std::optional<std::string> rna_PaintShapeSettings_path(const PointerRNA *
   if (owner == nullptr || GS(owner->name) != ID_SCE) {
     return std::nullopt;
   }
-  const Scene *scene = reinterpret_cast<const Scene *>(owner);
+  const Scene *scene = id_cast<const Scene *>(owner);
   if (scene->toolsettings == nullptr ||
       static_cast<const PaintShapeSettings *>(ptr->data) !=
           &BKE_paint_shape_settings_get(*scene->toolsettings))
@@ -1536,7 +1537,7 @@ static const PaintShapeSettings *rna_PaintShapeSettings_from_ptr(const PointerRN
    * only when the owner really is a Scene. */
   const ID *owner = ptr->owner_id;
   if (owner != nullptr && GS(owner->name) == ID_SCE) {
-    const Scene *scene = reinterpret_cast<const Scene *>(owner);
+    const Scene *scene = id_cast<const Scene *>(owner);
     if (scene->toolsettings != nullptr) {
       return &BKE_paint_shape_settings_get(*scene->toolsettings);
     }
@@ -3443,6 +3444,20 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem shape_draw_mode_items[] = {
+      {PAINT_SHAPE_DRAW_PIXEL,
+       "PIXEL",
+       ICON_IMAGE_RGB,
+       "Pixel",
+       "Draw directly into the texture in a single action"},
+      {PAINT_SHAPE_DRAW_VECTOR,
+       "VECTOR",
+       ICON_HANDLE_VECTOR,
+       "Vector",
+       "Movable preview, baked into the texture on confirm"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem shape_stroke_align_items[] = {
       {PAINT_SHAPE_STROKE_ALIGN_CENTER, "CENTER", 0, "Center", "Stroke centered on the outline"},
       {PAINT_SHAPE_STROKE_ALIGN_INSIDE, "INSIDE", 0, "Inside", "Stroke drawn inside the outline"},
@@ -3507,11 +3522,6 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
        0,
        "Gradient",
        "Gradient fill along the shape's bounding box, linear left to right"},
-      {PAINT_SHAPE_FILL_BRUSH_TEXTURE,
-       "BRUSH_TEXTURE",
-       0,
-       "Brush Texture",
-       "Brush texture fill. TODO: not composited yet"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -3547,6 +3557,12 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "type");
   RNA_def_property_enum_items(prop, shape_type_items);
   RNA_def_property_ui_text(prop, "Type", "Shape to draw");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "draw_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "draw_mode");
+  RNA_def_property_enum_items(prop, shape_draw_mode_items);
+  RNA_def_property_ui_text(prop, "Draw Mode", "How a shape is drawn and committed");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
   prop = RNA_def_property(srna, "use_fill", PROP_BOOLEAN, PROP_NONE);
@@ -3592,12 +3608,6 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
       "Write DirectX-style normals (inverted green channel)");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
-  prop = RNA_def_property(srna, "closed", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_CLOSED);
-  RNA_def_property_ui_text(
-      prop, "Closed", "Treat the outline as a closed loop. TODO: not honored by the rasterizer yet");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
-
   prop = RNA_def_property(srna, "stroke_align", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stroke_align");
   RNA_def_property_enum_items(prop, shape_stroke_align_items);
@@ -3629,7 +3639,9 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
       "What the stroke/fill profiles control");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
-  prop = RNA_def_property(srna, "stroke_width", PROP_FLOAT, PROP_PIXEL);
+  /* A diameter subtype, so the F radial control previews the full stroke width like the brush
+   * size does (the circle radius is half of the value). */
+  prop = RNA_def_property(srna, "stroke_width", PROP_FLOAT, PROP_PIXEL_DIAMETER);
   RNA_def_property_range(prop, 0.0f, 10000.0f);
   RNA_def_property_ui_range(prop, 1.0f, 500.0f, 1.0f, 1);
   RNA_def_property_ui_text(prop, "Width", "Stroke width in pixels");
@@ -3826,12 +3838,6 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 1.0f, 1000.0f, 1.0f, 1);
   RNA_def_property_ui_text(
       prop, "Pixels per Unit", "Pixel size of one Blender unit for the Original placement mode");
-  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
-
-  prop = RNA_def_property(srna, "use_stroke_screen_space", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_STROKE_SCREEN_SPACE);
-  RNA_def_property_ui_text(
-      prop, "Screen Space Stroke", "Stroke width in screen pixels");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
   prop = RNA_def_property(srna, "use_channels_override", PROP_BOOLEAN, PROP_NONE);

@@ -23,6 +23,7 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 #include "BKE_geometry_set.hh"
 #include "BKE_movieclip.hh"
 #include "BKE_object_types.hh"
+#include "BKE_paint.hh"
 
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
@@ -2356,6 +2357,39 @@ static bool rna_SpaceImageEditor_paint_select_is_transforming_get(PointerRNA *pt
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
   return ED_image_paint_select_is_transforming(sima);
+}
+
+static bool rna_SpaceImageEditor_paint_shape_transform_active_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  return ED_image_shape_transform_is_active(sima);
+}
+
+static PointerRNA rna_SpaceImageEditor_paint_shape_session_settings_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  PaintShapeSettings *settings = ED_image_shape_session_settings_get(sima);
+  if (settings == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_PaintShapeSettings, settings);
+}
+
+static PointerRNA rna_SpaceImageEditor_paint_shape_active_settings_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  if (PaintShapeSettings *settings = ED_image_shape_session_settings_get(sima)) {
+    return RNA_pointer_create_with_parent(*ptr, RNA_PaintShapeSettings, settings);
+  }
+  /* Same lookup as #rna_SpaceImageEditor_show_uvedit_get. */
+  bScreen *screen = id_cast<bScreen *>(ptr->owner_id);
+  wmWindow *win = ED_screen_window_find(screen, static_cast<wmWindowManager *>(G_MAIN->wm.first));
+  Scene *scene = (win != nullptr) ? WM_window_get_active_scene(win) : nullptr;
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_discrete(
+      &scene->id, RNA_PaintShapeSettings, &BKE_paint_shape_settings_get(*scene->toolsettings));
 }
 
 static void rna_SpaceImageEditor_paint_select_translation_get(PointerRNA *ptr, float *values)
@@ -4776,7 +4810,7 @@ static IDFilterEnumPropertyItem rna_enum_space_file_id_filter_categories[] = {
      "Environment",
      "Show worlds, lights, cameras and speakers"},
     {FILTER_ID_BR | FILTER_ID_GD_LEGACY | FILTER_ID_PA | FILTER_ID_PAL | FILTER_ID_PC |
-         FILTER_ID_TXT | FILTER_ID_VF | FILTER_ID_CF | FILTER_ID_WS,
+         FILTER_ID_PV | FILTER_ID_TXT | FILTER_ID_VF | FILTER_ID_CF | FILTER_ID_WS,
      "category_misc",
      ICON_GREASEPENCIL,
      "Miscellaneous",
@@ -7801,6 +7835,38 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Is Transforming", "A paint selection transform is currently in progress");
+
+  /* Live Vector shape session Transform mode (runtime only). */
+  prop = RNA_def_property(srna, "paint_shape_transform_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_paint_shape_transform_active_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Shape Transform Active", "A Polygon/Star/Arc transform cage is shown");
+
+  /* The live Vector shape session's own settings copy. Read-only pointer; its child
+   * properties are editable and drive the session, not the shared tool settings. */
+  prop = RNA_def_property(srna, "paint_shape_session_settings", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "PaintShapeSettings");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_SpaceImageEditor_paint_shape_session_settings_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Shape Session Settings",
+      "The live shape session's own settings copy (null when none)");
+
+  /* What the shape UI and the F radial control edit: the live session's copy, else the shared
+   * tool settings. Lets a single data path serve both Pixel and Vector mode. */
+  prop = RNA_def_property(srna, "paint_shape_active_settings", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "PaintShapeSettings");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_SpaceImageEditor_paint_shape_active_settings_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Shape Active Settings",
+      "The settings the shape tools currently edit (live session copy or tool settings)");
 
   prop = RNA_def_property(srna, "paint_select_translation", PROP_FLOAT, PROP_TRANSLATION);
   RNA_def_property_array(prop, 2);

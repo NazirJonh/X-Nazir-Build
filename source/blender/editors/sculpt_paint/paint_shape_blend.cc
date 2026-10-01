@@ -5,12 +5,12 @@
 /** \file
  * \ingroup edsculpt
  *
- * Implementation of the shared shape pixel blend core; see #paint_shape_blend.hh.
+ * Implementation of the shared shape pixel blend core; see #paint_shape_render.hh.
  *
  * The per-pixel arithmetic the 2D compositor's `tile_composite_pbr` / `tile_composite` share.
  */
 
-#include "paint_shape_blend.hh"
+#include "paint_shape_render.hh"
 
 #include <algorithm>
 
@@ -21,6 +21,12 @@
 #include "mesh/paint_material_blend.hh"
 
 namespace blender::ed::sculpt_paint::shape {
+
+/** The part's overall opacity, applied to the PBR channels as on the canvas. */
+static float shape_part_opacity(const ShapeStyle &style, const ShapePart part)
+{
+  return part == ShapePart::Stroke ? style.stroke_opacity : style.fill_opacity;
+}
 
 /** Combine a Height write into \a r_dst by #ShapeStyle::height_blend. \a target is the channel's
  * absolute level (its base value plus the relief) that Max and Replace converge to. */
@@ -42,9 +48,9 @@ static void height_blend_apply(float3 &r_dst,
       r_dst.z -= delta;
       break;
     case PAINT_SHAPE_HEIGHT_MAX:
-      r_dst.x = std::max(r_dst.x, target);
-      r_dst.y = std::max(r_dst.y, target);
-      r_dst.z = std::max(r_dst.z, target);
+      r_dst.x = std::max(r_dst.x, r_dst.x + (target - r_dst.x) * alpha);
+      r_dst.y = std::max(r_dst.y, r_dst.y + (target - r_dst.y) * alpha);
+      r_dst.z = std::max(r_dst.z, r_dst.z + (target - r_dst.z) * alpha);
       break;
     case PAINT_SHAPE_HEIGHT_REPLACE:
       r_dst.x += (target - r_dst.x) * alpha;
@@ -78,7 +84,7 @@ void shape_blend_pixel(float4 &dst,
       if (coverage <= 0.0f) {
         continue;
       }
-      const float opacity = part == ShapePart::Stroke ? style.stroke_opacity : style.fill_opacity;
+      const float opacity = shape_part_opacity(style, part);
       float4 color = (part == ShapePart::Fill && ctx.fill_gradient != nullptr) ?
                          shade_fill_gradient(style,
                                              p_shape,
@@ -111,7 +117,7 @@ void shape_blend_pixel(float4 &dst,
     float3 result = math::normalize(float3(dst.x, dst.y, dst.z) * 2.0f - float3(1.0f));
     for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
       const ChannelWrite write = shade_channel(style, sample, part, pbr_channel);
-      const float alpha = write.alpha * factor * alpha_cov;
+      const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
       if (alpha <= 0.0f) {
         continue;
       }
@@ -126,7 +132,7 @@ void shape_blend_pixel(float4 &dst,
   if (pbr_channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
     for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
       const ChannelWrite write = shade_channel(style, sample, part, pbr_channel);
-      const float alpha = write.alpha * factor * alpha_cov;
+      const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
       if (alpha <= 0.0f) {
         continue;
       }
@@ -145,7 +151,7 @@ void shape_blend_pixel(float4 &dst,
 
   for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
     const ChannelWrite write = shade_channel(style, sample, part, pbr_channel);
-    const float alpha = write.alpha * factor * alpha_cov;
+    const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
     if (alpha <= 0.0f) {
       continue;
     }

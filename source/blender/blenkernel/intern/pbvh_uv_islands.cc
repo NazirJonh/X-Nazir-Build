@@ -13,6 +13,7 @@
 
 #include "pbvh_uv_islands.hh"
 
+#include <atomic>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -1505,23 +1506,29 @@ static void add_uv_island(const MeshData &mesh_data,
         ceil((uv_bounds.ymax - tile.udim_offset.y) * tile.mask_resolution.y),
         tile.mask_resolution.y - 1);
 
-    for (int y = buffer_bounds.ymin; y < buffer_bounds.ymax + 1; y++) {
-      for (int x = buffer_bounds.xmin; x < buffer_bounds.xmax + 1; x++) {
-        float2 uv(float(x) / tile.mask_resolution.x, float(y) / tile.mask_resolution.y);
-        float3 weights;
-        barycentric_weights_v2(mesh_data.uv_map[tri[0]],
-                               mesh_data.uv_map[tri[1]],
-                               mesh_data.uv_map[tri[2]],
-                               uv + tile.udim_offset,
-                               weights);
-        if (!barycentric_inside_triangle_v2(weights)) {
-          continue;
-        }
+    /* Rows of one primitive are independent, and primitives stay in order so the later one still
+     * wins where UVs overlap. A low poly mesh has primitives covering most of the mask. */
+    const IndexRange rows = IndexRange::from_begin_end(
+        buffer_bounds.ymin, max_ii(buffer_bounds.ymax + 1, buffer_bounds.ymin));
+    threading::parallel_for(rows, 64, [&](const IndexRange y_range) {
+      for (const int y : y_range) {
+        for (int x = buffer_bounds.xmin; x < buffer_bounds.xmax + 1; x++) {
+          float2 uv(float(x) / tile.mask_resolution.x, float(y) / tile.mask_resolution.y);
+          float3 weights;
+          barycentric_weights_v2(mesh_data.uv_map[tri[0]],
+                                 mesh_data.uv_map[tri[1]],
+                                 mesh_data.uv_map[tri[2]],
+                                 uv + tile.udim_offset,
+                                 weights);
+          if (!barycentric_inside_triangle_v2(weights)) {
+            continue;
+          }
 
-        uint64_t offset = tile.mask_resolution.x * y + x;
-        tile.mask[offset] = island_index;
+          uint64_t offset = tile.mask_resolution.x * y + x;
+          tile.mask[offset] = island_index;
+        }
       }
-    }
+    });
   }
 }
 
@@ -1539,51 +1546,65 @@ void UVIslandsMask::add_tile(const float2 udim_offset, ushort2 resolution)
   tiles.append_as(Tile(udim_offset, resolution));
 }
 
+/* Each texel reads only `prev_mask` and writes only itself, so rows run in parallel and give the
+ * same result as a serial pass. */
 static bool dilate_x(UVIslandsMask::Tile &islands_mask)
 {
-  bool changed = false;
+  std::atomic<bool> changed = false;
   const Array<uint16_t> prev_mask = islands_mask.mask;
-  for (int y = 0; y < islands_mask.mask_resolution.y; y++) {
-    for (int x = 0; x < islands_mask.mask_resolution.x; x++) {
-      uint64_t offset = y * islands_mask.mask_resolution.x + x;
-      if (prev_mask[offset] != 0xffff) {
-        continue;
-      }
-      if (x != 0 && prev_mask[offset - 1] != 0xffff) {
-        islands_mask.mask[offset] = prev_mask[offset - 1];
-        changed = true;
-      }
-      else if (x < islands_mask.mask_resolution.x - 1 && prev_mask[offset + 1] != 0xffff) {
-        islands_mask.mask[offset] = prev_mask[offset + 1];
-        changed = true;
+  threading::parallel_for(IndexRange(islands_mask.mask_resolution.y), 32, [&](const IndexRange ys) {
+    bool changed_local = false;
+    for (const int y : ys) {
+      for (int x = 0; x < islands_mask.mask_resolution.x; x++) {
+        uint64_t offset = y * islands_mask.mask_resolution.x + x;
+        if (prev_mask[offset] != 0xffff) {
+          continue;
+        }
+        if (x != 0 && prev_mask[offset - 1] != 0xffff) {
+          islands_mask.mask[offset] = prev_mask[offset - 1];
+          changed_local = true;
+        }
+        else if (x < islands_mask.mask_resolution.x - 1 && prev_mask[offset + 1] != 0xffff) {
+          islands_mask.mask[offset] = prev_mask[offset + 1];
+          changed_local = true;
+        }
       }
     }
-  }
+    if (changed_local) {
+      changed.store(true, std::memory_order_relaxed);
+    }
+  });
   return changed;
 }
 
 static bool dilate_y(UVIslandsMask::Tile &islands_mask)
 {
-  bool changed = false;
+  std::atomic<bool> changed = false;
   const Array<uint16_t> prev_mask = islands_mask.mask;
-  for (int y = 0; y < islands_mask.mask_resolution.y; y++) {
-    for (int x = 0; x < islands_mask.mask_resolution.x; x++) {
+  threading::parallel_for(IndexRange(islands_mask.mask_resolution.y), 32, [&](const IndexRange ys) {
+    bool changed_local = false;
+    for (const int y : ys) {
+      for (int x = 0; x < islands_mask.mask_resolution.x; x++) {
       uint64_t offset = y * islands_mask.mask_resolution.x + x;
       if (prev_mask[offset] != 0xffff) {
         continue;
       }
-      if (y != 0 && prev_mask[offset - islands_mask.mask_resolution.x] != 0xffff) {
-        islands_mask.mask[offset] = prev_mask[offset - islands_mask.mask_resolution.x];
-        changed = true;
-      }
-      else if (y < islands_mask.mask_resolution.y - 1 &&
-               prev_mask[offset + islands_mask.mask_resolution.x] != 0xffff)
-      {
-        islands_mask.mask[offset] = prev_mask[offset + islands_mask.mask_resolution.x];
-        changed = true;
+        if (y != 0 && prev_mask[offset - islands_mask.mask_resolution.x] != 0xffff) {
+          islands_mask.mask[offset] = prev_mask[offset - islands_mask.mask_resolution.x];
+          changed_local = true;
+        }
+        else if (y < islands_mask.mask_resolution.y - 1 &&
+                 prev_mask[offset + islands_mask.mask_resolution.x] != 0xffff)
+        {
+          islands_mask.mask[offset] = prev_mask[offset + islands_mask.mask_resolution.x];
+          changed_local = true;
+        }
       }
     }
-  }
+    if (changed_local) {
+      changed.store(true, std::memory_order_relaxed);
+    }
+  });
   return changed;
 }
 

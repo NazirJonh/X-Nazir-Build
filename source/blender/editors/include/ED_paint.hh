@@ -530,6 +530,18 @@ bool ED_image_paint_shape3d_session_linked(const bContext *C);
 bool ED_image_paint_shape3d_session_apply(bContext *C);
 bool ED_image_paint_shape3d_session_cancel(bContext *C);
 
+/** Ask the user what to do with a live 3D Sculpt shape session (Apply / Discard / Continue)
+ * before the workspace changes; see #ED_paint_shape_session_defer_object_change. \return true
+ * when the caller must abandon this workspace change. */
+bool ED_paint_shape_session_defer_workspace_change(bContext *C, int workspace_session_uid);
+
+/** Ask the user what to do with a live 3D Sculpt shape session on the active object before it
+ * stops being active (a viewport pick, an Outliner / animation-editor row, a mode transfer; see
+ * #object::base_activate_user). \a object_new_session_uid is the object the user asked to
+ * activate; the change is re-issued once the session is resolved. \return true when the caller
+ * must abandon this activation. */
+bool ED_paint_shape_session_defer_object_change(bContext *C, int object_new_session_uid);
+
 /* `paint_image_select_move.cc` */
 
 bool ED_image_paint_select_is_moving(SpaceImage *sima);

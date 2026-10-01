@@ -777,6 +777,33 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
 
+    /* Same rule for a live Paint Shape session: ask before the mode (and the session with it)
+     * goes away. */
+    for (Base &base : view_layer.object_bases) {
+      const Object *ob = base.object;
+      if ((ob->mode & mode_flag) == 0 || !ob->runtime->sculpt_session ||
+          !ob->runtime->sculpt_session->paint_shape_session)
+      {
+        continue;
+      }
+      PointerRNA props = WM_operator_properties_create("SCULPT_OT_paint_shape_session_confirm");
+      RNA_boolean_set(&props, "resume_mode_toggle", true);
+      RNA_int_set(&props, "object_session_uid", int(ob->id.session_uid));
+      const wmOperatorStatus status = WM_operator_name_call(
+          C,
+          "SCULPT_OT_paint_shape_session_confirm",
+          wm::OpCallContext::InvokeDefault,
+          &props,
+          nullptr);
+      WM_operator_properties_free(&props);
+      /* Without the dialog up, refusing would trap the user in the mode; the exit below then
+       * discards the session through its free callback, the old behavior. */
+      if (status & OPERATOR_RUNNING_MODAL) {
+        return OPERATOR_CANCELLED;
+      }
+      break;
+    }
+
     /* Exit sculpt mode for all objects that are currently in it. */
     for (Base &base : view_layer.object_bases) {
       Object *ob = base.object;
@@ -2268,6 +2295,7 @@ void operatormacros_sculpt()
   WM_operatortype_append(SCULPT_OT_curve_patch_apply);
   WM_operatortype_append(SCULPT_OT_curve_patch_edit);
   WM_operatortype_append(SCULPT_OT_curve_patch_edit_confirm);
+  WM_operatortype_append(SCULPT_OT_paint_shape_session_confirm);
   WM_operatortype_append(SCULPT_OT_curve_patch_handle_type_set);
   WM_operatortype_append(SCULPT_OT_curve_patch_delete_point);
   WM_operatortype_append(SCULPT_OT_curve_patch_toggle_cyclic);

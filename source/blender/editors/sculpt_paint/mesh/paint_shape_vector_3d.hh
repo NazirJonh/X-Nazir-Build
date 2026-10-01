@@ -188,4 +188,12 @@ bool paint_shape_settings_update_3d(const Main *bmain, Scene *scene, PaintShapeS
  * a context-free brush / Strength / Blend change). False when none matched. */
 bool paint_shape_brush_update_3d(const Main *bmain, const Scene *scene, const Brush *brush);
 
+/** Refuse a workspace change while a live session owns the active object: the change is deferred
+ * to the session's confirm dialog, which re-issues it once the shape is resolved. True when the
+ * change was deferred (the dialog is up to carry it). */
+bool paint_shape_session_defer_workspace_change(bContext *C, int workspace_session_uid);
+/** Refuse an active-object change the same way; \a object_session_uid is the session-uid of the
+ * object the user asked to activate. True when the change was deferred. */
+bool paint_shape_session_defer_object_change(bContext *C, int object_session_uid);
+
 }  // namespace blender::ed::sculpt_paint::shape

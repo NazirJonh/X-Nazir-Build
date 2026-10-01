@@ -621,6 +621,14 @@ static wmOperatorStatus object_transfer_mode_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  /* The user is switching the active object under the cursor. While a live Paint Shape session
+   * owns the current active object, refuse and hand the switch to the session's Apply / Discard /
+   * Continue dialog, which re-issues it once the shape is resolved (this is the multi-object-sculpt
+   * active-object switch). */
+  if (ED_paint_shape_session_defer_object_change(C, int(ob_dst->id.session_uid))) {
+    return OPERATOR_CANCELLED;
+  }
+
   BLI_assert(ob_dst->id.orig_id == nullptr);
   if (!ID_IS_EDITABLE(ob_dst) || !ID_IS_EDITABLE(ob_src)) {
     BKE_reportf(op->reports,

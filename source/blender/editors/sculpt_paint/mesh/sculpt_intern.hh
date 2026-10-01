@@ -1821,6 +1821,11 @@ void SCULPT_OT_curve_patch_edit(wmOperatorType *ot);
  * to when a tool, brush or workspace change interrupts it -- never invoked by the user directly. */
 void SCULPT_OT_curve_patch_edit_confirm(wmOperatorType *ot);
 
+/* Defined in `paint_shape_vector_3d.cc`. The Apply/Discard/Continue dialog a live Paint Shape
+ * session is handed to when the mode, the workspace or the active object changes -- never invoked
+ * by the user directly. */
+void SCULPT_OT_paint_shape_session_confirm(wmOperatorType *ot);
+
 void SCULPT_OT_curve_patch_handle_type_set(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_delete_point(wmOperatorType *ot);
 void SCULPT_OT_curve_patch_toggle_cyclic(wmOperatorType *ot);

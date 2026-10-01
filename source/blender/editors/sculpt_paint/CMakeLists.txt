@@ -197,6 +197,7 @@ set(SRC
   mesh/sculpt_paint_shape_ops.cc
   mesh/sculpt_paint_shape_pixels.cc
   mesh/sculpt_paint_shape_sample.cc
+  mesh/paint_shape_session_confirm.cc
   mesh/paint_shape_vector_3d.cc
   mesh/paint_shape_gizmo.cc
   mesh/paint_shape_gizmo_view3d.cc

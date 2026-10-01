@@ -74,6 +74,7 @@
 #include "ED_mesh.hh"
 #include "ED_object.hh"
 #include "ED_outliner.hh"
+#include "ED_paint.hh"
 #include "ED_particle.hh"
 #include "ED_pointcloud.hh"
 #include "ED_screen.hh"
@@ -620,9 +621,10 @@ static bool do_lasso_select_objects(const ViewContext *vc,
      * selected after this gesture; otherwise activate the first newly-selected sculpting
      * object, in the same view-layer order this loop already walks. */
     if (!(old_obact_base && (old_obact_base->flag & BASE_SELECTED)) && first_sculpt_selected) {
-      ed::object::base_activate(vc->C, first_sculpt_selected);
-      ed::object::object_overlay_mode_transfer_animation_start(vc->C,
-                                                                first_sculpt_selected->object);
+      if (ed::object::base_activate_user(vc->C, first_sculpt_selected)) {
+        ed::object::object_overlay_mode_transfer_animation_start(vc->C,
+                                                                 first_sculpt_selected->object);
+      }
     }
   }
 
@@ -1703,7 +1705,7 @@ static wmOperatorStatus object_select_menu_exec(bContext *C, wmOperator *op)
   }
 
   if (oldbasact != basact) {
-    ed::object::base_activate(C, basact);
+    ed::object::base_activate_user(C, basact);
   }
 
   /* weak but ensures we activate menu again before using the enum */
@@ -1933,7 +1935,9 @@ static wmOperatorStatus bone_select_menu_exec(bContext *C, wmOperator *op)
     }
     else {
       if (oldbasact != basact) {
-        ed::object::base_activate(C, basact);
+        /* User-initiated activation (Alt+click menu): may be deferred to the live Paint Shape
+         * session's confirm dialog. There are no side effects tied to the activation here. */
+        ed::object::base_activate_user(C, basact);
       }
     }
   }
@@ -2970,6 +2974,19 @@ static bool ed_object_select_pick(bContext *C,
     const bool select_passthrough = params.select_passthrough && (changed_object_mode == false);
 
     bool found = (basact != nullptr) && BASE_SELECTABLE(v3d, basact);
+
+    /* A live Paint Shape session refuses the activation below. Ask before touching the selection,
+     * so a deferred pick leaves both the selection and the active object as they were. */
+    if (found && !is_obedit && oldbasact != basact &&
+        !(params.sel_op == SEL_OP_SET && select_passthrough && (basact->flag & BASE_SELECTED)) &&
+        ED_paint_shape_session_defer_object_change(C, int(basact->object->id.session_uid)))
+    {
+      if (gpu != nullptr) {
+        MEM_delete(gpu);
+      }
+      return changed_pose || changed_track;
+    }
+
     if (params.sel_op == SEL_OP_SET) {
       if ((found && select_passthrough) && (basact->flag & BASE_SELECTED)) {
         found = false;
@@ -3026,12 +3043,15 @@ static bool ed_object_select_pick(bContext *C,
    * the object from the pose-bone selected is also activated. */
   if (use_activate_selected_base && (basact != nullptr)) {
     changed_object = true;
-    ed::object::base_activate(C, basact); /* adds notifier */
-    if (basact->object->mode & OB_MODE_SCULPT) {
-      ed::object::object_overlay_mode_transfer_animation_start(C, basact->object);
-    }
-    if ((scene->toolsettings->object_flag & SCE_OBJECT_MODE_LOCK) == 0) {
-      WM_toolsystem_update_from_context_view3d(C);
+    /* May be deferred to the Paint Shape confirm dialog; only touch the toolsystem / flash when
+     * the activation actually happened. */
+    if (ed::object::base_activate_user(C, basact)) { /* adds notifier */
+      if (basact->object->mode & OB_MODE_SCULPT) {
+        ed::object::object_overlay_mode_transfer_animation_start(C, basact->object);
+      }
+      if ((scene->toolsettings->object_flag & SCE_OBJECT_MODE_LOCK) == 0) {
+        WM_toolsystem_update_from_context_view3d(C);
+      }
     }
   }
 
@@ -4430,8 +4450,10 @@ static bool do_object_box_select(bContext *C,
      * order this loop already walks) so the multi-object sculpt session always has a valid
      * active object to follow. */
     if (!(old_obact_base && (old_obact_base->flag & BASE_SELECTED)) && first_sculpt_selected) {
-      ed::object::base_activate(C, first_sculpt_selected);
-      ed::object::object_overlay_mode_transfer_animation_start(C, first_sculpt_selected->object);
+      if (ed::object::base_activate_user(C, first_sculpt_selected)) {
+        ed::object::object_overlay_mode_transfer_animation_start(C,
+                                                                 first_sculpt_selected->object);
+      }
     }
   }
 

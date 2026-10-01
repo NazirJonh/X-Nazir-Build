@@ -1049,6 +1049,16 @@ bool ED_paint_shape_sessions_alive()
   return shape::g_paint_shape_sessions_alive != 0;
 }
 
+bool ED_paint_shape_session_defer_workspace_change(bContext *C, const int workspace_session_uid)
+{
+  return shape::paint_shape_session_defer_workspace_change(C, workspace_session_uid);
+}
+
+bool ED_paint_shape_session_defer_object_change(bContext *C, const int object_new_session_uid)
+{
+  return shape::paint_shape_session_defer_object_change(C, object_new_session_uid);
+}
+
 void ED_paint_shape_session_discard_on_session_end(Object &ob)
 {
   shape::paint_shape_session_discard_on_session_end(ob);

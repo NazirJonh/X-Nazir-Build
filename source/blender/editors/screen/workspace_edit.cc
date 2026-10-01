@@ -35,6 +35,7 @@
 
 #include "ED_datafiles.h"
 #include "ED_object.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
 
@@ -200,6 +201,11 @@ bool ED_workspace_change(WorkSpace *workspace_new, bContext *C, wmWindowManager 
    * was built with. See #ed::sculpt_paint::curve_patch_defer_workspace_change, which re-issues
    * this change once the user has answered. */
   if (ed::sculpt_paint::curve_patch_defer_workspace_change(C, workspace_new)) {
+    return false;
+  }
+
+  /* Same rule for a live Paint Shape session. */
+  if (ED_paint_shape_session_defer_workspace_change(C, int(workspace_new->id.session_uid))) {
     return false;
   }
 

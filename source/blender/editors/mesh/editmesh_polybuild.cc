@@ -171,7 +171,7 @@ static wmOperatorStatus edbm_polybuild_transform_at_cursor_invoke(bContext *C,
   if (basact != nullptr) {
     BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
     if (BKE_view_layer_active_base_get(vc.view_layer) != basact) {
-      ed::object::base_activate(C, basact);
+      ed::object::base_activate_user(C, basact);
     }
   }
   BM_select_history_store(bm, ele_act);
@@ -257,7 +257,7 @@ static wmOperatorStatus edbm_polybuild_delete_at_cursor_invoke(bContext *C,
     if (basact != nullptr) {
       BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
       if (BKE_view_layer_active_base_get(vc.view_layer) != basact) {
-        ed::object::base_activate(C, basact);
+        ed::object::base_activate_user(C, basact);
       }
     }
     WM_event_add_mousemove(vc.win);
@@ -427,7 +427,7 @@ static wmOperatorStatus edbm_polybuild_face_at_cursor_invoke(bContext *C,
     if (basact != nullptr) {
       BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
       if (BKE_view_layer_active_base_get(vc.view_layer) != basact) {
-        ed::object::base_activate(C, basact);
+        ed::object::base_activate_user(C, basact);
       }
     }
 
@@ -519,7 +519,7 @@ static wmOperatorStatus edbm_polybuild_split_at_cursor_invoke(bContext *C,
 
     BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
     if (BKE_view_layer_active_base_get(vc.view_layer) != basact) {
-      ed::object::base_activate(C, basact);
+      ed::object::base_activate_user(C, basact);
     }
 
     return OPERATOR_FINISHED;
@@ -613,7 +613,7 @@ static wmOperatorStatus edbm_polybuild_dissolve_at_cursor_invoke(bContext *C,
 
     BKE_view_layer_synced_ensure(*vc.bmain, vc.scene, vc.view_layer);
     if (BKE_view_layer_active_base_get(vc.view_layer) != basact) {
-      ed::object::base_activate(C, basact);
+      ed::object::base_activate_user(C, basact);
     }
 
     WM_event_add_mousemove(vc.win);

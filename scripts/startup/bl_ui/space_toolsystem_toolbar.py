@@ -2723,10 +2723,14 @@ class _defs_image_paint_select:
 _PAINT_SHAPE_TOOLS = (
     ("line", "builtin.paint_shape_line", "Shape Line",
      "ops.gpencil.primitive_line", "Shape Line"),
+    ("polyline", "builtin.paint_shape_polyline", "Shape Polyline",
+     "ops.gpencil.primitive_polyline", "Shape Polyline"),
     ("rect", "builtin.paint_shape_rect", "Shape Rectangle",
      "ops.gpencil.primitive_box", "Shape Rectangle"),
     ("ellipse", "builtin.paint_shape_ellipse", "Shape Ellipse",
      "ops.gpencil.primitive_circle", "Shape Ellipse"),
+    ("curve", "builtin.paint_shape_curve", "Shape Curve Patch",
+     "ops.gpencil.primitive_curve", "Shape Curve"),
 )
 
 
@@ -4369,6 +4373,8 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             ),
             (
                 _defs_image_paint_shape.line,
+                _defs_image_paint_shape.polyline,
+                _defs_image_paint_shape.curve,
             ),
             *_tools_image_paint_select,
             # Standalone tool (not part of the selection group above): it writes the 3D Viewport

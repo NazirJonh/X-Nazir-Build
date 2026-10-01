@@ -278,6 +278,73 @@ TEST(ShapeRaster, OffsetRegionMatchesOriginRegion)
   EXPECT_NEAR(area, expected, expected * 0.01);
 }
 
+TEST(ShapeGeom, AutoHandlesResolveMatchesFlatten)
+{
+  /* Serialization resolves auto handles to explicit ones (`shape_to_op_props`): the resolved
+   * shape must flatten identically to the auto one, while the old buggy form (origin handles
+   * with `auto_handles = false`) pulls the curve towards the origin. */
+  PaintShape auto_shape;
+  auto_shape.type = PAINT_SHAPE_CURVE;
+  ShapeSpline spline;
+  spline.is_bezier = true;
+  spline.cyclic = false;
+  ShapePoint p0, p1, p2;
+  p0.co = float2(10.0f, 10.0f);
+  p0.auto_handles = true;
+  p1.co = float2(50.0f, 80.0f);
+  p1.auto_handles = true;
+  p2.co = float2(90.0f, 10.0f);
+  p2.auto_handles = true;
+  spline.points.append(p0);
+  spline.points.append(p1);
+  spline.points.append(p2);
+  auto_shape.splines.append(spline);
+
+  const Vector<ShapePolyline> auto_flat = shape_flatten(auto_shape, 0.5f);
+  ASSERT_FALSE(auto_flat.is_empty());
+  ASSERT_GT(auto_flat[0].points.size(), 2);
+
+  PaintShape resolved_shape = auto_shape;
+  for (ShapeSpline &resolved_spline : resolved_shape.splines) {
+    for (const int i : resolved_spline.points.index_range()) {
+      ShapePoint &point = resolved_spline.points[i];
+      if (point.auto_handles) {
+        shape_spline_point_handles_get(auto_shape.splines[0], i, point.handle_left, point.handle_right);
+        point.auto_handles = false;
+      }
+    }
+  }
+  /* The middle auto handles leave the origin. */
+  EXPECT_GT(math::length_squared(resolved_shape.splines[0].points[1].handle_left -
+                                float2(0.0f)),
+            1.0f);
+
+  const Vector<ShapePolyline> resolved_flat = shape_flatten(resolved_shape, 0.5f);
+  ASSERT_EQ(resolved_flat.size(), auto_flat.size());
+  ASSERT_EQ(resolved_flat[0].points.size(), auto_flat[0].points.size());
+  for (const int i : resolved_flat[0].points.index_range()) {
+    EXPECT_NEAR(resolved_flat[0].points[i].x, auto_flat[0].points[i].x, 1e-4);
+    EXPECT_NEAR(resolved_flat[0].points[i].y, auto_flat[0].points[i].y, 1e-4);
+  }
+
+  PaintShape buggy_shape = auto_shape;
+  for (ShapeSpline &buggy_spline : buggy_shape.splines) {
+    for (ShapePoint &point : buggy_spline.points) {
+      point.auto_handles = false;
+    }
+  }
+  const Vector<ShapePolyline> buggy_flat = shape_flatten(buggy_shape, 0.5f);
+  ASSERT_EQ(buggy_flat[0].points.size(), auto_flat[0].points.size());
+  bool differs = false;
+  for (const int i : buggy_flat[0].points.index_range()) {
+    if (math::distance(buggy_flat[0].points[i], auto_flat[0].points[i]) > 1.0f) {
+      differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(differs);
+}
+
 TEST(ShapeRaster, SubsetOutputsLeaveUnrequestedBuffersEmpty)
 {
   /* Canvas-style flags skip the direction/distance buffers but keep identical base coverage. */

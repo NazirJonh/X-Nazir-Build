@@ -20,6 +20,7 @@
 #include "rna_internal.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_curve_types.h"
 #include "DNA_object_types.h"
 #include "DNA_image_types.h"
 #include "DNA_scene_types.h"
@@ -1479,6 +1480,18 @@ static PointerRNA rna_PaintShapeSettings_fill_gradient_get(PointerRNA *ptr)
   PaintShapeSettings *settings = static_cast<PaintShapeSettings *>(ptr->data);
   /* Allocated by #BKE_paint_shape_settings_init, like the stroke ramp. */
   return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, settings->fill_gradient);
+}
+
+/** Poll for #PaintShapeSettings::curve_source_object: legacy 2D curve objects only. */
+static bool rna_PaintShapeSettings_curve_object_poll(PointerRNA * /*ptr*/,
+                                                          const PointerRNA value)
+{
+  const Object *ob = static_cast<const Object *>(value.data);
+  if (ob == nullptr || ob->type != OB_CURVES_LEGACY) {
+    return false;
+  }
+  const Curve *curve = id_cast<const Curve *>(ob->data);
+  return (curve->flag & CU_3D) == 0;
 }
 
 /** Bit mask of #eMaterialPaintChannel the shape bake writes for \a kind (0 = image maps,
@@ -3419,12 +3432,14 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
 
   static const EnumPropertyItem shape_type_items[] = {
       {PAINT_SHAPE_LINE, "LINE", ICON_LINE_DATA, "Line", "Straight line"},
+      {PAINT_SHAPE_POLYLINE, "POLYLINE", ICON_CURVE_PATH, "Polyline", "Chain of straight segments"},
       {PAINT_SHAPE_RECT, "RECTANGLE", ICON_MESH_PLANE, "Rectangle", "Rectangle with rounded corners"},
       {PAINT_SHAPE_ELLIPSE,
        "ELLIPSE",
        ICON_MESH_CIRCLE,
        "Ellipse",
        "Ellipse with separate horizontal and vertical radii"},
+      {PAINT_SHAPE_CURVE, "CURVE", ICON_CURVE_BEZCURVE, "Curve Patch", "Bézier curve patch"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -3457,6 +3472,31 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
        "The profile modulates opacity and color"},
       {PAINT_SHAPE_PROFILE_HEIGHT, "HEIGHT", 0, "Height", "The profile drives height and normals"},
       {PAINT_SHAPE_PROFILE_BOTH, "BOTH", 0, "Both", "Both coverage and height"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_curve_source_items[] = {
+      {PAINT_SHAPE_CURVE_SOURCE_OBJECT, "OBJECT", 0, "Object", "Single 2D curve object"},
+      {PAINT_SHAPE_CURVE_SOURCE_COLLECTION,
+       "COLLECTION",
+       0,
+       "Collection",
+       "Pick 2D curves from a collection"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_curve_fit_items[] = {
+      {PAINT_SHAPE_CURVE_FIT,
+       "FIT",
+       0,
+       "Fit",
+       "Fit the curve's bounding box into the drawing area"},
+      {PAINT_SHAPE_CURVE_FIT_FILL, "FILL", 0, "Fill", "Scale the curve up until it fills the area"},
+      {PAINT_SHAPE_CURVE_FIT_ORIGINAL,
+       "ORIGINAL",
+       0,
+       "Original",
+       "Keep the curve's original size (1 Blender unit equals a fixed pixel size)"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -3576,7 +3616,8 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop,
       "Joins",
-      "Shape of the stroke's corners (Center alignment; other alignments keep round corners)");
+      "Shape of the stroke's corners on polylines and curves (Center alignment; other alignments "
+      "keep round corners)");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
   prop = RNA_def_property(srna, "profile_mode", PROP_ENUM, PROP_NONE);
@@ -3745,6 +3786,48 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
       prop, "Use Stroke Ramp", "Color the stroke along its profile with the color ramp");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
+  prop = RNA_def_property(srna, "curve_source_collection", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "curve_source_collection");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_struct_type(prop, "Collection");
+  RNA_def_property_ui_text(
+      prop, "Curve Collection", "Collection to pick 2D curve objects from");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "curve_source_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "curve_source_object");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_PaintShapeSettings_curve_object_poll");
+  RNA_def_property_ui_text(prop, "Curve Object", "2D curve object to turn into a shape");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "curve_source_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "curve_source_mode");
+  RNA_def_property_enum_items(prop, shape_curve_source_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Source",
+      "Where 2D curves are picked from. TODO: curve import is not implemented yet");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "curve_fit_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "curve_fit_mode");
+  RNA_def_property_enum_items(prop, shape_curve_fit_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Placement",
+      "How an imported curve is placed on the canvas. TODO: curve import is not implemented yet");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "curve_pixels_per_unit", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, 1.0f, 100000.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 1000.0f, 1.0f, 1);
+  RNA_def_property_ui_text(
+      prop, "Pixels per Unit", "Pixel size of one Blender unit for the Original placement mode");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
   prop = RNA_def_property(srna, "use_stroke_screen_space", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_STROKE_SCREEN_SPACE);
   RNA_def_property_ui_text(
@@ -3824,6 +3907,56 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
           func, "channels", 0, 0, (1 << PAINT_MATERIAL_CHANNEL_NUM) - 1, "Channels", "Bit mask", 0,
           (1 << PAINT_MATERIAL_CHANNEL_NUM) - 1));
 }
+
+/** Runtime items of the `shape_points` collection property of the shape drawing operators
+ * (flat: one item per point, with the owning spline's index and flags; see
+ * #shape_to_op_props). */
+static void rna_def_operator_shape_point(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "OperatorShapePoint", "PropertyGroup");
+  RNA_def_struct_ui_text(
+      srna, "Operator Shape Point", "Control point of a shape drawn by a painting operator");
+
+  prop = RNA_def_property(srna, "co", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_text(prop, "Location", "Point position in reference-tile pixels");
+
+  prop = RNA_def_property(srna, "handle_left", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_text(prop, "Handle Left", "Left Bézier handle position");
+
+  prop = RNA_def_property(srna, "handle_right", PROP_FLOAT, PROP_XYZ);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_ui_text(prop, "Handle Right", "Right Bézier handle position");
+
+  prop = RNA_def_property(srna, "corner", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop, "Corner", "The segment leading into this point is straight");
+
+  prop = RNA_def_property(srna, "width", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop, "Width", "Stroke width multiplier at this point");
+
+  prop = RNA_def_property(srna, "spline", PROP_INT, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop, "Spline", "Index of the spline this point belongs to");
+
+  prop = RNA_def_property(srna, "cyclic", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop, "Cyclic", "Whether the owning spline is a closed loop");
+
+  prop = RNA_def_property(srna, "is_bezier", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_IDPROPERTY);
+  RNA_def_property_ui_text(prop, "Bezier", "Whether the owning spline evaluates Bézier handles");
+}
+
+/** \} */
 
 static void rna_def_image_paint(BlenderRNA *brna)
 {
@@ -4834,6 +4967,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_gp_weightpaint(brna);
   rna_def_vertex_paint(brna);
   rna_def_paint_mode(brna);
+  rna_def_operator_shape_point(brna);
   rna_def_paint_shape_channel_value(brna);
   rna_def_paint_shape_settings(brna);
   rna_def_image_paint(brna);

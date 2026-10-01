@@ -58,6 +58,7 @@ set(SRC
   paint_gradient_core.cc
   paint_gradient_curve.cc
   paint_ops.cc
+  paint_bezier_input.cc
   paint_shape_blend.cc
   paint_shape_create.cc
   paint_shape_draw.cc
@@ -223,6 +224,7 @@ paint_intern.hh
   paint_image_curve_patch_raster.hh
   paint_image_curve_patch_edit.hh
 
+  paint_bezier_input.hh
   paint_shape.hh
   paint_shape_blend.hh
   paint_shape_create.hh

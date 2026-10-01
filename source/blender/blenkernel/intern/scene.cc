@@ -796,6 +796,22 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     reader,
                                                     &toolsett_old->imapaint.canvas,
                                                     IDWALK_CB_USER);
+  /* Shape tool 2D curve sources: assigned from the UI (user-counted, see the RNA property's
+   * #PROP_ID_REFCOUNT). */
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->imapaint.shape.curve_source_collection,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->imapaint.shape.curve_source_collection,
+                                                    IDWALK_CB_USER);
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->imapaint.shape.curve_source_object,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->imapaint.shape.curve_source_object,
+                                                    IDWALK_CB_USER);
 
   /* Poly Paint: the canvas Image and the per-channel Image overrides an add-on can bind. Without
    * these the pointers are never remapped and are left dangling when the Image is deleted - the

@@ -36,6 +36,11 @@
 
 #include "DNA_scene_types.h"
 
+namespace blender::ed::sculpt_paint::bezier_input {
+class BezierInput;
+struct BezierInputPoint;
+}  // namespace blender::ed::sculpt_paint::bezier_input
+
 namespace blender::ed::sculpt_paint::shape {
 
 /**
@@ -97,10 +102,14 @@ constexpr ShapeTypeTraits shape_type_traits(const ePaintShapeType type)
   switch (type) {
     case PAINT_SHAPE_LINE:
       return {false, false, true};
+    case PAINT_SHAPE_POLYLINE:
+      return {false, false, true};
     case PAINT_SHAPE_RECT:
       return {true, true, false};
     case PAINT_SHAPE_ELLIPSE:
       return {true, true, false};
+    case PAINT_SHAPE_CURVE:
+      return {false, false, true};
   }
   /* Not reachable with the current #ePaintShapeType values; reached only if the enum grew without
    * a new row above. */
@@ -341,6 +350,12 @@ PaintShape shape_rect_at_center(const float2 &center, const ShapeStyle &style);
 
 /** Default-size ellipse centered at \a center (a click without a drag in Pixel mode). */
 PaintShape shape_ellipse_at_center(const float2 &center, const ShapeStyle &style);
+
+/**
+ * The outline placed with the shared Bézier input as a #PAINT_SHAPE_CURVE (Bézier handles,
+ * closed through the first point) or #PAINT_SHAPE_POLYLINE (straight segments).
+ */
+PaintShape shape_from_bezier_input(const bezier_input::BezierInput &input, ePaintShapeType type);
 
 /**
  * Resolve the handles of point \a index: the stored ones when the point owns them, Catmull-Rom

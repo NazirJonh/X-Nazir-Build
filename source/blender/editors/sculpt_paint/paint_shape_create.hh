@@ -5,11 +5,14 @@
 /** \file
  * \ingroup edsculpt
  *
- * Shared creation machine of the shape drawing tools: the drag builders (Rect / Ellipse).
+ * Shared creation machine of the shape drawing tools: the drag builders (Line / Rect / Ellipse /
+ * Polygon / Star / Arc) and the Bézier input (Polyline / Curve Patch), used by both the Image
+ * Editor and the 3D Viewport frontends.
  *
  * The gesture only turns presses, drags and modifiers into a #PaintShape; the frontend owns the
  * region, the overlay, the commit and the operator lifecycle. Coordinates are shape-space pixels;
- * the frontend maps its events into that space (reference-tile pixels for the Image Editor).
+ * the frontend maps its events into that space (region pixels for the 3D viewport, reference-tile
+ * pixels for the Image Editor).
  */
 
 #pragma once
@@ -18,10 +21,12 @@
 
 #include "BLI_math_vector_types.hh"
 
+#include "paint_bezier_input.hh"
 #include "paint_shape.hh"
 
 namespace blender {
 
+struct ARegion;
 struct bContext;
 struct wmEvent;
 
@@ -37,17 +42,19 @@ enum class ShapeCreateResult {
   Changed,
   /** The shape is ready; the frontend commits it. */
   Confirmed,
-  /** The gesture was abandoned (Esc). */
+  /** The gesture was abandoned (Esc / a zero-length line). */
   Cancelled,
 };
 
 /**
- * The drag creation machine. One instance per draw: constructed from the tool's type and a style
- * snapshot, seeded with #begin, fed every modal event, then queried for #shape.
+ * The drag and Bézier-input creation machine. One instance per draw: constructed from the tool's
+ * type and a style snapshot, seeded with #begin, fed every modal event, then queried for #shape.
  */
 class ShapeCreateGesture {
  public:
-  ShapeCreateGesture(ePaintShapeType type, const ShapeStyle &style);
+  ShapeCreateGesture(ePaintShapeType type,
+                     const ShapeStyle &style,
+                     bezier_input::Mapping input_mapping);
 
   /**
    * Start the gesture.
@@ -56,10 +63,24 @@ class ShapeCreateGesture {
    * \param button_held: true when the invocation is the mouse button still held (LMB press); a
    * keyboard or menu invocation passes false and the drag starts on the first press.
    */
-  void begin(const wmEvent &event, const float2 &event_p, bool button_held);
+  void begin(ARegion &region, const wmEvent &event, const float2 &event_p, bool button_held);
 
-  /** Feed a modal event; \a event_p is in shape space. */
-  ShapeCreateResult handle_event(const wmEvent &event, const float2 &event_p);
+  /** Feed a modal event; \a event_p is in shape space, \a in_owner whether it is in the owner
+   * region (the Bézier input ignores outside mouse motion). */
+  ShapeCreateResult handle_event(const wmEvent &event, const float2 &event_p, bool in_owner);
+
+  bool use_input() const
+  {
+    return use_input_;
+  }
+  bezier_input::BezierInput &input()
+  {
+    return input_;
+  }
+  const bezier_input::BezierInput &input() const
+  {
+    return input_;
+  }
 
   bool has_shape() const
   {
@@ -94,12 +115,15 @@ class ShapeCreateGesture {
     return cursor_p_;
   }
 
+  /** The shape built from the Bézier input (input mode, when no drag preview exists). */
+  PaintShape shape_from_input() const;
+
   /** Set the shape-space directions corresponding to one screen pixel along X and Y. */
   void set_drag_axes(const float2 &axis_x, const float2 &axis_y);
 
   /**
    * Pixel-mode F / Shift+F drag: adjust the stroke width or the overall opacity (the brush
-   * strength) while the key is held, like the brush radial control.
+   * strength) while the key is held, like the Vector session and the brush radial control.
    *
    * \param value: current stroke width or overall opacity the drag starts from.
    */
@@ -116,6 +140,11 @@ class ShapeCreateGesture {
 
   ePaintShapeType type_;
   ShapeStyle style_;
+  bezier_input::Mapping input_mapping_;
+  ARegion *owner_region_ = nullptr;
+
+  bool use_input_ = false;
+  bezier_input::BezierInput input_;
 
   bool drag_active_ = false;
   bool moved_ = false;
@@ -139,13 +168,14 @@ class ShapeCreateGesture {
   int2 value_drag_start_mval_ = int2(0);
 };
 
-/** Status-bar items of the creation drag. */
+/** Status-bar items of the creation drag / Bézier input, shared by both frontends. */
 void shape_status_set_creation(bContext *C, ePaintShapeType type);
+void shape_status_set_input(bContext *C);
 
 /**
  * Draw the animated dashed preview outline of \a shape: flatten it in shape space, project every
- * point through \a to_region, and draw. The frontend supplies the projector that maps the
- * reference-tile (Image Editor) space to region pixels.
+ * point through \a to_region, and draw. The frontend supplies the projector so the same overlay
+ * serves region-pixel (3D) and reference-tile (Image Editor) spaces.
  *
  * \param width_guide: when set, the stroke edges (stroke width and Align of this style) are drawn
  * too, so a width being adjusted shows the band the stroke will cover.

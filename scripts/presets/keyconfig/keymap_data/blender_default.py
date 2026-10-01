@@ -7848,6 +7848,11 @@ def km_image_editor_tool_paint_shape_line(params, *, fallback):
         params, fallback, "Image Editor Tool: Paint, Shape Line", 'LINE')
 
 
+def km_image_editor_tool_paint_shape_polyline(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Polyline", 'POLYLINE')
+
+
 def km_image_editor_tool_paint_shape_rect(params, *, fallback):
     return _km_image_editor_tool_paint_shape(
         params, fallback, "Image Editor Tool: Paint, Shape Rectangle", 'RECTANGLE')
@@ -7856,6 +7861,11 @@ def km_image_editor_tool_paint_shape_rect(params, *, fallback):
 def km_image_editor_tool_paint_shape_ellipse(params, *, fallback):
     return _km_image_editor_tool_paint_shape(
         params, fallback, "Image Editor Tool: Paint, Shape Ellipse", 'ELLIPSE')
+
+
+def km_image_editor_tool_paint_shape_curve(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Curve", 'CURVE')
 
 
 def km_image_paint_shape_modal_map(_params):
@@ -9780,8 +9790,10 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_gradient(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_line(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_polyline(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_rect(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_ellipse(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_curve(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_box(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_lasso(params, fallback=fallback) for fallback in (False, True)),

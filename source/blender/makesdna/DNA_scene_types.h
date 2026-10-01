@@ -1494,8 +1494,11 @@ enum eImagePaint_SelectionExpand : int8_t {
 /** #PaintShapeSettings::type */
 enum ePaintShapeType : int8_t {
   PAINT_SHAPE_LINE = 0,
+  PAINT_SHAPE_POLYLINE = 1,
   PAINT_SHAPE_RECT = 2,
   PAINT_SHAPE_ELLIPSE = 3,
+  /** Bézier Curve Patch. */
+  PAINT_SHAPE_CURVE = 4,
 };
 
 /** #PaintShapeSettings::flag */
@@ -1587,6 +1590,22 @@ enum ePaintShapeHeightBlend : int8_t {
   PAINT_SHAPE_HEIGHT_REPLACE = 3,
 };
 
+/** #PaintShapeSettings::curve_source_mode */
+enum ePaintShapeCurveSourceMode : int8_t {
+  PAINT_SHAPE_CURVE_SOURCE_OBJECT = 0,
+  PAINT_SHAPE_CURVE_SOURCE_COLLECTION = 1,
+};
+
+/** #PaintShapeSettings::curve_fit_mode */
+enum ePaintShapeCurveFitMode : int8_t {
+  /** Fit the curve's bounding box into the target area. */
+  PAINT_SHAPE_CURVE_FIT = 0,
+  /** Scale the curve up until it fills the target area. */
+  PAINT_SHAPE_CURVE_FIT_FILL = 1,
+  /** Keep the curve's original size (1 Blender unit = #curve_pixels_per_unit pixels). */
+  PAINT_SHAPE_CURVE_FIT_ORIGINAL = 2,
+};
+
 /**
  * One PBR paint channel value for a shape's Stroke or Fill part.
  *
@@ -1608,8 +1627,8 @@ struct PaintShapeChannelValue {
 };
 
 /**
- * Settings of the shape drawing tools (Rectangle/Ellipse), shared between the Canvas (single
- * image) and PBR Paint (material channels) targets.
+ * Settings of the shape drawing tools (Line/Polyline/Rectangle/Ellipse/Curve Patch),
+ * shared between the Canvas (single image) and PBR Paint (material channels) targets.
  *
  * Stored in #ImagePaintSettings last so existing files keep their field offsets; old files get
  * the runtime defaults from #BKE_paint_shape_settings_init in #blo_do_versions_520. New fields
@@ -1680,6 +1699,17 @@ struct PaintShapeSettings {
   /** Optional color ramp along the stroke profile (Canvas mode). Owned; may be null. */
   struct ColorBand *stroke_ramp = nullptr;
 
+  /* Source of 2D curves to turn into shapes (see #BKE_paint_shape_curve_object_is_valid). */
+  struct Collection *curve_source_collection = nullptr;
+  struct Object *curve_source_object = nullptr;
+  /** #ePaintShapeCurveSourceMode */
+  char curve_source_mode = PAINT_SHAPE_CURVE_SOURCE_OBJECT;
+  /** #ePaintShapeCurveFitMode */
+  char curve_fit_mode = PAINT_SHAPE_CURVE_FIT;
+  char _pad3[2] = {};
+  /** Pixels per Blender unit for #PAINT_SHAPE_CURVE_FIT_ORIGINAL. */
+  float curve_pixels_per_unit = 100.0f;
+
   /* Fill style and PBR relief (appended last). */
   /** #ePaintShapeFillType */
   char fill_type = PAINT_SHAPE_FILL_SOLID;
@@ -1694,7 +1724,7 @@ struct PaintShapeSettings {
   /** Normal relief strength. */
   float normal_strength = 1.0f;
   /* Pad so the owned #ColorBand pointer starts on an 8-byte boundary. */
-  char _pad3[4] = {};
+  char _pad5[4] = {};
   /** Fill gradient ramp (GRADIENT fill). Owned; may be null. */
   struct ColorBand *fill_gradient = nullptr;
 };

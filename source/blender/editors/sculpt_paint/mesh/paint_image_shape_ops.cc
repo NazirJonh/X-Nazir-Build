@@ -7,16 +7,22 @@
  *
  * Pixel mode of the Image Editor shape drawing tools ("Paint Shape").
  *
- * One modal operator draws a Rectangle or an Ellipse directly into the texture in a single
+ * One modal operator draws any of the supported shapes directly into the texture in a single
  * action (parameters are set up front, the release of the drag bakes everything in one undo
- * step). Shift snaps (square, circle), Alt grows the shape from its center, holding Space moves
- * the in-progress shape, and a plain click draws the default size from the tool settings at the
- * click point.
+ * step):
  *
- * The in-progress outline is drawn as an animated dashed overlay while the drag runs. `exec`
- * replays the stored shape and style properties (Python and Redo/F9: the redo panel exposes
- * colors, width and opacities on top of the stored style); the profile and ramp tables and the
- * PBR channel values follow the current settings.
+ * - Line / Rectangle / Ellipse are drag tools. Shift snaps (8-direction line, square, circle),
+ *   Alt grows the shape from its center, holding Space moves the in-progress shape, and a plain
+ *   click (rectangle / ellipse) draws the default size from the tool settings at the click
+ *   point.
+ * - Polyline / Curve Patch reuse the shared Bézier input module, exactly like Select Curve:
+ *   click to place points, drag to shape their handles, click the first point or double-click
+ *   to close, Enter to confirm (Polyline may stay open).
+ *
+ * The in-progress outline is drawn as an animated dashed overlay while the drag or the input
+ * runs. `exec` replays the stored shape and style properties (Python and Redo/F9: the redo
+ * panel exposes colors, width and opacities on top of the stored style); the profile and ramp
+ * tables and the PBR channel values follow the current settings.
  */
 
 #include <algorithm>
@@ -59,6 +65,7 @@
 #include "WM_keymap.hh"
 #include "WM_types.hh"
 
+#include "../paint_bezier_input.hh"
 #include "../paint_intern.hh"
 #include "../paint_shape_create.hh"
 #include "../paint_shape_draw.hh"
@@ -70,6 +77,7 @@
 
 namespace blender {
 
+namespace bezier_input = ed::sculpt_paint::bezier_input;
 namespace shape = ed::sculpt_paint::shape;
 
 /* -------------------------------------------------------------------- */
@@ -124,6 +132,27 @@ static float2 image_shape_px_to_region(const ARegion *region,
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Bézier input mapping (UV space, like Select Curve)
+ * \{ */
+
+static float2 image_shape_input_to_region(const ARegion &region, const float2 &uv)
+{
+  float region_px[2];
+  ui::view2d_view_to_region_fl(&region.v2d, uv.x, uv.y, &region_px[0], &region_px[1]);
+  return float2(region_px[0], region_px[1]);
+}
+
+static float2 image_shape_input_event_to_user(const ARegion &region, const wmEvent &event)
+{
+  float uv[2];
+  ui::view2d_region_to_view(
+      &region.v2d, float(event.mval[0]), float(event.mval[1]), &uv[0], &uv[1]);
+  return float2(uv[0], uv[1]);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Operator state
  * \{ */
 
@@ -140,7 +169,7 @@ struct ImageShapeState {
     return {ref_tile, ref_tile_size};
   }
 
-  /** The shared creation machine (drag). */
+  /** The shared creation machine (drag + Bézier input). */
   std::optional<shape::ShapeCreateGesture> create;
 };
 
@@ -197,6 +226,20 @@ static void image_shape_draw_drag(const bContext *C, ARegion *region, void *arg)
       show_width ? &state->create->style() : nullptr);
 }
 
+static void image_shape_draw_input(const bContext *C, ARegion *region, void *arg)
+{
+  ImageShapeState *state = static_cast<ImageShapeState *>(arg);
+  if (state == nullptr || !state->create) {
+    return;
+  }
+  if (CTX_wm_space_image(C) != state->owner_sima) {
+    return;
+  }
+  const bezier_input::Mapping mapping = {image_shape_input_to_region,
+                                        image_shape_input_event_to_user};
+  state->create->input().draw(*region, mapping, bezier_input::DrawStyle());
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -207,7 +250,20 @@ static void image_shape_draw_drag(const bContext *C, ARegion *region, void *arg)
 static wmOperatorStatus image_shape_apply(bContext *C, wmOperator *op, ImageShapeState *state)
 {
   shape::ShapeCreateGesture &create = *state->create;
-  const shape::PaintShape shape = create.shape();
+  shape::PaintShape shape = create.has_shape() ? create.shape() : create.shape_from_input();
+
+  /* The Bézier input runs in UV space; the shape converts into reference-tile pixels here. */
+  if (create.use_input()) {
+    const float2 size = float2(state->ref_tile_size);
+    const float2 origin = shape::tile_uv_origin(state->ref_tile);
+    for (shape::ShapeSpline &spline : shape.splines) {
+      for (shape::ShapePoint &point : spline.points) {
+        point.co = (point.co - origin) * size;
+        point.handle_left = (point.handle_left - origin) * size;
+        point.handle_right = (point.handle_right - origin) * size;
+      }
+    }
+  }
   if (shape.is_empty()) {
     image_shape_state_free(C, op);
     return OPERATOR_CANCELLED;
@@ -313,7 +369,10 @@ static wmOperatorStatus image_shape_draw_invoke(bContext *C,
     }
   }
 
-  state->create.emplace(ePaintShapeType(type), style);
+  state->create.emplace(ePaintShapeType(type),
+                        style,
+                        bezier_input::Mapping{image_shape_input_to_region,
+                                              image_shape_input_event_to_user});
   const float2 start_uv = image_shape_event_uv(region, event);
   const float2 screen_start = float2(event->mval[0], event->mval[1]);
   float screen_x_uv[2], screen_y_uv[2];
@@ -332,15 +391,23 @@ static wmOperatorStatus image_shape_draw_invoke(bContext *C,
   const float2 drag_axis_y = (float2(screen_y_uv[0], screen_y_uv[1]) - start_uv) *
                              float2(state->ref_tile_size);
   state->create->set_drag_axes(drag_axis_x, drag_axis_y);
-  state->create->begin(
-      *event,
-      image_shape_event_to_px(region, event, state->ref_tile, state->ref_tile_size),
-      (event->type == LEFTMOUSE) && (event->val == KM_PRESS));
+  state->create->begin(*region,
+                       *event,
+                       image_shape_event_to_px(
+                           region, event, state->ref_tile, state->ref_tile_size),
+                       (event->type == LEFTMOUSE) && (event->val == KM_PRESS));
 
   state->owner_region_type = region->runtime->type;
-  state->draw_handle = ED_region_draw_cb_activate(
-      state->owner_region_type, image_shape_draw_drag, state, REGION_DRAW_POST_PIXEL);
-  shape::shape_status_set_creation(C, state->create->type());
+  if (state->create->use_input()) {
+    state->draw_handle = ED_region_draw_cb_activate(
+        state->owner_region_type, image_shape_draw_input, state, REGION_DRAW_POST_PIXEL);
+    shape::shape_status_set_input(C);
+  }
+  else {
+    state->draw_handle = ED_region_draw_cb_activate(
+        state->owner_region_type, image_shape_draw_drag, state, REGION_DRAW_POST_PIXEL);
+    shape::shape_status_set_creation(C, state->create->type());
+  }
 
   op->customdata = state;
   WM_event_add_modal_handler(C, op);
@@ -423,7 +490,7 @@ static wmOperatorStatus image_shape_draw_modal(bContext *C,
 
   const float2 event_px = image_shape_event_to_px(
       region, event, state->ref_tile, state->ref_tile_size);
-  switch (create.handle_event(*event, event_px)) {
+  switch (create.handle_event(*event, event_px, true)) {
     case shape::ShapeCreateResult::Confirmed:
       return image_shape_apply(C, op, state);
     case shape::ShapeCreateResult::Cancelled:
@@ -569,8 +636,8 @@ void PAINT_OT_image_shape_draw(wmOperatorType *ot)
   ot->name = "Paint Shape";
   ot->idname = "PAINT_OT_image_shape_draw";
   ot->description =
-      "Draw a shape into the texture: drag for rectangle/ellipse; Shift snaps, Alt grows from "
-      "the center, Space moves";
+      "Draw a shape into the texture: drag for line/rectangle/ellipse, click to place points "
+      "for polyline and curve patch; Shift snaps, Alt grows from the center, Space moves";
 
   ot->invoke = image_shape_draw_invoke;
   ot->modal = image_shape_draw_modal;
@@ -589,8 +656,10 @@ void PAINT_OT_image_shape_draw(wmOperatorType *ot)
   static const EnumPropertyItem type_items[] = {
       {-1, "DEFAULT", 0, "Default", "Use the type from the tool settings"},
       {PAINT_SHAPE_LINE, "LINE", 0, "Line", "Straight line"},
+      {PAINT_SHAPE_POLYLINE, "POLYLINE", 0, "Polyline", "Chain of straight segments"},
       {PAINT_SHAPE_RECT, "RECTANGLE", 0, "Rectangle", "Rectangle with rounded corners"},
       {PAINT_SHAPE_ELLIPSE, "ELLIPSE", 0, "Ellipse", "Ellipse"},
+      {PAINT_SHAPE_CURVE, "CURVE", 0, "Curve Patch", "Bézier curve patch"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   PropertyRNA *prop = RNA_def_property(ot->srna, "type", PROP_ENUM, PROP_NONE);

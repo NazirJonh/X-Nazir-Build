@@ -48,9 +48,24 @@ static float2 snap_line_direction(const float2 &delta)
   return float2(math::cos(snapped), math::sin(snapped)) * length;
 }
 
-ShapeCreateGesture::ShapeCreateGesture(const ePaintShapeType type, const ShapeStyle &style)
-    : type_(type), style_(style)
+ShapeCreateGesture::ShapeCreateGesture(const ePaintShapeType type,
+                                       const ShapeStyle &style,
+                                       const bezier_input::Mapping input_mapping)
+    : type_(type), style_(style), input_mapping_(input_mapping)
 {
+  use_input_ = ELEM(type_, PAINT_SHAPE_POLYLINE, PAINT_SHAPE_CURVE);
+  if (use_input_) {
+    bezier_input::Flag flags = bezier_input::Flag::None;
+    if (type_ == PAINT_SHAPE_POLYLINE) {
+      flags |= bezier_input::Flag::AllowOpen | bezier_input::Flag::ForceStraight;
+    }
+    else if (style_.use_stroke()) {
+      /* A Curve Patch with Stroke keeps drawing as an open curve when it is not closed on the
+       * first point; without Stroke an open curve would draw nothing, so it still closes. */
+      flags |= bezier_input::Flag::AllowOpen;
+    }
+    input_ = bezier_input::BezierInput(flags);
+  }
 }
 
 void ShapeCreateGesture::set_drag_axes(const float2 &axis_x, const float2 &axis_y)
@@ -102,8 +117,16 @@ bool ShapeCreateGesture::value_drag_is_width() const
   return value_drag_is_width_;
 }
 
-void ShapeCreateGesture::begin(const wmEvent &event, const float2 &event_p, const bool button_held)
+void ShapeCreateGesture::begin(ARegion &region,
+                               const wmEvent &event,
+                               const float2 &event_p,
+                               const bool button_held)
 {
+  owner_region_ = &region;
+  if (use_input_) {
+    input_.begin(region, event, input_mapping_, button_held);
+    return;
+  }
   drag_active_ = button_held;
   press_p_ = event_p;
   cursor_p_ = event_p;
@@ -184,8 +207,56 @@ PaintShape ShapeCreateGesture::shape_at_center(const float2 &center) const
   return shape;
 }
 
-ShapeCreateResult ShapeCreateGesture::handle_event(const wmEvent &event, const float2 &event_p)
+PaintShape ShapeCreateGesture::shape_from_input() const
 {
+  return shape_from_bezier_input(input_, type_);
+}
+
+ShapeCreateResult ShapeCreateGesture::handle_event(const wmEvent &event,
+                                                   const float2 &event_p,
+                                                   const bool in_owner)
+{
+  if (use_input_) {
+    wmEvent translated = event;
+    if (event.type == EVT_MODAL_MAP) {
+      /* The modal map translates the confirm/cancel keys; the shared Bézier input only
+       * understands raw keys, so translate back before feeding it. */
+      if (event.val == PAINT_SHAPE_MODAL_CONFIRM) {
+        translated.type = EVT_RETKEY;
+        translated.val = KM_PRESS;
+      }
+      else if (event.val == PAINT_SHAPE_MODAL_CANCEL) {
+        translated.type = EVT_ESCKEY;
+        translated.val = KM_PRESS;
+      }
+      else if (event.val == PAINT_SHAPE_MODAL_UNDO) {
+        /* The undo item converts Ctrl+Z before the input sees it; restore the physical key so
+         * the input still undoes its own last point. */
+        translated.type = event.prev_type;
+        translated.val = event.prev_val;
+      }
+      else {
+        return ShapeCreateResult::None;
+      }
+    }
+    if (!in_owner && ISMOUSE_MOTION(event.type)) {
+      return ShapeCreateResult::None;
+    }
+    BLI_assert(owner_region_ != nullptr);
+    switch (input_.handle_event(*owner_region_, translated, input_mapping_)) {
+      case bezier_input::Result::Closed:
+      case bezier_input::Result::Confirmed:
+        return ShapeCreateResult::Confirmed;
+      case bezier_input::Result::Cancelled:
+        return ShapeCreateResult::Cancelled;
+      case bezier_input::Result::Changed:
+        return ShapeCreateResult::Changed;
+      case bezier_input::Result::None:
+        return ShapeCreateResult::None;
+    }
+    return ShapeCreateResult::None;
+  }
+
   const bool shift = (event.modifier & KM_SHIFT) != 0;
   const bool alt = (event.modifier & KM_ALT) != 0;
   const bool ctrl = (event.modifier & KM_CTRL) != 0;
@@ -295,6 +366,16 @@ void shape_status_set_creation(bContext *C, const ePaintShapeType type)
   }
   status.item(IFACE_("From Center"), ICON_EVENT_ALT);
   status.item(IFACE_("Move"), ICON_EVENT_SPACEKEY);
+  status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
+}
+
+void shape_status_set_input(bContext *C)
+{
+  WorkspaceStatus status(C);
+  status.item(IFACE_("Place Point"), ICON_MOUSE_LMB);
+  status.item(IFACE_("Close"), ICON_MOUSE_LMB_2X);
+  status.item(IFACE_("Straight Segment"), ICON_EVENT_CTRL);
+  status.item(IFACE_("Confirm"), ICON_EVENT_RETURN);
   status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
 }
 

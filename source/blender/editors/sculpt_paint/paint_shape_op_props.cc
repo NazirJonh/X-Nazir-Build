@@ -21,6 +21,7 @@
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
+#include "RNA_prototypes.hh"
 
 #include "WM_types.hh"
 
@@ -67,12 +68,40 @@ void shape_to_op_props(wmOperator *op, const PaintShape &shape)
   const float origin[2] = {shape.origin.x, shape.origin.y};
   RNA_float_set_array(op->ptr, "shape_origin", origin);
   RNA_boolean_set(op->ptr, "shape_origin_custom", shape.origin_is_custom);
+
+  RNA_collection_clear(op->ptr, "shape_points");
+  for (const int s : shape.splines.index_range()) {
+    const ShapeSpline &spline = shape.splines[s];
+    for (const int p : spline.points.index_range()) {
+      const ShapePoint &point = spline.points[p];
+      PointerRNA itemptr;
+      RNA_collection_add(op->ptr, "shape_points", &itemptr);
+      const float co[2] = {point.co.x, point.co.y};
+      RNA_float_set_array(&itemptr, "co", co);
+      /* Auto handles are stored as the origin, so they are resolved here: `from_op_props`
+       * always creates explicit handles. */
+      float2 handle_left = point.handle_left;
+      float2 handle_right = point.handle_right;
+      if (point.auto_handles && spline.is_bezier) {
+        shape_spline_point_handles_get(spline, p, handle_left, handle_right);
+      }
+      const float handle_left_arr[2] = {handle_left.x, handle_left.y};
+      RNA_float_set_array(&itemptr, "handle_left", handle_left_arr);
+      const float handle_right_arr[2] = {handle_right.x, handle_right.y};
+      RNA_float_set_array(&itemptr, "handle_right", handle_right_arr);
+      RNA_boolean_set(&itemptr, "corner", point.corner);
+      RNA_float_set(&itemptr, "width", point.width_factor);
+      RNA_int_set(&itemptr, "spline", s);
+      RNA_boolean_set(&itemptr, "cyclic", spline.cyclic);
+      RNA_boolean_set(&itemptr, "is_bezier", spline.is_bezier);
+    }
+  }
 }
 
 std::optional<PaintShape> shape_from_op_props(wmOperator *op)
 {
   const int type = RNA_int_get(op->ptr, "shape_type");
-  if (type < PAINT_SHAPE_LINE || type > PAINT_SHAPE_ELLIPSE) {
+  if (type < PAINT_SHAPE_LINE || type > PAINT_SHAPE_CURVE) {
     return std::nullopt;
   }
   PaintShape shape;
@@ -92,6 +121,43 @@ std::optional<PaintShape> shape_from_op_props(wmOperator *op)
   RNA_float_get_array(op->ptr, "shape_origin", origin);
   shape.origin = float2(origin[0], origin[1]);
   shape.origin_is_custom = RNA_boolean_get(op->ptr, "shape_origin_custom");
+
+  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "shape_points");
+  if (prop == nullptr) {
+    return std::nullopt;
+  }
+
+  RNA_PROP_BEGIN (op->ptr, itemptr, prop) {
+    ShapePoint point;
+    float co[2], handle_left[2], handle_right[2];
+    RNA_float_get_array(&itemptr, "co", co);
+    RNA_float_get_array(&itemptr, "handle_left", handle_left);
+    RNA_float_get_array(&itemptr, "handle_right", handle_right);
+    point.co = float2(co[0], co[1]);
+    point.handle_left = float2(handle_left[0], handle_left[1]);
+    point.handle_right = float2(handle_right[0], handle_right[1]);
+    point.corner = RNA_boolean_get(&itemptr, "corner");
+    point.width_factor = RNA_float_get(&itemptr, "width");
+    point.auto_handles = false;
+
+    const int spline_index = RNA_int_get(&itemptr, "spline");
+    while (shape.splines.size() <= spline_index) {
+      shape.splines.append(ShapeSpline{});
+    }
+    ShapeSpline &spline = shape.splines[spline_index];
+    if (spline.points.is_empty()) {
+      /* The spline-level flags repeat on every point; read them once. */
+      spline.cyclic = RNA_boolean_get(&itemptr, "cyclic");
+      spline.is_bezier = RNA_boolean_get(&itemptr, "is_bezier");
+    }
+    spline.points.append(point);
+  }
+  RNA_PROP_END;
+
+  /* No spline data and nothing parametric to draw: the properties hold no usable shape. */
+  if (shape.splines.is_empty() && !shape.is_parametric()) {
+    return std::nullopt;
+  }
   return shape;
 }
 
@@ -280,6 +346,9 @@ void shape_op_properties_register(wmOperatorType *ot)
   RNA_def_property_flag(prop, PROP_HIDDEN);
 
   prop = RNA_def_boolean(ot->srna, "shape_origin_custom", false, "Origin Custom", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_collection_runtime(ot->srna, "shape_points", RNA_OperatorShapePoint, "Points", "");
   RNA_def_property_flag(prop, PROP_HIDDEN);
 }
 

@@ -30,6 +30,7 @@
 #include "BKE_curves.hh"
 #include "BKE_colortools.hh"
 
+#include "paint_bezier_input.hh"
 #include "paint_shape.hh"
 
 namespace blender::ed::sculpt_paint::shape {
@@ -192,7 +193,8 @@ float4 ShapeStyle::fill_gradient_sample(const float t) const
 
 /**
  * Resolve the handles of point #index: the stored ones when the point owns them, Catmull-Rom
- * auto handles otherwise (so an untouched outline evaluates consistently).
+ * auto handles otherwise (mirroring the live Bézier input, so an untouched outline evaluates
+ * identically to its preview).
  */
 void shape_spline_point_handles_get(const ShapeSpline &spline,
                                     const int index,
@@ -576,6 +578,38 @@ PaintShape shape_ellipse_at_center(const float2 &center, const ShapeStyle &style
   shape.center = center;
   shape.half_size = style.size * 0.5f;
   shape.rotation = style.rotation;
+  return shape;
+}
+
+PaintShape shape_from_bezier_input(const bezier_input::BezierInput &input, const ePaintShapeType type)
+{
+  PaintShape shape;
+  shape.type = type;
+  ShapeSpline spline;
+  spline.cyclic = input.is_closed();
+  spline.is_bezier = (type == PAINT_SHAPE_CURVE);
+
+  /* The first point's corner flag is the closing segment (last point back to first): carry the
+   * Ctrl-at-close choice into the committed shape so ctrl-closing a Curve Patch flattens straight,
+   * exactly like the live input previewed it. */
+  const bool closing_straight = spline.cyclic && input.closed_straight();
+  for (const int point_index : input.points().index_range()) {
+    const bezier_input::BezierInputPoint &point = input.points()[point_index];
+    ShapePoint out;
+    out.co = point.co;
+    out.corner = point.straight_prev || !spline.is_bezier ||
+                 (point_index == 0 && closing_straight);
+    if (spline.is_bezier && point.handles_set) {
+      out.handle_left = point.handle_left;
+      out.handle_right = point.handle_right;
+      out.auto_handles = false;
+    }
+    spline.points.append(out);
+  }
+
+  if (spline.points.size() >= 2) {
+    shape.splines.append(std::move(spline));
+  }
   return shape;
 }
 

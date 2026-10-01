@@ -378,6 +378,7 @@ enum eView3DOverlay_SymmetryFlag : int {
   V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR = (1 << 4),
   V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR = (1 << 5),
   V3D_OVERLAY_SYMMETRY_CURVES_PLANE = (1 << 6),
+  V3D_OVERLAY_SYMMETRY_LATTICE_CONTOUR = (1 << 7),
 };
 ENUM_OPERATORS(eView3DOverlay_SymmetryFlag)
 
@@ -750,7 +751,8 @@ struct View3DOverlay {
                                               V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
                                               V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
                                               V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
-                                              V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR;
+                                              V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
+                                              V3D_OVERLAY_SYMMETRY_LATTICE_CONTOUR;
   /** Opacity of the symmetry plane. */
   float sculpt_symmetry_plane_opacity = 0.03f;
   /** Thickness of the symmetry contour, in pixels. */

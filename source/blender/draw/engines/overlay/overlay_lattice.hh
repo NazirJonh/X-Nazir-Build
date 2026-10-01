@@ -12,6 +12,11 @@
 #include "draw_cache_impl.hh"
 #include "draw_common_c.hh"
 #include "overlay_base.hh"
+#include "overlay_symmetry_contour.hh"
+
+#include "DEG_depsgraph_query.hh"
+
+#include "DNA_lattice_types.h"
 
 namespace blender::draw::overlay {
 
@@ -26,13 +31,27 @@ class Lattices : Overlay {
   PassMain::Sub *edit_lattice_wire_ps_;
   PassMain::Sub *edit_lattice_point_ps_;
 
+  bool show_symmetry_contour_ = false;
+  SymmetryContourOverlay symmetry_contour_;
+
  public:
+  Lattices(bool in_front)
+      : symmetry_contour_(SelectionType::DISABLED, "EditLatticeSymmetryContour", in_front)
+  {
+  }
+
   void begin_sync(Resources &res, const State &state) final
   {
     enabled_ = state.is_space_v3d();
     if (!enabled_) {
+      show_symmetry_contour_ = false;
+      symmetry_contour_.begin_sync(res, state, false);
       return;
     }
+
+    show_symmetry_contour_ = state.ctx_mode == CTX_MODE_EDIT_LATTICE &&
+                             state.show_lattice_symmetry_contour();
+    symmetry_contour_.begin_sync(res, state, show_symmetry_contour_);
 
     auto create_sub_pass = [&](const char *name, gpu::Shader *shader, bool add_weight_tex) {
       PassMain::Sub &sub_pass = ps_.sub(name);
@@ -59,7 +78,7 @@ class Lattices : Overlay {
   void edit_object_sync(Manager &manager,
                         const ObjectRef &ob_ref,
                         Resources &res,
-                        const State & /*state*/) final
+                        const State &state) final
   {
     if (!enabled_) {
       return;
@@ -73,6 +92,18 @@ class Lattices : Overlay {
     {
       gpu::Batch *geom = DRW_cache_lattice_vert_overlay_get(ob_ref.object);
       edit_lattice_point_ps_->draw(geom, res_handle, res.select_id(ob_ref).get());
+    }
+
+    if (show_symmetry_contour_) {
+      /* Read symmetry from the original object, not the evaluated copy, so the toggle always
+       * takes effect regardless of when the evaluated copy catches up (see the same approach in
+       * overlay_mesh.hh for the Edit Mesh overlay). */
+      const Object *ob_orig = DEG_get_original(ob_ref.object);
+      const Lattice &latt_orig = *id_cast<const Lattice *>(ob_orig->data);
+      const int symmetry_flags = symmetry_flags_from_lattice_symmetry(latt_orig.symmetry);
+      if (symmetry_flags != 0) {
+        symmetry_contour_.object_sync(ob_ref.object, symmetry_flags, state);
+      }
     }
   }
 
@@ -103,6 +134,14 @@ class Lattices : Overlay {
     }
   }
 
+  void end_sync(Resources & /*res*/, const State & /*state*/) final
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.end_sync();
+  }
+
   void pre_draw(Manager &manager, View &view) final
   {
     if (!enabled_) {
@@ -120,6 +159,20 @@ class Lattices : Overlay {
 
     GPU_framebuffer_bind(framebuffer);
     manager.submit_only(ps_, view);
+  }
+
+  /**
+   * The symmetry contour is drawn into the depth-less line frame-buffer so it feeds post-AA, and
+   * is therefore not depth tested against the passes that follow. It is kept out of #draw_line and
+   * submitted by #Instance::draw_v3d after the grid and the other line overlays, which share the
+   * same `line_tx` and would otherwise draw over it (same pattern as #Sculpts::draw_symmetry_contour).
+   */
+  void draw_symmetry_contour(Framebuffer &framebuffer, Manager &manager, View &view)
+  {
+    if (!enabled_) {
+      return;
+    }
+    symmetry_contour_.draw_line(framebuffer, manager, view);
   }
 };
 }  // namespace blender::draw::overlay

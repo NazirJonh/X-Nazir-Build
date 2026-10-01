@@ -755,6 +755,7 @@ void Instance::end_sync()
     layer.force_fields.end_sync(resources, state);
     layer.lights.end_sync(resources, state);
     layer.light_probes.end_sync(resources, state);
+    layer.lattices.end_sync(resources, state);
     layer.mesh_uvs.end_sync(resources, state);
     layer.meshes.end_sync(resources, state);
     layer.metaballs.end_sync(resources, state);
@@ -1076,12 +1077,14 @@ void Instance::draw_v3d(Manager &manager, View &view)
 
     /* Symmetry contours last. They target the depth-less line frame-buffer and resolve occlusion
      * per-fragment instead of by depth test, so any later pass writing `line_tx` (the grid, the
-     * mesh line overlays) would simply paint over them. The Edit Mode contour needs no entry here:
-     * it is drawn at the end of #Meshes::draw_line just above. */
+     * mesh line overlays) would simply paint over them. The Edit Mode mesh contour needs no entry
+     * here: it is drawn at the end of #Meshes::draw_line just above. */
     regular.paints.draw_line(resources.overlay_line_fb, manager, view);
     infront.paints.draw_line(resources.overlay_line_in_front_fb, manager, view);
     regular.sculpts.draw_symmetry_contour(resources.overlay_line_fb, manager, view);
     infront.sculpts.draw_symmetry_contour(resources.overlay_line_in_front_fb, manager, view);
+    regular.lattices.draw_symmetry_contour(resources.overlay_line_fb, manager, view);
+    infront.lattices.draw_symmetry_contour(resources.overlay_line_in_front_fb, manager, view);
 
     draw_color_only(regular, resources.overlay_color_only_fb);
     draw_color_only(infront, resources.overlay_color_only_fb);

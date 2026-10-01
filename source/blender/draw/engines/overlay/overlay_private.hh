@@ -359,6 +359,10 @@ struct State {
   {
     return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR);
   }
+  bool show_lattice_symmetry_contour() const
+  {
+    return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_LATTICE_CONTOUR);
+  }
   bool show_curves_symmetry_plane() const
   {
     return (this->overlay.symmetry_flag & V3D_OVERLAY_SYMMETRY_CURVES_PLANE);

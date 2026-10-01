@@ -287,6 +287,12 @@ class VIEW3D_HT_tool_header(Header):
             ob = context.object
             _row, sub = row_for_mirror()
             sub.prop(ob.pose, "use_mirror_x", text="X", toggle=True)
+        elif mode_string == 'EDIT_LATTICE':
+            ob = context.object
+            _row, sub = row_for_mirror()
+            sub.prop(ob.data, "use_mirror_x", text="X", toggle=True)
+            sub.prop(ob.data, "use_mirror_y", text="Y", toggle=True)
+            sub.prop(ob.data, "use_mirror_z", text="Z", toggle=True)
         elif mode_string in {'EDIT_MESH', 'PAINT_WEIGHT', 'SCULPT', 'PAINT_VERTEX', 'PAINT_TEXTURE'}:
             # Mesh Modes, Use Mesh Symmetry
             ob = context.object
@@ -1312,6 +1318,8 @@ class VIEW3D_HT_header(Header):
             sub.popover(panel="VIEW3D_PT_overlay_edit_mesh", text="", icon='EDITMODE_HLT')
         if mode_string == 'EDIT_CURVE':
             sub.popover(panel="VIEW3D_PT_overlay_edit_curve", text="", icon='EDITMODE_HLT')
+        elif mode_string == 'EDIT_LATTICE':
+            sub.popover(panel="VIEW3D_PT_overlay_edit_lattice", text="", icon='EDITMODE_HLT')
         elif mode_string == 'EDIT_CURVES':
             sub.popover(panel="VIEW3D_PT_overlay_edit_curves", text="", icon='EDITMODE_HLT')
         elif mode_string == 'SCULPT':
@@ -8706,6 +8714,33 @@ class VIEW3D_PT_overlay_edit_curve(Panel):
         sub.prop(overlay, "proportional_edit_viz_opacity", text="Proportional Highlight")
 
 
+class VIEW3D_PT_overlay_edit_lattice(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_label = "Lattice Edit Mode"
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'EDIT_LATTICE'
+
+    def draw(self, context):
+        layout = self.layout
+        view = context.space_data
+        overlay = view.overlay
+        display_all = overlay.show_overlays
+
+        layout.label(text="Lattice Edit Mode Overlays")
+
+        col = layout.column()
+        col.active = display_all
+
+        row = col.row(align=True)
+        row.prop(overlay, "show_lattice_symmetry_contour", text="")
+        sub = row.row()
+        sub.active = overlay.show_lattice_symmetry_contour
+        sub.prop(overlay, "symmetry_contour_thickness", text="Symmetry Contours")
+
+
 class VIEW3D_PT_overlay_edit_curves(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'HEADER'
@@ -11092,6 +11127,7 @@ classes = (
     VIEW3D_PT_overlay_edit_mesh_freestyle,
     VIEW3D_PT_overlay_edit_curve,
     VIEW3D_PT_overlay_edit_curves,
+    VIEW3D_PT_overlay_edit_lattice,
     VIEW3D_PT_overlay_texture_paint,
     VIEW3D_PT_overlay_vertex_paint,
     VIEW3D_PT_overlay_weight_paint,

@@ -193,6 +193,11 @@ char transform_convert_frame_side_dir_get(TransInfo *t, float cframe);
 bool FrameOnMouseSide(char side, float frame, float cframe);
 void transform_convert_clip_mirror_modifier_apply(TransDataContainer *tc);
 /**
+ * Snap edit-mode mirror points to their symmetry plane and copy the transformed position of each
+ * point in #TransDataContainer::data_mirror over from the point it mirrors from.
+ */
+void transform_convert_mirror_apply(TransDataContainer *tc);
+/**
  * For the realtime animation recording feature, handle overlapping data.
  */
 void animrecord_check_state(TransInfo *t, ID *id);

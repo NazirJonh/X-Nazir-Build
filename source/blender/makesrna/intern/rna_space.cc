@@ -6422,6 +6422,14 @@ static void rna_def_space_view3d_overlay(BlenderRNA *brna)
                            "Display symmetry contour lines in mesh edit mode");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  prop = RNA_def_property(srna, "show_lattice_symmetry_contour", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_LATTICE_CONTOUR);
+  RNA_def_property_ui_text(prop,
+                           "Show Lattice Symmetry Contours",
+                           "Display symmetry contour lines in lattice edit mode");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "show_curves_symmetry_plane", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(
       prop, nullptr, "overlay.symmetry_flag", V3D_OVERLAY_SYMMETRY_CURVES_PLANE);

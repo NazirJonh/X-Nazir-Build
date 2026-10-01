@@ -8,6 +8,7 @@
 
 #include "DNA_anim_types.h"
 #include "DNA_constraint_types.h"
+#include "DNA_lattice_types.h"
 #include "DNA_mesh_types.h"
 
 #include "MEM_guardedalloc.h"
@@ -860,6 +861,12 @@ static void init_TransDataContainers(TransInfo *t, Object *obact, Span<Object *>
         tc->use_mirror_axis_z = ((id_cast<Mesh *>(objects[i]->data))->symmetry & ME_SYMMETRY_Z) !=
                                 0;
       }
+      else if (!(t->flag & T_NO_MIRROR) && (objects[i]->type == OB_LATTICE)) {
+        const Lattice *latt = id_cast<Lattice *>(objects[i]->data);
+        tc->use_mirror_axis_x = (latt->symmetry & LT_SYMMETRY_X) != 0;
+        tc->use_mirror_axis_y = (latt->symmetry & LT_SYMMETRY_Y) != 0;
+        tc->use_mirror_axis_z = (latt->symmetry & LT_SYMMETRY_Z) != 0;
+      }
 
       if (object_mode & OB_MODE_EDIT) {
         tc->obedit = objects[i];
@@ -887,6 +894,41 @@ static void init_TransDataContainers(TransInfo *t, Object *obact, Span<Object *>
         normalize_m3_m3(tc->mat3_unit, tc->mat3);
       }
       /* Otherwise leave as zero. */
+    }
+  }
+}
+
+void transform_convert_mirror_apply(TransDataContainer *tc)
+{
+  if (tc->use_mirror_axis_any) {
+    TransData *td;
+    for (int i = 0; i < tc->data_len; i++) {
+      td = &tc->data[i];
+      if (td->flag & (TD_MIRROR_EDGE_X | TD_MIRROR_EDGE_Y | TD_MIRROR_EDGE_Z)) {
+        if (td->flag & TD_MIRROR_EDGE_X) {
+          td->loc[0] = 0.0f;
+        }
+        if (td->flag & TD_MIRROR_EDGE_Y) {
+          td->loc[1] = 0.0f;
+        }
+        if (td->flag & TD_MIRROR_EDGE_Z) {
+          td->loc[2] = 0.0f;
+        }
+      }
+    }
+
+    TransDataMirror *td_mirror = tc->data_mirror;
+    for (int i = 0; i < tc->data_mirror_len; i++, td_mirror++) {
+      copy_v3_v3(td_mirror->loc, td_mirror->loc_src);
+      if (td_mirror->flag & TD_MIRROR_X) {
+        td_mirror->loc[0] *= -1;
+      }
+      if (td_mirror->flag & TD_MIRROR_Y) {
+        td_mirror->loc[1] *= -1;
+      }
+      if (td_mirror->flag & TD_MIRROR_Z) {
+        td_mirror->loc[2] *= -1;
+      }
     }
   }
 }

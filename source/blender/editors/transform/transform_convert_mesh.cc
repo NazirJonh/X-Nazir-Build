@@ -2027,41 +2027,6 @@ static void mesh_partial_update(TransInfo *t,
 /** \name Recalc Mesh Data
  * \{ */
 
-static void mesh_transdata_mirror_apply(TransDataContainer *tc)
-{
-  if (tc->use_mirror_axis_any) {
-    int i;
-    TransData *td;
-    for (i = 0, td = tc->data; i < tc->data_len; i++, td++) {
-      if (td->flag & (TD_MIRROR_EDGE_X | TD_MIRROR_EDGE_Y | TD_MIRROR_EDGE_Z)) {
-        if (td->flag & TD_MIRROR_EDGE_X) {
-          td->loc[0] = 0.0f;
-        }
-        if (td->flag & TD_MIRROR_EDGE_Y) {
-          td->loc[1] = 0.0f;
-        }
-        if (td->flag & TD_MIRROR_EDGE_Z) {
-          td->loc[2] = 0.0f;
-        }
-      }
-    }
-
-    TransDataMirror *td_mirror = tc->data_mirror;
-    for (i = 0; i < tc->data_mirror_len; i++, td_mirror++) {
-      copy_v3_v3(td_mirror->loc, td_mirror->loc_src);
-      if (td_mirror->flag & TD_MIRROR_X) {
-        td_mirror->loc[0] *= -1;
-      }
-      if (td_mirror->flag & TD_MIRROR_Y) {
-        td_mirror->loc[1] *= -1;
-      }
-      if (td_mirror->flag & TD_MIRROR_Z) {
-        td_mirror->loc[2] *= -1;
-      }
-    }
-  }
-}
-
 static void recalcData_mesh(TransInfo *t)
 {
   if (t->mode == TFM_NORMAL_ROTATION) {
@@ -2084,7 +2049,7 @@ static void recalcData_mesh(TransInfo *t)
       transform_convert_clip_mirror_modifier_apply(tc);
 
       if (do_mirror) {
-        mesh_transdata_mirror_apply(tc);
+        transform_convert_mirror_apply(tc);
       }
 
       mesh_customdatacorrect_apply(tc, false);

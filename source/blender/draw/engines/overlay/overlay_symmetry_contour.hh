@@ -10,8 +10,9 @@
  * #SymmetryContour computes and draws the contour where a mesh surface intersects the X/Y/Z
  * symmetry planes. It supports every mesh editing context: sculpt mode (using the paint BVH with
  * incremental per-node caching for fast live updates), edit mode and the paint modes (weight,
- * vertex, texture). The resulting line geometry is generated in world space and accumulated for
- * all synced objects into a single line buffer.
+ * vertex, texture). For lattices in edit mode the contour is extracted from the outer shell of
+ * the grid instead (see #add_full_lattice_segments). The resulting line geometry is generated in
+ * world space and accumulated for all synced objects into a single line buffer.
  *
  * Curves objects, which have no surface to contour, are handled by #SymmetryPlaneOverlay (see
  * overlay_symmetry_plane.hh) which draws the translucent symmetry planes instead.
@@ -41,6 +42,8 @@ namespace blender::draw::overlay {
 int symmetry_flags_from_mesh_symmetry(char mesh_symmetry);
 /** Convert a curves `CURVES_SYMMETRY_*` bit-field into `PAINT_SYMM_*` axis flags. */
 int symmetry_flags_from_curves_symmetry(char curves_symmetry);
+/** Convert a lattice `LT_SYMMETRY_*` bit-field into `PAINT_SYMM_*` axis flags. */
+int symmetry_flags_from_lattice_symmetry(char lattice_symmetry);
 
 /** Where one symmetry plane sits in an object's local space. */
 struct SymmetryPlanePlacement {

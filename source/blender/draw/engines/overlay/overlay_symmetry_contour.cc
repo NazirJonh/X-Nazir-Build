@@ -9,6 +9,7 @@
 #include "overlay_symmetry_contour.hh"
 
 #include "BKE_ccg.hh"
+#include "BKE_lattice.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
@@ -17,6 +18,7 @@
 
 #include "DEG_depsgraph_query.hh"
 
+#include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_bounds.hh"
 #include "BLI_disjoint_set.hh"
@@ -30,6 +32,7 @@
 #include "bmesh.hh"
 
 #include "DNA_curves_types.h"
+#include "DNA_lattice_types.h"
 #include "DNA_mesh_types.h"
 
 #include <atomic>
@@ -399,6 +402,78 @@ void add_full_editmesh_segments(BMesh &bm,
       float3 s, e;
       if (intersect_triangle_plane(v0, float3(l->v->co), float3(l->next->v->co), plane, s, e)) {
         append_segment(segments, hashes, s, e, plane);
+      }
+    }
+  }
+}
+
+/**
+ * Full-lattice CPU extraction. Edit Mode has no paint BVH for lattices and the wire has no faces,
+ * so the contour is extracted from the outer shell quads of the grid instead: the result shows
+ * where the symmetry planes cut the lattice volume.
+ */
+void add_full_lattice_segments(const Lattice &latt,
+                               const PlaneParams &plane,
+                               Vector<ContourSegment> &segments,
+                               Set<uint64_t> &hashes)
+{
+  const int totu = latt.pntsu;
+  const int totv = latt.pntsv;
+  const int totw = latt.pntsw;
+  if (latt.def == nullptr || totu < 1 || totv < 1 || totw < 1) {
+    return;
+  }
+
+  auto point = [&](const int u, const int v, const int w) {
+    return float3(latt.def[BKE_lattice_index_from_uvw(&latt, u, v, w)].vec);
+  };
+  auto quad = [&](const float3 &a, const float3 &b, const float3 &c, const float3 &d) {
+    float3 s, e;
+    if (intersect_triangle_plane(a, b, c, plane, s, e)) {
+      append_segment(segments, hashes, s, e, plane);
+    }
+    if (intersect_triangle_plane(a, c, d, plane, s, e)) {
+      append_segment(segments, hashes, s, e, plane);
+    }
+  };
+
+  /* Faces of the boundary cells only: the interior cell faces would draw a full grid pattern on
+   * the plane instead of the outline of the cross-section. Shared faces of adjacent cells are
+   * handled by the hash-set deduplication, so coincident boundary planes (a single-point axis)
+   * are emitted only once. */
+  if (totv >= 2 && totw >= 2) {
+    for (const int u : {0, totu - 1}) {
+      for (const int j : IndexRange(totv - 1)) {
+        for (const int k : IndexRange(totw - 1)) {
+          quad(point(u, j, k),
+               point(u, j + 1, k),
+               point(u, j + 1, k + 1),
+               point(u, j, k + 1));
+        }
+      }
+    }
+  }
+  if (totu >= 2 && totw >= 2) {
+    for (const int v : {0, totv - 1}) {
+      for (const int i : IndexRange(totu - 1)) {
+        for (const int k : IndexRange(totw - 1)) {
+          quad(point(i, v, k),
+               point(i + 1, v, k),
+               point(i + 1, v, k + 1),
+               point(i, v, k + 1));
+        }
+      }
+    }
+  }
+  if (totu >= 2 && totv >= 2) {
+    for (const int w : {0, totw - 1}) {
+      for (const int i : IndexRange(totu - 1)) {
+        for (const int j : IndexRange(totv - 1)) {
+          quad(point(i, j, w),
+               point(i + 1, j, w),
+               point(i + 1, j + 1, w),
+               point(i, j + 1, w));
+        }
       }
     }
   }
@@ -782,8 +857,8 @@ void SymmetryContour::update_contours(const Object *ob,
                                       BMesh *edit_bm,
                                       const float4x4 *symmetry_space_to_object)
 {
-  if (!enabled_ || ob == nullptr || ob->data == nullptr || ob->type != OB_MESH ||
-      symmetry_flags == 0)
+  if (!enabled_ || ob == nullptr || ob->data == nullptr ||
+      !ELEM(ob->type, OB_MESH, OB_LATTICE) || symmetry_flags == 0)
   {
     return;
   }
@@ -798,7 +873,11 @@ void SymmetryContour::update_contours(const Object *ob,
   ObjectCache &cache = object_caches_.lookup_or_add_default(ob);
   cache.last_seen_frame = frame_counter_;
 
-  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*const_cast<Object *>(ob));
+  /* Only meshes can own a paint BVH; #pbvh_get asserts as much. Lattices in Edit Mode have no
+   * BVH, so they take the full-geometry extraction path below. */
+  bke::pbvh::Tree *pbvh = (ob->type == OB_MESH) ?
+                              bke::object::pbvh_get(*const_cast<Object *>(ob)) :
+                              nullptr;
   const SculptSession *ss = ob->runtime->sculpt_session;
   /* The BMesh path is only relevant when there is no paint BVH to draw from. */
   if (pbvh != nullptr) {
@@ -867,12 +946,41 @@ void SymmetryContour::update_contours(const Object *ob,
    * original topology. Reading the evaluated mesh here would index those arrays with the
    * post-modifier topology and run off the end of both (Subsurf and friends add vertices and
    * faces). The same reason #Sculpts::mesh_sync reads the original object. */
+  const bool is_lattice = (ob->type == OB_LATTICE);
   const bool pbvh_over_original_mesh = pbvh != nullptr && pbvh->type() == bke::pbvh::Type::Mesh;
   const Object &mesh_ob = pbvh_over_original_mesh ? *DEG_get_original(ob) : *ob;
-  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(mesh_ob);
+  const Mesh *mesh = nullptr;
+  const Lattice *lattice = nullptr;
+  if (is_lattice) {
+    /* In Edit Mode the live lattice points are in the edit-lattice of the ORIGINAL object, same
+     * as the BMesh is for edit-mesh. */
+    const Object &ob_orig = *DEG_get_original(const_cast<Object *>(ob));
+    const Lattice &lt_orig = *id_cast<const Lattice *>(ob_orig.data);
+    lattice = (lt_orig.editlatt != nullptr && lt_orig.editlatt->latt != nullptr) ?
+                  lt_orig.editlatt->latt :
+                  &lt_orig;
+  }
+  else {
+    mesh = &DRW_object_get_data_for_drawing<Mesh>(mesh_ob);
+  }
 
-  const Span<float3> positions = resolve_positions(*ob, mesh, pbvh, ss, state, edit_bm);
-  if (positions.is_empty() && edit_bm == nullptr) {
+  Array<float3> lattice_positions;
+  if (lattice != nullptr) {
+    const int lattice_tot = lattice->pntsu * lattice->pntsv * lattice->pntsw;
+    lattice_positions.reinitialize(lattice_tot);
+    for (const int i : IndexRange(lattice_tot)) {
+      lattice_positions[i] = float3(lattice->def[i].vec);
+    }
+    /* Degenerate lattice (no points): fall through to the empty-geometry early return below. */
+    if (lattice_positions.is_empty()) {
+      lattice = nullptr;
+    }
+  }
+
+  const Span<float3> positions = is_lattice ?
+                                     Span<float3>(lattice_positions) :
+                                     resolve_positions(*ob, *mesh, pbvh, ss, state, edit_bm);
+  if (positions.is_empty() && edit_bm == nullptr && lattice == nullptr) {
     return;
   }
 
@@ -1053,7 +1161,7 @@ void SymmetryContour::update_contours(const Object *ob,
                             Vector<ContourSegment> &node_segments,
                             Set<uint64_t> &local_hashes) {
                           process_pbvh_mesh(
-                              positions, mesh, node, plane, node_segments, local_hashes);
+                              positions, *mesh, node, plane, node_segments, local_hashes);
                         });
           break;
         }
@@ -1113,8 +1221,11 @@ void SymmetryContour::update_contours(const Object *ob,
       if (edit_bm != nullptr) {
         add_full_editmesh_segments(*edit_bm, plane, segments, segment_hashes);
       }
+      else if (lattice != nullptr) {
+        add_full_lattice_segments(*lattice, plane, segments, segment_hashes);
+      }
       else {
-        add_full_mesh_segments(mesh, positions, plane, segments, segment_hashes);
+        add_full_mesh_segments(*mesh, positions, plane, segments, segment_hashes);
       }
     }
 
@@ -1254,6 +1365,21 @@ int symmetry_flags_from_curves_symmetry(const char curves_symmetry)
     flags |= PAINT_SYMM_Y;
   }
   if (curves_symmetry & CURVES_SYMMETRY_Z) {
+    flags |= PAINT_SYMM_Z;
+  }
+  return flags;
+}
+
+int symmetry_flags_from_lattice_symmetry(const char lattice_symmetry)
+{
+  int flags = 0;
+  if (lattice_symmetry & LT_SYMMETRY_X) {
+    flags |= PAINT_SYMM_X;
+  }
+  if (lattice_symmetry & LT_SYMMETRY_Y) {
+    flags |= PAINT_SYMM_Y;
+  }
+  if (lattice_symmetry & LT_SYMMETRY_Z) {
     flags |= PAINT_SYMM_Z;
   }
   return flags;

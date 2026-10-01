@@ -1638,7 +1638,8 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
                                           V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
                                           V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
                                           V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
-                                          V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR;
+                                          V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
+                                          V3D_OVERLAY_SYMMETRY_LATTICE_CONTOUR;
             v3d->overlay.sculpt_symmetry_plane_opacity = 0.03f;
             v3d->overlay.sculpt_symmetry_contour_thickness = 3.0f;
           }
@@ -1658,6 +1659,22 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
             View3D *v3d = reinterpret_cast<View3D *>(&sl);
             v3d->overlay.flag |= V3D_OVERLAY_SCULPT_SHOW_LAYER_MASK;
             v3d->overlay.sculpt_mode_layer_mask_opacity = 0.75f;
+          }
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 80)) {
+    /* The lattice symmetry contour overlay is on by default, and its bit is new: every file
+     * predating it stored a zero there, which would otherwise read as "the user turned it off".
+     * Set once, so a later deliberate toggle survives. */
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_VIEW3D) {
+            View3D *v3d = reinterpret_cast<View3D *>(&sl);
+            v3d->overlay.symmetry_flag |= V3D_OVERLAY_SYMMETRY_LATTICE_CONTOUR;
           }
         }
       }

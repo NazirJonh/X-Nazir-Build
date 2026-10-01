@@ -227,7 +227,8 @@ static void blo_update_defaults_screen(bScreen *screen,
                                     V3D_OVERLAY_SYMMETRY_WEIGHT_PAINT_CONTOUR |
                                     V3D_OVERLAY_SYMMETRY_VERTEX_PAINT_CONTOUR |
                                     V3D_OVERLAY_SYMMETRY_TEXTURE_PAINT_CONTOUR |
-                                    V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR;
+                                    V3D_OVERLAY_SYMMETRY_EDIT_MESH_CONTOUR |
+                                    V3D_OVERLAY_SYMMETRY_LATTICE_CONTOUR;
       v3d->overlay.sculpt_symmetry_plane_opacity = 0.03f;
       v3d->overlay.sculpt_symmetry_contour_thickness = 3.0f;
       /* grease pencil settings */

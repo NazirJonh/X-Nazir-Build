@@ -34,6 +34,14 @@ enum eLattice_Flag : short {
 };
 ENUM_OPERATORS(eLattice_Flag)
 
+/** #Lattice::symmetry */
+enum eLattice_Symmetry : char {
+  LT_SYMMETRY_X = 1 << 0,
+  LT_SYMMETRY_Y = 1 << 1,
+  LT_SYMMETRY_Z = 1 << 2,
+};
+ENUM_OPERATORS(eLattice_Symmetry)
+
 #define LT_ACTBP_NONE -1
 
 #
@@ -84,8 +92,9 @@ struct Lattice {
   ListBaseT<struct bDeformGroup> vertex_group_names = {nullptr, nullptr};
   int vertex_group_active_index = 0;
 
-  char _pad0[4] = {};
-
+  /** Symmetry axes used while editing (#eLattice_Symmetry). */
+  eLattice_Symmetry symmetry = eLattice_Symmetry(0);
+  char _pad0[3] = {};
   struct EditLatt *editlatt = nullptr;
   draw::LatticeBatchCache *batch_cache = nullptr;
 };

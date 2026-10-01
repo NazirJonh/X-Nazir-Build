@@ -93,7 +93,7 @@ class Instance : public DrawEngine {
     Fluids fluids = {selection_type_};
     ForceFields force_fields = {selection_type_};
     GreasePencil grease_pencil;
-    Lattices lattices;
+    Lattices lattices = {in_front_};
     Lights lights = {selection_type_};
     LightProbes light_probes = {selection_type_};
     Meshes meshes = {in_front_};

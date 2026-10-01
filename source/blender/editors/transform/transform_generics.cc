@@ -600,7 +600,7 @@ void initTransInfo(bContext *C, TransInfo *t, wmOperator *op, const wmEvent *eve
       t->flag |= T_NO_MIRROR;
     }
   }
-  else if ((t->spacetype == SPACE_VIEW3D) && (t->obedit_type == OB_MESH)) {
+  else if ((t->spacetype == SPACE_VIEW3D) && ELEM(t->obedit_type, OB_MESH, OB_LATTICE)) {
     /* Pass. */
   }
   else {

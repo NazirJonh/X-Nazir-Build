@@ -72,6 +72,7 @@ set(SRC
   shapes/paint_vector_document.cc
   shapes/paint_vector_editor.cc
   paint_sample_color.cc
+  paint_session_confirm.cc
   paint_stroke.cc
   paint_stroke_roll.cc
   paint_utils.cc
@@ -250,6 +251,7 @@ paint_intern.hh
   shapes/paint_shape_target.hh
   shapes/paint_vector_document.hh
   shapes/paint_vector_editor.hh
+  paint_session_confirm.hh
 
   curves/sculpt_intern.hh
   curves/sculpt_multi_object.hh

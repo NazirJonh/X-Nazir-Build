@@ -1127,13 +1127,20 @@ static Array<RowFactorCache> compute_paint_row_factors(
           }
           tile_cache.row_changed[row_i] = true;
           paint_material_channel_perf::add_rows_painted(1);
-
-          const int2 start(pixel_row.start_image_coordinate.x, pixel_row.start_image_coordinate.y);
-          const int2 end = start + int2(pixel_row.num_pixels + 1, 0);
-          tile_cache.dirty_bounds = bounds::merge(tile_cache.dirty_bounds,
-                                                  Bounds<int2>(start, end));
         },
         exec_mode::grain_size(2));
+
+    /* Merged after the parallel loop: merging from the row tasks raced, and the bounds now also
+     * decide which undo tiles #push_undo_bounds saves, where a lost row would lose undo data. */
+    tile_cache.valid_rows.foreach_index([&](const int row_i) {
+      if (!tile_cache.row_changed[row_i]) {
+        return;
+      }
+      const PackedPixelRow &pixel_row = tile_data.pixel_rows[row_i];
+      const int2 start(pixel_row.start_image_coordinate.x, pixel_row.start_image_coordinate.y);
+      const int2 end = start + int2(pixel_row.num_pixels + 1, 0);
+      tile_cache.dirty_bounds = bounds::merge(tile_cache.dirty_bounds, Bounds<int2>(start, end));
+    });
   }
 
   return tile_caches;
@@ -1753,6 +1760,54 @@ static void push_undo(const PixelNode &node_data,
   }
 }
 
+/**
+ * Save only the undo tiles this dab's #RowFactorCache::dirty_bounds reach, instead of every tile
+ * under the node's UV region (#push_undo): a coarse node spans most of a 4096 map, which made the
+ * first dab of each stroke copy the whole map once per channel. \a tile_caches is indexed like
+ * #PixelNode::tiles. The bounds grow by the image's seam margin because
+ * #fix_non_manifold_seam_bleeding writes the bleed texels next to painted ones.
+ */
+static void push_undo_bounds(ImageData &image_data,
+                             const PixelNode &pixel_node,
+                             const Span<RowFactorCache> tile_caches)
+{
+  PRF_scope(ProfileCategory::Editor);
+  Image &image = *image_data.image;
+  ImageUser &image_user = *image_data.image_user;
+  const int margin = math::max(int(image.seam_margin), 0);
+  PaintTileMap *undo_tiles = ED_image_paint_tile_map_get();
+  for (const int tile_i : pixel_node.tiles.index_range()) {
+    const Bounds<int2> &bounds = tile_caches[tile_i].dirty_bounds;
+    if (bounds.is_empty()) {
+      continue;
+    }
+    const TileNumber tile_number = pixel_node.tiles[tile_i].tile_number;
+    ImBuf *buffer = image_data.buffers.lookup_default(tile_number, nullptr);
+    if (buffer == nullptr) {
+      continue;
+    }
+    image_user.tile = tile_number;
+    const int xmin = bounds.min.x - margin;
+    const int ymin = bounds.min.y - margin;
+    int tilex, tiley, tilew, tileh;
+    undo_region_tiles(buffer,
+                      xmin,
+                      ymin,
+                      bounds.max.x + margin - xmin + 1,
+                      bounds.max.y + margin - ymin + 1,
+                      &tilex,
+                      &tiley,
+                      &tilew,
+                      &tileh);
+    for (int ty = tiley; ty <= tileh; ty++) {
+      for (int tx = tilex; tx <= tilew; tx++) {
+        ED_image_paint_tile_push(
+            undo_tiles, &image, buffer, &image_user, tx, ty, nullptr, nullptr, true, true);
+      }
+    }
+  }
+}
+
 void do_push_undo_tile(ImageData &image_data, bke::pbvh::Node & /*node*/, PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -2189,16 +2244,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
         }
       });
     }
-    {
-      PAINT_CHANNEL_PERF_SCOPE(UndoPush);
-      node_mask.foreach_index(
-          [&](const int i) {
-            for (const PaintChannelWriteDest &dest : dests) {
-              do_push_undo_tile(*dest.image_data, nodes[i], pixel_nodes[i]);
-            }
-          },
-          exec_mode::grain_size(1));
-    }
+    /* Factors come before the undo push: their per-tile bounds limit which undo tiles are saved. */
     if (!factor_caches_valid) {
       PAINT_CHANNEL_PERF_SCOPE(PaintFactors);
       node_mask.foreach_index(
@@ -2219,6 +2265,16 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           },
           exec_mode::grain_size(1));
       factor_caches_valid = true;
+    }
+    {
+      PAINT_CHANNEL_PERF_SCOPE(UndoPush);
+      node_mask.foreach_index(
+          [&](const int i, const int pos) {
+            for (const PaintChannelWriteDest &dest : dests) {
+              push_undo_bounds(*dest.image_data, pixel_nodes[i], node_factor_caches[pos]);
+            }
+          },
+          exec_mode::grain_size(1));
     }
 #if PBR_PAINT_IMAGE_PROFILE
     const double group_pixels_start = group_write ? BLI_time_now_seconds() : 0.0;

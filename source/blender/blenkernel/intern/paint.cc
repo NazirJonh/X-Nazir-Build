@@ -3073,11 +3073,18 @@ static void sculpt_update_object(Depsgraph *depsgraph,
      *
      * The relevant changes are stored/encoded in the paint canvas key.
      * These include the active uv map, and resolutions. */
-    std::string paint_canvas_key = BKE_paint_canvas_key_get(
-        &scene->toolsettings->paint_mode,
-        ob,
-        BKE_paint_brush(&sd->paint),
-        sd->paint.visible_material_channels);
+    PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+    /* A Material canvas's key lists every channel map, and that list comes back empty from some
+     * callers, so the key flipped and each flip re-encoded every pixel (~270 ms at 4096). Its
+     * encodings are cached by #BKE_paint_pixels_layout_key_get, which already covers the maps'
+     * sizes and seam margin, so only the UV map has to be keyed here. */
+    std::string paint_canvas_key =
+        (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) ?
+            "UV_MAP:" + std::string(BKE_paint_canvas_uvmap_name_get(&paint_mode, ob).value_or("")) :
+            BKE_paint_canvas_key_get(&paint_mode,
+                                     ob,
+                                     BKE_paint_brush(&sd->paint),
+                                     sd->paint.visible_material_channels);
     if (!ss.last_paint_canvas_key || paint_canvas_key != ss.last_paint_canvas_key) {
       ss.last_paint_canvas_key = paint_canvas_key;
       BKE_pbvh_mark_rebuild_pixels(pbvh);

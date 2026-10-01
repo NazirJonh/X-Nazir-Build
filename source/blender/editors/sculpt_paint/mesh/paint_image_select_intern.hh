@@ -106,6 +106,66 @@ void image_paint_selection_undo_begin(const char *name,
 /** Invalidate derived mask data and notify all target images after a selection edit. */
 void image_paint_selection_targets_update(bContext *C, Span<ImagePaintSelectionTarget> targets);
 
+/* -------------------------------------------------------------------- */
+/** \name Selection-mask snapshots (interactive previews)
+ *
+ * Snapshots of the selection-mask tile of every target, for the interactive selection tools
+ * (wand drag, quick select): the live mask is rewritten from its snapshot on every preview step
+ * and on cancel.
+ * \{ */
+
+/** A copy of one target's selection-mask tile, taken for an interactive preview. */
+struct ImagePaintSelectionMaskSnapshot {
+  Image *image = nullptr;
+  int tile_number = 0;
+  /** Copy of the mask tile when the snapshot was taken. */
+  ImBuf *orig = nullptr;
+  /** The live tile did not exist yet and was created zeroed by the snapshot. */
+  bool created = false;
+};
+
+/**
+ * Snapshot the \a tile_number mask of every target that has that tile (creating a zeroed mask
+ * when the tile has none yet). Targets without the tile are skipped.
+ */
+Vector<ImagePaintSelectionMaskSnapshot> image_paint_selection_mask_snapshots_create(
+    Span<ImagePaintSelectionTarget> targets, int tile_number);
+
+/** Rewrite every live mask tile from its snapshot. */
+void image_paint_selection_mask_snapshots_restore(
+    Span<ImagePaintSelectionMaskSnapshot> snapshots);
+
+/**
+ * Rewrite the live tiles from their snapshots, and free the mask tiles the snapshots created
+ * (they had no mask before the interaction). For cancel paths, so a cancelled preview does not
+ * leave zeroed masks behind.
+ */
+void image_paint_selection_mask_snapshots_restore_for_cancel(
+    Span<ImagePaintSelectionMaskSnapshot> snapshots);
+
+/** Free the snapshot copies and clear \a snapshots. */
+void image_paint_selection_mask_snapshots_free(
+    Vector<ImagePaintSelectionMaskSnapshot> &snapshots);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Shared operator helpers
+ * \{ */
+
+/** #image_paint_selection_poll and an Image Editor with an image open. */
+bool image_paint_selection_image_poll(bContext *C);
+
+/**
+ * Set the always-explicit edge policy on every target from the feather setting: hard, or
+ * feathered with an integer blend radius once \a feather_px reaches 1. Callers run this after
+ * every selection edit so a feather of an earlier tool never leaks in.
+ */
+void image_paint_selection_edge_policy_apply(Span<ImagePaintSelectionTarget> targets,
+                                             float feather_px);
+
+/** \} */
+
 inline void selection_tile_fragment_free(SelectionTileFragment &frag)
 {
   image_select_fragment_free(frag);

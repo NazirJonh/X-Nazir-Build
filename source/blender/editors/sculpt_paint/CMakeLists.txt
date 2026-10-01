@@ -145,6 +145,10 @@ set(SRC
   mesh/paint_image_shape_vector.cc
   mesh/paint_image_shape_gizmo.cc
   mesh/paint_image_select_fragment.cc
+  mesh/paint_image_select_source.cc
+  mesh/paint_image_select_region.cc
+  mesh/paint_image_select_wand.cc
+  mesh/paint_image_select_quick.cc
   mesh/paint_image_select_floating.cc
   mesh/paint_image_select_move.cc
   mesh/paint_image_select_transform.cc
@@ -369,6 +373,7 @@ if(WITH_GTESTS)
     paint_gradient_curve_test.cc
     mesh/paint_test.cc
     mesh/paint_image_select_warp_tests.cc
+    mesh/paint_image_select_region_tests.cc
     mesh/paint_image_uv_geom_tests.cc
     mesh/paint_image_uv_symmetry_tests.cc
     mesh/sculpt_boundary_tests.cc

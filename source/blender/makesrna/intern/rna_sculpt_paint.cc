@@ -3281,6 +3281,12 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   RNA_def_property_pointer_funcs(
       prop, nullptr, nullptr, nullptr, "rna_Image_no_renderresult_or_viewer_poll");
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_CONTEXT_UPDATE);
+  /* Not reference-counted, like #SpaceImage.image. #PaintModeSettings.canvas_image is assigned
+   * directly from C in several places (#image_new_paint_canvas_follow, the 2D paint stroke setup)
+   * and is walked as #IDWALK_CB_NOP, so its user-count never counted this pointer. Left
+   * refcounted, the generated setter would decrement the previous image's count on every UI
+   * assignment and trip RNA's user-count consistency assert. */
+  RNA_def_property_clear_flag(prop, PROP_ID_REFCOUNT);
   RNA_def_property_ui_text(prop, "Texture", "Image used as painting target");
 
   /* Custom channel value range stays scene-level; enable/value/blend live on
@@ -4483,6 +4489,240 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_pointer_sdna(prop, nullptr, "shape");
   RNA_def_property_struct_type(prop, "PaintShapeSettings");
   RNA_def_property_ui_text(prop, "Shape", "Settings of the shape drawing tools");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Magic Wand / Quick Select. */
+
+  static const EnumPropertyItem select_sample_size_items[] = {
+      {1, "POINT", 0, "Point Sample", "Sample the clicked pixel only"},
+      {3, "AVERAGE_3", 0, "3x3 Average", ""},
+      {5, "AVERAGE_5", 0, "5x5 Average", ""},
+      {11, "AVERAGE_11", 0, "11x11 Average", ""},
+      {31, "AVERAGE_31", 0, "31x31 Average", ""},
+      {51, "AVERAGE_51", 0, "51x51 Average", ""},
+      {101, "AVERAGE_101", 0, "101x101 Average", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem select_component_items[] = {
+      {IMAGE_PAINT_SELECT_COMPONENT_RGB, "RGB", 0, "RGB", "Red, green and blue"},
+      {IMAGE_PAINT_SELECT_COMPONENT_RGBA, "RGBA", 0, "RGBA", "Red, green, blue and alpha"},
+      {IMAGE_PAINT_SELECT_COMPONENT_LUMINANCE, "LUMINANCE", 0, "Luminance", ""},
+      {IMAGE_PAINT_SELECT_COMPONENT_HUE, "HUE", 0, "Hue", ""},
+      {IMAGE_PAINT_SELECT_COMPONENT_SATURATION, "SATURATION", 0, "Saturation", ""},
+      {IMAGE_PAINT_SELECT_COMPONENT_VALUE, "VALUE", 0, "Value", ""},
+      {IMAGE_PAINT_SELECT_COMPONENT_RED, "RED", 0, "Red", ""},
+      {IMAGE_PAINT_SELECT_COMPONENT_GREEN, "GREEN", 0, "Green", ""},
+      {IMAGE_PAINT_SELECT_COMPONENT_BLUE, "BLUE", 0, "Blue", ""},
+      {IMAGE_PAINT_SELECT_COMPONENT_ALPHA, "ALPHA", 0, "Alpha", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem select_metric_items[] = {
+      {IMAGE_PAINT_SELECT_METRIC_AUTO,
+       "AUTO",
+       0,
+       "Auto",
+       "Angle for normal maps, max channel otherwise"},
+      {IMAGE_PAINT_SELECT_METRIC_MAX_CHANNEL, "MAX_CHANNEL", 0, "Max Channel", ""},
+      {IMAGE_PAINT_SELECT_METRIC_EUCLIDEAN, "EUCLIDEAN", 0, "Euclidean", ""},
+      {IMAGE_PAINT_SELECT_METRIC_OKLAB, "OKLAB", 0, "OkLab", "Perceptual color difference"},
+      {IMAGE_PAINT_SELECT_METRIC_NORMAL_ANGLE, "NORMAL_ANGLE", 0, "Normal Angle", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem select_source_channel_items[] = {
+      {IMAGE_PAINT_SELECT_SOURCE_ACTIVE_PASS,
+       "ACTIVE_PASS",
+       0,
+       "Active Pass",
+       "The channel currently displayed in the Image Editor"},
+      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+      {PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", "Compare by normal angle"},
+      {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
+      {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
+      {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem quick_select_mode_items[] = {
+      {IMAGE_PAINT_QUICK_SELECT_ADD, "ADD", ICON_SELECT_EXTEND, "Add", "Grow the selection"},
+      {IMAGE_PAINT_QUICK_SELECT_SUBTRACT,
+       "SUBTRACT",
+       ICON_SELECT_SUBTRACT,
+       "Subtract",
+       "Shrink the selection"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "select_tolerance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "select_tolerance");
+  RNA_def_property_range(prop, 0.0f, 255.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 255.0f, 1.0f, 0);
+  RNA_def_property_ui_text(
+      prop, "Tolerance", "How similar to the sampled color a pixel must be (0..255)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* Stored in degrees (not #PROP_ANGLE, which is radians). */
+  prop = RNA_def_property(srna, "select_normal_tolerance", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "select_normal_tolerance");
+  RNA_def_property_range(prop, 0.0f, 180.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 180.0f, 1.0f, 0);
+  RNA_def_property_ui_text(
+      prop, "Normal Tolerance", "Maximum normal deviation from the sample, in degrees");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_sample_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "select_sample_size");
+  RNA_def_property_enum_items(prop, select_sample_size_items);
+  RNA_def_property_ui_text(
+      prop, "Sample Size", "How large a patch is averaged into the comparison color");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_source_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "select_source_channel");
+  RNA_def_property_enum_items(prop, select_source_channel_items);
+  RNA_def_property_ui_text(prop,
+                           "Source",
+                           "Which image the similarity is measured on (PBR Paint; the Canvas "
+                           "tool always uses the active image)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_component", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "select_component");
+  RNA_def_property_enum_items(prop, select_component_items);
+  RNA_def_property_ui_text(prop, "Component", "Part of the pixel the similarity is measured on");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_metric", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "select_metric");
+  RNA_def_property_enum_items(prop, select_metric_items);
+  RNA_def_property_ui_text(prop, "Metric", "How feature differences are measured");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "use_select_contiguous", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_CONTIGUOUS);
+  RNA_def_property_ui_text(
+      prop, "Contiguous", "Only select the area connected to the clicked pixel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_antialias", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_ANTIALIAS);
+  RNA_def_property_ui_text(
+      prop, "Anti-alias", "Give the selection edge a soft sub-pixel boundary");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_use_uv_bounds", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_USE_UV_BOUNDS);
+  RNA_def_property_ui_text(
+      prop, "UV Borders", "Do not select across UV seams, or outside the UV islands");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_same_island_only", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_SAME_ISLAND_ONLY);
+  RNA_def_property_ui_text(
+      prop, "Same Island Only", "Non-contiguous selection keeps only pixels of the clicked island");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_connect_8", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_CONNECT_8);
+  RNA_def_property_ui_text(
+      prop, "Diagonal Connectivity", "Flood diagonally (8-connected) instead of 4-connected");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_drag_tolerance", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_DRAG_TOLERANCE);
+  RNA_def_property_ui_text(
+      prop, "Drag Tolerance", "Click-drag horizontally to adjust the tolerance interactively");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_normalize_range", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_NORMALIZE_RANGE);
+  RNA_def_property_ui_text(
+      prop, "Normalize Range", "Stretch a scalar source over the tile's value range first");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_symmetry_orig_sample", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_SYMMETRY_ORIG_SAMPLE);
+  RNA_def_property_ui_text(prop,
+                           "Symmetry Uses Original Sample",
+                           "Mirrored wand seeds compare against the clicked color, not their own");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  prop = RNA_def_property(srna, "select_aa_edges", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "select_flag", IMAGE_PAINT_SELECT_AA_EDGES);
+  RNA_def_property_ui_text(prop,
+                           "Include Anti-aliased Edges",
+                           "Also select the edge pixels that blend the selected color into its "
+                           "neighbor");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+
+  prop = RNA_def_property(srna, "select_uv_margin_px", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_sdna(prop, nullptr, "select_uv_margin_px");
+  RNA_def_property_range(prop, 0, 16);
+  RNA_def_property_ui_text(
+      prop, "UV Margin", "How far past a UV seam the selection may bleed, in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_smooth_px", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "select_smooth_px");
+  RNA_def_property_range(prop, 0.0f, 8.0f);
+  RNA_def_property_ui_text(prop, "Smooth", "Smooth the selection outline (pixels)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_feather_px", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "select_feather_px");
+  RNA_def_property_range(prop, 0.0f, 32.0f);
+  RNA_def_property_ui_text(prop, "Feather", "Soft outward edge of the selection (pixels)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_grow_px", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "select_grow_px");
+  RNA_def_property_range(prop, -16.0f, 16.0f);
+  RNA_def_property_ui_text(prop, "Grow/Shrink", "Grow (positive) or shrink (negative) the result");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "select_fill_holes_px", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_sdna(prop, nullptr, "select_fill_holes_px");
+  RNA_def_property_range(prop, 0, 100000);
+  RNA_def_property_ui_text(
+      prop, "Fill Holes", "Fill unselected holes smaller than this many pixels (0 = off)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "quick_select_radius", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "quick_select_radius");
+  RNA_def_property_range(prop, 1.0f, 500.0f);
+  RNA_def_property_ui_text(prop, "Radius", "Quick Selection brush radius in screen pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "quick_select_edge_sensitivity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "quick_select_edge_sensitivity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Edge Sensitivity", "How strongly contrasted edges stop the spread");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "quick_select_spread", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "quick_select_spread");
+  RNA_def_property_range(prop, 1.0f, 10.0f);
+  RNA_def_property_ui_text(
+      prop, "Spread", "How many brush radii past the stroke the selection may travel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "quick_select_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "quick_select_mode");
+  RNA_def_property_enum_items(prop, quick_select_mode_items);
+  RNA_def_property_ui_text(prop, "Mode", "Whether strokes grow or shrink the selection");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "quick_select_auto_enhance", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "quick_select_flag", IMAGE_PAINT_QUICK_SELECT_AUTO_ENHANCE);
+  RNA_def_property_ui_text(
+      prop, "Auto-Enhance", "Smooth the grown boundary of each dab to remove ragged edges");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 

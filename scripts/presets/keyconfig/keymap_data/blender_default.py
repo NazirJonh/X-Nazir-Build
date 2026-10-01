@@ -7739,6 +7739,56 @@ def km_image_editor_tool_paint_select_curve(params, *, fallback):
     )
 
 
+def km_image_editor_tool_paint_quick_select(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Quick Select", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.image_select_quick",
+                 {"type": params.tool_mouse, "value": 'PRESS'},
+                 None),
+                # Alt-stroke subtracts (the operator reads the modifier).
+                ("paint.image_select_quick",
+                 {"type": params.tool_mouse, "value": 'PRESS', "alt": True},
+                 None),
+                # F adjusts the brush radius (only of this tool), like the shape stroke width.
+                ("wm.radial_control", {"type": 'F', "value": 'PRESS'},
+                 {"properties": [("data_path_primary",
+                                 "tool_settings.image_paint.quick_select_radius")]}),
+                # [ and ] shrink / grow the brush radius in steps.
+                ("wm.context_scale_float", {"type": 'LEFT_BRACKET', "value": 'PRESS'},
+                 {"properties": [("data_path", "tool_settings.image_paint.quick_select_radius"),
+                                 ("value", 0.9)]}),
+                ("wm.context_scale_float", {"type": 'RIGHT_BRACKET', "value": 'PRESS'},
+                 {"properties": [("data_path", "tool_settings.image_paint.quick_select_radius"),
+                                 ("value", 1.0 / 0.9)]}),
+            ]),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_magic_wand(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Magic Wand", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else [
+                # Click takes the mode from the tool options; Shift adds, Ctrl subtracts,
+                # Shift+Ctrl intersects.
+                *_template_items_tool_select_actions_simple(
+                    "paint.image_select_wand",
+                    type=params.tool_mouse,
+                    value='PRESS',
+                ),
+                ("paint.image_select_wand",
+                 {"type": params.tool_mouse, "value": 'PRESS', "shift": True, "ctrl": True},
+                 {"properties": [("mode", 'AND')]}),
+            ]),
+        ]},
+    )
+
+
 def km_image_editor_tool_paint_select_move(params, *, fallback):
     return (
         _fallback_id("Image Editor Tool: Paint, Move Selection", fallback),
@@ -9844,6 +9894,8 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_lasso(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_polyline(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_curve(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_magic_wand(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_quick_select(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_move(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),

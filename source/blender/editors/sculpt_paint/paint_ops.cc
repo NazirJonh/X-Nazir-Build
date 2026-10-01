@@ -2583,6 +2583,9 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_circle);
   WM_operatortype_append(PAINT_OT_image_select_circle_radius);
   WM_operatortype_append(PAINT_OT_image_select_curve);
+  WM_operatortype_append(PAINT_OT_image_select_wand);
+  WM_operatortype_append(PAINT_OT_image_select_quick);
+  WM_operatortype_append(PAINT_OT_image_select_refine);
   WM_operatortype_append(PAINT_OT_image_shape_draw);
   WM_operatortype_append(PAINT_OT_shape_colors_swap);
   WM_operatortype_append(PAINT_OT_image_shape_vector_apply);

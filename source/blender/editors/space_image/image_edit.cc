@@ -58,6 +58,41 @@ Image *ED_space_image(const SpaceImage *sima)
   return sima->image;
 }
 
+/**
+ * When the Image Editor paints a flat texture (PBR Paint canvas source "Image"), the texture the
+ * user brings up in this editor is the one they mean to paint: point the PBR Paint canvas at it,
+ * so the panel follows the editor instead of the two silently disagreeing. The reverse direction
+ * is #image_new_paint_canvas_follow's job for a freshly created image.
+ *
+ * Only called for a user-driven image change (see #ED_space_image_set's \a automatic); an
+ * automatic sync of the editor (another editor's target, the active object/material) must not
+ * hijack the canvas. No-op unless this editor is in Paint mode and the canvas source is "Image".
+ */
+static void space_image_paint_canvas_follow(SpaceImage *sima, Image *ima)
+{
+  if (sima->mode != SI_MODE_PAINT || ima == nullptr) {
+    return;
+  }
+  /* Same exclusion as the `canvas_image` poll: a render result / viewer is not a paintable
+   * texture. */
+  if (ELEM(ima->type, IMA_TYPE_R_RESULT, IMA_TYPE_COMPOSITE)) {
+    return;
+  }
+  /* Maintained by #image_user_refresh_scene while this editor draws; a paint-mode editor that is
+   * visible always has it. Without a scene there is nothing to update. */
+  Scene *scene = sima->iuser.scene;
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return;
+  }
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.canvas_source != PAINT_CANVAS_SOURCE_IMAGE || paint_mode.canvas_image == ima) {
+    return;
+  }
+  paint_mode.canvas_image = ima;
+  BKE_imageuser_default(&paint_mode.image_user);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
+}
+
 void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automatic)
 {
   /* Automatically pin image when manually assigned, otherwise it follows object. */
@@ -76,6 +111,9 @@ void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automati
     }
     else {
       ED_image_paint_select_session_cancel(nullptr, sima);
+      /* A manual change is the user pointing this editor at a texture: keep the PBR Paint
+       * "Image" canvas on it. */
+      space_image_paint_canvas_follow(sima, ima);
     }
   }
 

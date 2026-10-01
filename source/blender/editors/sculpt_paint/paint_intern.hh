@@ -1093,6 +1093,9 @@ void PAINT_OT_image_select_circle(wmOperatorType *ot);
 void PAINT_OT_image_select_circle_radius(wmOperatorType *ot);
 void PAINT_OT_image_select_polyline(wmOperatorType *ot);
 void PAINT_OT_image_select_curve(wmOperatorType *ot);
+void PAINT_OT_image_select_wand(wmOperatorType *ot);
+void PAINT_OT_image_select_quick(wmOperatorType *ot);
+void PAINT_OT_image_select_refine(wmOperatorType *ot);
 void PAINT_OT_image_select_invert(wmOperatorType *ot);
 
 /* paint_image_shape_ops.cc */

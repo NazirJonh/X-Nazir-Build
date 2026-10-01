@@ -542,6 +542,18 @@ bool ED_paint_shape_session_defer_workspace_change(bContext *C, int workspace_se
  * must abandon this activation. */
 bool ED_paint_shape_session_defer_object_change(bContext *C, int object_new_session_uid);
 
+/* `paint_image_select_quick.cc` */
+
+struct wmWindowManager;
+
+/**
+ * Register (or, with \a enable false, remove) the Quick Select brush ring with its Add/Subtract
+ * sign. Registered for the whole Image Editor space; the cursor's own poll draws it only in a
+ * paint-mode Image Editor whose active tool is Quick Select, so it is never seen elsewhere. Safe
+ * to call repeatedly.
+ */
+void ED_image_paint_select_quick_cursor_update(wmWindowManager *wm, bool enable);
+
 /* `paint_image_select_move.cc` */
 
 bool ED_image_paint_select_is_moving(SpaceImage *sima);

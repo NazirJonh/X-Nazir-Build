@@ -200,6 +200,111 @@ void image_paint_selection_targets_update(bContext *C,
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Selection-mask snapshots (interactive previews)
+ * \{ */
+
+Vector<ImagePaintSelectionMaskSnapshot> image_paint_selection_mask_snapshots_create(
+    const Span<ImagePaintSelectionTarget> targets, const int tile_number)
+{
+  Vector<ImagePaintSelectionMaskSnapshot> snapshots;
+  for (const ImagePaintSelectionTarget &target : targets) {
+    ImageUser iuser = target.iuser;
+    iuser.tile = tile_number;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(target.image, &iuser, &lock);
+    if (!ibuf) {
+      continue;
+    }
+    const int w = ibuf->x, h = ibuf->y;
+    BKE_image_release_ibuf(target.image, ibuf, lock);
+
+    /* Presence check only: the `const Image *` overload avoids advancing the mask revision. */
+    const bool created = (BKE_image_paint_selection_mask_lookup(
+                              const_cast<const Image *>(target.image), tile_number) == nullptr);
+    const ImBuf *tile_mask = BKE_image_paint_selection_mask_get(target.image, tile_number, w, h);
+    if (!tile_mask || !tile_mask->float_data()) {
+      continue;
+    }
+    ImagePaintSelectionMaskSnapshot snapshot;
+    snapshot.image = target.image;
+    snapshot.tile_number = tile_number;
+    snapshot.created = created;
+    snapshot.orig = IMB_dupImBuf(tile_mask);
+    snapshots.append(snapshot);
+  }
+  return snapshots;
+}
+
+void image_paint_selection_mask_snapshots_restore(
+    const Span<ImagePaintSelectionMaskSnapshot> snapshots)
+{
+  for (const ImagePaintSelectionMaskSnapshot &snapshot : snapshots) {
+    ImBuf *tile_mask = BKE_image_paint_selection_mask_lookup(snapshot.image, snapshot.tile_number);
+    if (!tile_mask || !tile_mask->float_data() || !snapshot.orig || !snapshot.orig->float_data() ||
+        tile_mask->x != snapshot.orig->x || tile_mask->y != snapshot.orig->y)
+    {
+      continue;
+    }
+    std::memcpy(tile_mask->float_data_for_write(),
+                snapshot.orig->float_data(),
+                sizeof(float) * size_t(tile_mask->x) * size_t(tile_mask->y));
+  }
+}
+
+void image_paint_selection_mask_snapshots_restore_for_cancel(
+    const Span<ImagePaintSelectionMaskSnapshot> snapshots)
+{
+  for (const ImagePaintSelectionMaskSnapshot &snapshot : snapshots) {
+    if (snapshot.created) {
+      /* The tile had no mask before the interaction; drop the created zeroed one. */
+      BKE_image_paint_selection_mask_tile_free(snapshot.image, snapshot.tile_number);
+      continue;
+    }
+    image_paint_selection_mask_snapshots_restore(Span(&snapshot, 1));
+  }
+}
+
+void image_paint_selection_mask_snapshots_free(
+    Vector<ImagePaintSelectionMaskSnapshot> &snapshots)
+{
+  for (ImagePaintSelectionMaskSnapshot &snapshot : snapshots) {
+    IMB_freeImBuf(snapshot.orig);
+    snapshot.orig = nullptr;
+  }
+  snapshots.clear();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Shared operator helpers
+ * \{ */
+
+bool image_paint_selection_image_poll(bContext *C)
+{
+  if (!image_paint_selection_poll(C)) {
+    return false;
+  }
+  const SpaceImage *sima = CTX_wm_space_image(C);
+  return (sima != nullptr) && (sima->image != nullptr);
+}
+
+void image_paint_selection_edge_policy_apply(const Span<ImagePaintSelectionTarget> targets,
+                                             const float feather_px)
+{
+  PaintSelectionEdgePolicy policy = BKE_image_paint_selection_edge_policy_hard();
+  if (feather_px >= 1.0f) {
+    policy = BKE_image_paint_selection_edge_policy_feathered();
+    policy.blend_radius_px = int(feather_px);
+  }
+  for (const ImagePaintSelectionTarget &target : targets) {
+    BKE_image_paint_selection_edge_policy_set(target.image, policy);
+  }
+}
+
+/** \} */
+
 /**
  * Poll for all image paint selection operators.
  * Does not require an active brush -- selection tools are independent of the brush.
@@ -1761,6 +1866,83 @@ class ImageSelectPolylineShape : public ImageSelectGestureShape {
   }
 };
 
+/**
+ * The polyline's points are region pixels held by the WM gesture. A pan or zoom of the Image
+ * Editor between two clicks would leave them on screen instead of on the image, so the points are
+ * re-projected through the view change, and the navigation events are passed through instead of
+ * being swallowed by the gesture. One polyline is modal at a time, so the view it was last
+ * projected with is kept here.
+ */
+static rctf polyline_view_cur;
+static bool polyline_view_cur_valid = false;
+
+static bool image_select_polyline_is_navigation(const wmEvent *event)
+{
+  switch (event->type) {
+    case MIDDLEMOUSE:
+    case WHEELUPMOUSE:
+    case WHEELDOWNMOUSE:
+    case WHEELINMOUSE:
+    case WHEELOUTMOUSE:
+    case MOUSEPAN:
+    case MOUSEZOOM:
+    case NDOF_MOTION:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static void image_select_polyline_reproject(wmOperator *op, const ARegion *region)
+{
+  wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
+  if (!gesture || !gesture->customdata) {
+    return;
+  }
+  const rctf &cur = region->v2d.cur;
+  if (!polyline_view_cur_valid) {
+    polyline_view_cur = cur;
+    polyline_view_cur_valid = true;
+    return;
+  }
+  if (BLI_rctf_compare(&polyline_view_cur, &cur, 1e-9f)) {
+    return;
+  }
+  View2D old_view = region->v2d;
+  old_view.cur = polyline_view_cur;
+  short (*border)[2] = static_cast<short (*)[2]>(gesture->customdata);
+  for (const int i : IndexRange(gesture->points)) {
+    float u, v;
+    ui::view2d_region_to_view(&old_view, float(border[i][0]), float(border[i][1]), &u, &v);
+    border[i][0] = short(ui::view2d_view_to_region_x(&region->v2d, u));
+    border[i][1] = short(ui::view2d_view_to_region_y(&region->v2d, v));
+  }
+  polyline_view_cur = cur;
+}
+
+static wmOperatorStatus image_select_polyline_modal(bContext *C,
+                                                    wmOperator *op,
+                                                    const wmEvent *event)
+{
+  if (const ARegion *region = CTX_wm_region(C)) {
+    image_select_polyline_reproject(op, region);
+  }
+  if (image_select_polyline_is_navigation(event)) {
+    return OPERATOR_RUNNING_MODAL | OPERATOR_PASS_THROUGH;
+  }
+  const wmOperatorStatus status = WM_gesture_polyline_modal(C, op, event);
+  if (status != OPERATOR_RUNNING_MODAL) {
+    polyline_view_cur_valid = false;
+  }
+  return status;
+}
+
+static void image_select_polyline_cancel(bContext *C, wmOperator *op)
+{
+  polyline_view_cur_valid = false;
+  WM_gesture_polyline_cancel(C, op);
+}
+
 static wmOperatorStatus image_select_polyline_exec(bContext *C, wmOperator *op)
 {
   ImageSelectPolylineShape shape(C);
@@ -1774,6 +1956,7 @@ static wmOperatorStatus image_select_polyline_invoke(bContext *C,
   if (image_select_move_delegate_to_move_operator(C, event)) {
     return OPERATOR_FINISHED;
   }
+  polyline_view_cur_valid = false;
   return WM_gesture_polyline_invoke(C, op, event);
 }
 
@@ -1784,12 +1967,12 @@ void PAINT_OT_image_select_polyline(wmOperatorType *ot)
   ot->description = "Select a polygonal region as a paint mask";
 
   ot->invoke = image_select_polyline_invoke;
-  ot->modal = WM_gesture_polyline_modal;
+  ot->modal = image_select_polyline_modal;
   ot->exec = image_select_polyline_exec;
   /* Without a cancel callback the wmGesture held in `op->customdata` leaks when
    * the gesture is aborted; the four sculpt polyline operators install the same
    * handler. */
-  ot->cancel = WM_gesture_polyline_cancel;
+  ot->cancel = image_select_polyline_cancel;
   ot->poll = image_paint_selection_poll;
   ot->flag = IMAGE_SELECT_GESTURE_OPTYPE_FLAGS;
 

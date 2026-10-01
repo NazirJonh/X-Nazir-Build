@@ -552,6 +552,12 @@ void ED_space_image_paint_update(Main *bmain, wmWindowManager *wm, Scene *scene)
     }
   }
 
+  /* The Quick Select brush ring is registered unconditionally: it is drawn only where its own
+   * poll passes (a paint-mode Image Editor with the Quick Select tool active). Registering it here
+   * only by the "some Image Editor is in paint mode" test would drop it whenever this function
+   * runs while no editor is in paint mode, and nothing would register it again on a tool switch. */
+  ED_image_paint_select_quick_cursor_update(wm, true);
+
   if (enabled) {
     BKE_paint_init(bmain, scene, PaintMode::Texture2D);
 

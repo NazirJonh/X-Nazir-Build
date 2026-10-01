@@ -1740,6 +1740,65 @@ struct PaintShapeSettings {
   struct ColorBand *fill_gradient = nullptr;
 };
 
+/** #ImagePaintSettings::select_component */
+enum eImagePaint_SelectComponent : int8_t {
+  IMAGE_PAINT_SELECT_COMPONENT_RGB = 0,
+  IMAGE_PAINT_SELECT_COMPONENT_RGBA = 1,
+  IMAGE_PAINT_SELECT_COMPONENT_LUMINANCE = 2,
+  IMAGE_PAINT_SELECT_COMPONENT_HUE = 3,
+  IMAGE_PAINT_SELECT_COMPONENT_SATURATION = 4,
+  IMAGE_PAINT_SELECT_COMPONENT_VALUE = 5,
+  IMAGE_PAINT_SELECT_COMPONENT_RED = 6,
+  IMAGE_PAINT_SELECT_COMPONENT_GREEN = 7,
+  IMAGE_PAINT_SELECT_COMPONENT_BLUE = 8,
+  IMAGE_PAINT_SELECT_COMPONENT_ALPHA = 9,
+};
+
+/** #ImagePaintSettings::select_metric */
+enum eImagePaint_SelectMetric : int8_t {
+  IMAGE_PAINT_SELECT_METRIC_AUTO = 0,
+  IMAGE_PAINT_SELECT_METRIC_MAX_CHANNEL = 1,
+  IMAGE_PAINT_SELECT_METRIC_EUCLIDEAN = 2,
+  IMAGE_PAINT_SELECT_METRIC_OKLAB = 3,
+  IMAGE_PAINT_SELECT_METRIC_NORMAL_ANGLE = 4,
+};
+
+/** #ImagePaintSettings::select_flag */
+enum eImagePaint_SelectFlag : short {
+  /** Contiguous (flood) selection instead of all similar pixels. */
+  IMAGE_PAINT_SELECT_CONTIGUOUS = (1 << 0),
+  IMAGE_PAINT_SELECT_ANTIALIAS = (1 << 1),
+  /** Limit the selection to the UV island(s) under the seed (UV Borders). */
+  IMAGE_PAINT_SELECT_USE_UV_BOUNDS = (1 << 2),
+  /** Non-contiguous: keep only pixels of the seed's island. */
+  IMAGE_PAINT_SELECT_SAME_ISLAND_ONLY = (1 << 3),
+  /** 8-connected flood instead of 4-connected. */
+  IMAGE_PAINT_SELECT_CONNECT_8 = (1 << 4),
+  /** Click-drag adjusts the tolerance interactively. */
+  IMAGE_PAINT_SELECT_DRAG_TOLERANCE = (1 << 5),
+  /** Stretch a scalar source over the tile's value range. */
+  IMAGE_PAINT_SELECT_NORMALIZE_RANGE = (1 << 6),
+  /** Symmetry copies reuse the original click's sample instead of sampling themselves. */
+  IMAGE_PAINT_SELECT_SYMMETRY_ORIG_SAMPLE = (1 << 7),
+  /** Also select the anti-aliased pixels along the edge of the selection. */
+  IMAGE_PAINT_SELECT_AA_EDGES = (1 << 8),
+};
+
+/** #ImagePaintSettings::quick_select_mode */
+enum eImagePaint_QuickSelectMode : char {
+  IMAGE_PAINT_QUICK_SELECT_ADD = 0,
+  IMAGE_PAINT_QUICK_SELECT_SUBTRACT = 1,
+};
+
+/** #ImagePaintSettings::quick_select_flag */
+enum eImagePaint_QuickSelectFlag : char {
+  IMAGE_PAINT_QUICK_SELECT_AUTO_ENHANCE = (1 << 0),
+};
+
+/** #ImagePaintSettings::select_source_channel: values above the material channels are pseudo
+ * channels (a char holds them both). */
+#define IMAGE_PAINT_SELECT_SOURCE_ACTIVE_PASS 100
+
 /** Texture/Image Editor. */
 struct ImagePaintSettings {
   Paint paint;
@@ -1872,6 +1931,47 @@ struct ImagePaintSettings {
    * field offsets; the struct is 8-byte aligned by construction and keeps #ToolSettings 8-byte
    * aligned. */
   PaintShapeSettings shape;
+
+  /* Magic Wand / Quick Select. Appended after #ImagePaintSettings::shape so earlier fields keep
+   * their offsets; the block below is 48 bytes with no implicit padding. */
+
+  /** Tolerance for color/scalar sources, 0..255 (divided by 255 internally). */
+  float select_tolerance = 32.0f;
+  /** Tolerance for normal-map sources, degrees 0..180. */
+  float select_normal_tolerance = 15.0f;
+  /** Outline smoothing radius, pixels 0..8. */
+  float select_smooth_px = 1.0f;
+  /** Feather (outward soft edge), pixels 0..32. */
+  float select_feather_px = 0.0f;
+  /** Grow (+) / shrink (-) the result, pixels -16..16. */
+  float select_grow_px = 0.0f;
+  /** Fill unselected holes smaller than this area (pixels); 0 = off. */
+  int select_fill_holes_px = 0;
+  /** Sample window: 1, 3, 5, 11, 31, 51 or 101 (odd). */
+  short select_sample_size = 1;
+  /** #eImagePaint_SelectFlag */
+  short select_flag = IMAGE_PAINT_SELECT_CONTIGUOUS | IMAGE_PAINT_SELECT_ANTIALIAS |
+                      IMAGE_PAINT_SELECT_USE_UV_BOUNDS | IMAGE_PAINT_SELECT_AA_EDGES;
+  /** #eMaterialPaintChannel, or #IMAGE_PAINT_SELECT_SOURCE_ACTIVE_PASS. */
+  char select_source_channel = IMAGE_PAINT_SELECT_SOURCE_ACTIVE_PASS;
+  /** #eImagePaint_SelectComponent */
+  char select_component = IMAGE_PAINT_SELECT_COMPONENT_RGB;
+  /** #eImagePaint_SelectMetric */
+  char select_metric = IMAGE_PAINT_SELECT_METRIC_AUTO;
+  /** Gutter dilation around UV islands, pixels 0..16. */
+  char select_uv_margin_px = 2;
+
+  /** Quick Select brush radius in screen pixels 1..500. */
+  float quick_select_radius = 25.0f;
+  /** Edge sensitivity 0..1 (mapped to the geodesic edge-cost weight). */
+  float quick_select_edge_sensitivity = 0.5f;
+  /** Spread factor: how far past the brush the selection may travel, radii 1..10. */
+  float quick_select_spread = 4.0f;
+  /** #eImagePaint_QuickSelectMode */
+  char quick_select_mode = IMAGE_PAINT_QUICK_SELECT_ADD;
+  /** #eImagePaint_QuickSelectFlag */
+  char quick_select_flag = IMAGE_PAINT_QUICK_SELECT_AUTO_ENHANCE;
+  char _pad_qs[2] = {};
 };
 
 /** \} */

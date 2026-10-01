@@ -598,6 +598,25 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
     imapaint.gradient_curve_width = defaults.gradient_curve_width;
     imapaint.gradient_curve_smooth = defaults.gradient_curve_smooth;
     BKE_colorband_init(&imapaint.gradient_colorband, true);
+
+    /* Magic Wand / Quick Select defaults (a zero-filled block would select nothing). */
+    imapaint.select_tolerance = defaults.select_tolerance;
+    imapaint.select_normal_tolerance = defaults.select_normal_tolerance;
+    imapaint.select_smooth_px = defaults.select_smooth_px;
+    imapaint.select_feather_px = defaults.select_feather_px;
+    imapaint.select_grow_px = defaults.select_grow_px;
+    imapaint.select_fill_holes_px = defaults.select_fill_holes_px;
+    imapaint.select_sample_size = defaults.select_sample_size;
+    imapaint.select_flag = defaults.select_flag;
+    imapaint.select_source_channel = defaults.select_source_channel;
+    imapaint.select_component = defaults.select_component;
+    imapaint.select_metric = defaults.select_metric;
+    imapaint.select_uv_margin_px = defaults.select_uv_margin_px;
+    imapaint.quick_select_radius = defaults.quick_select_radius;
+    imapaint.quick_select_edge_sensitivity = defaults.quick_select_edge_sensitivity;
+    imapaint.quick_select_spread = defaults.quick_select_spread;
+    imapaint.quick_select_mode = defaults.quick_select_mode;
+    imapaint.quick_select_flag = defaults.quick_select_flag;
   }
 
   /* Shape tool defaults (allocates the owned profiles and ramps). */

@@ -205,6 +205,13 @@ class IMAGE_MT_select(Menu):
             layout.operator("paint.image_select_none", text="None")
             layout.operator("paint.image_select_invert", text="Invert")
             layout.separator()
+            imapaint = context.tool_settings.image_paint
+            layout.operator("paint.image_select_refine", text="Refine Selection")
+            layout.prop(imapaint, "select_smooth_px", text="Smooth")
+            layout.prop(imapaint, "select_fill_holes_px", text="Fill Holes")
+            layout.prop(imapaint, "select_grow_px", text="Grow/Shrink")
+            layout.prop(imapaint, "select_feather_px", text="Feather")
+            layout.separator()
             layout.operator("paint.image_select_move", text="Move Selection")
             layout.operator("paint.image_select_transform", text="Transform Selection")
             layout.operator("paint.image_select_warp", text="Warp Selection")

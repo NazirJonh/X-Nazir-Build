@@ -2197,6 +2197,41 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The Magic Wand / Quick Select settings are new; a file written before them has the block
+   * zero-filled, which is not a usable default (tolerance 0 would select nothing). Restore the
+   * DNA defaults.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "float", "select_tolerance"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (!scene.toolsettings) {
+        continue;
+      }
+      const ImagePaintSettings defaults{};
+      ImagePaintSettings &imapaint = scene.toolsettings->imapaint;
+      imapaint.select_tolerance = defaults.select_tolerance;
+      imapaint.select_normal_tolerance = defaults.select_normal_tolerance;
+      imapaint.select_sample_size = defaults.select_sample_size;
+      imapaint.select_source_channel = defaults.select_source_channel;
+      imapaint.select_component = defaults.select_component;
+      imapaint.select_metric = defaults.select_metric;
+      imapaint.select_flag = defaults.select_flag;
+      imapaint.select_uv_margin_px = defaults.select_uv_margin_px;
+      imapaint.select_smooth_px = defaults.select_smooth_px;
+      imapaint.select_feather_px = defaults.select_feather_px;
+      imapaint.select_grow_px = defaults.select_grow_px;
+      imapaint.select_fill_holes_px = defaults.select_fill_holes_px;
+      imapaint.quick_select_radius = defaults.quick_select_radius;
+      imapaint.quick_select_edge_sensitivity = defaults.quick_select_edge_sensitivity;
+      imapaint.quick_select_spread = defaults.quick_select_spread;
+      imapaint.quick_select_mode = defaults.quick_select_mode;
+      imapaint.quick_select_flag = defaults.quick_select_flag;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

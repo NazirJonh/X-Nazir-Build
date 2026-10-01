@@ -2695,6 +2695,67 @@ class _defs_image_paint_select:
         )
 
     @ToolDef.from_fn
+    def magic_wand():
+        def draw_settings(context, layout, tool):
+            imapaint = context.tool_settings.image_paint
+            is_material = context.tool_settings.paint_mode.canvas_source == 'MATERIAL'
+            props = tool.operator_properties("paint.image_select_wand")
+            _defs_image_paint_select.draw_select_mode_expand(context, layout, props)
+            layout.separator()
+            layout.prop(imapaint, "use_select_contiguous", text="Contiguous")
+            layout.prop(imapaint, "select_use_uv_bounds", text="UV Borders")
+            layout.prop(imapaint, "select_drag_tolerance", text="Drag Tolerance")
+            layout.separator()
+            if is_material:
+                layout.prop(imapaint, "select_source_channel", text="Source")
+                layout.prop(imapaint, "select_normal_tolerance", text="Normal Tolerance")
+            layout.prop(imapaint, "select_tolerance", text="Tolerance")
+            layout.prop(imapaint, "select_sample_size", text="Sample")
+            layout.separator()
+            layout.prop(imapaint, "select_antialias", text="Anti-alias")
+            layout.prop(imapaint, "select_aa_edges", text="AA Edges")
+            layout.prop(imapaint, "select_smooth_px", text="Smooth")
+            layout.prop(imapaint, "select_feather_px", text="Feather")
+            layout.prop(imapaint, "select_grow_px", text="Grow/Shrink")
+            layout.prop(imapaint, "select_fill_holes_px", text="Fill Holes")
+
+        return dict(
+            idname="builtin.select_magic_wand",
+            label="Magic Wand",
+            icon="ops.generic.select_paint",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Magic Wand",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def quick_select():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(imapaint, "quick_select_mode", text="", expand=True, icon_only=True)
+            layout.separator()
+            _defs_image_paint_select.draw_select_expand(context, layout)
+            layout.separator()
+            layout.prop(imapaint, "quick_select_radius", text="Radius")
+            layout.prop(imapaint, "quick_select_edge_sensitivity", text="Edge Sensitivity")
+            layout.prop(imapaint, "quick_select_spread", text="Spread")
+            layout.prop(imapaint, "quick_select_auto_enhance", text="Auto-Enhance")
+            layout.prop(imapaint, "select_use_uv_bounds", text="UV Borders")
+            layout.prop(imapaint, "select_feather_px", text="Feather")
+
+        return dict(
+            idname="builtin.select_quick",
+            label="Quick Select",
+            icon="ops.generic.select_lasso",
+            widget=None,
+            cursor='PAINT_CROSS',
+            keymap="Image Editor Tool: Paint, Quick Select",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def circle():
         def draw_settings(context, layout, tool):
             props = tool.operator_properties("paint.image_select_circle")
@@ -4427,6 +4488,9 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ),
     )
 
+    # Three separate toolbar groups (each a hold-menu button) with `None` separators between
+    # them, so the toolbar reads top-down: classic marquee selection, then the similarity-based
+    # tools, then the tools that edit an existing selection.
     _tools_image_paint_select = (
         (
             _defs_image_paint_select.box,
@@ -4434,6 +4498,14 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_image_paint_select.lasso,
             _defs_image_paint_select.polyline,
             _defs_image_paint_select.curve,
+        ),
+        None,
+        (
+            _defs_image_paint_select.magic_wand,
+            _defs_image_paint_select.quick_select,
+        ),
+        None,
+        (
             _defs_image_paint_select.move,
             _defs_image_paint_select.transform,
             _defs_image_paint_select.warp,

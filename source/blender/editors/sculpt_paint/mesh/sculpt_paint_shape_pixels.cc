@@ -322,6 +322,7 @@ static bool shape_write_image(bContext *C,
             if (image_buffer == nullptr || processors == nullptr) {
               continue;
             }
+            const bool premul_storage = image_data.image->alpha_mode == IMA_ALPHA_PREMUL;
 
             MutableSpan<float4> float_buffer;
             MutableSpan<uchar4> byte_buffer;
@@ -423,7 +424,8 @@ static bool shape_write_image(bContext *C,
                                                             pixel_row,
                                                             range,
                                                             image_buffer->x,
-                                                            byte_storage);
+                                                            byte_storage,
+                                                            premul_storage);
 
                     bool changed = false;
                     for (const int px : range.index_range()) {
@@ -485,7 +487,13 @@ static bool shape_write_image(bContext *C,
                     }
                     else {
                       paint::image::write_image_pixels(
-                          dst, byte_buffer, *processors, pixel_row, range, image_buffer->x);
+                          dst,
+                          byte_buffer,
+                          *processors,
+                          pixel_row,
+                          range,
+                          image_buffer->x,
+                          premul_storage);
                     }
                     rows_changed[r] = true;
                   }

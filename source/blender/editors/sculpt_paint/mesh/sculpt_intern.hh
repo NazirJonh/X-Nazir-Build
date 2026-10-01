@@ -39,6 +39,7 @@
 
 #include "DNA_brush_enums.h"
 #include "DNA_brush_types.h"
+#include "DNA_image_types.h"
 
 #include "ED_view3d.hh"
 
@@ -388,14 +389,16 @@ MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
                                       const bke::pbvh::pixels::PackedPixelRow &pixel_row,
                                       IndexRange range,
                                       int width,
-                                      Vector<float4> &storage);
+                                      Vector<float4> &storage,
+                                      bool premul_storage);
 
 void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
                         MutableSpan<uchar4> image_pixels,
                         const TileColorspaceProcessor &processors,
                         const bke::pbvh::pixels::PackedPixelRow &pixel_row,
                         IndexRange range,
-                        int width);
+                        int width,
+                        bool premul_storage);
 
 void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
                         MutableSpan<float4> image_pixels,

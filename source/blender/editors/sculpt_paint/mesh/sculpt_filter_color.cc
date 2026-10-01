@@ -1787,6 +1787,7 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
             if (image_buffer == nullptr || processors == nullptr) {
               continue;
             }
+            const bool premul_storage = image_data.image->alpha_mode == IMA_ALPHA_PREMUL;
 
             MutableSpan<float4> float_buffer;
             MutableSpan<uchar4> byte_buffer;
@@ -1826,7 +1827,8 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
                                           pixel_row,
                                           range,
                                           image_buffer->x,
-                                          byte_storage);
+                                          byte_storage,
+                                          premul_storage);
 
                 for (const int px : range.index_range()) {
                   const float t = row_t[px];
@@ -1844,8 +1846,13 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
                       scene_linear, float_buffer, *processors, pixel_row, range, image_buffer->x);
                 }
                 else {
-                  write_image_pixels(
-                      scene_linear, byte_buffer, *processors, pixel_row, range, image_buffer->x);
+                  write_image_pixels(scene_linear,
+                                     byte_buffer,
+                                     *processors,
+                                     pixel_row,
+                                     range,
+                                     image_buffer->x,
+                                     premul_storage);
                 }
                 rows_changed[r] = true;
               }

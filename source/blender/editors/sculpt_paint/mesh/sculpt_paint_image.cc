@@ -377,12 +377,35 @@ static void pack_float_pixels_to_byte(const Span<float4> src, uchar4 *dst)
   }
 }
 
+/**
+ * Byte buffers hold straight alpha while the blend works on pre-multiplied colors (the "over" of
+ * #blend_color_mix_float). Without the conversion a stroke over a transparent pixel stores its
+ * pre-multiplied color as if it were straight, so a soft edge reads darker than painted -- a
+ * visible rim on every stroke over a transparent map. Maps stored pre-multiplied (a mask
+ * correction's coverage, IMA_ALPHA_PREMUL) skip both directions: the blend output is already in
+ * storage encoding.
+ */
+static void straight_to_premul_pixels(MutableSpan<float4> pixels)
+{
+  for (float4 &pixel : pixels) {
+    straight_to_premul_v4(pixel);
+  }
+}
+
+static void premul_to_straight_pixels(MutableSpan<float4> pixels)
+{
+  for (float4 &pixel : pixels) {
+    premul_to_straight_v4(pixel);
+  }
+}
+
 MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
-                                      const TileColorspaceProcessor &processors,
-                                      const PackedPixelRow &pixel_row,
-                                      const IndexRange range,
-                                      const int width,
-                                      Vector<float4> &storage)
+                                       const TileColorspaceProcessor &processors,
+                                       const PackedPixelRow &pixel_row,
+                                       const IndexRange range,
+                                       const int width,
+                                       Vector<float4> &storage,
+                                       const bool premul_storage)
 {
   PRF_scope(ProfileCategory::Editor);
   storage.resize(range.size());
@@ -391,12 +414,18 @@ MutableSpan<float4> read_image_pixels(Span<uchar4> image_pixels,
 
   unpack_byte_pixels_to_float(image_pixels.data() + start_offset, storage);
 
-  if (processors.is_noop) {
-    return storage;
+  if (!processors.is_noop) {
+    /* A pre-multiplied byte buffer (a correction's coverage map) needs the transform applied to
+     * its un-multiplied colour, or a partly-covered texel's already-scaled-down RGB is pushed
+     * through the curve a second time -- #ColormanageProcessor::apply's `predivide` is exactly
+     * this un-multiply/transform/re-multiply, and it is a no-op wherever alpha is 1, which is why
+     * a straight-stored, always-opaque channel map never showed the difference. */
+    processors.buffer_to_linear_processor.apply(
+        reinterpret_cast<float *>(storage.data()), range.size(), 1, 4, premul_storage);
   }
-
-  processors.buffer_to_linear_processor.apply(
-      reinterpret_cast<float *>(storage.data()), range.size(), 1, 4, false);
+  if (!premul_storage) {
+    straight_to_premul_pixels(storage);
+  }
 
   return storage;
 }
@@ -406,12 +435,18 @@ void write_image_pixels(MutableSpan<float4> scene_linear_pixels,
                         const TileColorspaceProcessor &processors,
                         const PackedPixelRow &pixel_row,
                         const IndexRange range,
-                        const int width)
+                        const int width,
+                        const bool premul_storage)
 {
   PRF_scope(ProfileCategory::Editor);
+  if (!premul_storage) {
+    premul_to_straight_pixels(scene_linear_pixels);
+  }
   if (!processors.is_noop) {
+    /* See the matching #read_image_pixels: `predivide` un-multiplies before the transform and
+     * re-multiplies after, which is what a pre-multiplied buffer's partly-covered texels need. */
     processors.linear_to_buffer_processor.apply(
-        reinterpret_cast<float *>(scene_linear_pixels.data()), range.size(), 1, 4, false);
+        reinterpret_cast<float *>(scene_linear_pixels.data()), range.size(), 1, 4, premul_storage);
   }
 
   const int start_offset = int(pixel_row.start_image_coordinate.y) * width +
@@ -452,6 +487,26 @@ static void mix_paint_over_scene(float4 &paint, const float4 &scene, const float
   paint[3] = mt * scene[3] + t;
 }
 
+/**
+ * A single pre-multiplied "over": `scene * (1 - paint.a * brush_alpha) + paint * brush_alpha`.
+ *
+ * #mix_paint_over_scene lays the paint over the scene twice, which the second step only cancels
+ * for an opaque scene. Over a transparent texel it counts the scene alpha twice, so every nearby
+ * dab re-intensifies a soft edge already painted. A pre-multiplied map (a mask correction's
+ * coverage) is transparent by design and takes this form; for an opaque scene both agree.
+ */
+static void mix_paint_over_transparent_scene(float4 &paint,
+                                             const float4 &scene,
+                                             const float brush_alpha)
+{
+  paint *= brush_alpha;
+  const float mt = 1.0f - paint[3];
+  paint[0] = mt * scene[0] + paint[0];
+  paint[1] = mt * scene[1] + paint[1];
+  paint[2] = mt * scene[2] + paint[2];
+  paint[3] = mt * scene[3] + paint[3];
+}
+
 /** Same #IMB_BLEND_NORMAL_MIX body as #blend_colors. */
 static void mix_normal_over_scene(float4 &paint,
                                   const float4 &scene,
@@ -473,10 +528,18 @@ static void blend_colors(MutableSpan<float4> paint_pixels,
                          const Brush &brush,
                          const IMB_BlendMode blend_mode,
                          const bool is_float_storage,
-                         const bool material_blend)
+                         const bool material_blend,
+                         const bool single_over = false)
 {
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(paint_pixels.size() == scene_linear_pixels.size());
+
+  if (blend_mode == IMB_BLEND_MIX && single_over) {
+    for (const int i : paint_pixels.index_range()) {
+      mix_paint_over_transparent_scene(paint_pixels[i], scene_linear_pixels[i], brush.alpha);
+    }
+    return;
+  }
 
   if (blend_mode == IMB_BLEND_NORMAL_MIX) {
     for (const int i : paint_pixels.index_range()) {
@@ -572,6 +635,8 @@ struct PaintChannelRangeState {
   MaterialStrokeAccum *accum;
   /** Identifies the tile buffer the accumulator's texel blocks belong to. */
   const ImBuf *accum_buffer;
+  /** The byte map stores pre-multiplied coverage (IMA_ALPHA_PREMUL): skip the straight conversions. */
+  const bool premul_storage;
 };
 
 /** Prepare paint colors when no source texture is sampled for the channel. */
@@ -627,7 +692,8 @@ static void read_paint_range(PaintChannelRangeState &state,
                                                 pixel_row,
                                                 range,
                                                 state.image_width,
-                                                state.tls.byte_to_float_pixels);
+                                                state.tls.byte_to_float_pixels,
+                                                state.premul_storage);
   }
 }
 
@@ -686,6 +752,21 @@ static void accumulate_material_range(PaintChannelRangeState &state,
   }
 }
 
+/**
+ * Whether Mix uses the single pre-multiplied "over" (#mix_paint_over_transparent_scene).
+ *
+ * Every material channel map is a layer that can be transparent. The double "over" raises a
+ * partly covered texel's alpha even where the brush factor is zero, so each dab re-intensifies the
+ * soft edges of every PBVH node it gathers and leaves straight cuts along node boundaries. For an
+ * opaque scene both forms agree, so only the plain Image canvas keeps the stock form.
+ * #PaintChannelRangeState::premul_storage is tied to the map's storage rather than to this
+ * choice, so a straight colour map still never divides its low, byte-quantised alpha.
+ */
+static bool use_single_over(const PaintChannelRangeState &state)
+{
+  return state.material_blend || state.premul_storage;
+}
+
 /** Blend one prepared paint range for a channel. */
 static void blend_paint_range(PaintChannelRangeState &state,
                               const PackedPixelRow &pixel_row,
@@ -700,7 +781,8 @@ static void blend_paint_range(PaintChannelRangeState &state,
                state.brush,
                state.blend_mode,
                !state.float_buffer.is_empty(),
-               state.material_blend);
+               state.material_blend,
+               use_single_over(state));
 }
 
 /** Write one blended paint range to a channel image. */
@@ -722,7 +804,8 @@ static void write_paint_range(PaintChannelRangeState &state,
                        state.processors,
                        pixel_row,
                        range,
-                       state.image_width);
+                       state.image_width,
+                       state.premul_storage);
   }
 }
 
@@ -745,6 +828,7 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
                            int(pixel_row.start_image_coordinate.x) + range.start();
   const float brush_alpha = state.brush.alpha;
   const bool normal_mix = state.blend_mode == IMB_BLEND_NORMAL_MIX;
+  const bool single_over = use_single_over(state);
 
   if (!state.float_buffer.is_empty()) {
     float4 *image = state.float_buffer.data() + start_offset;
@@ -752,6 +836,9 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
       const float4 scene = image[i];
       if (normal_mix) {
         mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, true);
+      }
+      else if (single_over) {
+        mix_paint_over_transparent_scene(paint_pixels[i], scene, brush_alpha);
       }
       else {
         mix_paint_over_scene(paint_pixels[i], scene, brush_alpha);
@@ -765,11 +852,21 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
     for (const int i : paint_pixels.index_range()) {
       float4 scene;
       rgba_uchar_to_float(scene, image[i]);
+      if (!state.premul_storage) {
+        /* Straight byte storage, pre-multiplied blend: see #straight_to_premul_pixels. */
+        straight_to_premul_v4(scene);
+      }
       if (normal_mix) {
         mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, false);
       }
+      else if (single_over) {
+        mix_paint_over_transparent_scene(paint_pixels[i], scene, brush_alpha);
+      }
       else {
         mix_paint_over_scene(paint_pixels[i], scene, brush_alpha);
+      }
+      if (!state.premul_storage) {
+        premul_to_straight_v4(paint_pixels[i]);
       }
       rgba_float_to_uchar(image[i], paint_pixels[i]);
     }
@@ -1388,7 +1485,10 @@ static void apply_paint_channel(ImageData &image_data,
                                                blend_mode,
                                                material_blend,
                                                stroke_accum,
-                                               image_buffer};
+                                               image_buffer,
+                                               image_data.image != nullptr &&
+                                                   image_data.image->alpha_mode ==
+                                                       IMA_ALPHA_PREMUL};
             apply_prepared_paint_range(range_state,
                                        pixel_row,
                                        range,
@@ -1679,6 +1779,8 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
 
               const int slot = tile_i * dest_num + dest_i;
               ImBuf *buffer = buffers[slot];
+              const Image *dest_image = (dest.image_data != nullptr) ? dest.image_data->image :
+                                                                       nullptr;
               PaintChannelRangeState state{tls,
                                            tile_float_buffers[dest_i],
                                            tile_byte_buffers[dest_i],
@@ -1688,7 +1790,9 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
                                            dest.blend_mode,
                                            dest.is_material_channel,
                                            dest.accum,
-                                           buffer};
+                                           buffer,
+                                           dest_image != nullptr &&
+                                               dest_image->alpha_mode == IMA_ALPHA_PREMUL};
               apply_prepared_paint_range(state, pixel_row, range);
             }
           });

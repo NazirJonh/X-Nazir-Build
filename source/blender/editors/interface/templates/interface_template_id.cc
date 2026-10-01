@@ -950,6 +950,8 @@ static StringRef template_id_browse_tip(const StructRNA *type)
         return N_("Browse Palette Data to be linked");
       case ID_PC:
         return N_("Browse Paint Curve Data to be linked");
+      case ID_PV:
+        return N_("Browse Paint Vector Data to be linked");
       case ID_CF:
         return N_("Browse Cache Files to be linked");
       case ID_WS:

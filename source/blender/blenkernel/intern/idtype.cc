@@ -168,6 +168,7 @@ static void id_type_init()
   INIT_TYPE(ID_LS);
   INIT_TYPE(ID_PAL);
   INIT_TYPE(ID_PC);
+  INIT_TYPE(ID_PV);
   INIT_TYPE(ID_CF);
   INIT_TYPE(ID_WS);
   INIT_TYPE(ID_LP);
@@ -363,6 +364,7 @@ int BKE_idtype_idcode_to_index(const short idcode)
     CASE_IDINDEX(PA);
     CASE_IDINDEX(PAL);
     CASE_IDINDEX(PC);
+    CASE_IDINDEX(PV);
     CASE_IDINDEX(PT);
     CASE_IDINDEX(LP);
     CASE_IDINDEX(SCE);
@@ -421,6 +423,7 @@ int BKE_idtype_idfilter_to_index(const uint64_t id_filter)
     CASE_IDINDEX(PA);
     CASE_IDINDEX(PAL);
     CASE_IDINDEX(PC);
+    CASE_IDINDEX(PV);
     CASE_IDINDEX(PT);
     CASE_IDINDEX(LP);
     CASE_IDINDEX(SCE);

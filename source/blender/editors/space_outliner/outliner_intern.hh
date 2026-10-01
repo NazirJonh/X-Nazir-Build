@@ -177,7 +177,8 @@ struct TreeElementIcon {
         ID_MC, \
         ID_WS, \
         ID_MSK, \
-        ID_PC))
+        ID_PC, \
+        ID_PV))
 
 /* button events */
 #define OL_NAMEBUTTON 1

@@ -94,6 +94,7 @@ std::unique_ptr<TreeElementID> TreeElementID::create_from_id(TreeElement &legacy
     case ID_SO:
     case ID_PAL:
     case ID_PC:
+    case ID_PV:
     case ID_CF:
       return std::make_unique<TreeElementID>(legacy_te, id);
   }

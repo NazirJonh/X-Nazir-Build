@@ -67,6 +67,7 @@ set(SRC_DNA_INC
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_object_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_outliner_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_packedFile_types.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_paint_vector_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_particle_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_pointcache_types.h
   ${CMAKE_CURRENT_SOURCE_DIR}/makesdna/DNA_pointcloud_types.h

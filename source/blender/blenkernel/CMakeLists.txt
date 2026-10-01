@@ -268,6 +268,7 @@ set(SRC
   intern/paint_material_resolve.cc
   intern/paint_material_sync.cc
   intern/paint_runtime.cc
+  intern/paint_vector.cc
   intern/particle.cc
   intern/particle_child.cc
   intern/particle_distribute.cc
@@ -526,6 +527,7 @@ set(SRC
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
   BKE_paint_material_resolve.hh
+  BKE_paint_vector.hh
   BKE_particle.h
   BKE_path_templates.hh
   BKE_pointcache.h
@@ -830,6 +832,7 @@ if(WITH_GTESTS)
     intern/paint_material_composite_test.cc
     intern/paint_material_resolve_test.cc
     intern/paint_test.cc
+    intern/paint_vector_test.cc
     intern/path_templates_test.cc
     intern/preferences_test.cc
     intern/scene_test.cc

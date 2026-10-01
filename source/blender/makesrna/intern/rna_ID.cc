@@ -57,6 +57,7 @@ const EnumPropertyItem rna_enum_id_type_items[] = {
     {ID_NT, "NODETREE", ICON_NODETREE, "Node Tree", ""},
     {ID_OB, "OBJECT", ICON_OBJECT_DATA, "Object", ""},
     {ID_PC, "PAINTCURVE", ICON_CURVE_BEZCURVE, "Paint Curve", ""},
+    {ID_PV, "PAINTVECTOR", ICON_CURVE_BEZCURVE, "Paint Vector", ""},
     {ID_PAL, "PALETTE", ICON_COLOR, "Palette", ""},
     {ID_PA, "PARTICLE", ICON_PARTICLE_DATA, "Particle", ""},
     {ID_PT, "POINTCLOUD", ICON_POINTCLOUD_DATA, "Point Cloud", ""},
@@ -190,6 +191,11 @@ const IDFilterEnumPropertyItem rna_enum_id_type_filter_items[] = {
      ICON_CURVE_BEZCURVE,
      "Paint Curves",
      "Show Paint Curve data-blocks"},
+    {FILTER_ID_PV,
+     "filter_paint_vector",
+     ICON_CURVE_BEZCURVE,
+     "Paint Vectors",
+     "Show Paint Vector data-blocks"},
     {FILTER_ID_PT,
      "filter_pointcloud",
      ICON_POINTCLOUD_DATA,
@@ -491,6 +497,9 @@ short RNA_type_to_ID_code(const StructRNA *type)
   if (base_type == RNA_PaintCurve) {
     return ID_PC;
   }
+  if (base_type == RNA_PaintVector) {
+    return ID_PV;
+  }
   if (base_type == RNA_PointCloud) {
     return ID_PT;
   }
@@ -591,6 +600,8 @@ StructRNA *ID_code_to_RNA_type(short idcode)
       return RNA_Palette;
     case ID_PC:
       return RNA_PaintCurve;
+    case ID_PV:
+      return RNA_PaintVector;
     case ID_PT:
       return RNA_PointCloud;
     case ID_LP:

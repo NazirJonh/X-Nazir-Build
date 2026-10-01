@@ -32,6 +32,11 @@ from bl_ui.space_toolsystem_common import (
 )
 from bl_ui.properties_paint_common import (
     BrushAssetShelf,
+    UnifiedPaintPanel,
+    draw_paint_shape_extra_options,
+    draw_shape_color_row,
+    paint_shape_settings,
+    paint_shape_tool_flags,
 )
 
 
@@ -2713,6 +2718,151 @@ class _defs_image_paint_select:
         )
 
 
+# The shape tools of the Image Editor.
+# (attribute name, tool idname, label, icon, keymap suffix)
+_PAINT_SHAPE_TOOLS = (
+    ("rect", "builtin.paint_shape_rect", "Shape Rectangle",
+     "ops.gpencil.primitive_box", "Shape Rectangle"),
+    ("ellipse", "builtin.paint_shape_ellipse", "Shape Ellipse",
+     "ops.gpencil.primitive_circle", "Shape Ellipse"),
+)
+
+
+def _paint_shape_tools(keymap_prefix, draw_settings):
+    """One ToolDef base for the shape tools: ``keymap_prefix`` is the space's keymap group
+    ("Image Editor Tool: Paint"), ``draw_settings`` the space's settings panel. Module level, so
+    `ToolDef.from_fn` can run without referencing a class name that is not bound yet."""
+    tools = {}
+    for name, idname, label, icon, suffix in _PAINT_SHAPE_TOOLS:
+        def entry_from_fn(_idname=idname, _label=label, _icon=icon, _suffix=suffix):
+            return dict(
+                idname=_idname,
+                label=_label,
+                icon=_icon,
+                widget=None,
+                keymap="{!s}, {!s}".format(keymap_prefix, _suffix),
+                draw_settings=draw_settings,
+            )
+
+        tools[name] = ToolDef.from_fn(entry_from_fn)
+    return tools
+
+
+def _paint_shape_target_channels(context, kind=0):
+    """Channel identifiers a shape bake writes for ``kind`` (0 image maps, 1 vertex attributes),
+    or ``None`` when the canvas is not Material-based.
+
+    The resolution rule lives in C (#BKE_paint_shape_target_channels, surfaced as
+    ``PaintShapeSettings.target_channels``); this only maps the returned bit mask onto the RNA
+    channel identifiers the UI uses. Module level on purpose: a nested helper referenced from
+    ``ToolDef.from_fn`` runs while the class body is still executing (see ``_paint_shape_tools``)."""
+    tool_settings = context.tool_settings
+    if tool_settings.paint_mode.canvas_source != 'MATERIAL':
+        return None
+    mask = paint_shape_settings(context).target_channels(kind=kind)
+    channels = set()
+    for index, channel_id in enumerate(_defs_image_paint_shape._SHAPE_CHANNEL_DNA_ORDER):
+        if mask & (1 << index):
+            channels.add(channel_id)
+    return channels
+
+
+def _paint_shape_strength_prop(layout, context, brush, *, text, header):
+    """Draw the brush/unified Strength with the same helper the brush panels use, so the shape
+    tools share the standard Shift+F behavior. The value is the shape's overall opacity (stroke
+    and fill). Shown in the tool header only."""
+    if brush is None:
+        paint = UnifiedPaintPanel.paint_settings(context)
+        ups = None if paint is None else paint.unified_paint_settings
+        if not (ups and ups.use_unified_strength):
+            return
+    UnifiedPaintPanel.prop_unified(
+        layout, context, brush, "strength",
+        unified_name="use_unified_strength", text=text, header=header)
+
+
+class _defs_image_paint_shape:
+
+    # DNA order of #eMaterialPaintChannel (DNA_scene_types.h): the per-channel arrays of the
+    # shape settings follow the DNA enum, while the writable-channel helpers work with RNA
+    # identifiers.
+    _SHAPE_CHANNEL_DNA_ORDER = (
+        'BASE_COLOR',
+        'METALLIC',
+        'ROUGHNESS',
+        'SPECULAR',
+        'NORMAL',
+        'CUSTOM',
+        'HEIGHT',
+        'ALPHA',
+        'AO',
+        'EMISSION',
+    )
+
+    @staticmethod
+    def draw_shape_settings(context, layout, _tool):
+        imapaint = context.tool_settings.image_paint
+        shape = paint_shape_settings(context)
+        is_rect = paint_shape_tool_flags(context)
+
+        # Material (PBR) canvas mode bakes into the active object's material channel maps
+        # instead of the image open in this editor; say so and show the targeted channel count.
+        target_channels = _paint_shape_target_channels(context, 0)
+        if target_channels is not None:
+            layout.label(text="PBR: {:d} Channels".format(len(target_channels)))
+
+        region_is_header = context.region.type == 'TOOL_HEADER'
+        brush = imapaint.brush
+        canvas_source = context.tool_settings.paint_mode.canvas_source
+
+        if region_is_header:
+            # A flat horizontal row with separators: a column wraps the items of a tool header.
+            # Order: colors -> Blend -> Width -> Strength -> Fill/Stroke -> Corner Radius ->
+            # Angle -> options popover.
+            draw_shape_color_row(layout, shape, header=True)
+            layout.separator()
+            if brush is not None:
+                blend_row = layout.row(align=True)
+                blend_row.active = canvas_source not in {'MATERIAL', 'MATERIAL_PAINT'}
+                blend_row.prop(brush, "blend", text="")
+                layout.separator()
+            layout.prop(shape, "stroke_width", text="Width", slider=True)
+            layout.separator()
+            _paint_shape_strength_prop(layout, context, brush, text="Strength", header=True)
+            layout.separator()
+            row = layout.row(align=True)
+            row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+            row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+            layout.separator()
+            layout.prop(shape, "stroke_align", text="")
+            # Corner shape of the stroke outline (Round / Bevel / Miter = sharp).
+            layout.prop(shape, "join_type", text="")
+            if is_rect and shape.use_fill:
+                layout.separator()
+                layout.prop(shape, "corner_radius", index=0, text="Corner Radius")
+            layout.separator()
+            layout.prop(shape, "rotation", text="Angle")
+            layout.separator()
+            layout.popover(panel="IMAGE_PT_tools_shape_options", text="Options")
+            return
+
+        # The fields are drawn directly into the property-split layout (no nested column).
+        draw_shape_color_row(layout, shape)
+        layout.prop(shape, "stroke_width", text="Width", slider=True)
+        row = layout.row(align=True)
+        row.prop(shape, "use_fill", text="Fill", toggle=True, icon='SNAP_FACE')
+        row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
+        layout.prop(shape, "rotation", text="Angle")
+        draw_paint_shape_extra_options(context, layout, shape)
+
+
+# The Image Editor tools come from the shared base.
+for _shape_tool_name, _shape_tool in _paint_shape_tools(
+        "Image Editor Tool: Paint", _defs_image_paint_shape.draw_shape_settings).items():
+    setattr(_defs_image_paint_shape, _shape_tool_name, _shape_tool)
+del _shape_tool_name, _shape_tool
+
+
 class _defs_weight_paint:
 
     @staticmethod
@@ -4209,6 +4359,10 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.selection_gradient,
             _defs_texture_paint.mask,
             None,
+            (
+                _defs_image_paint_shape.rect,
+                _defs_image_paint_shape.ellipse,
+            ),
             *_tools_image_paint_select,
             # Standalone tool (not part of the selection group above): it writes the 3D Viewport
             # face selection paint mask instead of the Image Editor's own 2D selection mask.

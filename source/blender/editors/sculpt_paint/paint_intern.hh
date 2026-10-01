@@ -1095,6 +1095,32 @@ void PAINT_OT_image_select_polyline(wmOperatorType *ot);
 void PAINT_OT_image_select_curve(wmOperatorType *ot);
 void PAINT_OT_image_select_invert(wmOperatorType *ot);
 
+/* paint_image_shape_ops.cc */
+void PAINT_OT_image_shape_draw(wmOperatorType *ot);
+void PAINT_OT_shape_colors_swap(wmOperatorType *ot);
+
+/** Item ids of the "Image Paint Shape Modal" keymap (the name is kept for user keyconfigs). */
+enum {
+  PAINT_SHAPE_MODAL_CONFIRM = 1,
+  PAINT_SHAPE_MODAL_CANCEL = 2,
+  PAINT_SHAPE_MODAL_UNDO = 3,
+  PAINT_SHAPE_MODAL_REDO = 4,
+  PAINT_SHAPE_MODAL_MOVE = 5,
+  PAINT_SHAPE_MODAL_ROTATE = 6,
+  PAINT_SHAPE_MODAL_SCALE = 7,
+  PAINT_SHAPE_MODAL_STROKE_WIDTH = 8,
+  PAINT_SHAPE_MODAL_STROKE_OPACITY = 9,
+  PAINT_SHAPE_MODAL_EXTRUDE = 10,
+  PAINT_SHAPE_MODAL_SELECT_NEXT = 11,
+  PAINT_SHAPE_MODAL_AXIS_X = 12,
+  PAINT_SHAPE_MODAL_AXIS_Y = 13,
+  /** No key assigned yet : the item exists so a user keyconfig can bind it. */
+  PAINT_SHAPE_MODAL_ORIGIN_RESET = 14,
+};
+/* Defined in mesh/paint_image_shape_ops.cc; registered from
+ * #ED_keymap_paint. */
+wmKeyMap *paint_shape_modal_keymap(wmKeyConfig *keyconf);
+
 /* paint_image_symmetry_line.cc */
 void PAINT_OT_image_symmetry_edit(wmOperatorType *ot);
 /* paint_image_paint_mask_island.cc */

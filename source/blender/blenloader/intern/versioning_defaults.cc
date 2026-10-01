@@ -599,6 +599,9 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
     BKE_colorband_init(&imapaint.gradient_colorband, true);
   }
 
+  /* Shape tool defaults (allocates the owned profiles and ramps). */
+  BKE_paint_shape_settings_init(&ts->imapaint.shape);
+
   /* Weight Paint settings */
   ts->weightuser = OB_DRAW_GROUPUSER_ACTIVE;
 

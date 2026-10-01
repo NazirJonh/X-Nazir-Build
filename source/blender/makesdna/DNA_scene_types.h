@@ -1489,6 +1489,215 @@ enum eImagePaint_SelectionExpand : int8_t {
   IMAGE_PAINT_SELECT_EXPAND_MESH = 3,
 };
 
+/** #ImagePaintSettings::shape (and its nested fields). */
+
+/** #PaintShapeSettings::type */
+enum ePaintShapeType : int8_t {
+  PAINT_SHAPE_RECT = 2,
+  PAINT_SHAPE_ELLIPSE = 3,
+};
+
+/** #PaintShapeSettings::flag */
+enum ePaintShapeFlag : int {
+  PAINT_SHAPE_USE_FILL = (1 << 0),
+  PAINT_SHAPE_USE_STROKE = (1 << 1),
+  PAINT_SHAPE_USE_DASH = (1 << 2),
+  /** Rect/Ellipse drags grow from the center instead of a corner. */
+  PAINT_SHAPE_FROM_CENTER = (1 << 3),
+  /** Rect/Ellipse drags keep the aspect ratio. */
+  PAINT_SHAPE_KEEP_ASPECT = (1 << 4),
+  /** Rect corner radius handles move all four corners together. */
+  PAINT_SHAPE_CORNER_UNIFORM = (1 << 5),
+  /** Profiles (stroke/fill) modulate the shape (see #ePaintShapeProfileMode). */
+  PAINT_SHAPE_USE_PROFILE = (1 << 6),
+  /** Normal map is DirectX style (invert Y), as opposed to the default OpenGL. */
+  PAINT_SHAPE_NORMAL_FLIP_Y = (1 << 7),
+  /** Rect/Ellipse shapes without fill or stroke outlines: fill the closed interior. */
+  PAINT_SHAPE_CLOSED = (1 << 8),
+  /** Stroke width is in screen pixels, not canvas pixels. */
+  PAINT_SHAPE_STROKE_SCREEN_SPACE = (1 << 9),
+  /** PBR channels come from #PaintShapeSettings::stroke_channels/#fill_channels, not the brush. */
+  PAINT_SHAPE_CHANNELS_OVERRIDE = (1 << 10),
+  /**
+   * The normal relief derives from the height profile evaluation (it follows the height profile
+   * mode), instead of profiling independently of the height settings.
+   */
+  PAINT_SHAPE_HEIGHT_NORMAL_LINK = (1 << 11),
+};
+ENUM_OPERATORS(ePaintShapeFlag)
+
+/** #PaintShapeSettings::stroke_align */
+enum ePaintShapeStrokeAlign : int8_t {
+  PAINT_SHAPE_STROKE_ALIGN_CENTER = 0,
+  PAINT_SHAPE_STROKE_ALIGN_INSIDE = 1,
+  PAINT_SHAPE_STROKE_ALIGN_OUTSIDE = 2,
+};
+
+/** #PaintShapeSettings::cap_type */
+enum ePaintShapeCap : int8_t {
+  PAINT_SHAPE_CAP_ROUND = 0,
+  PAINT_SHAPE_CAP_BUTT = 1,
+  PAINT_SHAPE_CAP_SQUARE = 2,
+};
+
+/** #PaintShapeSettings::join_type */
+enum ePaintShapeJoin : int8_t {
+  PAINT_SHAPE_JOIN_ROUND = 0,
+  PAINT_SHAPE_JOIN_BEVEL = 1,
+  PAINT_SHAPE_JOIN_MITER = 2,
+};
+
+/** #PaintShapeSettings::profile_mode */
+enum ePaintShapeProfileMode : int8_t {
+  /** Profile modulates opacity/color. */
+  PAINT_SHAPE_PROFILE_COVERAGE = 0,
+  /** Profile drives height/normal amplitude. */
+  PAINT_SHAPE_PROFILE_HEIGHT = 1,
+  PAINT_SHAPE_PROFILE_BOTH = 2,
+};
+
+/** #PaintShapeSettings::fill_type */
+enum ePaintShapeFillType : int8_t {
+  PAINT_SHAPE_FILL_SOLID = 0,
+  PAINT_SHAPE_FILL_GRADIENT = 1,
+  PAINT_SHAPE_FILL_BRUSH_TEXTURE = 2,
+};
+
+/** #PaintShapeSettings::fill_rule */
+enum ePaintShapeFillRule : int8_t {
+  /** Non-zero winding. */
+  PAINT_SHAPE_FILL_NONZERO = 0,
+  /** Even-odd (holes). */
+  PAINT_SHAPE_FILL_EVENODD = 1,
+};
+
+/** #PaintShapeSettings::dash_cap */
+enum ePaintShapeDashCap : int8_t {
+  PAINT_SHAPE_DASH_CAP_ROUND = 0,
+  PAINT_SHAPE_DASH_CAP_BUTT = 1,
+  PAINT_SHAPE_DASH_CAP_SQUARE = 2,
+};
+
+/** #PaintShapeSettings::height_blend */
+enum ePaintShapeHeightBlend : int8_t {
+  PAINT_SHAPE_HEIGHT_ADD = 0,
+  PAINT_SHAPE_HEIGHT_SUB = 1,
+  PAINT_SHAPE_HEIGHT_MAX = 2,
+  PAINT_SHAPE_HEIGHT_REPLACE = 3,
+};
+
+/**
+ * One PBR paint channel value for a shape's Stroke or Fill part.
+ *
+ * Indexed by #eMaterialPaintChannel inside #PaintShapeSettings::stroke_channels and
+ * #fill_channels; only channels visible in PBR Paint and enabled here are written.
+ */
+struct PaintShapeChannelValue {
+  /** Channel enabled for this part. */
+  char use = false;
+  char _pad[1] = {};
+  /** #eBlendMode (IMB_BlendMode). */
+  short blend = 0;
+  /** Value for scalar channels (Metallic, Roughness, Specular, AO, Height base). */
+  float value = 0.0f;
+  /** Color for color channels (Base Color, Emission). */
+  float color[3] = {1.0f, 1.0f, 1.0f};
+  /** Height amplitude / Normal strength. */
+  float strength = 1.0f;
+};
+
+/**
+ * Settings of the shape drawing tools (Rectangle/Ellipse), shared between the Canvas (single
+ * image) and PBR Paint (material channels) targets.
+ *
+ * Stored in #ImagePaintSettings last so existing files keep their field offsets; old files get
+ * the runtime defaults from #BKE_paint_shape_settings_init in #blo_do_versions_520. New fields
+ * are appended at the end for the same reason.
+ */
+struct PaintShapeSettings {
+  /** #ePaintShapeType */
+  char type = PAINT_SHAPE_RECT;
+  /** #ePaintShapeStrokeAlign */
+  char stroke_align = PAINT_SHAPE_STROKE_ALIGN_CENTER;
+  /** #ePaintShapeCap */
+  char cap_type = PAINT_SHAPE_CAP_ROUND;
+  /** #ePaintShapeJoin */
+  char join_type = PAINT_SHAPE_JOIN_ROUND;
+  /** #ePaintShapeProfileMode */
+  char profile_mode = PAINT_SHAPE_PROFILE_COVERAGE;
+  char _pad[3] = {};
+
+  /** #ePaintShapeFlag */
+  int flag = PAINT_SHAPE_USE_FILL | PAINT_SHAPE_CORNER_UNIFORM;
+
+  /** Stroke width, reference-tile pixels. */
+  float stroke_width = 8.0f;
+  /** Edge feather width, pixels. */
+  float feather = 1.0f;
+  /** Rotation of the shape around its center, radians. */
+  float rotation = 0.0f;
+  /** Pixel-mode default Rect/Ellipse size (click without drag), pixels. */
+  float size[2] = {256.0f, 256.0f};
+  /** Corner radii: TL, TR, BR, BL (pixels); #PAINT_SHAPE_CORNER_UNIFORM keeps them equal. */
+  float corner_radius[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  /** Dash/gap lengths and offset along the stroke, pixels. */
+  float dash_length = 16.0f;
+  float gap_length = 16.0f;
+  float dash_offset = 0.0f;
+
+  /* Canvas (single image) part colors. */
+  float stroke_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  float fill_color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  /** #eBlendMode (IMB_BlendMode) of each part. */
+  short stroke_blend = 0;
+  short fill_blend = 0;
+  float stroke_opacity = 1.0f;
+  float fill_opacity = 1.0f;
+
+  /** Per-channel values for PBR Paint, indexed by #eMaterialPaintChannel.
+   * NOTE: the size is spelled as a literal because makesdna does not expand macros; keep in sync
+   * with #PAINT_MATERIAL_CHANNEL_NUM (asserted where the arrays are consumed). */
+  PaintShapeChannelValue stroke_channels[10 /*PAINT_MATERIAL_CHANNEL_NUM*/];
+  PaintShapeChannelValue fill_channels[10 /*PAINT_MATERIAL_CHANNEL_NUM*/];
+
+  /**
+   * Stroke profile: horizontal axis is the across-stroke coordinate t (0 = line center, 1 =
+   * outer edge), vertical is the profile value. Owned; never null at runtime (initialized in
+   * #BKE_paint_shape_settings_init).
+   */
+  struct CurveMapping *stroke_profile = nullptr;
+  /**
+   * Fill profile: t (0 = fill edge, 1 = #fill_profile_width inwards) -> value. Owned; never null
+   * at runtime.
+   */
+  struct CurveMapping *fill_profile = nullptr;
+  /** Width of the fill's edge falloff ("bevel"), pixels. */
+  float fill_profile_width = 8.0f;
+  char use_stroke_ramp = false;
+  /* Pad so the owned #ColorBand pointer starts on an 8-byte boundary. */
+  char _pad2[3] = {};
+  /** Optional color ramp along the stroke profile (Canvas mode). Owned; may be null. */
+  struct ColorBand *stroke_ramp = nullptr;
+
+  /* Fill style and PBR relief (appended last). */
+  /** #ePaintShapeFillType */
+  char fill_type = PAINT_SHAPE_FILL_SOLID;
+  /** #ePaintShapeFillRule */
+  char fill_rule = PAINT_SHAPE_FILL_NONZERO;
+  /** #ePaintShapeDashCap */
+  char dash_cap = PAINT_SHAPE_DASH_CAP_ROUND;
+  /** #ePaintShapeHeightBlend */
+  char height_blend = PAINT_SHAPE_HEIGHT_ADD;
+  /** Height relief depth, in the height channel's units. */
+  float height_depth = 1.0f;
+  /** Normal relief strength. */
+  float normal_strength = 1.0f;
+  /* Pad so the owned #ColorBand pointer starts on an 8-byte boundary. */
+  char _pad3[4] = {};
+  /** Fill gradient ramp (GRADIENT fill). Owned; may be null. */
+  struct ColorBand *fill_gradient = nullptr;
+};
+
 /** Texture/Image Editor. */
 struct ImagePaintSettings {
   Paint paint;
@@ -1616,6 +1825,11 @@ struct ImagePaintSettings {
   float gradient_curve_smooth = 0.5f;
   /* Pad the struct to an 8-byte multiple after adding gradient_curve fields. */
   char _pad_gradient_curve_end[4] = {};
+
+  /** Shape drawing tools, see #PaintShapeSettings. Appended last so existing files keep their
+   * field offsets; the struct is 8-byte aligned by construction and keeps #ToolSettings 8-byte
+   * aligned. */
+  PaintShapeSettings shape;
 };
 
 /** \} */

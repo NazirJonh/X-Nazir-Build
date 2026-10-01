@@ -2582,6 +2582,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_circle);
   WM_operatortype_append(PAINT_OT_image_select_circle_radius);
   WM_operatortype_append(PAINT_OT_image_select_curve);
+  WM_operatortype_append(PAINT_OT_image_shape_draw);
+  WM_operatortype_append(PAINT_OT_shape_colors_swap);
   WM_operatortype_append(PAINT_OT_image_select_invert);
   /* Canvas-space symmetry line widget for the Image Editor. */
   WM_operatortype_append(PAINT_OT_image_symmetry_edit);
@@ -2683,6 +2685,9 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
 
   /* Image paint floating selection (move / transform / warp). */
   image_select_floating_modal_keymap(keyconf);
+
+  /* Image paint shape drawing. */
+  paint_shape_modal_keymap(keyconf);
 }
 
 }  // namespace blender

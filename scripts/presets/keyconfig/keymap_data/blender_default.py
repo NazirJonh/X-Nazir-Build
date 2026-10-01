@@ -7813,6 +7813,81 @@ def km_image_editor_tool_paint_select_gradient(params, *, fallback):
     )
 
 
+def _template_items_image_paint_shape(params, shape_type):
+    return [
+        ("paint.image_shape_draw",
+         {"type": params.tool_mouse, "value": 'PRESS'},
+         {"properties": [("type", shape_type)]}),
+        # F adjusts the shape stroke width in reference-tile pixels; Shift+F the brush strength,
+        # which the shape uses as its overall opacity (the same radial-control gesture as the
+        # brush size/strength).
+        ("wm.radial_control", {"type": 'F', "value": 'PRESS'},
+         {"properties": [("data_path_primary",
+                         "tool_settings.image_paint.shape.stroke_width")]}),
+        ("wm.radial_control", {"type": 'F', "value": 'PRESS', "shift": True},
+         radial_control_properties("image_paint", "strength",
+                                   secondary_prop="use_unified_strength")),
+        # X swaps the shape's own Stroke / Fill colors.
+        ("paint.shape_colors_swap", {"type": 'X', "value": 'PRESS'}, None),
+    ]
+
+
+def _km_image_editor_tool_paint_shape(params, fallback, keymap_name, shape_type):
+    return (
+        _fallback_id(keymap_name, fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else
+              _template_items_image_paint_shape(params, shape_type)),
+        ]},
+    )
+
+
+def km_image_editor_tool_paint_shape_rect(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Rectangle", 'RECTANGLE')
+
+
+def km_image_editor_tool_paint_shape_ellipse(params, *, fallback):
+    return _km_image_editor_tool_paint_shape(
+        params, fallback, "Image Editor Tool: Paint, Shape Ellipse", 'ELLIPSE')
+
+
+def km_image_paint_shape_modal_map(_params):
+    items = []
+    keymap = (
+        "Image Paint Shape Modal",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW', "modal": True},
+        {"items": items},
+    )
+
+    items.extend([
+        ("CONFIRM", {"type": 'RET', "value": 'PRESS', "any": True}, None),
+        ("CONFIRM", {"type": 'NUMPAD_ENTER', "value": 'PRESS', "any": True}, None),
+        ("CANCEL", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+        ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS'}, None),
+        ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("CANCEL", {"type": 'RIGHTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+        ("UNDO", {"type": 'Z', "value": 'PRESS', "oskey": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "ctrl": True, "shift": True}, None),
+        ("REDO", {"type": 'Z', "value": 'PRESS', "oskey": True, "shift": True}, None),
+        ("REDO", {"type": 'Y', "value": 'PRESS', "ctrl": True}, None),
+        ("MOVE", {"type": 'G', "value": 'PRESS'}, None),
+        ("ROTATE", {"type": 'R', "value": 'PRESS'}, None),
+        ("SCALE", {"type": 'S', "value": 'PRESS'}, None),
+        ("STROKE_WIDTH", {"type": 'F', "value": 'PRESS'}, None),
+        ("STROKE_OPACITY", {"type": 'F', "value": 'PRESS', "shift": True}, None),
+        ("EXTRUDE", {"type": 'E', "value": 'PRESS'}, None),
+        ("SELECT_NEXT", {"type": 'TAB', "value": 'PRESS'}, None),
+        ("AXIS_X", {"type": 'X', "value": 'PRESS'}, None),
+        ("AXIS_Y", {"type": 'Y', "value": 'PRESS'}, None),
+        ("ORIGIN_RESET", {"type": 'O', "value": 'PRESS'}, None),
+    ])
+
+    return keymap
+
+
 # ------------------------------------------------------------------------------
 # Tool System (Node Editor)
 
@@ -9645,6 +9720,7 @@ def generate_keymaps(params=None):
         km_grease_pencil_primitive_tool_modal_map(params),
         km_grease_pencil_fill_tool_modal_map(params),
         km_grease_pencil_interpolate_tool_modal_map(params),
+        km_image_paint_shape_modal_map(params),
         km_sequencer_slip_modal_map(params),
 
         # Gizmos.
@@ -9698,6 +9774,8 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_gradient(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_rect(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_shape_ellipse(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_box(params, fallback=fallback) for fallback in (False, True)),
         *(km_node_editor_tool_select_lasso(params, fallback=fallback) for fallback in (False, True)),

@@ -3144,6 +3144,53 @@ def draw_color_settings(context, layout, brush, color_type=False):
                 col.prop(brush, "grad_spacing")
 
 
+def draw_shape_color_row(layout, shape, *, header=False):
+    """Draw the shape tool's own colors: Color = stroke, Secondary Color = fill. No swap button;
+    X (``paint.shape_colors_swap``) swaps them.
+
+    ``header`` keeps the two swatches and their separator in the brush tool header's fixed
+    4-UI-unit row so the shape colors match the brush color swatch width."""
+    row = layout.row(align=True)
+    if header:
+        row.ui_units_x = 4
+    row.prop(shape, "stroke_color", text="")
+    row.prop(shape, "fill_color", text="")
+    row.separator()
+    return row
+
+
+def paint_shape_tool_flags(context):
+    """True when the active Shape tool is the Rectangle, derived from the active tool so the
+    settings UI does not read the operator-only ``shape.type``."""
+    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+    tool = ToolSelectPanelHelper.tool_active_from_context(context)
+    tool_id = tool.idname if tool else ""
+    return tool_id in ("", "builtin.paint_shape_rect")
+
+
+def paint_shape_settings(context):
+    """The ``PaintShapeSettings`` the shape UI should edit: the shared
+    ``tool_settings.image_paint.shape``."""
+    return context.tool_settings.image_paint.shape
+
+
+def draw_paint_shape_extra_options(context, layout, shape):
+    """The rarer Shape settings, shown in the Shape tool's popover and (all of them) in the
+    N-panel: the rectangle/ellipse default size, the stroke alignment and the non-uniform corner
+    radii. The tool header shows only the main fields."""
+    is_rect = paint_shape_tool_flags(context)
+    layout.prop(shape, "size")
+    layout.prop(shape, "stroke_align", text="Align")
+    if is_rect and shape.use_fill:
+        if not shape.use_uniform_corners:
+            sub = layout.column(align=True)
+            sub.prop(shape, "corner_radius", index=0, text="Top Left")
+            sub.prop(shape, "corner_radius", index=1, text="Top Right")
+            sub.prop(shape, "corner_radius", index=2, text="Bottom Right")
+            sub.prop(shape, "corner_radius", index=3, text="Bottom Left")
+        layout.prop(shape, "use_uniform_corners", text="Uniform Corners")
+
+
 def _brush_texture_for_slot(brush, tex_slot):
     if tex_slot == brush.texture_slot:
         return brush.texture

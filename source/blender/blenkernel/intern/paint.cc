@@ -3986,6 +3986,39 @@ bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush
   return info.supports_image_paint || info.supports_vertex_paint;
 }
 
+uint32_t BKE_paint_shape_target_channels(const Paint &paint,
+                                         const PaintModeSettings &mode_settings,
+                                         const PaintShapeSettings &settings,
+                                         const eShapeTargetKind kind)
+{
+  const Brush *brush = BKE_paint_brush_for_read(&paint);
+  const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
+  const int visible = paint.visible_material_channels;
+  const bool override = (settings.flag & PAINT_SHAPE_CHANNELS_OVERRIDE) != 0;
+
+  uint32_t mask = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const bool supported = (kind == eShapeTargetKind::ImageMaps) ? info.supports_image_paint :
+                                                                   info.supports_vertex_paint;
+    if (!supported) {
+      continue;
+    }
+    const eMaterialPaintChannel channel = info.channel;
+    const bool brush_writes = brush_paint != nullptr &&
+                              BKE_paint_material_channel_writes_to_target(
+                                  *brush_paint, mode_settings, visible, channel);
+    const bool shape_use = (settings.stroke_channels[channel].use != 0) ||
+                           (settings.fill_channels[channel].use != 0);
+    /* A shape channel only writes when it is both an override and visible; the brush path
+     * already applies the visibility test in #BKE_paint_material_channel_writes_to_target. */
+    const bool shape_writes = override && shape_use && ((visible & (1 << int(channel))) != 0);
+    if (brush_writes || shape_writes) {
+      mask |= (1u << int(channel));
+    }
+  }
+  return mask;
+}
+
 bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
                                               const PaintModeSettings &mode_settings,
                                               const int visible_material_channels)
@@ -4674,12 +4707,13 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
   return true;
 }
 
-PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
-    Main &bmain,
-    Object &ob,
-    const BrushMaterialPaint &brush_paint,
-    PaintModeSettings &mode_settings,
-    const int visible_material_channels)
+/**
+ * Ensure the maps for every channel in \a channel_mask (a bit mask of #eMaterialPaintChannel).
+ * The shared body of both public entry points; the layer-aware resolution added when Stack Layers
+ * merge hooks in here, so both the brush and the shape path get it.
+ */
+static PaintMaterialImagesEnsureResult paint_material_images_ensure_writable_for_mask(
+    Main &bmain, Object &ob, PaintModeSettings &mode_settings, const uint32_t channel_mask)
 {
   BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
 
@@ -4694,9 +4728,7 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     if (!info.supports_image_paint) {
       continue;
     }
-    if (!BKE_paint_material_channel_writes_to_target(
-            brush_paint, mode_settings, visible_material_channels, info.channel))
-    {
+    if ((channel_mask & (1u << int(info.channel))) == 0) {
       continue;
     }
     Image *existing = nullptr;
@@ -4762,6 +4794,30 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
   return result;
 }
 
+PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
+    Main &bmain,
+    Object &ob,
+    const BrushMaterialPaint &brush_paint,
+    PaintModeSettings &mode_settings,
+    const int visible_material_channels)
+{
+  uint32_t mask = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (BKE_paint_material_channel_writes_to_target(
+            brush_paint, mode_settings, visible_material_channels, info.channel))
+    {
+      mask |= (1u << int(info.channel));
+    }
+  }
+  return paint_material_images_ensure_writable_for_mask(bmain, ob, mode_settings, mask);
+}
+
+PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable_for_channels(
+    Main &bmain, Object &ob, PaintModeSettings &mode_settings, const uint32_t channel_mask)
+{
+  return paint_material_images_ensure_writable_for_mask(bmain, ob, mode_settings, channel_mask);
+}
+
 void BKE_paint_material_enable_added_visible_channels(Paint &paint, const int added_channel_bits)
 {
   if (added_channel_bits == 0) {
@@ -4796,24 +4852,28 @@ bool BKE_paint_material_face_matches_active_slot(const Object &ob, const int fac
   return face_material_index == math::max(ob.actcol - 1, 0);
 }
 
-Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
+/**
+ * Resolve the maps for every channel in \a channel_mask (a bit mask of #eMaterialPaintChannel).
+ * The shared body of the brush and shape entry points; the layer-aware resolution added when Stack
+ * Layers merge hooks in here, so both get it.
+ *
+ * \param value_source: when non-null, a target's \a value / \a color are filled from this brush
+ * (the brush path); when null they stay at their defaults (the shape path takes the value from the
+ * shape's own style).
+ */
+static Vector<PaintMaterialImageTarget> paint_material_image_targets_get_for_mask(
     Object &ob,
     PaintModeSettings &mode_settings,
-    const BrushMaterialPaint *brush_paint,
-    const int visible_material_channels)
+    const uint32_t channel_mask,
+    const BrushMaterialPaint *value_source)
 {
   Vector<PaintMaterialImageTarget> targets;
-  if (brush_paint == nullptr) {
-    return targets;
-  }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!info.supports_image_paint) {
       /* No image backend for this channel yet, so there is no map to paint into. */
       continue;
     }
-    if (!BKE_paint_material_channel_writes_to_target(
-            *brush_paint, mode_settings, visible_material_channels, info.channel))
-    {
+    if ((channel_mask & (1u << int(info.channel))) == 0) {
       continue;
     }
 
@@ -4830,32 +4890,65 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     target.iuser = iuser;
     target.is_color_channel = info.is_color;
     target.is_normal_channel = (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+    if (value_source == nullptr) {
+      targets.append(target);
+      continue;
+    }
     if (info.is_color) {
       if (info.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
-        copy_v3_v3(target.color, brush_paint->base_color);
+        copy_v3_v3(target.color, value_source->base_color);
       }
       else {
-        copy_v3_v3(target.color, brush_paint->channels[info.channel].value);
+        copy_v3_v3(target.color, value_source->channels[info.channel].value);
       }
       target.value = 0.0f;
     }
     else if (target.is_normal_channel) {
       const float2 range = BKE_paint_material_channel_range(mode_settings, info.channel);
       target.color[0] = math::clamp(
-          brush_paint->channels[info.channel].value[0], range.x, range.y);
+          value_source->channels[info.channel].value[0], range.x, range.y);
       target.color[1] = math::clamp(
-          brush_paint->channels[info.channel].value[1], range.x, range.y);
+          value_source->channels[info.channel].value[1], range.x, range.y);
       target.color[2] = math::clamp(
-          brush_paint->channels[info.channel].value[2], range.x, range.y);
+          value_source->channels[info.channel].value[2], range.x, range.y);
       normalize_v3(target.color);
       target.value = 0.0f;
     }
     else {
-      target.value = BKE_paint_material_channel_value(*brush_paint, mode_settings, info.channel);
+      target.value = BKE_paint_material_channel_value(*value_source, mode_settings, info.channel);
     }
     targets.append(target);
   }
   return targets;
+}
+
+Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
+    Object &ob,
+    PaintModeSettings &mode_settings,
+    const BrushMaterialPaint *brush_paint,
+    const int visible_material_channels)
+{
+  if (brush_paint == nullptr) {
+    return {};
+  }
+  uint32_t mask = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (BKE_paint_material_channel_writes_to_target(
+            *brush_paint, mode_settings, visible_material_channels, info.channel))
+    {
+      mask |= (1u << int(info.channel));
+    }
+  }
+  return paint_material_image_targets_get_for_mask(ob, mode_settings, mask, brush_paint);
+}
+
+Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get_for_channels(
+    Object &ob,
+    PaintModeSettings &mode_settings,
+    const uint32_t channel_mask,
+    const float /*mask_stroke_value*/)
+{
+  return paint_material_image_targets_get_for_mask(ob, mode_settings, channel_mask, nullptr);
 }
 
 MaterialPaintAttributeStatus BKE_paint_mesh_material_attribute_ensure(Mesh &mesh,

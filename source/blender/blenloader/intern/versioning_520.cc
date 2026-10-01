@@ -2161,6 +2161,25 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The shape settings are new: a file written before them has the embedded struct
+   * zero-filled, so the owned profiles and color ramps need to be allocated and the scalar fields
+   * set to their defaults.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. The alias
+   * lookup takes the current (post-rename) member type name: it also matches files written
+   * before the `ImagePaintShapeSettings` -> `PaintShapeSettings` rename, so their settings are
+   * not reset on every load. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "PaintShapeSettings", "shape"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings) {
+        BKE_paint_shape_settings_init(&scene.toolsettings->imapaint.shape);
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

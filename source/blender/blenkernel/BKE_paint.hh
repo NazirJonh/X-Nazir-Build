@@ -1237,6 +1237,14 @@ std::optional<StringRef> BKE_paint_canvas_uvmap_name_get(const PaintModeSettings
 CurveMapping *BKE_sculpt_default_cavity_curve();
 CurveMapping *BKE_paint_default_curve();
 
+struct PaintShapeSettings;
+/** Runtime defaults for the shape settings: scalar fields keep their DNA defaults, owned
+ * curves/ramps are allocated and the PBR per-channel values get usable defaults. */
+void BKE_paint_shape_settings_init(PaintShapeSettings *settings);
+/** Mode-neutral accessor: the storage stays in `imapaint` for a minimal diff. */
+PaintShapeSettings &BKE_paint_shape_settings_get(ToolSettings &tool_settings);
+const PaintShapeSettings &BKE_paint_shape_settings_get(const ToolSettings &tool_settings);
+
 /* -------------------------------------------------------------------- */
 /** \name Material Painting (Poly Paint)
  *
@@ -1325,6 +1333,26 @@ bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush
                                                   const PaintModeSettings &mode_settings,
                                                   int visible_material_channels,
                                                   eMaterialPaintChannel channel);
+
+/** Which storage a shape's PBR channels are resolved for. Image maps and vertex attributes
+ * support different channel sets (#MaterialPaintChannelInfo::supports_image_paint /
+ * supports_vertex_paint), so the same rule yields different masks. */
+enum class eShapeTargetKind : int8_t {
+  ImageMaps,
+  VertexAttributes,
+};
+
+/**
+ * The bit mask of #eMaterialPaintChannel the shape bake will write for \a kind: a channel writes
+ * when the active brush writes it (#BKE_paint_material_channel_writes_to_target), or when the
+ * shape channel override is on, either part of the shape enables the channel, and the channel is
+ * visible. This is the single source of that rule: the 2D compositor and the Python tool UI
+ * (through RNA) resolve their target set here.
+ */
+uint32_t BKE_paint_shape_target_channels(const Paint &paint,
+                                          const PaintModeSettings &mode_settings,
+                                          const PaintShapeSettings &settings,
+                                          eShapeTargetKind kind);
 
 /**
  * Returns whether the enabled Alpha channel should mask other channels' writes this stroke
@@ -1688,6 +1716,21 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     int visible_material_channels);
 
 /**
+ * Same as #BKE_paint_material_images_ensure_writable, but for an explicit set of channels
+ * (\a channel_mask, a bit mask of #eMaterialPaintChannel) instead of the ones the brush writes.
+ *
+ * This is the entry point non-brush writers use: a shape bake resolves its channel set with
+ * #BKE_paint_shape_target_channels -- "the brush writes it OR the shape channel override enables
+ * it" -- and passes that mask here, so override channels the brush does not write still get their
+ * maps created. The brush version above computes its mask the same way and delegates.
+ *
+ * The layer-aware resolution and the MASK target mode hook into the internal function this
+ * forwards to when Stack Layers merge; keep this entry point alongside it.
+ */
+PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable_for_channels(
+    Main &bmain, Object &ob, PaintModeSettings &mode_settings, uint32_t channel_mask);
+
+/**
  * When channels are newly shown in a #Paint's visible material channels, also enable
  * their per-brush `use` flag so they can be painted and assigned a source immediately.
  */
@@ -1720,6 +1763,27 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     PaintModeSettings &mode_settings,
     const BrushMaterialPaint *brush_paint,
     int visible_material_channels);
+
+/**
+ * Same as #BKE_paint_material_image_targets_get, but for an explicit set of channels
+ * (\a channel_mask, a bit mask of #eMaterialPaintChannel) instead of the ones the brush writes.
+ *
+ * The returned targets carry only their identity (\a channel, \a image, \a iuser) and default
+ * \a value / \a color: a shape bake takes the painted value from the shape's own style, not from a
+ * brush. The brush version above computes its mask and delegates here to fill the values.
+ *
+ * \param mask_stroke_value: reserved for the layer / MASK target mode added when Stack Layers
+ * merge; unused in this tree (there are no mask targets yet), declared now so the signature does
+ * not change at the merge point.
+ *
+ * As in the brush version, only a direct Image Texture link / add-on binding resolves; missing
+ * maps are skipped and channels without a socket (Custom) are never included.
+ */
+Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get_for_channels(
+    Object &ob,
+    PaintModeSettings &mode_settings,
+    uint32_t channel_mask,
+    float mask_stroke_value = 1.0f);
 
 /**
  * Whether a face with \a face_material_index should receive image writes while painting

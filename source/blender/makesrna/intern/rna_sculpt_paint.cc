@@ -1435,6 +1435,197 @@ static void rna_Sculpt_sculpt_cursor_gizmo_size_set(PointerRNA *ptr, float value
   sd->sculpt_cursor_gizmo_size = uint8_t(clamp_i(int(roundf(value * 100.0f)), 25, 200));
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Paint Shape Settings
+ *
+ * Per-channel values live in fixed DNA arrays (#PaintShapeSettings::stroke_channels and
+ * #fill_channels), so an element's channel index can only be recovered from where the pointer
+ * sits in those arrays. Mirrors #rna_MaterialPaintChannelLayerBinding_channel_get, adapted to
+ * the ImagePaintSettings owner chain.
+ * \{ */
+
+static void rna_PaintShapeSettings_update(Main * /*bmain*/,
+                                          Scene * /*scene*/,
+                                          PointerRNA * /*ptr*/)
+{
+}
+
+static std::optional<std::string> rna_PaintShapeSettings_path(const PointerRNA *ptr)
+{
+  const ID *owner = ptr->owner_id;
+  if (owner == nullptr || GS(owner->name) != ID_SCE) {
+    return std::nullopt;
+  }
+  const Scene *scene = reinterpret_cast<const Scene *>(owner);
+  if (scene->toolsettings == nullptr ||
+      static_cast<const PaintShapeSettings *>(ptr->data) !=
+          &BKE_paint_shape_settings_get(*scene->toolsettings))
+  {
+    return std::nullopt;
+  }
+  return "tool_settings.image_paint.shape";
+}
+
+static PointerRNA rna_PaintShapeSettings_stroke_ramp_get(PointerRNA *ptr)
+{
+  PaintShapeSettings *settings = static_cast<PaintShapeSettings *>(ptr->data);
+  /* No lazy initialization here, see #rna_ImagePaintSettings_gradient_color_ramp_get: the ramp
+   * is allocated by #BKE_paint_shape_settings_init. */
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, settings->stroke_ramp);
+}
+
+static PointerRNA rna_PaintShapeSettings_fill_gradient_get(PointerRNA *ptr)
+{
+  PaintShapeSettings *settings = static_cast<PaintShapeSettings *>(ptr->data);
+  /* Allocated by #BKE_paint_shape_settings_init, like the stroke ramp. */
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, settings->fill_gradient);
+}
+
+/** Bit mask of #eMaterialPaintChannel the shape bake writes for \a kind (0 = image maps,
+ * 1 = vertex attributes). The channel source follows the canvas: the Image Editor's paint for
+ * image maps, the Sculpt mode paint for vertex attributes. */
+static int rna_PaintShapeSettings_target_channels(PaintShapeSettings *settings,
+                                                  bContext *C,
+                                                  const int kind)
+{
+  const ToolSettings *toolsettings = CTX_data_tool_settings(C);
+  if (toolsettings == nullptr) {
+    return 0;
+  }
+  const eShapeTargetKind target_kind = (kind == 0) ? eShapeTargetKind::ImageMaps :
+                                                     eShapeTargetKind::VertexAttributes;
+  const Paint *paint = nullptr;
+  if (target_kind == eShapeTargetKind::ImageMaps) {
+    paint = &toolsettings->imapaint.paint;
+  }
+  else if (toolsettings->sculpt != nullptr) {
+    paint = &toolsettings->sculpt->paint;
+  }
+  if (paint == nullptr) {
+    return 0;
+  }
+  return int(BKE_paint_shape_target_channels(
+      *paint, toolsettings->paint_mode, *settings, target_kind));
+}
+
+/**
+ * The #PaintShapeSettings that owns \a ptr, found through its ancestor chain, or null.
+ */
+static const PaintShapeSettings *rna_PaintShapeSettings_from_ptr(const PointerRNA *ptr)
+{
+  for (int i = int(ptr->ancestors.size()) - 1; i >= 0; i--) {
+    const AncestorPointerRNA &ancestor = ptr->ancestors[i];
+    if (ancestor.type == RNA_PaintShapeSettings) {
+      return static_cast<const PaintShapeSettings *>(ancestor.data);
+    }
+  }
+  /* A discrete pointer with no ancestor chain: only the shared scene block can be recovered, and
+   * only when the owner really is a Scene. */
+  const ID *owner = ptr->owner_id;
+  if (owner != nullptr && GS(owner->name) == ID_SCE) {
+    const Scene *scene = reinterpret_cast<const Scene *>(owner);
+    if (scene->toolsettings != nullptr) {
+      return &BKE_paint_shape_settings_get(*scene->toolsettings);
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Which channel (and stroke or fill part) the #PaintShapeChannelValue \a ptr points at, or
+ * #std::nullopt when the pointer is not inside the owner's arrays.
+ */
+static std::optional<eMaterialPaintChannel> rna_PaintShapeChannelValue_channel_get(
+    const PointerRNA *ptr, bool &r_is_fill)
+{
+  const PaintShapeSettings *settings = rna_PaintShapeSettings_from_ptr(ptr);
+  if (settings == nullptr) {
+    return std::nullopt;
+  }
+  const PaintShapeChannelValue *value = static_cast<const PaintShapeChannelValue *>(ptr->data);
+  if (value >= settings->stroke_channels &&
+      value < settings->stroke_channels + PAINT_MATERIAL_CHANNEL_NUM)
+  {
+    r_is_fill = false;
+    return eMaterialPaintChannel(int(value - settings->stroke_channels));
+  }
+  if (value >= settings->fill_channels &&
+      value < settings->fill_channels + PAINT_MATERIAL_CHANNEL_NUM)
+  {
+    r_is_fill = true;
+    return eMaterialPaintChannel(int(value - settings->fill_channels));
+  }
+  return std::nullopt;
+}
+
+/** Explicit path func: the generic ID-to-property path walk cannot address a fixed-array
+ * iterator's elements on its own (see #rna_MaterialPaintChannelLayerBinding_path). */
+static std::optional<std::string> rna_PaintShapeChannelValue_path(const PointerRNA *ptr)
+{
+  bool is_fill = false;
+  const std::optional<eMaterialPaintChannel> channel = rna_PaintShapeChannelValue_channel_get(
+      ptr, is_fill);
+  if (!channel) {
+    return std::nullopt;
+  }
+  const ID *owner = ptr->owner_id;
+  if (owner == nullptr || GS(owner->name) != ID_SCE) {
+    return std::nullopt;
+  }
+  return fmt::format(
+      "tool_settings.image_paint.shape.{}_channels[{}]", is_fill ? "fill" : "stroke", int(*channel));
+}
+
+static int rna_PaintShapeChannelValue_channel_get_rna(PointerRNA *ptr)
+{
+  bool is_fill = false;
+  if (const std::optional<eMaterialPaintChannel> channel = rna_PaintShapeChannelValue_channel_get(
+          ptr, is_fill))
+  {
+    return int(*channel);
+  }
+  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+static void rna_PaintShapeSettings_stroke_channels_begin(CollectionPropertyIterator *iter,
+                                                         PointerRNA *ptr)
+{
+  PaintShapeSettings *settings = static_cast<PaintShapeSettings *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           settings->stroke_channels,
+                           sizeof(PaintShapeChannelValue),
+                           ARRAY_SIZE(settings->stroke_channels),
+                           0,
+                           nullptr);
+}
+
+static int rna_PaintShapeSettings_stroke_channels_length(PointerRNA * /*ptr*/)
+{
+  return PAINT_MATERIAL_CHANNEL_NUM;
+}
+
+static void rna_PaintShapeSettings_fill_channels_begin(CollectionPropertyIterator *iter,
+                                                       PointerRNA *ptr)
+{
+  PaintShapeSettings *settings = static_cast<PaintShapeSettings *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           settings->fill_channels,
+                           sizeof(PaintShapeChannelValue),
+                           ARRAY_SIZE(settings->fill_channels),
+                           0,
+                           nullptr);
+}
+
+static int rna_PaintShapeSettings_fill_channels_length(PointerRNA * /*ptr*/)
+{
+  return PAINT_MATERIAL_CHANNEL_NUM;
+}
+
+/** \} */
+
+
 }  // namespace blender
 
 #else
@@ -3160,6 +3351,479 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
+static const EnumPropertyItem rna_shape_blend_items[] = {
+    {IMB_BLEND_MIX, "MIX", 0, "Mix", ""},
+    {IMB_BLEND_MUL, "MUL", 0, "Multiply", ""},
+    {IMB_BLEND_ADD, "ADD", 0, "Add", ""},
+    {IMB_BLEND_SUB, "SUB", 0, "Subtract", ""},
+    {IMB_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", ""},
+    {IMB_BLEND_SCREEN, "SCREEN", 0, "Screen", ""},
+    {IMB_BLEND_DARKEN, "DARKEN", 0, "Darken", ""},
+    {IMB_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void rna_def_paint_shape_channel_value(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "PaintShapeChannelValue", nullptr);
+  RNA_def_struct_sdna(srna, "PaintShapeChannelValue");
+  RNA_def_struct_path_func(srna, "rna_PaintShapeChannelValue_path");
+  RNA_def_struct_ui_text(srna,
+                         "Paint Shape Channel Value",
+                         "PBR paint channel value of a paint shape's stroke or fill part");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(prop, "rna_PaintShapeChannelValue_channel_get_rna", nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Channel", "PBR paint channel this value belongs to");
+
+  prop = RNA_def_property(srna, "use", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use", 1);
+  RNA_def_property_ui_text(prop, "Use", "Write this channel when the shape is baked");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Value", "Value for scalar channels (Metallic, Roughness, Specular, AO)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_float_sdna(prop, nullptr, "color");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_ui_text(prop, "Color", "Color for color channels (Base Color, Emission)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "blend", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "blend");
+  RNA_def_property_enum_items(prop, rna_shape_blend_items);
+  RNA_def_property_ui_text(prop, "Blend Mode", "How the shape mixes into the channel");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Strength", "Height amplitude or Normal strength");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+}
+
+static void rna_def_paint_shape_settings(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+  FunctionRNA *func;
+
+  static const EnumPropertyItem shape_type_items[] = {
+      {PAINT_SHAPE_RECT, "RECTANGLE", ICON_MESH_PLANE, "Rectangle", "Rectangle with rounded corners"},
+      {PAINT_SHAPE_ELLIPSE,
+       "ELLIPSE",
+       ICON_MESH_CIRCLE,
+       "Ellipse",
+       "Ellipse with separate horizontal and vertical radii"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_stroke_align_items[] = {
+      {PAINT_SHAPE_STROKE_ALIGN_CENTER, "CENTER", 0, "Center", "Stroke centered on the outline"},
+      {PAINT_SHAPE_STROKE_ALIGN_INSIDE, "INSIDE", 0, "Inside", "Stroke drawn inside the outline"},
+      {PAINT_SHAPE_STROKE_ALIGN_OUTSIDE, "OUTSIDE", 0, "Outside", "Stroke drawn outside the outline"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_cap_items[] = {
+      {PAINT_SHAPE_CAP_ROUND, "ROUND", 0, "Round", "Semicircular cap"},
+      {PAINT_SHAPE_CAP_BUTT, "BUTT", 0, "Butt", "Flat cap at the end point"},
+      {PAINT_SHAPE_CAP_SQUARE, "SQUARE", 0, "Square", "Square cap extending past the end point"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_join_items[] = {
+      {PAINT_SHAPE_JOIN_ROUND, "ROUND", 0, "Round", "Rounded corner"},
+      {PAINT_SHAPE_JOIN_BEVEL, "BEVEL", 0, "Bevel", "Beveled corner"},
+      {PAINT_SHAPE_JOIN_MITER, "MITER", 0, "Miter", "Pointed corner"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_profile_mode_items[] = {
+      {PAINT_SHAPE_PROFILE_COVERAGE,
+       "COVERAGE",
+       0,
+       "Coverage",
+       "The profile modulates opacity and color"},
+      {PAINT_SHAPE_PROFILE_HEIGHT, "HEIGHT", 0, "Height", "The profile drives height and normals"},
+      {PAINT_SHAPE_PROFILE_BOTH, "BOTH", 0, "Both", "Both coverage and height"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_fill_type_items[] = {
+      {PAINT_SHAPE_FILL_SOLID, "SOLID", 0, "Solid", "Solid fill color"},
+      {PAINT_SHAPE_FILL_GRADIENT,
+       "GRADIENT",
+       0,
+       "Gradient",
+       "Gradient fill along the shape's bounding box, linear left to right"},
+      {PAINT_SHAPE_FILL_BRUSH_TEXTURE,
+       "BRUSH_TEXTURE",
+       0,
+       "Brush Texture",
+       "Brush texture fill. TODO: not composited yet"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_fill_rule_items[] = {
+      {PAINT_SHAPE_FILL_NONZERO, "NONZERO", 0, "Non-Zero", "Non-zero winding fill rule"},
+      {PAINT_SHAPE_FILL_EVENODD, "EVENODD", 0, "Even-Odd", "Even-odd fill rule for holes"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_dash_cap_items[] = {
+      {PAINT_SHAPE_DASH_CAP_ROUND, "ROUND", 0, "Round", "Rounded dash ends"},
+      {PAINT_SHAPE_DASH_CAP_BUTT, "BUTT", 0, "Butt", "Flat dash ends"},
+      {PAINT_SHAPE_DASH_CAP_SQUARE, "SQUARE", 0, "Square", "Square dash ends"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_height_blend_items[] = {
+      {PAINT_SHAPE_HEIGHT_ADD, "ADD", 0, "Add", "Add height relief"},
+      {PAINT_SHAPE_HEIGHT_SUB, "SUB", 0, "Subtract", "Subtract height relief"},
+      {PAINT_SHAPE_HEIGHT_MAX, "MAX", 0, "Max", "Maximum height relief"},
+      {PAINT_SHAPE_HEIGHT_REPLACE, "REPLACE", 0, "Replace", "Replace height relief"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "PaintShapeSettings", nullptr);
+  RNA_def_struct_sdna(srna, "PaintShapeSettings");
+  RNA_def_struct_path_func(srna, "rna_PaintShapeSettings_path");
+  RNA_def_struct_ui_text(
+      srna, "Paint Shape Settings", "Settings of the shape drawing tools");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "type");
+  RNA_def_property_enum_items(prop, shape_type_items);
+  RNA_def_property_ui_text(prop, "Type", "Shape to draw");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_fill", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_USE_FILL);
+  RNA_def_property_ui_text(prop, "Fill", "Fill the shape's interior");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_stroke", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_USE_STROKE);
+  RNA_def_property_ui_text(prop, "Stroke", "Stroke the shape's outline");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_dash", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_USE_DASH);
+  RNA_def_property_ui_text(prop, "Dash", "Draw the stroke as a dash pattern");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_from_center", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_FROM_CENTER);
+  RNA_def_property_ui_text(prop, "From Center", "Drag grows the shape from its center");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_keep_aspect", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_KEEP_ASPECT);
+  RNA_def_property_ui_text(prop, "Keep Aspect", "Drag keeps the shape's aspect ratio");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_uniform_corners", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_CORNER_UNIFORM);
+  RNA_def_property_ui_text(prop, "Uniform Corners", "All rectangle corner radii move together");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_profile", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_USE_PROFILE);
+  RNA_def_property_ui_text(prop, "Use Profile", "Apply the stroke/fill profiles to the shape");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "normal_flip_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_NORMAL_FLIP_Y);
+  RNA_def_property_ui_text(
+      prop,
+      "DirectX Normal",
+      "Write DirectX-style normals (inverted green channel)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "closed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_CLOSED);
+  RNA_def_property_ui_text(
+      prop, "Closed", "Treat the outline as a closed loop. TODO: not honored by the rasterizer yet");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_align", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stroke_align");
+  RNA_def_property_enum_items(prop, shape_stroke_align_items);
+  RNA_def_property_ui_text(prop, "Align", "Which side of the outline the stroke is drawn on");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "cap_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "cap_type");
+  RNA_def_property_enum_items(prop, shape_cap_items);
+  RNA_def_property_ui_text(prop, "Caps", "Shape of the stroke's open ends");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "join_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "join_type");
+  RNA_def_property_enum_items(prop, shape_join_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Joins",
+      "Shape of the stroke's corners (Center alignment; other alignments keep round corners)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "profile_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "profile_mode");
+  RNA_def_property_enum_items(prop, shape_profile_mode_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Profile Mode",
+      "What the stroke/fill profiles control");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_width", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, 0.0f, 10000.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 500.0f, 1.0f, 1);
+  RNA_def_property_ui_text(prop, "Width", "Stroke width in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "feather", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, 0.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 50.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Feather", "Edge softness in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_range(prop, -M_PI, M_PI);
+  RNA_def_property_ui_text(prop, "Rotation", "Rotation of the shape around its center");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "size", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "size");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_range(prop, 1.0f, 10000.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 2048.0f, 1.0f, 0);
+  RNA_def_property_ui_text(
+      prop, "Size", "Default rectangle/ellipse size drawn by a click without a drag, in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "corner_radius", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_float_sdna(prop, nullptr, "corner_radius");
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_range(prop, 0.0f, 10000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 256.0f, 1.0f, 0);
+  RNA_def_property_ui_text(
+      prop, "Corner Radius", "Corner radii of the rectangle: top-left, top-right, bottom-right, "
+      "bottom-left, in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "dash_length", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, 0.0f, 10000.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 256.0f, 1.0f, 1);
+  RNA_def_property_ui_text(prop, "Dash Length", "Dash length along the stroke in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "gap_length", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, 0.0f, 10000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 256.0f, 1.0f, 1);
+  RNA_def_property_ui_text(prop, "Gap Length", "Gap between dashes along the stroke in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "dash_offset", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, -10000.0f, 10000.0f);
+  RNA_def_property_ui_range(prop, -256.0f, 256.0f, 1.0f, 1);
+  RNA_def_property_ui_text(prop, "Offset", "Shift of the dash pattern along the stroke in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_color", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_float_sdna(prop, nullptr, "stroke_color");
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_ui_text(prop, "Stroke Color", "Stroke color");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_color", PROP_FLOAT, PROP_COLOR_GAMMA);
+  RNA_def_property_float_sdna(prop, nullptr, "fill_color");
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_ui_text(prop, "Fill Color", "Fill color");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_blend", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stroke_blend");
+  RNA_def_property_enum_items(prop, rna_shape_blend_items);
+  RNA_def_property_ui_text(prop, "Stroke Blend", "Blend mode of the stroke");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_blend", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "fill_blend");
+  RNA_def_property_enum_items(prop, rna_shape_blend_items);
+  RNA_def_property_ui_text(prop, "Fill Blend", "Blend mode of the fill");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  /* Soft range for the F / Shift+F radial control (matches the brush strength's step). */
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.001, 3);
+  RNA_def_property_ui_text(prop, "Stroke Opacity", "Opacity of the stroke");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Fill Opacity", "Opacity of the fill");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_channels", PROP_COLLECTION, PROP_NONE);
+  /* Empty length name: fixed DNA array (same pattern as PaintModeSettings.channel_layer_bindings). */
+  RNA_def_property_collection_sdna(prop, nullptr, "stroke_channels", "");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_PaintShapeSettings_stroke_channels_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_PaintShapeSettings_stroke_channels_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "PaintShapeChannelValue");
+  RNA_def_property_ui_text(
+      prop, "Stroke Channels", "PBR paint channel values of the stroke, by channel");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "fill_channels", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "fill_channels", "");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_PaintShapeSettings_fill_channels_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_PaintShapeSettings_fill_channels_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_struct_type(prop, "PaintShapeChannelValue");
+  RNA_def_property_ui_text(
+      prop, "Fill Channels", "PBR paint channel values of the fill, by channel");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  prop = RNA_def_property(srna, "stroke_profile", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "stroke_profile");
+  RNA_def_property_struct_type(prop, "CurveMapping");
+  RNA_def_property_ui_text(
+      prop, "Stroke Profile", "Profile across the stroke: 0 at the line center, 1 at the edge");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_profile", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "fill_profile");
+  RNA_def_property_struct_type(prop, "CurveMapping");
+  RNA_def_property_ui_text(
+      prop, "Fill Profile", "Profile of the fill's edge falloff: 0 at the edge, 1 at the depth");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_profile_width", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, 0.0f, 10000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 256.0f, 1.0f, 1);
+  RNA_def_property_ui_text(prop, "Fill Falloff", "Width of the fill's edge falloff in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_ramp", PROP_POINTER, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "ColorRamp");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_PaintShapeSettings_stroke_ramp_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Stroke Ramp", "Optional color ramp along the stroke profile (Canvas mode)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_stroke_ramp", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "use_stroke_ramp", 1);
+  RNA_def_property_ui_text(
+      prop, "Use Stroke Ramp", "Color the stroke along its profile with the color ramp");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_stroke_screen_space", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_STROKE_SCREEN_SPACE);
+  RNA_def_property_ui_text(
+      prop, "Screen Space Stroke", "Stroke width in screen pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_channels_override", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_CHANNELS_OVERRIDE);
+  RNA_def_property_ui_text(prop,
+                           "Override Channels",
+                           "PBR channel values come from the shape, not the active brush");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "fill_type");
+  RNA_def_property_enum_items(prop, shape_fill_type_items);
+  RNA_def_property_ui_text(prop, "Fill Type", "How the fill is painted");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_rule", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "fill_rule");
+  RNA_def_property_enum_items(prop, shape_fill_rule_items);
+  RNA_def_property_ui_text(prop, "Fill Rule", "Winding rule of the fill");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "dash_cap", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "dash_cap");
+  RNA_def_property_enum_items(prop, shape_dash_cap_items);
+  RNA_def_property_ui_text(prop, "Dash Cap", "Shape of the dash ends");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "height_blend", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "height_blend");
+  RNA_def_property_enum_items(prop, shape_height_blend_items);
+  RNA_def_property_ui_text(prop, "Height Blend", "How height relief combines");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "height_depth", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 2);
+  RNA_def_property_ui_text(
+      prop, "Height Depth", "Depth of the height relief, in height channel units");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "normal_strength", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 10.0f);
+  RNA_def_property_ui_text(prop, "Normal Strength", "Strength of the normal relief");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_height_normal_link", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_HEIGHT_NORMAL_LINK);
+  RNA_def_property_ui_text(prop,
+                           "Height to Normal Link",
+                           "Derive the normal relief from the height profile evaluation instead "
+                           "of profiling independently");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fill_gradient", PROP_POINTER, PROP_NEVER_NULL);
+  RNA_def_property_struct_type(prop, "ColorRamp");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_PaintShapeSettings_fill_gradient_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(prop, "Fill Gradient", "Gradient ramp of the fill");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  /* The channel set a bake writes is resolved by the shared BKE rule; exposing it keeps the tool
+   * UI from duplicating the rule in Python. */
+  func = RNA_def_function(srna, "target_channels", "rna_PaintShapeSettings_target_channels");
+  RNA_def_function_ui_description(
+      func,
+      "Bit mask of the material paint channels a shape bake writes for a target kind "
+      "(0 image maps, 1 vertex attributes)");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_int(func, "kind", 0, 0, 1, "Kind", "0 image maps, 1 vertex attributes", 0, 1);
+  RNA_def_function_return(
+      func,
+      RNA_def_int(
+          func, "channels", 0, 0, (1 << PAINT_MATERIAL_CHANNEL_NUM) - 1, "Channels", "Bit mask", 0,
+          (1 << PAINT_MATERIAL_CHANNEL_NUM) - 1));
+}
+
 static void rna_def_image_paint(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3674,6 +4338,12 @@ static void rna_def_image_paint(BlenderRNA *brna)
   RNA_def_property_range(prop, 1, 16);
   RNA_def_property_ui_text(prop, "Count", "Number of parallel copies on each side of the line");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "shape", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "shape");
+  RNA_def_property_struct_type(prop, "PaintShapeSettings");
+  RNA_def_property_ui_text(prop, "Shape", "Settings of the shape drawing tools");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
 static void rna_def_particle_edit(BlenderRNA *brna)
@@ -4163,6 +4833,8 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_gp_weightpaint(brna);
   rna_def_vertex_paint(brna);
   rna_def_paint_mode(brna);
+  rna_def_paint_shape_channel_value(brna);
+  rna_def_paint_shape_settings(brna);
   rna_def_image_paint(brna);
   rna_def_particle_edit(brna);
   rna_def_gpencil_guides(brna);

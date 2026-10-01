@@ -2510,6 +2510,30 @@ class IMAGE_AST_brush_paint(ImageAssetShelf, AssetShelf):
         return context.space_data and context.space_data.mode == 'PAINT'
 
 
+class IMAGE_PT_tools_shape_options(Panel, ImagePaintPanel):
+    """Popover of the rare Shape tool settings (size, alignment, non-uniform corners). The tool
+    header shows the main fields; the Active Tool panel shows everything."""
+    bl_context = ".paint_common_2d"
+    bl_category = "Tool"
+    bl_label = "Shape Options"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+        tool = ToolSelectPanelHelper.tool_active_from_context(context)
+        return tool is not None and tool.idname.startswith("builtin.paint_shape_")
+
+    def draw(self, context):
+        from bl_ui.properties_paint_common import draw_paint_shape_extra_options, paint_shape_settings
+        layout = self.layout
+        shape = paint_shape_settings(context)
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        draw_paint_shape_extra_options(context, layout.column(), shape)
+
+
 classes = (
     IMAGE_MT_view,
     IMAGE_MT_view_zoom,
@@ -2571,6 +2595,7 @@ classes = (
     IMAGE_PT_paint_stroke_smooth_stroke,
     IMAGE_PT_paint_curve,
     IMAGE_PT_tools_brush_display,
+    IMAGE_PT_tools_shape_options,
     IMAGE_PT_tools_imagepaint_symmetry,
     IMAGE_PT_paint_symmetry_line,
     IMAGE_PT_uv_sculpt_options,

@@ -127,6 +127,7 @@ def register():
     properties_data_mesh.register_props()
     properties_paint_common.register()
     space_userpref.register()
+    space_toolsystem_toolbar.register_props()
 
     from bpy.props import (
         BoolProperty,
@@ -277,6 +278,7 @@ def unregister():
     space_userpref.unregister()
     properties_paint_common.unregister()
     properties_data_mesh.unregister_props()
+    space_toolsystem_toolbar.unregister_props()
 
     for mod in reversed(_modules_loaded):
         for cls in reversed(mod.classes):

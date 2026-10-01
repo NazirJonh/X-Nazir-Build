@@ -10,6 +10,10 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_screen_types.h"
+#include "DNA_windowmanager_types.h"
+
+#include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.h"
 #include "BLI_time.h"
 
@@ -104,10 +108,53 @@ void WM_tooltip_clear(bContext *C, wmWindow *win)
   }
 }
 
+/**
+ * The tool-tip keeps pointers to the area and region it was requested for, which may be freed
+ * while the timer runs (e.g. changing the area type or the UI layout).
+ */
+static bool tooltip_source_is_valid(const wmWindow *win, const bScreen *screen)
+{
+  const ScrArea *area = screen->tool_tip->area_from;
+  const ARegion *region = screen->tool_tip->region_from;
+  if (area == nullptr || region == nullptr) {
+    return true;
+  }
+  bool area_found = false;
+  for (const ScrArea &area_it : screen->areabase) {
+    if (&area_it == area) {
+      area_found = true;
+      break;
+    }
+  }
+  if (!area_found) {
+    for (const ScrArea &area_it : win->global_areas.areabase) {
+      if (&area_it == area) {
+        area_found = true;
+        break;
+      }
+    }
+  }
+  if (!area_found) {
+    return false;
+  }
+  for (const ARegion &region_it : area->regionbase) {
+    if (&region_it == region) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void WM_tooltip_init(bContext *C, wmWindow *win)
 {
   WM_tooltip_timer_clear(C, win);
   bScreen *screen = WM_window_get_active_screen(win);
+  if (!tooltip_source_is_valid(win, screen)) {
+    screen->tool_tip->area_from = nullptr;
+    screen->tool_tip->region_from = nullptr;
+    WM_tooltip_clear(C, win);
+    return;
+  }
   if (screen->tool_tip->region) {
     ui::tooltip_free(C, screen, screen->tool_tip->region);
     screen->tool_tip->region = nullptr;

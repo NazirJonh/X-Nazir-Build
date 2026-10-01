@@ -18,7 +18,12 @@ from collections import (
 )
 
 from bpy.types import (
+    Operator,
     Panel,
+    WindowManager,
+)
+from bpy.props import (
+    EnumProperty,
 )
 from bpy.app.translations import (
     pgettext_iface as iface_,
@@ -39,6 +44,29 @@ from bl_ui.properties_paint_common import (
     paint_shape_tool_has_angle,
     paint_shape_tool_flags,
 )
+
+# Items for the Sculpt Mode toolbar display group, shared by the #WindowManager property
+# (see `register_props`) and the operator that switches between the groups.
+_sculpt_paint_display_items = (
+    ('SCULPT', "Sculpt", "Show the sculpting tools"),
+    ('PAINT', "Paint", "Show the painting tools"),
+)
+
+
+def register_props():
+    # Which group of Sculpt Mode tools the toolbar shows, switched by the "Sculpt" / "Paint"
+    # buttons at the top of the toolbar (see `VIEW3D_PT_tools_active`).
+    # Session-only: an active tool exclusive to the other group overrides this when drawing.
+    WindowManager.sculpt_paint_tool_display = EnumProperty(
+        name="Tool Display",
+        description="Which group of tools the Sculpt Mode toolbar shows",
+        items=_sculpt_paint_display_items,
+        default='SCULPT',
+    )
+
+
+def unregister_props():
+    del WindowManager.sculpt_paint_tool_display
 
 
 def kmi_to_string_or_none(kmi):
@@ -5127,6 +5155,323 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         ],
     }
 
+    # Sculpt Mode toolbar display groups, switched by the "Sculpt" / "Paint" buttons at the top
+    # of the toolbar (see #WindowManager.sculpt_paint_tool_display).
+    # These reference the definitions of the master "SCULPT" list above, which must stay
+    # complete since it drives keymap registration and tool lookups (brush type to tool,
+    # tooltips, ...). Only the drawing uses these lists, see `tools_from_context_for_display`.
+    _tools_sculpt_display = [
+        _sculpt_tool,
+        _defs_sculpt.mask,
+        _defs_sculpt.draw_face_sets,
+        lambda context: (
+            (
+                _defs_sculpt.dyntopo_density,
+            )
+            if _defs_sculpt.poll_dyntopo(context)
+            else ()
+        ),
+        lambda context: (
+            (
+                _defs_sculpt.multires_eraser,
+                _defs_sculpt.multires_smear,
+            )
+            if _defs_sculpt.poll_multires(context)
+            else ()
+        ),
+        None,
+        _tools_sculpt_add,
+        None,
+        (
+            _defs_sculpt.mask_border,
+            _defs_sculpt.mask_lasso,
+            _defs_sculpt.mask_line,
+            _defs_sculpt.mask_polyline,
+        ),
+        (
+            _defs_sculpt.face_set_box,
+            _defs_sculpt.face_set_lasso,
+            _defs_sculpt.face_set_line,
+            _defs_sculpt.face_set_polyline,
+        ),
+        (
+            _defs_sculpt.trim_box,
+            _defs_sculpt.trim_lasso,
+            _defs_sculpt.trim_line,
+            _defs_sculpt.trim_polyline,
+        ),
+        _defs_sculpt.project_line,
+        None,
+        _defs_sculpt.layer_eraser,
+        None,
+        _defs_sculpt.mesh_filter,
+        _defs_sculpt.cloth_filter,
+        _defs_sculpt.color_filter,
+        None,
+        _defs_sculpt.face_set_edit,
+        _defs_sculpt.mask_by_color,
+        None,
+        _defs_sculpt.curves_edit,
+        None,
+        _defs_sculpt.mask_by_topology_island,
+        None,
+        _defs_transform.translate,
+        _defs_transform.rotate,
+        _defs_transform.scale,
+        _defs_transform.transform,
+        None,
+        _defs_sculpt.sculpt_cursor,
+        None,
+        *_tools_annotate,
+    ]
+
+    _tools_paint_display = [
+        _defs_sculpt.paint,
+        _defs_sculpt.texture_fill,
+        None,
+        (
+            _defs_sculpt.hide_border,
+            _defs_sculpt.hide_lasso,
+            _defs_sculpt.hide_line,
+            _defs_sculpt.hide_polyline,
+        ),
+        None,
+        # Kept as a pair so they share a row in the multi-column toolbar layout.
+        _defs_sculpt.curves_edit,
+        _defs_sculpt.mask_by_topology_island,
+        None,
+        _defs_sculpt.clone,
+        None,
+        _defs_sculpt.color_gradient,
+        None,
+        (
+            _defs_sculpt_paint_shape.rect,
+            _defs_sculpt_paint_shape.ellipse,
+        ),
+        (
+            _defs_sculpt_paint_shape.line,
+            _defs_sculpt_paint_shape.polyline,
+            _defs_sculpt_paint_shape.curve,
+        ),
+        None,
+        _defs_transform.translate,
+        _defs_transform.rotate,
+        _defs_transform.scale,
+        _defs_transform.transform,
+        None,
+        _defs_sculpt.sculpt_cursor,
+        None,
+        *_tools_annotate,
+    ]
+
+    # Flat tool identifiers of the display lists, to know which display group a tool belongs to.
+    _tools_sculpt_display_ids = frozenset(
+        item.idname
+        for item in ToolSelectPanelHelper._tools_flatten_with_dynamic(
+            _tools_sculpt_display, context=None)
+        if item is not None
+    )
+    _tools_paint_display_ids = frozenset(
+        item.idname
+        for item in ToolSelectPanelHelper._tools_flatten_with_dynamic(
+            _tools_paint_display, context=None)
+        if item is not None
+    )
+    _tools_sculpt_only_ids = _tools_sculpt_display_ids - _tools_paint_display_ids
+    _tools_paint_only_ids = _tools_paint_display_ids - _tools_sculpt_display_ids
+
+    # Default tools per display, also the fallback when the last used tool of the group
+    # is not currently available (e.g. the Density tool with dyntopo disabled).
+    _tool_id_display_default = {
+        'SCULPT': "builtin.brush",
+        'PAINT': "builtin_brush.paint",
+    }
+
+    # The last tool activated per display group, activated when switching the display so
+    # toggling returns to the tool last used in that group.
+    _last_tool_id_from_display = dict(_tool_id_display_default)
+
+    # Display group of tools registered at runtime (e.g. by add-ons), that are in neither of the
+    # display lists. Tools missing here are shown in the "Sculpt" group.
+    _tool_display_from_id_extra = {}
+
+    @classmethod
+    def tool_display_group_set(cls, idname, display):
+        """
+        Choose the Sculpt Mode toolbar group ('SCULPT' or 'PAINT') a tool registered at runtime
+        is shown in, None to forget it. Add-on tools can set `bl_display_group` instead.
+        """
+        if display is None:
+            cls._tool_display_from_id_extra.pop(idname, None)
+        else:
+            if display not in {'SCULPT', 'PAINT'}:
+                raise ValueError("Display must be 'SCULPT' or 'PAINT', not {!r}".format(display))
+            cls._tool_display_from_id_extra[idname] = display
+
+    @classmethod
+    def _tools_display_extra(cls, display):
+        """
+        Tools of the master list that are in neither display list (registered at runtime),
+        as `(tools, tools_by_anchor)`. The first are whole new items for the group `display`,
+        the second are lists of tools added to a group of the display lists, keyed by the identifier
+        of any of its tools.
+        """
+        known = cls._tools_sculpt_display_ids | cls._tools_paint_display_ids
+        from_id = cls._tool_display_from_id_extra
+        tools = []
+        tools_by_anchor = {}
+        for item in cls._tools['SCULPT']:
+            if item is None or (not (type(item) is ToolDef) and callable(item)):
+                continue
+            if type(item) is ToolDef:
+                if item.idname not in known and from_id.get(item.idname, 'SCULPT') == display:
+                    tools.append(item)
+                continue
+            group_extra = [
+                sub_item for sub_item in item
+                if sub_item is not None and sub_item.idname not in known and
+                from_id.get(sub_item.idname, 'SCULPT') == display
+            ]
+            if not group_extra:
+                continue
+            group_known = [sub_item for sub_item in item if sub_item is not None and sub_item.idname in known]
+            if group_known:
+                for sub_item in group_known:
+                    tools_by_anchor[sub_item.idname] = group_extra
+            else:
+                tools.append(tuple(group_extra))
+        return tools, tools_by_anchor
+
+    @classmethod
+    def _tool_display_exclusive_from_id(cls, idname):
+        """The display group `idname` is exclusive to, or None when shared or unknown."""
+        if idname in cls._tools_sculpt_only_ids:
+            return 'SCULPT'
+        if idname in cls._tools_paint_only_ids:
+            return 'PAINT'
+        if idname not in cls._tools_sculpt_display_ids and idname not in cls._tools_paint_display_ids:
+            for item in cls._tools_flatten(cls._tools['SCULPT']):
+                if item is not None and item.idname == idname:
+                    return cls._tool_display_from_id_extra.get(idname, 'SCULPT')
+        return None
+
+    @classmethod
+    def _tool_display_from_context(cls, context):
+        """The display group to show, following the active tool when it's exclusive to one."""
+        display = context.window_manager.sculpt_paint_tool_display
+        tool_active = ToolSelectPanelHelper._tool_active_from_context(context, 'VIEW_3D', 'SCULPT')
+        tool_active_id = getattr(tool_active, "idname", None)
+        if tool_active_id is not None:
+            display_exclusive = cls._tool_display_exclusive_from_id(tool_active_id)
+            if display_exclusive is not None:
+                display = display_exclusive
+        return display
+
+    @classmethod
+    def tools_from_context_for_display(cls, context):
+        if context.mode != 'SCULPT':
+            yield from cls.tools_from_context(context)
+            return
+        display = cls._tool_display_from_context(context)
+        tools = cls._tools_paint_display if display == 'PAINT' else cls._tools_sculpt_display
+        tools_extra, tools_extra_by_anchor = cls._tools_display_extra(display)
+        # Expand dynamic items exactly like `tools_from_context` does,
+        # the drawing itself cannot handle callables.
+        for item in tools:
+            if not (type(item) is ToolDef) and callable(item):
+                yield from item(context)
+            elif type(item) is tuple and tools_extra_by_anchor:
+                # Tools registered into an existing group are added at the end of it.
+                group_extra = []
+                for sub_item in item:
+                    for extra in tools_extra_by_anchor.get(sub_item.idname, ()):
+                        if extra not in group_extra:
+                            group_extra.append(extra)
+                yield item + tuple(group_extra) if group_extra else item
+            else:
+                yield item
+        if tools_extra:
+            yield None
+            yield from tools_extra
+
+    @classmethod
+    def on_tool_activated(cls, context, space_type, item):
+        # Follow tool switches that come from outside the toolbar, e.g. picking a brush
+        # of the other display group with the active brush.
+        if space_type != 'VIEW_3D':
+            return
+        if getattr(context, "mode", None) != 'SCULPT':
+            return
+        display = cls._tool_display_exclusive_from_id(item.idname)
+        if display is None:
+            return
+        context.window_manager.sculpt_paint_tool_display = display
+        cls._last_tool_id_from_display[display] = item.idname
+
+    @classmethod
+    def tool_display_set(cls, context, display):
+        """
+        Switch the toolbar display and activate the tool last used in that group.
+        Returns true when the tool could be activated.
+        """
+        from bl_ui.space_toolsystem_common import activate_by_id
+        tool_id = cls._last_tool_id_from_display[display]
+        if not activate_by_id(context, 'VIEW_3D', tool_id):
+            tool_id = cls._tool_id_display_default[display]
+            if not activate_by_id(context, 'VIEW_3D', tool_id):
+                return False
+        return True
+
+    def draw(self, context):
+        layout = self.layout
+        if context.mode == 'SCULPT':
+            display = self._tool_display_from_context(context)
+            # Same width detection as the tool buttons, the single column icon layout
+            # is too narrow for the full names so only the initials are shown.
+            region = context.region
+            view2d = region.view2d
+            width_scale = (
+                region.width * (view2d.region_to_view(1.0, 0.0)[0] - view2d.region_to_view(0.0, 0.0)[0]) /
+                context.preferences.system.ui_scale
+            )
+            is_narrow = width_scale <= 80.0
+            row = layout.row(align=True)
+            row.scale_y = 1.0
+            props = row.operator(
+                "view3d.sculpt_paint_display_set",
+                text=iface_("S" if is_narrow else "Sculpt"),
+                depress=(display == 'SCULPT'),
+            )
+            props.display = 'SCULPT'
+            props = row.operator(
+                "view3d.sculpt_paint_display_set",
+                text=iface_("P" if is_narrow else "Paint"),
+                depress=(display == 'PAINT'),
+            )
+            props.display = 'PAINT'
+            layout.separator()
+        self.draw_cls(layout, context)
+
+
+class VIEW3D_OT_sculpt_paint_display_set(Operator):
+    """Switch the Sculpt Mode toolbar between sculpting and painting tools"""
+    bl_idname = "view3d.sculpt_paint_display_set"
+    bl_label = "Sculpt/Paint Tools"
+
+    display: EnumProperty(
+        name="Display",
+        items=_sculpt_paint_display_items,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'SCULPT'
+
+    def execute(self, context):
+        if not VIEW3D_PT_tools_active.tool_display_set(context, self.display):
+            self.report({'WARNING'}, "Tool not found for display {:s}".format(self.display))
+        return {'FINISHED'}
+
 
 class SEQUENCER_PT_tools_active(ToolSelectPanelHelper, Panel):
     bl_space_type = 'SEQUENCE_EDITOR'
@@ -5211,6 +5556,7 @@ classes = (
     IMAGE_PT_tools_active,
     NODE_PT_tools_active,
     VIEW3D_PT_tools_active,
+    VIEW3D_OT_sculpt_paint_display_set,
     SEQUENCER_PT_tools_active,
     SCULPT_PT_insert_asset_correction,
     SCULPT_PT_insert_asset_extra,

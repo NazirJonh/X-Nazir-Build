@@ -230,6 +230,23 @@ class ToolSelectPanelHelper:
         """
         raise Exception("Sub-class {!r} must implement this method!".format(cls))
 
+    @classmethod
+    def tools_from_context_for_display(cls, context):
+        """
+        Tools to display in the toolbar, all of `tools_from_context` by default.
+        Sub-classes may filter this, e.g. to switch between groups of tools.
+
+        Note that this must only be used for drawing, tool lookups
+        (`activate_by_id`, brush type lookup, tooltips, ...) must keep
+        using `tools_from_context` so hidden tools keep working.
+        """
+        return cls.tools_from_context(context)
+
+    @classmethod
+    def on_tool_activated(cls, context, space_type, item):
+        """Called after `item` has been set as the active tool."""
+        pass
+
     @staticmethod
     def _tool_class_from_space_type(space_type):
         return next(
@@ -703,7 +720,7 @@ class ToolSelectPanelHelper:
         # Start iteration
         ui_gen.send(None)
 
-        for item in cls.tools_from_context(context):
+        for item in cls.tools_from_context_for_display(context):
             if item is None:
                 ui_gen.send(True)
                 continue
@@ -1076,6 +1093,8 @@ def _activate_by_item(context, space_type, item, index, *, as_fallback=False):
 
                 from bl_keymap_utils.io import _init_properties_from_data
                 _init_properties_from_data(props, gizmo_properties)
+
+    cls.on_tool_activated(context, space_type, item)
 
     WindowManager = bpy.types.WindowManager
 

@@ -1140,6 +1140,12 @@ def register_tool(tool_cls, *, after=None, separator=False, group=False):
 
     tool_converted = tool_from_class(tool_cls)
 
+    # Toolbars that split their tools into groups (Sculpt Mode: 'SCULPT' or 'PAINT') may be told
+    # which group to show the tool in, otherwise the toolbar chooses its default group.
+    display_group = getattr(tool_cls, "bl_display_group", None)
+    if display_group is not None and hasattr(cls, "tool_display_group_set") and context_mode == 'SCULPT':
+        cls.tool_display_group_set(tool_cls.bl_idname, display_group)
+
     if group:
         # Create a new group
         tool_converted = (tool_converted,)
@@ -1206,6 +1212,9 @@ def unregister_tool(tool_cls):
     if cls is None:
         raise Exception("Space type {!r} has no toolbar".format(space_type))
     tools = cls._tools[context_mode]
+
+    if hasattr(cls, "tool_display_group_set") and context_mode == 'SCULPT':
+        cls.tool_display_group_set(tool_cls.bl_idname, None)
 
     tool_def = tool_cls._bl_tool
     try:

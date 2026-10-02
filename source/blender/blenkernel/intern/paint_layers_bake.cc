@@ -361,7 +361,9 @@ static std::mutex &bake_subscriptions_mutex()
   return mutex;
 }
 
-static void bake_collect_source_images(const MaterialPaintLayer &layer, Vector<Image *> &r_images)
+static void bake_collect_source_images(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       Vector<Image *> &r_images)
 {
   auto add = [&](Image *image) {
     if (image != nullptr && !r_images.contains(image)) {
@@ -378,22 +380,26 @@ static void bake_collect_source_images(const MaterialPaintLayer &layer, Vector<I
     add(layer.bake->coverage);
   }
   for (int i = 0; i < layer.channels_num; i++) {
+    /* A channel outside the material's set is not rendered, so its map is not a dependency. */
+    if (paint_layer_channel_filtered(ma, layer, layer.channels[i].channel)) {
+      continue;
+    }
     add(layer.channels[i].image);
   }
   for (const MaterialPaintLayer &effect :
        layer.effects)
   {
-    bake_collect_source_images(effect, r_images);
+    bake_collect_source_images(ma, effect, r_images);
   }
   for (const MaterialPaintLayer &mask_item :
        layer.mask_stack)
   {
-    bake_collect_source_images(mask_item, r_images);
+    bake_collect_source_images(ma, mask_item, r_images);
   }
   for (const MaterialPaintLayer &child :
        layer.children)
   {
-    bake_collect_source_images(child, r_images);
+    bake_collect_source_images(ma, child, r_images);
   }
 }
 
@@ -434,7 +440,7 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
    * to them would invalidate the source maps on every mask stroke, so the row has no sources. */
   if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
     Vector<Image *> images;
-    bake_collect_source_images(layer, images);
+    bake_collect_source_images(ma, layer, images);
     for (Image *image : images) {
       PartialUpdateUser *user = BKE_image_partial_update_create(image);
       bake_subscription_user_drain(*image, user);
@@ -761,7 +767,14 @@ bool BKE_paint_layers_bake_row_to_image(const Material &ma,
 /** The generated nodes \a layer's subtree would add, the AUTO threshold's unit. */
 static int paint_layer_subtree_weight(const Material &ma, const MaterialPaintLayer &layer)
 {
-  int weight = 4 + layer.channels_num * 6;
+  /* Only channels that take part cost generator nodes; a channel outside the set is not built. */
+  int channels = 0;
+  for (int i = 0; i < layer.channels_num; i++) {
+    if (!paint_layer_channel_filtered(ma, layer, layer.channels[i].channel)) {
+      channels++;
+    }
+  }
+  int weight = 4 + channels * 6;
   for (const MaterialPaintLayer &effect :
        layer.effects)
   {
@@ -1257,6 +1270,10 @@ static bool material_live_row_eligible(const Material &ma,
   if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer.material == nullptr || channel < 0 ||
       channel >= PAINT_MATERIAL_CHANNEL_NUM)
   {
+    return false;
+  }
+  /* A channel outside the material's set does not show the source live: it takes no part. */
+  if (paint_layer_channel_filtered(ma, layer, channel)) {
     return false;
   }
   if (BKE_paint_layers_bake_row_is_deferred(ma, layer) ||
@@ -2598,6 +2615,11 @@ static uint64_t bake_hash_layer(uint64_t h,
   }
   for (int i = 0; i < layer.channels_num; i++) {
     const MaterialPaintLayerChannel &record = layer.channels[i];
+    /* A channel outside the material's set is not part of the result, so its record must not move
+     * the hash; re-adding the channel changes the hash and forces the re-bake then. */
+    if (ma != nullptr && paint_layer_channel_filtered(*ma, layer, record.channel)) {
+      continue;
+    }
     h = bake_hash_mix(h, uint8_t(record.channel));
     h = bake_hash_mix(h, uint8_t(record.state));
     h = bake_hash_mix(h, record.image != nullptr ? record.image->id.session_uid : 0);

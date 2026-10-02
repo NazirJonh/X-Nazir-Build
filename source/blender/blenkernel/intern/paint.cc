@@ -4231,9 +4231,11 @@ static bool paint_layers_row_takes_channel(const PaintLayersTarget &target,
     return false;
   }
   if (target.layer->channels_num > 0) {
-    /* Only a live record takes the brush's stroke: a DISABLED channel is not a target, so the
-     * stroke's other channels still write while this one is skipped. */
-    return paint_layer_channel_live(target.channel_record);
+    /* Only a live record the material's channel set also carries takes the brush's stroke: a
+     * DISABLED or out-of-set channel is not a target, so the stroke's other channels still write
+     * while this one is skipped. */
+    return target.material != nullptr &&
+           paint_layer_channel_live(*target.material, *target.layer, target.channel);
   }
   if (r_fallback_channel < 0) {
     r_fallback_channel = channel;

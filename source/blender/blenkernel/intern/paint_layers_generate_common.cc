@@ -413,6 +413,10 @@ bool layer_subtree_has_channel(const Material &ma,
   if (row_is_removed(ma, layer)) {
     return false;
   }
+  /* A channel outside the material's set takes no part, not even through a bake or a live source. */
+  if (paint_layer_channel_filtered(ma, layer, channel)) {
+    return false;
+  }
   Image *baked = nullptr;
   if (BKE_paint_layers_bake_substitute(ma, layer, channel, &baked)) {
     return true;
@@ -514,6 +518,9 @@ bool row_channel_substituted(const Material &ma,
  */
 bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, const int channel)
 {
+  if (paint_layer_channel_filtered(ma, layer, channel)) {
+    return false;
+  }
   if (!paint_layer_channel_present(ma, layer, channel)) {
     return false;
   }
@@ -540,6 +547,9 @@ bool layer_row_has_group(const Material &ma,
                          const PaintLayersRegenCache *cache)
 {
   if (row_is_removed(ma, layer)) {
+    return false;
+  }
+  if (paint_layer_channel_filtered(ma, layer, channel)) {
     return false;
   }
   Image *baked = nullptr;

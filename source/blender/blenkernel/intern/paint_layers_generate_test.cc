@@ -646,10 +646,10 @@ TEST_F(PaintLayersGenerateTest, authored_fill_wires_the_default_channels)
   /* The raw constructor adds no channels; the authored policy is what gives them. */
   EXPECT_EQ(fill->channels_num, 0);
   BKE_paint_layers_default_channels_apply(*ma, *fill);
-  EXPECT_EQ(fill->channels_num, 3);
+  EXPECT_EQ(fill->channels_num, 5);
   /* Idempotent: a second call adds nothing. */
   BKE_paint_layers_default_channels_apply(*ma, *fill);
-  EXPECT_EQ(fill->channels_num, 3);
+  EXPECT_EQ(fill->channels_num, 5);
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ChannelUnavailableReason reason = ChannelUnavailableReason::None;
@@ -669,6 +669,38 @@ TEST_F(PaintLayersGenerateTest, authored_fill_wires_the_default_channels)
       EXPECT_TRUE(socket->directly_linked_links().is_empty()) << socket_name;
     }
   }
+}
+
+TEST_F(PaintLayersGenerateTest, channel_outside_set_is_not_generated)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  const bNode *principled = BKE_paint_material_principled_find(*ma, reason);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *metallic = bke::node_find_socket(
+      const_cast<bNode &>(*principled), SOCK_IN, "Metallic"_ustr);
+  ASSERT_NE(metallic, nullptr);
+  EXPECT_FALSE(metallic->directly_linked_links().is_empty());
+
+  /* Metallic leaves the set: the row no longer participates, so the channel is not generated. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  principled = BKE_paint_material_principled_find(*ma, reason);
+  ASSERT_NE(principled, nullptr);
+  metallic = bke::node_find_socket(const_cast<bNode &>(*principled), SOCK_IN, "Metallic"_ustr);
+  ASSERT_NE(metallic, nullptr);
+  EXPECT_TRUE(metallic->directly_linked_links().is_empty());
+
+  /* Base Color is always in the set, so it stays wired. */
+  bNodeSocket *base_color = bke::node_find_socket(
+      const_cast<bNode &>(*principled), SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_FALSE(base_color->directly_linked_links().is_empty());
 }
 
 TEST_F(PaintLayersGenerateTest, disabled_channel_drops_its_map_from_the_tree)

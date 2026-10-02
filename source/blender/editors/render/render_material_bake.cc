@@ -2200,6 +2200,11 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
    * from one material can both be re-filled by a single render. */
   Vector<const BakeTargetSpec *> to_create;
   for (const BakeTargetSpec &target : params.targets) {
+    /* A channel outside the material's set is not rendered into a map, so it is neither created nor
+     * part of the bake hash. */
+    if (!BKE_paint_layers_channel_in_set(*params.material, target.channel)) {
+      continue;
+    }
     if (resolve.channels[target.channel] == ChannelResolution::Unavailable) {
       result.skipped_unavailable.append_non_duplicates(target.channel);
       continue;

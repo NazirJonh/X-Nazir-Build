@@ -898,7 +898,8 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator * /*op
    * or into its mask. */
   MaterialPaintLayer *base = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Base Color", nullptr, PaintLayerPlace::Above);
-  /* The default channel set, so the fresh stack reaches the Principled BSDF immediately. */
+  /* #BKE_paint_layers_add already materialized the global channel set from the build default, so
+   * the fresh stack reaches the Principled BSDF immediately. */
   BKE_paint_layers_default_channels_apply(*ma, *base);
   const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
   BKE_paint_layers_set_fill_color(*ma, base, base_color);

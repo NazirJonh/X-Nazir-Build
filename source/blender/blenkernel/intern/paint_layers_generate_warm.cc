@@ -242,7 +242,7 @@ static int warm_level_in_list(const Material &ma,
 
 PaintLayerWarmPlan paint_layers_warm_plan(const Material &ma,
                                           const MaterialPaintLayer &layer,
-                                          const PaintLayersRegenCache *cache)
+                                          const PaintLayersRegenCache * /*cache*/)
 {
   PaintLayerWarmPlan plan;
   if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {

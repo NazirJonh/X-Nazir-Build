@@ -118,7 +118,7 @@ bool values_sync_socket(Material &ma,
   }
   if (STREQ(role, ROLE_FILL)) {
     const int channel = prop_int_get(iface.properties, INPUT_CHANNEL_PROP, -1);
-    if (channel < 0) {
+    if (channel < 0 || paint_layer_channel_filtered(ma, *layer, channel)) {
       return false;
     }
     float color[4];
@@ -150,7 +150,7 @@ bool values_sync_socket(Material &ma,
   }
   if (STREQ(role, ROLE_LIVE_CONSTANT)) {
     const int channel = prop_int_get(iface.properties, INPUT_CHANNEL_PROP, -1);
-    if (channel < 0) {
+    if (channel < 0 || paint_layer_channel_filtered(ma, *layer, channel)) {
       return false;
     }
     /* #layer.material is walked by #material_paint_layer_foreach_id, so on the evaluated copy of

@@ -2285,6 +2285,11 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain, const PaintModeSettings *pa
     if (!paint_layers_is_layered(ma)) {
       continue;
     }
+    /* A file written before the field existed leaves it zero, and the derived set would then be
+     * recomputed on every per-channel filter call. Freeze it here, on the original and the main
+     * thread, before the generator, composite and bake ever run their loops. Quiet: this is not a
+     * user edit, so no tag and no extra regeneration is forced. */
+    BKE_paint_layers_channels_materialize(ma);
     /* Drain the bake subscriptions: a pixel edit to a source map shows up here and marks the
      * material for the planner, the same point the tree and slots are brought current. Then the
      * planner re-bakes the rows whose stored hash no longer matches, on the main thread. */

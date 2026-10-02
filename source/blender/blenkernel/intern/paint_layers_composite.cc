@@ -144,6 +144,9 @@ bool composite_layer_subtree_has_channel(const Material &material,
                                          const MaterialPaintLayer &layer,
                                          const int channel)
 {
+  if (paint_layer_channel_filtered(material, layer, channel)) {
+    return false;
+  }
   Image *baked = nullptr;
   if (BKE_paint_layers_bake_substitute(material, layer, channel, &baked)) {
     return true;
@@ -199,6 +202,11 @@ bool composite_image_layers_build(const Material &material,
                                   Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                   const bool isolate_pass_through = false)
 {
+  /* A channel outside the material's set is not composited at all: its result stays whatever is
+   * below, and a baked row must not slip past the participation gates below. */
+  if (!BKE_paint_layers_channel_in_set(material, eMaterialPaintChannel(channel))) {
+    return false;
+  }
   for (const MaterialPaintLayer &layer_ref : list) {
     const MaterialPaintLayer *layer = &layer_ref;
     /* The row whose "below" is being collected is not part of it, and neither is anything above

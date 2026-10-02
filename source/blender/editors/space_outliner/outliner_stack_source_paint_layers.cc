@@ -621,6 +621,12 @@ void paint_stack_rows_from_description_impl(const Material &material,
               StackRowPreview channels_slot;
               channels_slot.section_id = "CHANNELS";
               for (int c = 0; c < layer.channels_num; c++) {
+                /* A channel outside the material's set is not shown: it takes part nowhere. */
+                if (!BKE_paint_layers_channel_in_set(
+                        material, eMaterialPaintChannel(layer.channels[c].channel)))
+                {
+                  continue;
+                }
                 const Image *image = layer.channels[c].image;
                 if (image == nullptr) {
                   continue;
@@ -2404,6 +2410,12 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     return OPERATOR_CANCELLED;
   }
   const eMaterialPaintChannel channel = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  /* An image cannot be assigned to a channel outside the material's global set: the record would
+   * take part nowhere. */
+  if (!BKE_paint_layers_channel_in_set(material, channel)) {
+    BKE_report(op->reports, RPT_ERROR, "The channel is not part of the material's channel set");
+    return OPERATOR_CANCELLED;
+  }
 
   MaterialPaintLayer *layer = nullptr;
   bool created = false;

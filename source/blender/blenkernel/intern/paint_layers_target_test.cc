@@ -188,6 +188,41 @@ TEST_F(PaintLayersTargetTest, disabled_channel_is_not_a_paint_target)
   EXPECT_EQ(BKE_paint_layers_target_image(base_target), base_image);
 }
 
+TEST_F(PaintLayersTargetTest, channel_outside_material_set_is_not_a_paint_target)
+{
+  Material *ma = BKE_material_add(bmain, "OutOfSetMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  BKE_paint_layers_active_set(*ma, layer->marker);
+
+  MaterialPaintLayerChannel *metal = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_METALLIC);
+  ASSERT_NE(metal, nullptr);
+  Image *metal_image = solid_image("Metal", 4, 255, 255, 0);
+  metal->image = metal_image;
+
+  /* Dropping the channel from the set leaves the record and its map, but the channel is no longer a
+   * target and a stroke must not grow one. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, false));
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_METALLIC, PaintLayersTargetMode::Content, target));
+  EXPECT_EQ(BKE_paint_layers_target_image(target), nullptr);
+  EXPECT_STREQ(BKE_paint_layers_target_refusal(target),
+               "The channel is not part of the material's channel set: add it before painting");
+  EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, target, 4), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_METALLIC), metal);
+  EXPECT_EQ(metal->image, metal_image);
+
+  /* Back in the set, the same map is a target again. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, true));
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_METALLIC, PaintLayersTargetMode::Content, target));
+  EXPECT_EQ(BKE_paint_layers_target_image(target), metal_image);
+}
+
 TEST_F(PaintLayersTargetTest, get_refuses_flat_folder_and_no_active)
 {
   Material *flat = BKE_material_add(bmain, "FlatMat");

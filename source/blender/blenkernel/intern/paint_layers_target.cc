@@ -307,9 +307,9 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
     return nullptr;
   }
   if (target.mode == PaintLayersTargetMode::Content) {
-    /* A DISABLED record keeps its map for the file but is not a paint target, the same way it takes
-     * no part in the viewport. */
-    if (!paint_layer_channel_live(target.channel_record)) {
+    /* A DISABLED record keeps its map for the file but is not a paint target, and a channel
+     * outside the material's set takes no part at all; neither is a target. */
+    if (!paint_layer_channel_live(*target.material, *target.layer, target.channel)) {
       return nullptr;
     }
     return target.channel_record->image;
@@ -361,6 +361,13 @@ const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target)
   }
   if (BKE_paint_layers_target_is_frozen(target)) {
     return "The layer is frozen (bake); unfreeze it to paint";
+  }
+  /* A channel outside the material's global set takes no part anywhere, so a stroke into it would
+   * be invisible; the set has to gain the channel first. */
+  if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
+      paint_layer_channel_filtered(*target.material, *target.layer, target.channel))
+  {
+    return "The channel is not part of the material's channel set: add it before painting";
   }
   if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
       target.layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT)
@@ -473,6 +480,11 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
            MA_PAINT_LAYER_SOURCE_MATERIAL,
            MA_PAINT_LAYER_SOURCE_MESH_MAP))
   {
+    return nullptr;
+  }
+  /* A channel outside the material's set is not a target: a stroke must not grow a record for a
+   * channel that would take part nowhere. */
+  if (paint_layer_channel_filtered(*target.material, *target.layer, target.channel)) {
     return nullptr;
   }
   MaterialPaintLayerChannel *record = paint_layer_channel_find(*target.layer, target.channel);

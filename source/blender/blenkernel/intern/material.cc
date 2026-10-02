@@ -2331,9 +2331,10 @@ void BKE_paint_layers_texpaint_slots_refresh(Material *ma, const PaintModeSettin
     if (layer == nullptr) {
       return nullptr;
     }
+    /* A channel outside the material's set gets no slot map, so the slot reads as empty. */
     for (int i = 0; i < layer->channels_num; i++) {
       if (layer->channels[i].channel == channel &&
-          paint_layer_channel_live(&layer->channels[i]))
+          paint_layer_channel_live(*ma, *layer, channel))
       {
         return layer->channels[i].image;
       }

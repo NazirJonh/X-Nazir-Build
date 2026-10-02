@@ -378,7 +378,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_makes_paint_fill_folder_and_
   MaterialPaintLayer *paint_layer = paint_description_row_for_ordinal(*ma, paint);
   EXPECT_EQ(paint_layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   /* The Add gives a Paint or Fill row the default channel set, so it is not inert. */
-  EXPECT_EQ(paint_layer->channels_num, 3);
+  EXPECT_EQ(paint_layer->channels_num, 5);
 
   StackAddArgs fill_args;
   const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
@@ -391,7 +391,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_makes_paint_fill_folder_and_
   float base_color[4];
   BKE_paint_layers_base_color_get(*fill_layer, base_color);
   EXPECT_NEAR(base_color[0], 0.25f, 1e-6f);
-  EXPECT_EQ(fill_layer->channels_num, 3);
+  EXPECT_EQ(fill_layer->channels_num, 5);
 
   const int folder = paint_layers_edit_add(*ma, PAINT_STACK_ADD_FOLDER, -1, {});
   ASSERT_GE(folder, 0);

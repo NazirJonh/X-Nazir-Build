@@ -87,7 +87,7 @@ class PaintLayersUiTest(unittest.TestCase):
         bottom = self.material.paint_layers.new(source='IMAGE', name="Bottom")
         self.set_default_maps(bottom)
         fill = self.material.paint_layers.new(source='CONSTANT', name="Fill")
-        self.assertEqual(len(fill.channels), 3)
+        self.assertEqual(len(fill.channels), 5)
         fill.fill_color = (1.0, 0.0, 0.0, 1.0)
         self.regenerate()
         self.assertTrue(self.base_color_input_linked(), "Base Color must reach the Principled BSDF")
@@ -133,7 +133,7 @@ class PaintLayersUiTest(unittest.TestCase):
         before = self.composite_pixel()
 
         paint = self.material.paint_layers.new(source='IMAGE', name="Paint")
-        self.assertEqual(len(paint.channels), 3)
+        self.assertEqual(len(paint.channels), 5)
         self.regenerate()
         self.assertTrue(self.base_color_input_linked())
         after = self.composite_pixel()
@@ -142,7 +142,7 @@ class PaintLayersUiTest(unittest.TestCase):
 
     def test_fresh_paint_alone_does_not_wire_a_false_constant(self):
         paint = self.material.paint_layers.new(source='IMAGE', name="Paint")
-        self.assertEqual(len(paint.channels), 3)
+        self.assertEqual(len(paint.channels), 5)
         self.regenerate()
         # The channel output exists and is wired to the Principled BSDF even before the first
         # stroke, because the row participates.
@@ -150,11 +150,24 @@ class PaintLayersUiTest(unittest.TestCase):
 
     def test_authored_default_channels_are_enabled_without_maps(self):
         fill = self.material.paint_layers.new(source='CONSTANT', name="Fill")
-        self.assertEqual(len(fill.channels), 3)
+        self.assertEqual(len(fill.channels), 5)
         for record in fill.channels:
             self.assertIsNone(record.image)
             self.assertEqual(record.state, 'ENABLED')
-            self.assertIn(record.channel, {'BASE_COLOR', 'METALLIC', 'ROUGHNESS'})
+            self.assertIn(record.channel, {'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'AO'})
+
+    def test_material_channel_set_round_trip(self):
+        self.material.paint_layers.new(source='IMAGE', name="Layer")
+        # The build default is the effective set until one is authored.
+        self.assertEqual(set(self.material.paint_layers_channels),
+                         {'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'AO'})
+        self.assertTrue(self.material.paint_layers_channel_in_set(channel='BASE_COLOR'))
+        # Base Color cannot be removed: it is always in the set.
+        self.material.paint_layers_channels = {'METALLIC', 'ROUGHNESS'}
+        self.assertIn('BASE_COLOR', set(self.material.paint_layers_channels))
+        self.assertNotIn('NORMAL', set(self.material.paint_layers_channels))
+        self.assertFalse(self.material.paint_layers_channel_in_set(channel='NORMAL'))
+        self.assertTrue(self.material.paint_layers_channel_in_set(channel='METALLIC'))
 
     def test_folder_and_correction_get_no_default_channels(self):
         folder = self.material.paint_layers.new(source='STACK', name="Folder")
@@ -341,12 +354,12 @@ class PaintLayersUiTest(unittest.TestCase):
         self.assertEqual(base_color.blend_type, 'INHERIT')
         self.assertEqual(base_color.opacity, 100.0)
         # Editing the pair never creates a channel record.
-        self.assertEqual(len(layer.channels), 3)
+        self.assertEqual(len(layer.channels), 5)
         base_color.blend_type = 'MULTIPLY'
         base_color.opacity = 50.0
         self.assertEqual(base_color.blend_type, 'MULTIPLY')
         self.assertEqual(base_color.opacity, 50.0)
-        self.assertEqual(len(layer.channels), 3)
+        self.assertEqual(len(layer.channels), 5)
 
     def test_channel_settings_normal_has_no_blend(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")

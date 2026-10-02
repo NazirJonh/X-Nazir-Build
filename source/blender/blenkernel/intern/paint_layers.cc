@@ -1302,6 +1302,11 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
                                          MaterialPaintLayer *anchor,
                                          PaintLayerPlace place)
 {
+  /* The material's channel set is derived while the field is zero; freeze it before the new row is
+   * linked, so the per-channel filter reads the stored mask instead of recomputing the union. A
+   * no-op once anything has materialized it. */
+  BKE_paint_layers_channels_materialize(ma);
+
   /* Beside a correction would mean into its owner's corrections list, where a layer is neither
    * listed as a row nor composited as one (it would silently ride on the owner's visibility).
    * This function only ever creates a Layer-role row (a correction is linked through
@@ -1813,6 +1818,12 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
   MEM_delete(layer->channels);
   layer->channels = channels;
   layer->channels_num++;
+  /* A new record is an explicit participation. Once the set is materialized a channel a record
+   * names must enter it, otherwise the stored mask would disagree with the derived union a zero
+   * field computes. A zero field stays derived, so this is skipped until something materializes. */
+  if (ma.paint_layers_channels != 0 && channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) {
+    ma.paint_layers_channels |= uint16_t(uint16_t(1) << int(channel));
+  }
   BKE_paint_layers_tag_edited(ma);
   return &layer->channels[layer->channels_num - 1];
 }
@@ -1834,20 +1845,105 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
   if (!ELEM(layer.source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
     return;
   }
-  /* The channels that reach a Principled socket and hold no viewport-wide side effect: Alpha would
-   * change the material's transparency and Emission its glow, so both are opted into explicitly
-   * through channel_add. Normal and Height are painter-authored and stay out too. */
-  static constexpr eMaterialPaintChannel default_channels[] = {
-      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-      PAINT_MATERIAL_CHANNEL_METALLIC,
-      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-  };
-  for (const eMaterialPaintChannel channel : default_channels) {
-    if (paint_layer_channel_find(layer, channel) != nullptr) {
+  /* Every channel the material's set names gets a record. A set that was never authored derives
+   * from the layer records and the build default, so this is also how the default reaches a fresh
+   * stack: one source of truth instead of a second hard-coded list here. */
+  const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if ((set & (uint16_t(1) << channel)) == 0) {
       continue;
     }
-    BKE_paint_layers_channel_add(ma, &layer, channel);
+    const eMaterialPaintChannel paint_channel = eMaterialPaintChannel(channel);
+    if (paint_layer_channel_find(layer, paint_channel) != nullptr) {
+      continue;
+    }
+    BKE_paint_layers_channel_add(ma, &layer, paint_channel);
   }
+}
+
+namespace {
+
+/** The channels a layered material offers before any channel set is authored. Base Color included. */
+constexpr uint16_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
+    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL) |
+    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_AO);
+
+}  // namespace
+
+uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
+{
+  uint16_t mask = ma.paint_layers_channels;
+  if (mask == 0) {
+    /* Not authored: the union of the build default and every record any row already carries, so a
+     * stack's own channels are never dropped from the set. */
+    mask = PAINT_LAYERS_DEFAULT_CHANNEL_SET;
+    Vector<const MaterialPaintLayer *> rows;
+    BKE_paint_layers_flatten_all(ma, rows);
+    for (const MaterialPaintLayer *row : rows) {
+      for (const int i : IndexRange(row->channels_num)) {
+        mask |= uint16_t(uint16_t(1) << int(row->channels[i].channel));
+      }
+    }
+  }
+  /* Base Color is the material's constant and can never leave the set. */
+  mask |= uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  return mask;
+}
+
+void BKE_paint_layers_channels_materialize(Material &ma)
+{
+  if (ma.paint_layers_channels != 0) {
+    return;
+  }
+  /* Read the derived view while the field is still zero, so it carries the union of the rows and
+   * the build default; the write then freezes it. The getter forces Base Color in, so the stored
+   * mask is never zero and every later read takes the cheap branch. */
+  ma.paint_layers_channels = BKE_paint_layers_channel_set_mask_get(ma);
+}
+
+bool BKE_paint_layers_channel_in_set(const Material &ma, const eMaterialPaintChannel channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  return (BKE_paint_layers_channel_set_mask_get(ma) & (uint16_t(1) << int(channel))) != 0;
+}
+
+bool BKE_paint_layers_channel_set_enable(Material &ma,
+                                         const eMaterialPaintChannel channel,
+                                         const bool enabled)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  /* Base Color is the material's constant, so switching it off would leave a set with no colour. */
+  if (!enabled && channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    return false;
+  }
+  uint16_t mask = BKE_paint_layers_channel_set_mask_get(ma);
+  if (enabled) {
+    mask |= uint16_t(1) << int(channel);
+  }
+  else {
+    mask &= uint16_t(~(uint16_t(1) << int(channel)));
+  }
+  BKE_paint_layers_channel_set_mask_set(ma, mask);
+  return true;
+}
+
+void BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask)
+{
+  /* Base Color is the material's constant and can never leave the set. */
+  mask |= uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  if (ma.paint_layers_channels == mask) {
+    return;
+  }
+  ma.paint_layers_channels = mask;
+  /* A material setting, not a row: the layers keep every record and map they had. */
+  BKE_paint_layers_tag_edited(ma);
 }
 
 void BKE_paint_layers_channel_default_value(const Material &ma,

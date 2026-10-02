@@ -179,11 +179,41 @@ inline bool paint_layer_channel_live(const MaterialPaintLayerChannel *record)
   return record != nullptr && record->state == MA_PAINT_LAYER_CHANNEL_ENABLED;
 }
 
-/** Whether \a layer takes part in \a channel: a live record. */
+/**
+ * Whether \a layer's \a channel is filtered out by the material's global channel set.
+ *
+ * A channel absent from #Material::paint_layers_channels takes part nowhere; the record and its map
+ * stay on the row, so re-adding the channel brings it back untouched. A Mask Item is exempt: it is
+ * a single scalar over the row, not a PBR channel, and its placeholder channel record must survive
+ * the filter for #paint_layer_mask_correction_image to keep reading it.
+ */
+inline bool paint_layer_channel_filtered(const Material &ma,
+                                         const MaterialPaintLayer &layer,
+                                         const int channel)
+{
+  if (BKE_paint_layers_role(layer) == PaintLayerRole::MaskItem) {
+    return false;
+  }
+  return !BKE_paint_layers_channel_in_set(ma, eMaterialPaintChannel(channel));
+}
+
+/** #paint_layer_channel_live for a (row, channel) pair, with the global channel set applied. */
+inline bool paint_layer_channel_live(const Material &ma,
+                                     const MaterialPaintLayer &layer,
+                                     const int channel)
+{
+  return !paint_layer_channel_filtered(ma, layer, channel) &&
+         paint_layer_channel_live(paint_layer_channel_find(layer, channel));
+}
+
+/** Whether \a layer takes part in \a channel: a live record the material's set also carries. */
 inline bool paint_layer_channel_present(const Material &ma,
                                         const MaterialPaintLayer &layer,
                                         const int channel)
 {
+  if (paint_layer_channel_filtered(ma, layer, channel)) {
+    return false;
+  }
   if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     /* A MESH_MAP row paints the atlas in every channel its records name, whatever the map type. */
     return paint_layer_mesh_map_image(ma, layer) != nullptr &&
@@ -206,6 +236,9 @@ inline Image *paint_layer_channel_image(const Material &ma,
                                         const MaterialPaintLayer &layer,
                                         const int channel)
 {
+  if (paint_layer_channel_filtered(ma, layer, channel)) {
+    return nullptr;
+  }
   if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     return paint_layer_channel_present(ma, layer, channel) ?
                paint_layer_mesh_map_image(ma, layer) :

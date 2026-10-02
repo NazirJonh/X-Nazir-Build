@@ -848,12 +848,19 @@ struct Material {
   /** #eMaterialPaintLayersFlag. */
   eMaterialPaintLayersFlag paint_layers_flag = {};
   /**
+   * #eMaterialPaintChannel bitmask of the material's global paint channel set, one bit per channel
+   * (`1 << channel`). Zero means "not set": BKE then derives the set from the union of every layer's
+   * channel records plus the build default, so an existing file needs no versioning. Base Color is
+   * always part of the set. Leaving a channel out of the set never removes a layer's record or map;
+   * adding one never creates them (a record is created lazily).
+   */
+  uint16_t paint_layers_channels = 0;
+  /**
    * The UV layer the Paint Layers stack samples, by name. Empty keeps the previous behavior: the
    * generated graph reads the render UV and painting reads the object's active UV. Filled from the
    * active object's active UV when a material first becomes layered.
    */
   char paint_layers_uv_map[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";
-  char _pad2[2] = {};
   /**
    * Runtime-only derived state of the generated Paint Layers graph, owned by this material.
    * Lazily created; never saved, and a copy starts empty. See #MaterialPaintLayersRuntime.

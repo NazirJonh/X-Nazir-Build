@@ -771,6 +771,23 @@ static void rna_Material_paint_layers_locked_set(PointerRNA *ptr, bool value)
   DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
 }
 
+/* The effective set, not the raw field: an unauthored field reads the derived set. */
+static int rna_Material_paint_layers_channels_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_channel_set_mask_get(*id_cast<Material *>(ptr->owner_id));
+}
+
+static void rna_Material_paint_layers_channels_set(PointerRNA *ptr, int value)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  BKE_paint_layers_channel_set_mask_set(*ma, uint16_t(value));
+}
+
+static bool rna_Material_paint_layers_channel_in_set(Material *ma, int channel)
+{
+  return BKE_paint_layers_channel_in_set(*ma, eMaterialPaintChannel(channel));
+}
+
 /** A description edit: the stack samples another UV layer, so the generated tree is stale. */
 static void rna_Material_paint_layers_uv_map_update(Main * /*bmain*/,
                                                     Scene * /*scene*/,
@@ -1920,6 +1937,23 @@ static PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
 #else
 
 namespace blender {
+
+/* Bit-flag values for #Material.paint_layers_channels: the set is a bitmask keyed by
+ * #eMaterialPaintChannel, so each item must be a unique power-of-two bit. This must not reuse
+ * #rna_enum_material_paint_channel_items, which stores plain channel indices (0..9). */
+static const EnumPropertyItem rna_enum_material_paint_channel_flag_items[] = {
+    {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_CUSTOM, "CUSTOM", 0, "Custom", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
+    {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
 
 static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
@@ -3768,6 +3802,36 @@ void RNA_def_material(BlenderRNA *brna)
       "UV Map",
       "Name of the UV layer the Paint Layers stack samples; empty uses the object's active UV");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_uv_map_update");
+
+  prop = RNA_def_property(srna, "paint_layers_channels", PROP_ENUM, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_ENUM_FLAG);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_flag_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_Material_paint_layers_channels_get",
+                              "rna_Material_paint_layers_channels_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Channels",
+      "The material's global paint channel set; while unset it is derived from the layer records "
+      "and the build default. Base Color is always in the set");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  {
+    FunctionRNA *func = RNA_def_function(
+        srna, "paint_layers_channel_in_set", "rna_Material_paint_layers_channel_in_set");
+    RNA_def_function_ui_description(
+        func, "Whether a channel is in the material's global paint channel set");
+    PropertyRNA *parm = RNA_def_enum(func,
+                                     "channel",
+                                     rna_enum_material_paint_channel_items,
+                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                     "Channel",
+                                     "Channel to test");
+    RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+    parm = RNA_def_boolean(func, "result", false, "In Set", "Whether the channel is in the set");
+    RNA_def_function_return(func, parm);
+  }
 
   {
     FunctionRNA *func = RNA_def_function(

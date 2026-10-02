@@ -731,6 +731,10 @@ RowResult PaintLayersChainBuilder::build_row(const MaterialPaintLayer *layer,
   if (row_is_removed(ma, *layer)) {
     return {};
   }
+  /* A channel outside the material's set is not built, not even a Material row's live source. */
+  if (paint_layer_channel_filtered(ma, *layer, channel)) {
+    return {};
+  }
   /* The aliases keep the row body unchanged; for a leaf target points at the row's own group,
    * where the value socket mirrors each root input the row uses. */
   bNodeTree &tree = *target.tree;

@@ -334,14 +334,60 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
  * `Material.paint_layers.new`, `MATERIAL_OT_new_layered` -- calls this one function, so the default
  * set is decided in exactly one place and no path can forget it.
  *
- * The default set is the channels that reach a Principled socket and can carry a map, minus Normal
- * and Height: Base Color, Metallic, Roughness, Specular, Alpha and Emission. Each gets an enabled
- * record with no map: a Fill then shows its fill colour in all of them, a Paint contributes
- * nothing until a stroke gives a channel a map. Existing records are left as they are, so the call
- * is idempotent. Folders, corrections and the bake-backed sources (Material, NodeGroup) are left
- * alone.
+ * The set is the material's global channel set (#BKE_paint_layers_channel_set_mask_get): every
+ * channel it names gets an enabled record with no map, so a Fill then shows its fill colour in all
+ * of them and a Paint contributes nothing until a stroke gives a channel a map. Existing records
+ * are left as they are, so the call is idempotent. Folders, corrections and the bake-backed sources
+ * (Material, NodeGroup) are left alone; a MESH_MAP row still defaults to Base Color alone.
  */
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer);
+
+/**
+ * The material's global paint channel set, as a bitmask over #eMaterialPaintChannel (`1 << channel`).
+ *
+ * When #Material::paint_layers_channels is zero the set is derived: the union of every layer's
+ * channel records plus the build default (Base Color, Metallic, Roughness, Normal, AO), so a file
+ * written before the field existed reads the same set it always offered. Base Color is always in
+ * the returned set, whatever is stored. This is a read-only view of the description; it never
+ * creates a channel record.
+ */
+uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma);
+
+/** Whether \a channel is in \a ma's global paint channel set. */
+bool BKE_paint_layers_channel_in_set(const Material &ma, eMaterialPaintChannel channel);
+
+/**
+ * Add or remove \a channel from \a ma's global paint channel set, materializing the derived set on
+ * the first explicit write (a zero field becomes the computed mask, then the edit is applied).
+ *
+ * The layers are never touched: no channel record or map is created or removed, so switching a
+ * channel off keeps every layer's data and switching one on does not author records. Base Color
+ * cannot be switched off -- it is the material's constant -- and a request to do so is refused.
+ *
+ * \return false when \a channel is out of range or Base Color is to be disabled.
+ */
+bool BKE_paint_layers_channel_set_enable(Material &ma,
+                                         eMaterialPaintChannel channel,
+                                         bool enabled);
+
+/**
+ * Write \a ma's global paint channel set as a whole bitmask, forcing Base Color in and tagging the
+ * material once. The layers are never touched; see #BKE_paint_layers_channel_set_enable.
+ */
+void BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
+
+/**
+ * Freeze the derived channel set into #Material::paint_layers_channels when the field is still zero.
+ *
+ * While the field is zero #BKE_paint_layers_channel_set_mask_get recomputes the union of every
+ * layer record plus the build default on each call, which the per-channel filter does in hot loops.
+ * This stores that derived view once, so the filter reads a plain bitmask afterwards. Quiet on
+ * purpose -- the field is derived state, not a user edit -- so no tag, regeneration or undo step is
+ * forced; callers on an authoring path already tag the material themselves.
+ *
+ * A no-op when the field is already nonzero, so it is idempotent and never touches a layer record.
+ */
+void BKE_paint_layers_channels_materialize(Material &ma);
 
 /**
  * Whether \a target is reachable from \a from by following MATERIAL layers' source materials, so

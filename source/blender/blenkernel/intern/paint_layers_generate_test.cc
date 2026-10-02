@@ -541,6 +541,23 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     return record;
   }
 
+  /** One channel's bit in #Material::paint_layers_channels. */
+  static constexpr uint16_t channel_bit(const eMaterialPaintChannel channel)
+  {
+    return uint16_t(1) << int(channel);
+  }
+
+  /**
+   * Add \a extra to the material's channel set, keeping the derived default. A Material row has no
+   * channel records, so the channels its source carries beyond the build default set (Specular,
+   * Alpha, Emission) have to be opted into to keep the row participating in them.
+   */
+  void extend_channel_set(const uint16_t extra)
+  {
+    BKE_paint_layers_channel_set_mask_set(*ma,
+                                          BKE_paint_layers_channel_set_mask_get(*ma) | extra);
+  }
+
   /** A source material whose Principled is linked to its output and whose Roughness is constant. */
   Material *add_principled_source(const char *name, const float roughness)
   {
@@ -2308,6 +2325,10 @@ TEST_F(PaintLayersGenerateTest, live_material_constant_builds_a_group_input)
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* The source carries Specular, Alpha and Emission beyond the build default set. */
+  extend_channel_set(channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
   /* A baked map for the row, so the non-live path has something to show. */
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(
       *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("SourceBake")));
@@ -2942,6 +2963,10 @@ TEST_F(PaintLayersGenerateTest, source_group_instantiates_one_wrapper_node)
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* The source carries Specular, Alpha and Emission beyond the build default set. */
+  extend_channel_set(channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
   BKE_paint_layers_active_set(*ma, row->marker);
 
   PaintLayersRegenerateReport report;
@@ -5853,7 +5878,10 @@ TEST_F(PaintLayersGenerateTest, active_heavy_row_stays_live_and_gets_no_bake)
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_METALLIC,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR,
+                                              PAINT_MATERIAL_CHANNEL_NORMAL,
+                                              PAINT_MATERIAL_CHANNEL_AO,
+                                              PAINT_MATERIAL_CHANNEL_EMISSION})
   {
     ASSERT_NE(BKE_paint_layers_channel_add(*ma, corr, channel), nullptr);
   }
@@ -5971,6 +5999,8 @@ TEST_F(PaintLayersGenerateTest, heavy_auto_row_keeps_its_bake)
   ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("HeavyRough")), nullptr);
   ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_METALLIC, add_image("HeavyMetal")), nullptr);
   ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_SPECULAR, add_image("HeavySpec")), nullptr);
+  ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("HeavyNormal")), nullptr);
+  ASSERT_NE(add_channel(*heavy, PAINT_MATERIAL_CHANNEL_AO, add_image("HeavyAO")), nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *heavy));
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
 
@@ -6034,6 +6064,7 @@ TEST_F(PaintLayersGenerateTest, heavy_isolating_folder_becomes_a_bake_candidate)
   ASSERT_NE(group_one(*ma, folder), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
@@ -6106,6 +6137,7 @@ TEST_F(PaintLayersGenerateTest, active_child_defers_its_folder_bake)
   ASSERT_NE(folder, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
   BKE_paint_layers_active_set(*ma, child->marker);
@@ -6126,6 +6158,7 @@ TEST_F(PaintLayersGenerateTest, never_mode_folder_is_not_baked)
   ASSERT_NE(folder, nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_NEVER));
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
@@ -6180,6 +6213,7 @@ TEST_F(PaintLayersGenerateTest, auto_baked_folder_child_value_edit_invalidates_a
   ASSERT_NE(group_one(*ma, folder), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_FALSE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
@@ -6235,6 +6269,7 @@ TEST_F(PaintLayersGenerateTest, editing_a_sibling_outside_the_folder_leaves_the_
   ASSERT_NE(group_one(*ma, folder), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
   MaterialPaintLayer *outside = add_paint_layer("Outside", add_image("OutsideImg"));
@@ -6285,9 +6320,11 @@ TEST_F(PaintLayersGenerateTest, folder_level_counts_enclosing_folders)
 static MaterialPaintLayer *heavy_folder_make(PaintLayersGenerateTest &test)
 {
   MaterialPaintLayer *child = test.add_paint_layer("HeavyChild", test.add_image("HeavyChildMap"));
-  /* Three channels keep the child itself light (22) while the folder is heavy (34). */
-  for (const eMaterialPaintChannel channel :
-       {PAINT_MATERIAL_CHANNEL_ROUGHNESS, PAINT_MATERIAL_CHANNEL_METALLIC})
+  /* Three added channels plus the helper's Base Color keep the child itself light (28) while the
+   * folder is heavy (40, over the 36-node AUTO threshold). */
+  for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                              PAINT_MATERIAL_CHANNEL_METALLIC,
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
   {
     EXPECT_NE(BKE_paint_layers_channel_add(*test.ma, child, channel), nullptr);
   }
@@ -7698,6 +7735,9 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_hybrid_row)
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Hybrid", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* The source's Alpha is the row's coverage; Alpha is outside the build default set, so without
+   * this the factor falls back to the baked coverage map and adds a sampler. */
+  extend_channel_set(channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA));
   std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM> maps{};
   maps[PAINT_MATERIAL_CHANNEL_ROUGHNESS] = add_image("HybridBaked");
   material_bake_set(*this, *ma, *row, maps, add_image("HybridCoverage"));
@@ -9227,7 +9267,9 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_fill_layer)
   const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, green));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x998ad7a6ea1b8737ull, "fill_layer"); /* +warm */
+  /* The Fill default set is five channels now: the extra Normal and AO selectors are the only
+   * change to the serialized tree (see the report's fill_layer diff). */
+  snapshot_expect(*ma, 0x281a44432ac8cd8aull, "fill_layer"); /* +warm, +Normal/AO default */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_isolating)
@@ -9338,6 +9380,10 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_h
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* Restore the pre-filter topology: the source carries Specular, Alpha and Emission. */
+  extend_channel_set(channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(
       *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("HybridBaked")));
   BKE_paint_layers_active_set(*ma, row->marker);
@@ -9354,6 +9400,10 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_s
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* Restore the pre-filter topology: the source carries Specular, Alpha and Emission. */
+  extend_channel_set(channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA) |
+                     channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   snapshot_expect(*ma, 0x97c2879344f39406ull, "material_row_source_group"); /* +warm */
 }

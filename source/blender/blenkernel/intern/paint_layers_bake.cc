@@ -1272,8 +1272,12 @@ static bool material_live_row_eligible(const Material &ma,
   {
     return false;
   }
-  /* A channel outside the material's set does not show the source live: it takes no part. */
-  if (paint_layer_channel_filtered(ma, layer, channel)) {
+  /* A channel outside the material's set does not show the source live: it takes no part. Alpha is
+   * the exception: for a Material row it is only ever read as the row's coverage factor (see
+   * #paint_layer_material_source_map), and that factor is not a Principled channel output, so the
+   * set must not drop it. The Alpha *output* stays gated by #build_row and the composite's own
+   * channel gate. */
+  if (channel != PAINT_MATERIAL_CHANNEL_ALPHA && paint_layer_channel_filtered(ma, layer, channel)) {
     return false;
   }
   if (BKE_paint_layers_bake_row_is_deferred(ma, layer) ||

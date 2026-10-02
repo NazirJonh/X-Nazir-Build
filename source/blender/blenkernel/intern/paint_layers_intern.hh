@@ -573,8 +573,14 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed =
  * The generated-node weight above which an AUTO row is baked instead of evaluated live: the number
  * of nodes the row's subtree would add to the tree. One place to tune -- the planner compares a
  * row's weight against it, so a "heavy enough to be worth caching" row is one number, not a rule.
+ *
+ * 36 keeps the widest default row light: `paint_layer_subtree_weight` gives a leaf row
+ * `4 + channels * 6`, so the five build-default channels (Base Color, Metallic, Roughness, Normal,
+ * AO) weigh 34, two under the threshold. The historical value 24 predated that five-channel
+ * default and classified every fresh row as heavy; a heavy row is queued to a wmJob instead of
+ * staying live, which a script with no job can never settle.
  */
-constexpr int PAINT_LAYERS_AUTO_BAKE_NODES = 24;
+constexpr int PAINT_LAYERS_AUTO_BAKE_NODES = 36;
 
 /** What a child whose valid bake stands in costs its parent's weight: one map, like one channel. */
 constexpr int PAINT_LAYERS_BAKED_CHILD_WEIGHT = 6;

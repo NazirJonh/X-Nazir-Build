@@ -80,6 +80,24 @@ struct RGBA {
   float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
 };
 
+/** One channel's bit in #Material::paint_layers_channels. */
+static constexpr uint16_t channel_bit(const eMaterialPaintChannel channel)
+{
+  return uint16_t(1) << int(channel);
+}
+
+/**
+ * Add \a extra to the material's channel set, keeping the derived default. A Material row holds no
+ * channel records, so the base it reads for a channel outside the default set (Specular, Alpha,
+ * Emission, ...) has to be opted into explicitly in these fixtures to match the source it is built
+ * from. Called after every row exists and before the first regenerate, so the set does not widen
+ * the channel records a Paint/Fill row's default-apply would create.
+ */
+static void channel_set_extend(Material &ma, const uint16_t extra)
+{
+  BKE_paint_layers_channel_set_mask_set(ma, BKE_paint_layers_channel_set_mask_get(ma) | extra);
+}
+
 /** The generated tree's graph, evaluated at one pixel. */
 class GraphInterpreter {
  public:
@@ -1593,6 +1611,11 @@ TEST_F(PaintLayersGraphEvalTest, multi_source_rows_match_the_reference)
         *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(row, nullptr);
     ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, test_case.source));
+    /* The source carries Specular, Alpha and Emission, none of them in the build default set. */
+    channel_set_extend(*ma,
+                       channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                           channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA) |
+                           channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
     BKE_paint_layers_active_set(*ma, row->marker);
     ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
     ASSERT_NE(ma->paint_layers_tree, nullptr);
@@ -1688,6 +1711,11 @@ TEST_F(PaintLayersGraphEvalTest, multi_source_baked_rows_match_the_reference_and
         *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(row, nullptr);
     ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+    /* The baked source carries Specular, Alpha and Emission beyond the build default set. */
+    channel_set_extend(*ma,
+                       channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                           channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA) |
+                           channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
 
     auto raw_at = [&](const int channel, const int x, const int y, RGBA &r_out) -> bool {
       return grouped ? group_source_expected(group_spec, channel, x, y, r_out) :
@@ -5472,11 +5500,13 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_computes_and_commits)
   ma = BKE_material_add(bmain, "HeavyJob");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
-  /* Four channels put the subtree over the AUTO/worker threshold. */
+  /* Six channels weigh 40, over the 36-node AUTO/worker threshold. */
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
                                               PAINT_MATERIAL_CHANNEL_METALLIC,
-                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR,
+                                              PAINT_MATERIAL_CHANNEL_NORMAL,
+                                              PAINT_MATERIAL_CHANNEL_AO})
   {
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     ASSERT_NE(record, nullptr);
@@ -5516,12 +5546,14 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_allocates_bake_for_a_row_with_no
   ma = BKE_material_add(bmain, "HeavyJobNoBake");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Layer", nullptr, PaintLayerPlace::Above);
-  /* Four channels put the subtree over the AUTO/worker threshold, exactly like the job-create test
+  /* Six channels weigh 40, over the 36-node AUTO/worker threshold, exactly like the job-create test
    * above. */
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
                                               PAINT_MATERIAL_CHANNEL_METALLIC,
-                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR,
+                                              PAINT_MATERIAL_CHANNEL_NORMAL,
+                                              PAINT_MATERIAL_CHANNEL_AO})
   {
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     ASSERT_NE(record, nullptr);
@@ -5563,7 +5595,9 @@ TEST_F(PaintLayersGraphEvalTest, heavy_pending_sees_a_weight_heavy_row_with_no_b
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
                                               PAINT_MATERIAL_CHANNEL_METALLIC,
-                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR,
+                                              PAINT_MATERIAL_CHANNEL_NORMAL,
+                                              PAINT_MATERIAL_CHANNEL_AO})
   {
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     ASSERT_NE(record, nullptr);
@@ -5584,7 +5618,9 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_drops_removed_row)
   for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                               PAINT_MATERIAL_CHANNEL_ROUGHNESS,
                                               PAINT_MATERIAL_CHANNEL_METALLIC,
-                                              PAINT_MATERIAL_CHANNEL_SPECULAR})
+                                              PAINT_MATERIAL_CHANNEL_SPECULAR,
+                                              PAINT_MATERIAL_CHANNEL_NORMAL,
+                                              PAINT_MATERIAL_CHANNEL_AO})
   {
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, layer, channel);
     record->image = add_solid_image("Map", size, 128, 64, 32, 255);
@@ -6826,6 +6862,8 @@ TEST_F(PaintLayersGraphEvalTest, live_material_constant_matches_the_cpu)
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.5f));
+  /* The source Alpha is the row's coverage, and Alpha is outside the build default set. */
+  channel_set_extend(*ma, channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA));
   BKE_paint_layers_active_set(*ma, row->marker);
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -6890,6 +6928,8 @@ TEST_F(PaintLayersGraphEvalTest, inactive_material_constant_matches_the_cpu)
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.5f));
+  /* The source Alpha is the row's coverage, and Alpha is outside the build default set. */
+  channel_set_extend(*ma, channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA));
   /* The focus is on the bottom row, not on the Material row. */
   BKE_paint_layers_active_set(*ma, bottom->marker);
 
@@ -6957,6 +6997,8 @@ TEST_F(PaintLayersGraphEvalTest, live_material_constant_edit_syncs_without_rebui
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, 0.5f));
+  /* The source Alpha is the row's coverage, and Alpha is outside the build default set. */
+  channel_set_extend(*ma, channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA));
   BKE_paint_layers_active_set(*ma, row->marker);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
@@ -7593,6 +7635,8 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_alpha_input_matches_baked)
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, row, row_opacity));
+  /* The source Alpha is the row's coverage, and Alpha is outside the build default set. */
+  channel_set_extend(*ma, channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
 
@@ -8244,6 +8288,10 @@ TEST_F(PaintLayersGraphEvalTest, material_row_source_group_matches_its_baked_map
   MaterialPaintLayer *top = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Top", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(top, nullptr);
+  /* Specular and Emission are read from the source beyond the build default set. */
+  channel_set_extend(*ma,
+                     channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                         channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
 
   const eMaterialPaintChannel channels[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                             PAINT_MATERIAL_CHANNEL_METALLIC,
@@ -8400,6 +8448,8 @@ TEST_F(PaintLayersGraphEvalTest, material_row_source_group_keeps_specular)
         *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
     ASSERT_NE(row, nullptr);
     ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+    /* Specular is outside the build default set; the source wrapper must still carry it. */
+    channel_set_extend(*ma, channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR));
     BKE_paint_layers_active_set(*ma, row->marker);
     ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
@@ -9806,6 +9856,7 @@ TEST_F(PaintLayersGraphEvalTest, auto_baked_folder_matches_live)
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *folder));
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
   ASSERT_EQ(folder->bake, nullptr);
@@ -9870,6 +9921,7 @@ TEST_F(PaintLayersGraphEvalTest, stack_effect_correction_folder_auto_baked_match
       bc);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *correction));
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
@@ -9931,6 +9983,7 @@ TEST_F(PaintLayersGraphEvalTest, stack_mask_item_folder_auto_baked_matches_live)
       bc);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, mask, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *mask));
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
@@ -11146,6 +11199,13 @@ class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
     BKE_paint_layers_set_blend(*ma, s.top, MA_PAINT_LAYER_BLEND_MULTIPLY);
     BKE_paint_layers_set_opacity(*ma, s.top, kFsTopOpacity);
 
+    /* The Material rows read Specular, Emission and the Alpha coverage, none of them in the build
+     * default set; the reference model takes them into part. */
+    channel_set_extend(*ma,
+                       channel_bit(PAINT_MATERIAL_CHANNEL_SPECULAR) |
+                           channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION) |
+                           channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA));
+
     s.ma = ma;
     return s;
   }
@@ -12072,6 +12132,8 @@ TEST_F(PaintLayersGraphEvalTest, material_row_source_alpha_blends_the_content_al
       *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* The source Alpha is the row's coverage, and Alpha is outside the build default set. */
+  channel_set_extend(*ma, channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   BKE_paint_layers_values_sync(*ma);
 
@@ -12084,6 +12146,64 @@ TEST_F(PaintLayersGraphEvalTest, material_row_source_alpha_blends_the_content_al
   EXPECT_NEAR(graph.g, cpu.g, tolerance);
   EXPECT_NEAR(graph.b, cpu.b, tolerance);
   EXPECT_NEAR(cpu.a, baseline.a + 0.5f * (1.0f - baseline.a), 5e-3f);
+}
+
+/**
+ * The Alpha set bit gates the Principled Alpha output, never the Material row's coverage factor. A
+ * source whose Alpha is a live constant drives the row's coverage with Alpha out of the set -- the
+ * factor is not a channel output -- and the graph and the CPU agree. Naming Alpha in the set only
+ * adds `Result Alpha`.
+ */
+TEST_F(PaintLayersGraphEvalTest, material_row_coverage_ignores_the_alpha_set_bit)
+{
+  const int size = 4;
+  const eMaterialPaintChannel bc = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  const float tolerance = 1e-4f;
+
+  ma = BKE_material_add(bmain, "CoverageAlphaSet");
+  add_layer("Bottom",
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            add_solid_image("CovAlphaBottom", size, 200, 40, 10, 128),
+            bc);
+  const RGBA baseline = cpu_pixel(bc);
+
+  const HybridSourceSpec spec = {
+      {0.15f, 0.30f, 0.60f}, 0.80f, 0.42f, 0.20f, 0.50f, {0.05f, 0.10f, 0.40f}};
+  Material *source = build_hybrid_source(*bmain, "CovAlphaSource", "CovAlphaNormal", spec);
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+
+  /* Alpha is not part of the build default set, yet the live source Alpha is the row's coverage. */
+  EXPECT_FALSE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_ALPHA));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(result_output_exists(*ma->paint_layers_tree, PAINT_MATERIAL_CHANNEL_ALPHA));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = eval_channel_result(interpreter, bc);
+  const RGBA cpu = cpu_pixel(bc);
+  EXPECT_NEAR(graph.a, cpu.a, tolerance);
+  EXPECT_NEAR(graph.a, baseline.a + 0.5f * (1.0f - baseline.a), 5e-3f);
+
+  /* Naming Alpha in the set adds the Principled Alpha output; the coverage is unchanged. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_ALPHA, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(result_output_exists(*ma->paint_layers_tree, PAINT_MATERIAL_CHANNEL_ALPHA));
+
+  GraphInterpreter interpreter_set;
+  interpreter_set.instance = find_instance();
+  interpreter_set.tree = ma->paint_layers_tree;
+  interpreter_set.x = 1;
+  interpreter_set.y = 1;
+  ASSERT_NE(interpreter_set.instance, nullptr);
+  const RGBA graph_set = eval_channel_result(interpreter_set, bc);
+  EXPECT_NEAR(graph_set.a, graph.a, tolerance);
 }
 
 /** Guard: the same over model for a MESH_MAP row over a partially transparent Paint row -- the

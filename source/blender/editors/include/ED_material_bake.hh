@@ -220,6 +220,13 @@ struct BakeTargetSpec {
    * same material.
    */
   Image *existing = nullptr;
+  /**
+   * True when this target fills a Material row's composition coverage (`MaterialPaintLayerBake::coverage`)
+   * rather than a Principled channel output. Alpha doubles as the coverage factor (see
+   * #paint_layer_material_source_map), so this target is the row's factor, not the Principled Alpha
+   * channel, and the layered material's channel set must never drop it.
+   */
+  bool is_coverage = false;
 };
 
 struct MaterialBakeToImagesResult;
@@ -227,6 +234,13 @@ struct MaterialBakeToImagesResult;
 struct MaterialBakeToImagesParams {
   /** Source material. Not localized by the caller -- #material_bake_to_images copies it. */
   Material *material = nullptr;
+  /**
+   * The layered material whose channel set gates the targets, when the bake belongs to one of its
+   * rows. Null for a plain Bake to Images of a source material: then every requested channel is
+   * rendered. The set is read off this owner, never off the source #material, whose own field
+   * always derives the build default.
+   */
+  const Material *set_material = nullptr;
   Span<BakeTargetSpec> targets;
   /** Square side; clamped to [16, 16384]. */
   int size = 2048;

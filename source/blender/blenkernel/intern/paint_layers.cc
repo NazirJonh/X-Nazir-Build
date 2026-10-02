@@ -1886,6 +1886,20 @@ uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
       for (const int i : IndexRange(row->channels_num)) {
         mask |= uint16_t(uint16_t(1) << int(row->channels[i].channel));
       }
+      /* A Material row carries no channel records: it reads its content from the bake, so a map it
+       * actually baked is what makes that channel part of the material. Without this the set would
+       * drop the baked Specular/Emission (and the Alpha coverage) of an old file written before the
+       * field existed, which has no doversion. */
+      if (row->source == MA_PAINT_LAYER_SOURCE_MATERIAL && row->bake != nullptr) {
+        for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+          if (row->bake->images[channel] != nullptr) {
+            mask |= uint16_t(uint16_t(1) << channel);
+          }
+        }
+        if (row->bake->coverage != nullptr) {
+          mask |= uint16_t(1) << PAINT_MATERIAL_CHANNEL_ALPHA;
+        }
+      }
     }
   }
   /* Base Color is the material's constant and can never leave the set. */

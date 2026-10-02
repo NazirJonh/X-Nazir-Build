@@ -2200,9 +2200,13 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
    * from one material can both be re-filled by a single render. */
   Vector<const BakeTargetSpec *> to_create;
   for (const BakeTargetSpec &target : params.targets) {
-    /* A channel outside the material's set is not rendered into a map, so it is neither created nor
-     * part of the bake hash. */
-    if (!BKE_paint_layers_channel_in_set(*params.material, target.channel)) {
+    /* A channel outside the owning layered material's set is not rendered into a map, so it is
+     * neither created nor part of the bake hash. A coverage target is the row's composition factor,
+     * not a Principled channel, so the set never drops it. A plain Bake to Images has no owner and
+     * renders every requested channel. */
+    if (!target.is_coverage && params.set_material != nullptr &&
+        !BKE_paint_layers_channel_in_set(*params.set_material, target.channel))
+    {
       continue;
     }
     if (resolve.channels[target.channel] == ChannelResolution::Unavailable) {
@@ -2538,6 +2542,10 @@ static void rebake_start(Main &bmain,
   }
   MaterialBakeToImagesParams params;
   params.material = &ma;
+  /* These targets are maps that already exist and are simply re-rendered, not new channels a bake
+   * is deciding to create, and they may belong to rows of more than one layered consumer. No single
+   * owner's set applies, so the set filter is left off. */
+  params.set_material = nullptr;
   params.targets = targets;
   params.size = size;
   params.blocking = false;
@@ -2644,11 +2652,14 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
           existing = nullptr;
         }
       }
-      targets.append({channel, existing});
+      /* Alpha is the row's coverage factor, so its target is never gated by the channel set. */
+      targets.append({channel, existing, channel == PAINT_MATERIAL_CHANNEL_ALPHA});
     }
 
     MaterialBakeToImagesParams params;
     params.material = row->material;
+    /* The rows belong to this layered \a ma, so its channel set decides which channels bake. */
+    params.set_material = &ma;
     params.targets = targets;
     params.size = size;
     params.blocking = false;

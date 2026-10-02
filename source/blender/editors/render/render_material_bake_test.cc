@@ -25,6 +25,7 @@
 
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_scene_types.h"
 
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
@@ -144,6 +145,75 @@ TEST_F(MaterialBakeTest, constant_channel_is_filled_without_a_render)
   EXPECT_TRUE(result.skipped_unavailable.is_empty());
   EXPECT_EQ(BLI_listbase_count(&bmain->images), images_before + 1);
   expect_image_is_solid_color(*result.created[0], blue);
+}
+
+/**
+ * The channel set that gates a bake target belongs to the layered owner, not to the source material
+ * the target is rendered from: the source's own field always derives the build default, which would
+ * drop Specular/Emission/Alpha from every Material row's bake.
+ */
+TEST_F(MaterialBakeTest, target_set_is_read_off_the_layered_owner)
+{
+  Material *layered = BKE_material_add(bmain, "OwnerSet");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *layered, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*layered, row, material));
+  ASSERT_FALSE(BKE_paint_layers_channel_in_set(*layered, PAINT_MATERIAL_CHANNEL_SPECULAR));
+
+  BakeTargetSpec spec;
+  spec.channel = PAINT_MATERIAL_CHANNEL_SPECULAR;
+  MaterialBakeToImagesParams params;
+  params.material = material;
+  params.set_material = layered;
+  params.targets = Span<BakeTargetSpec>(&spec, 1);
+  params.size = 64;
+  params.blocking = true;
+
+  MaterialBakeToImagesResult result = material_bake_to_images(*bmain, nullptr, nullptr, params);
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(result.created.is_empty());
+
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*layered, PAINT_MATERIAL_CHANNEL_SPECULAR, true));
+  result = material_bake_to_images(*bmain, nullptr, nullptr, params);
+  EXPECT_TRUE(result.ok);
+  ASSERT_EQ(result.created.size(), 1);
+  EXPECT_EQ(result.created_channels[0], PAINT_MATERIAL_CHANNEL_SPECULAR);
+}
+
+/**
+ * A coverage target (`BakeTargetSpec::is_coverage`) is the Material row's composition factor, so the
+ * owner's channel set never drops it, while the same channel as a plain Principled output is gated.
+ */
+TEST_F(MaterialBakeTest, coverage_target_is_not_gated_by_the_set)
+{
+  Material *layered = BKE_material_add(bmain, "OwnerCoverage");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *layered, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*layered, row, material));
+  ASSERT_FALSE(BKE_paint_layers_channel_in_set(*layered, PAINT_MATERIAL_CHANNEL_ALPHA));
+
+  BakeTargetSpec spec;
+  spec.channel = PAINT_MATERIAL_CHANNEL_ALPHA;
+  spec.is_coverage = true;
+  MaterialBakeToImagesParams params;
+  params.material = material;
+  params.set_material = layered;
+  params.targets = Span<BakeTargetSpec>(&spec, 1);
+  params.size = 64;
+  params.blocking = true;
+
+  MaterialBakeToImagesResult result = material_bake_to_images(*bmain, nullptr, nullptr, params);
+  EXPECT_TRUE(result.ok);
+  ASSERT_EQ(result.created.size(), 1);
+  EXPECT_EQ(result.created_channels[0], PAINT_MATERIAL_CHANNEL_ALPHA);
+
+  /* The same channel as a Principled output, not coverage, is gated by the set. */
+  spec.is_coverage = false;
+  result = material_bake_to_images(*bmain, nullptr, nullptr, params);
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(result.created.is_empty());
 }
 
 /**

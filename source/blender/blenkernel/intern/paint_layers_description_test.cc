@@ -1004,6 +1004,78 @@ TEST_F(PaintLayersDescription, material_channel_set_preserves_layer_data)
   EXPECT_FALSE(paint_layer_channel_filtered(*ma, *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
 }
 
+/** A blank 4x4 float image, the shape every bake map in these tests takes. */
+static Image *make_test_map(Main *bmain, const char *name)
+{
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      bmain, 4, 4, name, 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  EXPECT_NE(image, nullptr);
+  return image;
+}
+
+/**
+ * A Material row carries no channel records, so a channel it baked is what makes that channel part
+ * of a material whose set was never authored (the file predates the field, no doversion). This is
+ * the derived set: an explicitly authored (materialized) default set ignores the bake instead, see
+ * #material_row_specular_bake_does_not_override_an_authored_set.
+ */
+TEST_F(PaintLayersDescription, old_material_row_baked_specular_enters_derived_set)
+{
+  Material *ma = BKE_material_add(bmain, "OldMaterialRow");
+  /* The row stands in for one loaded from a file written before the field existed: it is linked
+   * directly, so #BKE_paint_layers_add's materialization never ran and the field is still zero. */
+  MaterialPaintLayer *row = paint_layer_add(*ma, "Source");
+  row->source = MA_PAINT_LAYER_SOURCE_MATERIAL;
+  ASSERT_NE(row, nullptr);
+  ASSERT_EQ(ma->paint_layers_channels, 0);
+  EXPECT_FALSE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR));
+  EXPECT_TRUE(paint_layer_channel_filtered(*ma, *row, PAINT_MATERIAL_CHANNEL_SPECULAR));
+
+  /* The row baked Specular: the derived set now carries it, still without freezing the field. */
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_SPECULAR, make_test_map(bmain, "OldSpecularBake")));
+  ASSERT_EQ(ma->paint_layers_channels, 0);
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR));
+  EXPECT_FALSE(paint_layer_channel_filtered(*ma, *row, PAINT_MATERIAL_CHANNEL_SPECULAR));
+
+  /* The baked coverage is the row's Alpha. */
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *row, -1, make_test_map(bmain, "OldSpecularCoverage")));
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_ALPHA));
+
+  /* Materialization freezes exactly the derived view, baked channels included. */
+  BKE_paint_layers_channels_materialize(*ma);
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR));
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_ALPHA));
+}
+
+/**
+ * The counterpart: once a set is authored, a Material row's baked map does not widen it. Specular
+ * stays out until the set names it, then the row takes part, and dropping it filters it out again.
+ */
+TEST_F(PaintLayersDescription, material_row_specular_bake_does_not_override_an_authored_set)
+{
+  Material *ma = BKE_material_add(bmain, "AuthoredMaterialRow");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_channels_materialize(*ma);
+  ASSERT_NE(ma->paint_layers_channels, 0);
+
+  ASSERT_TRUE(BKE_paint_layers_bake_set_map(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_SPECULAR, make_test_map(bmain, "AuthoredSpecularBake")));
+  EXPECT_FALSE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR));
+  EXPECT_TRUE(paint_layer_channel_filtered(*ma, *row, PAINT_MATERIAL_CHANNEL_SPECULAR));
+
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR, true));
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR));
+  EXPECT_FALSE(paint_layer_channel_filtered(*ma, *row, PAINT_MATERIAL_CHANNEL_SPECULAR));
+
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR, false));
+  EXPECT_TRUE(paint_layer_channel_filtered(*ma, *row, PAINT_MATERIAL_CHANNEL_SPECULAR));
+}
+
 TEST_F(PaintLayersDescription, material_layer_source_is_validated)
 {
   Material *ma = BKE_material_add(bmain, "MaterialOwner");

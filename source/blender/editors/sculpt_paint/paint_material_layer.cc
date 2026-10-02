@@ -159,11 +159,14 @@ MaterialPaintLayer *add_material_layer_from_material(bContext &C,
    * maps are rendered right away. */
   Vector<BakeTargetSpec> targets;
   for (const eMaterialPaintChannel channel : BKE_paint_material_bakeable_channels()) {
-    targets.append({channel});
+    /* Alpha feeds the new row's coverage factor, not a Principled output. */
+    targets.append({channel, nullptr, channel == PAINT_MATERIAL_CHANNEL_ALPHA});
   }
 
   MaterialBakeToImagesParams params;
   params.material = picked;
+  /* The row belongs to \a owner: its channel set gates the channels, not the source's. */
+  params.set_material = &owner;
   params.targets = targets;
   params.size = size;
   params.blocking = true;

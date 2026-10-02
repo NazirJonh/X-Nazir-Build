@@ -697,26 +697,6 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         box.operator_menu_enum("material.paint_layer_correction_add", "role",
                                text="Add Effect", icon='ADD')
 
-        box = layout.box()
-        box.label(text="Channels", icon='IMAGE_RGB')
-        for ch in layer.channels:
-            row = box.row(align=True)
-            row.label(text=ch.channel)
-            if ch.image is not None:
-                row.label(text=ch.image.name, icon='IMAGE_DATA')
-            else:
-                row.label(text="No map", icon='INFO')
-            op = row.operator("material.paint_layer_channel_remove", text="", icon='X')
-            op.channel = ch.channel
-        row = box.row(align=True)
-        row.operator_menu_enum("material.paint_layer_channel_add", "channel",
-                               text="Add Channel", icon='ADD')
-        row.operator_menu_enum("material.paint_layer_correction_add", "role",
-                               text="Add Correction", icon='ADD')
-        if layer.source == 'NODE_GROUP':
-            layout.operator_menu_enum("material.paint_layer_custom_channel_add", "channel",
-                                      text="Add Custom Channel", icon='ADD')
-
         if len(layer.issues):
             box = layout.box()
             box.label(text="Issues", icon='ERROR')

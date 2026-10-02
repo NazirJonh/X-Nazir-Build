@@ -9418,7 +9418,9 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mask_image)
       *ma, bottom, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "M");
   ASSERT_NE(mask, nullptr);
   add_channel(*mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Mask"));
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   snapshot_expect(*ma, 0x9389951f02f59b9eull, "mask_image"); /* +warm */
 }
 
@@ -9430,7 +9432,9 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_mask_cha
   ASSERT_NE(mask, nullptr);
   mask->mask_channel = int8_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
   add_paint_layer_into(mask, "Child", add_image("Child"));
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   snapshot_expect(*ma, 0x357462d398462b03ull, "stack_mask_channel"); /* +warm */
 }
 

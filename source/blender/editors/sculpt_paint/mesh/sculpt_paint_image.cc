@@ -1556,6 +1556,30 @@ static void apply_paint_channel(ImageData &image_data,
       tile_data.mark_dirty(tile_cache.dirty_bounds);
     }
 
+    /* [PL-DIAG] Normal-stroke diagnosis: read one written texel back from the ImBuf right after the
+     * write to tell whether the stroke reached the main map (ImBuf bytes) or only the GPU preview.
+     * Remove once the Normal write path is confirmed. */
+    if (is_normal_channel && tile_data.flags.dirty &&
+        !tile_cache.dirty_bounds.is_empty())
+    {
+      const int dx = tile_cache.dirty_bounds.min.x;
+      const int dy = tile_cache.dirty_bounds.min.y;
+      if (image_buffer->byte_data() != nullptr && dx >= 0 && dy >= 0 &&
+          dx < image_buffer->x && dy < image_buffer->y)
+      {
+        const uchar *px = image_buffer->byte_data() + (int64_t(dy) * image_buffer->x + dx) * 4;
+        printf("[PL-DIAG] Normal ImBuf readback texel=(%d,%d) rgba=(%d %d %d %d) floatbuf=%d "
+               "dirty=1\n",
+               dx,
+               dy,
+               px[0],
+               px[1],
+               px[2],
+               px[3],
+               image_buffer->float_data() != nullptr ? 1 : 0);
+      }
+    }
+
     if (tile_data.flags.dirty) {
       BKE_image_mark_dirty(image_data.image, image_buffer);
     }

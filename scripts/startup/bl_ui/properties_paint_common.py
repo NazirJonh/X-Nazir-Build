@@ -1138,6 +1138,21 @@ class PAINT_MT_material_layer_channel_socket(Menu):
             layout.prop(settings, "opacity", text="Opacity")
             drawn_any = True
 
+        # Parity with the old Channels box: remove the record from here. A Fill's Base Color is the
+        # row's constant and cannot be removed (BKE_paint_layers_channel_remove refuses), so the
+        # entry is shown disabled instead of offering a click that can never stick.
+        if drawn_any:
+            layout.separator()
+        row = layout.row()
+        row.enabled = not (
+            channel.channel == 'BASE_COLOR' and layer.role == 'LAYER' and
+            layer.source == 'CONSTANT')
+        op = row.operator(
+            "material.paint_layer_channel_remove", text="Remove Channel", icon='X')
+        op.marker = layer.marker
+        op.channel = channel.channel
+        drawn_any = True
+
         if not drawn_any:
             layout.label(text="No options for this channel", icon='INFO')
 
@@ -2358,21 +2373,21 @@ def _draw_material_folder_channels(layout, material, layer):
 def _draw_material_baked_channel_status(layout, material, layer):
     """A Material / Node Group row's channels as a read-only baked/not list.
 
-    Such a row has no records to toggle and no map to drop: its channels come from a bake. Per-
-    channel bake images are not exposed to RNA, so the overall ``bake_is_valid`` plus a channel
-    record's map stands for "has a map".
+    Such a row has no records to toggle and no map to drop: its channels come from a bake.
+    ``baked_channels`` is the exact per-channel answer (every channel the current bake holds a map
+    for, coverage reported as Alpha), so the list names precisely what is baked rather than deriving
+    it from the overall validity plus a record's map.
     """
     channel_ids = material_layer_visible_channels(material)
     if not channel_ids:
         layout.label(text="No channels", icon='INFO')
         return
-    with_maps = {record.channel for record in layer.channels if record.image is not None}
-    valid = layer.bake_is_valid
+    baked = {item.channel for item in layer.baked_channels}
     col = layout.column(align=True)
     for channel_id in channel_ids:
         row = col.row(align=True)
         row.label(text=_MATERIAL_PAINT_CHANNEL_LABELS[channel_id])
-        if valid and channel_id in with_maps:
+        if channel_id in baked:
             row.label(text="Baked", icon='IMAGE_DATA')
         else:
             row.label(text="No map", icon='INFO')
@@ -2407,7 +2422,8 @@ def draw_material_mask_item(layout, item):
     """One mask item's control: a Fill shows a single value, a Paint only its channel and map.
 
     A constant mask reads its strength from ``fill_color``; an image mask reads a channel record's
-    map, and shows no constant.
+    map, and shows no constant. A MESH_MAP mask reads the material's shared atlas (read-only), the
+    same map a MESH_MAP row reads, so it shows a preview instead of a Drop image picker.
     """
     if item.source == 'CONSTANT':
         _draw_material_constant_value(layout, item, item.mask_channel)
@@ -2419,6 +2435,10 @@ def draw_material_mask_item(layout, item):
             row.label(text="No map", icon='INFO')
         else:
             _draw_layer_channel_source(row, record)
+    elif item.source == 'MESH_MAP':
+        row = layout.row(align=True)
+        row.prop(item, "mesh_map_type", text="Map")
+        _draw_mesh_map_atlas_preview(row, item)
     else:
         # A Material / Node Group / Stack mask carries more than one scalar, so it keeps the channel
         # picker the old Mask box offered.
@@ -2427,16 +2447,43 @@ def draw_material_mask_item(layout, item):
         row.prop(item, "mask_channel")
 
 
+def _draw_mesh_map_atlas_preview(layout, item):
+    """A read-only preview of the shared atlas a MESH_MAP mask reads, resolved through owner+type.
+
+    A MESH_MAP mask never assigns a map of its own (it reads the material's per-type atlas), so it
+    shows the atlas image compactly rather than a Drop image picker that would be a no-op.
+    """
+    # A #MaterialPaintLayer is a non-ID RNA struct owned by its Material, which `id_data` resolves.
+    owner = getattr(item, "id_data", None)
+    if owner is None or not hasattr(owner, "mesh_map_slots"):
+        layout.label(text="No atlas", icon='INFO')
+        return
+    slot = next(
+        (candidate for candidate in owner.mesh_map_slots
+         if candidate.type == item.mesh_map_type), None)
+    if slot is None or slot.atlas_image is None:
+        layout.label(text="No atlas", icon='INFO')
+        return
+    layout.template_ID(slot, "atlas_image", text="", compact=True)
+
+
 def draw_material_correction_channels(layout, context, material, item):
     """An Effect correction's channel controls, the same widget the layer rows use.
 
     A Fill effect's toggles create a record lazily and its value sliders write ``record.value``; a
-    Paint effect shows the record's own map picker and no constant. Material, Node Group and Stack
-    effects keep resolving their content, so they only expose the channel the widget reads.
+    Paint effect shows the record's own map picker and no constant. A Material or Node Group effect
+    is a baked/live source, so it shows the per-channel bake status (``baked_channels``) rather than
+    record toggles; a Stack effect owns no records, so it shows per-channel blend/opacity overrides
+    like a folder. Material and Node Group also keep the channel the widget reads.
     """
     if item.source in {'IMAGE', 'CONSTANT', 'MESH_MAP'}:
         draw_material_layer_channels(layout, context, material, item)
         return
+    if item.source == 'STACK':
+        _draw_material_folder_channels(layout, material, item)
+        return
+    # MATERIAL / NODE_GROUP: the content is a bake, not records to toggle.
+    _draw_material_baked_channel_status(layout, material, item)
     row = layout.row()
     row.prop(item, "mask_channel", text="Channel")
 

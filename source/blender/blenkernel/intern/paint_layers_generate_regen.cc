@@ -1612,74 +1612,227 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     for (const int channel : wired_probe) {
       wired.add(channel);
     }
-    std::function<void(const MaterialPaintLayer &)> add_corrections =
-        [&](const MaterialPaintLayer &layer) {
+
+    /* The state a Hybrid live map is shown with: the generator copies the source node's storage, so
+     * the key has to come from that node, not from the default. Declared first so the correction
+     * helpers below can use it. */
+    std::function<uint32_t(const MaterialPaintLayer &, int)> live_image_state =
+        [&](const MaterialPaintLayer &layer, const int channel) {
+          const MaterialSourceResolve &resolve = regen_cache.resolve(layer.material);
+          if (const bNode *source_node = resolve.images[channel].node) {
+            if (const NodeTexImage *storage = static_cast<const NodeTexImage *>(
+                    source_node->storage))
+            {
+              return image_sampler_state_key(*storage);
+            }
+          }
+          return default_image_sampler_state();
+        };
+
+    /* Forward declaration: #add_stack_children recurses back into #add_corrections for a child's
+     * own effects/masks, and #add_corrections calls #add_stack_children for a Stack item's subtree. */
+    std::function<void(const MaterialPaintLayer &)> add_corrections;
+
+    /* A Stack correction's (or mask item's) content is its children, composited in isolation
+     * exactly like a Layer folder's; their maps are samplers of their own. Mirrors #build_list over
+     * the subtree, where a Pass Through folder is inlined and a removed row drops out.
+     *
+     * \a fixed_channel is the channel the subtree builds in: a Stack Effect correction builds in
+     * the owner's current channel, so it is walked once per wired channel (-1 here); a Stack mask
+     * item builds in a fixed channel (its `mask_channel`, or Base Color on the Alpha convention),
+     * regardless of the wired set, so the subtree reads exactly that channel. */
+    std::function<void(const ListBaseT<MaterialPaintLayer> &, int)> add_stack_children;
+    add_stack_children = [&](const ListBaseT<MaterialPaintLayer> &list, const int fixed_channel) {
+      auto walk_channel = [&](const MaterialPaintLayer &child, const int channel) {
+        if (fixed_channel < 0 && !wired.contains(channel)) {
+          return;
+        }
+        Image *baked = nullptr;
+        if (row_channel_substituted(ma, child, channel, &baked) && baked != nullptr) {
+          counter.add_image(*baked);
+        }
+        else if (Image *image = paint_layer_channel_image(ma, child, channel)) {
+          counter.add_image(*image);
+        }
+      };
+      for (const MaterialPaintLayer &child : list) {
+        if (row_is_removed(ma, child)) {
+          continue;
+        }
+        if (BKE_paint_layers_folder_is_pass_through(ma, child)) {
+          add_stack_children(child.children, fixed_channel);
+          continue;
+        }
+        if (fixed_channel >= 0) {
+          walk_channel(child, fixed_channel);
+        }
+        else {
+          for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+            walk_channel(child, channel);
+          }
+        }
+        add_corrections(child);
+        /* A folder inside the subtree composites its own children in isolation, exactly like a
+         * top-level folder (#build_list recurses into it). */
+        if (BKE_paint_layers_is_folder(child) &&
+            !BKE_paint_layers_folder_is_pass_through(ma, child))
+        {
+          add_stack_children(child.children, fixed_channel);
+        }
+      }
+    };
+
+    /* The coverage a Material or Node Group correction/mask reads for its own factor, mirroring
+     * #resolve_correction_coverage: a live constant reads nothing, a live map reads that image, a
+     * SourceGroup reads the wrapper, and Baked reads the row's own coverage bake. */
+    auto add_material_or_group_coverage = [&](const MaterialPaintLayer &row) {
+      if (row.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+        if (row.bake != nullptr && row.bake->coverage != nullptr) {
+          counter.add_image(*row.bake->coverage);
+        }
+        return;
+      }
+      float live_value[4];
+      Image *live_image = nullptr;
+      const ImageUser *live_iuser = nullptr;
+      if (BKE_paint_layers_material_live_constant(
+              ma, row, PAINT_MATERIAL_CHANNEL_ALPHA, live_value, &regen_cache))
+      {
+        return;
+      }
+      if (BKE_paint_layers_material_live_image(
+              ma, row, PAINT_MATERIAL_CHANNEL_ALPHA, &live_image, &live_iuser, &regen_cache))
+      {
+        counter.add_image(*live_image, live_image_state(row, PAINT_MATERIAL_CHANNEL_ALPHA));
+        return;
+      }
+      if (row.material != nullptr && row.material != nullptr &&
+          BKE_paint_layers_material_mode(ma, row, &regen_cache) ==
+              PaintLayerMaterialMode::SourceGroup)
+      {
+        if (bNodeTree *wrapper = source_group_lookup(*row.material)) {
+          counter.add_tree(*wrapper);
+        }
+        return;
+      }
+      if (row.bake != nullptr && row.bake->coverage != nullptr) {
+        counter.add_image(*row.bake->coverage);
+      }
+    };
+
+    /* The content map a Material/Node Group correction or mask reads in \a channel, mirroring the
+     * build's Baked/Hybrid/SourceGroup resolution. */
+    auto add_material_or_group_content = [&](const MaterialPaintLayer &row, const int channel) {
+      if (row.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
+        Image *baked = nullptr;
+        if (BKE_paint_layers_bake_substitute(ma, row, channel, &baked) ||
+            BKE_paint_layers_bake_substitute_custom(ma, row, channel, &baked, nullptr))
+        {
+          if (baked != nullptr) {
+            counter.add_image(*baked);
+          }
+        }
+        return;
+      }
+      float live_value[4];
+      Image *live_image = nullptr;
+      const ImageUser *live_iuser = nullptr;
+      if (BKE_paint_layers_material_live_constant(ma, row, channel, live_value, &regen_cache)) {
+        return;
+      }
+      if (BKE_paint_layers_material_live_image(
+              ma, row, channel, &live_image, &live_iuser, &regen_cache))
+      {
+        counter.add_image(*live_image, live_image_state(row, channel));
+        return;
+      }
+      if (row.material != nullptr &&
+          BKE_paint_layers_material_mode(ma, row, &regen_cache) ==
+              PaintLayerMaterialMode::SourceGroup)
+      {
+        if (bNodeTree *wrapper = source_group_lookup(*row.material)) {
+          counter.add_tree(*wrapper);
+        }
+        return;
+      }
+      if (Image *image = paint_layer_channel_image(ma, row, channel)) {
+        counter.add_image(*image);
+      }
+    };
+
+    add_corrections = [&](const MaterialPaintLayer &layer) {
           for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, layer)) {
             if (BKE_paint_layers_source_type(*effect) == PaintLayerSourceType::Constant) {
               continue;
             }
-            for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-              if (!wired.contains(channel)) {
-                continue;
+            if (ELEM(effect->source,
+                     MA_PAINT_LAYER_SOURCE_MATERIAL,
+                     MA_PAINT_LAYER_SOURCE_NODE_GROUP))
+            {
+              /* Content per wired channel; the Normal channel is skipped for a content correction
+               * only when it is a Fill, which this branch already excluded. */
+              for (const int channel : wired) {
+                add_material_or_group_content(*effect, channel);
               }
-              if (Image *image = paint_layer_channel_image(ma, *effect, channel)) {
-                counter.add_image(*image);
-                continue;
+              /* A Material content correction reads its own factor coverage
+               * (#resolve_correction_coverage); a Node Group content correction has no separate
+               * coverage read (the build reads only its bake map). */
+              if (!wired.is_empty() && effect->source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+                add_material_or_group_coverage(*effect);
               }
-              /* A Node Group correction (and a baked Material one) reads its own bake map, which
-               * #paint_layer_channel_image does not resolve. */
-              Image *baked = nullptr;
-              if (BKE_paint_layers_bake_substitute(ma, *effect, channel, &baked) ||
-                  BKE_paint_layers_bake_substitute_custom(
-                      ma, *effect, channel, &baked, nullptr))
-              {
-                if (baked != nullptr) {
-                  counter.add_image(*baked);
+            }
+            else {
+              for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+                if (!wired.contains(channel)) {
+                  continue;
+                }
+                if (Image *image = paint_layer_channel_image(ma, *effect, channel)) {
+                  counter.add_image(*image);
                 }
               }
             }
-            /* A Stack correction's content is its children, composited in isolation exactly like a
-             * Layer folder's; their maps are samplers of their own. */
+            /* A Stack correction's content is its children's; a content correction builds in the
+             * owner's channel, so the subtree is walked once per wired channel. */
             if (effect->source == MA_PAINT_LAYER_SOURCE_STACK) {
-              for (const MaterialPaintLayer &child : effect->children) {
-                if (row_is_removed(ma, child)) {
-                  continue;
-                }
-                for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-                  if (!wired.contains(channel)) {
-                    continue;
-                  }
-                  if (Image *image = paint_layer_channel_image(ma, child, channel)) {
-                    counter.add_image(*image);
-                  }
-                }
-                add_corrections(child);
-              }
+              add_stack_children(effect->children, -1);
             }
           }
           for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma, layer)) {
             if (BKE_paint_layers_source_type(*mask_item) == PaintLayerSourceType::Constant) {
               continue;
             }
-            /* A mask reads one scalar over the row, built once per channel the row wires; the map is
-             * one sampler whenever the row builds at all. */
+            if (mask_item->source == MA_PAINT_LAYER_SOURCE_STACK) {
+              /* A Stack mask item builds its subtree in a fixed channel: the Alpha convention
+               * reads Base Color, every other `mask_channel` reads itself. */
+              const int mask_build_channel = (mask_item->mask_channel ==
+                                              PAINT_MATERIAL_CHANNEL_ALPHA) ?
+                                                 int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
+                                                 int(mask_item->mask_channel);
+              add_stack_children(mask_item->children, mask_build_channel);
+              continue;
+            }
+            if (ELEM(mask_item->source,
+                     MA_PAINT_LAYER_SOURCE_MATERIAL,
+                     MA_PAINT_LAYER_SOURCE_NODE_GROUP))
+            {
+              /* A normal mask channel builds nothing (the item is skipped). */
+              if (mask_item->mask_channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+                continue;
+              }
+              /* Alpha reads only its own coverage as the grey; every other channel reads the
+               * `mask_channel` content map plus the item's own coverage for its factor. */
+              add_material_or_group_coverage(*mask_item);
+              if (mask_item->mask_channel != PAINT_MATERIAL_CHANNEL_ALPHA) {
+                add_material_or_group_content(*mask_item, mask_item->mask_channel);
+              }
+              continue;
+            }
+            /* A plain Paint/MESH_MAP mask reads one Base Color map over the row. */
             if (Image *image = paint_layer_mask_correction_image(ma, *mask_item, 0)) {
               counter.add_image(*image);
             }
           }
         };
-
-    /* The state a Hybrid live map is shown with: the generator copies the source node's storage, so
-     * the key has to come from that node, not from the default. */
-    auto live_image_state = [&](const MaterialPaintLayer &layer, const int channel) {
-      const MaterialSourceResolve &resolve = regen_cache.resolve(layer.material);
-      if (const bNode *source_node = resolve.images[channel].node) {
-        if (const NodeTexImage *storage = static_cast<const NodeTexImage *>(source_node->storage)) {
-          return image_sampler_state_key(*storage);
-        }
-      }
-      return default_image_sampler_state();
-    };
 
     /* Whether the wrapper exposes a COVERAGE output: when it does, the build reads the row's factor
      * from the wrapper and never builds the baked coverage map. */

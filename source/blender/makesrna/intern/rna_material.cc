@@ -1800,6 +1800,42 @@ static int rna_MaterialPaintLayerCustomChannel_channel_get(PointerRNA *ptr)
   return static_cast<MaterialPaintLayerCustomChannelItem *>(ptr->data)->channel;
 }
 
+/** One row of the computed `MaterialPaintLayer.baked_channels` collection. */
+struct MaterialPaintLayerBakedChannelItem {
+  int channel;
+};
+
+static void rna_MaterialPaintLayer_baked_channels_begin(CollectionPropertyIterator *iter,
+                                                        PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  Vector<int> channels;
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_baked_channels_get(*ma, *layer, channels);
+  }
+  MaterialPaintLayerBakedChannelItem *array = nullptr;
+  if (!channels.is_empty()) {
+    array = MEM_new_array_uninitialized<MaterialPaintLayerBakedChannelItem>(
+        channels.size(), __func__);
+    for (const int64_t i : channels.index_range()) {
+      array[i].channel = channels[i];
+    }
+  }
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           array,
+                           sizeof(MaterialPaintLayerBakedChannelItem),
+                           channels.size(),
+                           array != nullptr,
+                           nullptr);
+}
+
+static int rna_MaterialPaintLayerBakedChannel_channel_get(PointerRNA *ptr)
+{
+  return static_cast<MaterialPaintLayerBakedChannelItem *>(ptr->data)->channel;
+}
+
 static int rna_MaterialPaintLayer_channels_length(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -1914,6 +1950,17 @@ static MaterialMeshMapSlot *rna_Material_mesh_map_slots_find(Material *ma, int t
 static int rna_MaterialMeshMapSlot_type_get(PointerRNA *ptr)
 {
   return static_cast<const MaterialMeshMapSlot *>(ptr->data)->type;
+}
+
+/** The atlas Image itself, resolving the slot's map type through the material's slot list. */
+static PointerRNA rna_MaterialMeshMapSlot_atlas_image_get(PointerRNA *ptr)
+{
+  const MaterialMeshMapSlot *slot = static_cast<const MaterialMeshMapSlot *>(ptr->data);
+  Image *image = (slot != nullptr) ? slot->image : nullptr;
+  if (image == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_id_pointer_create(&image->id);
 }
 
 static void rna_MaterialMeshMapSlot_image_set(PointerRNA *ptr, PointerRNA value, ReportList *)
@@ -2326,6 +2373,21 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Issues", "Description problems on this layer that the stack silently ignores");
 
+  prop = RNA_def_property(srna, "baked_channels", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerBakedChannel");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_baked_channels_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_dereference_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Baked Channels", "Channels the row's current bake holds a map for");
+
   prop = RNA_def_property(srna, "custom_channels", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayerCustomChannel");
   RNA_def_property_collection_funcs(prop,
@@ -2603,6 +2665,20 @@ static void rna_def_material_paint_layer_custom_channel(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Channel", "The paint channel the group declares");
 }
 
+static void rna_def_material_paint_layer_baked_channel(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerBakedChannel", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Baked Channel", "A channel a paint layer's bake holds a map for");
+
+  PropertyRNA *prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayerBakedChannel_channel_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "The baked paint channel");
+}
+
 static void rna_def_material_paint_layer_issue(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -2870,6 +2946,15 @@ static void rna_def_material_mesh_maps(BlenderRNA *brna, StructRNA *srna)
   RNA_def_property_pointer_funcs(prop, nullptr, "rna_MaterialMeshMapSlot_image_set", nullptr, nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Image", "The shared atlas for this map type, or none");
+
+  /* Read-only alias of `image`, named for the UI a MESH_MAP mask reads: same atlas, but drawn as a
+   * preview rather than a Drop image picker (a MESH_MAP mask never assigns a map of its own). */
+  prop = RNA_def_property(slot_srna, "atlas_image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialMeshMapSlot_atlas_image_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Atlas Image", "The shared atlas this slot holds, or none");
   /* The atlas is a map a MESH_MAP row reads, so changing it is a structural edit: the generated
    * tree has to be rebuilt. Same update a channel map's setter uses. */
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
@@ -3873,6 +3958,7 @@ void RNA_def_material(BlenderRNA *brna)
    * first. */
   rna_def_material_paint_layer_issue(brna);
   rna_def_material_paint_layer_custom_channel(brna);
+  rna_def_material_paint_layer_baked_channel(brna);
   rna_def_material_paint_layer(brna);
   rna_def_material_paint_layer_channel(brna);
   rna_def_material_paint_layer_channel_settings(brna);

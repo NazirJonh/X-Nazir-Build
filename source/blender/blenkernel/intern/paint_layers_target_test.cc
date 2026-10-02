@@ -289,6 +289,61 @@ TEST_F(PaintLayersTargetTest, ensure_normal_neutral_is_flat)
   BKE_image_release_ibuf(image, ibuf, lock);
 }
 
+/**
+ * A non-neutral Normal value written into the channel map's own ImBuf is read back from the map and
+ * reaches the CPU composite: the map is the committed store, not a GPU-only preview. This exercises
+ * the CPU branch of the write (the GPU readback/sync is not available head-less); see the report for
+ * what this leaves uncovered.
+ */
+TEST_F(PaintLayersTargetTest, normal_value_written_to_map_reaches_the_cpu_composite)
+{
+  const int size = 4;
+  Material *ma = BKE_material_add(bmain, "NormalCommitMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  BKE_paint_layers_active_set(*ma, layer->marker);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_NORMAL, PaintLayersTargetMode::Content, target));
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, size);
+  ASSERT_NE(image, nullptr);
+
+  /* A tilted tangent (0.5, 0.5, 0.5) packed for byte storage is (0.75, 0.75, 0.75): non-neutral,
+   * so it differs from the flat (128, 128, 255) the map starts from. */
+  const uchar packed = uchar(0.75f * 255.0f + 0.5f);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(size) * size)) {
+      pixels[i * 4 + 0] = packed;
+      pixels[i * 4 + 1] = packed;
+      pixels[i * 4 + 2] = packed;
+      pixels[i * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+  }
+
+  /* The map holds the written value (ImBuf is the committed store). */
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    const uchar *p = ibuf->byte_data();
+    EXPECT_NEAR(float(p[0]) / 255.0f, 0.75f, 0.01f);
+    EXPECT_NEAR(float(p[1]) / 255.0f, 0.75f, 0.01f);
+    EXPECT_NEAR(float(p[2]) / 255.0f, 0.75f, 0.01f);
+    BKE_image_release_ibuf(image, ibuf, lock);
+  }
+
+  /* The CPU composite reads the same map and yields a non-flat normal. */
+  float rgba[4];
+  composite_pixel(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, size, rgba);
+  EXPECT_NEAR(rgba[2], 0.75f, 0.05f);
+}
+
 TEST_F(PaintLayersTargetTest, ensure_mask_creates_white_straight_map)
 {
   Material *ma = BKE_material_add(bmain, "MaskMat");

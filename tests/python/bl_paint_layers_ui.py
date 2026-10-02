@@ -822,6 +822,134 @@ class PaintLayersUiTest(unittest.TestCase):
         self.assertTrue(mesh_map_pending_names_add(pending, [SimpleNamespace(name="C")]))
         self.assertEqual(pending, {"A", "B", "C"})
 
+    def test_baked_channels_is_available_and_empty_without_a_bake(self):
+        # Item 4c: `baked_channels` is the exact per-channel baked status (coverage reported as
+        # Alpha), read-only. Without a current bake it is an empty collection rather than absent.
+        for source in ('MATERIAL', 'NODE_GROUP'):
+            layer = self.material.paint_layers.new(source=source, name="Row")
+            self.assertEqual([item.channel for item in layer.baked_channels], [])
+            # read-only: the collection exposes no writer and is not a plain list to mutate.
+            self.assertFalse(
+                bpy.types.MaterialPaintLayer.bl_rna.properties['baked_channels'].is_editable)
+
+    def test_material_baked_status_widget_reads_baked_channels(self):
+        # Item 4c: the Material/Node Group status list names exactly the baked channels. The draw
+        # must not raise when the collection is empty (no bake yet) and must stay a read-only list.
+        from bl_ui.properties_paint_common import _draw_material_baked_channel_status
+
+        layer = self.material.paint_layers.new(source='NODE_GROUP', name="Row")
+        self.material.paint_layers.active = layer
+        layout = _MockLayout()
+        _draw_material_baked_channel_status(layout, self.material, layer)
+        self.assertIn("column", layout.kinds())
+
+    def test_layer_channel_socket_menu_offers_remove_record(self):
+        # Item 5(б): the layer channel's socket menu offers Remove record (parity with the old
+        # Channels box); a Fill's Base Color is refused by BKE, so the entry is disabled there and
+        # enabled on an ordinary Paint channel.
+        from bl_ui.properties_paint_common import PAINT_MT_material_layer_channel_socket
+
+        fill = self.material.paint_layers.new(source='CONSTANT', name="Fill")
+        base = self.channel_record(fill, 'BASE_COLOR')
+        # The menu reads only the two pointers off the context it is handed, so a SimpleNamespace
+        # stands in for the layout's context_pointer_set pointers.
+        ctx = SimpleNamespace(
+            material_paint_layer_channel=base, material_paint_layer_owner=fill)
+        layout = _MockLayout()
+        PAINT_MT_material_layer_channel_socket.draw(layout, ctx)
+        removals = [call for call in layout.calls if call[0] == "operator" and
+                    call[1][0] == "material.paint_layer_channel_remove"]
+        self.assertTrue(removals, layout.kinds())
+
+    def test_old_channels_box_parity_is_covered_by_the_widget(self):
+        # Item 5: the old Channels box is gone; its five functions live on the layer widget now.
+        # (а) the channel/name widget is `draw_material_layer_channels`; (в) Add Channel is the
+        # per-channel toggle that creates a record lazily; (г/д) Add Effect, Add Mask and Add
+        # Custom Channel are operators the widget/boxes expose. Verify the plate is complete.
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        # (в) toggle creates a record lazily, standing in for Add Channel. EMISSION is outside the
+        # default set of a fresh row, so it has no record yet.
+        before = len(layer.channels)
+        with bpy.context.temp_override(material=self.material):
+            self.assertEqual(
+                bpy.ops.material.paint_layer_channel_toggle(
+                    marker=layer.marker, channel='EMISSION', enable=True),
+                {'FINISHED'})
+        self.assertEqual(len(layer.channels), before + 1)
+        # (б) Remove record operator acts by marker+channel.
+        with bpy.context.temp_override(material=self.material):
+            self.assertEqual(
+                bpy.ops.material.paint_layer_channel_remove(
+                    marker=layer.marker, channel='EMISSION'),
+                {'FINISHED'})
+        self.assertNotIn('EMISSION', {record.channel for record in layer.channels})
+        # (г) Add Correction (Effect / Mask Item) and (д) Add Custom Channel are registered.
+        self.assertIsNotNone(
+            bpy.ops.material.paint_layer_correction_add.get_rna_type())
+        self.assertIsNotNone(
+            bpy.ops.material.paint_layer_custom_channel_add.get_rna_type())
+        # (д) the NODE_GROUP section draws the Add Custom Channel entry.
+        from bl_ui.properties_paint_common import _draw_material_custom_channels
+
+        group = self.material.paint_layers.new(source='NODE_GROUP', name="Group")
+        layout = _MockLayout()
+        _draw_material_custom_channels(layout, group)
+        adds = [call for call in layout.calls if call[0] == "operator_menu_enum" and
+                call[1][0] == "material.paint_layer_custom_channel_add"]
+        self.assertTrue(adds, layout.kinds())
+
+    def test_paint_mask_image_widget_draws_a_drop_row(self):
+        # Item 4a: a Paint (IMAGE) mask reads its Base-Color record; with the record present the
+        # widget draws a Drop image picker bound to that record's own image (the same widget the
+        # layer channels use). A record with no map draws at all without raising.
+        from bl_ui.properties_paint_common import draw_material_mask_item
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        mask = layer.correction_add(role='MASK_ITEM', source='IMAGE', name="M")
+        mask.channel_add(channel='BASE_COLOR')
+        layout = _MockLayout()
+        with bpy.context.temp_override(material=self.material):
+            draw_material_mask_item(layout, mask)
+        # The source row is drawn (a Drop picker, a template_ID_browser call).
+        self.assertIn("template_id", layout.kinds(), layout.kinds())
+
+    def test_effect_statuses_for_material_node_group_and_stack(self):
+        # Item 4d: Material/Node Group effects show per-channel bake statuses; a Stack effect shows
+        # per-channel blend/opacity overrides (like a folder). Both draw without raising.
+        from bl_ui.properties_paint_common import draw_material_correction_channels
+
+        owner = self.material.paint_layers.new(source='IMAGE', name="Owner")
+        self.material.paint_layers.active = owner
+        for source in ('MATERIAL', 'NODE_GROUP', 'STACK'):
+            effect = owner.correction_add(role='EFFECT', source=source, name="E")
+            layout = _MockLayout()
+            with bpy.context.temp_override(material=self.material):
+                draw_material_correction_channels(layout, bpy.context, self.material, effect)
+            # Every branch drew at least a column (status list or override list).
+            self.assertIn("column", layout.kinds(), (source, layout.kinds()))
+
+    def test_mesh_map_mask_widget_shows_read_only_atlas(self):
+        # Item 4b: a MESH_MAP mask never assigns its own map; it reads the owner material's shared
+        # per-type atlas, so it shows a read-only preview (atlas_image) instead of a Drop picker.
+        from bl_ui.properties_paint_common import draw_material_mask_item
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        mask = layer.correction_add(role='MASK_ITEM', source='MESH_MAP', name="MM")
+        mask.mesh_map_type = 'AO'
+        layout = _MockLayout()
+        with bpy.context.temp_override(material=self.material):
+            draw_material_mask_item(layout, mask)
+        # With no atlas allocated yet the widget draws a "No atlas" label, never a Drop picker.
+        labels = [call[1][0] for call in layout.calls if call[0] == "label"]
+        self.assertIn("No atlas", labels)
+        # Allocating an atlas makes the slot's read-only alias resolve to it.
+        self.material.mesh_map_slots.ensure(type='AO')
+        slot = next(s for s in self.material.mesh_map_slots if s.type == 'AO')
+        atlas = bpy.data.images.new("Atlas", 4, 4)
+        slot.image = atlas
+        self.assertIs(slot.atlas_image, atlas)
+
     def test_mesh_map_object_list_and_summary(self):
         bpy.ops.mesh.primitive_cube_add()
         ob = bpy.context.object

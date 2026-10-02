@@ -257,6 +257,15 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
  */
 void BKE_paint_layers_custom_channels_get(const MaterialPaintLayer &layer, Vector<int> &r_channels);
 
+/**
+ * The channels of \a layer's own bake that currently hold a map, in #eMaterialPaintChannel order.
+ * The coverage map stands for `PAINT_MATERIAL_CHANNEL_ALPHA`. Empty without a valid bake, or for a
+ * Material row (whose bake is its source's maps, resolved through the channels instead).
+ */
+void BKE_paint_layers_baked_channels_get(const Material &ma,
+                                         const MaterialPaintLayer &layer,
+                                         Vector<int> &r_channels);
+
 /** The kinds a Custom group's `pbr_custom_role` name can stand for. */
 enum class PaintLayerCustomRole : int8_t {
   /** No role at all: a user parameter. */

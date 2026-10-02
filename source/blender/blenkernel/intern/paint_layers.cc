@@ -1204,6 +1204,27 @@ void BKE_paint_layers_custom_channels_get(const MaterialPaintLayer &layer,
   }
 }
 
+void BKE_paint_layers_baked_channels_get(const Material &ma,
+                                         const MaterialPaintLayer &layer,
+                                         Vector<int> &r_channels)
+{
+  r_channels.clear();
+  /* The `hash` is the whole validity test (see #MaterialPaintLayerBake): a row without a bake, or
+   * with a stale one, has no current maps to report. */
+  if (layer.bake == nullptr || !BKE_paint_layers_bake_is_valid(ma, layer)) {
+    return;
+  }
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (layer.bake->images[channel] != nullptr) {
+      r_channels.append(channel);
+    }
+  }
+  /* The coverage map is the Alpha channel's data (#paint_layer_material_source_map). */
+  if (layer.bake->coverage != nullptr && !r_channels.contains(int(PAINT_MATERIAL_CHANNEL_ALPHA))) {
+    r_channels.append(int(PAINT_MATERIAL_CHANNEL_ALPHA));
+  }
+}
+
 void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r_issues)
 {
   r_issues.clear();

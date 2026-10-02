@@ -4015,7 +4015,9 @@ TEST_F(PaintLayersGraphEvalTest, content_correction_material_baked_partial_cover
   BKE_paint_layers_bake_finalize(*ma, *correction);
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *correction), PaintLayerMaterialMode::Baked);
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   GraphInterpreter interpreter;
   interpreter.instance = find_instance();
   interpreter.tree = ma->paint_layers_tree;
@@ -4219,7 +4221,9 @@ TEST_F(PaintLayersGraphEvalTest, mask_material_alpha_baked_matches_the_cpu)
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *mask, -1, coverage));
   BKE_paint_layers_bake_finalize(*ma, *mask);
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   GraphInterpreter interpreter;
   interpreter.instance = find_instance();
   interpreter.tree = ma->paint_layers_tree;
@@ -4329,7 +4333,9 @@ TEST_F(PaintLayersGraphEvalTest, mask_material_roughness_baked_matches_the_cpu)
       BKE_paint_layers_bake_set_map(*ma, *mask, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough_map));
   BKE_paint_layers_bake_finalize(*ma, *mask);
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   GraphInterpreter interpreter;
   interpreter.instance = find_instance();
   interpreter.tree = ma->paint_layers_tree;
@@ -4490,7 +4496,9 @@ TEST_F(PaintLayersGraphEvalTest, mask_node_group_baked_matches_the_cpu)
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *mask, -1, coverage));
   BKE_paint_layers_bake_finalize(*ma, *mask);
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   GraphInterpreter interpreter;
   interpreter.instance = find_instance();
   interpreter.tree = ma->paint_layers_tree;
@@ -5150,7 +5158,9 @@ TEST_F(PaintLayersGraphEvalTest, nested_folder_inside_stack_correction_matches_t
   leaf_record->image = add_solid_image("Leaf", size, 0, 0, 255, 200);
   leaf_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   GraphInterpreter interpreter;
   interpreter.instance = find_instance();
   interpreter.tree = ma->paint_layers_tree;

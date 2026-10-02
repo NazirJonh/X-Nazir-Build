@@ -1013,12 +1013,12 @@ TEST_F(PaintLayersDescription, source_change_converts_between_image_and_constant
   ASSERT_TRUE(BKE_paint_layers_channel_opacity_set(
       *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0.5f));
 
-  /* Paint to Fill: the map goes, the color stays with an opaque alpha, and the pair's per-channel
-   * blend/opacity override survives. */
-  layer->fill_color[0] = 0.1f;
-  layer->fill_color[1] = 0.2f;
-  layer->fill_color[2] = 0.3f;
-  layer->fill_color[3] = 0.0f;
+  /* Paint to Fill: the map goes, the record's Base Color stays (with an opaque alpha), and the
+   * pair's per-channel blend/opacity override survives. */
+  record->value[0] = 0.1f;
+  record->value[1] = 0.2f;
+  record->value[2] = 0.3f;
+  record->value[3] = 0.0f;
   EXPECT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
   EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
   ASSERT_EQ(layer->channels_num, 1);
@@ -1029,14 +1029,17 @@ TEST_F(PaintLayersDescription, source_change_converts_between_image_and_constant
   EXPECT_EQ(layer->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR].blend,
             MA_PAINT_LAYER_BLEND_MULTIPLY);
   EXPECT_FLOAT_EQ(layer->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR].opacity, 0.5f);
-  EXPECT_FLOAT_EQ(layer->fill_color[3], 1.0f);
+  /* Base Color is the record's value, the single storage location for a Layer-role row. The
+   * transparent value became an opaque Fill default, as it did on the DNA field before. */
+  EXPECT_FLOAT_EQ(record->value[0], 0.0f);
+  EXPECT_FLOAT_EQ(record->value[3], 1.0f);
 
-  /* Fill to Paint: the color resets to a clean starting point for the first stroke; the record and
-   * its overrides stay. */
+  /* Fill to Paint: the Base-Color record resets to a clean starting point for the first stroke; the
+   * record and its overrides stay. */
   EXPECT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE));
   EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
-  EXPECT_FLOAT_EQ(layer->fill_color[0], 0.0f);
-  EXPECT_FLOAT_EQ(layer->fill_color[3], 1.0f);
+  EXPECT_FLOAT_EQ(record->value[0], 0.0f);
+  EXPECT_FLOAT_EQ(record->value[3], 1.0f);
   ASSERT_EQ(layer->channels_num, 1);
   EXPECT_FLOAT_EQ(layer->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR].opacity, 0.5f);
 
@@ -1071,7 +1074,10 @@ TEST_F(PaintLayersDescription, value_setters_write_and_tag)
 
   EXPECT_EQ(layer->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
   EXPECT_FLOAT_EQ(layer->opacity, 0.4f);
-  EXPECT_FLOAT_EQ(layer->fill_color[1], 0.5f);
+  /* A Layer-role row keeps Base Color in its Base-Color record, so set_fill_color wrote there. */
+  float base_color[4];
+  BKE_paint_layers_base_color_get(*layer, base_color);
+  EXPECT_FLOAT_EQ(base_color[1], 0.5f);
   EXPECT_EQ(layer->color_tag, 3);
   EXPECT_STREQ(layer->name, "Renamed");
   EXPECT_EQ(layer->flag & MA_PAINT_LAYER_ENABLED, 0);

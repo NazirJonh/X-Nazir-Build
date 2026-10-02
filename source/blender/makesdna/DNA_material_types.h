@@ -631,6 +631,12 @@ struct MaterialPaintLayer {
   /** #eMaterialPaintLayerFlag. */
   int16_t flag = MA_PAINT_LAYER_ENABLED;
   float opacity = 1.0f;
+  /**
+   * The constant of rows that carry no channel records: masks and Fill-effect corrections. A
+   * Layer-role row keeps every channel -- Base Color included -- in #MaterialPaintLayerChannel
+   * records, so this field is not read for one; #paint_layer_channel_constant is the single reader
+   * for a Layer-role row's channel constant.
+   */
   float fill_color[4] = {};
   /** Display color tag, interpreted by the UI only. -1 means no color (default). */
   int8_t color_tag = -1;

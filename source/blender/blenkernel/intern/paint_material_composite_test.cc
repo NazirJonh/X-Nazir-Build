@@ -862,10 +862,11 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
     MaterialPaintLayer *layer = BKE_paint_layers_add(
         *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, name, nullptr, PaintLayerPlace::Above);
     EXPECT_NE(layer, nullptr);
-    copy_v4_v4(layer->fill_color, color);
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
         *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     EXPECT_NE(record, nullptr);
+    /* A Layer-role row keeps Base Color in its record, the single storage location. */
+    copy_v4_v4(record->value, color);
     record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
     record->image = nullptr;
     return layer;
@@ -932,6 +933,38 @@ TEST_F(PaintLayersCompositeTest, opacity_blends_top_over_bottom)
   EXPECT_NEAR(result[0], 0.5f, 1e-4f);
   EXPECT_NEAR(result[1], 0.0f, 1e-4f);
   EXPECT_NEAR(result[2], 0.5f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, disabled_channel_contributes_nothing)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_paint_layer(
+      "Top", add_solid_image("Top", 4, 0, 0, 255, 255));
+  ASSERT_EQ(top->channels_num, 1);
+  MaterialPaintLayerChannel *record = &top->channels[0];
+  Image *image = record->image;
+  ASSERT_NE(image, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
+      *ma, top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+
+  /* The disabled channel drops out of the CPU composite, so the red bottom shows through. */
+  int w = 0, h = 0;
+  ImBuf *ibuf = composite(PAINT_MATERIAL_CHANNEL_BASE_COLOR, w, h);
+  const uchar *p = pixel(*ibuf, 1, 1);
+  EXPECT_EQ(p[0], 255);
+  EXPECT_EQ(p[1], 0);
+  EXPECT_EQ(p[2], 0);
+  IMB_freeImBuf(ibuf);
+
+  /* The record and its map are kept, so enabling it back restores the blue layer. */
+  EXPECT_EQ(record->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+  EXPECT_EQ(record->image, image);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
+      *ma, top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+  ibuf = composite(PAINT_MATERIAL_CHANNEL_BASE_COLOR, w, h);
+  p = pixel(*ibuf, 1, 1);
+  EXPECT_EQ(p[2], 255);
+  IMB_freeImBuf(ibuf);
 }
 
 TEST_F(PaintLayersCompositeTest, disabled_layer_contributes_nothing)

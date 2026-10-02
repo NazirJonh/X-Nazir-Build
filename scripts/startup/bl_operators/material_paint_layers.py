@@ -346,7 +346,13 @@ class MATERIAL_OT_paint_layer_channel_remove(_PaintLayerOperator):
         layer = self._layer(context)
         if layer is None:
             return {'CANCELLED'}
-        layer.channel_remove(channel=self.channel)
+        # A Fill's Base Color is its constant and cannot be removed (see
+        # BKE_paint_layers_channel_remove); the RNA function reports it as an error.
+        try:
+            layer.channel_remove(channel=self.channel)
+        except RuntimeError as ex:
+            self.report({'WARNING'}, str(ex))
+            return {'CANCELLED'}
         return {'FINISHED'}
 
 

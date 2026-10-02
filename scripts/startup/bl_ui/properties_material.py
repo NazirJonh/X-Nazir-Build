@@ -14,6 +14,7 @@ from bl_operators.material_paint_layers import (
     mesh_map_summary_status,
 )
 from bl_ui.space_properties import PropertiesAnimationMixin
+from bl_ui.properties_paint_common import draw_material_layer_channels
 
 
 class MATERIAL_MT_context_menu(Menu):
@@ -636,8 +637,12 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         layout.prop(layer, "name", text="Layer")
         layout.prop(layer, "blend_type", text="Blend")
         layout.prop(layer, "opacity", text="Opacity")
-        if layer.source == 'CONSTANT':
-            layout.prop(layer, "fill_color")
+        # A stack Layer's channels, drawn with the same widget as the brush PBR Paint panel: its
+        # Base Color is the row's colour (no separate fill_color property), and each channel's
+        # value/source come from the row's own records.
+        if layer.role == 'LAYER':
+            layout.separator()
+            draw_material_layer_channels(layout, context, layer)
 
         box = layout.box()
         box.label(text="Mask", icon='MOD_MASK')

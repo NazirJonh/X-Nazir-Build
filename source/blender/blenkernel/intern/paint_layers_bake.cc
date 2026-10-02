@@ -2588,8 +2588,13 @@ static uint64_t bake_hash_layer(uint64_t h,
    * bakes are invalidated and re-rendered on first load; files written after it hash stably. */
   h = bake_hash_mix(h, uint8_t(layer.role));
   h = bake_hash_float(h, layer.opacity);
-  for (const float channel : layer.fill_color) {
-    h = bake_hash_float(h, channel);
+  /* A Layer-role row's Base Color lives in its Base-Color channel record and is hashed by the
+   * channel loop below; a mask or Fill-effect correction keeps it in the DNA field, which that loop
+   * cannot see. Hashing it unconditionally would fold a Layer-role row's Base Color in twice. */
+  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {
+    for (const float channel : layer.fill_color) {
+      h = bake_hash_float(h, channel);
+    }
   }
   for (int i = 0; i < layer.channels_num; i++) {
     const MaterialPaintLayerChannel &record = layer.channels[i];

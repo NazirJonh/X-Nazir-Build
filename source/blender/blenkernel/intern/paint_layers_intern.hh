@@ -166,7 +166,20 @@ inline Image *paint_layer_material_source_map(const MaterialPaintLayer &layer, c
   return layer.bake->images[channel];
 }
 
-/** Whether \a layer takes part in \a channel at all: a record that is not absent. */
+/**
+ * Whether \a record is a live channel: not null and #MA_PAINT_LAYER_CHANNEL_ENABLED.
+ *
+ * #MA_PAINT_LAYER_CHANNEL_DISABLED keeps the record and its map but unlinks the channel, so the row
+ * takes part nowhere while the map stays in the file; #MA_PAINT_LAYER_CHANNEL_ABSENT has no map at
+ * all. The participation helpers and the paint target share this one predicate, so a row cannot
+ * stay in the viewport or accept a stroke on one side and drop out on the other.
+ */
+inline bool paint_layer_channel_live(const MaterialPaintLayerChannel *record)
+{
+  return record != nullptr && record->state == MA_PAINT_LAYER_CHANNEL_ENABLED;
+}
+
+/** Whether \a layer takes part in \a channel: a live record. */
 inline bool paint_layer_channel_present(const Material &ma,
                                         const MaterialPaintLayer &layer,
                                         const int channel)
@@ -174,14 +187,12 @@ inline bool paint_layer_channel_present(const Material &ma,
   if (layer.source == MA_PAINT_LAYER_SOURCE_MESH_MAP) {
     /* A MESH_MAP row paints the atlas in every channel its records name, whatever the map type. */
     return paint_layer_mesh_map_image(ma, layer) != nullptr &&
-           paint_layer_channel_find(layer, channel) != nullptr &&
-           paint_layer_channel_find(layer, channel)->state != MA_PAINT_LAYER_CHANNEL_ABSENT;
+           paint_layer_channel_live(paint_layer_channel_find(layer, channel));
   }
   if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return paint_layer_material_source_map(layer, channel) != nullptr;
   }
-  const MaterialPaintLayerChannel *entry = paint_layer_channel_find(layer, channel);
-  return entry != nullptr && entry->state != MA_PAINT_LAYER_CHANNEL_ABSENT;
+  return paint_layer_channel_live(paint_layer_channel_find(layer, channel));
 }
 
 /**
@@ -204,7 +215,7 @@ inline Image *paint_layer_channel_image(const Material &ma,
     return paint_layer_material_source_map(layer, channel);
   }
   const MaterialPaintLayerChannel *entry = paint_layer_channel_find(layer, channel);
-  if (entry == nullptr || entry->state == MA_PAINT_LAYER_CHANNEL_ABSENT) {
+  if (!paint_layer_channel_live(entry)) {
     return nullptr;
   }
   return entry->image;
@@ -228,9 +239,13 @@ inline Image *paint_layer_mask_correction_image(const Material &ma,
 }
 
 /**
- * The flat colour \a layer contributes to \a channel when it has no map: a Fill's `fill_color` for
- * Base Color and its own record value for the other channels, or a Paint's record value (empty for
- * a fresh row). One definition for the generator and the CPU, so a constant cannot mean two things.
+ * The flat colour \a layer contributes to \a channel when it has no map: a Layer-role row's channel
+ * record value (Base Color included), or a mask/Fill-effect correction's DNA `fill_color`. One
+ * definition for the generator and the CPU, so a constant cannot mean two things.
+ *
+ * INVARIANT: this is the only reader of a Layer-role row's channel constant. Direct reads of
+ * #MaterialPaintLayer::fill_color are valid only for rows without channel records (masks and
+ * Fill-effect corrections), which read through #BKE_paint_layers_correction_constant.
  */
 void paint_layer_channel_constant(const MaterialPaintLayer &layer, int channel, float r_color[4]);
 

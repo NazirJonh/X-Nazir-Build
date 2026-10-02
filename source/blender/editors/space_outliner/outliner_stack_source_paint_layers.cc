@@ -613,7 +613,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
               fill_swatch.is_color_swatch = true;
               fill_swatch.icon = ICON_GP_DRAW_FILL;
               fill_swatch.section_id = "CHANNELS";
-              copy_v4_v4(fill_swatch.color, layer.fill_color);
+              BKE_paint_layers_base_color_get(layer, fill_swatch.color);
               fill_swatch.label = IFACE_("Fill Color");
               row.preview_slots.append(std::move(fill_swatch));
             }
@@ -1210,11 +1210,16 @@ class PaintLayersStackSource final : public StackSource,
         hash = hash * 1000003u ^ UUID(layer.marker).hash();
         hash ^= uint64_t(layer.source) | (uint64_t(layer.flag) << 8) |
                 (uint64_t(layer.blend) << 16) | (uint64_t(layer.mesh_map_type) << 24);
-        /* The swatch and the columns show these, so a change to them has to reach the rows. */
-        for (const float value : {layer.fill_color[0],
-                                  layer.fill_color[1],
-                                  layer.fill_color[2],
-                                  layer.fill_color[3],
+        /* The swatch and the columns show these, so a change to them has to reach the rows. The
+         * Base Color comes from the single reader, so a Layer-role Fill (whose colour lives in its
+         * Base-Color record) invalidates exactly as a mask or Fill-effect correction (DNA field)
+         * does. */
+        float base_color[4];
+        BKE_paint_layers_base_color_get(layer, base_color);
+        for (const float value : {base_color[0],
+                                  base_color[1],
+                                  base_color[2],
+                                  base_color[3],
                                   layer.opacity})
         {
           hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(value));

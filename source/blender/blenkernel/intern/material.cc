@@ -80,6 +80,8 @@
 #include "BKE_scene.hh"
 #include "BKE_vfont.hh"
 
+#include "paint_layers_intern.hh"
+
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
@@ -2331,7 +2333,7 @@ void BKE_paint_layers_texpaint_slots_refresh(Material *ma, const PaintModeSettin
     }
     for (int i = 0; i < layer->channels_num; i++) {
       if (layer->channels[i].channel == channel &&
-          layer->channels[i].state != MA_PAINT_LAYER_CHANNEL_ABSENT)
+          paint_layer_channel_live(&layer->channels[i]))
       {
         return layer->channels[i].image;
       }

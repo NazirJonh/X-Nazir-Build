@@ -89,6 +89,8 @@
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
 
+#include "paint_layers_intern.hh"
+
 #include "WM_api.hh"
 
 #include "DEG_depsgraph.hh"
@@ -3490,6 +3492,18 @@ MaterialPaintValueGradientMode BKE_paint_material_value_gradient_mode(const floa
   return MaterialPaintValueGradientMode::Unipolar;
 }
 
+bool BKE_paint_material_channel_is_scalar(const eMaterialPaintChannel channel)
+{
+  return ELEM(channel,
+              PAINT_MATERIAL_CHANNEL_METALLIC,
+              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+              PAINT_MATERIAL_CHANNEL_SPECULAR,
+              PAINT_MATERIAL_CHANNEL_HEIGHT,
+              PAINT_MATERIAL_CHANNEL_ALPHA,
+              PAINT_MATERIAL_CHANNEL_AO,
+              PAINT_MATERIAL_CHANNEL_CUSTOM);
+}
+
 void BKE_paint_material_value_gradient_color(const float value_min,
                                              const float value_max,
                                              const float t,
@@ -4217,7 +4231,9 @@ static bool paint_layers_row_takes_channel(const PaintLayersTarget &target,
     return false;
   }
   if (target.layer->channels_num > 0) {
-    return target.channel_record != nullptr;
+    /* Only a live record takes the brush's stroke: a DISABLED channel is not a target, so the
+     * stroke's other channels still write while this one is skipped. */
+    return paint_layer_channel_live(target.channel_record);
   }
   if (r_fallback_channel < 0) {
     r_fallback_channel = channel;

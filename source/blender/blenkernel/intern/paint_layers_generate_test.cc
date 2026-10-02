@@ -671,6 +671,66 @@ TEST_F(PaintLayersGenerateTest, authored_fill_wires_the_default_channels)
   }
 }
 
+TEST_F(PaintLayersGenerateTest, disabled_channel_drops_its_map_from_the_tree)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Base"));
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayerChannel *base = nullptr;
+  for (int i = 0; i < layer->channels_num; i++) {
+    if (layer->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      base = &layer->channels[i];
+    }
+  }
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(base->image, nullptr);
+  Image *base_image = base->image;
+  /* Adding a channel reallocates the row's array, so re-resolve the record after this. */
+  ASSERT_NE(add_channel(*layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("Rough")), nullptr);
+  base = nullptr;
+  for (int i = 0; i < layer->channels_num; i++) {
+    if (layer->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      base = &layer->channels[i];
+    }
+  }
+  ASSERT_NE(base, nullptr);
+
+  /* Whether the generated tree, or any nested group, samples \a image. */
+  auto tree_samples = [](auto &&self, const bNodeTree &tree, const Image &image) -> bool {
+    for (const bNode &node : tree.nodes) {
+      if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &image.id) {
+        return true;
+      }
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+          !BKE_paint_material_is_normal_combine_group(node))
+      {
+        if (self(self, *reinterpret_cast<const bNodeTree *>(node.id), image)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  EXPECT_TRUE(tree_samples(tree_samples, *ma->paint_layers_tree, *base_image));
+
+  /* Disabling Base Color rebuilds the tree without its map; the record and its image stay. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(tree_samples(tree_samples, *ma->paint_layers_tree, *base_image));
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+  EXPECT_EQ(base->image, base_image);
+
+  /* Enabling it back brings the map's node back. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(tree_samples(tree_samples, *ma->paint_layers_tree, *base_image));
+  EXPECT_EQ(base->image, base_image);
+}
+
 TEST_F(PaintLayersGenerateTest, authored_paint_participates_but_covers_nothing)
 {
   MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
@@ -805,12 +865,15 @@ TEST_F(PaintLayersGenerateTest, fill_constant_has_no_map)
       *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
   const float color[4] = {0.2f, 0.4f, 0.6f, 1.0f};
-  copy_v4_v4(layer->fill_color, color);
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, layer, color));
   add_channel(*layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr);
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  /* +warm: the root Fill row adds a Warm Mask map. */
-  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+  /* +warm: the root Fill row adds a Warm Mask map per wired channel record (Base Color and
+   * Roughness here): the mask builder looks the spare's image up through Base Color whatever
+   * channel is being built, so the same shared image lands in one node per channel. The Fill
+   * constant itself still builds no map of its own. */
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 2);
   /* The Fill constant lives on the layer's own group input, with a mirror on the root for the write
    * during evaluation (A1). */
   bNodeTree *fill_tree = layer_tree_find(*bmain, "Fill");

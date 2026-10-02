@@ -133,6 +133,61 @@ TEST_F(PaintLayersTargetTest, get_resolves_active_row_and_absent_channel)
   EXPECT_EQ(BKE_paint_layers_target_image(target), nullptr);
 }
 
+TEST_F(PaintLayersTargetTest, disabled_channel_is_not_a_paint_target)
+{
+  Material *ma = BKE_material_add(bmain, "DisabledChannelMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  BKE_paint_layers_active_set(*ma, layer->marker);
+
+  MaterialPaintLayerChannel *base = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  Image *base_image = solid_image("Base", 4, 255, 0, 0);
+  base->image = base_image;
+  MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  Image *rough_image = solid_image("Rough", 4, 128, 128, 128);
+  rough->image = rough_image;
+  /* channel_add reallocates the row's array, so re-resolve base after it. */
+  base = nullptr;
+  for (int i = 0; i < layer->channels_num; i++) {
+    if (layer->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      base = &layer->channels[i];
+    }
+  }
+  ASSERT_NE(base, nullptr);
+
+  /* Switching Base Color off keeps the record and its map, but the channel is no longer a paint
+   * target and a stroke cannot switch it back on. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+
+  PaintLayersTarget base_target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, base_target));
+  EXPECT_EQ(BKE_paint_layers_target_image(base_target), nullptr);
+  EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, base_target, 4), nullptr);
+  EXPECT_EQ(base->image, base_image);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+
+  /* A neighbouring live channel is unaffected. */
+  PaintLayersTarget rough_target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, PaintLayersTargetMode::Content, rough_target));
+  EXPECT_EQ(BKE_paint_layers_target_image(rough_target), rough_image);
+
+  /* Enabling it back restores the target with the same map. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, base_target));
+  EXPECT_EQ(BKE_paint_layers_target_image(base_target), base_image);
+}
+
 TEST_F(PaintLayersTargetTest, get_refuses_flat_folder_and_no_active)
 {
   Material *flat = BKE_material_add(bmain, "FlatMat");
@@ -593,9 +648,9 @@ TEST_F(PaintLayersTargetTest, source_change_keeps_channel_participation)
   ASSERT_TRUE(BKE_paint_layers_channel_opacity_set(
       *ma, *top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0.5f));
   /* The Fill the conversion produces shows this colour; matching the map's linear value makes the
-   * two states comparable. */
+   * two states comparable. Base Color lives in the channel record for a Layer-role row. */
   const float fill[4] = {1.0f, 0.0f, 0.0f, 1.0f};
-  copy_v4_v4(top->fill_color, fill);
+  copy_v4_v4(t->value, fill);
 
   float painted[4];
   composite_pixel(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 4, painted);

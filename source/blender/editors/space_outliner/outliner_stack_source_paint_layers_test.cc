@@ -388,7 +388,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_add_makes_paint_fill_folder_and_
   MaterialPaintLayer *fill_layer = paint_description_row_for_ordinal(*ma, fill);
   ASSERT_NE(fill_layer, nullptr);
   EXPECT_EQ(fill_layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
-  EXPECT_NEAR(fill_layer->fill_color[0], 0.25f, 1e-6f);
+  float base_color[4];
+  BKE_paint_layers_base_color_get(*fill_layer, base_color);
+  EXPECT_NEAR(base_color[0], 0.25f, 1e-6f);
   EXPECT_EQ(fill_layer->channels_num, 3);
 
   const int folder = paint_layers_edit_add(*ma, PAINT_STACK_ADD_FOLDER, -1, {});
@@ -656,7 +658,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_fill_color_only_touches_fill_lay
   ASSERT_GE(fill, 0);
   const float second[4] = {0.9f, 0.8f, 0.7f, 1.0f};
   ASSERT_TRUE(paint_layers_edit_fill_color(*ma, fill, second));
-  EXPECT_NEAR(paint_description_row_for_ordinal(*ma, fill)->fill_color[0], 0.9f, 1e-6f);
+  float base_color[4];
+  BKE_paint_layers_base_color_get(*paint_description_row_for_ordinal(*ma, fill), base_color);
+  EXPECT_NEAR(base_color[0], 0.9f, 1e-6f);
 
   /* A Paint layer refuses a fill-colour write. */
   const int paint = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, -1, {});

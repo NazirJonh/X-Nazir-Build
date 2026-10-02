@@ -1879,14 +1879,7 @@ static void rna_BrushMaterialPaintChannel_emission_color_set(PointerRNA *ptr, co
 
 static bool rna_BrushMaterialPaintChannel_is_scalar_channel(const eMaterialPaintChannel channel)
 {
-  return ELEM(channel,
-              PAINT_MATERIAL_CHANNEL_METALLIC,
-              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-              PAINT_MATERIAL_CHANNEL_SPECULAR,
-              PAINT_MATERIAL_CHANNEL_HEIGHT,
-              PAINT_MATERIAL_CHANNEL_ALPHA,
-              PAINT_MATERIAL_CHANNEL_AO,
-              PAINT_MATERIAL_CHANNEL_CUSTOM);
+  return BKE_paint_material_channel_is_scalar(channel);
 }
 
 static void rna_BrushMaterialPaintChannel_scalar_value_range(const eMaterialPaintChannel channel,

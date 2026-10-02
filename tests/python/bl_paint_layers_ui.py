@@ -45,8 +45,11 @@ class PaintLayersUiTest(unittest.TestCase):
 
     def regenerate(self):
         # The scheduling point is the depsgraph update; an explicit RNA call covers the case where
-        # a script's context has no scene to update.
+        # a script's context has no scene to update. regenerate() rebuilds the tree, while the
+        # view-layer update drains the bake queue (K-1 bake_plan_run via regenerate_tagged) and
+        # clears MA_PAINT_LAYERS_BAKE_STALE so composite() passes the freshness gate.
         self.material.paint_layers.regenerate()
+        bpy.context.view_layer.update()
 
     def principled(self):
         return self.material.node_tree.nodes.get("Principled BSDF")
@@ -109,7 +112,7 @@ class PaintLayersUiTest(unittest.TestCase):
         rough.value = (0.75, 0.75, 0.75, 1.0)
         self.regenerate()
         self.assertAlmostEqual(self.composite_pixel(channel="ROUGHNESS")[0], 0.75, delta=0.02)
-        # The Base Color channel still reads fill_color.
+        # The Base Color channel reads the row's Base-Color record, which `fill_color` routes to.
         self.assertGreater(self.composite_pixel()[0], 0.5)
 
     def test_fill_channel_value_is_value_only(self):
@@ -159,6 +162,120 @@ class PaintLayersUiTest(unittest.TestCase):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         correction = layer.correction_add(role='EFFECT', source='IMAGE', name="C")
         self.assertEqual(len(correction.channels), 0)
+
+    def channel_record(self, layer, channel):
+        return next(c for c in layer.channels if c.channel == channel)
+
+    def test_layer_channel_use_mirrors_state(self):
+        # The shared channel widget reads `use` on a layer channel exactly as it does on a brush
+        # channel; the setter goes through the layer's BKE enable path, not a direct state write.
+        fill = self.material.paint_layers.new(source='CONSTANT', name="Fill")
+        rough = self.channel_record(fill, 'ROUGHNESS')
+        self.assertTrue(rough.use)
+        rough.use = False
+        self.assertFalse(rough.use)
+        self.assertEqual(rough.state, 'DISABLED')
+        rough.use = True
+        self.assertEqual(rough.state, 'ENABLED')
+
+    def test_disabled_channel_keeps_map_and_leaves_the_tree(self):
+        # A channel map the user switches off stays on the record, but the generated tree stops
+        # wiring it; turning it back on restores both. There is no composite() here: its bake may be
+        # stale in this background-less run, and the record plus the tree are what the fix changes.
+        paint = self.material.paint_layers.new(source='IMAGE', name="Paint")
+        self.set_default_maps(paint)
+        base = self.channel_record(paint, 'BASE_COLOR')
+        image = base.image
+        self.assertIsNotNone(image)
+        self.regenerate()
+        self.assertTrue(self.base_color_input_linked())
+
+        base.use = False
+        self.regenerate()
+        self.assertEqual(base.state, 'DISABLED')
+        self.assertIs(base.image, image)
+        self.assertFalse(self.base_color_input_linked())
+
+        base.use = True
+        self.regenerate()
+        self.assertEqual(base.state, 'ENABLED')
+        self.assertIs(base.image, image)
+        self.assertTrue(self.base_color_input_linked())
+
+    def test_layer_fill_base_color_cannot_be_switched_off(self):
+        # A Fill's Base Color is its constant: it cannot be disabled, matching the record-removal
+        # invariant, so a disabled record never makes the layer paint nothing.
+        fill = self.material.paint_layers.new(source='CONSTANT', name="Fill")
+        base = self.channel_record(fill, 'BASE_COLOR')
+        base.use = False
+        self.assertTrue(base.use)
+        self.assertEqual(base.state, 'ENABLED')
+
+    def test_layer_channel_value_color_round_trips_scalar(self):
+        # The gradient swatch property mirrors the brush's: same BKE conversion, so the shared
+        # widget draws one thing. A scalar value maps to a grayscale color and back.
+        fill = self.material.paint_layers.new(source='CONSTANT', name="Fill")
+        rough = self.channel_record(fill, 'ROUGHNESS')
+        rough.value_scalar = 0.75
+        self.assertAlmostEqual(rough.value_color[0], 0.75, places=3)
+        rough.value_color = (0.25, 0.25, 0.25)
+        self.assertAlmostEqual(rough.value_scalar, 0.25, places=3)
+        # Base Color is a color channel: value_color does not apply.
+        base = self.channel_record(fill, 'BASE_COLOR')
+        self.assertEqual(tuple(base.value_color), (0.0, 0.0, 0.0))
+
+    def test_layer_channel_color_and_image_are_editable_through_rna(self):
+        # Color channels edit the record's `value` (the same [0,1] color as the brush's
+        # normal_color/emission_color); "Drop image" writes the record's own `image`.
+        paint = self.material.paint_layers.new(source='IMAGE', name="Paint")
+        base = self.channel_record(paint, 'BASE_COLOR')
+        base.value = (0.1, 0.2, 0.3, 1.0)
+        for actual, expected in zip(base.value, (0.1, 0.2, 0.3, 1.0)):
+            self.assertAlmostEqual(actual, expected, places=5)
+        image = bpy.data.images.new("PaintSrc", 4, 4)
+        base.image = image
+        self.assertIs(base.image, image)
+        base.image = None
+        self.assertIsNone(base.image)
+
+    def test_layer_widget_contract_holds_for_every_channel(self):
+        # The shared widget reads `use` on every channel and either a color or a scalar (plus the
+        # gradient swatch). Every fixed channel a layer can carry must satisfy that contract, so
+        # the widget never hits a missing property while drawing.
+        color_ids = {'BASE_COLOR', 'NORMAL', 'EMISSION'}
+        for channel_id in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'SPECULAR', 'NORMAL',
+                           'ALPHA', 'AO', 'EMISSION'):
+            layer = self.material.paint_layers.new(source='CONSTANT', name="C")
+            record = layer.channel_add(channel=channel_id)
+            self.assertIsNotNone(record, channel_id)
+            self.assertIsInstance(record.use, bool)
+            if channel_id in color_ids:
+                self.assertEqual(len(record.value), 4)
+            else:
+                record.value_scalar = 0.5
+                self.assertAlmostEqual(record.value_scalar, 0.5, places=3)
+                self.assertEqual(len(record.value_color), 3)
+
+    def test_layer_socket_menu_registered_and_data_contract(self):
+        # The layer channel's socket menu must be registered, and every property it reads must be
+        # available for a Fill and a Paint row, with and without an assigned image: that data
+        # contract is what the menu's draw needs, and a missing property is what would raise.
+        from bl_ui.properties_paint_common import PAINT_MT_material_layer_channel_socket
+
+        self.assertTrue(PAINT_MT_material_layer_channel_socket.is_registered)
+        for source in ('CONSTANT', 'IMAGE'):
+            layer = self.material.paint_layers.new(source=source, name="Row")
+            for channel_id in ('BASE_COLOR', 'ROUGHNESS'):
+                record = layer.channel_add(channel=channel_id)
+                # The color-space row is drawn only with an image; the settings row always exists.
+                for with_image in (False, True):
+                    record.image = bpy.data.images.new("Src", 4, 4) if with_image else None
+                    if record.image is not None:
+                        self.assertIsInstance(record.image.colorspace_settings.name, str)
+                    settings = next(
+                        s for s in layer.channel_settings if s.channel == channel_id)
+                    self.assertIsInstance(settings.blend_type, str)
+                    self.assertIsInstance(settings.opacity, float)
 
     def test_correction_add_accepts_every_layer_source(self):
         # Phase 6, goal 1: a correction or mask item offers the same sources a Layer row does

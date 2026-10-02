@@ -307,9 +307,9 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
     return nullptr;
   }
   if (target.mode == PaintLayersTargetMode::Content) {
-    if (target.channel_record == nullptr ||
-        target.channel_record->state == MA_PAINT_LAYER_CHANNEL_ABSENT)
-    {
+    /* A DISABLED record keeps its map for the file but is not a paint target, the same way it takes
+     * no part in the viewport. */
+    if (!paint_layer_channel_live(target.channel_record)) {
       return nullptr;
     }
     return target.channel_record->image;
@@ -476,6 +476,11 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
     return nullptr;
   }
   MaterialPaintLayerChannel *record = paint_layer_channel_find(*target.layer, target.channel);
+  /* A DISABLED record refuses writability rather than being switched back on behind the user's
+   * back: the stroke must not silently re-enable a channel the user turned off. */
+  if (record != nullptr && !paint_layer_channel_live(record)) {
+    return nullptr;
+  }
   const bool had_record = record != nullptr && record->state != MA_PAINT_LAYER_CHANNEL_ABSENT;
   if (record == nullptr) {
     record = BKE_paint_layers_channel_add(

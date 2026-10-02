@@ -186,6 +186,17 @@ void BKE_paint_layers_tag_edited(Material &ma);
  */
 void BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel channel, float r_color[4]);
 
+/**
+ * The Base Color \a layer shows: a Layer-role row's Base-Color channel record (its single stored
+ * constant, whether the row is a Fill or a Paint), or the DNA #MaterialPaintLayer::fill_color of a
+ * row without channel records (a mask or Fill-effect correction).
+ *
+ * The one reader of the Base-Color constant for code that has only the row, not a channel index --
+ * the Outliner swatch, the row hash and the RNA `fill_color` property. Anything that reads a
+ * channel constant directly must go through `paint_layer_channel_constant` instead.
+ */
+void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_color[4]);
+
 /** Why a row of a layered material behaves differently than its settings suggest. */
 enum class PaintLayersIssueCode : int8_t {
   /**

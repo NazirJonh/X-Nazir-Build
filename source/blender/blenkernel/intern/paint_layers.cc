@@ -514,7 +514,7 @@ const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &l
 
 bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, float r_fill[4])
 {
-  copy_v4_v4(r_fill, layer.fill_color);
+  BKE_paint_layers_base_color_get(layer, r_fill);
   /* Only a Layer-role Constant row reads as Fill; a Fill-effect correction is untouched by this
    * conversion, matching the old kind table (which had no entry for a correction). */
   if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer ||
@@ -522,12 +522,8 @@ bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, flo
   {
     return false;
   }
-  /* A Fill carries a value per channel (Base Color in `fill_color`, the rest in their records); a
-   * Paint row carries the constant per channel, so each record keeps what the Fill showed before
-   * the source flips and `fill_color` is reset. */
-  for (int i = 0; i < layer.channels_num; i++) {
-    paint_layer_channel_constant(layer, layer.channels[i].channel, layer.channels[i].value);
-  }
+  /* A Layer-role Fill carries a value per channel in its records (Base Color included), so each
+   * record already keeps what the Fill showed; the flip only changes the source. */
   layer.source = MA_PAINT_LAYER_SOURCE_IMAGE;
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -1798,10 +1794,17 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
       BKE_paint_layers_kind_info(layer->source).uses_fill_color)
   {
     /* A Fill shows a value per channel from the start; the Principled defaults keep the material
-     * looking like it did before the layer. A Fill-effect correction's own first record instead
-     * falls to the transparent branch below, exactly as it did through the old kind table (which
-     * had no entry for a correction). */
-    BKE_paint_layers_channel_default_value(ma, channel, record.value);
+     * looking like it did before the layer. Base Color is the exception: a fresh Fill lays nothing
+     * until its colour is set (the Principled 0.8 default would silently make every new Fill a
+     * grey layer), so its record starts transparent. #BKE_paint_layers_set_fill_color gives it a
+     * colour. A Fill-effect correction's own first record instead falls to the transparent branch
+     * below, exactly as it did through the old kind table (which had no entry for a correction). */
+    if (channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      zero_v4(record.value);
+    }
+    else {
+      BKE_paint_layers_channel_default_value(ma, channel, record.value);
+    }
   }
   else {
     /* A fresh Paint record is transparent: it takes part but lays nothing down until painted. */
@@ -1906,21 +1909,28 @@ void paint_layer_channel_constant(const MaterialPaintLayer &layer,
                                   const int channel,
                                   float r_color[4])
 {
-  /* Layer-role only: a Fill-effect correction reads through #BKE_paint_layers_correction_constant
-   * instead, which has always kept its own fill-colour rule independent of this one. */
-  if (BKE_paint_layers_role(layer) == PaintLayerRole::Layer &&
-      BKE_paint_layers_kind_info(layer.source).uses_fill_color &&
-      channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR)
-  {
-    copy_v4_v4(r_color, layer.fill_color);
-    return;
-  }
+  /* INVARIANT: a row's channel constant is read only through this function. A Layer-role row keeps
+   * every channel -- Base Color included -- in its #MaterialPaintLayerChannel records; the DNA
+   * #MaterialPaintLayer::fill_color field is the constant of rows that carry no channel records
+   * (masks and Fill-effect corrections) and is never read here. A correction reads through
+   * #BKE_paint_layers_correction_constant instead, which keeps its own fill-colour rule. */
   const MaterialPaintLayerChannel *entry = paint_layer_channel_find(layer, channel);
   if (entry != nullptr) {
     copy_v4_v4(r_color, entry->value);
     return;
   }
   zero_v4(r_color);
+}
+
+void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_color[4])
+{
+  /* A Layer-role row shows Base Color from its channel record, like the generator and the CPU; a
+   * mask or Fill-effect correction has no Base-Color record and keeps the DNA field. */
+  if (BKE_paint_layers_role(layer) == PaintLayerRole::Layer) {
+    paint_layer_channel_constant(layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, r_color);
+    return;
+  }
+  copy_v4_v4(r_color, layer.fill_color);
 }
 
 namespace {
@@ -1989,6 +1999,16 @@ bool BKE_paint_layers_channel_remove(Material &ma,
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
     return false;
   }
+  /* INVARIANT: a Layer-role Fill always carries its Base-Color record. Base Color is the row's
+   * constant, read through #paint_layer_channel_constant with no DNA `fill_color` fallback for a
+   * Layer-role row, so removing the record would silently make the Fill paint nothing. Other
+   * channels -- and a mask/Fill-effect correction's records -- are removed as before. */
+  if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+      BKE_paint_layers_kind_info(layer->source).uses_fill_color &&
+      channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR)
+  {
+    return false;
+  }
   MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
   if (record == nullptr) {
     return false;
@@ -2019,6 +2039,15 @@ bool BKE_paint_layers_channel_set_enabled(Material &ma,
   }
   MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
   if (record == nullptr) {
+    return false;
+  }
+  /* INVARIANT: a Layer-role Fill's Base Color cannot be switched off, the same way its record
+   * cannot be removed (#BKE_paint_layers_channel_remove). Base Color is the Fill's constant, so a
+   * disabled record would make the layer paint nothing while still claiming to take part. */
+  if (!enabled && BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
+      BKE_paint_layers_kind_info(layer->source).uses_fill_color &&
+      channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR)
+  {
     return false;
   }
   record->state = enabled ? MA_PAINT_LAYER_CHANNEL_ENABLED : MA_PAINT_LAYER_CHANNEL_DISABLED;
@@ -2099,19 +2128,28 @@ bool BKE_paint_layers_source_change(Material &ma,
   if (source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
     /* A painted map is not a constant, so the maps go; the records stay, because a per-channel
      * blend/opacity override is a setting of the pair, not a pixel. Only the image is forgotten;
-     * an image is owned by Main, so it is detached, not freed. */
+     * an image is owned by Main, so it is detached, not freed. Base Color already lives in its
+     * record, so it survives the flip like every other channel. A transparent Base Color becomes an
+     * opaque black Fill default, so the row shows a clean constant rather than laying nothing. */
     for (const int i : IndexRange(layer->channels_num)) {
       layer->channels[i].image = nullptr;
     }
-    if (layer->fill_color[3] == 0.0f) {
-      layer->fill_color[0] = layer->fill_color[1] = layer->fill_color[2] = 0.0f;
-      layer->fill_color[3] = 1.0f;
+    MaterialPaintLayerChannel *base = paint_layer_channel_find(
+        *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (base != nullptr && base->value[3] == 0.0f) {
+      base->value[0] = base->value[1] = base->value[2] = 0.0f;
+      base->value[3] = 1.0f;
     }
   }
   else {
-    /* Fill's color becomes the starting point of the first stroke's map, not a map of its own. */
-    static const float fill_default[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    copy_v4_v4(layer->fill_color, fill_default);
+    /* Fill's color becomes the starting point of the first stroke's map, not a map of its own. The
+     * Base-Color record is reset, not the DNA field: a Layer-role row keeps Base Color there. */
+    MaterialPaintLayerChannel *base = paint_layer_channel_find(
+        *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (base != nullptr) {
+      static const float fill_default[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      copy_v4_v4(base->value, fill_default);
+    }
   }
   layer->source = source;
   BKE_paint_layers_tag_edited(ma);
@@ -2297,6 +2335,20 @@ bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, co
 {
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
     return false;
+  }
+  /* A Layer-role row keeps Base Color in its channel record, like every other channel, so the
+   * record is the single place a Fill's colour lives; the DNA field stays the constant of rows
+   * without records (masks and Fill-effect corrections). The record is guaranteed to exist for a
+   * Fill (the default channel set creates Base Color), and created on demand for a Paint row that
+   * lost it, so a script cannot write into a field nothing reads. */
+  if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer) {
+    if (paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
+      if (BKE_paint_layers_channel_add(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
+        return false;
+      }
+    }
+    return BKE_paint_layers_channel_set_value(
+        ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color);
   }
   copy_v4_v4(layer->fill_color, color);
   /* A Fill colour is a group input as well. */

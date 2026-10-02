@@ -664,6 +664,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     {
       continue;
     }
+    /* A Fill lays its constant whatever its alpha; a Paint's alpha decides whether it lays one at
+     * all (topology). The gate is Fill-vs-Paint, not where the constant is stored: a Layer-role
+     * Fill keeps Base Color in its record now, like every other channel. */
     if (!(BKE_paint_layers_role(layer) == PaintLayerRole::Layer &&
           BKE_paint_layers_kind_info(layer.source).uses_fill_color))
     {

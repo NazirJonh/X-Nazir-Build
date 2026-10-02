@@ -6745,7 +6745,7 @@ TEST_F(PaintLayersGraphEvalTest, authored_paint_without_a_map_matches_the_cpu)
   ma = nullptr;
 }
 
-/** A Fill shows a value per channel: Base Color from `fill_color`, the rest from their records. */
+/** A Fill shows a value per channel, Base Color included, from the row's channel records. */
 TEST_F(PaintLayersGraphEvalTest, fill_has_a_value_per_channel)
 {
   const int size = 4;
@@ -6761,7 +6761,7 @@ TEST_F(PaintLayersGraphEvalTest, fill_has_a_value_per_channel)
   ASSERT_NE(fill, nullptr);
   BKE_paint_layers_default_channels_apply(*ma, *fill);
   const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
-  copy_v4_v4(fill->fill_color, red);
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, red));
   const float rough[4] = {0.75f, 0.75f, 0.75f, 1.0f};
   ASSERT_TRUE(
       BKE_paint_layers_channel_set_value(*ma, fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough));
@@ -11043,7 +11043,7 @@ class PaintLayersFullStackTest : public PaintLayersGraphEvalTest {
     {
       return s;
     }
-    copy_v4_v4(s.fill->fill_color, kFsFillColor);
+    BKE_paint_layers_channel_set_value(*ma, s.fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, kFsFillColor);
     const float rough[4] = {kFsFillRoughness, kFsFillRoughness, kFsFillRoughness, 1.0f};
     BKE_paint_layers_channel_set_value(*ma, s.fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough);
 

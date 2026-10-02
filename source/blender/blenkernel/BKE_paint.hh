@@ -1045,6 +1045,13 @@ enum class MaterialPaintValueGradientMode {
 MaterialPaintValueGradientMode BKE_paint_material_value_gradient_mode(float value_min,
                                                                       float value_max);
 
+/**
+ * Whether \a channel is a single scalar (Metallic, Roughness, Specular, Height, Alpha, AO, Custom)
+ * rather than a color (Base Color, Normal, Emission). One classifier for the brush and layer
+ * channel RNA, so their scalar value/color properties agree on which entries they apply to.
+ */
+bool BKE_paint_material_channel_is_scalar(eMaterialPaintChannel channel);
+
 /** t in [0,1] → RGB in [0,1]. */
 void BKE_paint_material_value_gradient_color(float value_min,
                                              float value_max,

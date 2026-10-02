@@ -306,8 +306,16 @@ class PaintLayersApiTest(unittest.TestCase):
         record = layer.channel_add(channel='BASE_COLOR')
         self.assertIsNotNone(record)
         self.assertEqual(record.channel, 'BASE_COLOR')
-        layer.channel_set_enabled(channel='BASE_COLOR', enabled=False)
-        layer.channel_remove(channel='BASE_COLOR')
+        # A Fill's Base Color is its constant: it can be neither switched off nor removed. The
+        # function reports the refusal; the `use` property (the widget's path) ignores it.
+        with self.assertRaises(RuntimeError):
+            layer.channel_set_enabled(channel='BASE_COLOR', enabled=False)
+        self.assertEqual(record.state, 'ENABLED')
+        record.use = False
+        self.assertTrue(record.use)
+        with self.assertRaises(RuntimeError):
+            layer.channel_remove(channel='BASE_COLOR')
+        layer.channel_remove(channel='ROUGHNESS')
 
     def test_issues_are_exposed(self):
         material = bpy.data.materials.new("LayeredIssuesMaterial")

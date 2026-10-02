@@ -2240,6 +2240,17 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       brush_color_ptr = &brush_color_default;
     }
     const float4 &brush_color = *brush_color_ptr;
+    /* [PL-DIAG] Normal-stroke value reaching the write. Remove once confirmed. */
+    if (target.is_normal_channel) {
+      printf("[PL-DIAG] Normal paint: image=%p override=%d brush=(%.3f %.3f %.3f %.3f) sampler=%p\n",
+             static_cast<void *>(image_data.image),
+             target.color_override.has_value() ? 1 : 0,
+             brush_color.x,
+             brush_color.y,
+             brush_color.z,
+             brush_color.w,
+             static_cast<const void *>(active_sampler));
+    }
 
     /* Rebuild UV pixel encoding only when tile layout differs from what is
      * already cached on the PBVH (resolution / UDIM / seam margin). Same-sized

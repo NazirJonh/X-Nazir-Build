@@ -693,6 +693,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             # A Fill effect gets the same channel widget as a layer row (its toggles create per-
             # channel records and its value sliders write them); a Paint effect shows only maps.
             draw_material_correction_channels(box, context, owner, item)
+        # Parity with the old Channels box: an Effect is added from here, a Mask from its own box.
+        box.operator_menu_enum("material.paint_layer_correction_add", "role",
+                               text="Add Effect", icon='ADD')
 
         box = layout.box()
         box.label(text="Channels", icon='IMAGE_RGB')

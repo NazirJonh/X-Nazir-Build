@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -4276,6 +4277,14 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
       return result;
     }
 
+    /* [PL-DIAG] Normal-stroke diagnosis. Remove once the Normal write path is confirmed. */
+    printf("[PL-DIAG] ensure_writable: visible=0x%x canvas=%d normal_use=%d normal_binding='%s'\n",
+           visible_material_channels,
+           int(mode_settings.canvas_source),
+           brush_paint.channels[PAINT_MATERIAL_CHANNEL_NORMAL].use,
+           BKE_paint_material_channel_attribute_name(mode_settings, PAINT_MATERIAL_CHANNEL_NORMAL)
+               .data());
+
     /* The channels the brush writes and that have no map yet. Any frozen target refuses the whole
      * stroke before anything is created, so C-1 never leaves a half-grown layer. */
     Vector<int> channels;
@@ -4284,24 +4293,44 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
       if (!info.supports_image_paint) {
         continue;
       }
-      if (!BKE_paint_material_channel_writes_to_target(
-              brush_paint, mode_settings, visible_material_channels, info.channel))
-      {
+      const bool writes = BKE_paint_material_channel_writes_to_target(
+          brush_paint, mode_settings, visible_material_channels, info.channel);
+      if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        printf("[PL-DIAG] Normal: writes_to_target=%d\n", int(writes));
+      }
+      if (!writes) {
         continue;
       }
       PaintLayersTarget target;
       if (!BKE_paint_layers_target_get(ob, -1, info.channel, mode_settings, target)) {
+        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          printf("[PL-DIAG] Normal: target_get=0 (no active row)\n");
+        }
         return result;
       }
       /* Frozen, or the content of a Fill (a colour, changed only through a Correction). */
-      if (BKE_paint_layers_target_refusal(target) != nullptr) {
+      const char *refusal = BKE_paint_layers_target_refusal(target);
+      if (refusal != nullptr) {
+        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          printf("[PL-DIAG] Normal: refusal='%s'\n", refusal);
+        }
         return result;
       }
       if (!paint_layers_row_takes_channel(target, info.channel, fallback_channel)) {
+        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          printf("[PL-DIAG] Normal: row_takes_channel=0 (record filtered/disabled)\n");
+        }
         continue;
       }
       if (BKE_paint_layers_target_image(target) == nullptr) {
+        if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          printf("[PL-DIAG] Normal: no map yet, will ensure_writable\n");
+        }
         channels.append(info.channel);
+      }
+      else if (info.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        printf("[PL-DIAG] Normal: already has image=%p\n",
+               static_cast<void *>(BKE_paint_layers_target_image(target)));
       }
     }
     if (channels.is_empty()) {
@@ -4313,7 +4342,12 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
       if (!BKE_paint_layers_target_get(ob, -1, channel, mode_settings, target)) {
         continue;
       }
-      if (BKE_paint_layers_target_ensure_writable(bmain, target, image_size) != nullptr) {
+      Image *created_image = BKE_paint_layers_target_ensure_writable(bmain, target, image_size);
+      if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        printf("[PL-DIAG] Normal: ensure_writable -> image=%p\n",
+               static_cast<void *>(created_image));
+      }
+      if (created_image != nullptr) {
         result.created++;
       }
     }

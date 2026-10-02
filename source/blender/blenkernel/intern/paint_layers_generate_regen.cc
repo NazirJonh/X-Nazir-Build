@@ -1605,27 +1605,69 @@ bool BKE_paint_layers_regenerate(Main &bmain,
 
     /* A correction's maps are built at most once per row, so adding each one once is enough. A
      * Constant (Fill) correction builds a group input, not a map: a stale image on it is ignored by
-     * the build and must not be counted. */
-    auto add_corrections = [&](const MaterialPaintLayer &layer) {
-      for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, layer)) {
-        if (BKE_paint_layers_source_type(*effect) == PaintLayerSourceType::Constant) {
-          continue;
-        }
-        for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-          if (Image *image = paint_layer_channel_image(ma, *effect, channel)) {
-            counter.add_image(*image);
+     * the build and must not be counted. Only channels the description wires are built at all, so a
+     * channel outside the set (or one a disabled record dropped) contributes no sampler. */
+    const Vector<int> wired_probe = paint_layers_wired_channels(ma, &regen_cache);
+    Set<int> wired;
+    for (const int channel : wired_probe) {
+      wired.add(channel);
+    }
+    std::function<void(const MaterialPaintLayer &)> add_corrections =
+        [&](const MaterialPaintLayer &layer) {
+          for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, layer)) {
+            if (BKE_paint_layers_source_type(*effect) == PaintLayerSourceType::Constant) {
+              continue;
+            }
+            for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+              if (!wired.contains(channel)) {
+                continue;
+              }
+              if (Image *image = paint_layer_channel_image(ma, *effect, channel)) {
+                counter.add_image(*image);
+                continue;
+              }
+              /* A Node Group correction (and a baked Material one) reads its own bake map, which
+               * #paint_layer_channel_image does not resolve. */
+              Image *baked = nullptr;
+              if (BKE_paint_layers_bake_substitute(ma, *effect, channel, &baked) ||
+                  BKE_paint_layers_bake_substitute_custom(
+                      ma, *effect, channel, &baked, nullptr))
+              {
+                if (baked != nullptr) {
+                  counter.add_image(*baked);
+                }
+              }
+            }
+            /* A Stack correction's content is its children, composited in isolation exactly like a
+             * Layer folder's; their maps are samplers of their own. */
+            if (effect->source == MA_PAINT_LAYER_SOURCE_STACK) {
+              for (const MaterialPaintLayer &child : effect->children) {
+                if (row_is_removed(ma, child)) {
+                  continue;
+                }
+                for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+                  if (!wired.contains(channel)) {
+                    continue;
+                  }
+                  if (Image *image = paint_layer_channel_image(ma, child, channel)) {
+                    counter.add_image(*image);
+                  }
+                }
+                add_corrections(child);
+              }
+            }
           }
-        }
-      }
-      for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma, layer)) {
-        if (BKE_paint_layers_source_type(*mask_item) == PaintLayerSourceType::Constant) {
-          continue;
-        }
-        if (Image *image = paint_layer_mask_correction_image(ma, *mask_item, 0)) {
-          counter.add_image(*image);
-        }
-      }
-    };
+          for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma, layer)) {
+            if (BKE_paint_layers_source_type(*mask_item) == PaintLayerSourceType::Constant) {
+              continue;
+            }
+            /* A mask reads one scalar over the row, built once per channel the row wires; the map is
+             * one sampler whenever the row builds at all. */
+            if (Image *image = paint_layer_mask_correction_image(ma, *mask_item, 0)) {
+              counter.add_image(*image);
+            }
+          }
+        };
 
     /* The state a Hybrid live map is shown with: the generator copies the source node's storage, so
      * the key has to come from that node, not from the default. */

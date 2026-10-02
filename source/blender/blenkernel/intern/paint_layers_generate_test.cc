@@ -760,14 +760,17 @@ TEST_F(PaintLayersGenerateTest, disabled_channel_drops_its_map_from_the_tree)
     return false;
   };
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   ASSERT_NE(ma->paint_layers_tree, nullptr);
   EXPECT_TRUE(tree_samples(tree_samples, *ma->paint_layers_tree, *base_image));
 
   /* Disabling Base Color rebuilds the tree without its map; the record and its image stay. */
   ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
       *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   EXPECT_FALSE(tree_samples(tree_samples, *ma->paint_layers_tree, *base_image));
   EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
   EXPECT_EQ(base->image, base_image);
@@ -775,7 +778,8 @@ TEST_F(PaintLayersGenerateTest, disabled_channel_drops_its_map_from_the_tree)
   /* Enabling it back brings the map's node back. */
   ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
       *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   EXPECT_TRUE(tree_samples(tree_samples, *ma->paint_layers_tree, *base_image));
   EXPECT_EQ(base->image, base_image);
 }
@@ -5030,7 +5034,9 @@ TEST_F(PaintLayersGenerateTest, effect_node_group_with_bake_reads_the_bake_image
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, -1, coverage));
   BKE_paint_layers_bake_finalize(*ma, *correction);
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   bNodeTree *group = layer_tree_find(*bmain, "Owner");
   ASSERT_NE(group, nullptr);
   EXPECT_NE(find_tex_image_of(*group, *bake_map), nullptr);
@@ -8972,7 +8978,9 @@ TEST_F(PaintLayersGenerateTest, stack_effect_correction_child_image_counts_as_a_
   const int samplers_before = BKE_paint_layers_sampler_count(*ma);
   add_paint_layer_into(correction, "Child", add_image("Child"));
 
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
 
   /* The owner's own map plus the correction child's map: two samplers over the baseline (zero
    * rows). #SamplerCounter follows the tree from its output nodes regardless of which row's
@@ -9397,7 +9405,9 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_correcti
       *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_STACK, "StackFX");
   ASSERT_NE(correction, nullptr);
   add_paint_layer_into(correction, "Child", add_image("Child"));
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   snapshot_expect(*ma, 0x09c3a172cefdf180ull, "stack_correction"); /* +warm */
 }
 
@@ -9534,7 +9544,9 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_custom_node_gr
       *ma, *correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, bake_map));
   ASSERT_TRUE(BKE_paint_layers_bake_set_map(*ma, *correction, -1, coverage));
   BKE_paint_layers_bake_finalize(*ma, *correction);
-  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   snapshot_expect(*ma, 0x43bf0140e84d6a0bull, "custom_node_group_row"); /* +warm */
 }
 

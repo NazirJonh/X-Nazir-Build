@@ -2258,9 +2258,22 @@ def draw_material_layer_channels(layout, context, material, layer):
     for (or carries DISABLED) reads as off. Enabling it lazily creates the record; a channel outside
     the set is never shown, even when the row still holds its record and map.
     """
-    # A Stack row is a folder: it groups children and carries no channels of its own, so it gets no
-    # set-driven controls even though its role is Layer.
-    channel_ids = [] if layer.source == 'STACK' else material_layer_visible_channels(material)
+    # A Stack row is a folder: it groups children and carries no channel records of its own, so it
+    # shows only the per-channel blend/opacity overrides it applies to them.
+    if layer.source == 'STACK':
+        _draw_material_folder_channels(layout, material, layer)
+        return
+    # A Material or Node Group row is baked: its channels are maps, not records to toggle, so it
+    # gets a read-only status list instead of the set-driven widget. A Node Group also offers its
+    # custom channels.
+    if layer.source == 'MATERIAL':
+        _draw_material_baked_channel_status(layout, material, layer)
+        return
+    if layer.source == 'NODE_GROUP':
+        _draw_material_baked_channel_status(layout, material, layer)
+        _draw_material_custom_channels(layout, layer)
+        return
+    channel_ids = material_layer_visible_channels(material)
     if not channel_ids:
         layout.label(text="No channels", icon='INFO')
         return
@@ -2294,6 +2307,13 @@ def draw_material_layer_channels(layout, context, material, layer):
             icon='ERROR',
         )
 
+    # A Mesh Map row reads one geometry map from the material's shared atlas: the type selector is
+    # part of the row, and (unlike a Paint row) there is no per-channel image to drop, only the
+    # read-only atlas preview below.
+    if layer.source == 'MESH_MAP':
+        row = layout.row(align=True)
+        row.prop(layer, "mesh_map_type", text="Map")
+
     channel_col = layout.column(align=False)
     first = True
     for channel_id in channel_ids:
@@ -2311,6 +2331,114 @@ def draw_material_layer_channels(layout, context, material, layer):
                 _MATERIAL_PAINT_CHANNEL_LABELS[channel_id]),
             source_enabled=True,
         )
+
+
+def _draw_material_folder_channels(layout, material, layer):
+    """A folder row's per-channel blend/opacity overrides, one row per channel of the set.
+
+    A folder owns no records (BKE refuses channel_add for it), so these shared settings are the
+    only per-channel controls it can offer.
+    """
+    channel_ids = material_layer_visible_channels(material)
+    if not channel_ids:
+        layout.label(text="No channels", icon='INFO')
+        return
+    settings = {item.channel: item for item in layer.channel_settings}
+    col = layout.column(align=True)
+    for channel_id in channel_ids:
+        item = settings.get(channel_id)
+        if item is None:
+            continue
+        row = col.row(align=True)
+        row.label(text=_MATERIAL_PAINT_CHANNEL_LABELS[channel_id])
+        row.prop(item, "blend_type", text="")
+        row.prop(item, "opacity", text="")
+
+
+def _draw_material_baked_channel_status(layout, material, layer):
+    """A Material / Node Group row's channels as a read-only baked/not list.
+
+    Such a row has no records to toggle and no map to drop: its channels come from a bake. Per-
+    channel bake images are not exposed to RNA, so the overall ``bake_is_valid`` plus a channel
+    record's map stands for "has a map".
+    """
+    channel_ids = material_layer_visible_channels(material)
+    if not channel_ids:
+        layout.label(text="No channels", icon='INFO')
+        return
+    with_maps = {record.channel for record in layer.channels if record.image is not None}
+    valid = layer.bake_is_valid
+    col = layout.column(align=True)
+    for channel_id in channel_ids:
+        row = col.row(align=True)
+        row.label(text=_MATERIAL_PAINT_CHANNEL_LABELS[channel_id])
+        if valid and channel_id in with_maps:
+            row.label(text="Baked", icon='IMAGE_DATA')
+        else:
+            row.label(text="No map", icon='INFO')
+
+
+def _draw_material_custom_channels(layout, layer):
+    """A Node Group row's custom channels and the Add button the old Channels box carried."""
+    for custom in layer.custom_channels:
+        layout.label(text=_MATERIAL_PAINT_CHANNEL_LABELS.get(custom.channel, custom.channel),
+                     icon='RNDCURVE')
+    layout.operator_menu_enum("material.paint_layer_custom_channel_add", "channel",
+                              text="Add Custom Channel", icon='ADD')
+
+
+def _correction_base_color_record(item):
+    for record in item.channels:
+        if record.channel == 'BASE_COLOR':
+            return record
+    return None
+
+
+def _draw_material_constant_value(layout, item, channel_id):
+    """One value control for a constant correction: a gradient for colours, a scalar slider else."""
+    row = layout.row(align=True)
+    if channel_id in ('BASE_COLOR', 'NORMAL', 'EMISSION'):
+        row.prop(item, "fill_color", text="")
+    else:
+        row.template_material_paint_value_slider(item, "fill_color", index=0)
+
+
+def draw_material_mask_item(layout, item):
+    """One mask item's control: a Fill shows a single value, a Paint only its channel and map.
+
+    A constant mask reads its strength from ``fill_color``; an image mask reads a channel record's
+    map, and shows no constant.
+    """
+    if item.source == 'CONSTANT':
+        _draw_material_constant_value(layout, item, item.mask_channel)
+    elif item.source == 'IMAGE':
+        row = layout.row(align=True)
+        row.prop(item, "mask_channel", text="")
+        record = _correction_base_color_record(item)
+        if record is None or record.image is None:
+            row.label(text="No map", icon='INFO')
+        else:
+            _draw_layer_channel_source(row, record)
+    else:
+        # A Material / Node Group / Stack mask carries more than one scalar, so it keeps the channel
+        # picker the old Mask box offered.
+        row = layout.row()
+        row.use_property_split = True
+        row.prop(item, "mask_channel")
+
+
+def draw_material_correction_channels(layout, context, material, item):
+    """An Effect correction's channel controls, the same widget the layer rows use.
+
+    A Fill effect's toggles create a record lazily and its value sliders write ``record.value``; a
+    Paint effect shows the record's own map picker and no constant. Material, Node Group and Stack
+    effects keep resolving their content, so they only expose the channel the widget reads.
+    """
+    if item.source in {'IMAGE', 'CONSTANT', 'MESH_MAP'}:
+        draw_material_layer_channels(layout, context, material, item)
+        return
+    row = layout.row()
+    row.prop(item, "mask_channel", text="Channel")
 
 
 def material_paint_visible_channels_owner(context):

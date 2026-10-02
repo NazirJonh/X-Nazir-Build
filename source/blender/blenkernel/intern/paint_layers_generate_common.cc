@@ -576,6 +576,28 @@ bool layer_row_has_group(const Material &ma,
   return leaf_participates(ma, layer, channel);
 }
 
+bool correction_channel_record_live(const Material &ma,
+                                    const MaterialPaintLayer &correction,
+                                    const int channel)
+{
+  if (paint_layer_channel_filtered(ma, correction, channel)) {
+    return false;
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(correction, channel);
+  return record != nullptr && record->state == MA_PAINT_LAYER_CHANNEL_ENABLED;
+}
+
+bool correction_has_live_channel_records(const Material &ma,
+                                         const MaterialPaintLayer &correction)
+{
+  for (const int i : IndexRange(correction.channels_num)) {
+    if (correction_channel_record_live(ma, correction, correction.channels[i].channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * The channels \a ma wires at all, in channel order: a channel nothing participates in gets no
  * output, so the material keeps whatever the user had on that Principled input. One helper for the

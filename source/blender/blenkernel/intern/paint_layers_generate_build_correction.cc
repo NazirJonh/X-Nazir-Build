@@ -159,6 +159,7 @@ void PaintLayersChainBuilder::build_content_correction(
   const PaintLayersBuildContext &ctx = outer_.ctx_;
   auto &correction_opacity_inputs = outer_.correction_opacity_inputs_;
   auto &correction_fill_inputs = outer_.correction_fill_inputs_;
+  auto &correction_fill_channel_inputs = outer_.correction_fill_channel_inputs_;
   auto &correction_live_constant_inputs = outer_.correction_live_constant_inputs_;
 if (!substituted) {
   const bool normal_channel = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
@@ -208,10 +209,25 @@ if (!substituted) {
      * same rule the mask chain follows). */
     bool content_map_is_data = false;
     if (fill) {
-      if (bNodeTreeInterfaceSocket **fill_iface =
-              correction_fill_inputs.lookup_ptr(&correction))
+      /* A live record's per-channel socket wins; every other channel reads the single socket,
+       * which carries fill_color. A no-record Fill and a mask item have only the single socket. */
+      bNodeTreeInterfaceSocket *fill_iface = nullptr;
+      if (Map<int, bNodeTreeInterfaceSocket *> *fill_by_channel =
+              correction_fill_channel_inputs.lookup_ptr(&correction))
       {
-        correction_color = group_input_socket(group_input, **fill_iface);
+        if (bNodeTreeInterfaceSocket **channel_iface = fill_by_channel->lookup_ptr(channel)) {
+          fill_iface = *channel_iface;
+        }
+      }
+      if (fill_iface == nullptr) {
+        if (bNodeTreeInterfaceSocket **legacy_iface =
+                correction_fill_inputs.lookup_ptr(&correction))
+        {
+          fill_iface = *legacy_iface;
+        }
+      }
+      if (fill_iface != nullptr) {
+        correction_color = group_input_socket(group_input, *fill_iface);
         correction_color_node = group_input;
       }
       if (correction_color == nullptr) {

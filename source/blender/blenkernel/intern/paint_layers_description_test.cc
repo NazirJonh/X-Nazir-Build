@@ -35,6 +35,7 @@
 
 #include "BLI_fileops.h"
 #include "BLI_listbase.h"
+#include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
@@ -1170,6 +1171,43 @@ TEST_F(PaintLayersDescription, channel_add_remove_and_set_enabled)
   EXPECT_TRUE(BKE_paint_layers_channel_remove(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
   EXPECT_EQ(layer->channels_num, 0);
   EXPECT_EQ(layer->channels, nullptr);
+}
+
+TEST_F(PaintLayersDescription, fill_correction_record_overrides_constant_per_channel)
+{
+  Material *ma = BKE_material_add(bmain, "FillCorrMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill");
+  ASSERT_NE(corr, nullptr);
+  const float fill[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  copy_v4_v4(corr->fill_color, fill);
+
+  float color[4];
+  /* No record: the row is the legacy constant on every channel. */
+  BKE_paint_layers_correction_constant(*corr, PAINT_MATERIAL_CHANNEL_ROUGHNESS, color);
+  EXPECT_FLOAT_EQ(color[0], 1.0f);
+
+  MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      *ma, corr, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  /* A new record starts at fill_color, so switching the channel on does not change the view. */
+  BKE_paint_layers_correction_constant(*corr, PAINT_MATERIAL_CHANNEL_ROUGHNESS, color);
+  EXPECT_FLOAT_EQ(color[0], 1.0f);
+
+  /* Editing the record overrides exactly its channel; the others keep fill_color. */
+  rough->value[0] = rough->value[1] = rough->value[2] = 0.75f;
+  rough->value[3] = 1.0f;
+  BKE_paint_layers_correction_constant(*corr, PAINT_MATERIAL_CHANNEL_ROUGHNESS, color);
+  EXPECT_FLOAT_EQ(color[0], 0.75f);
+  BKE_paint_layers_correction_constant(*corr, PAINT_MATERIAL_CHANNEL_METALLIC, color);
+  EXPECT_FLOAT_EQ(color[0], 1.0f);
+
+  /* A DISABLED record does not participate: the channel falls back to fill_color. */
+  rough->state = MA_PAINT_LAYER_CHANNEL_DISABLED;
+  BKE_paint_layers_correction_constant(*corr, PAINT_MATERIAL_CHANNEL_ROUGHNESS, color);
+  EXPECT_FLOAT_EQ(color[0], 1.0f);
 }
 
 TEST_F(PaintLayersDescription, source_change_converts_between_image_and_constant)

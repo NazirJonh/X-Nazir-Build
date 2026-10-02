@@ -627,6 +627,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
   auto &fill_inputs = fill_inputs_;
   auto &correction_opacity_inputs = correction_opacity_inputs_;
   auto &correction_fill_inputs = correction_fill_inputs_;
+  auto &correction_fill_channel_inputs = correction_fill_channel_inputs_;
   auto &live_constant_inputs = live_constant_inputs_;
   auto &correction_live_constant_inputs = correction_live_constant_inputs_;
   /* A substituted row's values are inside its bake; a group input would apply them twice. */
@@ -814,6 +815,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     if (BKE_paint_layers_source_type(correction) != PaintLayerSourceType::Constant) {
       return;
     }
+    /* The single socket is the no-record fallback: it carries fill_color and stands for every
+     * channel of the row that has no live record. A mask item and a Fill with no records stop
+     * here, so their topology and hashes are exactly what they were. */
     char base[200];
     SNPRINTF(base,
              "%s %s Fill",
@@ -828,12 +832,47 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
         PAINT_MATERIAL_CHANNEL_BASE_COLOR,
         warm_slot);
     if (socket != nullptr && socket->socket_data != nullptr) {
-      float color[4];
-      BKE_paint_layers_correction_constant(
-          correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color);
-      copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket->socket_data)->value, color);
+      copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket->socket_data)->value,
+                 correction.fill_color);
     }
     correction_fill_inputs.add(&correction, socket);
+    if (mask_item || !correction_has_live_channel_records(ma, correction)) {
+      return;
+    }
+    /* A Fill effect with live records gets one constant per recorded channel: the build reads the
+     * record's value for exactly those channels and falls back to the single socket (fill_color)
+     * for every other one. */
+    auto &fill_channel_inputs = correction_fill_channel_inputs.lookup_or_add_default(&correction);
+    for (const int channel : wired_channels) {
+      if (!correction_channel_record_live(ma, correction, channel)) {
+        continue;
+      }
+      const MaterialPaintChannelInfo &channel_info = BKE_paint_material_channel_info(
+          eMaterialPaintChannel(channel));
+      char channel_base[224];
+      SNPRINTF(channel_base,
+               "%s %s %s",
+               layer.name[0] != '\0' ? layer.name : "Layer",
+               correction.name[0] != '\0' ? correction.name : "Correction",
+               channel_info.ui_name);
+      bNodeTreeInterfaceSocket *channel_socket = layer_group_value_input(
+          group,
+          channel_base,
+          "NodeSocketColor",
+          ROLE_CORRECTION_FILL_CHANNEL,
+          correction.marker,
+          channel,
+          warm_slot);
+      if (channel_socket == nullptr) {
+        continue;
+      }
+      if (channel_socket->socket_data != nullptr) {
+        float color[4];
+        BKE_paint_layers_correction_constant(correction, eMaterialPaintChannel(channel), color);
+        copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(channel_socket->socket_data)->value, color);
+      }
+      fill_channel_inputs.add(channel, channel_socket);
+    }
   };
   for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma_, layer)) {
     if (!paint_layers_warm_defers_item(ma_, layer, *effect, false)) {

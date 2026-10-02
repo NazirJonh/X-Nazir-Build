@@ -223,6 +223,9 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayerChannel *, bNodeTreeInterfaceSocket *> fill_inputs_;
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> correction_opacity_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> correction_fill_inputs_;
+  /** A Fill correction's per-live-record constants: (correction, channel) -> its value input. */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>>
+      correction_fill_channel_inputs_;
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> live_constant_inputs_;
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>>
       correction_live_constant_inputs_;

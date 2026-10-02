@@ -16,7 +16,9 @@ from bl_operators.material_paint_layers import (
 from bl_ui.space_properties import PropertiesAnimationMixin
 from bl_ui.properties_paint_common import (
     draw_material_channel_set,
+    draw_material_correction_channels,
     draw_material_layer_channels,
+    draw_material_mask_item,
 )
 
 
@@ -665,13 +667,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             select.marker = item.marker
             row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
                 item.marker
-            # A mask item's own channel choice only means something for a source that carries more
-            # than one scalar (Material, Node Group, Stack); Image/Constant/Mesh Map already read
-            # as a single value and never show this.
-            if item.source in {'MATERIAL', 'NODE_GROUP', 'STACK'}:
-                sub = box.row()
-                sub.use_property_split = True
-                sub.prop(item, "mask_channel")
+            # A constant mask shows one value (fill_color); a Paint mask shows only its channel and
+            # map. A Material/Node Group/Stack mask keeps its channel picker.
+            draw_material_mask_item(box, item)
         box.operator("material.paint_layer_mask_add", text="Add Mask", icon='ADD')
 
         box = layout.box()
@@ -692,6 +690,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             select.marker = item.marker
             row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
                 item.marker
+            # A Fill effect gets the same channel widget as a layer row (its toggles create per-
+            # channel records and its value sliders write them); a Paint effect shows only maps.
+            draw_material_correction_channels(box, context, owner, item)
 
         box = layout.box()
         box.label(text="Channels", icon='IMAGE_RGB')

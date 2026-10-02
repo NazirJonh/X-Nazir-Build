@@ -136,8 +136,10 @@ inline constexpr const char *ROLE_OPACITY = "opacity";
 inline constexpr const char *ROLE_FILL = "fill";
 /** #INPUT_ROLE_PROP value of a correction's opacity (enabled already folded in). */
 inline constexpr const char *ROLE_CORRECTION_OPACITY = "correction_opacity";
-/** #INPUT_ROLE_PROP value of a Fill correction's constant colour. */
+/** #INPUT_ROLE_PROP value of a Fill correction's constant colour (the no-record fallback). */
 inline constexpr const char *ROLE_CORRECTION_FILL = "correction_fill";
+/** #INPUT_ROLE_PROP value of a Fill correction's per-channel constant, one socket per live record. */
+inline constexpr const char *ROLE_CORRECTION_FILL_CHANNEL = "correction_fill_channel";
 /** #INPUT_ROLE_PROP value of a Hybrid Material row's live constant (ТЗ-26). */
 inline constexpr const char *ROLE_LIVE_CONSTANT = "live_constant";
 
@@ -198,6 +200,13 @@ bool layer_subtree_has_channel(const Material &ma,
                                const MaterialPaintLayer &layer,
                                const int channel,
                                const PaintLayersRegenCache *cache)
+;
+bool correction_channel_record_live(const Material &ma,
+                                    const MaterialPaintLayer &correction,
+                                    const int channel)
+;
+bool correction_has_live_channel_records(const Material &ma,
+                                         const MaterialPaintLayer &correction)
 ;
 bool layer_tree_marker_get(const bNodeTree &tree, bUUID &r_marker)
 ;

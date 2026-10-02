@@ -141,8 +141,20 @@ bool values_sync_socket(Material &ma,
     return true;
   }
   if (STREQ(role, ROLE_CORRECTION_FILL)) {
+    /* The no-record fallback: this socket stands for every channel without a live record, so it
+     * always carries the row's fill_color -- never a record's value (that has its own socket). */
+    if (bNodeSocketValueRGBA *value = static_cast<bNodeSocketValueRGBA *>(socket.default_value)) {
+      copy_v4_v4(value->value, layer->fill_color);
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_CORRECTION_FILL_CHANNEL)) {
+    const int channel = prop_int_get(iface.properties, INPUT_CHANNEL_PROP, -1);
+    if (channel < 0 || paint_layer_channel_filtered(ma, *layer, channel)) {
+      return false;
+    }
     float color[4];
-    BKE_paint_layers_correction_constant(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color);
+    BKE_paint_layers_correction_constant(*layer, eMaterialPaintChannel(channel), color);
     if (bNodeSocketValueRGBA *value = static_cast<bNodeSocketValueRGBA *>(socket.default_value)) {
       copy_v4_v4(value->value, color);
     }

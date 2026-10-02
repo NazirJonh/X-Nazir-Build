@@ -523,6 +523,17 @@ uint64_t topology_hash_correction(uint64_t hash,
       hash = topology_hash_mix(hash, has_bake ? topology_hash_map_id(correction_baked) : 0);
     }
   }
+  /* A Fill effect with live records carries one constant input per recorded channel; which channels
+   * those are is topology. A no-record Fill (or a mask item) keeps the single socket, so it hashes
+   * exactly as before this branch existed. */
+  if (fill && !mask_item && correction_has_live_channel_records(ma, correction)) {
+    hash = topology_hash_mix(hash, 1);
+    for (const int channel : wired_channels) {
+      hash = topology_hash_mix(hash, uint64_t(channel));
+      hash = topology_hash_mix(
+          hash, correction_channel_record_live(ma, correction, channel) ? 1 : 0);
+    }
+  }
   return hash;
 }
 
@@ -1721,6 +1732,13 @@ bool BKE_paint_layers_regenerate(Main &bmain,
           }
           if (Image *image = paint_layer_channel_image(ma, layer, channel)) {
             counter.add_image(*image);
+            participates = true;
+          }
+          else if (leaf_participates(ma, layer, channel)) {
+            /* A row a constant Fill qualifies (`leaf_participates`) builds its group and, with it,
+             * its warm Mask/Effect chains: those shared maps are samplers the description alone
+             * cannot see (a lone Fill row contributes none of its own), so mark the row as built so
+             * #add_corrections counts them. */
             participates = true;
           }
         }

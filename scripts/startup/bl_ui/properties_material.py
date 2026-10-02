@@ -14,7 +14,10 @@ from bl_operators.material_paint_layers import (
     mesh_map_summary_status,
 )
 from bl_ui.space_properties import PropertiesAnimationMixin
-from bl_ui.properties_paint_common import draw_material_layer_channels
+from bl_ui.properties_paint_common import (
+    draw_material_channel_set,
+    draw_material_layer_channels,
+)
 
 
 class MATERIAL_MT_context_menu(Menu):
@@ -642,7 +645,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # value/source come from the row's own records.
         if layer.role == 'LAYER':
             layout.separator()
-            draw_material_layer_channels(layout, context, layer)
+            draw_material_layer_channels(layout, context, owner, layer)
 
         box = layout.box()
         box.label(text="Mask", icon='MOD_MASK')
@@ -865,6 +868,29 @@ class MATERIAL_PT_paint_layers(MaterialButtonsPanel, Panel):
             )
 
 
+class MATERIAL_PT_paint_layers_channels(MaterialButtonsPanel, Panel):
+    """The material's global paint channel set: which channels every layer of the stack may use.
+
+    A channel removed here leaves each row's record and map untouched; the rows simply stop showing
+    it. Base Color is the material's constant and is always in the set.
+    """
+
+    bl_idname = "MATERIAL_PT_paint_layers_channels"
+    bl_parent_id = "MATERIAL_PT_paint_layers"
+    bl_label = "Channels"
+    COMPAT_ENGINES = {'BLENDER_EEVEE', 'CYCLES'}
+
+    @classmethod
+    def poll(cls, context):
+        mat = context.material
+        return mat is not None and mat.is_layered and not mat.grease_pencil
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        draw_material_channel_set(layout, context.material)
+
+
 _MESH_MAP_TYPES = (
     ('AO', "Ambient Occlusion"),
     ('CURVATURE', "Curvature"),
@@ -1047,6 +1073,7 @@ classes = (
     MATERIAL_PT_animation,
     MATERIAL_PT_custom_props,
     MATERIAL_PT_paint_layers,
+    MATERIAL_PT_paint_layers_channels,
     LAYER_MATERIAL_PT_mesh_maps,
     BRUSH_MATERIAL_PT_context_material,
     BRUSH_MATERIAL_PT_surface,

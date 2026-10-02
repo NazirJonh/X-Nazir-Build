@@ -1540,6 +1540,11 @@ _MATERIAL_PAINT_VERTEX_CHANNELS = {
 # as possible on each row and wrap the rest; without a fixed cell width every toggle expands to
 # the full panel width and stacks vertically.
 _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X = 2
+# #paint_layer_subtree_weight (paint_layers_bake.cc) weighs a row as `4 + channels * 6`, counting
+# every channel record whose channel is in the material's set, DISABLED included. Five records weigh
+# 34 generated nodes, under the AUTO-bake threshold of 36; a sixth weighs 40 and pushes the row over,
+# so the layer widget warns from six such records on.
+_MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT = 5
 _MATERIAL_PAINT_SOCKET_COLOR_FLOAT = (0.63, 0.63, 0.63, 1.0)
 _MATERIAL_PAINT_SOCKET_COLOR_VECTOR = (0.39, 0.39, 0.78, 1.0)
 _MATERIAL_PAINT_SOCKET_COLOR_RGBA = (0.78, 0.78, 0.16, 1.0)
@@ -2194,35 +2199,106 @@ _MATERIAL_PAINT_CHANNEL_LABELS = {
 }
 
 
-def draw_material_layer_channels(layout, context, layer):
+def material_layer_visible_channels(material):
+    """The channels of \a material's global set the layer widget can draw, in display order.
+
+    Height and Custom have no channel widget and are absent from the display order, so a set that
+    names them still offers them nowhere in a layer; the records themselves are never dropped.
+    """
+    if material is None:
+        return []
+    return [
+        channel_id for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER
+        if material.paint_layers_channel_in_set(channel=channel_id)
+    ]
+
+
+def material_layer_channel_toggle_locked(layer, channel_id):
+    """Whether a layer channel's toggle is fixed on and cannot be switched off.
+
+    A Layer-role Fill's Base Color is the row's constant, so BKE refuses to disable or remove it
+    (#BKE_paint_layers_channel_set_enabled / _channel_remove): the widget shows it on but locked.
+    Matches BKE's `uses_fill_color`, which only the CONSTANT source sets.
+    """
+    return channel_id == 'BASE_COLOR' and layer.role == 'LAYER' and layer.source == 'CONSTANT'
+
+
+def material_layer_weight_record_count(material, layer):
+    """How many of \a layer's channel records take part in \a material's set.
+
+    This is the channel count #paint_layer_subtree_weight (paint_layers_bake.cc) weighs: every
+    record whose channel is in the set costs nodes, DISABLED or not. Five records weigh 34 nodes,
+    six weigh 40, over the AUTO-bake threshold of 36.
+    """
+    return sum(
+        1 for record in layer.channels
+        if material.paint_layers_channel_in_set(channel=record.channel))
+
+
+def draw_material_channel_set(layout, material):
+    """Checkboxes for \a material's global paint channel set, one per supported channel.
+
+    Base Color is always in the set (BKE forces it back on) and is the material's constant, so its
+    row is shown checked but disabled rather than offering a toggle that can never stick.
+    """
+    col = layout.column()
+    for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+        row = col.row(align=True)
+        if channel_id == 'BASE_COLOR':
+            row.enabled = False
+        row.prop_enum(material, "paint_layers_channels", channel_id)
+
+
+def draw_material_layer_channels(layout, context, material, layer):
     """Draw a stack layer's channels with the shared PBR Paint channel widget.
 
     The same fixed channel order and toggle buttons as the brush panel, but each channel's value
-    and source come from the layer's own #MaterialPaintLayerChannel records. Only channels the layer
-    already carries a record for are shown: a layer opts into a channel by adding its record, so an
-    absent channel is not offered a dead control here.
+    and source come from the layer's own #MaterialPaintLayerChannel records. The channel set drives
+    the rows: every channel of the material's set is offered, and one the layer carries no record
+    for (or carries DISABLED) reads as off. Enabling it lazily creates the record; a channel outside
+    the set is never shown, even when the row still holds its record and map.
     """
-    channels = {channel.channel: channel for channel in layer.channels}
-    channel_ids = [cid for cid in _MATERIAL_PAINT_CHANNEL_UI_ORDER if cid in channels]
-
+    # A Stack row is a folder: it groups children and carries no channels of its own, so it gets no
+    # set-driven controls even though its role is Layer.
+    channel_ids = [] if layer.source == 'STACK' else material_layer_visible_channels(material)
     if not channel_ids:
         layout.label(text="No channels", icon='INFO')
         return
+
+    records = {record.channel: record for record in layer.channels}
 
     flow = layout.grid_flow(row_major=True, columns=0, even_columns=False, even_rows=False,
                             align=False)
     flow.use_property_split = False
     flow.use_property_decorate = False
     for channel_id in channel_ids:
+        record = records.get(channel_id)
+        enabled = record is not None and record.use
         col = flow.column(align=False)
         col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
-        col.prop(channels[channel_id], "use", text=_MATERIAL_PAINT_CHANNEL_LABELS[channel_id],
-                 toggle=True)
+        # A Fill's Base Color is fixed on; show it locked rather than offering a toggle BKE refuses.
+        col.enabled = not material_layer_channel_toggle_locked(layer, channel_id)
+        op = col.operator(
+            "material.paint_layer_channel_toggle",
+            text=_MATERIAL_PAINT_CHANNEL_LABELS[channel_id],
+            depress=enabled,
+        )
+        op.marker = layer.marker
+        op.channel = channel_id
+        op.enable = not enabled
+
+    if material_layer_weight_record_count(
+            material, layer) > _MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT:
+        layout.label(
+            text="Six or more channels: the row becomes heavy and bakes in AUTO mode",
+            icon='ERROR',
+        )
 
     channel_col = layout.column(align=False)
     first = True
     for channel_id in channel_ids:
-        if not channels[channel_id].use:
+        record = records.get(channel_id)
+        if record is None or not record.use:
             continue
         if not first:
             channel_col.separator()
@@ -2231,7 +2307,7 @@ def draw_material_layer_channels(layout, context, layer):
             channel_col,
             context,
             _layer_channel_view(
-                layer, channels[channel_id], channel_id,
+                layer, record, channel_id,
                 _MATERIAL_PAINT_CHANNEL_LABELS[channel_id]),
             source_enabled=True,
         )

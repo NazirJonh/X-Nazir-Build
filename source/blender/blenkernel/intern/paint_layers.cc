@@ -606,19 +606,21 @@ void BKE_paint_layers_correction_constant(const MaterialPaintLayer &correction,
                                           const eMaterialPaintChannel channel,
                                           float r_color[4])
 {
-  for (int i = 0; i < correction.channels_num; i++) {
-    if (correction.channels[i].channel == channel) {
-      if (correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
-        copy_v4_v4(r_color, correction.fill_color);
-        return;
-      }
-      copy_v4_v4(r_color, correction.channels[i].value);
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(correction, channel);
+  if (correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+    /* A Fill's live record overrides its constant for that one channel; a channel with no live
+     * record (absent, or DISABLED) keeps the row's fill_color, and a row with no records at all is
+     * the legacy constant everywhere. New records start at fill_color (see
+     * #BKE_paint_layers_channel_add), so switching a channel on does not change the view. */
+    if (record != nullptr && record->state == MA_PAINT_LAYER_CHANNEL_ENABLED) {
+      copy_v4_v4(r_color, record->value);
       return;
     }
-  }
-  /* No record in this channel: a Fill still contributes its colour, a Paint contributes nothing. */
-  if (correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
     copy_v4_v4(r_color, correction.fill_color);
+    return;
+  }
+  if (record != nullptr) {
+    copy_v4_v4(r_color, record->value);
     return;
   }
   zero_v4(r_color);
@@ -1728,18 +1730,18 @@ bool BKE_paint_layers_channel_set_value(Material &ma,
     return false;
   }
   copy_v4_v4(record->value, value);
-  /* Only a Layer-role Constant row is a group input value; a Fill-effect correction's record is
-   * not (it has no entry of its own in the old kind table). */
-  if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
-      BKE_paint_layers_kind_info(layer->source).uses_fill_color)
-  {
-    /* A Fill's channel value is a group input, like `fill_color`: a value-only edit, so animating
-     * it does not rebuild the tree. */
+  /* A Layer-role Constant row and a Fill-effect correction both carry their per-channel constant
+   * on a group input, so a value edit is value-only and must not rebuild the tree. A mask item's
+   * record is not read this way (its strength lives in fill_color), and a Paint row's value alpha
+   * decides whether it lays a constant at all, which is topology. */
+  const bool fill_value_input =
+      BKE_paint_layers_kind_info(layer->source).uses_fill_color &&
+      ELEM(BKE_paint_layers_role(*layer), PaintLayerRole::Layer, PaintLayerRole::Effect);
+  if (fill_value_input) {
     paint_layers_tag_value_only(ma);
     BKE_paint_layers_values_sync(ma);
   }
   else {
-    /* A Paint value's alpha decides whether the row lays a constant at all, which is topology. */
     BKE_paint_layers_tag_edited(ma);
   }
   return true;
@@ -1810,6 +1812,12 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     else {
       BKE_paint_layers_channel_default_value(ma, channel, record.value);
     }
+  }
+  else if (BKE_paint_layers_kind_info(layer->source).uses_fill_color) {
+    /* A Fill-effect correction's channel record starts at the row's constant, so enabling a channel
+     * through the widget does not change the view until its own value is edited (the constant then
+     * overrides fill_color for that channel). See #BKE_paint_layers_correction_constant. */
+    copy_v4_v4(record.value, layer->fill_color);
   }
   else {
     /* A fresh Paint record is transparent: it takes part but lays nothing down until painted. */

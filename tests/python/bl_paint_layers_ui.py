@@ -25,6 +25,63 @@ from bl_operators.material_paint_layers import (
 )
 
 
+class _MockLayout:
+    """Records the draw calls a widget makes, so a branch can be exercised without a window."""
+
+    def __init__(self):
+        self.calls = []
+
+    def _record(self, kind, args, kwargs):
+        self.calls.append((kind, args, kwargs))
+        return self
+
+    def row(self, *args, **kwargs):
+        return self._record("row", args, kwargs)
+
+    def split(self, *args, **kwargs):
+        return self._record("split", args, kwargs)
+
+    def grid_flow(self, *args, **kwargs):
+        return self._record("grid_flow", args, kwargs)
+
+    def panel(self, *args, **kwargs):
+        self._record("panel", args, kwargs)
+        return self, self
+
+    def context_pointer_set(self, *args, **kwargs):
+        return self._record("context_pointer_set", args, kwargs)
+
+    def template_node_socket(self, *args, **kwargs):
+        return self._record("node_socket", args, kwargs)
+
+    def column(self, *args, **kwargs):
+        return self._record("column", args, kwargs)
+
+    def label(self, *args, **kwargs):
+        return self._record("label", args, kwargs)
+
+    def prop(self, *args, **kwargs):
+        return self._record("prop", args, kwargs)
+
+    def separator(self, *args, **kwargs):
+        return self._record("separator", args, kwargs)
+
+    def template_material_paint_value_slider(self, *args, **kwargs):
+        return self._record("slider", args, kwargs)
+
+    def template_ID_browser(self, *args, **kwargs):
+        return self._record("template_id", args, kwargs)
+
+    def operator(self, *args, **kwargs):
+        return self._record("operator", args, kwargs)
+
+    def operator_menu_enum(self, *args, **kwargs):
+        return self._record("operator_menu_enum", args, kwargs)
+
+    def kinds(self):
+        return [call[0] for call in self.calls]
+
+
 class _FakeUpdate:
     def __init__(self, id, is_updated_geometry, is_updated_transform=False):
         self.id = id
@@ -190,6 +247,252 @@ class PaintLayersUiTest(unittest.TestCase):
         self.assertEqual(rough.state, 'DISABLED')
         rough.use = True
         self.assertEqual(rough.state, 'ENABLED')
+
+    def test_layer_widget_channels_follow_the_material_set(self):
+        # The layer widget draws the material's global set, not just the layer's own records. The
+        # default set is the five built-in channels, in the fixed display order.
+        from bl_ui.properties_paint_common import material_layer_visible_channels
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.assertEqual(
+            material_layer_visible_channels(self.material),
+            ['BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'AO'])
+        # Removing a channel from the set hides it from the widget, but the row keeps its record.
+        self.material.paint_layers_channels = {'BASE_COLOR', 'METALLIC', 'ROUGHNESS'}
+        self.assertNotIn('NORMAL', material_layer_visible_channels(self.material))
+        self.assertIn('NORMAL', {record.channel for record in layer.channels})
+        # Putting the channel back in the set offers the same record again.
+        self.material.paint_layers_channels = {'BASE_COLOR', 'NORMAL'}
+        self.assertIn('NORMAL', material_layer_visible_channels(self.material))
+
+    def test_channel_out_of_set_keeps_record_and_map(self):
+        # A channel the set drops is not shown, but disabling it through the set is not a removal:
+        # the record and its map survive for the day the channel returns.
+        paint = self.material.paint_layers.new(source='IMAGE', name="Paint")
+        self.set_default_maps(paint)
+        normal = self.channel_record(paint, 'NORMAL')
+        image = bpy.data.images.new("NormalMap", 4, 4)
+        normal.image = image
+        self.material.paint_layers_channels = {'BASE_COLOR', 'METALLIC', 'ROUGHNESS'}
+        self.assertNotIn('NORMAL', set(self.material.paint_layers_channels))
+        self.assertIs(normal.image, image)
+        self.assertEqual(normal.state, 'ENABLED')
+
+    def test_channel_toggle_creates_the_record_lazily(self):
+        # A channel of the set the row has no record for reads as off; enabling it through the
+        # toggle creates the record ENABLED, the one thing the plain `use` property cannot do.
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        self.material.paint_layers_channels = {'BASE_COLOR', 'SPECULAR'}
+        self.assertNotIn('SPECULAR', {record.channel for record in layer.channels})
+        with bpy.context.temp_override(material=self.material):
+            result = bpy.ops.material.paint_layer_channel_toggle(
+                marker=layer.marker, channel='SPECULAR', enable=True)
+        self.assertEqual(result, {'FINISHED'})
+        record = self.channel_record(layer, 'SPECULAR')
+        self.assertTrue(record.use)
+        self.assertEqual(record.state, 'ENABLED')
+
+    def test_channel_toggle_disable_keeps_the_record_and_map(self):
+        # Switching a channel off hides its panel but keeps the record and map; switching it back
+        # on restores the same record untouched.
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        record = self.channel_record(layer, 'ROUGHNESS')
+        image = bpy.data.images.new("RoughMap", 4, 4)
+        record.image = image
+        with bpy.context.temp_override(material=self.material):
+            result = bpy.ops.material.paint_layer_channel_toggle(
+                marker=layer.marker, channel='ROUGHNESS', enable=False)
+        self.assertEqual(result, {'FINISHED'})
+        self.assertFalse(record.use)
+        self.assertEqual(record.state, 'DISABLED')
+        self.assertIs(record.image, image)
+        with bpy.context.temp_override(material=self.material):
+            bpy.ops.material.paint_layer_channel_toggle(
+                marker=layer.marker, channel='ROUGHNESS', enable=True)
+        self.assertTrue(record.use)
+        self.assertEqual(record.state, 'ENABLED')
+        self.assertIs(record.image, image)
+
+    def test_channel_vocabulary_covers_every_widget_channel(self):
+        # The operators' channel enum is the shared vocabulary the layer widget assigns to
+        # (`op.channel = channel_id`); the bake selector it used to read omits AO/Height/Custom, so
+        # every channel the widget draws must be offered or the draw raises a TypeError.
+        from bl_operators.material_paint_layers import _paint_channel_enum_items
+        from bl_ui.properties_paint_common import _MATERIAL_PAINT_CHANNEL_UI_ORDER
+
+        offered = {item[0] for item in _paint_channel_enum_items()}
+        for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+            self.assertIn(channel_id, offered, channel_id)
+
+    def test_channel_toggle_accepts_every_widget_channel(self):
+        # The widget sets the operator's channel for every set channel; AO, Emission and Specular
+        # must go through the enum without the TypeError the bake selector caused.
+        from bl_ui.properties_paint_common import _MATERIAL_PAINT_CHANNEL_UI_ORDER
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        self.material.paint_layers_channels = set(_MATERIAL_PAINT_CHANNEL_UI_ORDER)
+        for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
+            with bpy.context.temp_override(material=self.material):
+                result = bpy.ops.material.paint_layer_channel_toggle(
+                    marker=layer.marker, channel=channel_id, enable=True)
+            self.assertEqual(result, {'FINISHED'}, channel_id)
+            self.assertTrue(self.channel_record(layer, channel_id).use, channel_id)
+
+    def test_channel_add_and_remove_accept_ao_emission_specular(self):
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        for channel_id in ('AO', 'EMISSION', 'SPECULAR'):
+            self.assertNotIn(channel_id, {record.channel for record in layer.channels})
+            record = layer.channel_add(channel=channel_id)
+            self.assertIsNotNone(record, channel_id)
+            self.assertEqual(record.channel, channel_id)
+            layer.channel_remove(channel=channel_id)
+            self.assertNotIn(channel_id, {record.channel for record in layer.channels})
+
+    def test_mask_constant_widget_writes_fill_color(self):
+        # Add White/Black Mask creates a constant item whose strength lives in fill_color; its one
+        # value control binds that property, so the slider writes fill_color.
+        from bl_ui.properties_paint_common import draw_material_mask_item
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        with bpy.context.temp_override(material=self.material):
+            self.assertEqual(bpy.ops.material.paint_layer_mask_add(value=1.0), {'FINISHED'})
+        mask = layer.mask_stack[-1]
+        self.assertEqual(mask.source, 'CONSTANT')
+        self.assertAlmostEqual(mask.fill_color[0], 1.0, places=4)
+
+        # A scalar mask channel draws the one-handle gradient slider on fill_color.
+        mask.mask_channel = 'ROUGHNESS'
+        layout = _MockLayout()
+        draw_material_mask_item(layout, mask)
+        self.assertIn("slider", layout.kinds(), layout.kinds())
+
+        # The value control writes the same fill_color the item derives from.
+        mask.fill_color = (0.25, 0.25, 0.25, 1.0)
+        self.assertAlmostEqual(mask.fill_color[0], 0.25, places=4)
+
+    def test_paint_mask_widget_has_no_constant(self):
+        # A Paint (image) mask reads a channel record's map and shows no constant.
+        from bl_ui.properties_paint_common import draw_material_mask_item
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        mask = layer.correction_add(role='MASK_ITEM', source='IMAGE', name="M")
+        layout = _MockLayout()
+        draw_material_mask_item(layout, mask)
+        self.assertNotIn("slider", layout.kinds(), layout.kinds())
+
+    def test_fill_correction_toggle_creates_record_at_fill_color(self):
+        # A Fill effect's channel toggle creates the record lazily; it starts at fill_color so the
+        # view does not change, and editing it is a value-only edit.
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        corr = layer.correction_add(role='EFFECT', source='CONSTANT', name="Fill")
+        corr.fill_color = (0.3, 0.3, 0.3, 1.0)
+        self.material.paint_layers.active = corr
+        self.regenerate()
+        self.assertFalse(self.material.paint_layers_tree_is_stale)
+
+        with bpy.context.temp_override(material=self.material):
+            result = bpy.ops.material.paint_layer_channel_toggle(
+                marker=corr.marker, channel='ROUGHNESS', enable=True)
+        self.assertEqual(result, {'FINISHED'})
+        record = next(r for r in corr.channels if r.channel == 'ROUGHNESS')
+        self.assertAlmostEqual(record.value[0], 0.3, places=4)
+        self.assertFalse(self.material.paint_layers_tree_is_stale)
+
+        record.value = (0.75, 0.75, 0.75, 1.0)
+        self.assertAlmostEqual(record.value[0], 0.75, places=4)
+        self.assertFalse(self.material.paint_layers_tree_is_stale)
+
+    def test_layer_widget_draws_every_row_branch(self):
+        # Every row source has its own branch in the layer widget; each must draw without raising
+        # for the default channels plus AO.
+        from bl_ui.properties_paint_common import (
+            draw_material_correction_channels,
+            draw_material_layer_channels,
+        )
+
+        self.material.paint_layers_channels = {
+            'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'AO', 'EMISSION', 'SPECULAR'}
+        for source in ('IMAGE', 'CONSTANT', 'STACK', 'MATERIAL', 'NODE_GROUP', 'MESH_MAP'):
+            layer = self.material.paint_layers.new(source=source, name=source.title())
+            self.material.paint_layers.active = layer
+            draw_material_layer_channels(_MockLayout(), bpy.context, self.material, layer)
+        # An Effect correction reuses the same widget, drawing without raising too.
+        owner = self.material.paint_layers.new(source='IMAGE', name="Owner")
+        corr = owner.correction_add(role='EFFECT', source='CONSTANT', name="Fill")
+        draw_material_correction_channels(_MockLayout(), bpy.context, self.material, corr)
+
+    def test_folder_refuses_channel_add(self):
+        # A folder groups children and gets no content records of its own; the widget shows only its
+        # per-channel blend/opacity overrides.
+        folder = self.material.paint_layers.new(source='STACK', name="Folder")
+        with self.assertRaises(RuntimeError):
+            folder.channel_add(channel='ROUGHNESS')
+        self.assertEqual(len(folder.channels), 0)
+
+    def test_add_channel_menu_offers_only_set_channels_without_a_record(self):
+        # Add Channel offers exactly the set channels the row has no record for: a channel outside
+        # the set can never be added through the UI, and one already on the row has nothing to add.
+        # Tested through the filter the operator's enum callback calls, so it does not depend on
+        # `get_rna_type().enum_items` (which needs a full window context to evaluate dynamic items).
+        from bl_operators.material_paint_layers import _paint_layer_addable_channel_items
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = layer
+        self.material.paint_layers_channels = {'BASE_COLOR', 'SPECULAR'}
+        items = {item[0] for item in _paint_layer_addable_channel_items(
+            SimpleNamespace(material=self.material))}
+        self.assertIn('SPECULAR', items)
+        self.assertNotIn('METALLIC', items)
+        self.assertNotIn('EMISSION', items)
+
+    def test_base_color_cannot_leave_the_set(self):
+        # Base Color is the material's constant; the flag setter forces it back on, so a script
+        # (like the UI) can never author a set without it.
+        self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers_channels = {'METALLIC'}
+        self.assertEqual(set(self.material.paint_layers_channels), {'BASE_COLOR', 'METALLIC'})
+
+    def test_fill_base_color_toggle_is_refused_without_error(self):
+        # A Layer-role Fill's Base Color is its constant: BKE refuses to switch it off, the widget
+        # locks it, and the toggle reports the refusal instead of raising or changing the record.
+        # The lock mirrors BKE's `uses_fill_color`, which only the CONSTANT source sets.
+        from bl_ui.properties_paint_common import material_layer_channel_toggle_locked
+
+        fill = self.material.paint_layers.new(source='CONSTANT', name="Fill")
+        self.material.paint_layers.active = fill
+        base = self.channel_record(fill, 'BASE_COLOR')
+        self.assertTrue(material_layer_channel_toggle_locked(fill, 'BASE_COLOR'))
+        self.assertFalse(material_layer_channel_toggle_locked(fill, 'ROUGHNESS'))
+        with bpy.context.temp_override(material=self.material):
+            result = bpy.ops.material.paint_layer_channel_toggle(
+                marker=fill.marker, channel='BASE_COLOR', enable=False)
+        self.assertEqual(result, {'CANCELLED'})
+        self.assertTrue(base.use)
+        self.assertEqual(base.state, 'ENABLED')
+        # A Paint row's Base Color is an ordinary map; it is not locked and can be switched off.
+        paint = self.material.paint_layers.new(source='IMAGE', name="Paint")
+        self.assertFalse(material_layer_channel_toggle_locked(paint, 'BASE_COLOR'))
+
+    def test_heavy_hint_counts_set_records_including_disabled(self):
+        # The AUTO-bake weight counts every record whose channel is in the set, DISABLED included.
+        # Five records (the default set) stay light; a sixth, even disabled, crosses the threshold.
+        from bl_ui.properties_paint_common import material_layer_weight_record_count
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.assertEqual(material_layer_weight_record_count(self.material, layer), 5)
+        self.material.paint_layers_channels = {
+            'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'AO', 'SPECULAR'}
+        record = layer.channel_add(channel='SPECULAR')
+        record.use = False
+        self.assertEqual(record.state, 'DISABLED')
+        self.assertEqual(material_layer_weight_record_count(self.material, layer), 6)
+        # Dropping the set to one channel leaves the records on the row but counts only that channel.
+        self.material.paint_layers_channels = {'BASE_COLOR'}
+        self.assertEqual(material_layer_weight_record_count(self.material, layer), 1)
 
     def test_disabled_channel_keeps_map_and_leaves_the_tree(self):
         # A channel map the user switches off stays on the record, but the generated tree stops

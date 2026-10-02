@@ -939,6 +939,45 @@ TEST_F(PaintLayersGenerateTest, fill_constant_has_no_map)
   EXPECT_FALSE(roughness->directly_linked_links().is_empty());
 }
 
+TEST_F(PaintLayersGenerateTest, fill_correction_per_channel_value_is_a_value_input)
+{
+  MaterialPaintLayer *owner = add_paint_layer("Paint", add_image("Bottom"));
+  /* The owner must itself take part in Roughness, or the row has no chain in that channel and the
+   * correction has nowhere to apply (the CPU skips it for the same reason). */
+  add_channel(*owner, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("Rough"));
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "FillCorr");
+  ASSERT_NE(corr, nullptr);
+  const float fill[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  copy_v4_v4(corr->fill_color, fill);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* No records: the legacy single fallback socket, and no per-channel socket. */
+  bNodeTree *layer_tree = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(layer_tree, nullptr);
+  EXPECT_NE(group_input_find(*layer_tree, "Paint FillCorr Fill"), nullptr);
+  EXPECT_EQ(group_input_find(*layer_tree, "Paint FillCorr Roughness"), nullptr);
+
+  /* A live record adds its own constant input; the fallback socket stays for the other channels. */
+  MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      *ma, corr, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  rough->value[0] = rough->value[1] = rough->value[2] = 0.75f;
+  rough->value[3] = 1.0f;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  layer_tree = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(layer_tree, nullptr);
+  EXPECT_NE(group_input_find(*layer_tree, "Paint FillCorr Roughness"), nullptr);
+  EXPECT_NE(group_input_find(*layer_tree, "Paint FillCorr Fill"), nullptr);
+
+  /* A value-only edit does not move the topology, so the generated tree is not invalidated
+   * (#MA_PAINT_LAYERS_REGEN stays clear; the bake-stale signal is a different, expected one). */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  const float value[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+  EXPECT_TRUE(BKE_paint_layers_channel_set_value(*ma, corr, PAINT_MATERIAL_CHANNEL_ROUGHNESS, value));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
 TEST_F(PaintLayersGenerateTest, values_sync_writes_opacity_and_enabled)
 {
   MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
@@ -7748,6 +7787,27 @@ TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_hybrid_row)
   ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::Hybrid);
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
   /* +warm: only the shared warm image is sampled. */
+  EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
+}
+
+/**
+ * A lone constant Fill row contributes no map of its own, but it still builds its group and the
+ * warm Mask chain that chain reads the shared warm image from: the estimate must count that sampler
+ * even though `leaf_participates` (the build's own predicate) is what keeps the row alive.
+ */
+TEST_F(PaintLayersGenerateTest, sampler_estimate_matches_a_lone_constant_fill)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  const float color[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, color));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
+  /* +warm: the shared `.PL Warm` mask image, deduped across the row's wired channels. */
   EXPECT_EQ(BKE_paint_layers_sampler_count(*ma), 1);
 }
 

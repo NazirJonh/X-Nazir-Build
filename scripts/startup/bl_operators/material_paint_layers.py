@@ -306,18 +306,47 @@ class MATERIAL_OT_paint_layer_correction_select(Operator):
         return {'FINISHED'}
 
 
+def _paint_channel_enum_items():
+    """Every paint channel as an enum item tuple, the shared channel vocabulary.
+
+    The identifiers match #Material.paint_layers_channels and a layer record's channel, so the same
+    strings address the global set and a layer record. Reads the full channel table, not the bake
+    selector (`bake_paint_channels`), which deliberately omits AO, Height and Custom and so could
+    not address the channels the layer widget draws.
+    """
+    return [
+        (item.identifier, item.name, "")
+        for item in bpy.types.MaterialPaintLayerChannel.bl_rna.properties["channel"].enum_items
+        if item.identifier
+    ]
+
+
+def _paint_layer_addable_channel_items(context):
+    """The channels the Add Channel menu offers for the active layer.
+
+    Only channels of the material's global set that the layer carries no record for: a channel
+    outside the set can never be added through the UI, and one already on the row has nothing to
+    add. Falls back to the full list when no layered material/layer is in context, so the menu is
+    never empty-by-accident in a scripted call.
+    """
+    mat = context.material
+    layer = mat.paint_layers.active if (mat is not None and mat.is_layered) else None
+    if layer is None:
+        return _paint_channel_enum_items()
+    existing = {record.channel for record in layer.channels}
+    return [
+        item for item in _paint_channel_enum_items()
+        if item[0] not in existing and mat.paint_layers_channel_in_set(channel=item[0])
+    ]
+
+
 class MATERIAL_OT_paint_layer_channel_add(_PaintLayerOperator):
     bl_idname = "material.paint_layer_channel_add"
     bl_label = "Add Paint Layer Channel"
 
     channel: bpy.props.EnumProperty(
         name="Channel",
-        items=lambda self, context: [
-            (item.identifier, item.name, "")
-            for item in bpy.types.Material.bl_rna.functions["bake_paint_channels"].parameters[
-                "channels"].enum_items
-            if item.identifier
-        ],
+        items=lambda self, context: _paint_layer_addable_channel_items(context),
     )
 
     def execute(self, context):
@@ -334,12 +363,7 @@ class MATERIAL_OT_paint_layer_channel_remove(_PaintLayerOperator):
 
     channel: bpy.props.EnumProperty(
         name="Channel",
-        items=lambda self, context: [
-            (item.identifier, item.name, "")
-            for item in bpy.types.Material.bl_rna.functions["bake_paint_channels"].parameters[
-                "channels"].enum_items
-            if item.identifier
-        ],
+        items=lambda self, context: _paint_channel_enum_items(),
     )
 
     def execute(self, context):
@@ -350,6 +374,50 @@ class MATERIAL_OT_paint_layer_channel_remove(_PaintLayerOperator):
         # BKE_paint_layers_channel_remove); the RNA function reports it as an error.
         try:
             layer.channel_remove(channel=self.channel)
+        except RuntimeError as ex:
+            self.report({'WARNING'}, str(ex))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_paint_layer_channel_toggle(_PaintLayerOperator):
+    """Switch one channel of a layer on or off, creating the record lazily on enable.
+
+    An absent record is how a channel the layer never opted into reads as off; enabling has to both
+    create the record and start it ENABLED (`channel_add` already does), which the plain `use`
+    property cannot do because there is no record to bind to. Disabling only flips an existing
+    record's state, so its map stays on the row (BKE_paint_layers_channel_set_enabled).
+    """
+
+    bl_idname = "material.paint_layer_channel_toggle"
+    bl_label = "Toggle Paint Layer Channel"
+
+    channel: bpy.props.EnumProperty(
+        name="Channel",
+        items=lambda self, context: _paint_channel_enum_items(),
+    )
+    enable: bpy.props.BoolProperty(name="Enable", default=True)
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        record = next(
+            (item for item in layer.channels if item.channel == self.channel), None)
+        try:
+            if self.enable:
+                if record is None:
+                    layer.channel_add(channel=self.channel)
+                else:
+                    record.use = True
+            elif record is not None:
+                record.use = False
+                if record.use:
+                    # BKE refused the switch (a Layer-role Fill's Base Color is its constant), so the
+                    # record still reads enabled; report instead of claiming a change that did not
+                    # happen, the way channel_remove reports its own refusal.
+                    self.report({'WARNING'}, "This channel cannot be switched off")
+                    return {'CANCELLED'}
         except RuntimeError as ex:
             self.report({'WARNING'}, str(ex))
             return {'CANCELLED'}
@@ -895,6 +963,7 @@ classes = (
     MATERIAL_OT_paint_layer_correction_select,
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
+    MATERIAL_OT_paint_layer_channel_toggle,
     MATERIAL_OT_paint_layer_correction_add,
     MATERIAL_OT_paint_layer_rebake,
     OBJECT_OT_mesh_map_refresh,

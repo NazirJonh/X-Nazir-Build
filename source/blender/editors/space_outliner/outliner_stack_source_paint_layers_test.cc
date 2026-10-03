@@ -850,7 +850,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, folder_rows_offer_channel_overrides_w
   }
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, normal_channel_has_opacity_but_no_blend_column)
+TEST_F(OutlinerStackPaintLayersSourceTest, normal_channel_has_opacity_and_a_mix_replace_column)
 {
   Material *ma = BKE_material_add(bmain, "NormalColumns");
   MaterialPaintLayer *layer = BKE_paint_layers_add(
@@ -861,9 +861,10 @@ TEST_F(OutlinerStackPaintLayersSourceTest, normal_channel_has_opacity_but_no_ble
   Vector<StackRow> rows;
   paint_stack_rows_from_description(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, rows);
   ASSERT_EQ(rows.size(), 1u);
-  /* Opacity is a real per-pair setting; the blend is forced, so the mode column is left empty. */
+  /* Opacity is a real per-pair setting, and the mode column offers Mix or Replace; Mix is the
+   * stored inherit value, so the column is never dimmed as inherited. */
   EXPECT_TRUE(rows[0].value_ptr.has_value());
-  EXPECT_FALSE(rows[0].mode_ptr.has_value());
+  EXPECT_TRUE(rows[0].mode_ptr.has_value());
   EXPECT_FALSE(rows[0].mode_inherited);
 }
 

@@ -839,6 +839,17 @@ static bool use_single_over(const PaintChannelRangeState &state)
   return state.material_blend || state.premul_storage || state.correction_target;
 }
 
+/**
+ * Whether a Normal stroke lays itself over the map with the single "over"
+ * (#mix_normal_over_correction_scene) instead of keeping the scene alpha. A fresh Paint layer map starts transparent, so keeping the
+ * scene alpha would leave every stroke at alpha 0 and the layer would never count it as painted.
+ * For an opaque map both forms agree.
+ */
+static bool normal_mix_uses_over(const PaintChannelRangeState &state)
+{
+  return state.material_blend || state.correction_target;
+}
+
 /** Blend one prepared paint range for a channel. */
 static void blend_paint_range(PaintChannelRangeState &state,
                               const PackedPixelRow &pixel_row,
@@ -855,7 +866,7 @@ static void blend_paint_range(PaintChannelRangeState &state,
                !state.float_buffer.is_empty(),
                state.material_blend,
                use_single_over(state),
-               state.correction_target,
+               normal_mix_uses_over(state),
                state.byte_buffer.size() != 0 && !state.premul_storage);
 }
 
@@ -903,12 +914,13 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
   const float brush_alpha = state.brush.alpha;
   const bool normal_mix = state.blend_mode == IMB_BLEND_NORMAL_MIX;
   const bool single_over = use_single_over(state);
+  const bool normal_over = normal_mix_uses_over(state);
 
   if (!state.float_buffer.is_empty()) {
     float4 *image = state.float_buffer.data() + start_offset;
     for (const int i : paint_pixels.index_range()) {
       const float4 scene = image[i];
-      if (normal_mix && state.correction_target) {
+      if (normal_mix && normal_over) {
         mix_normal_over_correction_scene(paint_pixels[i], scene, brush_alpha, true, false);
       }
       else if (normal_mix) {
@@ -933,7 +945,7 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
         /* Straight byte storage, pre-multiplied blend: see #straight_to_premul_pixels. */
         straight_to_premul_v4(scene);
       }
-      if (normal_mix && state.correction_target) {
+      if (normal_mix && normal_over) {
         mix_normal_over_correction_scene(
             paint_pixels[i], scene, brush_alpha, false, !state.premul_storage);
       }
@@ -1562,21 +1574,46 @@ static void apply_paint_channel(ImageData &image_data,
     if (is_normal_channel && tile_data.flags.dirty &&
         !tile_cache.dirty_bounds.is_empty())
     {
-      const int dx = tile_cache.dirty_bounds.min.x;
-      const int dy = tile_cache.dirty_bounds.min.y;
-      if (image_buffer->byte_data() != nullptr && dx >= 0 && dy >= 0 &&
-          dx < image_buffer->x && dy < image_buffer->y)
-      {
-        const uchar *px = image_buffer->byte_data() + (int64_t(dy) * image_buffer->x + dx) * 4;
-        printf("[PL-DIAG] Normal ImBuf readback texel=(%d,%d) rgba=(%d %d %d %d) floatbuf=%d "
-               "dirty=1\n",
-               dx,
-               dy,
-               px[0],
-               px[1],
-               px[2],
-               px[3],
-               image_buffer->float_data() != nullptr ? 1 : 0);
+      /* Scan the dirty rectangle on a coarse grid: the corner is usually outside the brush circle,
+       * so only the aggregate says whether any stroke texel gained coverage. */
+      const int x0 = max_ii(tile_cache.dirty_bounds.min.x, 0);
+      const int y0 = max_ii(tile_cache.dirty_bounds.min.y, 0);
+      const int x1 = min_ii(tile_cache.dirty_bounds.max.x, image_buffer->x);
+      const int y1 = min_ii(tile_cache.dirty_bounds.max.y, image_buffer->y);
+      if (image_buffer->byte_data() != nullptr && x0 < x1 && y0 < y1) {
+        const int step = max_ii(1, (x1 - x0) / 16);
+        int sampled = 0;
+        int covered = 0;
+        int max_alpha = 0;
+        for (int y = y0; y < y1; y += step) {
+          for (int x = x0; x < x1; x += step) {
+            const uchar *px = image_buffer->byte_data() + (int64_t(y) * image_buffer->x + x) * 4;
+            sampled++;
+            covered += px[3] > 0 ? 1 : 0;
+            max_alpha = max_ii(max_alpha, px[3]);
+          }
+        }
+        const int cx = (x0 + x1) / 2;
+        const int cy = (y0 + y1) / 2;
+        const uchar *c = image_buffer->byte_data() + (int64_t(cy) * image_buffer->x + cx) * 4;
+        printf(
+            "[PL-DIAG] Normal ImBuf scan bounds=(%d,%d)-(%d,%d) sampled=%d alpha>0=%d max_alpha=%d "
+            "center=(%d,%d) rgba=(%d %d %d %d) premul=%d\n",
+            x0,
+            y0,
+            x1,
+            y1,
+            sampled,
+            covered,
+            max_alpha,
+            cx,
+            cy,
+            c[0],
+            c[1],
+            c[2],
+            c[3],
+            image_data.image != nullptr && image_data.image->alpha_mode == IMA_ALPHA_PREMUL ? 1 :
+                                                                                              0);
       }
     }
 

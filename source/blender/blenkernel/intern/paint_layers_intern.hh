@@ -453,6 +453,15 @@ float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer);
 int BKE_paint_layers_channel_blend_effective(const MaterialPaintLayer &layer, int channel);
 
 /**
+ * Whether \a layer's Normal channel replaces what lies below it rather than combining with it.
+ *
+ * Unlike every other channel the Normal one ignores the row's own blend: it is either the Normal
+ * Combine group or, when its channel override is #MA_PAINT_LAYER_BLEND_NORMAL_REPLACE, a plain
+ * Mix. The generator and the CPU composite read this one helper.
+ */
+bool BKE_paint_layers_normal_replace(const MaterialPaintLayer &layer);
+
+/**
  * The factor \a layer's \a channel blends by: the row's effective opacity
  * (#BKE_paint_layers_effective_opacity, which folds enabled and a constant mask) times the
  * channel record's #MaterialPaintLayerChannel::opacity, or the row's effective opacity alone when

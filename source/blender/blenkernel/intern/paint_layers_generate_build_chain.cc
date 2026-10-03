@@ -246,7 +246,8 @@ ChainResult PaintLayersChainBuilder::build_list(
       row_blend_out = row.group_blend;
     }
     else if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && ctx.normal_combine_group != nullptr &&
-        tree.typeinfo != nullptr && tree.typeinfo->group_idname != nullptr)
+             !BKE_paint_layers_normal_replace(*current.layer) && tree.typeinfo != nullptr &&
+             tree.typeinfo->group_idname != nullptr)
     {
       bNode *combine = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
       if (combine != nullptr) {
@@ -577,7 +578,8 @@ ChainResult PaintLayersChainBuilder::build_list(
   else {
     bool combined = false;
     if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && ctx.normal_combine_group != nullptr &&
-        tree.typeinfo != nullptr && tree.typeinfo->group_idname != nullptr)
+        !BKE_paint_layers_normal_replace(*current.layer) && tree.typeinfo != nullptr &&
+        tree.typeinfo->group_idname != nullptr)
     {
       bNode *combine = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
       if (combine != nullptr) {
@@ -1645,7 +1647,8 @@ bool PaintLayersChainBuilder::build_grouped_row_result(const MaterialPaintLayer 
                              const float factor_default)
         -> std::pair<bNode *, bNodeSocket *> {
       if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && ctx.normal_combine_group != nullptr &&
-          tree.typeinfo != nullptr && tree.typeinfo->group_idname != nullptr)
+          !BKE_paint_layers_normal_replace(*layer) && tree.typeinfo != nullptr &&
+          tree.typeinfo->group_idname != nullptr)
       {
         bNode *combine = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
         if (combine == nullptr) {

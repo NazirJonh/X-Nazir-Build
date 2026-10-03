@@ -835,6 +835,45 @@ TEST_F(PaintLayersDescription, mask_add_inserts_a_base_item_and_toggles)
   EXPECT_EQ(BKE_paint_layers_mask_base(*layer), item);
 }
 
+TEST_F(PaintLayersDescription, effects_and_mask_items_reorder_within_their_own_list)
+{
+  Material *ma = BKE_material_add(bmain, "CorrectionReorder");
+  MaterialPaintLayer *owner = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Owner", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(owner, nullptr);
+
+  for (const char *name : {"E1", "E2", "E3"}) {
+    ASSERT_NE(BKE_paint_layers_correction_add(
+                  *ma, owner, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, name),
+              nullptr);
+  }
+  MaterialPaintLayer *a = static_cast<MaterialPaintLayer *>(owner->effects.first);
+  MaterialPaintLayer *b = a->next;
+  MaterialPaintLayer *c = b->next;
+  EXPECT_TRUE(BKE_paint_layers_reorder(*ma, c, 0));
+  EXPECT_EQ(owner->effects.first, c);
+  EXPECT_EQ(c->next, a);
+  EXPECT_EQ(a->next, b);
+
+  /* The base mask stays the first item of its stack: it never moves and nothing goes before it. */
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, owner, 1.0f);
+  ASSERT_NE(base, nullptr);
+  for (const char *name : {"M1", "M2"}) {
+    ASSERT_NE(
+        BKE_paint_layers_correction_add(
+            *ma, owner, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, name),
+        nullptr);
+  }
+  ASSERT_EQ(owner->mask_stack.first, base);
+  MaterialPaintLayer *first_item = base->next;
+  MaterialPaintLayer *second_item = first_item->next;
+  EXPECT_FALSE(BKE_paint_layers_reorder(*ma, base, 2));
+  EXPECT_TRUE(BKE_paint_layers_reorder(*ma, second_item, 0));
+  EXPECT_EQ(owner->mask_stack.first, base);
+  EXPECT_EQ(base->next, second_item);
+  EXPECT_EQ(second_item->next, first_item);
+}
+
 TEST_F(PaintLayersDescription, fill_channel_value_is_value_only)
 {
   Material *ma = BKE_material_add(bmain, "FillValue");

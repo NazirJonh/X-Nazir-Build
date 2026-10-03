@@ -392,9 +392,9 @@ void paint_stack_rows_from_description_impl(const Material &material,
       row.mode_prop = "blend_type";
       return;
     }
-    /* The Normal channel forces its own combine, so it has no blend to set: only its opacity is a
-     * per-pair setting. */
-    const bool has_blend = channel != PAINT_MATERIAL_CHANNEL_NORMAL;
+    /* The Normal channel offers Mix (the forced combine) or Replace through the same column; its
+     * "Mix" is the stored inherit value, so it is a real choice and is never dimmed as inherited. */
+    const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
     const MaterialPaintLayerChannelSettings &settings = layer.channel_settings[channel];
 
     PointerRNA settings_ptr = RNA_pointer_create_discrete(
@@ -405,11 +405,9 @@ void paint_stack_rows_from_description_impl(const Material &material,
     row.value_prop = "opacity";
     /* The flags only dim the columns; they no longer change how the control is built. */
     row.value_inherited = settings.opacity == 1.0f;
-    if (has_blend) {
-      row.mode_ptr = settings_ptr;
-      row.mode_prop = "blend_type";
-      row.mode_inherited = settings.blend < 0;
-    }
+    row.mode_ptr = settings_ptr;
+    row.mode_prop = "blend_type";
+    row.mode_inherited = !is_normal && settings.blend < 0;
   };
 
   /* The description's own problems -- a folder carrying channels, a Fill correction on Normal and
@@ -946,11 +944,25 @@ bool paint_layers_edit_move(Material &material,
       return false;
     }
     const int anchor_index = BLI_findindex(owner_list, anchor);
-    if (anchor_index < 0) {
+    const int from_index = BLI_findindex(owner_list, from);
+    if (anchor_index < 0 || from_index < 0) {
       return false;
     }
-    edited = BKE_paint_layers_reorder(
-        material, from, (place == StackMovePlace::Above) ? anchor_index : anchor_index + 1);
+    /* The screen lists attached rows top first (#outliner_stack_attached_rows_plan walks them
+     * backward), so the row drawn above the anchor sits later in storage, and the row drawn below it
+     * earlier. #BKE_paint_layers_reorder takes the index the row ends up at, after it left its old
+     * slot, so an anchor behind the row has shifted one place by the time the row is put back. */
+    int target_index = (place == StackMovePlace::Below) ? anchor_index : anchor_index + 1;
+    if (from_index < target_index) {
+      target_index--;
+    }
+    edited = BKE_paint_layers_reorder(material, from, target_index);
+    /* [PL-DIAG] Print only: how a correction reorder resolved. */
+    printf("[PL-DIAG] correction reorder from=%d anchor=%d target=%d edited=%d\n",
+           from_index,
+           anchor_index,
+           target_index,
+           int(edited));
   }
   else
   {

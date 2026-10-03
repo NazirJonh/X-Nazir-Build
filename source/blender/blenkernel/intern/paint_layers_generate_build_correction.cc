@@ -507,7 +507,7 @@ if (!substituted) {
     bNodeSocket *mix_color2 = nullptr;
     bNodeSocket *mix_fac = nullptr;
     bNodeSocket *mix_out = nullptr;
-    if (normal_channel) {
+    if (normal_channel && !BKE_paint_layers_normal_replace(correction)) {
       if (ctx.normal_combine_group == nullptr || tree.typeinfo == nullptr ||
           tree.typeinfo->group_idname == nullptr)
       {
@@ -556,8 +556,44 @@ if (!substituted) {
       BLI_assert_msg(false, "blend node sockets were not declared");
       continue;
     }
-    bke::node_add_link(
-        tree, *current.source_node, *current.source, *correction_mix, *mix_color1);
+    /* The Normal Combine decodes its A input as a tangent normal, but wherever the row has no
+     * content yet its colour is the map's empty black, which decodes to `(-1, -1, -1)` and drags
+     * every correction laid over such a texel into a black result. There the layer holds no normal
+     * at all, so the input falls back to the flat one by the row's coverage before this correction
+     * (the same `alpha` the CPU composite starts from). A row that covers fully needs nothing. */
+    bNode *below_node = current.source_node;
+    bNodeSocket *below_socket = current.source;
+    if (normal_channel && !BKE_paint_layers_normal_replace(correction)) {
+      const bool folder_row = BKE_paint_layers_is_folder(*layer);
+      bNode *base_coverage_node = folder_row ? folder_coverage_node : content_cov_node;
+      bNodeSocket *base_coverage = folder_row ? folder_coverage : content_cov;
+      if (base_coverage_node != nullptr && base_coverage != nullptr) {
+        bNode *flat_fallback = mix_node_add(tree, MA_RAMP_BLEND, location_x + 80.0f, location_y);
+        bNodeSocket *flat_color = (flat_fallback != nullptr) ? socket_in(*flat_fallback, "A_Color") :
+                                                               nullptr;
+        bNodeSocket *content_color = (flat_fallback != nullptr) ?
+                                         socket_in(*flat_fallback, "B_Color") :
+                                         nullptr;
+        bNodeSocket *coverage_fac = (flat_fallback != nullptr) ?
+                                        socket_in(*flat_fallback, "Factor_Float") :
+                                        nullptr;
+        bNodeSocket *fallback_out = (flat_fallback != nullptr) ?
+                                        socket_out(*flat_fallback, "Result_Color") :
+                                        nullptr;
+        if (flat_color != nullptr && content_color != nullptr && coverage_fac != nullptr &&
+            fallback_out != nullptr && flat_color->default_value != nullptr)
+        {
+          const float flat_normal[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+          copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(flat_color->default_value)->value,
+                     flat_normal);
+          bke::node_add_link(tree, *current.source_node, *current.source, *flat_fallback, *content_color);
+          bke::node_add_link(tree, *base_coverage_node, *base_coverage, *flat_fallback, *coverage_fac);
+          below_node = flat_fallback;
+          below_socket = fallback_out;
+        }
+      }
+    }
+    bke::node_add_link(tree, *below_node, *below_socket, *correction_mix, *mix_color1);
     /* A data map reaches the chain as `C * A` (the upload pre-multiplied it and the Image
      * Texture node leaves a data texture alone); divide by the map's alpha to get `C`, so the
      * coverage is applied once, exactly as the CPU reads the straight bytes. A non-data map

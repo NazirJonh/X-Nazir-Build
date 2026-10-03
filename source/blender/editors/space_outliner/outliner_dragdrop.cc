@@ -1390,10 +1390,33 @@ static bool stack_layer_drop_init(bContext *C, const wmEvent *event, wmDragStack
       continue;
     }
     if (!drag_stack_row->parent_section_id.empty()) {
-      if (insert_type == TE_INSERT_INTO ||
-          !stack_rows_are_siblings(*drag_stack_row, *target_row))
-      {
+      if (!stack_rows_are_siblings(*drag_stack_row, *target_row)) {
+        /* [PL-DIAG] Print only: which rule refused an attached-row drop. */
+        printf("[PL-DIAG] drop refused: attached drag ordinal=%d (parent=%d section='%s') vs "
+               "target ordinal=%d (parent=%d section='%s')\n",
+               drag_stack_row->ordinal,
+               int(drag_stack_row->parent_ordinal),
+               drag_stack_row->parent_section_id.c_str(),
+               target_row->ordinal,
+               int(target_row->parent_ordinal),
+               target_row->parent_section_id.c_str());
         return false;
+      }
+      if (insert_type == TE_INSERT_INTO) {
+        /* An attached row has no inside to land in, and its rows are only one line high, so the
+         * middle third of one is a dead zone. It reads as "put it here": above or below the row by
+         * the half of it the pointer is in. */
+        const float height = float(outliner_tree_element_height(*space_outliner, *te));
+        float view_x = 0.0f;
+        float view_y = 0.0f;
+        ARegion *drop_region = CTX_wm_region(C);
+        ui::view2d_region_to_view(&drop_region->v2d,
+                                  event->xy[0] - drop_region->winrct.xmin,
+                                  event->xy[1] - drop_region->winrct.ymin,
+                                  &view_x,
+                                  &view_y);
+        insert_type = (view_y - float(te->ys) > height * 0.5f) ? TE_INSERT_BEFORE :
+                                                                 TE_INSERT_AFTER;
       }
     }
     else if (!target_row->parent_section_id.empty()) {

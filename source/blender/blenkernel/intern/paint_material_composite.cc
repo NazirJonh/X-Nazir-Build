@@ -774,6 +774,17 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                           clamp_f((cc[0] + cc[1] + cc[2]) / 3.0f, 0.0f, 1.0f);
         }
         const float fac = clamp_f(correction.opacity * corr_alpha, 0.0f, 1.0f);
+        if (correction.blend == CompositeBlend::NormalCombine) {
+          /* Where the row has no content its colour is the map's empty black, which decodes to a
+           * tangent of `(-1, -1, -1)` and drags the whole combine into a black result. There the
+           * layer holds no normal, so the flat one stands in by the coverage before this correction
+           * -- the same fallback the generated chain builds. */
+          const float below_coverage = clamp_f(alpha[i], 0.0f, 1.0f);
+          float *below = r_color + i * 4;
+          below[0] = 0.5f + (below[0] - 0.5f) * below_coverage;
+          below[1] = 0.5f + (below[1] - 0.5f) * below_coverage;
+          below[2] = 1.0f + (below[2] - 1.0f) * below_coverage;
+        }
         blend_row_linear(r_color + i * 4, corr_rgba, correction.blend, fac);
         alpha[i] = alpha[i] + fac * (1.0f - alpha[i]);
         if (content_alpha != nullptr) {

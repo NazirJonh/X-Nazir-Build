@@ -455,6 +455,9 @@ enum eMaterialPaintLayerBlend : int8_t {
   MA_PAINT_LAYER_BLEND_SATURATION = 17,
   MA_PAINT_LAYER_BLEND_COLOR = 18,
   MA_PAINT_LAYER_BLEND_VALUE = 19,
+  /** The Normal channel only, as a per-channel override: the upper normal replaces the lower one
+   * instead of being combined with it (Whiteout, #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE). */
+  MA_PAINT_LAYER_BLEND_NORMAL_REPLACE = 20,
 };
 
 /**

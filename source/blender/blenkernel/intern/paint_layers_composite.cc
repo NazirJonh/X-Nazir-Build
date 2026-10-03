@@ -94,12 +94,14 @@ CompositeBlend blend_from_description(const int8_t blend)
  * The generator routes every Normal row -- the layer itself and a content correction -- through the
  * Normal Combine group, whatever the row's own blend says, so the CPU has to read the same operation
  * here. Mask corrections are the exception: they only change the factor scalar, which does not
- * depend on the colour channel, so their own blend is kept.
+ * depend on the colour channel, so their own blend is kept. A Normal channel set to Replace lets
+ * the upper normal cover the lower one with a plain Mix, as the generator builds it.
  */
 CompositeBlend layer_channel_blend(const MaterialPaintLayer &layer, const int channel)
 {
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    return CompositeBlend::NormalCombine;
+    return BKE_paint_layers_normal_replace(layer) ? CompositeBlend::Mix :
+                                                    CompositeBlend::NormalCombine;
   }
   return blend_from_description(
       eMaterialPaintLayerBlend(BKE_paint_layers_channel_blend_effective(layer, channel)));

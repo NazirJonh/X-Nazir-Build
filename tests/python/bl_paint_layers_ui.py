@@ -664,12 +664,15 @@ class PaintLayersUiTest(unittest.TestCase):
         self.assertEqual(base_color.opacity, 50.0)
         self.assertEqual(len(layer.channels), 5)
 
-    def test_channel_settings_normal_has_no_blend(self):
+    def test_channel_settings_normal_offers_mix_and_replace(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         normal = self.channel_settings(layer, 'NORMAL')
-        normal.blend_type = 'MULTIPLY'
-        # The setter refuses the Normal channel, which forces its own combine.
-        self.assertEqual(normal.blend_type, 'INHERIT')
+        # The Normal channel forces its own combine: Mix (the combine) or Replace, nothing else.
+        self.assertEqual(normal.blend_type, 'MIX')
+        normal.blend_type = 'REPLACE'
+        self.assertEqual(normal.blend_type, 'REPLACE')
+        normal.blend_type = 'MIX'
+        self.assertEqual(normal.blend_type, 'MIX')
 
     def test_channel_settings_opacity_keyframe_path_resolves(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")

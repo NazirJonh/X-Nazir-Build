@@ -708,11 +708,20 @@ TEST_F(PaintLayersTargetTest, channel_blend_opacity_effective_and_setters)
   EXPECT_FALSE(BKE_paint_layers_channel_blend_set(
       *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_NORMAL_COMBINE));
 
-  /* The Normal channel has no blend override at all: its combine is forced, so a stored blend
-   * could never take effect. */
+  /* The Normal channel's combine is forced, so only Replace (or inherit, back to Combine) can take
+   * effect there; any other stored blend never could. */
   EXPECT_FALSE(BKE_paint_layers_channel_blend_set(
       *ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_MULTIPLY));
   EXPECT_EQ(layer->channel_settings[PAINT_MATERIAL_CHANNEL_NORMAL].blend, -1);
+  EXPECT_FALSE(BKE_paint_layers_normal_replace(*layer));
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
+  EXPECT_TRUE(BKE_paint_layers_normal_replace(*layer));
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(*ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, -1));
+  EXPECT_FALSE(BKE_paint_layers_normal_replace(*layer));
+  /* Replace is the Normal channel's alone. */
+  EXPECT_FALSE(BKE_paint_layers_channel_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
 }
 
 TEST_F(PaintLayersTargetTest, source_change_keeps_channel_participation)

@@ -594,6 +594,12 @@ int BKE_paint_layers_channel_blend_effective(const MaterialPaintLayer &layer, co
   return (blend < 0) ? layer.blend : blend;
 }
 
+bool BKE_paint_layers_normal_replace(const MaterialPaintLayer &layer)
+{
+  return layer.channel_settings[PAINT_MATERIAL_CHANNEL_NORMAL].blend ==
+         MA_PAINT_LAYER_BLEND_NORMAL_REPLACE;
+}
+
 float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer, const int channel)
 {
   const float multiplier = (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) ?
@@ -746,6 +752,7 @@ int BKE_paint_layers_blend_to_ramp(const eMaterialPaintLayerBlend blend)
     case MA_PAINT_LAYER_BLEND_VALUE:
       return MA_RAMP_VAL;
     case MA_PAINT_LAYER_BLEND_NORMAL_COMBINE:
+    case MA_PAINT_LAYER_BLEND_NORMAL_REPLACE:
       return MA_RAMP_BLEND;
   }
   return MA_RAMP_BLEND;
@@ -1563,9 +1570,10 @@ bool BKE_paint_layers_reorder(Material &ma, MaterialPaintLayer *layer, int index
   if (layer == nullptr) {
     return false;
   }
-  /* A base mask stays first and corrections stay above it; their order is the mask semantics, not
-   * a user rearrangement. */
-  if (BKE_paint_layers_role(*layer) == PaintLayerRole::MaskItem) {
+  /* The base mask is always the first item of its stack, so it never moves and nothing moves in
+   * front of it; the corrections above it may be rearranged among themselves. */
+  const bool is_mask_item = BKE_paint_layers_role(*layer) == PaintLayerRole::MaskItem;
+  if (is_mask_item && (layer->flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
     return false;
   }
   ListBase *owner = paint_layer_owner_list(&ma.paint_layers, layer);
@@ -1573,7 +1581,12 @@ bool BKE_paint_layers_reorder(Material &ma, MaterialPaintLayer *layer, int index
     return false;
   }
   const int count = BLI_listbase_count(owner);
-  index = clamp_i(index, 0, count - 1);
+  const MaterialPaintLayer *head = static_cast<const MaterialPaintLayer *>(owner->first);
+  const int min_index = (is_mask_item && head != nullptr &&
+                         (head->flag & MA_PAINT_LAYER_MASK_BASE) != 0) ?
+                            1 :
+                            0;
+  index = clamp_i(index, min_index, count - 1);
 
   BLI_remlink(owner, layer);
   /* The stack is bottom-to-top, so index 0 is the first link of the list. */
@@ -2205,10 +2218,15 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
-  /* The Normal channel forces its own combine in the generator and the CPU, so a blend override
-   * there could never take effect; refuse it rather than store a setting that does nothing. */
+  /* The Normal channel forces its own combine in the generator and the CPU and ignores the row's
+   * blend, so the only override that can take effect there is Replace (or -1 back to Combine). */
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    return false;
+    if (!ELEM(blend, -1, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE)) {
+      return false;
+    }
+    layer.channel_settings[channel].blend = int8_t(blend);
+    BKE_paint_layers_tag_edited(ma);
+    return true;
   }
   /* Inherit, or one of the user-facing blends; Normal Combine is the Normal channel's own doing. */
   if (blend < -1 || blend > MA_PAINT_LAYER_BLEND_VALUE ||
@@ -2451,7 +2469,7 @@ bool BKE_paint_layers_set_blend(Material &ma,
   }
   /* The Normal channel forces the combine operation by itself, and no other channel can express
    * it; a stored value would only ever be a switch the user cannot make effective. */
-  if (blend == MA_PAINT_LAYER_BLEND_NORMAL_COMBINE) {
+  if (ELEM(blend, MA_PAINT_LAYER_BLEND_NORMAL_COMBINE, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE)) {
     return false;
   }
   layer->blend = blend;

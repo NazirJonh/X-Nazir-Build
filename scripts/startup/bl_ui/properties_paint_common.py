@@ -1128,10 +1128,10 @@ class PAINT_MT_material_layer_channel_socket(Menu):
             drawn_any = True
 
         # The per (row, channel) blend and opacity live on the layer's fixed settings array, keyed
-        # by the channel. Normal forces its own combine, so it has no blend to offer.
+        # by the channel. Normal offers only Mix (combine) or Replace; its enum list is dynamic.
         settings = next(
             (s for s in layer.channel_settings if s.channel == channel.channel), None)
-        if settings is not None and channel.channel != 'NORMAL':
+        if settings is not None:
             if drawn_any:
                 layout.separator()
             layout.prop(settings, "blend_type", text="Blend")

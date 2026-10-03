@@ -645,57 +645,16 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # A stack Layer's channels, drawn with the same widget as the brush PBR Paint panel: its
         # Base Color is the row's colour (no separate fill_color property), and each channel's
         # value/source come from the row's own records.
+        # Masks and Effects are added and selected from the Outliner stack; only the active row is
+        # edited here. An Effect gets the same channel widget as a Layer, so a Paint correction can
+        # write more than Base Color once its channels are switched on.
+        layout.separator()
         if layer.role == 'LAYER':
-            layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)
-
-        box = layout.box()
-        box.label(text="Mask", icon='MOD_MASK')
-        for item in layer.mask_stack:
-            row = box.row(align=True)
-            row.operator(
-                "material.paint_layer_mask_toggle",
-                text="",
-                icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT',
-            ).item_marker = item.marker
-            select = row.operator(
-                "material.paint_layer_correction_select",
-                text=item.name if item.name else "Mask",
-                icon='RADIOBUT_ON' if item.marker == layer.marker else 'RADIOBUT_OFF',
-                emboss=False,
-            )
-            select.marker = item.marker
-            row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
-                item.marker
-            # A constant mask shows one value (fill_color); a Paint mask shows only its channel and
-            # map. A Material/Node Group/Stack mask keeps its channel picker.
-            draw_material_mask_item(box, item)
-        box.operator("material.paint_layer_mask_add", text="Add Mask", icon='ADD')
-
-        box = layout.box()
-        box.label(text="Effects", icon='MODIFIER')
-        for item in layer.effects:
-            row = box.row(align=True)
-            row.operator(
-                "material.paint_layer_mask_toggle",
-                text="",
-                icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT',
-            ).item_marker = item.marker
-            select = row.operator(
-                "material.paint_layer_correction_select",
-                text=item.name if item.name else "Correction",
-                icon='RADIOBUT_ON' if item.marker == layer.marker else 'RADIOBUT_OFF',
-                emboss=False,
-            )
-            select.marker = item.marker
-            row.operator("material.paint_layer_correction_remove", text="", icon='X').item_marker = \
-                item.marker
-            # A Fill effect gets the same channel widget as a layer row (its toggles create per-
-            # channel records and its value sliders write them); a Paint effect shows only maps.
-            draw_material_correction_channels(box, context, owner, item)
-        # Parity with the old Channels box: an Effect is added from here, a Mask from its own box.
-        box.operator_menu_enum("material.paint_layer_correction_add", "role",
-                               text="Add Effect", icon='ADD')
+        elif layer.role == 'EFFECT':
+            draw_material_correction_channels(layout, context, owner, layer)
+        elif layer.role == 'MASK_ITEM':
+            draw_material_mask_item(layout, layer)
 
         if len(layer.issues):
             box = layout.box()
@@ -1058,7 +1017,6 @@ classes = (
     MATERIAL_PT_custom_props,
     MATERIAL_PT_paint_layers,
     MATERIAL_PT_paint_layers_channels,
-    LAYER_MATERIAL_PT_mesh_maps,
     BRUSH_MATERIAL_PT_context_material,
     BRUSH_MATERIAL_PT_surface,
     BRUSH_MATERIAL_PT_settings,
@@ -1066,6 +1024,7 @@ classes = (
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_mesh_maps,
     LAYER_MATERIAL_PT_source_material,
     LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_custom_layer,

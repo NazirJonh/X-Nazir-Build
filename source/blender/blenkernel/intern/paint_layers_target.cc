@@ -523,6 +523,15 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   else {
     paint_layer_channel_neutral(target.channel, fill);
   }
+  /* A transparent texel still takes part in bilinear filtering: the GPU texture holds straight
+   * bytes, so across a stroke's edge the colour is interpolated on its own and a black background
+   * decodes to a tilted normal -- a thin dark contour round everything the map holds. The empty
+   * texels of a Normal map therefore hold the flat tangent, which is what interpolates to nothing. */
+  if (target.channel == PAINT_MATERIAL_CHANNEL_NORMAL && fill[3] <= 0.0f) {
+    fill[0] = 0.5f;
+    fill[1] = 0.5f;
+    fill[2] = 1.0f;
+  }
 
   char name[192];
   paint_layers_channel_image_name(*target.layer, target.channel, name, sizeof(name));
@@ -530,8 +539,15 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   if (image == nullptr) {
     return nullptr;
   }
-  if (BKE_paint_layers_role(*target.layer) != PaintLayerRole::Layer) {
-    /* Transparent around every stroke: see #IMA_GPU_LINEAR_PREMUL. */
+  /* Transparent around every stroke: see #IMA_GPU_LINEAR_PREMUL. A correction's map always is. A
+   * Layer's starts transparent too now (a fresh record lays nothing), and a colour map left straight
+   * bleeds its empty black into the stroke's edge under filtering -- the dark contour round the
+   * layer. Premultiplied filtering fixes it with nothing else to build, because the Image Texture
+   * node un-premultiplies a colour texture itself. A data map (Normal, Roughness, ...) would reach
+   * the chain as `C * A` and would need the generator's Divide, so it stays straight. */
+  if (BKE_paint_layers_role(*target.layer) != PaintLayerRole::Layer ||
+      (info.is_color && fill[3] < 1.0f))
+  {
     image->flag |= IMA_GPU_LINEAR_PREMUL;
   }
   if (!BKE_paint_layers_channel_set_image(

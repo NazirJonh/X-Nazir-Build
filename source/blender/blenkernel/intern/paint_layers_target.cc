@@ -37,7 +37,23 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
+#include <atomic>
+
 namespace blender {
+
+/* Comparison switch for the stroke-edge fix: premultiplied GPU filtering (default, confirmed) or
+ * straight 8-bit maps with a dilation pass after each dab. Only read at map creation. */
+static std::atomic<bool> g_paint_layers_bleed_enabled = false;
+
+bool BKE_paint_layers_bleed_enabled()
+{
+  return g_paint_layers_bleed_enabled.load();
+}
+
+void BKE_paint_layers_bleed_set_enabled(bool enabled)
+{
+  g_paint_layers_bleed_enabled.store(enabled);
+}
 
 namespace {
 
@@ -544,9 +560,15 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
    * bleeds its empty black into the stroke's edge under filtering -- the dark contour round the
    * layer. Premultiplied filtering fixes it with nothing else to build, because the Image Texture
    * node un-premultiplies a colour texture itself. A data map (Normal, Roughness, ...) would reach
-   * the chain as `C * A` and would need the generator's Divide, so it stays straight. */
-  if (BKE_paint_layers_role(*target.layer) != PaintLayerRole::Layer ||
-      (info.is_color && fill[3] < 1.0f))
+   * the chain as `C * A` and would need the generator's Divide, so it stays straight. With the
+   * bleed switch on, a Layer colour map skips the flag instead: it stays a straight 8-bit texture
+   * and the stroke dilates painted RGB into the empty texels around it, so the taps find paint. */
+  const bool bleed_path = BKE_paint_layers_bleed_enabled() &&
+                          BKE_paint_layers_role(*target.layer) == PaintLayerRole::Layer &&
+                          info.is_color;
+  if (!bleed_path &&
+      (BKE_paint_layers_role(*target.layer) != PaintLayerRole::Layer ||
+       (info.is_color && fill[3] < 1.0f)))
   {
     image->flag |= IMA_GPU_LINEAR_PREMUL;
   }

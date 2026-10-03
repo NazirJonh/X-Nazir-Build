@@ -167,6 +167,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_channel_blend_items[
 #  include "BKE_paint_layers.hh"
 #  include "BKE_paint_layers_composite.hh"
 #  include "BKE_paint_layers_generate.hh"
+#  include "BKE_paint_layers_target.hh"
 #  include "BKE_report.hh"
 #  include "BKE_scene.hh"
 #  include "BKE_texture.h"
@@ -801,6 +802,18 @@ static void rna_Material_paint_layers_locked_set(PointerRNA *ptr, bool value)
     ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   }
   DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+}
+
+/* Process-wide creation switch, not per-material state: every layered material reads the same
+ * value, so it is documented on the property itself. */
+static bool rna_Material_paint_layers_bleed_get(PointerRNA * /*ptr*/)
+{
+  return BKE_paint_layers_bleed_enabled();
+}
+
+static void rna_Material_paint_layers_bleed_set(PointerRNA * /*ptr*/, bool value)
+{
+  BKE_paint_layers_bleed_set_enabled(value);
 }
 
 /* The effective set, not the raw field: an unauthored field reads the derived set. */
@@ -3908,6 +3921,17 @@ void RNA_def_material(BlenderRNA *brna)
       "Locked",
       "The generator owns the node tree and overwrites manual edits; unlock for debugging, then "
       "Regenerate explicitly");
+
+  prop = RNA_def_property(srna, "paint_layers_bleed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_Material_paint_layers_bleed_get",
+                                 "rna_Material_paint_layers_bleed_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Bleed New Color Maps",
+      "Process-wide comparison switch: newly created Layer color maps stay straight 8-bit and "
+      "each stroke dilates paint into the empty texels around it, instead of premultiplied "
+      "half-float filtering; off keeps the confirmed premultiplied path");
 
   prop = RNA_def_property(srna, "paint_layers_uv_map", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "paint_layers_uv_map");

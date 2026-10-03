@@ -200,8 +200,22 @@ ChainResult PaintLayersChainBuilder::build_list(
       row = build_row(layer, row_target, substituted, baked_color, premul, layer_group, channel);
     }
     if (!row.valid) {
+      /* [PL-DIAG] Row-chain audit for the correction-visibility report: which rows take part
+       * per channel and how (live or bake-substituted). Prints only. Compare the Layer 1
+       * lines between the one-row and two-row states: identical lines prove the graph side. */
+      printf("[PL-DIAG] chain row='%s' channel=%d substituted=%d grouped=%d valid=0\n",
+             layer->name,
+             channel,
+             int(substituted),
+             int(layer_group != nullptr));
       continue;
     }
+    /* [PL-DIAG] See above: the taking-part counterpart of the skip line. */
+    printf("[PL-DIAG] chain row='%s' channel=%d substituted=%d grouped=%d valid=1\n",
+           layer->name,
+           channel,
+           int(substituted),
+           int(layer_group != nullptr));
     ChainLayer current = row.current;
     if (row.grouped) {
       /* The parent chains the group through its instance: Color and Coverage are the row's

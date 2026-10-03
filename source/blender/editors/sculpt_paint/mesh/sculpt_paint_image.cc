@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 
 #include "ED_paint.hh"
@@ -1302,6 +1303,115 @@ static Array<RowFactorCache> compute_paint_row_factors(
   return tile_caches;
 }
 
+/* Dilation radius of the stroke-edge bleed, in texels: the first ring feeds bilinear taps at the
+ * stroke edge, the second softens the first mip level. Deeper mips need a wider fill; that is a
+ * known limitation, not part of this pass. */
+static constexpr int PAINT_LAYER_BLEED_RADIUS = 2;
+
+/* Whether \a image takes the bleed pass: a straight-alpha color map (Base Color and Emission are
+ * the only channels with #is_color_channel) without #IMA_GPU_LINEAR_PREMUL. A flagged map filters
+ * premultiplied already, and data maps must keep their empty texels untouched. */
+static bool paint_layer_bleed_eligible(const Image *image,
+                                       const bool is_color_channel,
+                                       const bool is_normal_channel)
+{
+  return is_color_channel && !is_normal_channel && image != nullptr &&
+         (image->flag & IMA_GPU_LINEAR_PREMUL) == 0;
+}
+
+/**
+ * Dilate painted RGB into the empty texels around \a dirty_bounds.
+ *
+ * A straight 8-bit map starts on black, and bilinear taps at the stroke edge mix that black into
+ * the stroke. Every empty texel near paint instead takes the nearest painted texel's RGB, with
+ * alpha left at zero, so neither the coverage the CPU composites by nor the Image Texture Alpha
+ * output changes: only the filtered color does. Reads the pre-pass texels from a snapshot, so
+ * parallel rows never race each other's writes. On return \a r_expanded covers the grown, clipped
+ * rectangle, which the caller marks dirty so the ring reaches the GPU partial upload.
+ */
+static void paint_layer_bleed_rect(ImBuf &image_buffer,
+                                   const Bounds<int2> &dirty_bounds,
+                                   Bounds<int2> &r_expanded)
+{
+  r_expanded = dirty_bounds;
+  if (dirty_bounds.is_empty() || image_buffer.byte_data() == nullptr) {
+    return;
+  }
+  const double bleed_start = BLI_time_now_seconds();
+  const int width = image_buffer.x;
+  const int height = image_buffer.y;
+  /* Grown by the bleed radius and clipped to the image: the neighbor search indexes it directly,
+   * and the caller marks this rectangle dirty. */
+  const int x0 = max_ii(dirty_bounds.min.x - PAINT_LAYER_BLEED_RADIUS, 0);
+  const int y0 = max_ii(dirty_bounds.min.y - PAINT_LAYER_BLEED_RADIUS, 0);
+  const int x1 = min_ii(dirty_bounds.max.x + PAINT_LAYER_BLEED_RADIUS, width - 1);
+  const int y1 = min_ii(dirty_bounds.max.y + PAINT_LAYER_BLEED_RADIUS, height - 1);
+  if (x0 > x1 || y0 > y1) {
+    return;
+  }
+  r_expanded = Bounds<int2>(int2(x0, y0), int2(x1, y1));
+  const int rect_w = x1 - x0 + 1;
+  const int rect_h = y1 - y0 + 1;
+  /* Snapshot of the pre-pass texels: rows below run in parallel and read neighbors other threads
+   * write, so they read this copy instead. Only the dirty neighborhood is copied, never the map.
+   */
+  Array<uchar4> snapshot(size_t(rect_w) * size_t(rect_h));
+  const uchar *src_pixels = image_buffer.byte_data();
+  for (int row = 0; row < rect_h; row++) {
+    memcpy(&snapshot[size_t(row) * rect_w],
+           src_pixels + (size_t(y0 + row) * width + x0) * 4,
+           size_t(rect_w) * 4);
+  }
+  uchar *dst_pixels = image_buffer.byte_data_for_write();
+  threading::parallel_for(IndexRange(rect_h), 16, [&](const IndexRange rows) {
+    for (const int row : rows) {
+      const int y = y0 + row;
+      for (int col = 0; col < rect_w; col++) {
+        const uchar *center = reinterpret_cast<const uchar *>(
+            &snapshot[size_t(row) * rect_w + col]);
+        if (center[3] != 0) {
+          continue;
+        }
+        const int x = x0 + col;
+        /* Rings outward: the first painted texel found is the nearest one. */
+        bool done = false;
+        for (int r = 1; r <= PAINT_LAYER_BLEED_RADIUS && !done; r++) {
+          for (int dy = -r; dy <= r && !done; dy++) {
+            for (int dx = -r; dx <= r && !done; dx++) {
+              const int adx = dx < 0 ? -dx : dx;
+              const int ady = dy < 0 ? -dy : dy;
+              if (max_ii(adx, ady) != r) {
+                continue;
+              }
+              const int nx = x + dx;
+              const int ny = y + dy;
+              if (nx < x0 || nx > x1 || ny < y0 || ny > y1) {
+                continue;
+              }
+              const uchar *cand = reinterpret_cast<const uchar *>(
+                  &snapshot[size_t(ny - y0) * rect_w + (nx - x0)]);
+              if (cand[3] != 0) {
+                uchar *out = dst_pixels + (size_t(y) * width + x) * 4;
+                out[0] = cand[0];
+                out[1] = cand[1];
+                out[2] = cand[2];
+                done = true;
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+  /* [PL-DIAG] Bleed pass cost per dab. Prints only; remove once the timings are confirmed. */
+  printf("[PL-DIAG] bleed rect=(%d,%d)-(%d,%d) %.3fms\n",
+         x0,
+         y0,
+         x1,
+         y1,
+         (BLI_time_now_seconds() - bleed_start) * 1000.0);
+}
+
 /** Apply cached brush factors to one Material paint channel's image (read/blend/write only). */
 static void apply_paint_channel(ImageData &image_data,
                                 const Brush &brush,
@@ -1564,8 +1674,14 @@ static void apply_paint_channel(ImageData &image_data,
         },
         exec_mode::grain_size(2));
 
-    if (!tile_cache.dirty_bounds.is_empty()) {
-      tile_data.mark_dirty(tile_cache.dirty_bounds);
+    /* The bleed ring around the stroke rides along into the dirty region: the partial GPU
+     * upload and the partial-update log below only ever see #dirty_region. */
+    Bounds<int2> bleed_bounds = tile_cache.dirty_bounds;
+    if (paint_layer_bleed_eligible(image_data.image, is_color_channel, is_normal_channel)) {
+      paint_layer_bleed_rect(*image_buffer, tile_cache.dirty_bounds, bleed_bounds);
+    }
+    if (!bleed_bounds.is_empty()) {
+      tile_data.mark_dirty(bleed_bounds);
     }
 
     /* [PL-DIAG] Normal-stroke diagnosis: read one written texel back from the ImBuf right after the
@@ -1897,8 +2013,21 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
 #if PBR_PAINT_IMAGE_PROFILE
       g_pair_paint_profile.tile_num.fetch_add(1);
 #endif
+      /* Each destination bleeds into its own buffer, but the node's dirty region is shared: the
+       * union covers every ring, so each image's partial upload still sees its own. */
+      Bounds<int2> bleed_union = tile_cache.dirty_bounds;
       for (const int dest_i : dests.index_range()) {
-        tile.mark_dirty(tile_cache.dirty_bounds);
+        const PaintChannelWriteDest &dest = dests[dest_i];
+        if (!paint_layer_bleed_eligible(dest.image_data->image, dest.is_color_channel, false)) {
+          continue;
+        }
+        Bounds<int2> dest_expanded = tile_cache.dirty_bounds;
+        paint_layer_bleed_rect(
+            *buffers[tile_i * dest_num + dest_i], tile_cache.dirty_bounds, dest_expanded);
+        bleed_union = bounds::merge(bleed_union, dest_expanded);
+      }
+      for (const int dest_i : dests.index_range()) {
+        tile.mark_dirty(bleed_union);
         BKE_image_mark_dirty(dests[dest_i].image_data->image,
                              buffers[tile_i * dest_num + dest_i]);
         dest_pixels_updated[dest_i] = true;
@@ -1962,16 +2091,19 @@ static void push_undo(const PixelNode &node_data,
  * under the node's UV region (#push_undo): a coarse node spans most of a 4096 map, which made the
  * first dab of each stroke copy the whole map once per channel. \a tile_caches is indexed like
  * #PixelNode::tiles. The bounds grow by the image's seam margin because
- * #fix_non_manifold_seam_bleeding writes the bleed texels next to painted ones.
+ * #fix_non_manifold_seam_bleeding writes the bleed texels next to painted ones, and by \a
+ * bleed_margin because #paint_layer_bleed_rect dilates paint into the ring around the stroke after
+ * the undo snapshot is taken: without it an undone stroke would leave its ring behind.
  */
 static void push_undo_bounds(ImageData &image_data,
                              const PixelNode &pixel_node,
-                             const Span<RowFactorCache> tile_caches)
+                             const Span<RowFactorCache> tile_caches,
+                             const int bleed_margin)
 {
   PRF_scope(ProfileCategory::Editor);
   Image &image = *image_data.image;
   ImageUser &image_user = *image_data.image_user;
-  const int margin = math::max(int(image.seam_margin), 0);
+  const int margin = math::max(int(image.seam_margin), 0) + bleed_margin;
   PaintTileMap *undo_tiles = ED_image_paint_tile_map_get();
   for (const int tile_i : pixel_node.tiles.index_range()) {
     const Bounds<int2> &bounds = tile_caches[tile_i].dirty_bounds;
@@ -2475,7 +2607,16 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       node_mask.foreach_index(
           [&](const int i, const int pos) {
             for (const PaintChannelWriteDest &dest : dests) {
-              push_undo_bounds(*dest.image_data, pixel_nodes[i], node_factor_caches[pos]);
+              /* The bleed ring is written after the stroke, so its pre-stroke texels must join
+               * the snapshot now, together with the stroke itself. */
+              const int bleed_margin = paint_layer_bleed_eligible(
+                                           dest.image_data->image,
+                                           dest.is_color_channel,
+                                           false) ?
+                                           PAINT_LAYER_BLEED_RADIUS :
+                                           0;
+              push_undo_bounds(
+                  *dest.image_data, pixel_nodes[i], node_factor_caches[pos], bleed_margin);
             }
           },
           exec_mode::grain_size(1));

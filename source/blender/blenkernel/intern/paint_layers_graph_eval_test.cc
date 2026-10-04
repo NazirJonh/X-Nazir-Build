@@ -40,6 +40,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 
+#include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_generate.hh"
@@ -167,6 +168,18 @@ class GraphInterpreter {
 
   RGBA sample_image(Image *image, const char *output) const
   {
+    return sample_image_uv(image, -1.0f, -1.0f, output);
+  }
+
+  /**
+   * Read the Image Texture at the UV \a u/\a v, or -- when either is negative -- at the current
+   * reference texel, the way the plain node reads it. A mapped chain (UV Map -> Mapping -> Image)
+   * supplies the vector, so the read follows the mapping: bilinear, with Repeat edges, exactly the
+   * wrap the CPU resample and the shader's REPEAT textures use. The colorspace, premultiply and
+   * alpha stages are the sample's own, shared with the direct read.
+   */
+  RGBA sample_image_uv(Image *image, const float u_in, const float v_in, const char *output) const
+  {
     RGBA out;
     if (image == nullptr) {
       return out;
@@ -175,50 +188,80 @@ class GraphInterpreter {
     BKE_imageuser_default(&iuser);
     void *lock = nullptr;
     ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
-    if (ibuf == nullptr || x >= ibuf->x || y >= ibuf->y) {
-      if (ibuf != nullptr) {
-        BKE_image_release_ibuf(image, ibuf, lock);
-      }
+    if (ibuf == nullptr) {
       return out;
     }
-    /* Straight alpha, as the generator's layer and mask maps are created (#IMA_ALPHA_STRAIGHT): the
-     * Image Texture Alpha output is then exactly the stored alpha, like the CPU reads it. */
+    const float u = (u_in >= 0.0f) ? u_in : (float(x) + 0.5f) / float(ibuf->x);
+    const float v = (v_in >= 0.0f) ? v_in : (float(y) + 0.5f) / float(ibuf->y);
+    /* Repeat edges: a UV outside [0, 1] wraps, then a bilinear read follows. */
+    const float uu = u - floorf(u);
+    const float vv = v - floorf(v);
+    const float su = uu * float(ibuf->x) - 0.5f;
+    const float sv = vv * float(ibuf->y) - 0.5f;
     const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
-    const int64_t offset = (int64_t(y) * ibuf->x + x) * channels;
+    auto wrap_texel = [&](int i, int n) {
+      const int r = i % n;
+      return r < 0 ? r + n : r;
+    };
+    auto read_texel = [&](const int tx, const int ty, float r_pixel[4]) {
+      const int64_t offset = (int64_t(ty) * ibuf->x + tx) * channels;
+      if (ibuf->byte_buffer.data != nullptr) {
+        const uchar *p = ibuf->byte_data() + offset;
+        r_pixel[0] = float(p[0]) / 255.0f;
+        r_pixel[1] = float(p[1]) / 255.0f;
+        r_pixel[2] = float(p[2]) / 255.0f;
+        r_pixel[3] = channels == 4 ? float(p[3]) / 255.0f : 1.0f;
+        if (ibuf->byte_buffer.colorspace != nullptr) {
+          IMB_colormanagement_colorspace_to_scene_linear_v4(
+              r_pixel, false, ibuf->byte_buffer.colorspace);
+        }
+      }
+      else {
+        const float *p = ibuf->float_buffer.data + offset;
+        r_pixel[0] = p[0];
+        r_pixel[1] = p[1];
+        r_pixel[2] = p[2];
+        r_pixel[3] = channels == 4 ? p[3] : 1.0f;
+        if (r_pixel[3] > 0.0f) {
+          const float inv = 1.0f / r_pixel[3];
+          r_pixel[0] *= inv;
+          r_pixel[1] *= inv;
+          r_pixel[2] *= inv;
+        }
+        if (ibuf->float_buffer.colorspace != nullptr) {
+          IMB_colormanagement_colorspace_to_scene_linear_v4(
+              r_pixel, false, ibuf->float_buffer.colorspace);
+        }
+      }
+    };
     float pixel[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    if (ibuf->byte_buffer.data != nullptr) {
-      const uchar *p = ibuf->byte_data() + offset;
-      pixel[0] = float(p[0]) / 255.0f;
-      pixel[1] = float(p[1]) / 255.0f;
-      pixel[2] = float(p[2]) / 255.0f;
-      pixel[3] = channels == 4 ? float(p[3]) / 255.0f : 1.0f;
-      if (ibuf->byte_buffer.colorspace != nullptr) {
-        IMB_colormanagement_colorspace_to_scene_linear_v4(
-            pixel, false, ibuf->byte_buffer.colorspace);
+    if (u_in >= 0.0f || v_in >= 0.0f) {
+      /* A mapped read: bilinear over the wrapped coordinates. */
+      const float a = su - floorf(su);
+      const float b = sv - floorf(sv);
+      const int x0 = int(floorf(su));
+      const int y0 = int(floorf(sv));
+      float t00[4], t10[4], t01[4], t11[4];
+      read_texel(wrap_texel(x0, ibuf->x), wrap_texel(y0, ibuf->y), t00);
+      read_texel(wrap_texel(x0 + 1, ibuf->x), wrap_texel(y0, ibuf->y), t10);
+      read_texel(wrap_texel(x0, ibuf->x), wrap_texel(y0 + 1, ibuf->y), t01);
+      read_texel(wrap_texel(x0 + 1, ibuf->x), wrap_texel(y0 + 1, ibuf->y), t11);
+      for (const int k : IndexRange(4)) {
+        pixel[k] = (1.0f - a) * (1.0f - b) * t00[k] + a * (1.0f - b) * t10[k] +
+                   (1.0f - a) * b * t01[k] + a * b * t11[k];
       }
     }
     else {
-      const float *p = ibuf->float_buffer.data + offset;
-      pixel[0] = p[0];
-      pixel[1] = p[1];
-      pixel[2] = p[2];
-      pixel[3] = channels == 4 ? p[3] : 1.0f;
-      /* A float buffer is premultiplied: straighten it, then decode its colorspace. */
-      if (pixel[3] > 0.0f) {
-        const float inv = 1.0f / pixel[3];
-        pixel[0] *= inv;
-        pixel[1] *= inv;
-        pixel[2] *= inv;
+      /* The direct read of the current reference texel; out of range stays empty, as the plain
+       * Image Texture branch always did. */
+      if (x >= ibuf->x || y >= ibuf->y) {
+        BKE_image_release_ibuf(image, ibuf, lock);
+        return out;
       }
-      if (ibuf->float_buffer.colorspace != nullptr) {
-        IMB_colormanagement_colorspace_to_scene_linear_v4(
-            pixel, false, ibuf->float_buffer.colorspace);
-      }
+      read_texel(x, y, pixel);
     }
-    /* Model the GPU texture upload: an #IMA_GPU_LINEAR_PREMUL byte buffer is stored as a scene
-     * linear, pre-multiplied float texture, so its straight byte RGB is multiplied by alpha here
-     * (colormanagement.cc's `use_premultiply` path). Without this stage the interpreter sees the
-     * raw byte buffer and cannot show the double multiply that makes the viewport halo. */
+    /* Straight alpha, as the generator's layer and mask maps are created (#IMA_ALPHA_STRAIGHT): the
+     * Image Texture Alpha output is then exactly the stored alpha, like the CPU reads it. */
     const bool gpu_premul = (image->flag & IMA_GPU_LINEAR_PREMUL) != 0;
     if (gpu_premul && ibuf->byte_buffer.data != nullptr) {
       pixel[0] *= pixel[3];
@@ -352,14 +395,68 @@ class GraphInterpreter {
     switch (node.type_legacy) {
       case SH_NODE_TEX_IMAGE: {
         /* The generator sets Extend only on a MESH_MAP atlas' node; sampled bilinearly through the
-         * reference grid, like the CPU resample reads it. Painted maps keep the direct read. */
+         * reference grid, like the CPU resample reads it. Painted maps keep the direct read.
+         * A mapped chain (UV Map -> Mapping -> Image) feeds the Vector input: the read follows the
+         * mapping, with the Repeat wrap the graph and the CPU agree on. */
         const NodeTexImage *storage = static_cast<const NodeTexImage *>(node.storage);
         if (storage != nullptr && storage->extension == SHD_IMAGE_EXTENSION_EXTEND &&
             ref_width > 0 && ref_height > 0)
         {
           return sample_image_extend(id_cast<Image *>(node.id), out_identifier);
         }
+        bNode &mutable_node = const_cast<bNode &>(node);
+        const bNodeSocket *vector = bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr);
+        /* Only a Mapping in front moves the read; a bare UV Map feed is the reference texel, which
+         * the direct read below already is (the UV Map node has no grid in some tests). */
+        if (vector != nullptr && !vector->directly_linked_links().is_empty() &&
+            vector->directly_linked_links()[0]->fromnode->type_legacy == SH_NODE_MAPPING)
+        {
+          const RGBA uv = eval_socket(*vector);
+          return sample_image_uv(id_cast<Image *>(node.id), uv.r, uv.g, out_identifier);
+        }
         return sample_image(id_cast<Image *>(node.id), out_identifier);
+      }
+      case SH_NODE_MAPPING: {
+        /* Point only, the one type the generated chain builds: `R * (uv * scale) + offset`, the
+         * rotation around Z. The output is a Vector; its fourth component stays 1. */
+        bNode &mutable_node = const_cast<bNode &>(node);
+        const RGBA uv = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const RGBA scale = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Scale"_ustr));
+        const RGBA location = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Location"_ustr));
+        const RGBA rotation = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Rotation"_ustr));
+        const float angle = rotation.b;
+        const float cos_rot = cosf(angle);
+        const float sin_rot = sinf(angle);
+        if (node.custom1 == NODE_MAPPING_TYPE_VECTOR) {
+          /* `R * (v * scale)`, no location; the rotation is around Z only (the generator never
+           * sets X/Y). */
+          const float vx = uv.r * scale.r;
+          const float vy = uv.g * scale.g;
+          return {vx * cos_rot - vy * sin_rot, vx * sin_rot + vy * cos_rot, uv.b * scale.b, 1.0f};
+        }
+        if (node.custom1 == NODE_MAPPING_TYPE_TEXTURE) {
+          /* `(R^-1 * (v - location)) / scale`, the divide being the shader's safe divide. */
+          const float vx = uv.r - location.r;
+          const float vy = uv.g - location.g;
+          auto safe = [](const float a, const float b) { return b != 0.0f ? a / b : 0.0f; };
+          return {safe(vx * cos_rot + vy * sin_rot, scale.r),
+                  safe(-vx * sin_rot + vy * cos_rot, scale.g),
+                  safe(uv.b - location.b, scale.b),
+                  1.0f};
+        }
+        if (node.custom1 != NODE_MAPPING_TYPE_POINT) {
+          return uv;
+        }
+        const float sx = uv.r * scale.r;
+        const float sy = uv.g * scale.g;
+        return {sx * cos_rot - sy * sin_rot + location.r,
+                sx * sin_rot + sy * cos_rot + location.g,
+                uv.b * scale.b + location.b,
+                1.0f};
       }
       case SH_NODE_UVMAP: {
         /* The generated stack reads one named UV layer. The tests run with a single UV layer and
@@ -481,6 +578,10 @@ class GraphInterpreter {
           float normalized[3] = {vector.r, vector.g, vector.b};
           normalize_v3(normalized);
           return {normalized[0], normalized[1], normalized[2], 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_SIGN) {
+          auto sign = [](const float a) { return a > 0.0f ? 1.0f : (a < 0.0f ? -1.0f : 0.0f); };
+          return {sign(vector.r), sign(vector.g), sign(vector.b), 1.0f};
         }
         if (node.custom1 == NODE_VECTOR_MATH_MULTIPLY_ADD) {
           const RGBA scale = eval_socket(
@@ -912,6 +1013,89 @@ TEST_F(PaintLayersGraphEvalTest, compose_color_alpha_uses_linked_color_and_alpha
   EXPECT_FLOAT_EQ(result.g, color[1]);
   EXPECT_FLOAT_EQ(result.b, color[2]);
   EXPECT_FLOAT_EQ(result.a, 0.3f);
+}
+
+/** Stage 2: the interpreter reads a mapped chain (UV Map -> Mapping -> Image Texture) at the
+ * vector the mapping produces, with the Repeat wrap, instead of the direct texel. */
+TEST_F(PaintLayersGraphEvalTest, mapping_node_feeds_the_image_texture_vector)
+{
+  bNodeTree *tree = bke::node_tree_add_tree(bmain, "MappedChain", "ShaderNodeTree");
+  ASSERT_NE(tree, nullptr);
+
+  /* A 2x2 Non-Color map whose bottom-left texel is red, the rest green. */
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 2, 2, "MappedChainImg", 32, false, IMA_GENTYPE_BLANK, black, false, true, false);
+  ASSERT_NE(map, nullptr);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(map, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    const uchar colors[4][4] = {{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 255, 0, 255}, {0, 255, 0, 255}};
+    for (const int i : IndexRange(4)) {
+      memcpy(pixels + i * 4, colors[i], 4);
+    }
+    BKE_image_release_ibuf(map, ibuf, lock);
+  }
+  make_image_data(map);
+
+  bNode *uv_map = bke::node_add_static_node(nullptr, *tree, SH_NODE_UVMAP);
+  bNode *mapping = bke::node_add_static_node(nullptr, *tree, SH_NODE_MAPPING);
+  bNode *tex = bke::node_add_static_node(nullptr, *tree, SH_NODE_TEX_IMAGE);
+  ASSERT_NE(uv_map, nullptr);
+  ASSERT_NE(mapping, nullptr);
+  ASSERT_NE(tex, nullptr);
+  mapping->custom1 = NODE_MAPPING_TYPE_POINT;
+  tex->id = &map->id;
+  id_us_plus(&map->id);
+  bke::node_add_link(*tree,
+                     *uv_map,
+                     *bke::node_find_socket(*uv_map, SOCK_OUT, "UV"_ustr),
+                     *mapping,
+                     *bke::node_find_socket(*mapping, SOCK_IN, "Vector"_ustr));
+  bke::node_add_link(*tree,
+                     *mapping,
+                     *bke::node_find_socket(*mapping, SOCK_OUT, "Vector"_ustr),
+                     *tex,
+                     *bke::node_find_socket(*tex, SOCK_IN, "Vector"_ustr));
+  tree->ensure_topology_cache();
+
+  GraphInterpreter interpreter;
+  interpreter.tree = tree;
+  /* With no ref grid the UV Map node reads (0, 0), so the Mapping output is its offset alone:
+   * (0.25, 0.25) lands exactly on the bottom-left texel of the 2x2 map. */
+  copy_v3_fl3(static_cast<bNodeSocketValueVector *>(
+                  bke::node_find_socket(*mapping, SOCK_IN, "Location"_ustr)->default_value)
+                  ->value,
+              0.25f,
+              0.25f,
+              0.0f);
+  const RGBA mapped = interpreter.eval_output(*tex, "Color");
+  EXPECT_NEAR(mapped.r, 1.0f, 1e-5f);
+  EXPECT_NEAR(mapped.g, 0.0f, 1e-5f);
+  EXPECT_NEAR(mapped.b, 0.0f, 1e-5f);
+
+  /* Repeat: offset (1.25, 0.25) wraps to the same texel. */
+  copy_v3_fl3(static_cast<bNodeSocketValueVector *>(
+                  bke::node_find_socket(*mapping, SOCK_IN, "Location"_ustr)->default_value)
+                  ->value,
+              1.25f,
+              0.25f,
+              0.0f);
+  const RGBA wrapped = interpreter.eval_output(*tex, "Color");
+  EXPECT_NEAR(wrapped.r, 1.0f, 1e-5f);
+  EXPECT_NEAR(wrapped.g, 0.0f, 1e-5f);
+
+  /* Offset (0.75, 0.25) reads the bottom-right texel: green. */
+  copy_v3_fl3(static_cast<bNodeSocketValueVector *>(
+                  bke::node_find_socket(*mapping, SOCK_IN, "Location"_ustr)->default_value)
+                  ->value,
+              0.75f,
+              0.25f,
+              0.0f);
+  const RGBA shifted = interpreter.eval_output(*tex, "Color");
+  EXPECT_NEAR(shifted.g, 1.0f, 1e-5f);
+  EXPECT_NEAR(shifted.r, 0.0f, 1e-5f);
 }
 
 /**
@@ -12357,6 +12541,352 @@ TEST_F(PaintLayersGraphEvalTest, mesh_map_atlas_equal_size_reads_the_texel_direc
     EXPECT_NEAR(cpu.g, direct, tolerance) << px;
     EXPECT_NEAR(cpu.b, direct, tolerance) << px;
   }
+}
+
+/**
+ * The reference for a tangent-space normal read through a UV mapping `uv' = R * (S * uv) + t`: the
+ * covariant counterpart `S * R^T` of the transform, with only the sign of the scale kept (a
+ * magnitude does not turn a direction).
+ */
+static void normal_remap_reference(const float n[3],
+                                   const float rotation,
+                                   const float scale_x,
+                                   const float scale_y,
+                                   float r_out[3])
+{
+  const float cos_rot = cosf(rotation);
+  const float sin_rot = sinf(rotation);
+  const float sign_x = scale_x < 0.0f ? -1.0f : 1.0f;
+  const float sign_y = scale_y < 0.0f ? -1.0f : 1.0f;
+  r_out[0] = sign_x * (cos_rot * n[0] + sin_rot * n[1]);
+  r_out[1] = sign_y * (-sin_rot * n[0] + cos_rot * n[1]);
+  r_out[2] = n[2];
+}
+
+/** Evaluate the generated Normal Remap chain on the decoded normal \a n; returns its node count. */
+static int normal_remap_chain_eval(Main &bmain,
+                                   const float n[3],
+                                   const float rotation,
+                                   const float scale[3],
+                                   float r_out[3])
+{
+  bNodeTree *tree = bke::node_tree_add_tree(&bmain, "NormalRemapChain", "ShaderNodeTree");
+  bNode *source = bke::node_add_static_node(nullptr, *tree, SH_NODE_RGB);
+  bNode *rotation_node = bke::node_add_static_node(nullptr, *tree, SH_NODE_RGB);
+  bNode *scale_node = bke::node_add_static_node(nullptr, *tree, SH_NODE_RGB);
+  bNodeSocket *source_out = bke::node_find_socket(*source, SOCK_OUT, "Color"_ustr);
+  bNodeSocket *rotation_out = bke::node_find_socket(*rotation_node, SOCK_OUT, "Color"_ustr);
+  bNodeSocket *scale_out = bke::node_find_socket(*scale_node, SOCK_OUT, "Color"_ustr);
+  const float encoded[4] = {n[0] * 0.5f + 0.5f, n[1] * 0.5f + 0.5f, n[2] * 0.5f + 0.5f, 1.0f};
+  const float rotation_value[4] = {0.0f, 0.0f, rotation, 1.0f};
+  const float scale_value[4] = {scale[0], scale[1], scale[2], 1.0f};
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(source_out->default_value)->value, encoded);
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(rotation_out->default_value)->value,
+             rotation_value);
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(scale_out->default_value)->value, scale_value);
+  bNode *out_node = nullptr;
+  bNodeSocket *out = bke::paint_layers::normal_remap_nodes_add(*tree,
+                                                               *source,
+                                                               *source_out,
+                                                               {rotation_node, rotation_out},
+                                                               {scale_node, scale_out},
+                                                               0.0f,
+                                                               0.0f,
+                                                               out_node);
+  tree->ensure_topology_cache();
+  GraphInterpreter interpreter;
+  interpreter.tree = tree;
+  const RGBA encoded_out = interpreter.eval_output(*out_node, out->identifier);
+  r_out[0] = encoded_out.r * 2.0f - 1.0f;
+  r_out[1] = encoded_out.g * 2.0f - 1.0f;
+  r_out[2] = encoded_out.b * 2.0f - 1.0f;
+  return BLI_listbase_count(&tree->nodes);
+}
+
+/**
+ * The generated Normal Remap chain: identity for a zero rotation and unit scale, a rotation by the
+ * mapping angle, and a flip by the sign of each scale axis (never its magnitude). The order is the
+ * covariant `S * R^T`, so a rotation followed by a mirror differs from the reverse.
+ */
+TEST_F(PaintLayersGraphEvalTest, normal_remap_chain_rotates_and_mirrors_the_vectors)
+{
+  const float tolerance = 1e-5f;
+  const float half_pi = 1.5707964f;
+  struct Case {
+    float n[3];
+    float rotation;
+    float scale[3];
+  };
+  const Case cases[] = {
+      /* (a) Identity. */
+      {{0.3f, -0.5f, 0.8f}, 0.0f, {1.0f, 1.0f, 1.0f}},
+      /* (b) Quarter and half turns on the axes. */
+      {{1.0f, 0.0f, 0.0f}, half_pi, {1.0f, 1.0f, 1.0f}},
+      {{0.0f, 1.0f, 0.0f}, half_pi, {1.0f, 1.0f, 1.0f}},
+      {{1.0f, 0.0f, 0.0f}, 2.0f * half_pi, {1.0f, 1.0f, 1.0f}},
+      {{0.0f, 1.0f, 0.0f}, 2.0f * half_pi, {1.0f, 1.0f, 1.0f}},
+      /* (c) Mirror by U, by V and by both. */
+      {{0.3f, 0.5f, 0.8f}, 0.0f, {-1.0f, 1.0f, 1.0f}},
+      {{0.3f, 0.5f, 0.8f}, 0.0f, {1.0f, -1.0f, 1.0f}},
+      {{0.3f, 0.5f, 0.8f}, 0.0f, {-1.0f, -1.0f, 1.0f}},
+      /* (d) Rotation and mirror together fix the operation order. */
+      {{1.0f, 0.0f, 0.0f}, half_pi, {-1.0f, 1.0f, 1.0f}},
+      {{0.0f, 1.0f, 0.0f}, half_pi, {-1.0f, 1.0f, 1.0f}},
+      {{0.6f, -0.2f, 0.7f}, 0.7f, {1.0f, -1.0f, 1.0f}},
+      /* The magnitude of the scale and a free angle do not change the sign rule. */
+      {{0.6f, -0.2f, 0.7f}, -1.1f, {3.0f, -0.25f, 1.0f}},
+  };
+  int index = 0;
+  for (const Case &test : cases) {
+    SCOPED_TRACE(::testing::Message() << "case " << index++);
+    float expected[3];
+    normal_remap_reference(test.n, test.rotation, test.scale[0], test.scale[1], expected);
+    float got[3];
+    normal_remap_chain_eval(*bmain, test.n, test.rotation, test.scale, got);
+    EXPECT_NEAR(got[0], expected[0], tolerance);
+    EXPECT_NEAR(got[1], expected[1], tolerance);
+    EXPECT_NEAR(got[2], expected[2], tolerance);
+  }
+  /* The identity case is the input itself, and the quarter turn sends +Y to +X. */
+  float identity[3];
+  const float unit_scale[3] = {1.0f, 1.0f, 1.0f};
+  const float tilted[3] = {0.3f, -0.5f, 0.8f};
+  normal_remap_chain_eval(*bmain, tilted, 0.0f, unit_scale, identity);
+  EXPECT_NEAR(identity[0], 0.3f, tolerance);
+  EXPECT_NEAR(identity[1], -0.5f, tolerance);
+  EXPECT_NEAR(identity[2], 0.8f, tolerance);
+  float turned[3];
+  const float up[3] = {0.0f, 1.0f, 0.0f};
+  normal_remap_chain_eval(*bmain, up, half_pi, unit_scale, turned);
+  EXPECT_NEAR(turned[0], 1.0f, tolerance);
+  EXPECT_NEAR(turned[1], 0.0f, tolerance);
+}
+
+/** Changing the scale or the rotation values never changes the chain's node count. */
+TEST_F(PaintLayersGraphEvalTest, normal_remap_chain_topology_ignores_the_values)
+{
+  const float n[3] = {0.3f, 0.5f, 0.8f};
+  const float unit[3] = {1.0f, 1.0f, 1.0f};
+  const float other[3] = {-4.0f, 0.5f, 1.0f};
+  float out[3];
+  const int base = normal_remap_chain_eval(*bmain, n, 0.0f, unit, out);
+  EXPECT_EQ(normal_remap_chain_eval(*bmain, n, 1.3f, other, out), base);
+}
+
+/**
+ * A mapped Fill row on the Normal channel: the graph and the CPU both rotate and mirror the map's
+ * vectors before they are combined, and the closed form agrees. A Base Color row of the same
+ * mapping reads its texels unchanged apart from the read point.
+ */
+TEST_F(PaintLayersGraphEvalTest, mapped_fill_normal_follows_rotation_and_mirror_in_graph_and_cpu)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  const float rotation = 1.5707964f;
+  const float scale[2] = {-2.0f, 1.0f};
+
+  ma = BKE_material_add(bmain, "MappedFillNormal");
+  Image *bottom_map = add_solid_image("MappedFillNormalBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
+
+  Image *detail_map = add_solid_image("MappedFillNormalDetail", size, 200, 100, 220, 255);
+  make_image_data(detail_map);
+  MaterialPaintLayer *fill = add_layer("MappedFill", MA_PAINT_LAYER_SOURCE_CONSTANT, detail_map, channel);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, rotation));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA bottom_enc = interpreter.sample_image(bottom_map, "Color");
+  const RGBA detail_enc = interpreter.sample_image(detail_map, "Color");
+  const float detail[3] = {detail_enc.r * 2.0f - 1.0f,
+                           detail_enc.g * 2.0f - 1.0f,
+                           detail_enc.b * 2.0f - 1.0f};
+  float remapped[3];
+  normal_remap_reference(detail, rotation, scale[0], scale[1], remapped);
+  float expected[3];
+  normal_result_reference(bottom_enc, remapped, 1.0f, expected);
+  float unmapped[3];
+  normal_result_reference(bottom_enc, detail, 1.0f, unmapped);
+  EXPECT_GT(fabsf(expected[0] - unmapped[0]) + fabsf(expected[1] - unmapped[1]), 0.05f);
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, expected[0], tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.g, expected[1], tolerance) << "graph x=" << x;
+    EXPECT_NEAR(graph.b, expected[2], tolerance) << "graph x=" << x;
+    EXPECT_NEAR(cpu.r, expected[0], tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(cpu.g, expected[1], tolerance) << "cpu x=" << x;
+    EXPECT_NEAR(cpu.b, expected[2], tolerance) << "cpu x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/** Mapping nodes of \a type_custom1 in \a tree and every wrapper copy under it. */
+static int mapping_nodes_of_type(const bNodeTree &tree, const int mapping_type)
+{
+  int count = 0;
+  for (const bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_MAPPING && node.custom1 == mapping_type) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * A mapped SourceGroup row whose Normal comes from a Normal Map over a texture: the wrapper
+ * re-orients the Color it exposes by the row's rotation and the sign of its scale, fed by the
+ * wrapper's mapping inputs.
+ */
+TEST_F(PaintLayersGraphEvalTest, source_group_normal_map_color_follows_the_row_mapping)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  const float rotation = 1.5707964f;
+  const float scale[2] = {-1.0f, 1.0f};
+
+  ma = BKE_material_add(bmain, "SGMappedNormalMap");
+  Image *bottom_map = add_solid_image("SGMappedNormalMapBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
+  Image *source_normal = add_solid_image("SGMappedNormalMapTexture", size, 200, 100, 220, 255);
+  make_image_data(source_normal);
+
+  bNode *principled = nullptr;
+  Material *source = make_wrapper_forced_source(*bmain, "SGMappedNormalMapSource", &principled);
+  bNodeTree &ntree = *source->nodetree;
+  bNode *texture = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  ASSERT_NE(texture, nullptr);
+  texture->id = &source_normal->id;
+  id_us_plus(&source_normal->id);
+  bNode *normal_map = bke::node_add_static_node(nullptr, ntree, SH_NODE_NORMAL_MAP);
+  ASSERT_NE(normal_map, nullptr);
+  bke::node_add_link(ntree,
+                     *texture,
+                     *bke::node_find_socket(*texture, SOCK_OUT, "Color"_ustr),
+                     *normal_map,
+                     *bke::node_find_socket(*normal_map, SOCK_IN, "Color"_ustr));
+  bke::node_add_link(ntree,
+                     *normal_map,
+                     *bke::node_find_socket(*normal_map, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, row, rotation));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+
+  bNodeTree *wrapper = wrapper_tree_find(*bmain, "SGMappedNormalMapSource");
+  ASSERT_NE(wrapper, nullptr);
+  /* One Texture-type Mapping is the remap; the source's UV Mapping is of the Point type. */
+  EXPECT_EQ(mapping_nodes_of_type(*wrapper, NODE_MAPPING_TYPE_TEXTURE), 1);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA bottom_enc = interpreter.sample_image(bottom_map, "Color");
+  const RGBA row_enc = interpreter.sample_image(source_normal, "Color");
+  const float detail[3] = {row_enc.r * 2.0f - 1.0f, row_enc.g * 2.0f - 1.0f, row_enc.b * 2.0f - 1.0f};
+  float remapped[3];
+  normal_remap_reference(detail, rotation, scale[0], scale[1], remapped);
+  float expected[3];
+  normal_result_reference(bottom_enc, remapped, 1.0f, expected);
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    interpreter.y = 0;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    EXPECT_NEAR(graph.r, expected[0], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.g, expected[1], tolerance) << "x=" << x;
+    EXPECT_NEAR(graph.b, expected[2], tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * The Bump / computed-normal branch of a mapped wrapper encodes a world-space-like vector, not a
+ * tangent-space map read through the UVs, so the remap must not touch it.
+ */
+TEST_F(PaintLayersGraphEvalTest, source_group_computed_normal_gets_no_remap_when_mapped)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  const float raw[3] = {2.0f, 1.0f, 0.5f};
+
+  ma = BKE_material_add(bmain, "SGMappedComputed");
+  Image *bottom_map = add_solid_image("SGMappedComputedBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
+
+  bNode *principled = nullptr;
+  Material *source = make_wrapper_forced_source(*bmain, "SGMappedComputedSource", &principled);
+  bNode *normal = bke::node_add_static_node(nullptr, *source->nodetree, SH_NODE_VECTOR_MATH);
+  ASSERT_NE(normal, nullptr);
+  normal->custom1 = NODE_VECTOR_MATH_NORMALIZE;
+  bNodeSocket *normal_in = bke::node_find_socket(*normal, SOCK_IN, "Vector"_ustr);
+  copy_v3_v3(static_cast<bNodeSocketValueVector *>(normal_in->default_value)->value, raw);
+  bke::node_add_link(*source->nodetree,
+                     *normal,
+                     *bke::node_find_socket(*normal, SOCK_OUT, "Vector"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, row, 1.5707964f));
+  BKE_paint_layers_active_set(*ma, row->marker);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(BKE_paint_layers_material_mode(*ma, *row), PaintLayerMaterialMode::SourceGroup);
+
+  bNodeTree *wrapper = wrapper_tree_find(*bmain, "SGMappedComputedSource");
+  ASSERT_NE(wrapper, nullptr);
+  EXPECT_EQ(mapping_nodes_of_type(*wrapper, NODE_MAPPING_TYPE_TEXTURE), 0);
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA bottom_enc = interpreter.sample_image(bottom_map, "Color");
+  float detail[3] = {raw[0], raw[1], raw[2]};
+  normalize_v3(detail);
+  float expected[3];
+  normal_result_reference(bottom_enc, detail, 1.0f, expected);
+  interpreter.x = 0;
+  interpreter.y = 0;
+  const RGBA graph = interpreter.eval_result(result_name(channel));
+  EXPECT_NEAR(graph.r, expected[0], tolerance);
+  EXPECT_NEAR(graph.g, expected[1], tolerance);
+  EXPECT_NEAR(graph.b, expected[2], tolerance);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
 }
 
 }  // namespace blender::bke::tests

@@ -864,6 +864,7 @@ bNode *layer_factor_node = nullptr;
 bNodeSocket *layer_factor_socket = nullptr;
 resolve_row_factor(layer,
                    tree,
+                   group_input,
                    location_x,
                    location_y,
                    substituted,
@@ -1149,8 +1150,31 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
           dst->projection = src_storage->projection;
         }
       }
+      /* A mapped row's live texture reads through the row's own Mapping node, fed by the row
+       * group's mapping inputs -- the same node a Fill branch builds. Tiling needs Repeat: the
+       * CPU remap repeats unconditionally, so the graph may not keep the source's Extend/Clip
+       * (a source like that would have moved the row to the wrapper instead). */
+      if (std::pair<bNode *, bNodeSocket *> mapping = outer_.mapping_vector_ensure(
+              tree, group_input, *layer, location_x - 180.0f, location_y);
+          mapping.first != nullptr && mapping.second != nullptr)
+      {
+        if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+          storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+        }
+        texture_vector_link_mapped(tree, *map, *mapping.first, *mapping.second);
+      }
       current.source_node = map;
       current.source = socket_out(*map, "Color");
+      if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && current.source != nullptr) {
+        /* The Mapping moved only the read point; the tangent-space vectors follow it. */
+        current.source = outer_.normal_remap_ensure(tree,
+                                                    *layer,
+                                                    *map,
+                                                    *current.source,
+                                                    current.source_node,
+                                                    location_x + 60.0f,
+                                                    location_y - 400.0f);
+      }
       leaf_map_node = map;
       /* A Material row's transparency is the source's Alpha input, not the channel map's own
        * alpha (the Principled's Base Color reads RGB only). It tracks no content alpha of its
@@ -1197,8 +1221,28 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
           storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
         }
       }
+      else if (std::pair<bNode *, bNodeSocket *> mapping = outer_.mapping_vector_ensure(
+                   tree, group_input, *layer, location_x - 180.0f, location_y);
+               mapping.first != nullptr && mapping.second != nullptr)
+      {
+        /* A mapped Fill layer reads its map through its own Mapping node; tiling needs Repeat. */
+        if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+          storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+        }
+        texture_vector_link_mapped(tree, *map, *mapping.first, *mapping.second);
+      }
       current.source_node = map;
       current.source = socket_out(*map, "Color");
+      if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && !mesh_map && current.source != nullptr) {
+        /* The Mapping moved only the read point; the tangent-space vectors follow it. */
+        current.source = outer_.normal_remap_ensure(tree,
+                                                    *layer,
+                                                    *map,
+                                                    *current.source,
+                                                    current.source_node,
+                                                    location_x + 60.0f,
+                                                    location_y - 400.0f);
+      }
       /* A scalar atlas (AO, Curvature, Edge) stores its value in R; spread it across RGB so a
        * colour channel reads it as grey and the CPU reads the same. An RGB atlas (Normal, IDs)
        * is wired as it is. */
@@ -1441,6 +1485,7 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
 
 void PaintLayersChainBuilder::resolve_row_factor(const MaterialPaintLayer *layer,
                                                  bNodeTree &tree,
+                                                 bNode *group_input,
                                                  const float location_x,
                                                  const float location_y,
                                                  const bool substituted,
@@ -1482,7 +1527,8 @@ void PaintLayersChainBuilder::resolve_row_factor(const MaterialPaintLayer *layer
                                                 cache))
   {
     /* The source's alpha is a live texture: the factor is that map's Alpha output, the same
-     * output the CPU reads as its coverage. */
+     * output the CPU reads as its coverage. A mapped row's Mapping sits before this texture
+     * too, and forces Repeat like the color map's does. */
     bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
     bNodeSocket *map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
     if (map != nullptr && map_alpha != nullptr) {
@@ -1506,6 +1552,15 @@ void PaintLayersChainBuilder::resolve_row_factor(const MaterialPaintLayer *layer
           dst->extension = src_storage->extension;
           dst->projection = src_storage->projection;
         }
+      }
+      if (std::pair<bNode *, bNodeSocket *> mapping = outer_.mapping_vector_ensure(
+              tree, group_input, *layer, location_x - 180.0f, location_y - 320.0f);
+          mapping.first != nullptr && mapping.second != nullptr)
+      {
+        if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+          storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+        }
+        texture_vector_link_mapped(tree, *map, *mapping.first, *mapping.second);
       }
       layer_factor_node = map;
       layer_factor_socket = map_alpha;

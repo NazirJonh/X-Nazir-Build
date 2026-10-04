@@ -643,6 +643,57 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                 box.label(text=issue.text)
 
 
+class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
+    """UV mapping of the active row's own maps.
+
+    Shown only while the row reads a repeatable map (RNA ``mapping_supported``, the one BKE
+    predicate the graph and the CPU share). The rotation turns the map lookup around Z; the
+    tangent-space vectors of a Normal map are rotated (and flipped by the scale sign) to follow it.
+
+    A Material row's mapping is live: it moves the source textures as they are rendered, so the
+    Image Editor shows it only while the row shows its source (Hybrid). In SourceGroup mode the
+    CPU preview and the Image Editor keep the last bake, which the mapping does not resample.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_mapping"
+    bl_label = "Mapping"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        _owner, layer = cls._active_layer(context)
+        return layer is not None and layer.mapping_supported
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        _owner, layer = self._active_layer(context)
+        if layer is None:
+            return
+
+        layout.prop(layer, "mapping_enabled", text="Enabled")
+        col = layout.column()
+        col.enabled = layer.mapping_enabled
+        col.prop(layer, "mapping_offset", text="Offset")
+        row = col.row(align=True)
+        row.prop(layer, "mapping_scale", text="Scale")
+        row.prop(layer, "mapping_scale_lock", text="", icon_only=True)
+        col.prop(layer, "mapping_rotation", text="Rotation")
+
+        if layer.mapping_enabled and not layer.mapping_applies:
+            # The mode cannot carry the mapping right now: the row shows its baked maps (a forced
+            # bake from the sampler budget, say), which the mapping does not resample.
+            col = layout.column()
+            col.enabled = False
+            col.label(text="Mapping ignored: the mode shows the baked maps", icon='INFO')
+
+        if layer.mapping_enabled:
+            col = layout.column(align=True)
+            col.enabled = False
+            col.label(text="Procedural (Generated) textures are not mapped", icon='BLANK1')
+
+
 class LAYER_MATERIAL_PT_source_material(LayerMaterialButtonsPanel, Panel):
     """The source material of the active Material layer: the material it bakes its channels from.
 
@@ -865,6 +916,7 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
         ob = context.object
 
         layout.prop_search(mat, "paint_layers_uv_map", ob.data, "uv_layers")
+        layout.prop(mat, "paint_layers_remap_all_uv")
         uv_name = mat.paint_layers_uv_map
         if not uv_name:
             layout.operator("material.mesh_map_use_active_uv", text="Use Active UV")
@@ -1004,6 +1056,7 @@ classes = (
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_mapping,
     LAYER_MATERIAL_PT_source_material,
     LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_custom_layer,

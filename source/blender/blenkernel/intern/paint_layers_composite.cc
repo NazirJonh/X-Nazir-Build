@@ -340,10 +340,15 @@ bool composite_image_layers_build(const Material &material,
       {
         return;
       }
-      /* A Fill whose channel holds an assigned map reads it like a Paint correction's map. */
+      /* A Fill whose channel holds an assigned map reads it like a Paint correction's map. A
+       * Fill mask that carries its own map reads it the same way the generator does; a Fill
+       * without a map stays the constant on both sides. */
       const bool fill = BKE_paint_layers_source_type(correction) ==
                             PaintLayerSourceType::Constant &&
-                        !(is_content && paint_layer_fill_effect_reads_map(material, correction, channel));
+                        (is_content ?
+                             !paint_layer_fill_reads_map(material, correction, channel) :
+                             paint_layer_mask_correction_image(material, correction, channel) ==
+                                 nullptr);
       /* A constant normal makes no sense, so a content Fill correction is unsupported in the Normal
        * channel; the generator leaves it out too. */
       if (normal_channel && is_content && fill) {
@@ -575,6 +580,30 @@ bool composite_image_layers_build(const Material &material,
       out_correction.enabled = true;
       out_correction.row_enabled = true;
       out_correction.marker = correction.marker;
+      /* The row's UV mapping travels with its map: applied only while the row remaps a repeatable
+       * map and its mode builds the node, the same gate the graph builds by. A Material-source
+       * correction is remapped by the CPU only in Hybrid; the mode is resolved once here rather
+       * than a second time inside the applied predicate. */
+      if (correction.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        out_correction.mapping_enabled = BKE_paint_layers_mapping_enabled_get(correction) &&
+                                         BKE_paint_layers_mapping_supported(material,
+                                                                            correction) &&
+                                         BKE_paint_layers_material_mode(material, correction) ==
+                                             PaintLayerMaterialMode::Hybrid;
+      }
+      else {
+        out_correction.mapping_enabled = BKE_paint_layers_mapping_applies(material, correction);
+      }
+      /* The live coverage map reads through the same Mapping as the content map (one node per
+       * row), so only the flag is its own: a baked coverage is never remapped. */
+      out_correction.coverage_mapping_enabled = out_correction.mapping_enabled &&
+                                                out_correction.coverage_from_alpha;
+      copy_v2_v2(out_correction.mapping_offset, correction.mapping.offset);
+      copy_v2_v2(out_correction.mapping_scale, correction.mapping.scale);
+      out_correction.mapping_rotation = correction.mapping.rotation;
+      /* Only a content map holds normals; a mask is reduced to a grey and never remapped as one. */
+      out_correction.tangent_normal = is_content && channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+                                      out_correction.mapping_enabled;
       if (is_content) {
         content_corrections.append(out_correction);
       }
@@ -658,6 +687,26 @@ bool composite_image_layers_build(const Material &material,
       }
     }
     out.blend = layer_channel_blend(*layer, channel);
+    /* Same rule as the corrections: the predicate is false for rows that do not remap (Mesh Map,
+     * folders, a Baked Material row), so the defaults stay for them. A SourceGroup Material row's
+     * CPU stack still reads its baked maps -- the wrapper is what the mapping lives in, and the
+     * CPU does not evaluate it -- so only a Hybrid row's live buffers go through the remap. */
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      /* Hybrid is the only mode the CPU remaps, and it is one of the two the applied predicate
+       * accepts, so the mode is computed once here instead of a second time inside that predicate
+       * (the resolve behind it is not free, and the build runs once per channel of the caller). */
+      out.mapping_enabled = BKE_paint_layers_mapping_enabled_get(*layer) &&
+                            BKE_paint_layers_mapping_supported(material, *layer) &&
+                            BKE_paint_layers_material_mode(material, *layer) ==
+                                PaintLayerMaterialMode::Hybrid;
+    }
+    else {
+      out.mapping_enabled = BKE_paint_layers_mapping_applies(material, *layer);
+    }
+    copy_v2_v2(out.mapping_offset, layer->mapping.offset);
+    copy_v2_v2(out.mapping_scale, layer->mapping.scale);
+    out.mapping_rotation = layer->mapping.rotation;
+    out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.mapping_enabled;
     /* The row's effective opacity times the channel's own multiplier and the disabled case; the
      * same helper the generator's per (row, channel) input reads. The mask stack is its own list of
      * corrections below. */
@@ -676,10 +725,16 @@ bool composite_image_layers_build(const Material &material,
     else if (BKE_paint_layers_material_live_image(
                  material, *layer, PAINT_MATERIAL_CHANNEL_ALPHA, &live_alpha_image, &live_alpha_iuser))
     {
-      /* A live source alpha map: read as its alpha, the output the generator uses as the factor. */
+      /* A live source alpha map: read as its alpha, the output the generator uses as the factor.
+       * A mapped row's graph puts its Mapping before this texture too, so the CPU remap follows
+       * the same gate the color map's does. */
       out.coverage_image = live_alpha_image;
       out.coverage_iuser = live_alpha_iuser;
       out.coverage_from_alpha = true;
+      out.coverage_mapping_enabled = out.mapping_enabled;
+      copy_v2_v2(out.coverage_mapping_offset, out.mapping_offset);
+      copy_v2_v2(out.coverage_mapping_scale, out.mapping_scale);
+      out.coverage_mapping_rotation = out.mapping_rotation;
     }
     else if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->bake != nullptr &&
              layer->bake->coverage != nullptr)

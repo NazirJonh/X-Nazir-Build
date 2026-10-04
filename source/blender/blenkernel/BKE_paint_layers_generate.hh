@@ -226,6 +226,13 @@ struct PaintLayersRegenerateReport {
     uint32_t source_uid;
     /** The row is the active one, or an ancestor of it, so its source stays live. */
     bool deferred;
+    /**
+     * The row asks for a UV mapping its mode cannot apply (ТЗ 2.2): the mode shows the baked
+     * maps (a forced bake from the sampler budget, say), so the mapping toggle sits inert until
+     * the mode changes. Reported for Layer rows only. A BAKE_NEVER row stays live and keeps its mapping.
+     * Reported rather than silently dropped -- the UI can tell the user why nothing moved.
+     */
+    bool mapping_ignored;
   };
   Vector<MaterialRowModeReport> material_rows;
 };
@@ -293,6 +300,11 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
  * \return null when the source cannot be expressed per channel -- see
  *         #PaintLayersSourceGroupRefusal -- and the row must stay on its baked maps.
  *
+ * \param mapped: whether the row mapping applies to any row of this source (ТЗ 2.2). It is part
+ *                of the wrapper's topology hash: turning it on rebuilds the wrapper with Mapping
+ *                nodes in front of the UV outputs and the three value inputs on the interface;
+ *                turning it off rebuilds it without. Toggling it is therefore a one-time rebuild,
+ *                and the values keep sliding through the inputs.
  * \param r_changed: set when the wrapper was created or rebuilt.
  * \param r_values_synced: set when an existing wrapper had the source's values copied into it.
  */
@@ -301,7 +313,8 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
                                                 Material &source,
                                                 PaintLayersSourceGroupRefusal &r_refusal,
                                                 bool *r_changed = nullptr,
-                                                bool *r_values_synced = nullptr);
+                                                bool *r_values_synced = nullptr,
+                                                bool mapped = false);
 
 /**
  * The state hash of \a ma's node tree, or zero when it has none. The recursive form includes every

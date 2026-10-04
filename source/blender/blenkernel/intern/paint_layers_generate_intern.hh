@@ -143,8 +143,27 @@ inline constexpr const char *ROLE_CORRECTION_OPACITY = "correction_opacity";
 inline constexpr const char *ROLE_CORRECTION_FILL = "correction_fill";
 /** #INPUT_ROLE_PROP value of a Fill correction's per-channel constant, one socket per live record. */
 inline constexpr const char *ROLE_CORRECTION_FILL_CHANNEL = "correction_fill_channel";
+/** #INPUT_ROLE_PROP value of a row's UV mapping offset (a Vector input holding offset + 0). */
+inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";
+/** #INPUT_ROLE_PROP value of a row's UV mapping scale (a Vector input holding scale + 1). */
+inline constexpr const char *ROLE_MAPPING_SCALE = "mapping_scale";
+/** #INPUT_ROLE_PROP value of a row's UV mapping rotation (a Vector input holding 0, 0, angle). */
+inline constexpr const char *ROLE_MAPPING_ROTATION = "mapping_rotation";
 /** #INPUT_ROLE_PROP value of a Hybrid Material row's live constant (ТЗ-26). */
 inline constexpr const char *ROLE_LIVE_CONSTANT = "live_constant";
+
+/** On a source-group wrapper's interface inputs: the row mapping value each carries (ТЗ 2.2).
+ * The wrapper is shared by every row of one source, so the values ride its interface; a row
+ * without the mapping applied leaves them unlinked and the wrapper's Mapping reads its identity
+ * defaults. The dot prefix keeps the names outside a source's own namespace, and the roles keep
+ * the value sync from ever touching them (a source carries no such role). */
+inline constexpr const char *SOURCE_GROUP_MAPPING_INPUT_PREFIX = ".PL Mapping ";
+inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_OFFSET = "source_mapping_offset";
+inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_SCALE = "source_mapping_scale";
+inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_ROTATION = "source_mapping_rotation";
+/** The generated Mapping node a wrapper inserts after a UV source; the dot prefix keeps the
+ * value sync (nodes match by name) from ever matching it against a source node. */
+inline constexpr const char *SOURCE_GROUP_MAPPING_NODE_NAME = ".PL Mapping";
 
 /** One owner's forced-bake markers, keeping the owning material so a same-uid free is safe. */
 struct ForcedBakeState {
@@ -310,6 +329,48 @@ void forced_bake_clear(const Material &ma)
 void forced_bake_remove(const Material &ma, const bUUID &marker)
 ;
 void generated_uv_maps_wire(bNodeTree &tree, const char *uv_name)
+;
+/**
+ * The input of \a tree's interface whose #INPUT_ROLE_PROP is \a role (one of the
+ * #SOURCE_GROUP_ROLE_MAPPING_* values), whatever its identifier is. A wrapper instance and the
+ * row group that feeds it carry different identifiers for the same role, so a link between them
+ * must look each side up by role in its own tree's interface. Null when there is none.
+ */
+bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const char *role)
+;
+/**
+ * The one coordinate source of \a tree: the existing `ShaderNodeUVMap` naming \a uv_name (made
+ * when missing), or -- with no name set -- the existing `ShaderNodeTexCoord` (made when missing).
+ * Returns the source node and its `UV` output. Idempotent: a second call finds the node the first
+ * one made, so every tree carries exactly one source no matter how many maps or Mapping nodes
+ * read it.
+ */
+std::pair<bNode *, bNodeSocket *> generated_uv_map_ensure(bNodeTree &tree, const char *uv_name)
+;
+/**
+ * Feed \a texture's `Vector` from \a mapping_out, replacing any link it already has. A `Vector`
+ * takes one link, so a coordinate source wired there first would leave the Mapping node dangling
+ * and the map unmapped.
+ */
+void texture_vector_link_mapped(bNodeTree &tree,
+                                bNode &texture,
+                                bNode &mapping,
+                                bNodeSocket &mapping_out)
+;
+/**
+ * Build the fixed four-node chain that re-orients an encoded tangent-space normal for a UV
+ * mapping: decode (`2c - 1`), Mapping(Texture) rotating by `-rotation` and dividing by
+ * `sign(scale)`, encode (`0.5n + 0.5`). \a rotation / \a scale are the sockets feeding the row's
+ * Mapping (null leaves identity). Returns the encoded output, and \a r_node its node.
+ */
+bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
+                                    bNode &color_node,
+                                    bNodeSocket &color,
+                                    const std::pair<bNode *, bNodeSocket *> &rotation,
+                                    const std::pair<bNode *, bNodeSocket *> &scale,
+                                    float location_x,
+                                    float location_y,
+                                    bNode *&r_node)
 ;
 void input_link_restore(Material &ma,
                         bNodeSocket &input,

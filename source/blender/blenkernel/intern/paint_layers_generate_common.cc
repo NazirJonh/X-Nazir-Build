@@ -557,7 +557,9 @@ void interface_name_unique(const bNodeTreeInterface &interface,
  */
 bool row_is_substituted(const Material &ma, const MaterialPaintLayer &layer)
 {
-  return layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL && BKE_paint_layers_bake_is_valid(ma, layer);
+  return layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL &&
+         !BKE_paint_layers_mapping_blocks_bake(ma, layer) &&
+         BKE_paint_layers_bake_is_valid(ma, layer);
 }
 
 /**

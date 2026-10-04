@@ -18,6 +18,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLI_hash.hh"
@@ -1373,6 +1374,180 @@ static ImBuf *composite_resample_mesh_map(const ImBuf *src,
   return dst;
 }
 
+/**
+ * Resample \a src onto a \a ref_width x \a ref_height grid through a row's UV mapping, as a float
+ * RGBA premultiplied scene-linear ImBuf the caller owns.
+ *
+ * Each reference texel centre `((x + 0.5) / W, (y + 0.5) / H)` is transformed exactly like the
+ * generated Mapping node (Point) does -- scale, then rotate around Z, then offset -- and the
+ * source is read bilinearly at `u * W_src - 0.5` with Repeat edges, the texel-centre convention
+ * #composite_resample_mesh_map uses. The taps are decoded to linear and filtered premultiplied,
+ * the way the Image Texture node filters before it un-premultiplies; the evaluator straightens
+ * the result on read, like every float map. The grey a mask reduces (mean, luminance, red) is
+ * therefore read after the mapping, matching the generator's grey chain.
+ */
+static ImBuf *composite_resample_mapped(const ImBuf *src,
+                                        const int ref_width,
+                                        const int ref_height,
+                                        const float offset[2],
+                                        const float scale[2],
+                                        const float rotation,
+                                        const bool tangent_normal)
+{
+  if (src == nullptr || ref_width <= 0 || ref_height <= 0 || src->x <= 0 || src->y <= 0) {
+    return nullptr;
+  }
+  const bool src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
+  if (!src_is_float && src->byte_buffer.data == nullptr) {
+    return nullptr;
+  }
+  const int src_channels = src->channels == 0 ? 4 : src->channels;
+  ImBuf *dst = IMB_allocImBuf(uint(ref_width), uint(ref_height), ImBufFlags::FloatData);
+  if (dst == nullptr || dst->float_data() == nullptr) {
+    if (dst != nullptr) {
+      IMB_freeImBuf(dst);
+    }
+    return nullptr;
+  }
+  dst->channels = 4;
+  float *out = dst->float_data_for_write();
+  /* The buffer's own colorspace, like the evaluator reads: a data buffer filters as stored. */
+  const ColorSpace *colorspace = src_is_float ? src->float_buffer.colorspace :
+                                                src->byte_buffer.colorspace;
+  const bool decode = colorspace != nullptr &&
+                      !IMB_colormanagement_space_is_data(colorspace) &&
+                      !IMB_colormanagement_space_is_scene_linear(colorspace);
+  /* One helper, shared by RNA, the graph and the CPU: zeroes read back as one. */
+  const float scale_x = BKE_paint_layers_mapping_scale_normalize(scale[0]);
+  const float scale_y = BKE_paint_layers_mapping_scale_normalize(scale[1]);
+  const float cos_rot = cosf(rotation);
+  const float sin_rot = sinf(rotation);
+  /* One straight-linear tap at wrapped texel (tx, ty), re-premultiplied for the filter below: byte
+   * buffers are straight-stored, float buffers premultiplied-stored, the convention the tile
+   * decode assumes. */
+  auto tap_straight = [&](const int tx, const int ty, float r_tap[4]) {
+    if (!src_is_float) {
+      const uchar *pixel = src->byte_data() + (int64_t(ty) * src->x + tx) * 4;
+      r_tap[0] = float(pixel[0]) / 255.0f;
+      r_tap[1] = float(pixel[1]) / 255.0f;
+      r_tap[2] = float(pixel[2]) / 255.0f;
+      r_tap[3] = float(pixel[3]) / 255.0f;
+    }
+    else if (src_channels == 4) {
+      const float *pixel = src->float_buffer.data + (int64_t(ty) * src->x + tx) * 4;
+      copy_v4_v4(r_tap, pixel);
+      if (r_tap[3] > 0.0f) {
+        const float inv = 1.0f / r_tap[3];
+        r_tap[0] *= inv;
+        r_tap[1] *= inv;
+        r_tap[2] *= inv;
+      }
+    }
+    else {
+      /* Non-4-channel float buffers are rare here; read the nearest texel. */
+      const float *pixel = src->float_buffer.data +
+                           (int64_t(ty) * src->x + tx) * src_channels;
+      r_tap[0] = src_channels > 0 ? pixel[0] : 0.0f;
+      r_tap[1] = src_channels > 1 ? pixel[1] : 0.0f;
+      r_tap[2] = src_channels > 2 ? pixel[2] : 0.0f;
+      r_tap[3] = 1.0f;
+    }
+    if (decode) {
+      IMB_colormanagement_colorspace_to_scene_linear_v4(r_tap, false, colorspace);
+    }
+    r_tap[0] *= r_tap[3];
+    r_tap[1] *= r_tap[3];
+    r_tap[2] *= r_tap[3];
+  };
+  auto wrap_texel = [](const int i, const int n) {
+    const int r = i % n;
+    return r < 0 ? r + n : r;
+  };
+  for (int y = 0; y < ref_height; y++) {
+    const float v = (float(y) + 0.5f) / float(ref_height);
+    for (int x = 0; x < ref_width; x++) {
+      const float u = (float(x) + 0.5f) / float(ref_width);
+      const float sx = u * scale_x;
+      const float sy = v * scale_y;
+      float uu = sx * cos_rot - sy * sin_rot + offset[0];
+      float vv = sx * sin_rot + sy * cos_rot + offset[1];
+      /* Repeat edges, like the graph's REPEAT textures. */
+      uu -= floorf(uu);
+      vv -= floorf(vv);
+      const float su = uu * float(src->x) - 0.5f;
+      const float sv = vv * float(src->y) - 0.5f;
+      const int x0 = int(floorf(su));
+      const int y0 = int(floorf(sv));
+      const float a = su - float(x0);
+      const float b = sv - float(y0);
+      float t00[4], t10[4], t01[4], t11[4];
+      tap_straight(wrap_texel(x0, src->x), wrap_texel(y0, src->y), t00);
+      tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0, src->y), t10);
+      tap_straight(wrap_texel(x0, src->x), wrap_texel(y0 + 1, src->y), t01);
+      tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0 + 1, src->y), t11);
+      float *p = out + (int64_t(y) * ref_width + x) * 4;
+      for (const int k : IndexRange(4)) {
+        p[k] = (1.0f - a) * (1.0f - b) * t00[k] + a * (1.0f - b) * t10[k] +
+               (1.0f - a) * b * t01[k] + a * b * t11[k];
+      }
+      if (tangent_normal && p[3] > 0.0f) {
+        /* The mapping moved only the read point; the tangent-space vectors follow it. `S * R^T`
+         * (rotation undone, then flipped by the scale's sign) is the covariant counterpart of the
+         * UV transform `R * S`; the magnitude of the scale does not turn a direction. Un-premultiply
+         * first so the alpha does not skew the decode. */
+        const float inv_alpha = 1.0f / p[3];
+        const float nx = 2.0f * p[0] * inv_alpha - 1.0f;
+        const float ny = 2.0f * p[1] * inv_alpha - 1.0f;
+        const float nz = 2.0f * p[2] * inv_alpha - 1.0f;
+        const float rx = scale_x < 0.0f ? -1.0f : 1.0f;
+        const float ry = scale_y < 0.0f ? -1.0f : 1.0f;
+        p[0] = (0.5f * rx * (cos_rot * nx + sin_rot * ny) + 0.5f) * p[3];
+        p[1] = (0.5f * ry * (-sin_rot * nx + cos_rot * ny) + 0.5f) * p[3];
+        p[2] = (0.5f * nz + 0.5f) * p[3];
+      }
+    }
+  }
+  /* Premultiplied scene-linear, like every float map the evaluator straightens on read. */
+  IMB_colormanagement_assign_float_colorspace(
+      dst, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  return dst;
+}
+
+/**
+ * Replace an acquired map buffer by its UV-mapped resample when the row remaps it. A null
+ * resample keeps the acquired buffer, so a mapping never fails the stack, it just reads
+ * unmapped. One owned buffer per mapped map, reused for every pixel and tile of the evaluation;
+ * nothing is allocated per pixel.
+ */
+static void composite_mapped_remap(ImBuf *&r_ibuf,
+                                   const char *&r_colorspace_name,
+                                   const bool mapping_enabled,
+                                   const float mapping_offset[2],
+                                   const float mapping_scale[2],
+                                   const float mapping_rotation,
+                                   const int ref_width,
+                                   const int ref_height,
+                                   Vector<CompositeImageLock> &r_locks,
+                                   const bool tangent_normal = false)
+{
+  if (!mapping_enabled || r_ibuf == nullptr) {
+    return;
+  }
+  if (ImBuf *mapped = composite_resample_mapped(r_ibuf,
+                                                ref_width,
+                                                ref_height,
+                                                mapping_offset,
+                                                mapping_scale,
+                                                mapping_rotation,
+                                                tangent_normal))
+  {
+    /* The source buffer stays locked; the owned resample is what the evaluator reads. */
+    composite_image_own(mapped, r_locks);
+    r_ibuf = mapped;
+    r_colorspace_name = composite_buffer_colorspace_name(r_ibuf);
+  }
+}
+
 /** Acquire one image-layer's buffers into \a r_layer, recursing into a folder's children. */
 static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_layer,
                                   Vector<CompositeImageLock> &r_locks,
@@ -1398,6 +1573,10 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
   r_layer.has_coverage_constant = image_layer.has_coverage_constant;
   r_layer.coverage_from_alpha = image_layer.coverage_from_alpha;
   r_layer.coverage_iuser = image_layer.coverage_iuser;
+  r_layer.coverage_mapping_enabled = image_layer.coverage_mapping_enabled;
+  copy_v2_v2(r_layer.coverage_mapping_offset, image_layer.coverage_mapping_offset);
+  copy_v2_v2(r_layer.coverage_mapping_scale, image_layer.coverage_mapping_scale);
+  r_layer.coverage_mapping_rotation = image_layer.coverage_mapping_rotation;
 
   if (image_layer.color_image != nullptr) {
     r_layer.color_ibuf = composite_image_acquire(
@@ -1414,6 +1593,19 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
         composite_image_own(resampled, r_locks);
         r_layer.color_ibuf = resampled;
       }
+    }
+    /* Mesh atlases stay Extend and never remap; a mapped Fill reads through its Mapping here. */
+    if (!image_layer.is_mesh_map) {
+      composite_mapped_remap(r_layer.color_ibuf,
+                             r_layer.color_colorspace_name,
+                             image_layer.mapping_enabled,
+                             image_layer.mapping_offset,
+                             image_layer.mapping_scale,
+                             image_layer.mapping_rotation,
+                             ref_width,
+                             ref_height,
+                             r_locks,
+                             image_layer.tangent_normal);
     }
     /* The buffer's own colorspace, not the Image setting: the two can disagree, and the evaluator
      * has to decode what it is actually handed. */
@@ -1434,6 +1626,17 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
       return false;
     }
     r_layer.coverage_colorspace_name = composite_buffer_colorspace_name(r_layer.coverage_ibuf);
+    /* A mapped Hybrid row's live alpha reads through the row's mapping, the same transform the
+     * graph's node applies; the baked coverage of every other mode never does. */
+    composite_mapped_remap(r_layer.coverage_ibuf,
+                           r_layer.coverage_colorspace_name,
+                           r_layer.coverage_mapping_enabled,
+                           r_layer.coverage_mapping_offset,
+                           r_layer.coverage_mapping_scale,
+                           r_layer.coverage_mapping_rotation,
+                           ref_width,
+                           ref_height,
+                           r_locks);
   }
   for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
     PaintMaterialCompositeCorrectionBuffer buffer;
@@ -1451,6 +1654,18 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
         composite_image_own(resampled, r_locks);
         buffer.ibuf = resampled;
       }
+    }
+    if (!correction.mesh_map) {
+      composite_mapped_remap(buffer.ibuf,
+                             buffer.colorspace_name,
+                             correction.mapping_enabled,
+                             correction.mapping_offset,
+                             correction.mapping_scale,
+                             correction.mapping_rotation,
+                             ref_width,
+                             ref_height,
+                             r_locks,
+                             correction.tangent_normal);
     }
     if (buffer.ibuf != nullptr) {
       buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
@@ -1471,6 +1686,15 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
         return false;
       }
       buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
+      composite_mapped_remap(buffer.coverage_ibuf,
+                             buffer.coverage_colorspace_name,
+                             correction.coverage_mapping_enabled,
+                             correction.mapping_offset,
+                             correction.mapping_scale,
+                             correction.mapping_rotation,
+                             ref_width,
+                             ref_height,
+                             r_locks);
     }
     if (correction.is_folder) {
       /* A Stack correction has no map of its own; its children are acquired the same way a Layer
@@ -1503,6 +1727,19 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
         buffer.ibuf = resampled;
       }
     }
+    /* A mapped Fill mask is resampled through its Mapping here, so the grey the evaluator
+     * reduces afterwards is read after the mapping, like the generator's grey chain. */
+    if (!correction.mesh_map) {
+      composite_mapped_remap(buffer.ibuf,
+                             buffer.colorspace_name,
+                             correction.mapping_enabled,
+                             correction.mapping_offset,
+                             correction.mapping_scale,
+                             correction.mapping_rotation,
+                             ref_width,
+                             ref_height,
+                             r_locks);
+    }
     if (buffer.ibuf != nullptr) {
       buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
     }
@@ -1523,6 +1760,15 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
         return false;
       }
       buffer.coverage_colorspace_name = composite_buffer_colorspace_name(buffer.coverage_ibuf);
+      composite_mapped_remap(buffer.coverage_ibuf,
+                             buffer.coverage_colorspace_name,
+                             correction.coverage_mapping_enabled,
+                             correction.mapping_offset,
+                             correction.mapping_scale,
+                             correction.mapping_rotation,
+                             ref_width,
+                             ref_height,
+                             r_locks);
     }
     if (correction.is_folder) {
       buffer.is_folder = true;
@@ -1854,6 +2100,9 @@ bool BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel chann
   return BKE_paint_material_channel_info(channel).supports_image_paint;
 }
 
+static uint64_t composite_layers_hash(uint64_t hash,
+                                      Span<PaintMaterialCompositeImageLayer> image_layers);
+
 /** Extend \a hash with everything about one correction that changes the composited pixels. */
 static uint64_t composite_correction_hash(uint64_t hash,
                                           const PaintMaterialCompositeCorrection &correction)
@@ -1880,18 +2129,50 @@ static uint64_t composite_correction_hash(uint64_t hash,
                           correction.opacity);
   /* A Material correction's own coverage (its source's Alpha) can change independently of its
    * colour above -- a source Alpha edit must invalidate this composite too. */
-  return get_default_hash(
+  hash = get_default_hash(
       hash,
       correction.coverage_image != nullptr ? correction.coverage_image->id.session_uid : 0,
       correction.has_coverage_constant,
       correction.coverage_constant,
-      correction.coverage_from_alpha);
+      correction.coverage_from_alpha,
+      correction.coverage_mapping_enabled);
+  /* A mapping slider moves pixels without changing any image, so the normalized values join the
+   * hash like any other value input. */
+  hash = get_default_hash(hash,
+                          correction.mapping_enabled,
+                          correction.mapping_offset[0],
+                          correction.mapping_offset[1],
+                          BKE_paint_layers_mapping_scale_normalize(correction.mapping_scale[0]));
+  hash = get_default_hash(hash,
+                          BKE_paint_layers_mapping_scale_normalize(correction.mapping_scale[1]),
+                          correction.mapping_rotation,
+                          correction.tangent_normal);
+  /* A flat Fill-effect colour has no image behind it, and the flags below change how the same map
+   * is read, so none of them can be left out or a slider/toggle would serve a stale composite. */
+  hash = get_default_hash(hash,
+                          correction.has_constant_color,
+                          correction.constant_color[0],
+                          correction.constant_color[1],
+                          correction.constant_color[2],
+                          correction.constant_color[3]);
+  hash = get_default_hash(hash,
+                          int(correction.mask_gray_mode),
+                          correction.material_source,
+                          correction.mesh_map,
+                          correction.mesh_map_scalar,
+                          correction.mesh_map_mask_reads_red);
+  hash = get_default_hash(hash, correction.is_folder, correction.row_enabled);
+  return composite_layers_hash(
+      hash,
+      Span<PaintMaterialCompositeImageLayer>(correction.children.data(),
+                                             correction.children.size()));
 }
 
-uint64_t BKE_paint_material_composite_stack_hash(
-    Span<PaintMaterialCompositeImageLayer> image_layers)
+/** Extend \a hash with every layer of \a image_layers, folders and Stack corrections included. */
+static uint64_t composite_layers_hash(uint64_t hash,
+                                      Span<PaintMaterialCompositeImageLayer> image_layers)
 {
-  uint64_t hash = get_default_hash(image_layers.size());
+  hash = get_default_hash(hash, image_layers.size());
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
     /* Mix the running hash multiplicatively before each layer: #get_default_hash folds its
      * arguments with XOR, which is order-independent, so two layers swapped would otherwise hash
@@ -1918,6 +2199,30 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.color_alpha_coverage,
                             layer.tracks_content_alpha);
     hash = get_default_hash(hash, layer.empty_base);
+    /* A mapping slider moves pixels without changing any image, so the normalized values join the
+     * hash like any other value input. Split rather than appended: #get_default_hash mixes a
+     * fixed number of values at once. */
+    hash = get_default_hash(hash,
+                            layer.mapping_enabled,
+                            layer.mapping_offset[0],
+                            layer.mapping_offset[1],
+                            BKE_paint_layers_mapping_scale_normalize(layer.mapping_scale[0]));
+    hash = get_default_hash(hash,
+                            BKE_paint_layers_mapping_scale_normalize(layer.mapping_scale[1]),
+                            layer.mapping_rotation,
+                            layer.tangent_normal);
+    /* The coverage's own mapping (a mapped Hybrid row's live alpha): without it a mapping slider
+     * would change the composited pixels while the cache still served the old ones. */
+    hash = get_default_hash(hash,
+                            layer.coverage_mapping_enabled,
+                            layer.coverage_mapping_offset[0],
+                            layer.coverage_mapping_offset[1],
+                            BKE_paint_layers_mapping_scale_normalize(
+                                layer.coverage_mapping_scale[0]));
+    hash = get_default_hash(hash,
+                            BKE_paint_layers_mapping_scale_normalize(
+                                layer.coverage_mapping_scale[1]),
+                            layer.coverage_mapping_rotation);
     /* A live constant is not backed by an image, so its value has to be hashed explicitly or the
      * cached composite would not follow a source slider. */
     hash = get_default_hash(hash,
@@ -1936,8 +2241,19 @@ uint64_t BKE_paint_material_composite_stack_hash(
     for (const PaintMaterialCompositeCorrection &correction : layer.mask_corrections) {
       hash = composite_correction_hash(hash, correction);
     }
+    /* The shape of the row and its folder subtree: a child's map or mapping slider changes the
+     * folder's composited pixels without touching any field above. */
+    hash = get_default_hash(hash, layer.is_mesh_map, layer.is_mesh_map_scalar, layer.is_folder);
+    hash = composite_layers_hash(
+        hash, Span<PaintMaterialCompositeImageLayer>(layer.children.data(), layer.children.size()));
   }
   return hash;
+}
+
+uint64_t BKE_paint_material_composite_stack_hash(
+    Span<PaintMaterialCompositeImageLayer> image_layers)
+{
+  return composite_layers_hash(0, image_layers);
 }
 
 /** \} */

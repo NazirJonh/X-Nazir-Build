@@ -25,6 +25,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace blender {
 
@@ -203,12 +204,45 @@ class PaintLayersTreeBuilder {
   void wire_generated_uv_maps();
 
   bNode *source_group_instance_get(const MaterialPaintLayer &layer, bNodeTree &tree);
+  /**
+   * Wire the wrapper instance's mapping inputs from the row group's own (ТЗ 2.2): the row's
+   * offset/scale/rotation feed the shared wrapper's Mapping. Nothing is built when the row's
+   * mapping does not apply; the wiring itself is idempotent.
+   */
+  void source_group_mapping_wire(const MaterialPaintLayer &layer,
+                                 bNodeTree &tree,
+                                 bNode &instance);
   RowMaterialSource resolve_row_material_source(const MaterialPaintLayer &row,
                                                 int channel,
                                                 bNodeTree &row_tree,
                                                 bool substituted);
   void create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer);
   LayerGroup *layer_group_ensure(const MaterialPaintLayer &layer, bNodeTree &parent_tree);
+  /**
+   * The row's Mapping `Vector` output, creating its node on first use: a `Point` Mapping whose
+   * `Vector` reads the tree's one coordinate source and whose Location/Rotation/Scale read the
+   * row group's mapping inputs. One node per row, shared by every channel and every map of it.
+   * Null when the row builds no mapping (disabled, or nothing repeatable to remap).
+   */
+  std::pair<bNode *, bNodeSocket *> mapping_vector_ensure(bNodeTree &tree,
+                                                          bNode *group_input,
+                                                          const MaterialPaintLayer &row,
+                                                          float location_x,
+                                                          float location_y);
+  /**
+   * Re-orient a tangent-space Normal map read through the row's Mapping: returns the socket to
+   * use in place of \a color. The Mapping only moves the read point, so the encoded vectors must
+   * be rotated by the row's rotation and flipped by the sign of its scale to match. Returns
+   * \a color unchanged when the row builds no Mapping. The topology is fixed (the values ride
+   * the same group inputs as the Mapping), so editing Rotation/Scale never recompiles the shader.
+   */
+  bNodeSocket *normal_remap_ensure(bNodeTree &tree,
+                                   const MaterialPaintLayer &row,
+                                   bNode &color_node,
+                                   bNodeSocket &color,
+                                   bNode *&r_node,
+                                   float location_x,
+                                   float location_y);
   RowResult row_from_unchanged_group(LayerGroup &group,
                                      const MaterialPaintLayer &layer,
                                      int channel);
@@ -231,6 +265,12 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> live_constant_inputs_;
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>>
       correction_live_constant_inputs_;
+  /** A mapped row's offset/scale/rotation value inputs, keyed by the row that owns the Mapping. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_offset_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_scale_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
+  /** The Mapping node built for a row, so every channel and map of it shares the one node. */
+  Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;
   bNode *group_input_ = nullptr;
   bNode *group_output_ = nullptr;
@@ -324,6 +364,7 @@ class PaintLayersChainBuilder {
   /** The factor base the mask stack builds on: the source's coverage, or one. */
   void resolve_row_factor(const MaterialPaintLayer *layer,
                           bNodeTree &tree,
+                          bNode *group_input,
                           float location_x,
                           float location_y,
                           bool substituted,
@@ -388,9 +429,23 @@ class PaintLayersChainBuilder {
 
   /** The Material/Node Group correction's own coverage, on the Alpha channel. */
   std::pair<bNode *, bNodeSocket *> resolve_correction_coverage(bNodeTree &tree,
+                                                                bNode *group_input,
                                                                 float location_x,
                                                                 float location_y,
                                                                 const MaterialPaintLayer &row);
+
+  /**
+   * Configure a Hybrid Material row's live Image Texture the way a Layer row does: the source
+   * node's sampling settings travel with it, then a mapped row reads through its own Mapping
+   * (Repeat forced). `channel` picks which source image's settings are copied.
+   */
+  void live_map_configure(bNode &map,
+                          bNodeTree &tree,
+                          bNode *group_input,
+                          const MaterialPaintLayer &row,
+                          int channel,
+                          float location_x,
+                          float location_y);
 
   /** Materialize the factor's neutral base (one) when the mask stack needs one. */
   void ensure_factor_base(bNodeTree &tree,

@@ -929,14 +929,14 @@ TEST_F(PaintLayersDescription, authored_default_channels_set)
   ASSERT_NE(rough, nullptr);
   EXPECT_EQ(rough->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
 
-  /* A folder and a correction carry no participation of their own. */
+  /* A folder carries no participation of its own; a Paint correction takes the whole set. */
   MaterialPaintLayer *folder = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
   BKE_paint_layers_default_channels_apply(*ma, *folder);
   EXPECT_EQ(folder->channels_num, 0);
   MaterialPaintLayer *correction = paint_layer_add_correction(*paint, "Correction");
   BKE_paint_layers_default_channels_apply(*ma, *correction);
-  EXPECT_EQ(correction->channels_num, 0);
+  EXPECT_EQ(correction->channels_num, 5);
 }
 
 TEST_F(PaintLayersDescription, add_materializes_default_channel_set)
@@ -3926,6 +3926,207 @@ TEST_F(PaintLayersDescription, rna_uv_map_autofill_fills_from_the_object_active_
 
   EXPECT_STREQ(ma->paint_layers_uv_map, "UVMap");
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+TEST_F(PaintLayersDescription, fill_layer_with_map_reads_map)
+{
+  Material *ma = BKE_material_add(bmain, "FillLayerMap");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(BKE_paint_layers_role(*fill), PaintLayerRole::Layer);
+  /* No map yet: the row reads its constant. */
+  EXPECT_FALSE(
+      BKE_paint_layers_fill_reads_map(*ma, *fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *fill));
+
+  static const float blank[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 4, 4, "FillLayerMapImg", 32, false, IMA_GENTYPE_BLANK, blank, false, true, false);
+  ASSERT_NE(map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  /* A Fill layer with a channel map reads it, like a Fill correction does. */
+  EXPECT_TRUE(BKE_paint_layers_fill_reads_map(*ma, *fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *fill));
+}
+
+TEST_F(PaintLayersDescription, mapping_block_copies_with_the_row)
+{
+  Material *ma = BKE_material_add(bmain, "MappingCopy");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  static const float blank[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 4, 4, "MappingCopyImg", 32, false, IMA_GENTYPE_BLANK, blank, false, true, false);
+  ASSERT_NE(map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  const float offset[2] = {0.25f, 0.5f};
+  const float scale[2] = {2.0f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_enabled_get(*fill));
+
+  /* A duplicated branch keeps the block: same values, still enabled and supported. */
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, fill);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_FLOAT_EQ(copy->mapping.offset[0], 0.25f);
+  EXPECT_FLOAT_EQ(copy->mapping.offset[1], 0.5f);
+  EXPECT_FLOAT_EQ(copy->mapping.scale[0], 2.0f);
+  EXPECT_FLOAT_EQ(copy->mapping.scale[1], 0.5f);
+  EXPECT_FLOAT_EQ(copy->mapping.rotation, 0.5f);
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*copy));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *copy));
+  BKE_paint_layers_remove(*ma, copy);
+
+  /* Enabling without a map is refused; scale zeroes normalize to one. */
+  MaterialPaintLayer *plain = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Plain", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(plain, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(*ma, plain, true));
+  EXPECT_FALSE(BKE_paint_layers_mapping_enabled_get(*plain));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(0.0f), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(1e-6f), 1e-3f);
+  /* A negative axis mirrors the map: the sign survives, only a tiny magnitude is lifted. */
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(-2.0f), -2.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(-1e-6f), -1e-3f);
+}
+
+TEST_F(PaintLayersDescription, mapping_scale_keeps_a_negative_sign_through_the_setter)
+{
+  Material *ma = BKE_material_add(bmain, "MappingMirror");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  const float mirror[2] = {-1.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, mirror));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], -1.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 2.0f);
+}
+
+TEST_F(PaintLayersDescription, mapping_scale_lock_moves_both_axes_together)
+{
+  Material *ma = BKE_material_add(bmain, "MappingScaleLock");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+
+  /* Unlocked axes stay independent. */
+  const float uneven[2] = {2.0f, 3.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, uneven));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 3.0f);
+
+  /* Locking joins the axes at X and leaves the enabled flag alone. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, true));
+  EXPECT_TRUE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], 2.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 2.0f);
+  EXPECT_FALSE(BKE_paint_layers_mapping_enabled_get(*fill));
+
+  /* Editing either axis drags the other along, a negative (mirror) value included. */
+  const float edit_y[2] = {2.0f, 5.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, edit_y));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], 5.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 5.0f);
+  const float edit_x[2] = {-4.0f, 5.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, edit_x));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], -4.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], -4.0f);
+
+  /* Unlocking keeps the values and frees the axes again. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
+  EXPECT_FALSE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+  const float split[2] = {-4.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, split));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 1.0f);
+}
+
+TEST_F(PaintLayersDescription, mapping_values_are_value_only)
+{
+  Material *ma = BKE_material_add(bmain, "MappingValueOnly");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  static const float blank[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 4, 4, "MappingValueImg", 32, false, IMA_GENTYPE_BLANK, blank, false, true, false);
+  ASSERT_NE(map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+
+  ma->paint_layers_flag = {};
+  const float offset[2] = {0.1f, 0.2f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
+  /* A value edit never rebuilds the tree. */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  /* The row stays live and is never baked, so the drag must not mark the bake planner stale. */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE, 0);
+}
+
+/** Stage 2: a Material row's support is its source itself -- a Layer row over a source material
+ * supports the mapping without any map of its own, and so does a Material correction or mask. */
+TEST_F(PaintLayersDescription, mapping_supports_a_material_row_of_any_role)
+{
+  Material *ma = BKE_material_add(bmain, "MappingMaterial");
+  Material *source = BKE_material_add(bmain, "MappingMaterialSource");
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  /* No source yet: there is nothing to remap, and the setter refuses. */
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  EXPECT_FALSE(BKE_paint_layers_mapping_enabled_get(*row));
+
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
+  /* The row's live maps are the source's own: they repeat through the row's Mapping whatever
+   * the source's extension is, because the row forces Repeat on them. */
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *row));
+  EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*row));
+
+  /* A duplicated row keeps the support, like a Fill's mapping block does. */
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, row);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *copy));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*copy));
+  BKE_paint_layers_remove(*ma, copy);
+
+  /* A Material-source correction owns its mapping like a Layer row: the wrapper is shared but
+   * every row carries its own values. With no source yet there is nothing to remap. */
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_MATERIAL, "Corr");
+  ASSERT_NE(correction, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *correction));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, correction, source));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *correction));
+  EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*correction));
+
+  /* A Material mask item is the same story; a Fill mask without a map still is not supported. */
+  MaterialPaintLayer *fill_mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(fill_mask, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *fill_mask));
+  MaterialPaintLayer *mask = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_MATERIAL, "MatMask");
+  ASSERT_NE(mask, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(*ma, *mask));
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, mask, source));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *mask));
+  EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, mask, true));
 }
 
 /** \} */

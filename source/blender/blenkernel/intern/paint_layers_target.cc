@@ -378,6 +378,29 @@ const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target)
   if (BKE_paint_layers_target_is_frozen(target)) {
     return "The layer is frozen (bake); unfreeze it to paint";
   }
+  /* A Material layer's content is its source baked into maps, which a re-bake rewrites: strokes
+   * there would be lost, so like a Fill it is changed through a Correction or its mask. Checked
+   * before the mapping refusal below, so a mapped Material row's message names the Material row
+   * it is, which it stays whatever the mapping does. */
+  if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
+      target.layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL)
+  {
+    return "A Material layer shows its source material: add a Correction to paint on it, or "
+           "paint its mask";
+  }
+  /* A stroke writes at the raw UV while a mapped row reads its map through the mapping, so the
+   * stroke would land somewhere else than the user sees it. */
+  const MaterialPaintLayer *painted_row = (target.mode == PaintLayersTargetMode::Mask &&
+                                           target.mask_item != nullptr) ?
+                                              target.mask_item :
+                                              target.layer;
+  /* A Material correction or mask is excluded: its mapping is live on the source's textures and
+   * says nothing about a painted map, so the message would mislead; the Material rules decide. */
+  if (painted_row != nullptr && painted_row->source != MA_PAINT_LAYER_SOURCE_MATERIAL &&
+      BKE_paint_layers_mapping_enabled_get(*painted_row))
+  {
+    return "The row has UV mapping enabled: disable the mapping to paint on its map";
+  }
   /* A channel outside the material's global set takes no part anywhere, so a stroke into it would
    * be invisible; the set has to gain the channel first. */
   if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
@@ -389,14 +412,6 @@ const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target)
       target.layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT)
   {
     return "A Fill layer is a color: add a Correction to paint on it, or paint its mask";
-  }
-  /* A Material layer's content is its source baked into maps, which a re-bake rewrites: strokes
-   * there would be lost, so like a Fill it is changed through a Correction or its mask. */
-  if (target.layer != nullptr && target.mode == PaintLayersTargetMode::Content &&
-      target.layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL)
-  {
-    return "A Material layer shows its source material: add a Correction to paint on it, or "
-           "paint its mask";
   }
   /* A Mesh Map row draws a geometry map the object's bake owns; a stroke would not belong to the
    * painted stack, so like a Fill it is changed through a Correction or its mask. */

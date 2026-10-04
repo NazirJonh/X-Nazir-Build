@@ -83,6 +83,27 @@ struct PaintMaterialCompositeCorrection {
    * #PaintMaterialCompositeImageLayer.constant_color. */
   float constant_color[4] = {};
   bool has_constant_color = false;
+  /**
+   * The row's UV mapping (stage 1: Fill rows and Fill masks): when set, the row's own map is read
+   * through `uv' = R * (uv * scale) + offset` with Repeat edges, the same transform the generated
+   * Mapping node applies. Copied from the description when the stack is derived; the evaluator
+   * reads the resampled buffer and never sees these.
+   */
+  bool mapping_enabled = false;
+  float mapping_offset[2] = {};
+  float mapping_scale[2] = {1.0f, 1.0f};
+  float mapping_rotation = 0.0f;
+  /**
+   * The mapped map holds tangent-space normals (Normal channel): the resample also rotates and
+   * flips the vectors, see #composite_resample_mapped.
+   */
+  bool tangent_normal = false;
+  /**
+   * Set when the live coverage map (#coverage_from_alpha) is remapped: it reads through the same
+   * Mapping node as the content map, so the transform is the one above. A baked coverage is never
+   * remapped.
+   */
+  bool coverage_mapping_enabled = false;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   /** On in this channel: the row is on and its coverage here is not the switched-off form. */
@@ -168,6 +189,21 @@ struct PaintMaterialCompositeImageLayer {
   float constant_color[4] = {};
   bool has_constant_color = false;
   /**
+   * The row's UV mapping (stage 1: Fill rows and Fill masks): when set, the row's own map is read
+   * through `uv' = R * (uv * scale) + offset` with Repeat edges, the same transform the generated
+   * Mapping node applies. Copied from the description when the stack is derived; the evaluator
+   * reads the resampled buffer and never sees these.
+   */
+  bool mapping_enabled = false;
+  float mapping_offset[2] = {};
+  float mapping_scale[2] = {1.0f, 1.0f};
+  float mapping_rotation = 0.0f;
+  /**
+   * The mapped map holds tangent-space normals (Normal channel): the resample also rotates and
+   * flips the vectors, see #composite_resample_mapped.
+   */
+  bool tangent_normal = false;
+  /**
    * The mask is the image's alpha rather than its colour.
    *
    * Which output of the Image Texture the factor was taken from, and not a detail: a layer stack
@@ -221,6 +257,16 @@ struct PaintMaterialCompositeImageLayer {
    * alpha map: the generator reads that map's Alpha output as the factor.
    */
   bool coverage_from_alpha = false;
+  /**
+   * The row's UV mapping applied to the coverage (stage 2): a mapped Hybrid row's live source
+   * alpha map is read through the row's mapping, `uv' = R * (uv * scale) + offset` with Repeat
+   * edges, exactly what the graph builds before the alpha texture. The baked coverage of an
+   * unmapped or Baked/SourceGroup row keeps these unset: the graph never remaps a bake.
+   */
+  bool coverage_mapping_enabled = false;
+  float coverage_mapping_offset[2] = {};
+  float coverage_mapping_scale[2] = {1.0f, 1.0f};
+  float coverage_mapping_rotation = 0.0f;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   /** How much of #mask_image applies; 0 ignores the mask entirely. */
@@ -336,6 +382,12 @@ struct PaintMaterialCompositeLayer {
   bool coverage_from_alpha = false;
   /** See #PaintMaterialCompositeImageLayer.coverage_iuser. */
   const ImageUser *coverage_iuser = nullptr;
+  /** See #PaintMaterialCompositeImageLayer.coverage_mapping_*: the CPU resamples the coverage
+   * buffer through the row's mapping when set, the same transform the graph's node applies. */
+  bool coverage_mapping_enabled = false;
+  float coverage_mapping_offset[2] = {};
+  float coverage_mapping_scale[2] = {1.0f, 1.0f};
+  float coverage_mapping_rotation = 0.0f;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   float mask_influence = 1.0f;

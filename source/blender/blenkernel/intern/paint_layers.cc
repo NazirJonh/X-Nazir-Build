@@ -262,6 +262,16 @@ MaterialPaintLayer *paint_layer_alloc(Material &ma,
   layer->blend = MA_PAINT_LAYER_BLEND_MIX;
   layer->flag = MA_PAINT_LAYER_ENABLED;
   layer->opacity = 1.0f;
+  /* A fresh row carries no mapping: the DNA default already gives scale one, set it explicitly
+   * so the intent survives even if the default ever changes. */
+  layer->mapping.offset[0] = 0.0f;
+  layer->mapping.offset[1] = 0.0f;
+  layer->mapping.scale[0] = 1.0f;
+  layer->mapping.scale[1] = 1.0f;
+  layer->mapping.rotation = 0.0f;
+  layer->mapping.space = MA_PAINT_LAYER_MAPPING_SPACE_UV;
+  /* Uniform scale is the common case, so a new row starts with the axes locked together. */
+  layer->mapping.flag = MA_PAINT_LAYER_MAPPING_SCALE_LOCK;
   STRNCPY(layer->name, name != nullptr ? name : "");
   layer->marker = paint_layer_unique_marker(ma);
   return layer;
@@ -2748,6 +2758,231 @@ bool BKE_paint_layers_set_custom_group(Material &ma,
   }
   layer->custom_group = group;
   BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+float BKE_paint_layers_mapping_scale_normalize(const float scale)
+{
+  /* Old files read back as zeroes; a zero axis would collapse UVs, so it means one. */
+  if (scale == 0.0f) {
+    return 1.0f;
+  }
+  const float magnitude = fabsf(scale);
+  if (magnitude < PAINT_LAYER_MAPPING_SCALE_MIN) {
+    return copysignf(PAINT_LAYER_MAPPING_SCALE_MIN, scale);
+  }
+  return scale;
+}
+
+bool BKE_paint_layers_fill_reads_map(const Material &ma,
+                                     const MaterialPaintLayer &row,
+                                     const int channel)
+{
+  /* A Fill is never painted, but its channels may hold their own image, which is then a texture
+   * source for that channel only; the other channels keep the constant. */
+  if (!ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT)) {
+    return false;
+  }
+  if (row.source != MA_PAINT_LAYER_SOURCE_CONSTANT) {
+    return false;
+  }
+  return paint_layer_channel_image(ma, row, channel) != nullptr;
+}
+
+bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer)
+{
+  /* A mask is scalar over its owner; its map lives in the Base Color record of the item itself,
+   * never in coverage maps or the owner's records. Only a Fill mask's map is remappable: a
+   * painted (Image) mask is written by strokes at the raw UV, mesh-map atlases stay Extend and
+   * Material/Node-Group/Stack masks copy their source's extension. */
+  if (BKE_paint_layers_role(layer) == PaintLayerRole::MaskItem) {
+    /* A Material mask repeats its live map through the item's own Mapping, like a Layer. */
+    if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      return layer.material != nullptr;
+    }
+    if (layer.source != MA_PAINT_LAYER_SOURCE_CONSTANT) {
+      return false;
+    }
+    return paint_layer_mask_correction_image(ma, layer, 0) != nullptr;
+  }
+  /* A Material row's live maps repeat through the row's own Mapping, whatever its role: the
+   * wrapper is shared per (owner, source) but every row owns its instance and its values. */
+  if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return layer.material != nullptr;
+  }
+  /* Only a Fill row's own maps repeat: the graph forces Repeat on them. Any other source either
+   * owns no repeatable map (Mesh-Map atlases stay Extend) or copies its source's extension
+   * (Material live maps). */
+  if (!ELEM(layer.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT)) {
+    return false;
+  }
+  if (layer.source != MA_PAINT_LAYER_SOURCE_CONSTANT) {
+    return false;
+  }
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (BKE_paint_layers_fill_reads_map(ma, layer, channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer)
+{
+  return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_ENABLED) != 0;
+}
+
+bool BKE_paint_layers_mapping_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled)
+{
+  if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
+    return false;
+  }
+  /* Enabling mapping without a repeatable map would add a node the graph never builds, so refuse
+   * it while the row reads no map. Disabling is always allowed. */
+  if (enabled && !BKE_paint_layers_mapping_supported(ma, *layer)) {
+    return false;
+  }
+  const bool changed = BKE_paint_layers_mapping_enabled_get(*layer) != enabled;
+  SET_FLAG_FROM_TEST(layer->mapping.flag, enabled, MA_PAINT_LAYER_MAPPING_ENABLED);
+  if (changed) {
+    /* The row gains or loses its Mapping node, which is topology. */
+    BKE_paint_layers_tag_edited(ma);
+  }
+  return true;
+}
+
+bool BKE_paint_layers_mapping_applies(const Material &ma,
+                                      const MaterialPaintLayer &layer,
+                                      const PaintLayersRegenCache *cache)
+{
+  /* The one predicate that decides whether the row carries a mapping anywhere: enabled, reading a
+   * repeatable map, and -- a Material row only -- in a mode that actually builds one. The values
+   * never move this answer; a slider drag must not rebuild anything. */
+  if (!BKE_paint_layers_mapping_enabled_get(layer) ||
+      !BKE_paint_layers_mapping_supported(ma, layer))
+  {
+    return false;
+  }
+  /* A Fill (or Fill mask) row always carries its Mapping node: the graph builds it and the CPU
+   * resamples through it unconditionally. */
+  if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return true;
+  }
+  /* A Material row's mapping is built where its source is shown: the live textures of a Hybrid
+   * row get their own Mapping node, and a SourceGroup row's wrapper carries it. A Baked row --
+   * forced by the sampler budget -- shows its raw maps and ignores the mapping (reported by the
+   * regeneration). A BAKE_NEVER row stays live and keeps it. */
+  const PaintLayerMaterialMode mode = BKE_paint_layers_material_mode(ma, layer, cache);
+  return ELEM(mode, PaintLayerMaterialMode::Hybrid, PaintLayerMaterialMode::SourceGroup);
+}
+
+bool BKE_paint_layers_mapping_blocks_bake(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          const PaintLayersRegenCache *cache)
+{
+  /* A row with a mapping anywhere inside it stays live: a bake would freeze the slider values, and
+   * re-rendering it on every drag tick is what this rule avoids. */
+  if (BKE_paint_layers_mapping_applies(ma, layer, cache)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (BKE_paint_layers_mapping_blocks_bake(ma, effect, cache)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
+    if (BKE_paint_layers_mapping_blocks_bake(ma, mask_item, cache)) {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (BKE_paint_layers_mapping_blocks_bake(ma, child, cache)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * A mapping edit is a pure shading value: its row is live and never baked, so unlike
+ * #paint_layers_tag_value_only it must not mark the bake planner stale.
+ */
+static void paint_layers_tag_mapping_value(Material &ma)
+{
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+}
+
+bool BKE_paint_layers_mapping_set_offset(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         const float offset[2])
+{
+  if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
+    return false;
+  }
+  copy_v2_v2(layer->mapping.offset, offset);
+  /* Values ride the row group's inputs, so the tree keeps its nodes. */
+  paint_layers_tag_mapping_value(ma);
+  BKE_paint_layers_values_sync(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_scale(Material &ma,
+                                        MaterialPaintLayer *layer,
+                                        const float scale[2])
+{
+  if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
+    return false;
+  }
+  /* Normalize through the one helper the graph and the CPU share, so zeroes from old files and
+   * tiny values behave the same on both sides. */
+  float next[2] = {BKE_paint_layers_mapping_scale_normalize(scale[0]),
+                   BKE_paint_layers_mapping_scale_normalize(scale[1])};
+  if (BKE_paint_layers_mapping_scale_lock_get(*layer)) {
+    /* The caller hands over both axes, so the edited one is the one that moved from the stored
+     * value; when both moved (a multi-drag) the first axis leads. */
+    const float stored_x = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+    const float lead = (next[0] != stored_x) ? next[0] : next[1];
+    next[0] = lead;
+    next[1] = lead;
+  }
+  layer->mapping.scale[0] = next[0];
+  layer->mapping.scale[1] = next[1];
+  paint_layers_tag_mapping_value(ma);
+  BKE_paint_layers_values_sync(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mapping_scale_lock_get(const MaterialPaintLayer &layer)
+{
+  return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_SCALE_LOCK) != 0;
+}
+
+bool BKE_paint_layers_mapping_set_scale_lock(Material &ma, MaterialPaintLayer *layer, bool locked)
+{
+  if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
+    return false;
+  }
+  SET_FLAG_FROM_TEST(layer->mapping.flag, locked, MA_PAINT_LAYER_MAPPING_SCALE_LOCK);
+  if (locked) {
+    /* Locking joins the axes at the first one, so what the row shows stays where the user left
+     * the X value. A value-only change like any other scale edit. */
+    const float joined = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+    layer->mapping.scale[0] = joined;
+    layer->mapping.scale[1] = joined;
+    paint_layers_tag_mapping_value(ma);
+    BKE_paint_layers_values_sync(ma);
+  }
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_rotation(Material &ma, MaterialPaintLayer *layer, float rotation)
+{
+  if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
+    return false;
+  }
+  layer->mapping.rotation = rotation;
+  paint_layers_tag_mapping_value(ma);
+  BKE_paint_layers_values_sync(ma);
   return true;
 }
 

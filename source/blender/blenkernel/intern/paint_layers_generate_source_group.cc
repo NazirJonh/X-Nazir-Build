@@ -348,6 +348,21 @@ bNode *source_group_normal_encode_node_add(bNodeTree &tree)
 }
 
 /**
+ * Which UV readers of a source the row mapping remaps. A Texture Coordinate always; a UV Map node
+ * with no layer or the owner's layer; an Attribute (Geometry) node naming the owner's layer (read
+ * on `Vector`, which carries the UV). \a remap_all
+ * (#MA_PAINT_LAYERS_REMAP_ALL_UV) widens the last two to every UV Map node and every Attribute
+ * (Geometry) node with a non-empty name. Part of the wrapper's topology hash.
+ */
+struct SourceGroupUvPolicy {
+  const char *uv_name;
+  bool remap_all;
+};
+
+bNode *source_group_group_input_ensure(bNodeTree &tree);
+bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const char *role);
+
+/**
  * Feed \a out_in the source's Normal in the format the bake reads and the Normal chain expects: the
  * encoded tangent-space map. A Normal Map contributes its Color input (already encoded, its own
  * output is decoded); any other source -- a Bump with relief, a computed normal -- is encoded
@@ -360,7 +375,8 @@ bNode *source_group_normal_encode_node_add(bNodeTree &tree)
 bool source_group_wire_normal(bNodeTree &tree,
                                      bNode &group_output,
                                      bNodeSocket &out_in,
-                                     const bNodeSocket &principled_normal)
+                                     const bNodeSocket &principled_normal,
+                                     const bool mapped)
 {
   const SourceGroupSourceSocket source = source_group_follow_source(principled_normal);
   if (!source) {
@@ -373,7 +389,38 @@ bool source_group_wire_normal(bNodeTree &tree,
     }
     const SourceGroupSourceSocket color_source = source_group_follow_source(*color);
     if (color_source) {
-      bke::node_add_link(tree, *color_source.node, *color_source.socket, group_output, out_in);
+      bNode *from_node = color_source.node;
+      bNodeSocket *from_socket = color_source.socket;
+      if (mapped) {
+        /* The row mapping moved the texture's read point, so the encoded vectors follow it, fed
+         * by this level's mapping inputs. Limitation: the correction applies to whatever reaches
+         * the Normal Map's Color, so a source mixing several textures (each behind its own
+         * Mapping) gets one common rotation/flip; the Bump branch below needs none. */
+        bNode *group_input = source_group_group_input_ensure(tree);
+        nodes::update_node_declaration_and_sockets(tree, *group_input);
+        auto input_out = [&](const char *role) -> std::pair<bNode *, bNodeSocket *> {
+          bNodeTreeInterfaceSocket *iface = source_group_mapping_input_find(tree, role);
+          if (iface == nullptr || iface->identifier == nullptr) {
+            return {nullptr, nullptr};
+          }
+          bNodeSocket *out = bke::node_find_socket(
+              *group_input, SOCK_OUT, UString::from_ptr_noinline(iface->identifier));
+          return {out != nullptr ? group_input : nullptr, out};
+        };
+        bNode *remap_node = nullptr;
+        bNodeSocket *remap_out = normal_remap_nodes_add(
+            tree,
+            *color_source.node,
+            *color_source.socket,
+            input_out(SOURCE_GROUP_ROLE_MAPPING_ROTATION),
+            input_out(SOURCE_GROUP_ROLE_MAPPING_SCALE),
+            color_source.node->location[0] + 160.0f,
+            color_source.node->location[1] - 240.0f,
+            remap_node);
+        from_node = remap_node;
+        from_socket = remap_out;
+      }
+      bke::node_add_link(tree, *from_node, *from_socket, group_output, out_in);
       return true;
     }
     /* An unlinked Color is the encoded constant; carry its rgb to the vector output. */
@@ -399,11 +446,462 @@ bool source_group_wire_normal(bNodeTree &tree,
   return true;
 }
 
+/** The Group Input of \a tree, created when the copied tree has none. */
+bNode *source_group_group_input_ensure(bNodeTree &tree)
+{
+  for (bNode &node : tree.nodes) {
+    if (node.is_group_input()) {
+      return &node;
+    }
+  }
+  return bke::node_add_node(nullptr, tree, "NodeGroupInput"_ustr);
+}
+
+/** Find the wrapper interface input whose role names it, whatever it is called. */
+bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const char *role)
+{
+  tree.ensure_interface_cache();
+  for (bNodeTreeInterfaceSocket *socket : tree.interface_inputs()) {
+    const char *socket_role = prop_string_get(socket->properties, INPUT_ROLE_PROP);
+    if (socket_role != nullptr && STREQ(socket_role, role)) {
+      return socket;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Add or find one of the wrapper's three row-mapping value inputs (ТЗ 2.2). The interface is
+ * found by role before anything is added, so a rebuild keeps the socket identifiers an instance
+ * of the wrapper links into; the role marker is also what keeps the value sync from copying a
+ * source interface input over it. \a default_value is the identity the Mapping reads while no
+ * row links the input.
+ */
+static bNodeTreeInterfaceSocket *source_group_mapping_input_ensure(bNodeTree &tree,
+                                                                   const char *name,
+                                                                   const char *role,
+                                                                   const float default_value[3])
+{
+  if (bNodeTreeInterfaceSocket *found = source_group_mapping_input_find(tree, role)) {
+    return found;
+  }
+  bNodeTreeInterfaceSocket *socket = tree.tree_interface.add_socket(
+      name, "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  if (socket == nullptr) {
+    return nullptr;
+  }
+  prop_string_set(socket->properties, INPUT_ROLE_PROP, role);
+  if (socket->socket_data != nullptr) {
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket->socket_data)->value, default_value);
+  }
+  return socket;
+}
+
+/** The wrapper's three row-mapping value inputs, in the order the Mapping node reads them. */
+static void source_group_mapping_interface_ensure(bNodeTree &tree)
+{
+  static const float zero[3] = {0.0f, 0.0f, 0.0f};
+  static const float one[3] = {1.0f, 1.0f, 1.0f};
+  char name[64];
+  SNPRINTF(name, "%sOffset", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
+  source_group_mapping_input_ensure(tree, name, SOURCE_GROUP_ROLE_MAPPING_OFFSET, zero);
+  SNPRINTF(name, "%sScale", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
+  source_group_mapping_input_ensure(tree, name, SOURCE_GROUP_ROLE_MAPPING_SCALE, one);
+  SNPRINTF(name, "%sRotation", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
+  source_group_mapping_input_ensure(tree, name, SOURCE_GROUP_ROLE_MAPPING_ROTATION, zero);
+}
+
+/**
+ * Drop the three row-mapping inputs again once no row applies a mapping, and re-declare the Group
+ * Input so it loses their sockets. Instances of the wrapper are re-declared by the regeneration
+ * (`refresh_generated_instances`), and rows that linked into them were rebuilt with the mapping
+ * flag, so no link is left dangling.
+ */
+static void source_group_mapping_interface_remove(bNodeTree &tree)
+{
+  const char *roles[3] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
+                          SOURCE_GROUP_ROLE_MAPPING_SCALE,
+                          SOURCE_GROUP_ROLE_MAPPING_ROTATION};
+  bool removed = false;
+  for (const char *role : roles) {
+    if (bNodeTreeInterfaceSocket *socket = source_group_mapping_input_find(tree, role)) {
+      tree.tree_interface.remove_item(reinterpret_cast<bNodeTreeInterfaceItem &>(*socket));
+      removed = true;
+    }
+  }
+  if (!removed) {
+    return;
+  }
+  for (bNode &node : tree.nodes) {
+    if (node.is_group_input()) {
+      nodes::update_node_declaration_and_sockets(tree, node);
+    }
+  }
+}
+
+/**
+ * Whether \a tree -- transitively through the group instances it instantiates -- reads the
+ * object's UVs: a Texture Coordinate or UV Map node, an Image Texture with an open Vector input
+ * (which samples the active UV), or a group that does any of that. This is what decides whether
+ * a shared source group has to be copied privately (ТЗ 2.3): a group without UV readers stays
+ * shared, its sampling is coordinate-driven and a mapping in front would be wrong.
+ */
+static bool source_group_attribute_names_uv(const bNode &node, const SourceGroupUvPolicy &uv)
+{
+  if (node.type_legacy != SH_NODE_ATTRIBUTE) {
+    return false;
+  }
+  const NodeShaderAttribute *attr = static_cast<const NodeShaderAttribute *>(node.storage);
+  if (attr == nullptr || attr->type != SHD_ATTRIBUTE_GEOMETRY || attr->name[0] == '\0') {
+    return false;
+  }
+  return uv.remap_all || (uv.uv_name != nullptr && STREQ(attr->name, uv.uv_name));
+}
+
+static bool source_group_uv_map_is_remapped(const bNode &node, const SourceGroupUvPolicy &uv)
+{
+  if (node.type_legacy != SH_NODE_UVMAP) {
+    return false;
+  }
+  const NodeShaderUVMap *storage = static_cast<const NodeShaderUVMap *>(node.storage);
+  if (storage == nullptr) {
+    return false;
+  }
+  /* A UV Map node with no layer named reads the object's active UV, the very layer the owner's
+   * name selects, so it is the row's to remap like a named match. */
+  return uv.remap_all || storage->uv_map[0] == '\0' ||
+         (uv.uv_name != nullptr && STREQ(storage->uv_map, uv.uv_name));
+}
+
+static bool source_group_tree_reads_uv(bNodeTree &tree, const SourceGroupUvPolicy &uv, const int depth)
+{
+  /* The depth guard keeps a cyclic or corrupted source from recursing forever; it matches the
+   * path depth the wrapper itself accepts, so anything deeper was refused before this ran. */
+  if (depth > PAINT_LAYERS_SOURCE_GROUP_MAX_DEPTH) {
+    return false;
+  }
+  tree.ensure_topology_cache();
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_TEX_COORD || node.type_legacy == SH_NODE_UVMAP ||
+        source_group_attribute_names_uv(node, uv))
+    {
+      return true;
+    }
+    if (node.type_legacy == SH_NODE_TEX_IMAGE) {
+      const bNodeSocket *vector = bke::node_find_socket(node, SOCK_IN, "Vector"_ustr);
+      if (vector != nullptr && !vector->is_directly_linked()) {
+        return true;
+      }
+    }
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT) {
+      bNodeTree *child = reinterpret_cast<bNodeTree *>(node.id);
+      if (child != nullptr && source_group_tree_reads_uv(*child, uv, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Insert one Mapping (Point) node in front of every UV output that feeds anything: each Texture
+ * Coordinate node and the owner's UV Map node (matched by name -- a source's own other UV layers
+ * are not the row's mapping to remap). The outgoing links are re-pointed through the new node,
+ * read from #bNodeTree::links, not the stale per-socket caches; a source's own Mapping ends up
+ * *behind* the row's one, so the row's mapping applies on top of it. The node feeds its
+ * Location/Rotation/Scale from the tree's Group Input through the wrapper's mapping inputs, and
+ * is named with the dot prefix so the value sync never matches it against a source node.
+ */
+static void source_group_mapping_insert(bNodeTree &tree, const SourceGroupUvPolicy &uv)
+{
+  bNode *group_input = source_group_group_input_ensure(tree);
+  nodes::update_node_declaration_and_sockets(tree, *group_input);
+  const float offset_default[3] = {0.0f, 0.0f, 0.0f};
+  const float scale_default[3] = {1.0f, 1.0f, 1.0f};
+  char name[64];
+  SNPRINTF(name, "%sOffset", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
+  bNodeTreeInterfaceSocket *offset_iface = source_group_mapping_input_ensure(
+      tree, name, SOURCE_GROUP_ROLE_MAPPING_OFFSET, offset_default);
+  SNPRINTF(name, "%sScale", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
+  bNodeTreeInterfaceSocket *scale_iface = source_group_mapping_input_ensure(
+      tree, name, SOURCE_GROUP_ROLE_MAPPING_SCALE, scale_default);
+  SNPRINTF(name, "%sRotation", SOURCE_GROUP_MAPPING_INPUT_PREFIX);
+  bNodeTreeInterfaceSocket *rotation_iface = source_group_mapping_input_ensure(
+      tree, name, SOURCE_GROUP_ROLE_MAPPING_ROTATION, offset_default);
+  if (offset_iface == nullptr || scale_iface == nullptr || rotation_iface == nullptr ||
+      offset_iface->identifier == nullptr || scale_iface->identifier == nullptr ||
+      rotation_iface->identifier == nullptr)
+  {
+    return;
+  }
+  bNodeSocket *offset_out = bke::node_find_socket(
+      *group_input, SOCK_OUT, UString::from_ptr_noinline(offset_iface->identifier));
+  bNodeSocket *scale_out = bke::node_find_socket(
+      *group_input, SOCK_OUT, UString::from_ptr_noinline(scale_iface->identifier));
+  bNodeSocket *rotation_out = bke::node_find_socket(
+      *group_input, SOCK_OUT, UString::from_ptr_noinline(rotation_iface->identifier));
+  if (offset_out == nullptr || scale_out == nullptr || rotation_out == nullptr) {
+    return;
+  }
+  for (bNode &node : tree.nodes) {
+    const bool is_tex_coord = node.type_legacy == SH_NODE_TEX_COORD;
+    const bool is_owner_uv_map = source_group_uv_map_is_remapped(node, uv);
+    /* The Attribute node carries the UV on `Vector`, not on `UV`; its Color/Fac/Alpha outputs are
+     * the attribute's own data and stay untouched. */
+    const bool is_uv_attribute = source_group_attribute_names_uv(node, uv);
+    if (!is_tex_coord && !is_owner_uv_map && !is_uv_attribute) {
+      continue;
+    }
+    bNodeSocket *uv_out = socket_out(node, is_uv_attribute ? "Vector" : "UV");
+    if (uv_out == nullptr) {
+      continue;
+    }
+    /* The links are read from the tree itself, like #texture_vector_link_mapped does: the
+     * per-socket link cache is refreshed by a tree update this build has not run. */
+    Vector<std::pair<bNode *, bNodeSocket *>> readers;
+    for (bNodeLink &link : tree.links) {
+      if (link.fromnode == &node && link.fromsock == uv_out && link.is_available()) {
+        readers.append({link.tonode, link.tosock});
+      }
+    }
+    if (readers.is_empty()) {
+      continue;
+    }
+    bNode *mapping = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
+    if (mapping == nullptr) {
+      return;
+    }
+    mapping->custom1 = NODE_MAPPING_TYPE_POINT;
+    STRNCPY_UTF8(mapping->name, SOURCE_GROUP_MAPPING_NODE_NAME);
+    bke::node_unique_name(tree, *mapping);
+    mapping->location[0] = node.location[0] + 80.0f;
+    mapping->location[1] = node.location[1];
+    bNodeSocket *map_vector = socket_in(*mapping, "Vector");
+    bNodeSocket *map_out = socket_out(*mapping, "Vector");
+    bNodeSocket *map_location = socket_in(*mapping, "Location");
+    bNodeSocket *map_scale = socket_in(*mapping, "Scale");
+    bNodeSocket *map_rotation = socket_in(*mapping, "Rotation");
+    if (map_vector == nullptr || map_out == nullptr || map_location == nullptr ||
+        map_scale == nullptr || map_rotation == nullptr)
+    {
+      return;
+    }
+    bke::node_add_link(tree, node, *uv_out, *mapping, *map_vector);
+    bke::node_add_link(tree, *group_input, *offset_out, *mapping, *map_location);
+    bke::node_add_link(tree, *group_input, *scale_out, *mapping, *map_scale);
+    bke::node_add_link(tree, *group_input, *rotation_out, *mapping, *map_rotation);
+    /* Re-point the readers: remove-and-add keeps the tree's own bookkeeping honest, which
+     * assigning `tonode`/`tosock` in place would bypass. */
+    for (const std::pair<bNode *, bNodeSocket *> &reader : readers) {
+      bNodeLink *stale = nullptr;
+      for (bNodeLink &link : tree.links) {
+        if (link.fromnode == &node && link.fromsock == uv_out && link.tonode == reader.first &&
+            link.tosock == reader.second)
+        {
+          stale = &link;
+          break;
+        }
+      }
+      if (stale != nullptr) {
+        bke::node_remove_link(&tree, *stale);
+      }
+      bke::node_add_link(tree, *mapping, *map_out, *reader.first, *reader.second);
+    }
+  }
+}
+
+/**
+ * With no UV layer named, #generated_uv_maps_wire leaves the open Vector of every Image Texture
+ * alone, and #source_group_mapping_insert only remaps Texture Coordinate and named UV Map nodes,
+ * so an implicitly-UV texture would sit outside the row mapping. Feed those textures from a
+ * Texture Coordinate `UV` output here, so the mapping insertion then finds it. Links are read from
+ * the tree, like #generated_uv_maps_wire does.
+ */
+static void source_group_implicit_uv_wire(bNodeTree &tree)
+{
+  bNode *tex_coord = nullptr;
+  bNodeSocket *uv_out = nullptr;
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy != SH_NODE_TEX_IMAGE) {
+      continue;
+    }
+    bNodeSocket *vector = socket_in(node, "Vector");
+    if (vector == nullptr) {
+      continue;
+    }
+    bool linked = false;
+    for (const bNodeLink &link : tree.links) {
+      if (link.tosock == vector) {
+        linked = true;
+        break;
+      }
+    }
+    if (linked) {
+      continue;
+    }
+    if (tex_coord == nullptr) {
+      std::tie(tex_coord, uv_out) = generated_uv_map_ensure(tree, "");
+      if (tex_coord == nullptr || uv_out == nullptr) {
+        return;
+      }
+    }
+    bke::node_add_link(tree, *tex_coord, *uv_out, node, *vector);
+  }
+}
+
+/**
+ * The row-mapping half of a mapped level: the three interface inputs, the implicit-UV wiring for
+ * an unnamed layer, and the Mapping nodes in front of every UV output. One place for the wrapper
+ * root, its path copies and the private copies.
+ */
+static void source_group_mapping_prepare(bNodeTree &tree, const SourceGroupUvPolicy &uv)
+{
+  if (uv.uv_name == nullptr || uv.uv_name[0] == '\0') {
+    source_group_implicit_uv_wire(tree);
+  }
+  source_group_mapping_interface_ensure(tree);
+  source_group_mapping_insert(tree, uv);
+}
+
+/**
+ * Wire the wrapper instance's mapping inputs from the row group's own: the three values travel
+ * the same relay every other value does, from the root instance down through each interface.
+ * Idempotent: the instance is shared by the row's channels, and a second wiring must add no
+ * link. An unlinked input (the row carries no mapping, or its inputs were never created) leaves
+ * the wrapper's Mapping at its identity defaults.
+ */
+static void source_group_mapping_instance_wire(bNodeTree &tree,
+                                               bNode &group_input,
+                                               bNode &instance)
+{
+  /* The two sides are different trees with their own identifiers: the source is the parent's
+   * interface input, the target the child's (the instance's group), each found by role. */
+  if (instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+    return;
+  }
+  bNodeTree &child = *id_cast<bNodeTree *>(instance.id);
+  const char *roles[3] = {SOURCE_GROUP_ROLE_MAPPING_OFFSET,
+                          SOURCE_GROUP_ROLE_MAPPING_SCALE,
+                          SOURCE_GROUP_ROLE_MAPPING_ROTATION};
+  for (const char *role : roles) {
+    const bNodeTreeInterfaceSocket *iface = source_group_mapping_input_find(tree, role);
+    const bNodeTreeInterfaceSocket *child_iface = source_group_mapping_input_find(child, role);
+    if (iface == nullptr || iface->identifier == nullptr || child_iface == nullptr ||
+        child_iface->identifier == nullptr)
+    {
+      continue;
+    }
+    bNodeSocket *src = bke::node_find_socket(
+        group_input, SOCK_OUT, UString::from_ptr_noinline(iface->identifier));
+    bNodeSocket *dst = bke::node_find_socket(
+        instance, SOCK_IN, UString::from_ptr_noinline(child_iface->identifier));
+    if (src == nullptr || dst == nullptr) {
+      continue;
+    }
+    bool wired = false;
+    for (bNodeLink &link : tree.links) {
+      if (link.tosock == dst) {
+        wired = true;
+        break;
+      }
+    }
+    if (!wired) {
+      bke::node_add_link(tree, group_input, *src, instance, *dst);
+    }
+  }
+}
+
+/**
+ * The private (copy-on-write) copy of the shared source group \a orig (ТЗ 2.3): a group whose
+ * tree reads the owner's UVs anywhere must not be shared with other users of the source, so it
+ * is rebuilt here like a path copy -- private nodes, the owner's UV wiring, the row mapping in
+ * front of the UV outputs and its three inputs on the interface, then the same treatment for the
+ * groups it instantiates. Null when \a orig owns no UV reader at any depth: the group stays
+ * shared, exactly as the original material built it.
+ */
+static bNodeTree *source_group_private_copy_ensure(Main &bmain,
+                                                   const bNodeTree &orig,
+                                                   const int depth,
+                                                   const bUUID &owner_uid,
+                                                   const int source_uid,
+                                                   const char *source_name,
+                                                   const SourceGroupUvPolicy &uv,
+                                                   const bool mapped)
+{
+  if (depth > PAINT_LAYERS_SOURCE_GROUP_MAX_DEPTH) {
+    return nullptr;
+  }
+  if (!source_group_tree_reads_uv(const_cast<bNodeTree &>(orig), uv, 0)) {
+    return nullptr;
+  }
+  char name[MAX_ID_NAME - 2];
+  SNPRINTF(name, ".PL Source %s %s", source_name, orig.id.name + 2);
+  bNodeTree *copy = bke::node_tree_add_tree(&bmain, name, "ShaderNodeTree");
+  if (copy == nullptr) {
+    return nullptr;
+  }
+  /* The instance is the only user; the copy owns its own reference like a path copy does. */
+  id_us_min(&copy->id);
+  tree_owner_uid_set(*copy, owner_uid);
+  prop_int_set(copy->id.properties, TREE_SOURCE_PROP, source_uid);
+  copy->tree_interface.free_data();
+  /* The copy keeps the original's interface so the other nodes of the parent copy keep their
+   * links; `copy_data` carries `next_uid` over, so the mapping inputs added after it take fresh
+   * identifiers. */
+  copy->tree_interface.copy_data(orig.tree_interface, 0);
+  Map<const bNode *, bNode *> node_map;
+  if (!source_group_copy_nodes(bmain, *copy, orig, node_map)) {
+    BKE_id_free(&bmain, copy);
+    return nullptr;
+  }
+  copy->ensure_topology_cache();
+  generated_uv_maps_wire(*copy, uv.uv_name);
+  if (mapped) {
+    source_group_mapping_prepare(*copy, uv);
+  }
+  /* The groups this copy instantiates follow the same rule; a shared group below a private one
+   * is copied too, so the mapping reaches every UV reader the group feeds. */
+  for (const auto &item : node_map.items()) {
+    const bNode *orig_node = item.key;
+    bNode *copy_node = item.value;
+    if (!copy_node->is_group() || orig_node->id == nullptr ||
+        GS(orig_node->id->name) != ID_NT)
+    {
+      continue;
+    }
+    const bNodeTree *orig_child = reinterpret_cast<const bNodeTree *>(orig_node->id);
+    bNodeTree *child_copy = source_group_private_copy_ensure(bmain,
+                                                             *orig_child,
+                                                             depth + 1,
+                                                             owner_uid,
+                                                             source_uid,
+                                                             source_name,
+                                                             uv,
+                                                             mapped);
+    if (child_copy == nullptr) {
+      continue;
+    }
+    if (copy_node->id != nullptr) {
+      id_us_min(copy_node->id);
+    }
+    copy_node->id = &child_copy->id;
+    id_us_plus(&child_copy->id);
+    nodes::update_node_declaration_and_sockets(*copy, *copy_node);
+    if (mapped) {
+      bNode *group_input = source_group_group_input_ensure(*copy);
+      nodes::update_node_declaration_and_sockets(*copy, *group_input);
+      source_group_mapping_instance_wire(*copy, *group_input, *copy_node);
+    }
+  }
+  return copy;
+}
+
 /** Expose \a channels in \a tree, reading them straight from \a principled. */
 bool source_group_wire_principled(bNodeTree &tree,
                                   bNode &principled,
                                   const Vector<SourceGroupChannel> &channels,
-                                  const bool is_root)
+                                  const bool is_root,
+                                  const bool mapped)
 {
   bNode *group_output = source_group_group_output(tree);
   if (group_output == nullptr) {
@@ -445,7 +943,7 @@ bool source_group_wire_principled(bNodeTree &tree,
     else if (channels[i].channel == int(PAINT_MATERIAL_CHANNEL_NORMAL)) {
       /* The Normal leaves as the encoded map the bake and the chain share, never as the decoded
        * vector the Principled input carries. */
-      source_group_wire_normal(tree, *group_output, *out_in, *input);
+      source_group_wire_normal(tree, *group_output, *out_in, *input, mapped);
     }
     else {
       bke::node_add_link(tree, *links[0]->fromnode, *links[0]->fromsock, *group_output, *out_in);
@@ -504,6 +1002,10 @@ bool source_group_wire_instance(bNodeTree &tree,
  * #TREE_SOURCE_PROP so #source_groups_prune collects it), the recursion descends, and each level
  * propagates the child's new outputs up to its own Group Output. Only \a is_root carries the
  * `COLOR:<CHANNEL>`/`COVERAGE` roles.
+ *
+ * With \a mapped, every level puts the row mapping in front of its UV outputs (ТЗ 2.2) and
+ * carries the three mapping inputs on its interface; shared groups off the path whose trees read
+ * UVs are copied privately (ТЗ 2.3) so the mapping reaches them too.
  */
 bool source_group_build_level(Main &bmain,
                               bNodeTree &tree,
@@ -516,7 +1018,8 @@ bool source_group_build_level(Main &bmain,
                               const bUUID &owner_uid,
                               const int source_uid,
                               const char *source_name,
-                              const char *uv_name)
+                              const SourceGroupUvPolicy &uv,
+                              const bool mapped)
 {
   Map<const bNode *, bNode *> node_map;
   if (!source_group_copy_nodes(bmain, tree, orig_tree, node_map)) {
@@ -529,13 +1032,66 @@ bool source_group_build_level(Main &bmain,
   tree.ensure_topology_cache();
   /* Every Image Texture the wrapper copied samples the owner's named UV layer: an already-wired
    * Vector is left alone, an open one is linked to the shared UV Map node. */
-  generated_uv_maps_wire(tree, uv_name);
+  generated_uv_maps_wire(tree, uv.uv_name);
+  if (mapped) {
+    /* The row mapping in front of the UV outputs (Texture Coordinate, the owner's UV Map and the
+     * implicitly wired Image Textures), driven by this level's three interface inputs. The root's
+     * interface survives a rebuild because the inputs are found by role; a path copy's interface
+     * was copied from its original and the inputs are added on top here. */
+    source_group_mapping_prepare(tree, uv);
+  }
+  else if (is_root) {
+    /* The root's interface survives a rebuild, so inputs left by an earlier mapped build go now.
+     * Path copies need no such step: their interface is copied fresh from the original. */
+    source_group_mapping_interface_remove(tree);
+  }
+  /* Only a mapped wrapper copies shared groups off the path (copy-on-write, on every level, the
+   * Principled's own included): one whose tree reads UVs gets its own private copy so the mapping
+   * reaches it. Without the mapping nothing in them changes, so they stay shared with the original
+   * material exactly as before. The group the path descends through is skipped here -- it is
+   * handled by the recursion below. */
+  const bNode *path_node = (depth < int(path.size())) ? path[depth] : nullptr;
+  for (const auto &item : node_map.items()) {
+    const bNode *orig_node = item.key;
+    bNode *copy_node = item.value;
+    if (!mapped || orig_node == path_node || !copy_node->is_group() || orig_node->id == nullptr ||
+        GS(orig_node->id->name) != ID_NT)
+    {
+      continue;
+    }
+    const bNodeTree *orig_child_shared = reinterpret_cast<const bNodeTree *>(orig_node->id);
+    if (orig_child_shared == nullptr) {
+      continue;
+    }
+    bNodeTree *private_copy = source_group_private_copy_ensure(bmain,
+                                                               *orig_child_shared,
+                                                               depth + 1,
+                                                               owner_uid,
+                                                               source_uid,
+                                                               source_name,
+                                                               uv,
+                                                               mapped);
+    if (private_copy == nullptr) {
+      continue;
+    }
+    if (copy_node->id != nullptr) {
+      id_us_min(copy_node->id);
+    }
+    copy_node->id = &private_copy->id;
+    id_us_plus(&private_copy->id);
+    nodes::update_node_declaration_and_sockets(tree, *copy_node);
+    if (mapped) {
+      bNode *group_input = source_group_group_input_ensure(tree);
+      nodes::update_node_declaration_and_sockets(tree, *group_input);
+      source_group_mapping_instance_wire(tree, *group_input, *copy_node);
+    }
+  }
   if (depth >= int(path.size())) {
     bNode *copied_principled = node_map.lookup_default(principled, nullptr);
     if (copied_principled == nullptr) {
       return false;
     }
-    return source_group_wire_principled(tree, *copied_principled, channels, is_root);
+    return source_group_wire_principled(tree, *copied_principled, channels, is_root, mapped);
   }
   const bNode *orig_group = path[depth];
   bNode *instance = node_map.lookup_default(orig_group, nullptr);
@@ -581,12 +1137,20 @@ bool source_group_build_level(Main &bmain,
                                 owner_uid,
                                 source_uid,
                                 source_name,
-                                uv_name))
+                                uv,
+                                mapped))
   {
     return false;
   }
   /* The child gained its outputs; the instance only sees them after a declaration update. */
   nodes::update_node_declaration_and_sockets(tree, *instance);
+  if (mapped) {
+    /* The parent relays its own three mapping inputs into the child instance, the same way it
+     * relays a row's value inputs through the group interfaces. */
+    bNode *group_input = source_group_group_input_ensure(tree);
+    nodes::update_node_declaration_and_sockets(tree, *group_input);
+    source_group_mapping_instance_wire(tree, *group_input, *instance);
+  }
   return source_group_wire_instance(tree, *instance, *child, channels, is_root);
 }
 
@@ -602,7 +1166,8 @@ bool source_group_build(Main &bmain,
                         const Material &source,
                         const bNode *principled,
                         const Vector<const bNode *> &path,
-                        const int source_uid)
+                        const int source_uid,
+                        const bool mapped)
 {
   source.nodetree->ensure_topology_cache();
   const Vector<SourceGroupChannel> channels = source_group_channels(*principled);
@@ -617,7 +1182,10 @@ bool source_group_build(Main &bmain,
                                   owner.paint_layers_owner_uid,
                                   source_uid,
                                   source.id.name + 2,
-                                  BKE_paint_layers_uv_map_name(owner));
+                                  SourceGroupUvPolicy{BKE_paint_layers_uv_map_name(owner),
+                                                      (owner.paint_layers_flag &
+                                                       MA_PAINT_LAYERS_REMAP_ALL_UV) != 0},
+                                  mapped);
 }
 
 /** Delete the wrapper trees of \a owner whose source is no longer referenced by any row. */
@@ -862,6 +1430,16 @@ static bool source_group_refresh_channel_defaults(bNodeTree &dst_tree,
   return changed;
 }
 
+/** Whether \a socket is one of the wrapper's own row-mapping value inputs: their values belong to
+ * the rows, so the value sync must never copy a source interface input over them. */
+static bool source_group_input_is_mapping(const bNodeTreeInterfaceSocket &socket)
+{
+  const char *role = prop_string_get(socket.properties, INPUT_ROLE_PROP);
+  return role != nullptr && (STREQ(role, SOURCE_GROUP_ROLE_MAPPING_OFFSET) ||
+                             STREQ(role, SOURCE_GROUP_ROLE_MAPPING_SCALE) ||
+                             STREQ(role, SOURCE_GROUP_ROLE_MAPPING_ROTATION));
+}
+
 /**
  * Copy every value of \a src_tree into the matching nodes of \a dst_tree, once each, then recurse
  * into the private copies of the groups on the path to the Principled. Matching is by node name and
@@ -960,7 +1538,9 @@ static int source_group_values_sync_tree(Main &bmain,
                                                                       nullptr);
     const bke::bNodeSocketType *src_type =
         src_socket->socket_typeinfo();
-    if (dst_socket != nullptr && src_type != nullptr) {
+    if (dst_socket != nullptr && src_type != nullptr &&
+        !source_group_input_is_mapping(*dst_socket))
+    {
       if (source_group_value_copy(
               src_type->type, dst_socket->socket_data, src_socket->socket_data))
       {
@@ -1120,7 +1700,8 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
                                                  Material &source,
                                                  PaintLayersSourceGroupRefusal &r_refusal,
                                                  bool *r_changed,
-                                                 bool *r_values_synced)
+                                                 bool *r_values_synced,
+                                                 const bool mapped)
 {
   if (r_changed != nullptr) {
     *r_changed = false;
@@ -1158,6 +1739,15 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
   /* The owner's UV layer name decides the UV Map wiring inside the wrapper, so it is part of what
    * the wrapper is built from: a change rebuilds it, the same name keeps it. */
   topology_hash_string(source_topology, BKE_paint_layers_uv_map_name(owner));
+  /* The remap-all flag changes which UV readers get a Mapping, so it is part of the topology too. */
+  if ((owner.paint_layers_flag & MA_PAINT_LAYERS_REMAP_ALL_UV) != 0) {
+    /* Mixed only when set, so the flag-off hash stays what older files stored. */
+    source_topology = topology_hash_mix(source_topology, 2);
+  }
+  /* Whether the row mapping is applied at all (ТЗ 2.2): on means the wrapper carries Mapping
+   * nodes and the three value inputs, off means none of them. Toggling the mapping on any row of
+   * this source therefore rebuilds the wrapper once. */
+  source_topology = topology_hash_mix(source_topology, mapped ? 1 : 0);
   const int source_uid = int(source.id.session_uid);
   char name[MAX_ID_NAME - 2];
   SNPRINTF(name, ".PL Source %s", source.id.name + 2);
@@ -1215,7 +1805,7 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
       }
       old_copies.append(&tree);
     }
-    if (!source_group_build(bmain, *existing, owner, source, principled, group_path, source_uid)) {
+    if (!source_group_build(bmain, *existing, owner, source, principled, group_path, source_uid, mapped)) {
       r_refusal = PaintLayersSourceGroupRefusal::BuildFailed;
       return nullptr;
     }
@@ -1273,7 +1863,7 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
   tree_hash_set(*group, TREE_SOURCE_HASH_LOW_PROP, TREE_SOURCE_HASH_HIGH_PROP, source_topology);
   tree_hash_set(
       *group, TREE_SOURCE_VALUES_LOW_PROP, TREE_SOURCE_VALUES_HIGH_PROP, source_values);
-  if (!source_group_build(bmain, *group, owner, source, principled, group_path, source_uid)) {
+  if (!source_group_build(bmain, *group, owner, source, principled, group_path, source_uid, mapped)) {
     BKE_id_free(&bmain, group);
     r_refusal = PaintLayersSourceGroupRefusal::BuildFailed;
     return nullptr;

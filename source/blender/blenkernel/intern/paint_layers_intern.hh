@@ -255,18 +255,19 @@ inline Image *paint_layer_channel_image(const Material &ma,
 }
 
 /**
- * Whether a content Fill correction reads a map the user assigned in \a channel instead of its
+ * Whether a Fill row reads a map the user assigned in \a channel instead of its
  * constant. A Fill is never painted, but its channels may hold their own image, which is then a
  * texture source for that channel only; the other channels keep the constant. The generator, the
  * CPU composite and the topology hash all ask this, so they cannot disagree about it.
+ *
+ * Covers both a stack Layer Fill and a content Fill correction (Effect): the one rule
+ * #BKE_paint_layers_fill_reads_map.
  */
-inline bool paint_layer_fill_effect_reads_map(const Material &ma,
-                                              const MaterialPaintLayer &correction,
-                                              const int channel)
+inline bool paint_layer_fill_reads_map(const Material &ma,
+                                       const MaterialPaintLayer &row,
+                                       const int channel)
 {
-  return correction.role == MA_PAINT_LAYER_ROLE_EFFECT &&
-         correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
-         paint_layer_channel_image(ma, correction, channel) != nullptr;
+  return BKE_paint_layers_fill_reads_map(ma, row, channel);
 }
 
 /**

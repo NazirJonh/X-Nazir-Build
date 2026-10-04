@@ -2024,20 +2024,20 @@ class PaintLayersStackSource final : public StackSource,
       if (row == nullptr) {
         return false;
       }
-      /* A Fill correction is never painted, so it takes the user's own maps. */
-      if (BKE_paint_layers_role(*row) == PaintLayerRole::Effect &&
+      /* A Fill row is never painted, so it takes the user's own maps: a stack Fill layer
+       * as well as a Fill correction. */
+      if (ELEM(BKE_paint_layers_role(*row), PaintLayerRole::Layer, PaintLayerRole::Effect) &&
           row->source == MA_PAINT_LAYER_SOURCE_CONSTANT)
       {
         return true;
       }
-      /* A Paint row owns the maps its brush writes into, so a drop must not swap them; a Fill
-       * layer is a colour, a folder composites its children and a Material layer is its source's
-       * bake. */
+      /* A Paint row owns the maps its brush writes into, so a drop must not swap them; a folder
+       * composites its children and a Material layer is its source's bake. */
       *r_disabled_hint = (BKE_paint_layers_role(*row) == PaintLayerRole::Layer &&
                           row->source == MA_PAINT_LAYER_SOURCE_IMAGE) ?
                              TIP_("The maps of a Paint layer cannot be replaced; drop the image "
                                   "between rows to add a layer") :
-                             TIP_("Only a Paint layer takes an image; drop it between rows to add "
+                             TIP_("Only a Fill row takes an image; drop it between rows to add "
                                   "a layer");
       return false;
     }
@@ -2469,12 +2469,12 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
       BKE_report(op->reports, RPT_ERROR, "The layer the image was dropped on is gone");
       return OPERATOR_CANCELLED;
     }
-    /* Mirrors the drop gate: only a Fill correction takes a map; a Paint layer's maps belong to
-     * it. */
-    if (BKE_paint_layers_role(*layer) != PaintLayerRole::Effect ||
+    /* Mirrors the drop gate: only a Fill row takes a map; a Paint layer's maps belong to
+     * it. In a Fill layer the maps are only assigned, never painted. */
+    if (!ELEM(BKE_paint_layers_role(*layer), PaintLayerRole::Layer, PaintLayerRole::Effect) ||
         layer->source != MA_PAINT_LAYER_SOURCE_CONSTANT)
     {
-      BKE_report(op->reports, RPT_ERROR, "Only a Fill correction takes an image");
+      BKE_report(op->reports, RPT_ERROR, "Only a Fill row takes an image");
       return OPERATOR_CANCELLED;
     }
   }

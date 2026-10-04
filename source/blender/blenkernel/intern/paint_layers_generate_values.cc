@@ -201,6 +201,40 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  /* The row's UV mapping values: carried on Vector inputs so a slider move syncs in place and
+   * never rebuilds the group. The offsets/scales/rotation read the description through the one
+   * normalizer the RNA setters share, so an old file's zeroes agree on both sides. */
+  if (STREQ(role, ROLE_MAPPING_OFFSET)) {
+    if (bNodeSocketValueVector *socket_value = static_cast<bNodeSocketValueVector *>(
+            socket.default_value))
+    {
+      socket_value->value[0] = layer->mapping.offset[0];
+      socket_value->value[1] = layer->mapping.offset[1];
+      socket_value->value[2] = 0.0f;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_MAPPING_SCALE)) {
+    if (bNodeSocketValueVector *socket_value = static_cast<bNodeSocketValueVector *>(
+            socket.default_value))
+    {
+      socket_value->value[0] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+      socket_value->value[1] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[1]);
+      socket_value->value[2] = 1.0f;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_MAPPING_ROTATION)) {
+    if (bNodeSocketValueVector *socket_value = static_cast<bNodeSocketValueVector *>(
+            socket.default_value))
+    {
+      socket_value->value[0] = 0.0f;
+      socket_value->value[1] = 0.0f;
+      /* The rotation turns the map lookup around Z; normal vectors stay in tangent space. */
+      socket_value->value[2] = layer->mapping.rotation;
+    }
+    return true;
+  }
   return false;
 }
 

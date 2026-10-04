@@ -690,6 +690,10 @@ bool BKE_paint_layers_bake_substitute(const Material &ma,
   if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return false;
   }
+  /* A row with a mapping inside stays live, so its slider values reach the graph and the CPU. */
+  if (BKE_paint_layers_mapping_blocks_bake(ma, layer)) {
+    return false;
+  }
   if (!BKE_paint_layers_bake_is_valid(ma, layer)) {
     return false;
   }
@@ -1034,6 +1038,10 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       if (BKE_paint_layers_kind_info(layer.source).needs_external_bake) {
         continue;
       }
+      /* A row with a mapping inside stays live and is never baked (see #row_is_substituted). */
+      if (BKE_paint_layers_mapping_blocks_bake(ma, layer)) {
+        continue;
+      }
 
       MaterialPaintLayerBake *bake = nullptr;
       int size = 0;
@@ -1302,7 +1310,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
     Vector<const MaterialPaintLayer *> layers;
     BKE_paint_layers_flatten_all(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
-      if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
+      if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
+          BKE_paint_layers_mapping_blocks_bake(ma, *layer))
+      {
         continue;
       }
       if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
@@ -1467,7 +1477,18 @@ static bool material_live_row_eligible(const Material &ma,
   {
     return true;
   }
+  /* A mapped row always shows its source: its baked maps are read at the raw UV, so showing them
+   * through the row would jump the pixels away from where the mapping puts them. This runs before
+   * the BAKE_NEVER and bake-ready checks, so a row whose bake is switched off, stale or still
+   * rendering stays live too -- the mode the mapping predicate
+   * (#BKE_paint_layers_mapping_applies) reads stays consistent with the graph. */
+  if (BKE_paint_layers_mapping_enabled_get(layer) &&
+      BKE_paint_layers_mapping_supported(ma, layer))
+  {
+    return true;
+  }
   if (layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER) {
+    /* The user forbade the bake: the row keeps whatever maps it has, read raw. */
     return false;
   }
   if (cache == nullptr || !cache->modes_frozen) {
@@ -1483,16 +1504,23 @@ static bool material_live_row_eligible(const Material &ma,
 
 /**
  * Whether \a source names an Image Texture both sides can show in UV space: a flat projection with
- * nothing linked to its Vector input. The CPU samples the buffer straight and reproduces neither a
- * mapping chain nor a non-flat projection, so anything else belongs to the wrapper group.
+ * nothing linked to its Vector input, and -- for a mapped row, whose CPU remap always repeats --
+ * the Repeat extension. The CPU samples the buffer straight and reproduces neither a mapping chain
+ * nor a non-flat projection, so anything else belongs to the wrapper group.
  */
-static bool material_image_is_trivial(const ChannelSourceImage &source)
+static bool material_image_is_trivial(const ChannelSourceImage &source, const bool mapped)
 {
   if (source.image == nullptr || source.node == nullptr) {
     return false;
   }
   const NodeTexImage *storage = static_cast<const NodeTexImage *>(source.node->storage);
   if (storage == nullptr || storage->projection != SHD_PROJ_FLAT) {
+    return false;
+  }
+  /* A mapped row's live texture is forced to Repeat in the graph and the CPU remap repeats
+   * unconditionally, so a source with Extend/Clip cannot be reproduced: the row goes through the
+   * wrapper, whose Mapping sits before the source's own sampling. */
+  if (mapped && storage->extension != SHD_IMAGE_EXTENSION_REPEAT) {
     return false;
   }
   const bNodeSocket *vector = bke::node_find_socket(
@@ -1543,6 +1571,12 @@ static PaintLayerMaterialMode material_mode_compute(const Material &ma,
   /* One resolver pass for the whole row; the live helpers then answer a specific channel. */
   MaterialSourceResolve resolve_local;
   const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(layer.material, cache, resolve_local);
+  /* The mapping gates the trivial-image check before the mode exists: a mapped row's live
+   * textures must repeat, or the row cannot be shown Hybrid at all. This is the enabled and
+   * supported pair, not the applied predicate -- the mode is what is being computed here. */
+  const bool mapping_wants_repeat =
+      BKE_paint_layers_mapping_enabled_get(layer) &&
+      BKE_paint_layers_mapping_supported(ma, layer);
   bool any_live = false;
   for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
     if (!material_live_row_eligible(ma, layer, channel, cache)) {
@@ -1557,7 +1591,8 @@ static PaintLayerMaterialMode material_mode_compute(const Material &ma,
     if (resolution == ChannelResolution::Constant) {
       continue;
     }
-    if (resolution == ChannelResolution::Image && material_image_is_trivial(resolve.images[channel]))
+    if (resolution == ChannelResolution::Image &&
+        material_image_is_trivial(resolve.images[channel], mapping_wants_repeat))
     {
       continue;
     }
@@ -1623,7 +1658,11 @@ bool BKE_paint_layers_material_live_image(const Material &ma,
     return false;
   }
   const ChannelSourceImage &source = resolve.images[channel];
-  if (!material_image_is_trivial(source)) {
+  /* The same `mapped` the mode was computed with, or the graph (Repeat required) and the CPU
+   * (which would take the live image) disagree on a mapped row. */
+  const bool mapped = BKE_paint_layers_mapping_enabled_get(layer) &&
+                      BKE_paint_layers_mapping_supported(ma, layer);
+  if (!material_image_is_trivial(source, mapped)) {
     return false;
   }
   *r_image = source.image;
@@ -1732,7 +1771,9 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
     if (layer->role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(*layer)) {
       continue;
     }
-    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
+    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
+        BKE_paint_layers_mapping_blocks_bake(ma, *layer))
+    {
       continue;
     }
     /* The active row and its ancestors are not queued: their bake catches up once the marker
@@ -1903,7 +1944,9 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     if (layer->role != MA_PAINT_LAYER_ROLE_LAYER && !BKE_paint_layers_is_folder(*layer)) {
       continue;
     }
-    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
+    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
+        BKE_paint_layers_mapping_blocks_bake(ma, *layer))
+    {
       continue;
     }
     /* The row the user is editing inside is left live; it is queued only after the active marker
@@ -2170,7 +2213,9 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten_all(*ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
-    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake) {
+    if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
+        BKE_paint_layers_mapping_blocks_bake(*ma, *layer))
+    {
       continue;
     }
     if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
@@ -2898,6 +2943,11 @@ static uint64_t bake_hash_layer(uint64_t h,
     if (is_child) {
       h = bake_hash_mix(h, (layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1 : 0);
     }
+    /* Only the fact of a mapping, not its values: a mapped row stays live and is never baked
+     * (#BKE_paint_layers_mapping_blocks_bake), so the sliders must not move any bake hash. */
+    if (is_child && BKE_paint_layers_mapping_enabled_get(layer)) {
+      h = bake_hash_mix(h, 1);
+    }
     return h;
   }
   h = bake_hash_mix(h, uint8_t(layer.source));
@@ -2925,6 +2975,11 @@ static uint64_t bake_hash_layer(uint64_t h,
    * bakes are invalidated and re-rendered on first load; files written after it hash stably. */
   h = bake_hash_mix(h, uint8_t(layer.role));
   h = bake_hash_float(h, layer.opacity);
+  /* Only the fact that the mapping is enabled: such a row stays live and is never baked
+   * (#BKE_paint_layers_mapping_blocks_bake), so the slider values must not move the hash. */
+  if (BKE_paint_layers_mapping_enabled_get(layer)) {
+    h = bake_hash_mix(h, 1);
+  }
   /* A Layer-role row's Base Color lives in its Base-Color channel record and is hashed by the
    * channel loop below; a mask or Fill-effect correction keeps it in the DNA field, which that loop
    * cannot see. Hashing it unconditionally would fold a Layer-role row's Base Color in twice. */

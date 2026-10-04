@@ -177,7 +177,7 @@ if (!substituted) {
     }
     /* A Fill whose channel holds an assigned map reads it like a Paint correction's map. */
     const bool fill = BKE_paint_layers_source_type(correction) == PaintLayerSourceType::Constant &&
-                      !paint_layer_fill_effect_reads_map(ma, correction, channel);
+                      !paint_layer_fill_reads_map(ma, correction, channel);
     /* A constant normal makes no sense; the CPU skips this correction as well. */
     if (normal_channel && fill) {
       continue;
@@ -225,6 +225,9 @@ if (!substituted) {
      * un-premultiplies a non-data texture, so a data map needs the chain's own Divide (the
      * same rule the mask chain follows). */
     bool content_map_is_data = false;
+    /* A mapped Normal correction map is remapped after the data-map straighten below: that
+     * Divide is not linear-compatible with the remap, so the order is fixed. */
+    bool normal_remap_pending = false;
     if (fill) {
       /* A live record's per-channel socket wins; every other channel reads the single socket,
        * which carries fill_color. A no-record Fill and a mask item have only the single socket. */
@@ -284,12 +287,24 @@ if (!substituted) {
             dst->iuser = *row_source.live_map_iuser;
           }
         }
+        live_map_configure(
+            *map, tree, group_input, correction, channel, location_x - 180.0f, location_y - 160.0f);
         correction_color = socket_out(*map, "Color");
         correction_alpha = socket_out(*map, "Alpha");
         correction_color_node = map;
         correction_source = map;
         if (correction_color == nullptr) {
           continue;
+        }
+        if (normal_channel) {
+          /* The Mapping moved only the read point; the tangent-space vectors follow it. */
+          correction_color = outer_.normal_remap_ensure(tree,
+                                                        correction,
+                                                        *map,
+                                                        *correction_color,
+                                                        correction_color_node,
+                                                        location_x + 60.0f,
+                                                        location_y - 400.0f);
         }
       }
       else if (row_source.source_group_instance != nullptr &&
@@ -356,6 +371,13 @@ if (!substituted) {
               dst->iuser = *alpha_source.live_map_iuser;
             }
           }
+          live_map_configure(*map,
+                             tree,
+                             group_input,
+                             correction,
+                             PAINT_MATERIAL_CHANNEL_ALPHA,
+                             location_x - 270.0f,
+                             location_y - 240.0f);
           correction_material_coverage_node = map;
           correction_material_coverage_socket = map_alpha;
         }
@@ -480,9 +502,23 @@ if (!substituted) {
             storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
           }
         }
+        else if (std::pair<bNode *, bNodeSocket *> mapping = outer_.mapping_vector_ensure(
+                     tree, group_input, correction, location_x - 180.0f, location_y - 160.0f);
+                 mapping.first != nullptr && mapping.second != nullptr)
+        {
+          /* A mapped Fill reads its map through its own Mapping node; tiling needs Repeat. */
+          if (NodeTexImage *storage = static_cast<NodeTexImage *>(
+                  correction_source->storage))
+          {
+            storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+          }
+          texture_vector_link_mapped(
+              tree, *correction_source, *mapping.first, *mapping.second);
+        }
         correction_color = socket_out(*correction_source, "Color");
         correction_alpha = socket_out(*correction_source, "Alpha");
         correction_color_node = correction_source;
+        normal_remap_pending = normal_channel && !correction_mesh_map;
         /* A scalar atlas spreads its R across RGB, matching the row and the CPU. */
         if (correction_mesh_map &&
             paint_layer_mesh_map_is_scalar(correction.mesh_map_type))
@@ -651,6 +687,16 @@ if (!substituted) {
           correction_color = vector_out;
         }
       }
+    }
+    if (normal_remap_pending && correction_color_node != nullptr && correction_color != nullptr) {
+      /* The Mapping moved only the read point; the tangent-space vectors follow it. */
+      correction_color = outer_.normal_remap_ensure(tree,
+                                                    correction,
+                                                    *correction_color_node,
+                                                    *correction_color,
+                                                    correction_color_node,
+                                                    location_x + 60.0f,
+                                                    location_y - 400.0f);
     }
     /* The colour arrives from a group input (Fill) or a map (Paint). */
     if (correction_color_node != nullptr) {
@@ -855,8 +901,49 @@ bNodeSocket *PaintLayersChainBuilder::group_input_socket(bNode *group_input,
 }
 
 
+void PaintLayersChainBuilder::live_map_configure(bNode &map,
+                                                 bNodeTree &tree,
+                                                 bNode *group_input,
+                                                 const MaterialPaintLayer &row,
+                                                 const int channel,
+                                                 const float location_x,
+                                                 const float location_y)
+{
+  NodeTexImage *dst = static_cast<NodeTexImage *>(map.storage);
+  if (dst == nullptr) {
+    return;
+  }
+  /* The source node's sampling settings travel with the live map, like a Layer row's. */
+  MaterialSourceResolve resolve_local;
+  const MaterialSourceResolve &resolve = PaintLayersRegenCache::resolve_get(
+      row.material, outer_.cache_, resolve_local);
+  const bNode *src_node = (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) ?
+                              resolve.images[channel].node :
+                              nullptr;
+  if (const NodeTexImage *src_storage = (src_node != nullptr) ?
+                                            static_cast<const NodeTexImage *>(src_node->storage) :
+                                            nullptr)
+  {
+    dst->interpolation = src_storage->interpolation;
+    dst->extension = src_storage->extension;
+    dst->projection = src_storage->projection;
+  }
+  /* Tiling needs Repeat: the CPU remap repeats unconditionally. One shared Mapping per row. */
+  if (std::pair<bNode *, bNodeSocket *> mapping = outer_.mapping_vector_ensure(
+          tree, group_input, row, location_x, location_y);
+      mapping.first != nullptr && mapping.second != nullptr)
+  {
+    dst->extension = SHD_IMAGE_EXTENSION_REPEAT;
+    texture_vector_link_mapped(tree, map, *mapping.first, *mapping.second);
+  }
+}
+
 std::pair<bNode *, bNodeSocket *> PaintLayersChainBuilder::resolve_correction_coverage(
-    bNodeTree &tree, const float location_x, const float location_y, const MaterialPaintLayer &row)
+    bNodeTree &tree,
+    bNode *group_input,
+    const float location_x,
+    const float location_y,
+    const MaterialPaintLayer &row)
 {
   if (row.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
     /* A Node Group has no live path at all (it is Baked-only); its "coverage" is its own
@@ -893,6 +980,13 @@ std::pair<bNode *, bNodeSocket *> PaintLayersChainBuilder::resolve_correction_co
           dst->iuser = *alpha_source.live_map_iuser;
         }
       }
+      live_map_configure(*map,
+                         tree,
+                         group_input,
+                         row,
+                         PAINT_MATERIAL_CHANNEL_ALPHA,
+                         location_x - 270.0f,
+                         location_y - 240.0f);
       return {map, map_alpha};
     }
     return {nullptr, nullptr};
@@ -967,8 +1061,11 @@ if (current.opacity != nullptr)
     bNodeSocket *factor_socket = layer_factor_socket;
     for (const MaterialPaintLayer *mask_item : mask_items) {
       const MaterialPaintLayer &correction = *mask_item;
+      /* A Fill mask that carries its own map reads it like a Paint mask's map below; the grey
+       * chain reduces it the same way. A Fill without a map stays the constant. */
       const bool fill = BKE_paint_layers_source_type(correction) ==
-                        PaintLayerSourceType::Constant;
+                            PaintLayerSourceType::Constant &&
+                        paint_layer_mask_correction_image(ma, correction, channel) == nullptr;
       const bool mask_material_or_group = ELEM(correction.source,
                                                 MA_PAINT_LAYER_SOURCE_MATERIAL,
                                                 MA_PAINT_LAYER_SOURCE_NODE_GROUP,
@@ -1113,7 +1210,7 @@ if (current.opacity != nullptr)
         else if (mask_alpha_channel) {
           /* The channel itself is the source's coverage: no separate grey/coverage split. */
           std::tie(correction_coverage_node, correction_coverage_socket) =
-              resolve_correction_coverage(tree, location_x, location_y, correction);
+              resolve_correction_coverage(tree, group_input, location_x, location_y, correction);
           if (correction_coverage_node == nullptr || correction_coverage_socket == nullptr) {
             continue;
           }
@@ -1151,6 +1248,13 @@ if (current.opacity != nullptr)
                     dst->iuser = *row_source.live_map_iuser;
                   }
                 }
+                live_map_configure(*map,
+                                   tree,
+                                   group_input,
+                                   correction,
+                                   correction.mask_channel,
+                                   location_x - 400.0f,
+                                   location_y - 320.0f);
                 value_socket = socket_out(*map, "Color");
                 value_node = map;
               }
@@ -1234,7 +1338,7 @@ if (current.opacity != nullptr)
           /* This item's own Fac multiplier: the source's coverage, resolved once more (its
            * own Alpha channel, independent of `mask_channel`). */
           std::tie(correction_coverage_node, correction_coverage_socket) =
-              resolve_correction_coverage(tree, location_x, location_y, correction);
+              resolve_correction_coverage(tree, group_input, location_x, location_y, correction);
         }
       }
       else {
@@ -1260,6 +1364,16 @@ if (current.opacity != nullptr)
           if (NodeTexImage *storage = static_cast<NodeTexImage *>(correction_map->storage)) {
             storage->extension = SHD_IMAGE_EXTENSION_EXTEND;
           }
+        }
+        else if (std::pair<bNode *, bNodeSocket *> mapping = outer_.mapping_vector_ensure(
+                     tree, group_input, correction, location_x - 400.0f, location_y - 320.0f);
+                 mapping.first != nullptr && mapping.second != nullptr)
+        {
+          /* A mapped Fill mask reads its map through its own Mapping node; tiling needs Repeat. */
+          if (NodeTexImage *storage = static_cast<NodeTexImage *>(correction_map->storage)) {
+            storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+          }
+          texture_vector_link_mapped(tree, *correction_map, *mapping.first, *mapping.second);
         }
         correction_alpha = socket_out(*correction_map, "Alpha");
         gray_source_color = socket_out(*correction_map, "Color");

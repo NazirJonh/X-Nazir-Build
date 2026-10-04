@@ -1077,6 +1077,111 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
 /** Set whether \a layer takes part in the stack. */
 bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled);
 
+/* -------------------------------------------------------------------- */
+/** \name Row UV mapping (stage 1: Fill layer / Fill correction / Fill mask)
+ * \{ */
+
+/** Lower bound of the mapping scale magnitude; a zero axis reads back as one. */
+constexpr float PAINT_LAYER_MAPPING_SCALE_MIN = 1e-3f;
+
+/**
+ * Normalized mapping scale of one axis: zero reads back as one, the magnitude
+ * never drops below #PAINT_LAYER_MAPPING_SCALE_MIN. The one helper RNA,
+ * value-sync and the CPU compositor share, so an old file's zeroes cannot
+ * disagree between them.
+ */
+float BKE_paint_layers_mapping_scale_normalize(float scale);
+
+/**
+ * Whether a Fill row reads a user-assigned map in \a channel instead of its
+ * constant: a Layer or an Effect with a Constant source whose channel record
+ * carries a live image. The generator, the CPU composite and the topology hash
+ * all ask this, so they cannot disagree about it.
+ */
+bool BKE_paint_layers_fill_reads_map(const Material &ma,
+                                      const MaterialPaintLayer &row,
+                                      int channel);
+
+/**
+ * Whether \a layer may carry UV mapping: it reads at least one map through
+ * #BKE_paint_layers_fill_reads_map (Layer/Effect) or its mask image
+ * (Mask Item), or it is a Layer row over a source material. Mesh-Map atlases
+ * (forced Extend), Material corrections/masks and Node-Group/Stack rows never
+ * support it. The one predicate UI, RNA, the graph and the CPU share; UI never
+ * inspects channel records itself.
+ */
+bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer's mapping is actually applied right now: enabled, supported, and -- a Material
+ * row only -- in a mode that builds it (Hybrid's live textures or the SourceGroup wrapper). A
+ * Baked Material row (forced bake) ignores its mapping (a BAKE_NEVER row stays live), so this is
+ * the predicate the topology hash, the row interface, the warm spares and the CPU stack build by;
+ * the values never move it, an offset/scale/rotation drag is value-only.
+ *
+ * \param cache: the regeneration cache to read a row's mode through, or null to compute it.
+ */
+bool BKE_paint_layers_mapping_applies(const Material &ma,
+                                      const MaterialPaintLayer &layer,
+                                      const PaintLayersRegenCache *cache = nullptr);
+
+/**
+ * Whether \a layer must stay live (never substituted by a bake nor planned for one): its own
+ * mapping applies, or that of any effect, mask item or child inside it. The mapping values are
+ * not part of the bake hash, so the row is the only place they are honored per drag tick.
+ */
+bool BKE_paint_layers_mapping_blocks_bake(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          const PaintLayersRegenCache *cache = nullptr);
+
+/** Whether \a layer's mapping is enabled. */
+bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer);
+
+/**
+ * Set whether \a layer's mapping is enabled. Refused when
+ * #BKE_paint_layers_mapping_supported reports false. Structural: the generated
+ * tree gains or loses the row's Mapping node.
+ */
+bool BKE_paint_layers_mapping_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled);
+
+/**
+ * Set the mapping offset of \a layer. Value-only: carried on the row group's
+ * inputs through #BKE_paint_layers_values_sync, never a rebuild.
+ */
+bool BKE_paint_layers_mapping_set_offset(Material &ma,
+                                          MaterialPaintLayer *layer,
+                                          const float offset[2]);
+
+/**
+ * Set the mapping scale of \a layer. Value-only, normalized through
+ * #BKE_paint_layers_mapping_scale_normalize.
+ */
+bool BKE_paint_layers_mapping_set_scale(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         const float scale[2]);
+
+/** Whether the scale axes of \a layer move together (the Lock toggle). */
+bool BKE_paint_layers_mapping_scale_lock_get(const MaterialPaintLayer &layer);
+
+/**
+ * Lock or unlock the scale axes of \a layer. While locked, #BKE_paint_layers_mapping_set_scale
+ * gives both axes the value of the one that changed; locking joins them at the X value at once.
+ * Value-only, never a rebuild.
+ */
+bool BKE_paint_layers_mapping_set_scale_lock(Material &ma, MaterialPaintLayer *layer, bool locked);
+
+/**
+ * Set the mapping rotation of \a layer, in radians around Z. Value-only.
+ *
+ * The rotation changes where the row's maps are read. A Normal map's tangent-space vectors are
+ * rotated by it too (and flipped by the sign of the scale), so the lighting follows the pattern.
+ */
+bool BKE_paint_layers_mapping_set_rotation(Material &ma,
+                                            MaterialPaintLayer *layer,
+                                            float rotation);
+
+/** \} */
+
 /**
  * Set the custom node group of \a layer. The old group loses the layer's user, the new one gains
  * it; user counts are what keeps a group alive, so they are maintained here rather than by the

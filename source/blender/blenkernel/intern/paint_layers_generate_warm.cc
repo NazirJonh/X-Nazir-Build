@@ -77,6 +77,12 @@ static bool warm_item_is_compatible(const Material &ma,
   if (real.blend != MA_PAINT_LAYER_BLEND_MIX) {
     return false;
   }
+  /* A mapped row builds a Mapping node the spare does not have, so it cannot take the slot --
+   * like a row reading a map, which builds a texture node instead of the spare's constant. The
+   * applied-mapping predicate is what the hash and the build read, so the three cannot disagree. */
+  if (BKE_paint_layers_mapping_applies(ma, real)) {
+    return false;
+  }
   if (kind == WarmKind::Mask) {
     return real.source == MA_PAINT_LAYER_SOURCE_IMAGE &&
            warm_item_builds_a_chain(ma, owner, real, kind);
@@ -89,7 +95,7 @@ static bool warm_item_is_compatible(const Material &ma,
       return false;
     }
     for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
-      if (paint_layer_fill_effect_reads_map(ma, real, channel)) {
+      if (paint_layer_fill_reads_map(ma, real, channel)) {
         return false;
       }
     }

@@ -136,6 +136,12 @@ enum eMaterialPaintLayersFlag : short {
    * scheduling code alone (see `ED_paint_layers_stale_or_pending`).
    */
   MA_PAINT_LAYERS_BAKE_SCHEDULED = 1 << 6,
+  /**
+   * Row mapping of Material rows also remaps every UV Map node and every Attribute (Geometry) node
+   * with a non-empty name, whatever layer it names. Off by default (and in files written before the
+   * flag existed) so a source's lightmap UV is left alone.
+   */
+  MA_PAINT_LAYERS_REMAP_ALL_UV = 1 << 7,
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
 
@@ -614,6 +620,40 @@ struct MaterialPaintLayerBake {
   uint32_t hash[2] = {};
 };
 
+/** #MaterialPaintLayerMapping::space */
+enum eMaterialPaintLayerMappingSpace : int16_t {
+  MA_PAINT_LAYER_MAPPING_SPACE_UV = 0,
+};
+
+/** #MaterialPaintLayerMapping::flag */
+enum eMaterialPaintLayerMappingFlag : int16_t {
+  MA_PAINT_LAYER_MAPPING_ENABLED = 1 << 0,
+  /** The scale axes move together: editing one sets the other to the same value. */
+  MA_PAINT_LAYER_MAPPING_SCALE_LOCK = 1 << 1,
+};
+ENUM_OPERATORS(eMaterialPaintLayerMappingFlag)
+
+/**
+ * UV mapping of one paint layer row, stored by value.
+ *
+ * Zeroes mean "disabled": old files read back as disabled, and a zero scale
+ * axis reads back as one (see `BKE_paint_layers_mapping_scale_normalize`).
+ */
+struct MaterialPaintLayerMapping {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerMapping)
+
+  /** Translation in UV space. */
+  float offset[2] = {};
+  /** Scale in UV space; 0 reads back as 1. */
+  float scale[2] = {1.0f, 1.0f};
+  /** Rotation around Z, in radians. */
+  float rotation = 0.0f;
+  /** #eMaterialPaintLayerMappingSpace. */
+  int16_t space = MA_PAINT_LAYER_MAPPING_SPACE_UV;
+  /** #eMaterialPaintLayerMappingFlag. */
+  int16_t flag = 0;
+};
+
 /**
  * One row of a layered material's stack, the DNA description the node tree is generated from.
  *
@@ -693,6 +733,11 @@ struct MaterialPaintLayer {
    * its coverage starts at one. Same type as a layer, linked by their own markers.
    */
   ListBaseT<MaterialPaintLayer> mask_stack = {nullptr, nullptr};
+  /**
+   * UV mapping of this row's own maps. Stored by value, so a flat copy carries it.
+   * Zeroes read back as disabled; a zero scale axis reads back as one.
+   */
+  MaterialPaintLayerMapping mapping = {};
 };
 
 /**

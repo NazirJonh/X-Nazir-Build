@@ -375,12 +375,21 @@ uint64_t topology_hash_correction(uint64_t hash,
    * (#BKE_paint_layers_effective_opacity), so it must not move this hash. */
   const bool fill = BKE_paint_layers_source_type(correction) == PaintLayerSourceType::Constant;
   hash = topology_hash_mix(hash, fill ? 1 : 0);
+  /* Whether the row carries a Mapping node: the applied-mapping predicate, which folds a
+   * Material row's mode in. The values ride group inputs and never move this hash. */
+  hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, correction, cache) ? 1 : 0);
   const bool mask_material_or_group = mask_item &&
                                       ELEM(correction.source,
                                            MA_PAINT_LAYER_SOURCE_MATERIAL,
                                            MA_PAINT_LAYER_SOURCE_NODE_GROUP,
                                            MA_PAINT_LAYER_SOURCE_STACK);
-  if (mask_item && !fill && !mask_material_or_group) {
+  /* A Fill mask that carries a map builds the same grey chain as a painted one, so its map's
+   * colorspace decides the Divide as well. */
+  const bool fill_mask_reads_map =
+      mask_item && fill &&
+      paint_layer_mask_correction_image(ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR) !=
+          nullptr;
+  if (mask_item && (!fill || fill_mask_reads_map) && !mask_material_or_group) {
     /* Whether the mask map is read as colour data decides whether the chain builds its Divide: a
      * data texture is left pre-multiplied by the Image Texture node, a non-data one is straightened
      * there. A change of the map's colorspace must therefore rebuild the group. */
@@ -572,6 +581,10 @@ uint64_t topology_hash_layer(uint64_t hash,
   }
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.role)));
+  /* Whether the row carries a Mapping node: the applied-mapping predicate, which folds a
+   * Material row's mode in (Hybrid's live textures or the wrapper). The values ride group inputs
+   * and never move this hash. */
+  hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, layer, cache) ? 1 : 0);
   /* Visibility is a value: disabling leaves the row in the graph with factor zero, so the flag is
    * not part of topology. A rebuild for another reason may drop the row (see the removed-rows set),
    * and enabling it back force-invalidates the stored root hash and rebuilds it in. */
@@ -1634,6 +1647,14 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * recorded for the report; a refused source keeps its row on the baked maps. */
   Map<const Material *, bNodeTree *> source_groups;
   Map<const Material *, PaintLayersSourceGroupRefusal> source_group_refusals;
+  /* Whether any row of one source applies its mapping (ТЗ 2.2): the wrapper carries the Mapping
+   * nodes and the value inputs when at least one does, and neither when none does. Filled by a
+   * pre-pass over every row before any wrapper is built, so the row order cannot cache a wrapper
+   * without the mapping a later row needs. */
+  Map<const Material *, bool> source_group_mapped;
+  /* What each cached wrapper was built with: a re-run whose modes moved (the sampler fallback)
+   * rebuilds a wrapper whose mapping flag changed instead of keeping a stale one. */
+  Map<const Material *, bool> source_group_built_mapped;
   bool source_groups_changed = false;
   /* Re-runnable: the sampler fallback changes some rows' modes, so the report is rebuilt once the
    * final forced set is known. Wrappers are cached, so a second call does not rebuild them. */
@@ -1645,6 +1666,15 @@ bool BKE_paint_layers_regenerate(Main &bmain,
      * role, not just Layer rows. The report itself stays Layer-only below: it is a per-row status
      * display, and mixing a correction into it would change what its existing readers see. */
     BKE_paint_layers_flatten_all(ma, layers);
+    /* Recomputed from scratch each pass: a `true` from before a mode change must not survive. */
+    source_group_mapped.clear();
+    for (const MaterialPaintLayer *layer : layers) {
+      if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->material != nullptr &&
+          BKE_paint_layers_mapping_applies(ma, *layer, &regen_cache))
+      {
+        source_group_mapped.add_overwrite(layer->material, true);
+      }
+    }
     for (const MaterialPaintLayer *layer : layers) {
       if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
         continue;
@@ -1661,18 +1691,28 @@ bool BKE_paint_layers_regenerate(Main &bmain,
           group_depth = int(path.size());
         }
         bNodeTree *wrapper = nullptr;
-        if (bNodeTree *const *found = source_groups.lookup_ptr(layer->material)) {
+        const bool mapped_now = source_group_mapped.lookup_default(layer->material, false);
+        if (bNodeTree *const *found = source_groups.lookup_ptr(layer->material);
+            found != nullptr &&
+            source_group_built_mapped.lookup_default(layer->material, false) == mapped_now)
+        {
           wrapper = *found;
           refusal = source_group_refusals.lookup_default(layer->material,
                                                          PaintLayersSourceGroupRefusal::None);
         }
         else {
           bool wrapper_changed = false;
-          wrapper = BKE_paint_layers_source_group_ensure(
-              bmain, ma, *layer->material, refusal, &wrapper_changed);
+          wrapper = BKE_paint_layers_source_group_ensure(bmain,
+                                                         ma,
+                                                         *layer->material,
+                                                         refusal,
+                                                         &wrapper_changed,
+                                                         nullptr,
+                                                         mapped_now);
           source_groups_changed |= wrapper_changed;
-          source_groups.add(layer->material, wrapper);
-          source_group_refusals.add(layer->material, refusal);
+          source_groups.add_overwrite(layer->material, wrapper);
+          source_group_built_mapped.add_overwrite(layer->material, mapped_now);
+          source_group_refusals.add_overwrite(layer->material, refusal);
           if (wrapper == nullptr &&
               report.source_group_refusal == PaintLayersSourceGroupRefusal::None)
           {
@@ -1696,6 +1736,12 @@ bool BKE_paint_layers_regenerate(Main &bmain,
           row.source_uid = layer->material->id.session_uid;
         }
         row.deferred = BKE_paint_layers_bake_row_is_deferred(ma, *layer);
+        /* The row asks for a mapping its mode cannot apply: a forced bake (the sampler budget)
+         * keeps it on the raw baked maps, so the toggle sits there inert until the budget allows.
+         * Reported, never silently dropped. A BAKE_NEVER row stays live and keeps its mapping. */
+        row.mapping_ignored = BKE_paint_layers_mapping_enabled_get(*layer) &&
+                              BKE_paint_layers_mapping_supported(ma, *layer) &&
+                              !BKE_paint_layers_mapping_applies(ma, *layer, &regen_cache);
         if (BKE_paint_layers_material_forced_bake(ma, *layer)) {
           row.refusal = PaintLayersSourceGroupRefusal::TooManyTextures;
         }

@@ -475,8 +475,8 @@ uint64_t topology_hash_correction(uint64_t hash,
                              paint_layer_mask_correction_image(ma, correction, channel) :
                              paint_layer_channel_image(ma, correction, channel);
     hash = topology_hash_mix(hash, topology_hash_map_id(image));
-    if (!mask_item && !fill) {
-      /* A content effect reads its own map per channel; whether that map is data decides whether
+    if (!mask_item && (!fill || image != nullptr)) {
+      /* A content effect reads its own map per channel (a Fill too, once a map is assigned); whether that map is data decides whether
        * the chain builds a Divide (see the mask branch above). */
       const bool data = image != nullptr &&
                         IMB_colormanagement_space_name_is_data(image->colorspace_settings.name);
@@ -526,7 +526,9 @@ uint64_t topology_hash_correction(uint64_t hash,
   /* A Fill effect with live records carries one constant input per recorded channel; which channels
    * those are is topology. A no-record Fill (or a mask item) keeps the single socket, so it hashes
    * exactly as before this branch existed. */
-  if (fill && !mask_item && correction_has_live_channel_records(ma, correction)) {
+  if (fill && !mask_item &&
+      (correction.channels_num > 0 || correction_has_live_channel_records(ma, correction)))
+  {
     hash = topology_hash_mix(hash, 1);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, uint64_t(channel));

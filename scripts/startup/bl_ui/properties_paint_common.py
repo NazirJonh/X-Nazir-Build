@@ -2170,25 +2170,42 @@ def _layer_channel_view(layer, channel, channel_id, name):
         socket_menu="PAINT_MT_material_layer_channel_socket",
         socket_context_set=(("material_paint_layer_channel", channel),
                             ("material_paint_layer_owner", layer)),
-        source_draw=lambda panel, ctx, enabled: _draw_layer_channel_source(panel, channel),
-        source_preview=lambda layout: _draw_layer_channel_source_preview(layout, channel),
+        source_draw=lambda panel, ctx, enabled: _draw_layer_channel_source(
+            panel, channel, locked=_layer_images_locked(layer)),
+        source_preview=lambda layout: _draw_layer_channel_source_preview(
+            layout, channel, locked=_layer_images_locked(layer)),
         source_has=lambda: channel.image is not None,
         source_active=lambda enabled: channel.image is not None,
         invert_channel=None,
     )
 
 
-def _draw_layer_channel_source_preview(layout, channel):
+def _layer_images_locked(layer):
+    """Whether a row's channel maps belong to the row and must not be replaced or unlinked.
+
+    A Paint (IMAGE) layer or correction creates and owns its maps, which the brush writes into; a
+    Fill (CONSTANT) correction is never painted, so the user may assign their own maps there.
+    """
+    return layer.source == 'IMAGE'
+
+
+def _draw_layer_channel_source_preview(layout, channel, locked=False):
     """Compact preview of a layer channel's own image, in the panel header."""
     if channel.image is not None:
-        layout.template_ID_browser(
+        row = layout.row(align=True)
+        row.enabled = not locked
+        row.template_ID_browser(
             channel, "image", compact=True, image_filter='PAINT_SOURCE',
         )
 
 
-def _draw_layer_channel_source(panel, channel):
-    """The layer channel's source row: a "Drop image" picker writing the record's own image."""
+def _draw_layer_channel_source(panel, channel, locked=False):
+    """The layer channel's source row: a "Drop image" picker writing the record's own image.
+
+    \a locked draws it read-only, so the map owned by a Paint row can be seen but not swapped.
+    """
     row = panel.row(align=True)
+    row.enabled = not locked
     row.template_ID_browser(
         channel,
         "image",
@@ -2434,7 +2451,7 @@ def draw_material_mask_item(layout, item):
         if record is None or record.image is None:
             row.label(text="No map", icon='INFO')
         else:
-            _draw_layer_channel_source(row, record)
+            _draw_layer_channel_source(row, record, locked=True)
     elif item.source == 'MESH_MAP':
         row = layout.row(align=True)
         row.prop(item, "mesh_map_type", text="Map")
@@ -2631,7 +2648,7 @@ def _draw_layer_target_status(layout, context, paint_mode):
         return
 
     if layer.role == 'EFFECT':
-        kind = iface_("Fill Correction") if layer.source == 'CONSTANT' else iface_("Correction")
+        kind = iface_("Fill") if layer.source == 'CONSTANT' else iface_("Paint")
     elif layer.role == 'MASK_ITEM':
         kind = iface_("Mask")
     else:

@@ -82,8 +82,18 @@ static bool warm_item_is_compatible(const Material &ma,
            warm_item_builds_a_chain(ma, owner, real, kind);
   }
   if (effect == PaintLayerWarmEffect::Fill) {
-    /* A constant builds its mix from the description's fill color, no map is needed. */
-    return real.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+    /* A constant builds its mix from the description's fill color, no map is needed. A Fill that
+     * carries an assigned map in any channel builds a texture node there instead, which is other
+     * code than the spare's, so it cannot take the slot. */
+    if (real.source != MA_PAINT_LAYER_SOURCE_CONSTANT) {
+      return false;
+    }
+    for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+      if (paint_layer_fill_effect_reads_map(ma, real, channel)) {
+        return false;
+      }
+    }
+    return true;
   }
   return real.source == MA_PAINT_LAYER_SOURCE_IMAGE &&
          warm_item_builds_a_chain(ma, owner, real, kind);

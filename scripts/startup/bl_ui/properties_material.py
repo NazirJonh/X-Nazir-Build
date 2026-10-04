@@ -598,7 +598,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
     the old graph path and hides itself for a layered material."""
 
     bl_idname = "LAYER_MATERIAL_PT_layers"
-    bl_label = "Paint Layers"
+    bl_label = "Channel"
 
     @classmethod
     def poll(cls, context):
@@ -611,36 +611,16 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         if owner is None:
             return
 
-        col = layout.column(align=True)
-        col.prop(owner, "paint_layers_locked", text="Locked")
-        row = col.row()
-        row.enabled = owner.paint_layers_tree_is_stale
-        row.operator("material.paint_layers_regenerate", text="Regenerate", icon='FILE_REFRESH')
+        # Locked and Regenerate live in the Material tab's Layered Material panel; the row
+        # add/remove/duplicate operators and the layer name are handled from the Outliner stack.
         if owner.paint_layers_tree_is_stale:
             layout.label(text="Tree out of step with the layers", icon='ERROR')
 
-        row = layout.row(align=True)
-        row.operator_menu_enum("material.paint_layer_add", "source", text="Add", icon='ADD')
-        row.operator("material.paint_layer_remove", text="", icon='REMOVE')
-        row.operator("material.paint_layer_duplicate", text="", icon='DUPLICATE')
-
-        row = layout.row()
-        row.operator_menu_enum("material.paint_layer_add_material", "source",
-                               text="New Material Layer", icon='MATERIAL')
-        row.operator_menu_enum("material.paint_layer_use_row_result", "source",
-                               text="Use Row Result", icon='RENDER_STILL')
-        layout.operator("material.paint_layer_add_custom", text="New Custom Layer",
-                        icon='NODETREE')
-
         _, layer = self._active_layer(context)
         if layer is None:
-            layout.separator()
             layout.label(text="No active layer", icon='INFO')
             return
 
-        layout.separator()
-        layout.prop(layer, "name", text="Layer")
-        layout.prop(layer, "blend_type", text="Blend")
         layout.prop(layer, "opacity", text="Opacity")
         # A stack Layer's channels, drawn with the same widget as the brush PBR Paint panel: its
         # Base Color is the row's colour (no separate fill_color property), and each channel's
@@ -1024,10 +1004,10 @@ classes = (
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
-    LAYER_MATERIAL_PT_mesh_maps,
     LAYER_MATERIAL_PT_source_material,
     LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_custom_layer,
+    LAYER_MATERIAL_PT_mesh_maps,
     LAYER_MATERIAL_PT_custom_props,
 )
 

@@ -255,6 +255,38 @@ inline Image *paint_layer_channel_image(const Material &ma,
 }
 
 /**
+ * Whether a content Fill correction reads a map the user assigned in \a channel instead of its
+ * constant. A Fill is never painted, but its channels may hold their own image, which is then a
+ * texture source for that channel only; the other channels keep the constant. The generator, the
+ * CPU composite and the topology hash all ask this, so they cannot disagree about it.
+ */
+inline bool paint_layer_fill_effect_reads_map(const Material &ma,
+                                              const MaterialPaintLayer &correction,
+                                              const int channel)
+{
+  return correction.role == MA_PAINT_LAYER_ROLE_EFFECT &&
+         correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+         paint_layer_channel_image(ma, correction, channel) != nullptr;
+}
+
+/**
+ * Whether a content Fill correction lays nothing in \a channel because that channel is switched off.
+ *
+ * A Fill that carries channel records contributes only through the live ones, so a disabled or
+ * missing record must never fall back to the row's flat colour (it would fill the channel with the
+ * constant's default black). Only a Fill with no records at all keeps the legacy "constant in every
+ * channel" meaning.
+ */
+inline bool paint_layer_fill_effect_channel_off(const Material &ma,
+                                                const MaterialPaintLayer &correction,
+                                                const int channel)
+{
+  return correction.role == MA_PAINT_LAYER_ROLE_EFFECT &&
+         correction.source == MA_PAINT_LAYER_SOURCE_CONSTANT && correction.channels_num > 0 &&
+         !paint_layer_channel_live(ma, correction, channel);
+}
+
+/**
  * The map a mask item carries in its channel record, or null when the item is a constant.
  *
  * A mask is scalar and one for every channel, so its map and constant live in a single channel
@@ -281,6 +313,16 @@ inline Image *paint_layer_mask_correction_image(const Material &ma,
  * Fill-effect corrections), which read through #BKE_paint_layers_correction_constant.
  */
 void paint_layer_channel_constant(const MaterialPaintLayer &layer, int channel, float r_color[4]);
+
+/**
+ * Whether an enabled content correction of \a layer lays a map or a flat colour in \a channel.
+ *
+ * A Paint row nobody has painted yet holds no map and a fully transparent constant, so it would
+ * normally drop out of the stack and take its corrections with it. This is what keeps such a row
+ * alive as an empty (alpha 0) constant instead, without allocating a map for it: nothing is
+ * stored until the user paints. One answer for the generator and the CPU composite.
+ */
+bool paint_layer_effects_lay_content(const Material &ma, const MaterialPaintLayer &layer, int channel);
 
 /* -------------------------------------------------------------------- */
 /** \name Implementation-only declarations

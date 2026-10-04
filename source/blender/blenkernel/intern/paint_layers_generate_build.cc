@@ -756,7 +756,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
           BKE_paint_layers_kind_info(layer.source).uses_fill_color))
     {
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-      if (record == nullptr || record->value[3] <= 0.0f) {
+      if (record == nullptr ||
+          (record->value[3] <= 0.0f && !paint_layer_effects_lay_content(ma, layer, channel)))
+      {
         continue;
       }
     }

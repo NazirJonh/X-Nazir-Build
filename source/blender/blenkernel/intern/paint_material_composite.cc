@@ -363,7 +363,7 @@ static float composite_correction_pixel_mask_factor(const PaintMaterialComposite
     mask_coverage *= mask_factor_at(
         layer.coverage_ibuf, layer.coverage_from_alpha, x, y, 1.0f);
   }
-  float alpha = 1.0f;
+  float alpha = layer.empty_base ? 0.0f : 1.0f;
   if (layer.color_alpha_coverage && layer.color_ibuf != nullptr) {
     alpha = composite_color_alpha_at(layer.color_ibuf, x, y);
   }
@@ -682,7 +682,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     {
       return clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f);
     }
-    return 1.0f;
+    return layer.empty_base ? 0.0f : 1.0f;
   };
   auto base_coverage = [&](const int64_t i) -> float {
     return mask_coverage(i) * content_coverage(i);
@@ -1386,6 +1386,7 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
   r_layer.mask_from_alpha = image_layer.mask_from_alpha;
   r_layer.mask_reads_grey = image_layer.mask_reads_grey;
   r_layer.color_alpha_coverage = image_layer.color_alpha_coverage;
+  r_layer.empty_base = image_layer.empty_base;
   r_layer.tracks_content_alpha = image_layer.tracks_content_alpha;
   r_layer.is_bare_base = image_layer.is_bare_base;
   r_layer.is_folder = image_layer.is_folder;
@@ -1916,6 +1917,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
                                 0,
                             layer.color_alpha_coverage,
                             layer.tracks_content_alpha);
+    hash = get_default_hash(hash, layer.empty_base);
     /* A live constant is not backed by an image, so its value has to be hashed explicitly or the
      * cached composite would not follow a source slider. */
     hash = get_default_hash(hash,

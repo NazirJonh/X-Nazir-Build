@@ -830,8 +830,19 @@ int paint_layers_edit_add(Material &material,
                                               mask_section ? MA_PAINT_LAYER_ROLE_MASK_ITEM :
                                                              MA_PAINT_LAYER_ROLE_EFFECT,
                                               source,
-                                              "Correction",
+                                              source == MA_PAINT_LAYER_SOURCE_CONSTANT ? "Fill" :
+                                              source == MA_PAINT_LAYER_SOURCE_IMAGE    ? "Paint" :
+                                                                                         "Correction",
                                               anchor);
+    /* A fresh Fill starts with Base Color on; without any record it would be the legacy constant in
+     * every channel, which fills channels the user never switched on. */
+    if (created != nullptr && !mask_section && source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+      BKE_paint_layers_channel_add(material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+    /* A fresh Paint correction has every channel of the set on, like a Paint layer. */
+    if (created != nullptr && !mask_section && source == MA_PAINT_LAYER_SOURCE_IMAGE) {
+      BKE_paint_layers_default_channels_apply(material, *created);
+    }
     /* Material and Node Group take their source the same way #PAINT_STACK_ADD_MATERIAL does
      * (#StackAddArgs::source), but unlike a Layer row this is not an eager bake: the correction is
      * left empty when no source is given (or the wrong ID type is), pickable afterward through the
@@ -1503,11 +1514,11 @@ class PaintLayersStackSource final : public StackSource,
     r_kinds.append(material_kind);
     r_kinds.append({"FOLDER", IFACE_("Folder"), "A group holding other layers", ICON_FILE_FOLDER});
     r_kinds.append({"CORRECTION_PAINT",
-                    IFACE_("Correction"),
+                    IFACE_("Paint"),
                     "A painted adjustment hung on the content of the row this is added from",
                     ICON_BRUSH_DATA});
     r_kinds.append({"CORRECTION_FILL",
-                    IFACE_("Fill Correction"),
+                    IFACE_("Fill"),
                     "A flat-fill adjustment on the content of the row this is added from",
                     ICON_BRUSH_DATA});
     r_kinds.append({"MASK_CORRECTION_PAINT",
@@ -2013,16 +2024,22 @@ class PaintLayersStackSource final : public StackSource,
       if (row == nullptr) {
         return false;
       }
-      /* Only a Paint row is made of maps: a Fill is a colour (corrected, never painted), a folder
-       * composites its children and a Material layer is its source's bake. */
-      if (BKE_paint_layers_role(*row) != PaintLayerRole::Layer ||
-          row->source != MA_PAINT_LAYER_SOURCE_IMAGE)
+      /* A Fill correction is never painted, so it takes the user's own maps. */
+      if (BKE_paint_layers_role(*row) == PaintLayerRole::Effect &&
+          row->source == MA_PAINT_LAYER_SOURCE_CONSTANT)
       {
-        *r_disabled_hint = TIP_(
-            "Only a Paint layer takes an image; drop it between rows to add a layer");
-        return false;
+        return true;
       }
-      return true;
+      /* A Paint row owns the maps its brush writes into, so a drop must not swap them; a Fill
+       * layer is a colour, a folder composites its children and a Material layer is its source's
+       * bake. */
+      *r_disabled_hint = (BKE_paint_layers_role(*row) == PaintLayerRole::Layer &&
+                          row->source == MA_PAINT_LAYER_SOURCE_IMAGE) ?
+                             TIP_("The maps of a Paint layer cannot be replaced; drop the image "
+                                  "between rows to add a layer") :
+                             TIP_("Only a Paint layer takes an image; drop it between rows to add "
+                                  "a layer");
+      return false;
     }
     /* A dropped material becomes a Material layer baked from it; the same gesture the tab's "New
      * Material Layer" uses. */
@@ -2452,10 +2469,12 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
       BKE_report(op->reports, RPT_ERROR, "The layer the image was dropped on is gone");
       return OPERATOR_CANCELLED;
     }
-    if (BKE_paint_layers_role(*layer) != PaintLayerRole::Layer ||
-        layer->source != MA_PAINT_LAYER_SOURCE_IMAGE)
+    /* Mirrors the drop gate: only a Fill correction takes a map; a Paint layer's maps belong to
+     * it. */
+    if (BKE_paint_layers_role(*layer) != PaintLayerRole::Effect ||
+        layer->source != MA_PAINT_LAYER_SOURCE_CONSTANT)
     {
-      BKE_report(op->reports, RPT_ERROR, "Only a Paint layer takes an image");
+      BKE_report(op->reports, RPT_ERROR, "Only a Fill correction takes an image");
       return OPERATOR_CANCELLED;
     }
   }

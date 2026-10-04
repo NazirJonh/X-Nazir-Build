@@ -1561,6 +1561,30 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
     content_cov = socket_out(*leaf_map_node, "Alpha");
     content_cov_node = (content_cov != nullptr) ? leaf_map_node : nullptr;
   }
+  else if (leaf_map_node == nullptr && !substituted && !BKE_paint_layers_is_folder(*layer) &&
+           layer->source == MA_PAINT_LAYER_SOURCE_IMAGE)
+  {
+    /* An unpainted Paint row kept only for its corrections (#paint_layer_effects_lay_content):
+     * its constant covers nothing, so the coverage starts at zero and the corrections bring it in,
+     * the same `empty_base` the CPU composite starts from. Without this the row would cover fully
+     * with its empty constant. */
+    const Material &ma = outer_.ma_;
+    float constant[4];
+    paint_layer_channel_constant(*layer, channel, constant);
+    if (paint_layer_channel_image(ma, *layer, channel) == nullptr && constant[3] <= 0.0f &&
+        paint_layer_effects_lay_content(ma, *layer, channel))
+    {
+      bNode *empty_cov = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+      bNodeSocket *empty_out = (empty_cov != nullptr) ? socket_out(*empty_cov, "Value") : nullptr;
+      if (empty_out != nullptr && empty_out->default_value != nullptr) {
+        empty_cov->location[0] = location_x - 90.0f;
+        empty_cov->location[1] = location_y - 80.0f;
+        static_cast<bNodeSocketValueFloat *>(empty_out->default_value)->value = 0.0f;
+        content_cov_node = empty_cov;
+        content_cov = empty_out;
+      }
+    }
+  }
 
   /* Content corrections adjust the colour the row paints with, before its own blend. Only the
    * exact subset the CPU composites: a Paint correction backed by a map, or a Fill correction

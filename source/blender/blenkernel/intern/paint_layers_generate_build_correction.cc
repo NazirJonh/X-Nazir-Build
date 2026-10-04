@@ -175,10 +175,15 @@ if (!substituted) {
     {
       continue;
     }
-    const bool fill = BKE_paint_layers_source_type(correction) ==
-                      PaintLayerSourceType::Constant;
+    /* A Fill whose channel holds an assigned map reads it like a Paint correction's map. */
+    const bool fill = BKE_paint_layers_source_type(correction) == PaintLayerSourceType::Constant &&
+                      !paint_layer_fill_effect_reads_map(ma, correction, channel);
     /* A constant normal makes no sense; the CPU skips this correction as well. */
     if (normal_channel && fill) {
+      continue;
+    }
+    /* A switched-off channel lays nothing; the CPU skips it the same way. */
+    if (paint_layer_fill_effect_channel_off(ma, correction, channel)) {
       continue;
     }
     bNodeSocket *correction_opacity = nullptr;

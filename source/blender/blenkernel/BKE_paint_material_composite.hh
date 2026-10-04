@@ -188,6 +188,11 @@ struct PaintMaterialCompositeImageLayer {
    */
   bool color_alpha_coverage = false;
   /**
+   * An unpainted Paint row kept alive only for the corrections laid over it: its constant covers
+   * nothing, so the corrections bring coverage in instead of the row filling everything with black.
+   */
+  bool empty_base = false;
+  /**
    * Whether the generated chain tracks a content alpha for this row (F2-C1/F2-C5).
    *
    * True for a Paint/Fill/Custom row on a channel whose generated chain carries one, or a folder of
@@ -317,6 +322,8 @@ struct PaintMaterialCompositeLayer {
   bool mask_reads_grey = false;
   /** See #PaintMaterialCompositeImageLayer.color_alpha_coverage. */
   bool color_alpha_coverage = false;
+  /** See #PaintMaterialCompositeImageLayer.empty_base. */
+  bool empty_base = false;
   /** See #PaintMaterialCompositeImageLayer.tracks_content_alpha. */
   bool tracks_content_alpha = false;
   /** See #PaintMaterialCompositeImageLayer.coverage_image; with its buffer's colorspace. */

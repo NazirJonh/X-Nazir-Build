@@ -1906,7 +1906,11 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
 
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer)
 {
-  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {
+  /* A Paint correction (content effect) takes every channel of the set too, so the user can paint
+   * into any of them at once; other corrections keep their channels opt-in. */
+  const bool paint_effect = BKE_paint_layers_role(layer) == PaintLayerRole::Effect &&
+                            layer.source == MA_PAINT_LAYER_SOURCE_IMAGE;
+  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer && !paint_effect) {
     return;
   }
   /* A MESH_MAP row reads the material's shared atlas; a layer has a single explicit participation
@@ -2089,6 +2093,34 @@ void BKE_paint_layers_channel_default_value(const Material &ma,
     const float *value = static_cast<const bNodeSocketValueRGBA *>(socket->default_value)->value;
     copy_v4_v4(r_value, value);
   }
+}
+
+bool paint_layer_effects_lay_content(const Material &ma,
+                                     const MaterialPaintLayer &layer,
+                                     const int channel)
+{
+  if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer ||
+      layer.source != MA_PAINT_LAYER_SOURCE_IMAGE)
+  {
+    return false;
+  }
+  for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
+    if ((effect->flag & MA_PAINT_LAYER_ENABLED) == 0) {
+      continue;
+    }
+    if (effect->source == MA_PAINT_LAYER_SOURCE_IMAGE &&
+        paint_layer_channel_image(ma, *effect, channel) != nullptr)
+    {
+      return true;
+    }
+    /* A constant normal makes no sense, so a Fill lays nothing in the Normal channel. */
+    if (effect->source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+        channel != PAINT_MATERIAL_CHANNEL_NORMAL)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 void paint_layer_channel_constant(const MaterialPaintLayer &layer,

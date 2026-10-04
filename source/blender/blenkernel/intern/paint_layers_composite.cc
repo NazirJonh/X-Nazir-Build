@@ -292,7 +292,9 @@ bool composite_image_layers_build(const Material &material,
       /* Mirrors the generator: a non-Fill row with no map covers nothing unless its flat value is
        * set (a Fill converted to Paint keeps its colour there until the first stroke). */
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
-      if (record == nullptr || record->value[3] <= 0.0f) {
+      if (record == nullptr ||
+          (record->value[3] <= 0.0f && !paint_layer_effects_lay_content(material, *layer, channel)))
+      {
         continue;
       }
     }
@@ -338,11 +340,17 @@ bool composite_image_layers_build(const Material &material,
       {
         return;
       }
+      /* A Fill whose channel holds an assigned map reads it like a Paint correction's map. */
       const bool fill = BKE_paint_layers_source_type(correction) ==
-                        PaintLayerSourceType::Constant;
+                            PaintLayerSourceType::Constant &&
+                        !(is_content && paint_layer_fill_effect_reads_map(material, correction, channel));
       /* A constant normal makes no sense, so a content Fill correction is unsupported in the Normal
        * channel; the generator leaves it out too. */
       if (normal_channel && is_content && fill) {
+        return;
+      }
+      /* A switched-off channel lays nothing, exactly like the generator. */
+      if (is_content && paint_layer_fill_effect_channel_off(material, correction, channel)) {
         return;
       }
       /* A Mask Item reads its own single `mask_channel`, never the channel this whole stack is
@@ -641,6 +649,11 @@ bool composite_image_layers_build(const Material &material,
           BKE_paint_layers_constant_to_linear(
               eMaterialPaintChannel(channel), constant, out.constant_color);
           out.has_constant_color = true;
+          /* An unpainted Paint row kept only for its corrections covers nothing: they bring the
+           * coverage in, so the row never fills the channel with its empty (black) constant. */
+          out.empty_base = layer->source == MA_PAINT_LAYER_SOURCE_IMAGE &&
+                           constant[3] <= 0.0f &&
+                           paint_layer_effects_lay_content(material, *layer, channel);
         }
       }
     }

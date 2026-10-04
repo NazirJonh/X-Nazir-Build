@@ -599,7 +599,10 @@ bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, cons
     return true;
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-  return record != nullptr && record->value[3] > 0.0f;
+  /* An unpainted Paint row stays as an empty constant while a correction lays content over it, so
+   * no map has to be allocated for it. */
+  return record != nullptr &&
+         (record->value[3] > 0.0f || paint_layer_effects_lay_content(ma, layer, channel));
 }
 
 /**

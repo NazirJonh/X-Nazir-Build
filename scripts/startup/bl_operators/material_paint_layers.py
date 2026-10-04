@@ -306,6 +306,25 @@ class MATERIAL_OT_paint_layer_correction_select(Operator):
         return {'FINISHED'}
 
 
+# Dynamic enum items must stay referenced from Python: Blender keeps raw pointers to the strings of
+# the last returned list, so a list rebuilt on every call leaves the UI reading freed memory.
+_ENUM_ITEMS_CACHE = {}
+
+
+def _rna_enum_items_cached(struct, prop, keep=None):
+    """The (identifier, name, "") items of an RNA enum, built once and kept alive."""
+    key = (struct, prop, tuple(keep) if keep is not None else None)
+    items = _ENUM_ITEMS_CACHE.get(key)
+    if items is None:
+        items = [
+            (item.identifier, item.name, "")
+            for item in getattr(bpy.types, struct).bl_rna.properties[prop].enum_items
+            if item.identifier and (keep is None or item.identifier in keep)
+        ]
+        _ENUM_ITEMS_CACHE[key] = items
+    return items
+
+
 def _paint_channel_enum_items():
     """Every paint channel as an enum item tuple, the shared channel vocabulary.
 
@@ -314,11 +333,7 @@ def _paint_channel_enum_items():
     selector (`bake_paint_channels`), which deliberately omits AO, Height and Custom and so could
     not address the channels the layer widget draws.
     """
-    return [
-        (item.identifier, item.name, "")
-        for item in bpy.types.MaterialPaintLayerChannel.bl_rna.properties["channel"].enum_items
-        if item.identifier
-    ]
+    return _rna_enum_items_cached("MaterialPaintLayerChannel", "channel")
 
 
 def _paint_layer_addable_channel_items(context):
@@ -430,33 +445,23 @@ class MATERIAL_OT_paint_layer_correction_add(_PaintLayerOperator):
 
     role: bpy.props.EnumProperty(
         name="Role",
-        items=lambda self, context: [
-            (item.identifier, item.name, "")
-            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["role"].enum_items
-            # A correction is Effect or Mask Item; Layer is a stack row, not something this
-            # operator ever creates.
-            if item.identifier in ('EFFECT', 'MASK_ITEM')
-        ],
+        # A correction is Effect or Mask Item; Layer is a stack row, not something this operator
+        # ever creates.
+        items=lambda self, context: _rna_enum_items_cached(
+            "MaterialPaintLayer", "role", keep=('EFFECT', 'MASK_ITEM')),
     )
     source: bpy.props.EnumProperty(
         name="Source",
-        items=lambda self, context: [
-            (item.identifier, item.name, "")
-            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["source"].enum_items
-            # A correction reads a Material, a Node Group or a Stack exactly like a Layer row of
-            # the same kind (BKE_paint_layers_correction_add, phase 4); every source but Layer's
-            # own conversion-only distinction applies here too.
-        ],
+        # A correction reads a Material, a Node Group or a Stack exactly like a Layer row of the
+        # same kind (BKE_paint_layers_correction_add, phase 4).
+        items=lambda self, context: _rna_enum_items_cached("MaterialPaintLayer", "source"),
     )
     # Only meaningful when source is Mesh Map; the Mesh Map correction otherwise has no way to
     # pick its map type at creation (the dedicated mesh_map_add_mask operator sets it the same
     # way, after the fact, for the mask-only path this operator now covers for both roles).
     mesh_map_type: bpy.props.EnumProperty(
         name="Map Type",
-        items=lambda self, context: [
-            (item.identifier, item.name, "")
-            for item in bpy.types.MaterialPaintLayer.bl_rna.properties["mesh_map_type"].enum_items
-        ],
+        items=lambda self, context: _rna_enum_items_cached("MaterialPaintLayer", "mesh_map_type"),
     )
     name: bpy.props.StringProperty(name="Name")
 

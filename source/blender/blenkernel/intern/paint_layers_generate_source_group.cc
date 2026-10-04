@@ -435,6 +435,9 @@ bool source_group_wire_principled(bNodeTree &tree,
     if (input == nullptr) {
       continue;
     }
+    /* The declaration update above and every link added by an earlier channel invalidate the
+     * topology cache that `directly_linked_links` reads, so it is rebuilt before each read. */
+    tree.ensure_topology_cache();
     const Span<const bNodeLink *> links = input->directly_linked_links();
     if (links.is_empty()) {
       socket_default_copy(*out_in, *input);

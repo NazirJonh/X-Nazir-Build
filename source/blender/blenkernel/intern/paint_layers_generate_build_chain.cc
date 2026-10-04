@@ -1377,6 +1377,21 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
         printf("[PL-DIAG]   %s: null\n", what);
         return;
       }
+      /* The full-pixel scan of two large maps ran on the main thread at every regen (about 35 ms
+       * of `groups_scratch_build`). It stays available behind an environment flag. */
+      static const bool scan = getenv("PL_DIAG_SCAN") != nullptr;
+      if (!scan) {
+        printf("[PL-DIAG]   %s: '%s' %p us=%d cs='%s' alpha_mode=%d flag=%d (set PL_DIAG_SCAN=1 "
+               "for the pixel scan)\n",
+               what,
+               image->id.name + 2,
+               static_cast<void *>(image),
+               image->id.us,
+               image->colorspace_settings.name,
+               int(image->alpha_mode),
+               int(image->flag));
+        return;
+      }
       void *lock = nullptr;
       ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
       int64_t alpha_px = 0, rgb_px = 0;

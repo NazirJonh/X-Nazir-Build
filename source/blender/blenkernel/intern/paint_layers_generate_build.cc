@@ -262,6 +262,41 @@ static bNodeTreeInterfaceSocket *group_interface_socket_find_by_slot(LayerGroup 
   return found;
 }
 
+/* The value input of \a group that already belongs to the item \a marker for \a role and
+ * \a channel, whatever it is called now. */
+static bNodeTreeInterfaceSocket *group_interface_socket_find_by_marker(
+    LayerGroup &group,
+    const bUUID &marker,
+    const char *role,
+    const int channel,
+    const StringRef socket_type)
+{
+  bNodeTreeInterfaceSocket *found = nullptr;
+  group.tree->tree_interface.foreach_item([&](bNodeTreeInterfaceItem &item) {
+    if (item.item_type != NodeTreeInterfaceItemType::Socket) {
+      return true;
+    }
+    bNodeTreeInterfaceSocket &socket = reinterpret_cast<bNodeTreeInterfaceSocket &>(item);
+    if ((socket.flag & NODE_INTERFACE_SOCKET_INPUT) == 0 || socket.socket_type == nullptr ||
+        StringRef(socket.socket_type) != socket_type || group.used_sockets.contains(&socket))
+    {
+      return true;
+    }
+    bUUID socket_marker = BLI_uuid_nil();
+    const char *socket_role = prop_string_get(socket.properties, INPUT_ROLE_PROP);
+    if (socket_role == nullptr || !STREQ(socket_role, role) ||
+        prop_int_get(socket.properties, INPUT_CHANNEL_PROP, -1) != channel ||
+        !uid_prop_get(socket.properties, INPUT_MARKER_PROP, socket_marker) ||
+        !BLI_uuid_equal(socket_marker, marker))
+    {
+      return true;
+    }
+    found = &socket;
+    return false;
+  });
+  return found;
+}
+
 bNodeTreeInterfaceSocket *layer_group_value_input(LayerGroup &group,
                                                  const char *base,
                                                  const StringRef socket_type,
@@ -291,7 +326,34 @@ bNodeTreeInterfaceSocket *layer_group_value_input(LayerGroup &group,
     }
   }
   else {
-    socket = layer_group_add_socket(group, base, socket_type, NODE_INTERFACE_SOCKET_INPUT);
+    /* Corrections of one row are all called "Correction" by default, so a name alone would hand
+     * two of them the same socket and the last one to build would own its marker: toggling one
+     * would then drive the other. The item's own socket wins, and a name match that another item
+     * already claimed in this build is never shared. */
+    socket = group_interface_socket_find_by_marker(group, marker, role, channel, socket_type);
+    if (socket != nullptr) {
+      group.used_sockets.add(socket);
+    }
+    else if (bNodeTreeInterfaceSocket *by_name = group_interface_socket_find(
+                 group, base, socket_type, NODE_INTERFACE_SOCKET_INPUT);
+             by_name != nullptr && !group.used_sockets.contains(by_name))
+    {
+      group.used_sockets.add(by_name);
+      socket = by_name;
+    }
+    else if (by_name == nullptr) {
+      socket = layer_group_add_socket(group, base, socket_type, NODE_INTERFACE_SOCKET_INPUT);
+    }
+    else {
+      char name[256];
+      interface_name_unique(group.tree->tree_interface, base, name, sizeof(name));
+      socket = group.tree->tree_interface.add_socket(
+          name, "", socket_type, NODE_INTERFACE_SOCKET_INPUT, nullptr);
+      if (socket != nullptr) {
+        group.used_sockets.add(socket);
+        refresh_layer_group(group);
+      }
+    }
   }
   if (socket == nullptr) {
     return nullptr;
@@ -631,8 +693,30 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
   auto &live_constant_inputs = live_constant_inputs_;
   auto &correction_live_constant_inputs = correction_live_constant_inputs_;
   /* A substituted row's values are inside its bake; a group input would apply them twice. */
-  if (row_is_substituted(ma, layer)) {
-    return;
+  bool any_channel_substituted = row_is_substituted(ma, layer);
+  for (const int channel : wired_channels) {
+    Image *baked_probe = nullptr;
+    any_channel_substituted = any_channel_substituted ||
+                              row_channel_substituted(ma, layer, channel, &baked_probe);
+  }
+  if (any_channel_substituted) {
+    /* The one live part left is visibility: opacity is inside the coverage map, so this input
+     * carries 0 or 1 (times the Pass Through scale) and never the opacity again. */
+    char enabled_base[200];
+    SNPRINTF(enabled_base, "%s Enabled", layer.name[0] != '\0' ? layer.name : "Layer");
+    bNodeTreeInterfaceSocket *enabled_socket = layer_group_value_input(
+        group, enabled_base, "NodeSocketFloat", ROLE_ENABLED, layer.marker, -1);
+    if (enabled_socket != nullptr) {
+      if (enabled_socket->socket_data != nullptr) {
+        static_cast<bNodeSocketValueFloat *>(enabled_socket->socket_data)->value =
+            (((layer.flag & MA_PAINT_LAYER_ENABLED) != 0) ? 1.0f : 0.0f) *
+            pass_through_scale_of(ma, layer, cache);
+      }
+      enabled_inputs_.add_overwrite(&layer, enabled_socket);
+    }
+    if (row_is_substituted(ma, layer)) {
+      return;
+    }
   }
   for (const int channel : wired_channels) {
     if (!layer_subtree_has_channel(ma, layer, channel, cache)) {

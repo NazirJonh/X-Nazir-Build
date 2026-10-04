@@ -191,6 +191,18 @@ if (!substituted) {
         correction_opacity = group_input_socket(group_input, **opacity_iface);
       }
     }
+    /* [PL-DIAG] The chain order of a row's content corrections, in build order (the first is the
+     * lowest). Prints only. */
+    printf("[PL-DIAG] correction chain row='%s' channel=%d marker=%08x warm=%d fill=%d enabled=%d "
+           "effective_opacity=%.3f opacity_input=%d\n",
+           layer->name,
+           channel,
+           unsigned(correction.marker.time_low),
+           int(paint_layers_warm_item_present(ma, correction.marker)),
+           int(fill),
+           int((correction.flag & MA_PAINT_LAYER_ENABLED) != 0),
+           BKE_paint_layers_channel_opacity_effective(correction, channel),
+           int(correction_opacity != nullptr));
     bNode *correction_source = nullptr;
     bNodeSocket *correction_color = nullptr;
     bNodeSocket *correction_alpha = nullptr;

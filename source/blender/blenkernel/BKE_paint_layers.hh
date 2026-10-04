@@ -735,6 +735,22 @@ constexpr int PAINT_LAYERS_HEAVY_BAKE_SIZE = 2048;
 bool BKE_paint_layers_bake_heavy_pending(const Material &ma);
 
 /**
+ * Idle time a correction visibility toggle waits before its row is re-baked. Someone looking for
+ * the right correction flips several in a row; each flip moves the row's hash, so a shorter wait
+ * would start a heavy bake (and the graph rebuild that follows it) for every flip.
+ */
+constexpr double PAINT_LAYERS_BAKE_EDIT_QUIET_SECONDS = 1.5;
+
+/** Restart \a ma's long bake debounce window; call after a visibility toggle. */
+void BKE_paint_layers_bake_debounce_extend(Material &ma);
+
+/**
+ * The debounce delay to arm for \a ma: \a base_seconds, or the rest of the window opened by
+ * #BKE_paint_layers_bake_debounce_extend when that is longer. Also reports the rest to the log.
+ */
+double BKE_paint_layers_bake_debounce_seconds(const Material &ma, double base_seconds);
+
+/**
  * Whether \a layer must stay live right now rather than be baked: it is the active row, or
  * an ancestor of it, so the user is editing inside it and a bake would fight the edit.
  *

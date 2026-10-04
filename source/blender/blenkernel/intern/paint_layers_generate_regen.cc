@@ -593,7 +593,9 @@ uint64_t topology_hash_layer(uint64_t hash,
     const bool participates = is_folder ? layer_subtree_has_channel(ma, layer, channel, cache) :
                                           layer_row_has_group(ma, layer, channel, cache);
     hash = topology_hash_mix(hash, uint64_t(channel));
-    hash = topology_hash_mix(hash, substituted ? 1 : 0);
+    /* A substituted channel is 2, not 1: such a group gained a visibility input, so a group an
+     * older build left behind must not be kept as unchanged. */
+    hash = topology_hash_mix(hash, substituted ? 2 : 0);
     hash = topology_hash_mix(hash, participates ? 1 : 0);
     hash = topology_hash_mix(
         hash, uint64_t(BKE_paint_layers_channel_blend_effective(layer, channel)));
@@ -1406,6 +1408,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
 #if PAINT_LAYERS_DEBUG_LOG
   const double regen_start = BLI_time_now_seconds();
 #endif
+  /* [PL-DIAG] Phase stamps (print only): the cost of a regeneration split by phase. */
+  const double pl_diag_start = BLI_time_now_seconds();
+  double pl_diag_mark[10] = {};
   if (!paint_layers_is_layered(ma) || ma.nodetree == nullptr) {
     if (r_report != nullptr) {
       *r_report = report;
@@ -1576,6 +1581,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     }
   };
   populate_material_rows();
+  pl_diag_mark[0] = BLI_time_now_seconds();
   /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
   const auto source_group_lookup = [&source_groups](const Material &source) -> bNodeTree * {
     return source_groups.lookup_default(&source, nullptr);
@@ -2079,6 +2085,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   regen_cache.modes_frozen = true;
   /* The modes may have moved (forced bake, hidden cleanup): refresh the report before building. */
   populate_material_rows();
+  pl_diag_mark[1] = BLI_time_now_seconds();
 #if PAINT_LAYERS_DEBUG_LOG
   material_row_modes_log(ma, report.material_rows);
 #endif
@@ -2175,6 +2182,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   bNodeTree *scratch = bke::node_tree_add_tree(nullptr, "PBR Layers Scratch", "ShaderNodeTree");
   bNodeTree &build_target = (scratch != nullptr) ? *scratch : *tree;
   paint_layers_tree_build(ma, build_target, ctx);
+  pl_diag_mark[2] = BLI_time_now_seconds();
   /* The build may have grown a group's interface (a new effect or mask). Every instance of that
    * group, in the real root included, must have matching sockets before any tree update: an update
    * of a layer tree also visits the trees that use it, and the node tree update's interface pass
@@ -2197,8 +2205,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       DEG_id_tag_update(&layer_tree->id, ID_RECALC_SYNC_TO_EVAL);
     }
   }
+  pl_diag_mark[3] = BLI_time_now_seconds();
   const uint64_t root_hash = paint_layers_root_topology_hash(
       ma, wired_channels, layer_trees, &regen_cache);
+  pl_diag_mark[4] = BLI_time_now_seconds();
   uint64_t stored_root = 0;
   const bool have_stored_root = !created_tree && tree_root_hash_get(*tree, stored_root);
   /* Undo safety net: a row recorded as removed but enabled again (memfile undo preserves the row
@@ -2275,6 +2285,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_tag_all(tree);
     BKE_ntree_update_after_single_tree_change(bmain, *tree);
   }
+  pl_diag_mark[5] = BLI_time_now_seconds();
 #if PAINT_LAYERS_DEBUG_LOG
   printf("paint layers regen: root=%s groups_created=%d groups_deleted=%d groups_rebuilt=%d "
          "source_groups_changed=%d total=%.2fms\n",
@@ -2329,6 +2340,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* Source-group wrappers are pruned by the same rule: no row of this owner reads their source any
    * more, so nothing keeps them. */
   source_groups_prune(bmain, ma);
+  pl_diag_mark[6] = BLI_time_now_seconds();
 #if PAINT_LAYERS_DEBUG_LOG
   source_group_instances_log(ma, layer_trees, source_groups, &regen_cache);
 #endif
@@ -2362,6 +2374,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_tag_node_property(ma.nodetree, instance);
   }
   BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
+  pl_diag_mark[7] = BLI_time_now_seconds();
 
   /* The owner's own node tree is rewritten from here. Only a row that reads its owner as its source
    * could have cached an answer about it, but dropping it costs one resolve and is always right. */
@@ -2373,7 +2386,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * only grows its sockets once the updater is told, and the plain update above does not always do
    * it for inputs. */
   nodes::update_node_declaration_and_sockets(*ma.nodetree, *instance);
+  pl_diag_mark[8] = BLI_time_now_seconds();
   values_sync_with_cache(ma, &regen_cache);
+  pl_diag_mark[9] = BLI_time_now_seconds();
 
   BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
 
@@ -2472,6 +2487,30 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     DEG_relations_tag_update(&bmain);
     report.relations_changed = true;
   }
+  {
+    const double pl_diag_end = BLI_time_now_seconds();
+    printf(
+        "[PL-DIAG] regen phases ms: warm+populate=%.2f estimate+budget=%.2f groups_scratch_build=%.2f "
+        "group_refresh=%.2f root_hash=%.2f root_%s=%.2f cleanup=%.2f instance=%.2f "
+        "principled+wire=%.2f values_sync=%.2f tail=%.2f total=%.2f groups_rebuilt=%d "
+        "groups_created=%d groups_deleted=%d\n",
+        (pl_diag_mark[0] - pl_diag_start) * 1000.0,
+        (pl_diag_mark[1] - pl_diag_mark[0]) * 1000.0,
+        (pl_diag_mark[2] - pl_diag_mark[1]) * 1000.0,
+        (pl_diag_mark[3] - pl_diag_mark[2]) * 1000.0,
+        (pl_diag_mark[4] - pl_diag_mark[3]) * 1000.0,
+        keep_root ? "kept" : "rebuild",
+        (pl_diag_mark[5] - pl_diag_mark[4]) * 1000.0,
+        (pl_diag_mark[6] - pl_diag_mark[5]) * 1000.0,
+        (pl_diag_mark[7] - pl_diag_mark[6]) * 1000.0,
+        (pl_diag_mark[8] - pl_diag_mark[7]) * 1000.0,
+        (pl_diag_mark[9] - pl_diag_mark[8]) * 1000.0,
+        (pl_diag_end - pl_diag_mark[9]) * 1000.0,
+        (pl_diag_end - pl_diag_start) * 1000.0,
+        layer_groups_rebuilt,
+        int(groups_created),
+        int(groups_deleted));
+  }
   if (r_report != nullptr) {
     *r_report = report;
   }
@@ -2506,8 +2545,18 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain, const PaintModeSettings *pa
     /* Drain the bake subscriptions: a pixel edit to a source map shows up here and marks the
      * material for the planner, the same point the tree and slots are brought current. Then the
      * planner re-bakes the rows whose stored hash no longer matches, on the main thread. */
+    const double pl_diag_notice_start = BLI_time_now_seconds();
     BKE_paint_layers_bake_notice_changes(ma);
+    const double pl_diag_plan_start = BLI_time_now_seconds();
     BKE_paint_layers_bake_plan_run(bmain, ma);
+    const double pl_diag_plan_ms = (BLI_time_now_seconds() - pl_diag_plan_start) * 1000.0;
+    /* Quiet for the idle sweep: only a pass that did measurable work or will regenerate reports. */
+    if (pl_diag_plan_ms > 0.5 || (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0) {
+      printf("[PL-DIAG] regen tagged: bake_notice=%.2f ms bake_plan_run=%.2f ms regen_flag=%d\n",
+             (pl_diag_plan_start - pl_diag_notice_start) * 1000.0,
+             pl_diag_plan_ms,
+             int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0));
+    }
     const bool needs_regen = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0 ||
                              ma.paint_layers_tree == nullptr;
     const bool needs_slots = (ma.paint_layers_flag & MA_PAINT_LAYERS_SLOTS_STALE) != 0;

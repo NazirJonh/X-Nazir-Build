@@ -16,6 +16,7 @@
 
 #include "BLI_assert.h"
 #include "BLI_map.hh"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "MEM_guardedalloc.h"
@@ -108,6 +109,11 @@ struct MaterialPaintLayersRuntime {
    * bake reads it from here instead of falling back to the content dimensions. Never saved.
    */
   Map<UUID, int> dropped_bake_size;
+  /**
+   * End (#BLI_time_now_seconds) of the long bake debounce window a visibility toggle opened, or
+   * zero. Never saved: it only delays the editor's bake timer.
+   */
+  double bake_debounce_until = 0.0;
 };
 
 /** The runtime of \a ma, or null when it was never needed. */

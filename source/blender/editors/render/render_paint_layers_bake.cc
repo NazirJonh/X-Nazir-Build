@@ -414,8 +414,14 @@ void paint_layers_bake_debounce_arm(wmWindowManager &wm, Material &ma)
   /* `win = nullptr`: this timer belongs to no window, exactly like `wm->autosavetimer` -- it is
    * dispatched straight from the window-manager's own timer loop (see `TIMERPAINTLAYERSBAKE` in
    * `wm_window.cc`), never queued as a `wmEvent` to any area's handlers. */
+  /* A correction visibility toggle keeps the longer window open (see
+   * #PAINT_LAYERS_BAKE_EDIT_QUIET_SECONDS); every re-arm in it, including the one the graph
+   * rebuild's own shading tag causes, restarts the countdown with the rest of that window. */
+  const double seconds = BKE_paint_layers_bake_debounce_seconds(
+      ma, paint_layers_bake_debounce_seconds);
+  printf("[PL-DIAG] bake debounce armed material='%s' wait=%.2f s\n", ma.id.name + 2, seconds);
   paint_layers_bake_debounce_timer_handle() = WM_event_timer_add(
-      &wm, nullptr, TIMERPAINTLAYERSBAKE, paint_layers_bake_debounce_seconds);
+      &wm, nullptr, TIMERPAINTLAYERSBAKE, seconds);
 }
 
 bool paint_layers_bake_debounce_settles_immediately(const bool jobs_in_flight,

@@ -2640,6 +2640,30 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
            enabled ? 1.0 : 0.0,
            int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
            int(diag_row.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, diag_row)));
+    /* [PL-DIAG] Which effect of the row was switched (the names are all alike) and what every
+     * effect of the row reads now; effect 0 is the head of the list. */
+    int toggled_index = -1;
+    int effect_index = 0;
+    for (const MaterialPaintLayer &effect : diag_row.effects) {
+      if (&effect == layer) {
+        toggled_index = effect_index;
+      }
+      effect_index++;
+    }
+    printf("[PL-DIAG] set_enabled effects row='%s' toggled_index=%d marker=%08x effect_num=%d\n",
+           diag_row.name,
+           toggled_index,
+           unsigned(layer->marker.time_low),
+           effect_index);
+    effect_index = 0;
+    for (const MaterialPaintLayer &effect : diag_row.effects) {
+      printf("[PL-DIAG]   effect[%d] marker=%08x enabled=%d opacity=%.3f effective=%.3f\n",
+             effect_index++,
+             unsigned(effect.marker.time_low),
+             int((effect.flag & MA_PAINT_LAYER_ENABLED) != 0),
+             effect.opacity,
+             BKE_paint_layers_effective_opacity(effect));
+    }
   }
   return true;
 }

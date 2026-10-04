@@ -116,6 +116,13 @@ bool values_sync_socket(Material &ma,
         pass_through_scale_of(ma, *layer, cache);
     return true;
   }
+  if (STREQ(role, ROLE_ENABLED)) {
+    /* Only visibility: the substituted row's opacity is baked into its coverage map. */
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value =
+        (((layer->flag & MA_PAINT_LAYER_ENABLED) != 0) ? 1.0f : 0.0f) *
+        pass_through_scale_of(ma, *layer, cache);
+    return true;
+  }
   if (STREQ(role, ROLE_FILL)) {
     const int channel = prop_int_get(iface.properties, INPUT_CHANNEL_PROP, -1);
     if (channel < 0 || paint_layer_channel_filtered(ma, *layer, channel)) {
@@ -135,9 +142,22 @@ bool values_sync_socket(Material &ma,
     }
     /* A mask correction carries the row opacity on every channel socket. */
     const bool mask_correction = BKE_paint_layers_role(*layer) == PaintLayerRole::MaskItem;
+    const float old_value = static_cast<bNodeSocketValueFloat *>(socket.default_value)->value;
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value =
         mask_correction ? BKE_paint_layers_effective_opacity(*layer) :
                           BKE_paint_layers_channel_opacity_effective(*layer, channel);
+    if (old_value != static_cast<bNodeSocketValueFloat *>(socket.default_value)->value) {
+      /* [PL-DIAG] Which effect a changed correction opacity socket resolved to. Prints only. */
+      printf("[PL-DIAG] values_sync correction opacity socket='%s' id='%s' channel=%d "
+             "marker=%08x layer='%s' %.3f -> %.3f\n",
+             iface.name != nullptr ? iface.name : "",
+             iface.identifier != nullptr ? iface.identifier : "",
+             channel,
+             unsigned(marker.time_low),
+             layer->name,
+             old_value,
+             static_cast<bNodeSocketValueFloat *>(socket.default_value)->value);
+    }
     return true;
   }
   if (STREQ(role, ROLE_CORRECTION_FILL)) {

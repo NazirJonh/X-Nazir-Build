@@ -132,6 +132,9 @@ inline constexpr const char *INPUT_SLOT_PROP = "pbr_paint_layers_slot";
 
 /** #INPUT_ROLE_PROP value of a layer's opacity (enabled already folded in). */
 inline constexpr const char *ROLE_OPACITY = "opacity";
+/** #INPUT_ROLE_PROP value of a bake-substituted row's visibility multiplier (0 or 1, times the
+ * Pass Through scale). Its opacity is inside the bake, so only this part stays live. */
+inline constexpr const char *ROLE_ENABLED = "enabled";
 /** #INPUT_ROLE_PROP value of a Fill layer's constant. */
 inline constexpr const char *ROLE_FILL = "fill";
 /** #INPUT_ROLE_PROP value of a correction's opacity (enabled already folded in). */

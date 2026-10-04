@@ -307,6 +307,11 @@ void paint_layers_warm_reconcile(Material &ma,
   bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_mutable(ma);
   Set<UUID> kept;
   for (const MaterialPaintLayer *row : rows) {
+    /* A row the graph no longer carries has no group to hold its spares: let the sweep below drop
+     * them. Enabling it back recreates the entry fresh, so the slot is not lost, only deferred. */
+    if (bke::paint_layers::row_is_removed(ma, *row)) {
+      continue;
+    }
     PaintLayerWarmPlan plan;
     if (warm_image != nullptr) {
       plan = paint_layers_warm_plan(ma, *row, cache);
@@ -556,6 +561,10 @@ bool BKE_paint_layers_warm_replenish(Material &ma)
     for (const MaterialPaintLayer *row : rows) {
       if (!BLI_uuid_equal(row->marker, entry->marker)) {
         continue;
+      }
+      /* A row out of the graph keeps no slot: it is rebuilt (with its spares) when it returns. */
+      if (bke::paint_layers::row_is_removed(ma, *row)) {
+        break;
       }
       const PaintLayerWarmPlan plan = paint_layers_warm_plan(ma, *row);
       if (plan.mask && !entry->mask_present) {

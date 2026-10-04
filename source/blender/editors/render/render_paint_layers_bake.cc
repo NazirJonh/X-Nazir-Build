@@ -26,8 +26,12 @@
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_debug.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_report.hh"
 
+#include "DEG_depsgraph.hh"
+
+#include "DNA_ID.h"
 #include "DNA_material_types.h"
 
 #include "RNA_prototypes.hh"
@@ -471,6 +475,35 @@ void paint_layers_bake_debounce_timer(Main &bmain, wmWindowManager &wm, wmTimer 
   paint_layers_bake_debounce_timer_handle() = nullptr;
 }
 
+namespace {
+
+/**
+ * Materials with a hidden row still inside the cold-tier window, by `ID::session_uid` -- not by
+ * pointer, since the material may be deleted while this is waiting. Process-static editor state,
+ * exactly like #paint_layers_bake_debounce_pending.
+ */
+Set<uint32_t> &paint_layers_cold_pending()
+{
+  static Set<uint32_t> pending;
+  return pending;
+}
+
+/** Null when no cold-tier timer is currently armed; owned by the window manager once set. */
+wmTimer *&paint_layers_cold_timer_handle()
+{
+  static wmTimer *handle = nullptr;
+  return handle;
+}
+
+/** The absolute time the armed cold timer targets; only re-armed when it moves perceptibly. */
+double &paint_layers_cold_deadline()
+{
+  static double deadline = 0.0;
+  return deadline;
+}
+
+}  // namespace
+
 void paint_layers_bake_debounce_reset(wmWindowManager &wm)
 {
   /* The debounce timer handle and pending set are process-static ED state, keyed on a #wmWindowManager
@@ -484,6 +517,91 @@ void paint_layers_bake_debounce_reset(wmWindowManager &wm)
     paint_layers_bake_debounce_timer_handle() = nullptr;
   }
   paint_layers_bake_debounce_pending().clear();
+  /* The cold timer is keyed on the same `wm`, so it must be disarmed here too or its handle would
+   * dangle into the next file. */
+  if (wmTimer *timer = paint_layers_cold_timer_handle()) {
+    WM_event_timer_remove(&wm, nullptr, timer);
+    paint_layers_cold_timer_handle() = nullptr;
+  }
+  paint_layers_cold_pending().clear();
+}
+
+void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
+{
+  const double now = BLI_time_now_seconds();
+  Set<uint32_t> &pending = paint_layers_cold_pending();
+  const int no_regen_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
+  double next = -1.0;
+  for (Material &ma : bmain.materials) {
+    if ((ma.id.tag & no_regen_tags) != 0 || !paint_layers_is_layered(ma)) {
+      continue;
+    }
+    /* Rows hidden behind set_enabled's back (undo) get their clock before the deadline is read. */
+    BKE_paint_layers_cold_tier_stamp(ma, now);
+    const double remaining = BKE_paint_layers_cold_tier_seconds(ma, now);
+    if (remaining < 0.0) {
+      /* No hidden row: nothing to watch and nothing to do. */
+      pending.remove(ma.id.session_uid);
+      continue;
+    }
+    if (remaining <= 0.0) {
+      /* Checked before the poll, which sets the flag itself: a regeneration already requested and
+       * not yet consumed must not be announced a second time. */
+      const bool regen_pending = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0;
+      const bool diag_due = BKE_paint_layers_cold_tier_poll(ma, now);
+      printf("[PL-DIAG] cold tier scan material='%s' remaining=%.2f due=%d regen_pending=%d\n",
+             ma.id.name + 2,
+             remaining,
+             int(diag_due),
+             int(regen_pending));
+      if (diag_due && !regen_pending) {
+        printf("[PL-DIAG] cold tier: material='%s' drops rows hidden >= %.0f s\n",
+               ma.id.name + 2,
+               PAINT_LAYERS_COLD_TIER_SECONDS);
+        /* The flag alone is consumed by the next regenerate; the tag is what makes that happen
+         * without a user action. */
+        WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma.id);
+        DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
+      }
+      pending.remove(ma.id.session_uid);
+      continue;
+    }
+    pending.add(ma.id.session_uid);
+    if (next < 0.0 || remaining < next) {
+      next = remaining;
+    }
+  }
+  const double deadline = now + next;
+  const bool armed = paint_layers_cold_timer_handle() != nullptr;
+  const double deadband = deadline - paint_layers_cold_deadline();
+  const bool moved = deadband > 0.5 || deadband < -0.5;
+  if (next >= 0.0 && (!armed || moved)) {
+    /* Only re-arm when the deadline actually moved: a scan on every scene update must not keep
+     * resetting the timer. A hair past the deadline so the poll's `>=` age test cannot miss. */
+    if (armed) {
+      WM_event_timer_remove(&wm, nullptr, paint_layers_cold_timer_handle());
+    }
+    paint_layers_cold_timer_handle() = WM_event_timer_add(
+        &wm, nullptr, TIMERPAINTLAYERSCOLD, next + 0.05);
+    paint_layers_cold_deadline() = deadline;
+    printf("[PL-DIAG] cold tier timer armed wait=%.1f s\n", next + 0.05);
+  }
+  else if (next < 0.0 && armed) {
+    WM_event_timer_remove(&wm, nullptr, paint_layers_cold_timer_handle());
+    paint_layers_cold_timer_handle() = nullptr;
+    paint_layers_cold_deadline() = 0.0;
+  }
+}
+
+void paint_layers_cold_tier_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt)
+{
+  printf("[PL-DIAG] cold tier tick\n");
+  if (paint_layers_cold_timer_handle() == &wt) {
+    paint_layers_cold_timer_handle() = nullptr;
+  }
+  WM_event_timer_remove(&wm, nullptr, &wt);
+  /* Rescan, which drops whatever is now due and re-arms for the rest. */
+  paint_layers_cold_tier_scan(bmain, wm);
 }
 
 namespace {

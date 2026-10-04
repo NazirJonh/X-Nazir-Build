@@ -141,6 +141,23 @@ bool paint_layers_bake_debounce_settles_immediately(bool jobs_in_flight, bool he
 void paint_layers_bake_debounce_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt);
 
 /**
+ * Look for hidden rows that have aged past #PAINT_LAYERS_COLD_TIER_SECONDS and make them leave the
+ * graph: each due material is marked for regeneration, its stored root hash invalidated and a
+ * depsgraph update requested. Materials still inside the window are remembered and the shared cold
+ * timer is (re)armed for the earliest remaining deadline; with no hidden row at all the timer is
+ * disarmed and nothing else happens -- an idle material is never polled. Called from
+ * #ED_render_scene_update on every scene update and from the cold timer's own tick.
+ */
+void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm);
+
+/**
+ * The cold-tier timer's tick, dispatched from the window-manager's timer loop like
+ * #paint_layers_bake_debounce_timer: remove the one-shot timer and rescan, which drops every row
+ * that has now aged past the tier and re-arms for the rest.
+ */
+void paint_layers_cold_tier_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt);
+
+/**
  * Whether an already-#MA_PAINT_LAYERS_BAKE_SCHEDULED material should have that mark cleared now,
  * from \a jobs_in_flight alone. Trivial, but named and tested on its own: it is the one decision
  * #paint_layers_bake_scheduled_settle makes per material, and it is what should be checked without

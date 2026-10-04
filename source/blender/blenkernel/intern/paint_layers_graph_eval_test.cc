@@ -6128,7 +6128,8 @@ TEST_F(PaintLayersGraphEvalTest, custom_layer_isolating_folder_partial_alpha_mat
  * ТЗ-F2-C3 regression: the same hole also hit a Paint row that switches to substituted mode via its
  * own valid cache bake (an "inactive" row shown from its bake instead of its live map). Before the
  * fix its content alpha was dropped exactly like the Custom case, even though the row's kind is one
- * the live path already tracks.
+ * the live path already tracks. Unlike the Custom sibling, a Paint row's content enters the
+ * coverage (folder_opacity * content_alpha), as in #check_iso_folder_two_map_channel.
  */
 TEST_F(PaintLayersGraphEvalTest, substituted_paint_row_isolating_folder_partial_alpha_matches_cpu)
 {
@@ -6200,7 +6201,7 @@ TEST_F(PaintLayersGraphEvalTest, substituted_paint_row_isolating_folder_partial_
   const float leaf_color[3] = {0.0f, 1.0f, 0.0f};
   for (int x = 0; x < size; x++) {
     const int y = 0;
-    const float factor = folder_opacity;
+    const float factor = folder_opacity * content_alpha;
     const RGBA expected = {bottom_color[0] * (1.0f - factor) + leaf_color[0] * factor,
                            bottom_color[1] * (1.0f - factor) + leaf_color[1] * factor,
                            bottom_color[2] * (1.0f - factor) + leaf_color[2] * factor,
@@ -6223,7 +6224,7 @@ TEST_F(PaintLayersGraphEvalTest, substituted_paint_row_isolating_folder_partial_
     EXPECT_NEAR(cpu.g, expected.g, tolerance) << "x=" << x;
     EXPECT_NEAR(cpu.b, expected.b, tolerance) << "x=" << x;
     EXPECT_NEAR(cpu.a, expected.a, tolerance) << "x=" << x;
-    EXPECT_NEAR(graph_cov, folder_opacity, tolerance) << "x=" << x;
+    EXPECT_NEAR(graph_cov, folder_opacity * content_alpha, tolerance) << "x=" << x;
     EXPECT_NEAR(graph_content_a, content_alpha, tolerance) << "x=" << x;
   }
 
@@ -9761,8 +9762,13 @@ TEST_F(PaintLayersGraphEvalTest, baked_material_row_color_alpha_stays_one)
   ma = nullptr;
 }
 
-/** F2-C6 guard: the Normal channel tracks no content alpha, so its bake colour map stays opaque. */
-TEST_F(PaintLayersGraphEvalTest, baked_normal_row_color_alpha_stays_one)
+/**
+ * F2-C6 guard: the Normal channel tracks no content alpha in the stack, but the bake colour map's
+ * alpha still carries the row's content (variant C, #keep_normal_alpha in
+ * paint_material_composite.cc). It does not affect the normal vector. 0.502 map alpha over the 0.502
+ * correction: 0.502 + 0.502 * 0.498 = 0.752 (128/255 quantization).
+ */
+TEST_F(PaintLayersGraphEvalTest, baked_normal_row_color_alpha_carries_content)
 {
   const int size = 4;
   const eMaterialPaintChannel ch = PAINT_MATERIAL_CHANNEL_NORMAL;
@@ -9784,7 +9790,7 @@ TEST_F(PaintLayersGraphEvalTest, baked_normal_row_color_alpha_stays_one)
   Vector<float> coverage(int64_t(size) * size, -1.0f);
   ASSERT_TRUE(BKE_paint_layers_bake_render_node(
       *ma, *row, int(ch), size, color.data(), coverage.data()));
-  EXPECT_NEAR(color[0 * 4 + 3], 1.0f, 1e-4f);
+  EXPECT_NEAR(color[0 * 4 + 3], 0.752f, 1e-2f);
 
   BKE_id_free(bmain, ma);
   ma = nullptr;

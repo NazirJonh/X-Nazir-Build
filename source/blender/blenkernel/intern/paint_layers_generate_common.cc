@@ -269,6 +269,49 @@ bNodeSocket *source_group_output(bNodeTree &wrapper,
   return nullptr;
 }
 
+/**
+ * Whether \a ma has carried \a marker hidden for at least #PAINT_LAYERS_COLD_TIER_SECONDS at \a now.
+ *
+ * A missing mark counts as young: a row hidden without going through
+ * #BKE_paint_layers_set_enabled (undo, a loaded file, code writing the flag directly) is first
+ * stamped by #BKE_paint_layers_cold_tier_stamp and only then ages, so such a hide cannot skip the
+ * hysteresis. A missing runtime reads the same way. The over-budget pass ignores age entirely.
+ */
+bool cold_tier_hidden_long_enough(const Material &ma, const bUUID &marker, const double now)
+{
+  if (budget_cleanup_active(ma)) {
+    return true;
+  }
+  const MaterialPaintLayersRuntime *runtime = paint_layers_runtime_get(ma);
+  if (runtime == nullptr) {
+    return false;
+  }
+  const double *since = runtime->hidden_since.lookup_ptr(marker);
+  if (since == nullptr) {
+    return false;
+  }
+  return (now - *since) >= PAINT_LAYERS_COLD_TIER_SECONDS;
+}
+
+/** Forget every mark whose row is gone from the stack or is enabled again. */
+void hidden_marks_prune(Material &ma)
+{
+  MaterialPaintLayersRuntime *runtime = paint_layers_runtime_mutable(ma);
+  if (runtime == nullptr || runtime->hidden_since.is_empty()) {
+    return;
+  }
+  Vector<const MaterialPaintLayer *> layers;
+  BKE_paint_layers_flatten(ma, layers);
+  runtime->hidden_since.remove_if([&](auto item) {
+    for (const MaterialPaintLayer *layer : layers) {
+      if (BLI_uuid_equal(layer->marker, item.key)) {
+        return (layer->flag & MA_PAINT_LAYER_ENABLED) != 0;
+      }
+    }
+    return true;
+  });
+}
+
 bool removed_rows_contains(const Material &ma, const bUUID &marker)
 {
   const MaterialPaintLayersRuntime *runtime = paint_layers_runtime_get(ma);
@@ -297,8 +340,15 @@ bool row_is_removed(const Material &ma, const MaterialPaintLayer &layer)
 }
 
 /** Record exactly the rows disabled at this rebuild, so the build omits them from here on. */
-void removed_rows_reconcile(Material &ma)
+void removed_rows_reconcile(Material &ma, const double now)
 {
+  /* The over-budget pass is the one caller that ignores the cold-tier age: memory pressure wins, so
+   * it drops every hidden row it can the moment it runs. */
+  const bool budget = budget_cleanup_active(ma);
+  if (!budget) {
+    /* A row hidden behind set_enabled's back has no mark yet; start its clock before the age test. */
+    BKE_paint_layers_cold_tier_stamp(ma, now);
+  }
   Vector<bUUID> markers;
   Vector<const MaterialPaintLayer *> layers;
   BKE_paint_layers_flatten(ma, layers);
@@ -307,18 +357,34 @@ void removed_rows_reconcile(Material &ma)
      * never written to the removed set -- unless the over-budget pass is dropping hidden rows. */
     /* The row the user is working in, and the folders around it, stay in the graph while hidden:
      * hiding it is only a check of how the result looks, and showing it again must not rebuild. */
-    if (!budget_cleanup_active(ma) &&
-        BKE_paint_layers_subtree_contains(*layer, ma.active_layer_marker))
-    {
+    if (!budget && BKE_paint_layers_subtree_contains(*layer, ma.active_layer_marker)) {
       continue;
     }
     if ((layer->flag & MA_PAINT_LAYER_ENABLED) == 0 &&
-        (!BKE_paint_layers_folder_is_pass_through(ma, *layer) || budget_cleanup_active(ma)))
+        (!BKE_paint_layers_folder_is_pass_through(ma, *layer) || budget))
     {
+      /* Hysteresis: a row hidden for less than the cold tier stays in the graph, so a quick off/on
+       * is a value edit rather than a rebuild. Only the idle tick ages a hidden row past it. */
+      /* A row already out of the graph stays out: its mark was dropped when it left, so the age
+       * test below would read it as young and a later rebuild would bring it back. */
+      if (!budget && !removed_rows_contains(ma, layer->marker) &&
+          !cold_tier_hidden_long_enough(ma, layer->marker, now))
+      {
+        continue;
+      }
       markers.append(layer->marker);
     }
   }
-  paint_layers_runtime_ensure(ma).removed_rows = std::move(markers);
+  MaterialPaintLayersRuntime &runtime = paint_layers_runtime_ensure(ma);
+  runtime.removed_rows = std::move(markers);
+  /* The rows now out of the graph have stopped aging: forget their marks, so a later re-enable
+   * starts a fresh window instead of inheriting the old one. */
+  for (const bUUID &marker : runtime.removed_rows) {
+    runtime.hidden_since.remove(marker);
+  }
+  /* Marks of rows deleted from the stack or re-enabled behind set_enabled's back would otherwise
+   * linger and keep the idle scan walking the stack for nothing. */
+  hidden_marks_prune(ma);
 }
 
 /**

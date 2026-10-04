@@ -2231,6 +2231,11 @@ static bool wm_window_timers_process(const bContext *C, int *sleep_us_p)
        * `wm_autosave_timer` keeps its own logic in `wm_files.cc` rather than this dispatch loop. */
       blender::ed::material_bake::paint_layers_bake_debounce_timer(*bmain, *wm, wt);
     }
+    else if (wt.event_type == TIMERPAINTLAYERSCOLD) {
+      /* Mirrors #TIMERPAINTLAYERSBAKE: the paint-layers cold tier's own timer, dispatched straight
+       * to its handler in `ED_paint_layers_bake.hh`, never queued to a window. */
+      blender::ed::material_bake::paint_layers_cold_tier_timer(*bmain, *wm, wt);
+    }
     else if (wmWindow *win = wt.win) {
       wmEvent event;
       wm_event_init_from_window(win, &event);

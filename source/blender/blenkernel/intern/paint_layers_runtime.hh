@@ -87,6 +87,14 @@ struct MaterialPaintLayersRuntime {
    */
   Vector<bUUID> removed_rows;
   /**
+   * The time (#BLI_time_now_seconds) each row the graph still carries was hidden, by marker. A row
+   * hidden for less than #PAINT_LAYERS_COLD_TIER_SECONDS stays in the graph so a quick off/on is a
+   * value edit; the idle tick drops the rows that aged past it (see #removed_rows_reconcile). A
+   * missing entry means "hidden long ago": rows hidden without a mark (a loaded file, a test that
+   * edits the flag directly) keep the old drop-on-rebuild behavior. Never saved.
+   */
+  Map<UUID, double> hidden_since;
+  /**
    * Markers of Material rows whose live source wrapper could not be built in the last
    * regeneration. The Main-free status and the Outliner read it; a successful rebuild, a different
    * source or the owner's free clears the marker.

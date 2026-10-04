@@ -41,6 +41,7 @@
 #include "BLI_span.hh"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
+#include "BLI_time.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 
@@ -123,6 +124,25 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     record->image = image;
     record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
     return layer;
+  }
+
+  /** Move \a layer's hidden-at mark past #PAINT_LAYERS_COLD_TIER_SECONDS, so the next rebuild may
+   * drop it. The mark is set by #BKE_paint_layers_set_enabled; this only ages it, the seam that
+   * lets a test model "hidden longer than the tier" without waiting the real tier. */
+  void age_cold_mark(MaterialPaintLayer *layer)
+  {
+    bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_mutable(*ma);
+    ASSERT_NE(runtime, nullptr);
+    double *since = runtime->hidden_since.lookup_ptr(layer->marker);
+    ASSERT_NE(since, nullptr);
+    *since = BLI_time_now_seconds() - PAINT_LAYERS_COLD_TIER_SECONDS - 1.0;
+  }
+
+  /** Disable \a layer and age its mark, so a rebuild now leaves it out of the graph. */
+  void disable_and_age(MaterialPaintLayer *layer)
+  {
+    ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+    age_cold_mark(layer);
   }
 
   bNodeTree *make_tree(const char *name)
@@ -4586,7 +4606,11 @@ TEST_F(PaintLayersGenerateTest, own_visibility_of_a_baked_layer_does_not_tag_a_r
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 
-/** A child's visibility is part of its baked parent's hash, so it must rebuild. */
+/**
+ * A child's visibility is part of its baked parent's hash, so it must rebuild. Only a valid bake
+ * substitutes the folder's nodes; REGEN is tagged when the substitution state changes
+ * (#paint_layer_ancestor_bake_state), so the fixture needs a finalized bake.
+ */
 TEST_F(PaintLayersGenerateTest, child_visibility_under_a_baked_folder_tags_a_rebuild)
 {
   MaterialPaintLayer *folder = BKE_paint_layers_add(
@@ -4594,11 +4618,32 @@ TEST_F(PaintLayersGenerateTest, child_visibility_under_a_baked_folder_tags_a_reb
   ASSERT_NE(folder, nullptr);
   MaterialPaintLayer *child = add_paint_layer_into(folder, "Child", add_image("Child"));
   ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
+  BKE_paint_layers_bake_finalize(*ma, *folder);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *folder));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
 
   ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, child, false));
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+/**
+ * A stale (never finalized) folder bake substitutes nothing: the child's nodes are live, so
+ * hiding it is a multiplier edit and the substitution state does not change, hence no REGEN.
+ */
+TEST_F(PaintLayersGenerateTest, child_visibility_under_a_stale_baked_folder_keeps_the_graph)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = add_paint_layer_into(folder, "Child", add_image("Child"));
+  ASSERT_NE(BKE_paint_layers_bake_struct_ensure(*folder), nullptr);
+  ASSERT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *folder));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, child, false));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 
 /**
@@ -4641,7 +4686,9 @@ TEST_F(PaintLayersGenerateTest, disabled_row_leaves_on_incidental_rebuild_and_re
   /* Still in the graph: disabling is a value. */
   ASSERT_NE(layer_tree_find(*bmain, "Bottom"), nullptr);
 
-  /* An unrelated topology change rebuilds the root and drops the disabled row. */
+  /* Once the row has been hidden past the cold tier, an unrelated topology change is the chance to
+   * drop it. Under the tier it would stay (the cold-tier tests cover the age). */
+  age_cold_mark(bottom);
   add_paint_layer("Extra", add_image("Extra"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), nullptr);
@@ -8610,8 +8657,8 @@ TEST_F(PaintLayersGenerateTest, removed_rows_state_is_dropped_with_its_material)
   ASSERT_NE(witness, nullptr);
   const bUUID marker = probe->marker;
   const uint32_t uid = ma->id.session_uid;
-  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, probe, false));
-  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, witness, false));
+  disable_and_age(probe);
+  disable_and_age(witness);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   /* The disables were recorded. */
@@ -8642,7 +8689,7 @@ TEST_F(PaintLayersGenerateTest, runtime_removed_rows_is_not_shared_with_a_copy)
   add_paint_layer("OnLayer", add_image("On"));
   MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
   ASSERT_NE(off, nullptr);
-  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
+  disable_and_age(off);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
 
   ASSERT_NE(bke::paint_layers_runtime_get(*ma), nullptr);
@@ -8718,6 +8765,340 @@ TEST_F(PaintLayersGenerateTest, sampler_runtime_survives_release_of_a_same_uid_o
   EXPECT_TRUE(bke::paint_layers::forced_bake_contains(*neu, marker));
   EXPECT_TRUE(bke::paint_layers::budget_cleanup_active(*neu));
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Paint Layers cold tier (ТЗ-I2)
+ * \{ */
+
+/** (a) A row hidden under the cold tier survives a rebuild: the off/on stays a value edit. */
+TEST_F(PaintLayersGenerateTest, cold_tier_keeps_a_young_hidden_row)
+{
+  MaterialPaintLayer *row = add_paint_layer("Young", add_image("Young"));
+  ASSERT_NE(row, nullptr);
+  /* The mark #BKE_paint_layers_set_enabled writes is only a moment old. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  EXPECT_GT(BKE_paint_layers_cold_tier_seconds(*ma, BLI_time_now_seconds()), 0.0);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "Young"), nullptr);
+  EXPECT_FALSE(bke::paint_layers::removed_rows_contains(*ma, row->marker));
+}
+
+/** (b) A row hidden past the cold tier is dropped by the tick and the rebuild that follows. */
+TEST_F(PaintLayersGenerateTest, cold_tier_drops_a_row_hidden_past_the_tier)
+{
+  MaterialPaintLayer *row = add_paint_layer("Old", add_image("Old"));
+  ASSERT_NE(row, nullptr);
+  disable_and_age(row);
+
+  EXPECT_LE(BKE_paint_layers_cold_tier_seconds(*ma, BLI_time_now_seconds()), 0.0);
+  EXPECT_TRUE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Old"), nullptr);
+  EXPECT_TRUE(bke::paint_layers::removed_rows_contains(*ma, row->marker));
+}
+
+/** (c) Enabling a cold row brings it back with one rebuild. */
+TEST_F(PaintLayersGenerateTest, cold_tier_row_returns_when_enabled)
+{
+  MaterialPaintLayer *row = add_paint_layer("Back", add_image("Back"));
+  ASSERT_NE(row, nullptr);
+  disable_and_age(row);
+  ASSERT_TRUE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(layer_tree_find(*bmain, "Back"), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, true));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  /* set_enabled cleared the recorded marker, so the rebuild brings the row back. */
+  EXPECT_FALSE(bke::paint_layers::removed_rows_contains(*ma, row->marker));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "Back"), nullptr);
+}
+
+/**
+ * (d) The active subtree and a Pass Through folder are never cold-tier candidates: the user is
+ * working in the first, and the second keeps its children in the graph with a zero factor.
+ */
+TEST_F(PaintLayersGenerateTest, cold_tier_spares_the_active_subtree_and_a_pass_through_folder)
+{
+  MaterialPaintLayer *active = add_paint_layer("Active", add_image("Active"));
+  ASSERT_NE(active, nullptr);
+  BKE_paint_layers_active_set(*ma, active->marker);
+  disable_and_age(active);
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  EXPECT_LT(BKE_paint_layers_cold_tier_seconds(*ma, BLI_time_now_seconds()), 0.0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "Active"), nullptr);
+
+  /* Leave the active state and re-enable that row, so only the folder below is a candidate. */
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, active, true));
+
+  MaterialPaintLayer *child = add_paint_layer("PassChild", add_image("PassChild"));
+  ASSERT_NE(child, nullptr);
+  MaterialPaintLayer *folder = group_one(*ma, child);
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*ma, *folder));
+  disable_and_age(folder);
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "PassChild"), nullptr);
+}
+
+/** A mark of a deleted row, or of a row shown again behind set_enabled's back, does not linger. */
+TEST_F(PaintLayersGenerateTest, cold_tier_reconcile_prunes_stale_marks)
+{
+  MaterialPaintLayer *gone = add_paint_layer("Gone", add_image("Gone"));
+  MaterialPaintLayer *shown = add_paint_layer("Shown", add_image("Shown"));
+  ASSERT_NE(gone, nullptr);
+  ASSERT_NE(shown, nullptr);
+  const bUUID shown_marker = shown->marker;
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, gone, false));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, shown, false));
+  ASSERT_EQ(bke::paint_layers_runtime_get(*ma)->hidden_since.size(), 2);
+
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, gone));
+  shown->flag |= MA_PAINT_LAYER_ENABLED;
+
+  ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  BKE_paint_layers_root_hash_invalidate(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_get(*ma);
+  ASSERT_NE(runtime, nullptr);
+  EXPECT_TRUE(runtime->hidden_since.is_empty());
+  EXPECT_EQ(runtime->hidden_since.lookup_ptr(shown_marker), nullptr);
+}
+
+/** A row hidden without set_enabled is young at first, then ages like any other. */
+TEST_F(PaintLayersGenerateTest, cold_tier_unmarked_hidden_row_is_young_until_stamped_and_aged)
+{
+  MaterialPaintLayer *row = add_paint_layer("Direct", add_image("Direct"));
+  ASSERT_NE(row, nullptr);
+  row->flag &= ~MA_PAINT_LAYER_ENABLED;
+  const double now = BLI_time_now_seconds();
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, now));
+  EXPECT_FALSE(bke::paint_layers::cold_tier_hidden_long_enough(*ma, row->marker, now));
+  EXPECT_DOUBLE_EQ(BKE_paint_layers_cold_tier_seconds(*ma, now), PAINT_LAYERS_COLD_TIER_SECONDS);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "Direct"), nullptr);
+  EXPECT_FALSE(bke::paint_layers::removed_rows_contains(*ma, row->marker));
+  /* The reconcile started the clock. */
+  ASSERT_NE(bke::paint_layers_runtime_get(*ma), nullptr);
+  ASSERT_NE(bke::paint_layers_runtime_get(*ma)->hidden_since.lookup_ptr(row->marker), nullptr);
+
+  age_cold_mark(row);
+  ASSERT_TRUE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Direct"), nullptr);
+  EXPECT_TRUE(bke::paint_layers::removed_rows_contains(*ma, row->marker));
+  EXPECT_EQ(bke::paint_layers_runtime_get(*ma)->hidden_since.lookup_ptr(row->marker), nullptr);
+}
+
+/** An overdue row keeps reporting zero when a younger hidden row sits next to it, in any order. */
+TEST_F(PaintLayersGenerateTest, cold_tier_seconds_reports_an_overdue_row_beside_a_younger_one)
+{
+  MaterialPaintLayer *young_a = add_paint_layer("YoungA", add_image("YoungA"));
+  MaterialPaintLayer *old = add_paint_layer("OldOne", add_image("OldOne"));
+  MaterialPaintLayer *young_b = add_paint_layer("YoungB", add_image("YoungB"));
+  ASSERT_NE(young_a, nullptr);
+  ASSERT_NE(old, nullptr);
+  ASSERT_NE(young_b, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, young_a, false));
+  disable_and_age(old);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, young_b, false));
+
+  const double now = BLI_time_now_seconds();
+  EXPECT_DOUBLE_EQ(BKE_paint_layers_cold_tier_seconds(*ma, now), 0.0);
+
+  /* Only the young rows left: a positive wait, below the full tier. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, old, true));
+  const double wait = BKE_paint_layers_cold_tier_seconds(*ma, BLI_time_now_seconds());
+  EXPECT_GT(wait, 0.0);
+  EXPECT_LE(wait, PAINT_LAYERS_COLD_TIER_SECONDS);
+
+  /* No candidate at all reads -1, not zero. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, young_a, true));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, young_b, true));
+  EXPECT_DOUBLE_EQ(BKE_paint_layers_cold_tier_seconds(*ma, BLI_time_now_seconds()), -1.0);
+}
+
+/** A row already out of the graph and still disabled stays out on every later rebuild. */
+TEST_F(PaintLayersGenerateTest, cold_tier_removed_row_stays_out_across_rebuilds)
+{
+  add_paint_layer("Keep", add_image("Keep"));
+  MaterialPaintLayer *row = add_paint_layer("Stay", add_image("Stay"));
+  ASSERT_NE(row, nullptr);
+  disable_and_age(row);
+  ASSERT_TRUE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(bke::paint_layers::removed_rows_contains(*ma, row->marker));
+  /* The drop forgets the mark: the row now reads as young unless the reconcile remembers it. */
+  ASSERT_EQ(bke::paint_layers_runtime_get(*ma)->hidden_since.lookup_ptr(row->marker), nullptr);
+
+  for (int pass = 0; pass < 3; pass++) {
+    ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    BKE_paint_layers_root_hash_invalidate(*ma);
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    EXPECT_TRUE(bke::paint_layers::removed_rows_contains(*ma, row->marker)) << "pass " << pass;
+    EXPECT_EQ(layer_tree_find(*bmain, "Stay"), nullptr) << "pass " << pass;
+    EXPECT_NE(layer_tree_find(*bmain, "Keep"), nullptr) << "pass " << pass;
+  }
+}
+
+/** Two hidden rows of different age: the old one drops first, the young one when it has aged too. */
+TEST_F(PaintLayersGenerateTest, cold_tier_rows_of_different_age_drop_independently)
+{
+  MaterialPaintLayer *old = add_paint_layer("AgedRow", add_image("AgedRow"));
+  MaterialPaintLayer *young = add_paint_layer("FreshRow", add_image("FreshRow"));
+  ASSERT_NE(old, nullptr);
+  ASSERT_NE(young, nullptr);
+  disable_and_age(old);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, young, false));
+
+  ASSERT_TRUE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(bke::paint_layers::removed_rows_contains(*ma, old->marker));
+  EXPECT_FALSE(bke::paint_layers::removed_rows_contains(*ma, young->marker));
+  EXPECT_EQ(layer_tree_find(*bmain, "AgedRow"), nullptr);
+  EXPECT_NE(layer_tree_find(*bmain, "FreshRow"), nullptr);
+
+  age_cold_mark(young);
+  ASSERT_TRUE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(bke::paint_layers::removed_rows_contains(*ma, old->marker))
+      << "the first dropped row came back when the second one was dropped";
+  EXPECT_TRUE(bke::paint_layers::removed_rows_contains(*ma, young->marker));
+  EXPECT_EQ(layer_tree_find(*bmain, "AgedRow"), nullptr);
+  EXPECT_EQ(layer_tree_find(*bmain, "FreshRow"), nullptr);
+}
+
+/**
+ * The user's return scenario: a row moved to the cold tier comes back on enabling, in its old
+ * place, and hiding it again starts a fresh window rather than inheriting the old mark.
+ */
+TEST_F(PaintLayersGenerateTest, cold_tier_returned_row_keeps_its_place_and_gets_a_fresh_window)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *row = add_paint_layer("Middle", add_image("Middle"));
+  add_paint_layer("Top", add_image("Top"));
+  ASSERT_NE(row, nullptr);
+  const bUUID marker = row->marker;
+
+  auto stack_order = [&]() {
+    Vector<const MaterialPaintLayer *> layers;
+    BKE_paint_layers_flatten(*ma, layers);
+    Vector<bUUID> order;
+    for (const MaterialPaintLayer *layer : layers) {
+      order.append(layer->marker);
+    }
+    return order;
+  };
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  const Vector<bUUID> order_before = stack_order();
+  uint64_t hash_before = 0;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*ma->paint_layers_tree, hash_before));
+
+  disable_and_age(row);
+  ASSERT_TRUE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_TRUE(bke::paint_layers::removed_rows_contains(*ma, marker));
+  ASSERT_EQ(layer_tree_find(*bmain, "Middle"), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, true));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_FALSE(bke::paint_layers::removed_rows_contains(*ma, marker))
+      << "row_removed_clear did not run";
+  EXPECT_EQ(bke::paint_layers_runtime_get(*ma)->hidden_since.lookup_ptr(marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "Middle"), nullptr);
+
+  const Vector<bUUID> order_after = stack_order();
+  ASSERT_EQ(order_after.size(), order_before.size());
+  for (const int64_t i : order_before.index_range()) {
+    EXPECT_TRUE(BLI_uuid_equal(order_before[i], order_after[i])) << "row " << i << " moved";
+  }
+  /* Same rows in the same order give the same graph topology as before the drop. */
+  uint64_t hash_after = 0;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*ma->paint_layers_tree, hash_after));
+  EXPECT_EQ(hash_after, hash_before);
+
+  /* Hiding it again begins a fresh window: not due, and not the old aged mark. */
+  const double hide_time = BLI_time_now_seconds();
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  const double *since = bke::paint_layers_runtime_get(*ma)->hidden_since.lookup_ptr(marker);
+  ASSERT_NE(since, nullptr);
+  EXPECT_GE(*since, hide_time - 1.0);
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  EXPECT_GT(BKE_paint_layers_cold_tier_seconds(*ma, BLI_time_now_seconds()),
+            PAINT_LAYERS_COLD_TIER_SECONDS - 5.0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(layer_tree_find(*bmain, "Middle"), nullptr);
+}
+
+/** A quick off/on inside the tier neither requests a rebuild nor changes the root topology. */
+TEST_F(PaintLayersGenerateTest, cold_tier_quick_toggle_does_not_rebuild_the_graph)
+{
+  add_paint_layer("Base", add_image("Base"));
+  MaterialPaintLayer *row = add_paint_layer("Toggled", add_image("Toggled"));
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *tree = ma->paint_layers_tree;
+  ASSERT_NE(tree, nullptr);
+  uint64_t hash_before = 0;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*tree, hash_before));
+  ASSERT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, true));
+  uint64_t hash_after = 0;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*tree, hash_after));
+  EXPECT_EQ(hash_after, hash_before);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "a quick toggle of a row still in the graph must stay a value edit";
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+}
+
+/** The poll touches the REGEN flag and the stored root hash only when a row is due. */
+TEST_F(PaintLayersGenerateTest, cold_tier_poll_invalidates_only_when_due)
+{
+  add_paint_layer("Base", add_image("Base"));
+  MaterialPaintLayer *row = add_paint_layer("Polled", add_image("Polled"));
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  uint64_t stored = 0;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*ma->paint_layers_tree, stored));
+  ASSERT_NE(stored, 0u);
+  ASSERT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* Nothing hidden, then a young hidden row: no due row, nothing touched. */
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, row, false));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  EXPECT_FALSE(BKE_paint_layers_cold_tier_poll(*ma, BLI_time_now_seconds()));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  uint64_t after_idle = 0;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*ma->paint_layers_tree, after_idle));
+  EXPECT_EQ(after_idle, stored);
+
+  /* A far-future "now" makes the same row due without touching the mark. */
+  EXPECT_TRUE(BKE_paint_layers_cold_tier_poll(
+      *ma, BLI_time_now_seconds() + PAINT_LAYERS_COLD_TIER_SECONDS + 5.0));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  uint64_t after_due = stored;
+  ASSERT_TRUE(bke::paint_layers::tree_root_hash_get(*ma->paint_layers_tree, after_due));
+  EXPECT_EQ(after_due, 0u);
+}
+
+/* The over-budget pass ignoring age is covered by
+ * sampler_budget_cleanup_drops_hidden_pass_through. */
+
+/** \} */
 
 /** \} */
 
@@ -9443,7 +9824,7 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_normal_layer)
   MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
   add_channel(*bottom, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x1873b4c54740e73full, "normal_layer"); /* +warm */
+  snapshot_expect(*ma, 0x1a372c505167737cull, "normal_layer"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_hybrid)
@@ -9511,9 +9892,12 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_disabled_row)
   add_paint_layer("OnLayer", add_image("On"));
   MaterialPaintLayer *off = add_paint_layer("OffLayer", add_image("Off"));
   ASSERT_NE(off, nullptr);
-  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, off, false));
-  /* The baseline is the first regeneration after the toggle; snapshot_expect's own unchanged
-   * regeneration must then keep the root (D1: the stored hash describes what was built). */
+  /* The row is hidden past the tier, so the first rebuild drops it: the snapshot is the graph
+   * without it. A row hidden for less than the tier would still be in the graph (the cold-tier
+   * tests cover that side). */
+  disable_and_age(off);
+  /* snapshot_expect's own unchanged regeneration must then keep the root (D1: the stored hash
+   * describes what was built). */
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   snapshot_expect(*ma, 0x6f88403e126b5ab9ull, "disabled_row"); /* +warm */
 }

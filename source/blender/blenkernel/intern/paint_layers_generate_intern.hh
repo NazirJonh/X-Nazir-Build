@@ -226,6 +226,8 @@ bool pass_through_scale_find(const Material &ma,
                                     const float scale,
                                     float &r_scale)
 ;
+bool cold_tier_hidden_long_enough(const Material &ma, const bUUID &marker, double now)
+;
 bool removed_rows_contains(const Material &ma, const bUUID &marker)
 ;
 bool row_channel_substituted(const Material &ma,
@@ -344,7 +346,9 @@ void prop_string_set(IDProperty *&properties, const char *key, const char *value
 ;
 void refresh_generated_instances(bNodeTree &tree, const bUUID &owner_uid, Set<bNodeTree *> &visited)
 ;
-void removed_rows_reconcile(Material &ma)
+void removed_rows_reconcile(Material &ma, double now)
+;
+void hidden_marks_prune(Material &ma)
 ;
 void source_groups_prune(Main &bmain, const Material &owner)
 ;

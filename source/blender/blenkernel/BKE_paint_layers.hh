@@ -741,6 +741,14 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma);
  */
 constexpr double PAINT_LAYERS_BAKE_EDIT_QUIET_SECONDS = 1.5;
 
+/**
+ * Time a row may stay hidden before the idle tick drops it from the graph. Under it the toggle is a
+ * value edit: the row keeps its nodes and only its factor goes to zero, so flipping a row off and
+ * back on costs neither a rebuild nor an EEVEE compile. Past it the row leaves the graph and coming
+ * back is the one rebuild (and possible re-bake) that its return needs.
+ */
+constexpr double PAINT_LAYERS_COLD_TIER_SECONDS = 60.0;
+
 /** Restart \a ma's long bake debounce window; call after a visibility toggle. */
 void BKE_paint_layers_bake_debounce_extend(Material &ma);
 

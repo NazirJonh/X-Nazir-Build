@@ -4247,11 +4247,30 @@ static ListBaseT<wmEventHandler> *wm_event_cross_window_modalhandlers(wmWindowMa
   return nullptr;
 }
 
+/**
+ * An open undo group is legitimate between events while a modal operator runs: a layered paint
+ * stroke groups its map-creation step with the stroke and closes the group when the stroke ends.
+ */
+static bool wm_event_undo_state_valid(bContext *C, wmWindowManager *wm)
+{
+  if (ED_undo_is_state_valid(C)) {
+    return true;
+  }
+  for (wmWindow &win : wm->windows) {
+    for (wmEventHandler &handler_base : win.runtime->modalhandlers) {
+      if (handler_base.type == WM_HANDLER_TYPE_OP) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void wm_event_do_handlers(bContext *C)
 {
   PRF_scope(ProfileCategory::Core);
   wmWindowManager *wm = CTX_wm_manager(C);
-  BLI_assert(ED_undo_is_state_valid(C));
+  BLI_assert(wm_event_undo_state_valid(C, wm));
 
   wm->runtime->break_events_handling = false;
 

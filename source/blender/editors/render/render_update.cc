@@ -210,6 +210,11 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
   ed::material_bake::paint_layers_bake_jobs_ensure(
       *wm, static_cast<wmWindow *>(wm->windows.first), *bmain);
 
+  /* The cold tier: a row hidden past #PAINT_LAYERS_COLD_TIER_SECONDS leaves the graph on its own.
+   * This is the belt; #paint_layers_cold_tier_scan's own timer is the suspenders that wake the loop
+   * when no user action would otherwise do it. */
+  ed::material_bake::paint_layers_cold_tier_scan(*bmain, *wm);
+
   recursive_check = false;
 }
 
@@ -309,6 +314,10 @@ static void material_changed(Main *bmain, Material *ma)
    * edits inside that window coalesces into one bake pass instead of restarting a `wmJob` on each. */
   if (wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first)) {
     ed::material_bake::paint_layers_bake_debounce_arm(*wm, *ma);
+    /* Hiding a row is a value edit that reaches here without a scene update, so this is the one
+     * place that sees it: arm the cold-tier clock now, or a row hidden and then left alone would
+     * never be looked at again. */
+    ed::material_bake::paint_layers_cold_tier_scan(*bmain, *wm);
   }
   else {
     ed::material_bake::material_bake_images_rebake_stale(*bmain, *ma);

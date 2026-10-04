@@ -335,6 +335,32 @@ bool BKE_paint_layers_row_removed_clear(Material &ma, const bUUID &marker);
 void BKE_paint_layers_root_hash_invalidate(Material &ma);
 
 /**
+ * The time until the earliest row of \a ma hidden past #PAINT_LAYERS_COLD_TIER_SECONDS may leave the
+ * graph, at \a now, or -1 when no row is a candidate. A row already old enough reports zero; only -1 means "no candidate".
+ * The editor uses it to arm the cold-tier timer for exactly the wait that is left.
+ *
+ * A row is a candidate when it is disabled, not a Pass Through folder, not in the active subtree and
+ * not already out of the graph -- the same conditions #removed_rows_reconcile applies.
+ */
+double BKE_paint_layers_cold_tier_seconds(const Material &ma, double now);
+
+/**
+ * Start the cold-tier clock (at \a now) of every candidate row of \a ma that has none, and forget
+ * the marks of rows that are gone or shown again. A row hidden without
+ * #BKE_paint_layers_set_enabled (undo, direct flag write) has no mark and counts as young until
+ * this stamps it. Does nothing on a localized, evaluated or Main-less copy.
+ */
+void BKE_paint_layers_cold_tier_stamp(Material &ma, double now);
+
+/**
+ * Record every row of \a ma that has been hidden past #PAINT_LAYERS_COLD_TIER_SECONDS so the next
+ * full root rebuild leaves it out, forcing that rebuild by invalidating the stored root hash.
+ * \return whether anything became due. Called from the editor's idle tick; does nothing when no row
+ * is hidden (no polling, no work).
+ */
+bool BKE_paint_layers_cold_tier_poll(Material &ma, double now);
+
+/**
  * Drop the generator's runtime state of \a ma: its #MaterialPaintLayersRuntime (the removed-rows
  * set and the build-failed markers) and the mode/embed diagnostic maps. Called when the material is
  * freed, and by tests to model a file load; the reconcile rebuilds what a live material needs on its

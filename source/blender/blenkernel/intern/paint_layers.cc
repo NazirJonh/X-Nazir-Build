@@ -2583,6 +2583,19 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
   uint64_t bake_state_before = 0;
   paint_layer_ancestor_bake_state(ma, ma.paint_layers, layer, bake_state_before);
   SET_FLAG_FROM_TEST(layer->flag, enabled, MA_PAINT_LAYER_ENABLED);
+  /* Start (or clear) the hidden row's cold-tier clock. The mark is what lets the idle tick drop a
+   * row hidden past #PAINT_LAYERS_COLD_TIER_SECONDS while a quick off/on stays a value edit. A
+   * localized or evaluated copy shares its description and must not get a runtime. */
+  const int no_runtime_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
+  if ((ma.id.tag & no_runtime_tags) == 0) {
+    bke::MaterialPaintLayersRuntime &runtime = bke::paint_layers_runtime_ensure(ma);
+    if (enabled) {
+      runtime.hidden_since.remove(layer->marker);
+    }
+    else {
+      runtime.hidden_since.add_overwrite(layer->marker, BLI_time_now_seconds());
+    }
+  }
   /* Enabled folds into the group-input factor (#BKE_paint_layers_effective_opacity), and the
    * generator keeps a disabled row in the topology with factor zero, so this is a value edit: an
    * F-curve on it reaches the shader without a rebuild. A row an earlier rebuild actually dropped

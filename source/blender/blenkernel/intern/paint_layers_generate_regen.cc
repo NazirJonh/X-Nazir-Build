@@ -975,6 +975,9 @@ void input_link_restore(Material &ma,
                         bNodeSocket &from_socket,
                         PaintLayersRegenerateReport &r_report)
 {
+  /* Every link added or removed below dirties the topology cache, and the next call (the following
+   * channel, or the second link of one) reads `directly_linked_links` through it. */
+  ma.nodetree->ensure_topology_cache();
   const bool locked = (ma.paint_layers_flag & MA_PAINT_LAYERS_LOCKED) != 0;
   const Span<bNodeLink *> links = input.directly_linked_links();
   if (!links.is_empty()) {
@@ -1068,6 +1071,8 @@ void wire_instance_to_material(Material &ma,
        * the Principled Normal, be that the Normal Map or a hand-built graph. */
       bNodeSocket *bump_normal_in = socket_in(*bump, "Normal");
       if (bump_normal_in != nullptr) {
+        /* The Height link just made dirtied the cache that this read goes through. */
+        ma.nodetree->ensure_topology_cache();
         const Span<bNodeLink *> normal_links = principled_normal->directly_linked_links();
         if (normal_links.size() == 1) {
           input_link_restore(ma,
@@ -1136,6 +1141,127 @@ void BKE_paint_layers_root_hash_invalidate(Material &ma)
   if (ma.paint_layers_tree != nullptr) {
     tree_root_hash_set(*ma.paint_layers_tree, 0);
   }
+}
+
+/**
+ * Whether \a layer is a row the cold tier may drop at \a now: disabled, not a Pass Through folder,
+ * not in the active subtree, not already out, and hidden longer than the tier. The same gates
+ * #removed_rows_reconcile applies, so a row this says yes to is one the next rebuild will omit.
+ */
+static bool cold_tier_row_is_candidate(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 || row_is_removed(ma, layer)) {
+    return false;
+  }
+  return !BKE_paint_layers_folder_is_pass_through(ma, layer) &&
+         !BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker);
+}
+
+static bool cold_tier_row_is_due(const Material &ma,
+                                 const MaterialPaintLayer &layer,
+                                 const double now)
+{
+  return cold_tier_row_is_candidate(ma, layer) &&
+         cold_tier_hidden_long_enough(ma, layer.marker, now);
+}
+
+/** Whether any row of the composited stack is disabled; walks without allocating. */
+static bool cold_tier_any_row_disabled(const ListBaseT<MaterialPaintLayer> &list)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    if (BKE_paint_layers_role(layer) != PaintLayerRole::Layer) {
+      continue;
+    }
+    if ((layer.flag & MA_PAINT_LAYER_ENABLED) == 0) {
+      return true;
+    }
+    if (BKE_paint_layers_is_folder(layer) && cold_tier_any_row_disabled(layer.children)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void BKE_paint_layers_cold_tier_stamp(Material &ma, const double now)
+{
+  /* A localized or evaluated copy shares its description and must not get a runtime. */
+  const int no_runtime_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
+  if ((ma.id.tag & no_runtime_tags) != 0 || !paint_layers_is_layered(ma) ||
+      !cold_tier_any_row_disabled(ma.paint_layers))
+  {
+    return;
+  }
+  Vector<const MaterialPaintLayer *> layers;
+  BKE_paint_layers_flatten(ma, layers);
+  bke::MaterialPaintLayersRuntime &runtime = bke::paint_layers_runtime_ensure(ma);
+  for (const MaterialPaintLayer *layer : layers) {
+    if (!cold_tier_row_is_candidate(ma, *layer)) {
+      continue;
+    }
+    if (runtime.hidden_since.lookup_ptr(layer->marker) == nullptr) {
+      runtime.hidden_since.add(layer->marker, now);
+    }
+  }
+  hidden_marks_prune(ma);
+}
+
+double BKE_paint_layers_cold_tier_seconds(const Material &ma, const double now)
+{
+  if (!paint_layers_is_layered(ma)) {
+    return -1.0;
+  }
+  /* The common case by far: a live material with every row shown. Answer without allocating. */
+  if (!cold_tier_any_row_disabled(ma.paint_layers)) {
+    return -1.0;
+  }
+  const bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_get(ma);
+  Vector<const MaterialPaintLayer *> layers;
+  BKE_paint_layers_flatten(ma, layers);
+  /* A separate flag, not -1 as "none yet": an overdue row's remaining time is itself negative, and
+   * a later, younger row would otherwise replace it and hide the one that is already due. */
+  bool found = false;
+  double best = 0.0;
+  for (const MaterialPaintLayer *layer : layers) {
+    if (!cold_tier_row_is_candidate(ma, *layer)) {
+      continue;
+    }
+    const double *since = (runtime != nullptr) ?
+                              runtime->hidden_since.lookup_ptr(layer->marker) :
+                              nullptr;
+    /* No mark means young (the full wait), matching #cold_tier_hidden_long_enough. */
+    const double remaining = (since != nullptr) ?
+                                 PAINT_LAYERS_COLD_TIER_SECONDS - (now - *since) :
+                                 PAINT_LAYERS_COLD_TIER_SECONDS;
+    if (!found || remaining < best) {
+      best = remaining;
+      found = true;
+    }
+  }
+  /* Negative is reserved for "no candidate", so an overdue row reports zero. */
+  return found ? std::max(best, 0.0) : -1.0;
+}
+
+bool BKE_paint_layers_cold_tier_poll(Material &ma, const double now)
+{
+  if (!paint_layers_is_layered(ma)) {
+    return false;
+  }
+  Vector<const MaterialPaintLayer *> layers;
+  BKE_paint_layers_flatten(ma, layers);
+  bool due = false;
+  for (const MaterialPaintLayer *layer : layers) {
+    if (cold_tier_row_is_due(ma, *layer, now)) {
+      due = true;
+      break;
+    }
+  }
+  if (due) {
+    /* The rebuild is the drop: invalidate the stored hash so the next regenerate does not keep the
+     * root that still carries the row, and let the reconcile leave it out. */
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    BKE_paint_layers_root_hash_invalidate(ma);
+  }
+  return due;
 }
 
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
@@ -2001,7 +2127,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     }
     if (any_disabled) {
       budget_cleanup_owner_set(ma, true);
-      removed_rows_reconcile(ma);
+      removed_rows_reconcile(ma, BLI_time_now_seconds());
       sampler_estimate_value = sampler_estimate();
     }
     /* 2. Keep a row pinned last pass on its stale maps while its bake is rebuilt. It must not revive
@@ -2267,7 +2393,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     used_layer_trees.clear();
     unchanged_layers.clear();
     layer_trees.clear();
-    removed_rows_reconcile(ma);
+    removed_rows_reconcile(ma, BLI_time_now_seconds());
     tree_clear(bmain, *tree);
     paint_layers_tree_build(ma, *tree, ctx);
     for (bNodeTree *layer_tree : used_layer_trees) {

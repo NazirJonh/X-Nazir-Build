@@ -14,6 +14,7 @@
 #include "BKE_paint_layers_debug.hh"
 
 #include <algorithm>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -427,6 +428,93 @@ static void bake_subscription_user_drain(Image &image, PartialUpdateUser *user)
          bke::image::partial_update::ePartialUpdateIterResult::ChangeAvailable)
   {
   }
+}
+
+/** The visibility of each effect of \a layer as "name=0/1" pairs. For the diagnostic only. */
+static std::string bake_diag_effects_state(const MaterialPaintLayer &layer)
+{
+  std::string text = "[";
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    text += std::string(effect.name) + "=" +
+            (((effect.flag & MA_PAINT_LAYER_ENABLED) != 0) ? "1" : "0") + " ";
+  }
+  return text + "]";
+}
+
+/**
+ * Print what a heavy-bake render of \a layer in \a channel holds inside and outside the row's own
+ * base map alpha, and how many enabled content corrections reach it. For the diagnostic only: it
+ * reads, never writes, so it cannot change what is baked.
+ */
+static void bake_diag_channel_stats(const Material &ma,
+                                    const MaterialPaintLayer &layer,
+                                    const int channel,
+                                    const int size,
+                                    const Vector<float> &color,
+                                    const Vector<float> &coverage)
+{
+  int corrections_with_map = 0;
+  int corrections_enabled = 0;
+  for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
+    if ((effect->flag & MA_PAINT_LAYER_ENABLED) == 0) {
+      continue;
+    }
+    corrections_enabled++;
+    if (paint_layer_channel_image(ma, *effect, channel) != nullptr) {
+      corrections_with_map++;
+    }
+  }
+  /* Base alpha per texel: the row's own map, or fully covering when it has none. */
+  Image *base_image = paint_layer_channel_image(ma, layer, channel);
+  void *lock = nullptr;
+  ImBuf *base = nullptr;
+  if (base_image != nullptr) {
+    base = BKE_image_acquire_ibuf(base_image, nullptr, &lock);
+  }
+  int64_t cov_in = 0, cov_out = 0, alpha_in = 0, alpha_out = 0;
+  float cov_max = 0.0f;
+  double cov_sum = 0.0;
+  for (int y = 0; y < size; y++) {
+    for (int x = 0; x < size; x++) {
+      const int64_t i = int64_t(y) * size + x;
+      bool in_base = true;
+      if (base != nullptr) {
+        const int bx = std::min(int(int64_t(x) * base->x / size), base->x - 1);
+        const int by = std::min(int(int64_t(y) * base->y / size), base->y - 1);
+        const int64_t b = int64_t(by) * base->x + bx;
+        if (base->float_data() != nullptr) {
+          in_base = base->float_data()[b * 4 + 3] > 0.0f;
+        }
+        else if (base->byte_data() != nullptr) {
+          in_base = base->byte_data()[b * 4 + 3] > 0;
+        }
+      }
+      const bool has_cov = coverage[i] > 0.002f;
+      const bool has_alpha = color[i * 4 + 3] > 0.002f;
+      (in_base ? cov_in : cov_out) += has_cov ? 1 : 0;
+      (in_base ? alpha_in : alpha_out) += has_alpha ? 1 : 0;
+      cov_max = std::max(cov_max, coverage[i]);
+      cov_sum += double(coverage[i]);
+    }
+  }
+  if (base != nullptr) {
+    BKE_image_release_ibuf(base_image, base, lock);
+  }
+  printf(
+      "[PL-DIAG] heavy bake row='%s' channel=%d size=%d corrections_enabled=%d with_map=%d "
+      "cov_in_base=%lld cov_outside_base=%lld alpha_in_base=%lld alpha_outside_base=%lld "
+      "cov_max=%.3f cov_sum=%.1f\n",
+      layer.name,
+      channel,
+      size,
+      corrections_enabled,
+      corrections_with_map,
+      static_cast<long long>(cov_in),
+      static_cast<long long>(cov_out),
+      static_cast<long long>(alpha_in),
+      static_cast<long long>(alpha_out),
+      cov_max,
+      cov_sum);
 }
 
 void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
@@ -909,6 +997,8 @@ static int paint_layer_dropped_bake_size(const Material &ma, const MaterialPaint
   return (size != nullptr) ? *size : 0;
 }
 
+static bool bake_row_is_hidden(const Material &ma, const MaterialPaintLayer &layer);
+
 bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
 {
   bool changed = false;
@@ -981,6 +1071,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
         if (BKE_paint_layers_bake_row_is_deferred(ma, layer)) {
           continue;
         }
+        if (bake_row_is_hidden(ma, layer)) {
+          continue;
+        }
         /* A heavy row leaves the main thread: the wmJob scheduler picks it up from the same
          * pending/bake-stale signal this function leaves set. */
         if (BKE_paint_layers_bake_is_heavy(ma, layer)) {
@@ -1038,6 +1131,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
         if (BKE_paint_layers_bake_row_is_deferred(ma, layer)) {
           continue;
         }
+        if (bake_row_is_hidden(ma, layer)) {
+          continue;
+        }
         if (BKE_paint_layers_bake_is_heavy(ma, layer)) {
           continue;
         }
@@ -1080,8 +1176,28 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       /* A changed rectangle may update only that part of an existing cache; a fresh cache needs
        * the whole render. */
       int region[4];
-      const bool has_region = BKE_paint_layers_bake_changed_region(ma, layer, region);
+      bool has_region = BKE_paint_layers_bake_changed_region(ma, layer, region);
+      /* A rectangle only describes pixel edits. When the structural hash moved too (a visibility,
+       * opacity or blend edit while a stroke was still pending), the whole cache is out of date and a
+       * rectangle-only write would keep the old content, a hidden correction included, outside it. */
+      uint32_t diag_hash[2];
+      BKE_paint_layers_bake_hash(ma, layer, diag_hash);
+      const bool structure_changed = diag_hash[0] != bake->hash[0] || diag_hash[1] != bake->hash[1];
+      if (has_region && structure_changed) {
+        has_region = false;
+      }
       const bool reuse_cache = bake->coverage != nullptr;
+      printf("[PL-DIAG] sync bake start row='%s' row_enabled=%d effects=%s structure_changed=%d "
+             "partial=%d hash %08x%08x stored %08x%08x\n",
+             layer.name,
+             int((layer.flag & MA_PAINT_LAYER_ENABLED) != 0),
+             bake_diag_effects_state(layer).c_str(),
+             int(structure_changed),
+             int(has_region && reuse_cache),
+             diag_hash[0],
+             diag_hash[1],
+             bake->hash[0],
+             bake->hash[1]);
       int src_width = 0;
       int src_height = 0;
       bool have_source_dims = false;
@@ -1113,6 +1229,10 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
 
       Vector<float> color(int64_t(size) * size * 4);
       Vector<float> coverage(int64_t(size) * size);
+      /* Variant C accumulator: `common = mask x opacity`, the max of `coverage / content` over
+       * channels, written once below so channel order cannot matter. A partial re-bake folds
+       * only its rectangle; untouched texels keep the stored common. */
+      Vector<float> common(int64_t(size) * size, 0.0f);
       bool any_channel = false;
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
         const int channel = int(info.channel);
@@ -1129,22 +1249,44 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           continue;
         }
         Image *color_image = bake_service_image(bmain, layer, channel, size, info.is_color);
-        Image *coverage_image = bake_service_image(bmain, layer, -1, size, false);
-        if (color_image == nullptr || coverage_image == nullptr) {
+        if (color_image == nullptr) {
           continue;
         }
         /* The colour map's alpha carries the row's content alpha (F2-C6). */
         bake_write_image(*color_image, color.data(), info.is_color, channel_rect, true);
-        bake_write_coverage_image(*coverage_image, coverage.data(), channel_rect);
+        const int ax0 = (channel_rect != nullptr) ? channel_rect[0] : 0;
+        const int ay0 = (channel_rect != nullptr) ? channel_rect[1] : 0;
+        const int ax1 = (channel_rect != nullptr) ? channel_rect[2] : size;
+        const int ay1 = (channel_rect != nullptr) ? channel_rect[3] : size;
+        for (int y = ay0; y < ay1; y++) {
+          for (int x = ax0; x < ax1; x++) {
+            const int64_t i = int64_t(y) * size + x;
+            const float content = color[i * 4 + 3];
+            if (content > 0.002f) {
+              common[i] = std::max(common[i], clamp_f(coverage[i] / content, 0.0f, 1.0f));
+            }
+          }
+        }
         any_channel = true;
       }
       if (!any_channel) {
         continue;
       }
+      /* One shared coverage write for all channels (variant C); a partial re-bake touches only
+       * its rectangle, so the stored common outside it survives. */
+      if (Image *coverage_image = bake_service_image(bmain, layer, -1, size, false)) {
+        bake_write_coverage_image(
+            *coverage_image, common.data(), (rect_ptr != nullptr && reuse_cache) ? rect_ptr : nullptr);
+      }
       uint32_t hash[2];
       BKE_paint_layers_bake_hash(ma, layer, hash);
       bake->hash[0] = hash[0];
       bake->hash[1] = hash[1];
+      printf("[PL-DIAG] sync bake done row='%s' effects=%s hash %08x%08x\n",
+             layer.name,
+             bake_diag_effects_state(layer).c_str(),
+             hash[0],
+             hash[1]);
       BKE_paint_layers_bake_subscribe(ma, layer);
       changed = true;
     }
@@ -1166,6 +1308,11 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       if (layer->bake != nullptr && layer->bake->mode != MA_PAINT_LAYER_BAKE_NEVER &&
           !BKE_paint_layers_bake_is_valid(ma, *layer))
       {
+        /* A hidden row stays stale without holding the signal: showing it marks it again. */
+        if (bake_row_is_hidden(ma, *layer)) {
+          printf("[PL-DIAG] bake skipped hidden row='%s' stale=1\n", layer->name);
+          continue;
+        }
         pending = true;
         break;
       }
@@ -1197,6 +1344,41 @@ bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPai
     return false;
   }
   return BKE_paint_layers_subtree_contains(layer, ma.active_layer_marker);
+}
+
+/** Depth-first search for \a target; true when found with it or an ancestor not enabled. */
+static bool bake_hidden_find(const ListBaseT<MaterialPaintLayer> &list,
+                             const MaterialPaintLayer *target,
+                             const bool ancestor_hidden,
+                             bool &r_hidden)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    const bool hidden = ancestor_hidden || (layer.flag & MA_PAINT_LAYER_ENABLED) == 0;
+    if (&layer == target) {
+      r_hidden = hidden;
+      return true;
+    }
+    if (bake_hidden_find(layer.children, target, hidden, r_hidden) ||
+        bake_hidden_find(layer.effects, target, hidden, r_hidden) ||
+        bake_hidden_find(layer.mask_stack, target, hidden, r_hidden))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether \a layer, or a folder above it, is hidden. A hidden row is not baked: its render would
+ * fold the zero visibility into the coverage while the hash (top-level visibility is not in it)
+ * kept calling the cache valid, and nothing on screen needs the bake until it is shown again,
+ * when the visibility edit marks the planner stale and the row is brought up to date.
+ */
+static bool bake_row_is_hidden(const Material &ma, const MaterialPaintLayer &layer)
+{
+  bool hidden = false;
+  bake_hidden_find(ma.paint_layers, &layer, false, hidden);
+  return hidden;
 }
 
 /* Maps a bake job is rendering right now; the editor's job code fills it. */
@@ -1558,6 +1740,10 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
     if (BKE_paint_layers_bake_row_is_deferred(ma, *layer)) {
       continue;
     }
+    /* A hidden row queues nothing; showing it marks the planner stale again. */
+    if (bake_row_is_hidden(ma, *layer)) {
+      continue;
+    }
     if (BKE_paint_layers_is_folder(*layer)) {
       const int mode = BKE_paint_layers_bake_mode_get(*layer);
       if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
@@ -1646,7 +1832,51 @@ struct PaintLayersBakeJob {
     Vector<ChannelResult> channels;
   };
   Vector<RowResult> rows;
+  /**
+   * The visibility of every row, effect and mask item when #material_copy was taken. The commit
+   * stamps the live hash, so an edit made while the worker ran would otherwise label a render of the
+   * old state as current: a correction hidden meanwhile would stay baked in.
+   */
+  Vector<std::pair<bUUID, int16_t>> enabled_at_create;
 };
+
+/**
+ * The channel-independent row factor (variant C): `common = mask x opacity`, recovered from the
+ * per-channel renders without a new map. Every channel rendered `coverage = common x content`
+ * with its own `content` in the color alpha (F2-C6; Normal keeps its map alpha the same way, so
+ * its content is readable too). Where that content is present the quotient is the common factor;
+ * the maximum over channels does not depend on channel order, and a texel no channel covers
+ * keeps zero. Float math here; the byte write quantizes once afterwards. A Fill constant lays
+ * whatever its alpha, so its quotient assumes an opaque constant; a Normal content correction
+ * under mask items folds the mask into its alpha and stays a documented limit.
+ */
+static void bake_common_from_job_channels(Span<PaintLayersBakeJob::ChannelResult> channels,
+                                          const int64_t pixel_num,
+                                          float *r_common)
+{
+  for (int64_t i = 0; i < pixel_num; i++) {
+    float common = 0.0f;
+    for (const PaintLayersBakeJob::ChannelResult &channel : channels) {
+      const float content = channel.color[i * 4 + 3];
+      if (content > 0.002f) {
+        common = std::max(common, clamp_f(channel.coverage[i] / content, 0.0f, 1.0f));
+      }
+    }
+    r_common[i] = common;
+  }
+}
+
+/** The (marker, enabled) pair of every row, effect and mask item of \a ma, in a stable order. */
+static Vector<std::pair<bUUID, int16_t>> bake_job_enabled_snapshot(const Material &ma)
+{
+  Vector<const MaterialPaintLayer *> layers;
+  BKE_paint_layers_flatten_all(ma, layers);
+  Vector<std::pair<bUUID, int16_t>> snapshot;
+  for (const MaterialPaintLayer *layer : layers) {
+    snapshot.append({layer->marker, int16_t(layer->flag & MA_PAINT_LAYER_ENABLED)});
+  }
+  return snapshot;
+}
 
 PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
 {
@@ -1679,6 +1909,9 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     /* The row the user is editing inside is left live; it is queued only after the active marker
      * leaves its subtree. */
     if (BKE_paint_layers_bake_row_is_deferred(ma, *layer)) {
+      continue;
+    }
+    if (bake_row_is_hidden(ma, *layer)) {
       continue;
     }
     if (BKE_paint_layers_is_folder(*layer)) {
@@ -1744,6 +1977,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     MEM_delete(job);
     return nullptr;
   }
+  job->enabled_at_create = bake_job_enabled_snapshot(ma);
   job->material_copy = id_cast<Material *>(BKE_id_copy_ex(
       nullptr,
       &ma.id,
@@ -1752,6 +1986,14 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
   if (job->material_copy == nullptr) {
     MEM_delete(job);
     return nullptr;
+  }
+  for (const PaintLayersBakeJob::RowResult &row : job->rows) {
+    if (const MaterialPaintLayer *queued = BKE_paint_layers_find(ma, row.marker)) {
+      printf("[PL-DIAG] heavy bake create row='%s' row_enabled=%d effects=%s\n",
+             queued->name,
+             int((queued->flag & MA_PAINT_LAYER_ENABLED) != 0),
+             bake_diag_effects_state(*queued).c_str());
+    }
   }
   return job;
 }
@@ -1789,8 +2031,10 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
         report_progress(total_pairs > 0 ? float(done_pairs) / float(total_pairs) : 1.0f);
       }
       if (!rendered) {
+        printf("[PL-DIAG] heavy bake row='%s' channel=%d render=failed\n", layer->name, channel);
         continue;
       }
+      bake_diag_channel_stats(ma, *layer, channel, row.size, color, coverage);
       PaintLayersBakeJob::ChannelResult result;
       result.channel = channel;
       result.is_color = info.is_color;
@@ -1818,12 +2062,24 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     return false;
   }
   bool changed = false;
+  /* A visibility edit made while the worker ran: the render shows the old state, so it is dropped
+   * and the rows stay invalid for the planner to queue again. */
+  const Vector<std::pair<bUUID, int16_t>> enabled_now = bake_job_enabled_snapshot(*ma);
+  bool visibility_moved = enabled_now.size() != job.enabled_at_create.size();
+  for (int64_t i = 0; !visibility_moved && i < enabled_now.size(); i++) {
+    visibility_moved = !BLI_uuid_equal(enabled_now[i].first, job.enabled_at_create[i].first) ||
+                       enabled_now[i].second != job.enabled_at_create[i].second;
+  }
+  printf("[PL-DIAG] heavy bake commit material='%s' rows=%d visibility_moved=%d\n",
+         ma->id.name + 2,
+         int(job.rows.size()),
+         int(visibility_moved));
   for (PaintLayersBakeJob::RowResult &row : job.rows) {
     MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, row.marker);
     /* The row was removed, its bake dropped or switched off while the worker ran: nothing to
      * write. */
     if (layer == nullptr || layer->bake == nullptr ||
-        layer->bake->mode == MA_PAINT_LAYER_BAKE_NEVER)
+        layer->bake->mode == MA_PAINT_LAYER_BAKE_NEVER || visibility_moved)
     {
       continue;
     }
@@ -1831,17 +2087,52 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     for (PaintLayersBakeJob::ChannelResult &channel : row.channels) {
       Image *color_image = bake_service_image(
           bmain, *layer, channel.channel, row.size, channel.is_color);
-      Image *coverage_image = bake_service_image(bmain, *layer, -1, row.size, false);
-      if (color_image == nullptr || coverage_image == nullptr) {
+      if (color_image == nullptr) {
         continue;
       }
       /* The colour map's alpha carries the row's content alpha (F2-C6). */
       bake_write_image(*color_image, channel.color.data(), channel.is_color, nullptr, true);
-      bake_write_coverage_image(*coverage_image, channel.coverage.data(), nullptr);
       row_written = true;
     }
     if (!row_written) {
       continue;
+    }
+    /* Variant C: one shared coverage holds the channel-independent `common = mask x opacity`,
+     * recovered as the max of `coverage / content` over channels, so the write no longer depends
+     * on channel order. Per-channel content stays in its color map alpha for the substituted
+     * factor `common x content`. */
+    {
+      const int64_t pixel_num = int64_t(row.size) * row.size;
+      Vector<float> common(pixel_num);
+      bake_common_from_job_channels(row.channels, pixel_num, common.data());
+      if (Image *coverage_image = bake_service_image(bmain, *layer, -1, row.size, false)) {
+        bake_write_coverage_image(*coverage_image, common.data(), nullptr);
+      }
+    }
+    /* [PL-DIAG] The shared coverage map keeps only the last written channel; the union is what
+     * every channel together covered. Prints only. */
+    {
+      const int64_t pixel_num = int64_t(row.size) * row.size;
+      int64_t last_nonzero = 0, union_nonzero = 0, common_nonzero = 0;
+      Vector<float> diag_common(pixel_num);
+      bake_common_from_job_channels(row.channels, pixel_num, diag_common.data());
+      for (int64_t i = 0; i < pixel_num; i++) {
+        float union_value = 0.0f;
+        for (const PaintLayersBakeJob::ChannelResult &channel : row.channels) {
+          union_value = std::max(union_value, channel.coverage[i]);
+        }
+        union_nonzero += int64_t(union_value > 0.002f);
+        last_nonzero += int64_t(row.channels.last().coverage[i] > 0.002f);
+        common_nonzero += int64_t(diag_common[i] > 0.002f);
+      }
+      printf("[PL-DIAG] coverage final row='%s' nonzero=%lld union_of_channels=%lld\n",
+             layer->name,
+             static_cast<long long>(last_nonzero),
+             static_cast<long long>(union_nonzero));
+      printf("[PL-DIAG] coverage final row='%s' common_nonzero=%lld channels_union=%lld\n",
+             layer->name,
+             static_cast<long long>(common_nonzero),
+             static_cast<long long>(union_nonzero));
     }
     uint32_t hash[2];
     BKE_paint_layers_bake_hash(*ma, *layer, hash);
@@ -1849,6 +2140,26 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     layer->bake->hash[1] = hash[1];
     BKE_paint_layers_bake_subscribe(*ma, *layer);
     changed = true;
+    /* [PL-DIAG] The commit writes pixels straight into the ibuf and sets only
+     * MA_PAINT_LAYERS_REGEN: no BKE_image_mark_dirty, no partial-update mark, no ID_RECALC tag on
+     * the Images or the Material. This prints what each written Image looks like afterwards. */
+    for (Image *image : layer->bake->images) {
+      if (image == nullptr) {
+        continue;
+      }
+      void *diag_lock = nullptr;
+      ImBuf *diag_ibuf = BKE_image_acquire_ibuf(image, nullptr, &diag_lock);
+      printf("[PL-DIAG] commit image '%s' %p us=%d id.tag=0x%x recalc=0x%x ibuf_dirty=%d "
+             "has_ibuf=%d\n",
+             image->id.name + 2,
+             static_cast<void *>(image),
+             image->id.us,
+             unsigned(image->id.tag),
+             unsigned(image->id.recalc),
+             (diag_ibuf != nullptr) ? int((diag_ibuf->userflags & IB_BITMAPDIRTY) != 0) : -1,
+             int(diag_ibuf != nullptr));
+      BKE_image_release_ibuf(image, diag_ibuf, diag_lock);
+    }
   }
   if (changed) {
     ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
@@ -2554,6 +2865,11 @@ static uint64_t bake_hash_layer(uint64_t h,
                                 const MaterialPaintLayer &layer,
                                 const bool is_child)
 {
+  /* Variant C (ТЗ-H): the shared coverage changed meaning from per-channel content coverage to
+   * the channel-independent `common = mask x opacity`, and Normal color maps carry content in
+   * alpha now. Old caches hold the previous meaning, so they invalidate once here; no DNA or
+   * file-format change, only pixels are re-rendered. */
+  h = bake_hash_mix(h, uint64_t(0x9e3779b97f4a7c15ull));
   if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     /* A Material layer's bake is its source material rendered into maps, and depends on nothing
      * else: the row's mask, corrections, opacity and blend apply to those maps live. Hashing them

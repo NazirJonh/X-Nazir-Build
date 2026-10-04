@@ -82,6 +82,8 @@
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 
+#include "IMB_imbuf_types.hh"
+
 #include "paint_material_composite_internal.hh"
 
 /* The recursive chain builders: #PaintLayersChainBuilder::build_list and its row
@@ -1037,11 +1039,54 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
    * same read #composite_image_layers_build sets up with #color_alpha_coverage. */
   leaf_map_node = nullptr;
   if (substituted) {
-    if (!build_substituted_source(
-            layer, tree, track_content_alpha, location_x, location_y, baked_color, current))
+    /* Variant C: the baked color Alpha is the live map Alpha the row had (or the folder subtree
+     * content), so the factor chain below multiplies `common x content` exactly like the live
+     * `mask x content` chain. A constant leaf had no live map alpha, so it keeps covering by
+     * common alone. Material and mesh-map rows never reach this branch. */
+    const bool use_baked_content =
+        !ELEM(layer->source, MA_PAINT_LAYER_SOURCE_MATERIAL, MA_PAINT_LAYER_SOURCE_MESH_MAP) &&
+        (BKE_paint_layers_is_folder(*layer) ||
+         paint_layer_channel_image(ma, *layer, channel) != nullptr);
+    bNode *baked_content_node = nullptr;
+    if (!build_substituted_source(layer,
+                                  tree,
+                                  track_content_alpha,
+                                  location_x,
+                                  location_y,
+                                  baked_color,
+                                  current,
+                                  channel,
+                                  use_baked_content,
+                                  &baked_content_node))
     {
       return false;
     }
+    leaf_map_node = baked_content_node;
+    /* The baked factor already holds mask x opacity, so the row's own opacity input is not used
+     * again; only visibility is multiplied in, from its own 0/1 input. */
+    bNodeSocket *enabled_out = nullptr;
+    if (bNodeTreeInterfaceSocket *const *enabled_iface = outer_.enabled_inputs_.lookup_ptr(layer)) {
+      enabled_out = group_input_socket(group_input, **enabled_iface);
+    }
+    if (enabled_out != nullptr && current.opacity != nullptr) {
+      bNode *visible = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+      bNodeSocket *visible_a = (visible != nullptr) ? socket_in(*visible, "Value") : nullptr;
+      bNodeSocket *visible_b = (visible != nullptr) ? socket_in(*visible, "Value_001") : nullptr;
+      if (visible_a == nullptr || visible_b == nullptr) {
+        return false;
+      }
+      visible->custom1 = NODE_MATH_MULTIPLY;
+      visible->location[0] = location_x + 90.0f;
+      visible->location[1] = location_y - 160.0f;
+      bke::node_add_link(tree, *current.opacity_node, *current.opacity, *visible, *visible_a);
+      bke::node_add_link(tree, *group_input, *enabled_out, *visible, *visible_b);
+      current.opacity_node = visible;
+      current.opacity = socket_out(*visible, "Value");
+    }
+    printf("[PL-DIAG] substituted enabled row='%s' channel=%d enabled_input=%d\n",
+           layer->name,
+           channel,
+           int(enabled_out != nullptr));
   }
   else {
     /* A constant answers first: it needs no sampler, so a channel the resolver calls Constant
@@ -1243,7 +1288,10 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
                                                        const float location_x,
                                                        const float location_y,
                                                        Image *baked_color,
-                                                       ChainLayer &r_current)
+                                                       ChainLayer &r_current,
+                                                       const int channel,
+                                                       const bool use_baked_content,
+                                                       bNode **r_content_node)
 {
   ChainLayer &current = r_current;
   bNode *baked_color_node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
@@ -1311,6 +1359,67 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
     }
     current.opacity_node = divide;
     current.opacity = socket_out(*divide, "Value");
+  }
+  /* Variant C: the baked coverage is the channel-independent `common = mask x opacity`
+   * (mean of grey RGB below), and per-channel content comes from the baked color Alpha exactly
+   * like a live leaf map. Hand the baked color node out when the live row had content of its own
+   * (a map or a folder subtree); a constant leaf covers by common alone, as its live factor does. */
+  if (r_content_node != nullptr) {
+    *r_content_node = use_baked_content ? baked_color_node : nullptr;
+  }
+  /* [PL-DIAG] What a substituted row reads from its bake, for the correction-visibility report.
+   * Prints only (the pixel read goes through the same acquire the CPU composite and the GPU upload
+   * use). Compare `alpha_px` with the heavy-bake line: a value near zero here, with the bake line
+   * large, means the map lost its content after the commit. */
+  {
+    auto diag_image = [](const char *what, Image *image) {
+      if (image == nullptr) {
+        printf("[PL-DIAG]   %s: null\n", what);
+        return;
+      }
+      void *lock = nullptr;
+      ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+      int64_t alpha_px = 0, rgb_px = 0;
+      int dirty = -1, width = 0, height = 0;
+      if (ibuf != nullptr && ibuf->byte_data() != nullptr) {
+        width = ibuf->x;
+        height = ibuf->y;
+        dirty = (ibuf->userflags & IB_BITMAPDIRTY) ? 1 : 0;
+        const uchar *px = ibuf->byte_data();
+        for (int64_t i = 0; i < int64_t(width) * height; i++) {
+          if (px[i * 4 + 3] > 0) {
+            alpha_px++;
+            rgb_px += (px[i * 4] | px[i * 4 + 1] | px[i * 4 + 2]) != 0 ? 1 : 0;
+          }
+        }
+      }
+      printf("[PL-DIAG]   %s: '%s' %p us=%d cs='%s' alpha_mode=%d flag=%d size=%dx%d ibuf_dirty=%d "
+             "alpha_px=%lld rgb_nonzero_where_alpha=%lld\n",
+             what,
+             image->id.name + 2,
+             static_cast<void *>(image),
+             image->id.us,
+             image->colorspace_settings.name,
+             int(image->alpha_mode),
+             int(image->flag),
+             width,
+             height,
+             dirty,
+             static_cast<long long>(alpha_px),
+             static_cast<long long>(rgb_px));
+      BKE_image_release_ibuf(image, ibuf, lock);
+    };
+    printf("[PL-DIAG] substituted source row='%s' content_alpha_from=baked_color.Alpha(%d) "
+           "factor=mean(coverage.RGB)(%d) live_correction_nodes=none\n",
+           layer->name,
+           int(current.content_alpha != nullptr),
+           int(current.opacity != nullptr));
+    printf("[PL-DIAG] substituted factor row='%s' channel=%d mode=%s\n",
+           layer->name,
+           channel,
+           use_baked_content ? "common x baked_alpha" : "common");
+    diag_image("color", baked_color);
+    diag_image("coverage", layer->bake->coverage);
   }
   return true;
 }

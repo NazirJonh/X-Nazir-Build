@@ -220,6 +220,8 @@ class PaintLayersTreeBuilder {
   Vector<int> wired_channels_;
 
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> opacity_inputs_;
+  /** A bake-substituted row's visibility input; the bake already holds its opacity. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> enabled_inputs_;
   Map<const MaterialPaintLayerChannel *, bNodeTreeInterfaceSocket *> fill_inputs_;
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> correction_opacity_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> correction_fill_inputs_;
@@ -304,14 +306,20 @@ class PaintLayersChainBuilder {
                         ChainLayer &r_current,
                         bNode *&r_leaf_map_node);
 
-  /** The substituted (baked) row's two Image Texture nodes and its coverage-derived opacity. */
+  /** The substituted (baked) row's two Image Texture nodes and its coverage-derived opacity.
+   * Variant C: when \a use_baked_content is set the baked color node is also returned in
+   * \a r_content_node, so the factor chain reads per-channel content from its Alpha exactly
+   * like a live leaf map; otherwise the row covers by its common factor alone. */
   bool build_substituted_source(const MaterialPaintLayer *layer,
                                 bNodeTree &tree,
                                 bool track_content_alpha,
                                 float location_x,
                                 float location_y,
                                 Image *baked_color,
-                                ChainLayer &r_current);
+                                ChainLayer &r_current,
+                                int channel,
+                                bool use_baked_content,
+                                bNode **r_content_node = nullptr);
 
   /** The factor base the mask stack builds on: the source's coverage, or one. */
   void resolve_row_factor(const MaterialPaintLayer *layer,

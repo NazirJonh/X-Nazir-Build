@@ -1689,7 +1689,8 @@ bool BKE_paint_material_composite_eval_row_content(
     const bUUID &row_marker,
     float *r_color_rgba,
     float *r_coverage_gray,
-    const rcti *region)
+    const rcti *region,
+    const int channel)
 {
   if (r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
@@ -1723,9 +1724,16 @@ bool BKE_paint_material_composite_eval_row_content(
       r_color_rgba[i * 4 + 1] = color[i * 4 + 1];
       r_color_rgba[i * 4 + 2] = color[i * 4 + 2];
       /* The colour map's alpha is the row's content alpha, so the generated chain can read it back
-       * after substitution (F2-C6). A row that tracks none -- Material, Normal, a channel outside
-       * the image-paint set -- keeps it opaque; its transparency is the coverage map alone. */
-      r_color_rgba[i * 4 + 3] = layer.tracks_content_alpha ? color[i * 4 + 3] : 1.0f;
+       * after substitution (F2-C6). A row that tracks none -- Material, a channel outside the
+       * image-paint set -- keeps it opaque; its transparency is the coverage map alone. Normal
+       * keeps its own map alpha here (variant C): its content coverage has nowhere else to live,
+       * and the substituted factor reads it back as `common x content`. With mask items and a
+       * Normal content correction the stored alpha folds the mask in, so that combination stays
+       * a documented limit. */
+      const bool keep_normal_alpha = (channel == PAINT_MATERIAL_CHANNEL_NORMAL);
+      r_color_rgba[i * 4 + 3] = (layer.tracks_content_alpha || keep_normal_alpha) ?
+                                   color[i * 4 + 3] :
+                                   1.0f;
       r_coverage_gray[i] = clamp_f(layer.opacity * factor[i], 0.0f, 1.0f);
     }
     ok = true;

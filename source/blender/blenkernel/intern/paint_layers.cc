@@ -22,6 +22,7 @@
 #include <utility>
 
 #include "paint_layers_intern.hh"
+#include "paint_layers_runtime.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -41,6 +42,7 @@
 
 #include "BLI_hash.hh"
 #include "BLI_set.hh"
+#include "BLI_time.h"
 
 #include "BLT_translation.hh"
 
@@ -133,9 +135,41 @@ static bool paint_layer_or_ancestor_has_bake(const ListBaseT<MaterialPaintLayer>
   return false;
 }
 
+/**
+ * One bit per bake-carrying ancestor of \a target (outermost first), set while that bake is valid,
+ * i.e. while the generator replaces the row by its bake. \a target's own bake is not counted.
+ * Comparing the value before and after an edit says whether the graph went live or back to
+ * substituted: only then did its topology change.
+ *
+ * \return whether \a target was found in \a list.
+ */
+static bool paint_layer_ancestor_bake_state(const Material &ma,
+                                            const ListBaseT<MaterialPaintLayer> &list,
+                                            const MaterialPaintLayer *target,
+                                            uint64_t &r_state)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    if (&layer == target) {
+      return true;
+    }
+    const bool found = paint_layer_ancestor_bake_state(ma, layer.effects, target, r_state) ||
+                       paint_layer_ancestor_bake_state(ma, layer.mask_stack, target, r_state) ||
+                       paint_layer_ancestor_bake_state(ma, layer.children, target, r_state);
+    if (found) {
+      /* Same rule as #row_is_substituted: a Material row's bake is not a cache of the row. */
+      if (layer.bake != nullptr && layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        r_state = (r_state << 1) | (BKE_paint_layers_bake_is_valid(ma, layer) ? 1 : 0);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 void paint_layers_tag_value_edited(Material &ma,
                                    const MaterialPaintLayer *edited,
-                                   const bool value_in_own_bake = true)
+                                   const bool value_in_own_bake = true,
+                                   const bool regen_for_baked_ancestor = true)
 {
   /* A value can be baked into a row's cache (the hash covers opacity/fill), and the value-only path
    * does not rebuild the tree, so it has to ask the bake planner for a re-bake as well. The planner
@@ -143,7 +177,7 @@ void paint_layers_tag_value_edited(Material &ma,
   ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
   /* The generated tree substituted only the baked rows, so only a value change to such a row (or
    * one of its ancestors) is topology. Anything else stays the free path an animation needs. */
-  if (edited != nullptr &&
+  if (regen_for_baked_ancestor && edited != nullptr &&
       paint_layer_or_ancestor_has_bake(ma.paint_layers, edited, false, value_in_own_bake))
   {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
@@ -2539,6 +2573,15 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
     return false;
   }
+  /* [PL-DIAG] Visibility edit: the hash of the row whose bake covers this item, before and after. */
+  const MaterialPaintLayer *diag_owner = paint_layer_correction_owner(ma.paint_layers, *layer);
+  const MaterialPaintLayer &diag_row = (diag_owner != nullptr) ? *diag_owner : *layer;
+  uint32_t diag_hash_before[2];
+  BKE_paint_layers_bake_hash(ma, diag_row, diag_hash_before);
+  const bool diag_regen_before = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0;
+  /* Whether each baked ancestor replaces its row right now, before the edit changes its hash. */
+  uint64_t bake_state_before = 0;
+  paint_layer_ancestor_bake_state(ma, ma.paint_layers, layer, bake_state_before);
   SET_FLAG_FROM_TEST(layer->flag, enabled, MA_PAINT_LAYER_ENABLED);
   /* Enabled folds into the group-input factor (#BKE_paint_layers_effective_opacity), and the
    * generator keeps a disabled row in the topology with factor zero, so this is a value edit: an
@@ -2550,8 +2593,75 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
   }
   /* A row's own visibility is not in its bake hash, so its own bake is no reason to rebuild:
    * toggling the row being looked at must not cost a graph rebuild. */
-  paint_layers_tag_value_edited(ma, layer, /*value_in_own_bake=*/false);
+  /* A baked ancestor is only topology while its substitution flips: a substituted row has no live
+   * nodes to carry the new factor, and a row that just became valid again has to go back to its
+   * bake. A row that stays live (its bake already stale) keeps every node, so flipping one more
+   * correction is a value sync -- that is what lets a series of toggles cost no graph rebuild. */
+  paint_layers_tag_value_edited(
+      ma, layer, /*value_in_own_bake=*/false, /*regen_for_baked_ancestor=*/false);
+  uint64_t bake_state_after = 0;
+  paint_layer_ancestor_bake_state(ma, ma.paint_layers, layer, bake_state_after);
+  const bool substitution_flipped = bake_state_before != bake_state_after;
+  if (substitution_flipped) {
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  }
+  /* The heavy re-bake waits for a pause in the toggling instead of starting per flip. */
+  BKE_paint_layers_bake_debounce_extend(ma);
+  printf("[PL-DIAG] set_enabled toggle item='%s' value=%d regen_set=%d bake_stale_set=%d "
+         "ancestor_valid_bits %llx -> %llx (1 = substituted by bake) debounce_s=%.2f\n",
+         layer->name,
+         int(enabled),
+         int(substitution_flipped),
+         int((ma.paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE) != 0),
+         static_cast<unsigned long long>(bake_state_before),
+         static_cast<unsigned long long>(bake_state_after),
+         PAINT_LAYERS_BAKE_EDIT_QUIET_SECONDS);
+  {
+    uint32_t hash_after[2];
+    BKE_paint_layers_bake_hash(ma, diag_row, hash_after);
+    printf(
+        "[PL-DIAG] set_enabled item='%s' role=%d enabled=%d row='%s' row_has_bake=%d "
+        "row_bake_valid=%d hash %08x%08x -> %08x%08x regen %d -> %d active_row_in_subtree=%d\n",
+        layer->name,
+        int(layer->role),
+        int(enabled),
+        diag_row.name,
+        int(diag_row.bake != nullptr),
+        int(BKE_paint_layers_bake_is_valid(ma, diag_row)),
+        diag_hash_before[0],
+        diag_hash_before[1],
+        hash_after[0],
+        hash_after[1],
+        int(diag_regen_before),
+        int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
+        int(BKE_paint_layers_subtree_contains(diag_row, ma.active_layer_marker)));
+    printf("[PL-DIAG] set_enabled multiplier item='%s' value=%.1f regen_called=%d row_substituted=%d\n",
+           layer->name,
+           enabled ? 1.0 : 0.0,
+           int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
+           int(diag_row.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, diag_row)));
+  }
   return true;
+}
+
+void BKE_paint_layers_bake_debounce_extend(Material &ma)
+{
+  /* Only the owning material has a runtime; a localized or evaluated copy never gets one. */
+  if ((ma.id.tag & (ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN)) != 0) {
+    return;
+  }
+  bke::paint_layers_runtime_ensure(ma).bake_debounce_until = BLI_time_now_seconds() +
+                                                           PAINT_LAYERS_BAKE_EDIT_QUIET_SECONDS;
+}
+
+double BKE_paint_layers_bake_debounce_seconds(const Material &ma, const double base_seconds)
+{
+  const bke::MaterialPaintLayersRuntime *runtime = bke::paint_layers_runtime_get(ma);
+  if (runtime == nullptr) {
+    return base_seconds;
+  }
+  const double rest = runtime->bake_debounce_until - BLI_time_now_seconds();
+  return std::max(base_seconds, rest);
 }
 
 bool BKE_paint_layers_set_custom_group(Material &ma,

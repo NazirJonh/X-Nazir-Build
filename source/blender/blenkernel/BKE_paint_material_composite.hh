@@ -472,7 +472,8 @@ bool BKE_paint_material_composite_eval_row_content(
     const bUUID &row_marker,
     float *r_color_rgba,
     float *r_coverage_gray,
-    const rcti *region = nullptr);
+    const rcti *region = nullptr,
+    int channel = -1);
 
 /**
  * Dimensions of the composite, taken from the bottom-most enabled layer.

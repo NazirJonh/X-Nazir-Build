@@ -244,9 +244,21 @@ bool composite_image_layers_build(const Material &material,
       out.mask_iuser = nullptr;
       out.mask_from_alpha = false;
       out.mask_influence = 1.0f;
+      /* Variant C: the shared coverage is `common = mask x opacity`; per-channel content comes
+       * from the baked color Alpha exactly like a live leaf map, so a correction outside the
+       * base stays per-channel instead of being overwritten by the last channel. A constant
+       * leaf had no live map alpha and keeps covering by common alone, as its live factor does.
+       * Material rows never reach this branch with their own coverage. */
+      out.color_alpha_coverage =
+          !ELEM(layer->source,
+                MA_PAINT_LAYER_SOURCE_MATERIAL,
+                MA_PAINT_LAYER_SOURCE_MESH_MAP) &&
+          (BKE_paint_layers_is_folder(*layer) ||
+           paint_layer_channel_image(material, *layer, channel) != nullptr);
       out.blend = layer_channel_blend(*layer, channel);
-      /* The coverage map already carries the opacity and the mask. */
-      out.opacity = 1.0f;
+      /* The coverage map already carries the opacity and the mask; only visibility is live, the
+       * same 0/1 the generated graph multiplies in. */
+      out.opacity = ((layer->flag & MA_PAINT_LAYER_ENABLED) != 0) ? 1.0f : 0.0f;
       out.enabled = true;
       out.is_bare_base = false;
       out.marker = layer->marker;
@@ -898,7 +910,7 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
   Vector<float> content_coverage(int64_t(area_w) * area_h);
   rcti region = area;
   if (!BKE_paint_material_composite_eval_row_content(
-          one, layer.marker, content_color.data(), content_coverage.data(), &region))
+          one, layer.marker, content_color.data(), content_coverage.data(), &region, channel))
   {
     return false;
   }

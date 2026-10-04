@@ -1329,19 +1329,36 @@ wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
                                   black ? 0.0f : 1.0f,
                                   black ? 0.0f : 1.0f,
                                   1.0f};
+  /* A mask just added is the one the user means to work on, so its layer row reads as selected and
+   * active like the brush target the editor switched to. Nothing renumbers, but the selection is
+   * re-targeted all the same. */
   const bool ok = stack_mutate(
       *C,
       *space_outliner,
-      false,
+      add,
       [&](const StackSource & /*source*/,
           const StackEditor &editor,
           const StackFocus &focus,
           ID &owner,
-           int & /*r_select_ordinal*/) {
+          int &r_select_ordinal) {
         const StackGroupingEditor *grouping = editor.grouping();
-        return grouping != nullptr &&
-               grouping->row_mask_set(*C, focus, owner, ordinal, add, initial_color);
+        if (grouping == nullptr ||
+            !grouping->row_mask_set(*C, focus, owner, ordinal, add, initial_color))
+        {
+          return false;
+        }
+        if (add) {
+          r_select_ordinal = ordinal;
+        }
+        return true;
       });
+  if (ok && add) {
+    /* The row now has a MASK section; show it, as a click on the mask thumbnail would. The mutation
+     * rebuilt the rows, so the row is looked up again. */
+    if (const StackRow *rebuilt = outliner_stack_row_find(*space_outliner, ordinal)) {
+      outliner_stack_row_active_section_set(*space_outliner, *rebuilt, "MASK");
+    }
+  }
   return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 
@@ -2279,6 +2296,15 @@ int outliner_stack_row_add(bContext *C,
       &new_ordinal);
   if (!ok) {
     return -1;
+  }
+  /* A row attached to a section of its parent (a mask correction under MASK) is listed only while
+   * that section is active, so switch the parent to it or the new row would stay hidden. */
+  if (const StackRow *added = outliner_stack_row_find(space_outliner, new_ordinal)) {
+    if (!added->parent_section_id.empty() && added->parent_ordinal >= 0) {
+      if (const StackRow *parent = outliner_stack_row_find(space_outliner, added->parent_ordinal)) {
+        outliner_stack_row_active_section_set(space_outliner, *parent, added->parent_section_id);
+      }
+    }
   }
   /* A layer the user just asked for is the one they mean to work on next. */
   outliner_stack_row_activate(C, space_outliner, new_ordinal);

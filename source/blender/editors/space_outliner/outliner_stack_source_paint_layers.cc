@@ -1618,6 +1618,8 @@ class PaintLayersStackSource final : public StackSource,
       // TODO(debug): remove
       printf("[STACK_DBG] %s: call active_set\n", __func__);
       BKE_paint_layers_active_set(material, layer->marker);
+      /* A new layer is painted on its content, not on the mask the previous layer was edited in. */
+      layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
       WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
       return layers_ordinal_of(material, layer);
@@ -1661,6 +1663,11 @@ class PaintLayersStackSource final : public StackSource,
              PAINT_STACK_ADD_MASK_CORRECTION_STACK))
     {
       layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+    }
+    else {
+      /* A new layer is painted on its content, not on the mask the previous layer was edited in:
+       * the target mode is global, so it would otherwise carry over and give the layer a mask. */
+      layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return created;
@@ -1814,6 +1821,14 @@ class PaintLayersStackSource final : public StackSource,
                              1024;
         BKE_paint_layers_target_ensure_writable(*bmain, target, size, initial_color);
       }
+    }
+    if (add) {
+      /* A mask the user just added is the one they mean to work on: make its layer active and point
+       * the brush at the mask, as adding a mask correction does. */
+      if (MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal)) {
+        BKE_paint_layers_active_set(material, layer->marker);
+      }
+      layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;

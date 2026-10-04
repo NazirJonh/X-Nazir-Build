@@ -32,6 +32,8 @@
 #include "DEG_depsgraph.hh"
 
 #include "DNA_ID.h"
+#include "DNA_image_types.h"
+#include "DNA_node_types.h"
 #include "DNA_material_types.h"
 
 #include "RNA_prototypes.hh"
@@ -244,6 +246,61 @@ void paint_layers_bake_undo_post(Main *bmain,
   if (bmain == nullptr) {
     return;
   }
+  /* Diagnostic only: reports what survived the memfile undo, without touching anything. */
+  {
+    Set<const Image *> live_images;
+    for (const Image &image : bmain->images) {
+      live_images.add(&image);
+    }
+    Set<const bNodeTree *> live_trees;
+    for (const bNodeTree &ntree : bmain->nodetrees) {
+      live_trees.add(&ntree);
+    }
+    for (Material &ma : bmain->materials) {
+      if (!paint_layers_is_layered(ma)) {
+        continue;
+      }
+      Vector<const MaterialPaintLayer *> layers;
+      BKE_paint_layers_flatten_all(ma, layers);
+      int images_total = 0;
+      int images_dangling = 0;
+      for (const MaterialPaintLayer *layer : layers) {
+        for (int i = 0; i < layer->channels_num; i++) {
+          const Image *image = layer->channels[i].image;
+          if (image != nullptr) {
+            images_total++;
+            if (!live_images.contains(image)) {
+              images_dangling++;
+            }
+          }
+        }
+      }
+      printf(
+          "[PL-DIAG] undo_post material='%s' regen_flag=%d slots_stale=%d tree=%p tree_in_main=%d "
+          "nodetree=%p rows=%d channel_images=%d dangling=%d eval_copy=%p\n",
+          ma.id.name + 2,
+          int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
+          int((ma.paint_layers_flag & MA_PAINT_LAYERS_SLOTS_STALE) != 0),
+          static_cast<void *>(ma.paint_layers_tree),
+          int(ma.paint_layers_tree != nullptr && live_trees.contains(ma.paint_layers_tree)),
+          static_cast<void *>(ma.nodetree),
+          int(layers.size()),
+          images_total,
+          images_dangling,
+          static_cast<void *>(ma.id.orig_id));
+    }
+  }
+
+  /* The snapshot restores the generated trees and their stored root hash, but the regeneration
+   * flag it carries was already cleared, and the runtime that would notice the mismatch is not part
+   * of it. Without this the restored graph stays out of step with the restored description until
+   * the next unrelated edit. */
+  for (Material &ma : bmain->materials) {
+    if (paint_layers_is_layered(ma)) {
+      BKE_paint_layers_tag_edited(ma);
+    }
+  }
+
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first);
   const bool debounce_armed = paint_layers_bake_debounce_timer_handle() != nullptr;
   for (Material &ma : bmain->materials) {

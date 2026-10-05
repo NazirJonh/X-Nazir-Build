@@ -22,6 +22,7 @@ struct bContext;
 struct Depsgraph;
 struct Main;
 struct Collection;
+struct GPUOffScreen;
 struct Mesh;
 struct Object;
 struct TempLibraryContext;
@@ -105,6 +106,9 @@ struct SculptDropPreviewRuntime {
   uint64_t generation = 0;
   /** Window to re-find View3D region for redraw after async pull (§6.4). */
   uint redraw_winid = 0;
+  /** Region-sized color+depth target the preview is rendered into: the window back-buffer has no
+   * depth attachment on every backend (e.g. Vulkan), so occlusion needs a buffer of our own. */
+  GPUOffScreen *offscreen = nullptr;
   bool is_collection = false;
   bool preview_ready = false;
   bool preview_failed = false;

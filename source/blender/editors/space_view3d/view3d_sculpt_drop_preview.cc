@@ -20,10 +20,13 @@
 #include "BLI_array.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_rect.h"
+#include "BLI_vector.hh"
 #include "BLI_utildefines.h"
 
 #include "BLO_readfile.hh"
@@ -46,11 +49,16 @@
 #include "ED_view3d.hh"
 
 #include "GPU_batch.hh"
+#include "GPU_framebuffer.hh"
+#include "GPU_immediate.hh"
+#include "GPU_immediate_util.hh"
 #include "GPU_index_buffer.hh"
 #include "GPU_matrix.hh"
 #include "GPU_shader.hh"
 #include "GPU_shader_builtin.hh"
+#include "GPU_shader_shared.hh"
 #include "GPU_state.hh"
+#include "GPU_uniform_buffer.hh"
 #include "GPU_vertex_buffer.hh"
 
 #include "UI_resources.hh"
@@ -516,10 +524,14 @@ static gpu::Batch *preview_batch_tris_from_mesh(const Mesh &mesh)
 
   GPUVertFormat format = {};
   const uint pos_id = GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+  /* Vertex normals feed the headlight pass (#GPU_SHADER_SIMPLE_LIGHTING) so the filled preview
+   * shows shading contrast instead of a flat silhouette. */
+  const uint nor_id = GPU_vertformat_attr_add(&format, "nor", gpu::VertAttrType::SFLOAT_32_32_32);
 
   gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
   GPU_vertbuf_data_alloc(*vbo, positions.size());
   GPU_vertbuf_attr_fill(vbo, pos_id, positions.data());
+  GPU_vertbuf_attr_fill(vbo, nor_id, mesh.vert_normals().data());
 
   GPUIndexBufBuilder builder;
   GPU_indexbuf_init(&builder, GPU_PRIM_TRIS, vert_tris.size(), positions.size());
@@ -563,6 +575,10 @@ void preview_runtime_clear(SculptDropPreviewRuntime &rt)
     preview_item_gpu_free(item);
   }
   rt.items.clear();
+  if (rt.offscreen) {
+    GPU_offscreen_free(rt.offscreen);
+    rt.offscreen = nullptr;
+  }
   rt.placement = {};
   rt.is_collection = false;
   rt.preview_ready = false;
@@ -806,7 +822,8 @@ static float4x4 drop_preview_world_matrix_for_symmetry_pass(const Object &active
 static void drop_preview_draw_item(const PreviewItemGPU &item,
                                    const float m_drop[4][4],
                                    const float color[4],
-                                   const float edge_color[4])
+                                   const float edge_color[4],
+                                   gpu::UniformBuf *lighting_ubo)
 {
   if (!item.batch_tris) {
     return;
@@ -815,11 +832,28 @@ static void drop_preview_draw_item(const PreviewItemGPU &item,
   float m_item[4][4];
   mul_m4_m4m4(m_item, m_drop, item.local_to_drop.ptr());
 
+  /* The solid fill relies on back-face culling. A mirrored transform (negative determinant:
+   * a symmetry flip pass, or an asset object with negative scale) reverses the winding, so cull
+   * the opposite side there or the fill would show only its interior. */
+  const bool mirrored_winding = math::is_negative(float4x4(m_item));
+  if (mirrored_winding) {
+    GPU_face_culling(GPU_CULL_FRONT);
+  }
+
   GPU_matrix_push();
   GPU_matrix_mul(m_item);
 
+  /* Mostly opaque base pass so the dropped shape reads as filled faces rather than a see-through
+   * wireframe. The headlight pass on top only ever brightens toward its own color, so faces
+   * pointing away from the light keep the base color instead of turning black. */
   GPU_batch_program_set_builtin(item.batch_tris, GPU_SHADER_3D_UNIFORM_COLOR);
   GPU_batch_uniform_4fv(item.batch_tris, "color", color);
+  GPU_batch_draw(item.batch_tris);
+
+  /* View-space headlight pass: adds the shading contrast that lets users judge the form of the
+   * mesh they are about to drop. */
+  GPU_batch_program_set_builtin(item.batch_tris, GPU_SHADER_SIMPLE_LIGHTING);
+  GPU_batch_uniformbuf_bind(item.batch_tris, "simple_lighting_data", lighting_ubo);
   GPU_batch_draw(item.batch_tris);
 
   if (item.batch_edges) {
@@ -829,6 +863,10 @@ static void drop_preview_draw_item(const PreviewItemGPU &item,
   }
 
   GPU_matrix_pop();
+
+  if (mirrored_winding) {
+    GPU_face_culling(GPU_CULL_BACK);
+  }
 }
 
 void preview_draw_paint_cursor(bContext *C,
@@ -897,10 +935,6 @@ void preview_draw_paint_cursor(bContext *C,
 
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
 
-  wmViewport(&region->winrct);
-  GPU_matrix_projection_set(rv3d->winmat);
-  GPU_matrix_set(rv3d->viewmat);
-
   float m_drop[4][4];
   if (rt.is_collection) {
     build_collection_snap_matrix(
@@ -913,30 +947,34 @@ void preview_draw_paint_cursor(bContext *C,
 
   uchar color_ub[4];
   ui::theme::get_color_4ubv(TH_GIZMO_PRIMARY, color_ub);
-  float color[4] = {
+  const float color_rgb[3] = {
       color_ub[0] / 255.0f,
       color_ub[1] / 255.0f,
       color_ub[2] / 255.0f,
-      0.45f,
-  };
-  float edge_color[4] = {
-      color_ub[0] / 255.0f,
-      color_ub[1] / 255.0f,
-      color_ub[2] / 255.0f,
-      0.85f,
   };
 
-  const GPUBlend blend = GPU_blend_get();
-  const GPUDepthTest depth_test = GPU_depth_test_get();
-  const bool depth_mask = GPU_depth_mask_get();
-  const GPUFaceCullTest face_cull = GPU_face_culling_get();
+  /* Solid "clay" look: a near-opaque fill in the theme color, a view-space headlight on top for
+   * the shading contrast, and faint edges so the wire reads as surface detail instead of
+   * dominating the silhouette. */
+  /* Rendered opaque into the offscreen target; the overall translucency is applied when the
+   * target is composited over the viewport. Edges are a darker shade of the fill since they can no
+   * longer be blended over it. */
+  const float preview_alpha = 0.85f;
+  float color[4] = {color_rgb[0], color_rgb[1], color_rgb[2], 1.0f};
+  float edge_color[4] = {color_rgb[0] * 0.6f, color_rgb[1] * 0.6f, color_rgb[2] * 0.6f, 1.0f};
 
-  GPU_blend(GPU_BLEND_ALPHA);
-  /* Drawn without depth-testing so the preview always reads clearly over the sculpt mesh it will
-   * be joined into, regardless of what the surface underneath looks like. */
-  GPU_depth_test(GPU_DEPTH_NONE);
-  GPU_depth_mask(false);
-  GPU_face_culling(GPU_CULL_NONE);
+  float light_dir[3] = {0.2f, 0.25f, 0.95f};
+  normalize_v3(light_dir);
+  const float white[3] = {1.0f, 1.0f, 1.0f};
+  float lit_rgb[3];
+  interp_v3_v3v3(lit_rgb, color_rgb, white, 0.25f);
+
+  SimpleLightingData lighting_data;
+  copy_v4_fl4(lighting_data.l_color, lit_rgb[0], lit_rgb[1], lit_rgb[2], 0.5f);
+  copy_v3_v3(lighting_data.light, light_dir);
+  lighting_data._pad = 0.0f;
+  gpu::UniformBuf *lighting_ubo = GPU_uniformbuf_create_ex(
+      sizeof(SimpleLightingData), &lighting_data, __func__);
 
   /* Mirror preview through the active sculpt mesh's symmetry flags (same math as the drop
    * operator). Reuse GPU batches; only the world matrix changes per pass. */
@@ -952,6 +990,7 @@ void preview_draw_paint_cursor(bContext *C,
   }
 
   const float4x4 snap_world = float4x4(m_drop);
+  Vector<float4x4, 8> passes;
 
   for (int symmpass = 0; symmpass <= int(symm); symmpass++) {
     if (!drop_preview_symmetry_iteration_valid(char(symmpass), char(symm))) {
@@ -968,12 +1007,89 @@ void preview_draw_paint_cursor(bContext *C,
       copy_m4_m4(m_drop_pass, world_mat.ptr());
     }
 
+    passes.append(float4x4(m_drop_pass));
+  }
+
+  const int width = BLI_rcti_size_x(&region->winrct) + 1;
+  const int height = BLI_rcti_size_y(&region->winrct) + 1;
+  if (rt.offscreen &&
+      (GPU_offscreen_width(rt.offscreen) != width || GPU_offscreen_height(rt.offscreen) != height))
+  {
+    GPU_offscreen_free(rt.offscreen);
+    rt.offscreen = nullptr;
+  }
+  if (!rt.offscreen) {
+    char err_out[256];
+    rt.offscreen = GPU_offscreen_create(width,
+                                        height,
+                                        true,
+                                        gpu::TextureFormat::UNORM_8_8_8_8,
+                                        GPU_TEXTURE_USAGE_SHADER_READ,
+                                        false,
+                                        err_out);
+  }
+  if (!rt.offscreen) {
+    GPU_uniformbuf_free(lighting_ubo);
+    return;
+  }
+
+  const GPUBlend blend = GPU_blend_get();
+  const GPUDepthTest depth_test = GPU_depth_test_get();
+  const bool depth_mask = GPU_depth_mask_get();
+  const GPUFaceCullTest face_cull = GPU_face_culling_get();
+
+  /* Rendered off-screen because the window back-buffer has no depth attachment on every backend
+   * (e.g. Vulkan), so occluded and back-facing parts would otherwise show through. */
+  GPU_offscreen_bind(rt.offscreen, true);
+  GPU_scissor_test(false);
+  GPU_viewport(0, 0, width, height);
+  GPU_clear_color(0.0f, 0.0f, 0.0f, 0.0f);
+  GPU_clear_depth(1.0f);
+
+  GPU_matrix_push_projection();
+  GPU_matrix_push();
+  GPU_matrix_projection_set(rv3d->winmat);
+  GPU_matrix_set(rv3d->viewmat);
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_depth_mask(true);
+  GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+  GPU_face_culling(GPU_CULL_BACK);
+
+  for (const float4x4 &pass : passes) {
     for (const PreviewItemGPU &item : rt.items) {
-      drop_preview_draw_item(item, m_drop_pass, color, edge_color);
+      drop_preview_draw_item(item, pass.ptr(), color, edge_color, lighting_ubo);
     }
   }
 
   GPU_shader_unbind();
+  GPU_matrix_pop();
+  GPU_matrix_pop_projection();
+  GPU_offscreen_unbind(rt.offscreen, true);
+  GPU_uniformbuf_free(lighting_ubo);
+
+  /* Composite over the region. Straight alpha is premultiplied since the target is opaque where
+   * drawn and fully transparent elsewhere. */
+  wmViewport(&region->winrct);
+  GPU_depth_test(GPU_DEPTH_NONE);
+  GPU_face_culling(GPU_CULL_NONE);
+  GPU_blend(GPU_BLEND_ALPHA_PREMULT);
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  const uint texco = GPU_vertformat_attr_add(format, "texCoord", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_IMAGE_COLOR);
+  immUniformColor4f(preview_alpha, preview_alpha, preview_alpha, preview_alpha);
+  immBindTextureSampler("image",
+                        GPU_offscreen_color_texture(rt.offscreen),
+                        {GPU_SAMPLER_FILTERING_LINEAR,
+                         GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER,
+                         GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER});
+  const rctf rect = {0.0f, float(width), 0.0f, float(height)};
+  const rctf uv = {0.0f, 1.0f, 0.0f, 1.0f};
+  immRectf_with_texco(pos, texco, rect, uv);
+  immUnbindProgram();
+
   GPU_face_culling(face_cull);
   GPU_depth_mask(depth_mask);
   GPU_depth_test(depth_test);

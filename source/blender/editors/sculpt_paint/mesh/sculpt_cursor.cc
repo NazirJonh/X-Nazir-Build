@@ -9,6 +9,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
@@ -16,6 +17,7 @@
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector.h"
+#include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_vector.hh"
 
@@ -23,14 +25,17 @@
 
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_object_types.h"
 #include "DNA_view3d_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_idprop.hh"
 #include "BKE_layer.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_unit.hh"
 
@@ -47,6 +52,7 @@
 #include "ED_view3d.hh"
 
 #include "UI_interface_types.hh"
+#include "UI_resources.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -123,6 +129,16 @@ bool is_enabled(const Scene &scene)
 {
   const Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
   return sculpt && (sculpt->sculpt_cursor_flag & SCULPT_CURSOR_ENABLED);
+}
+
+bool addon_active()
+{
+  return BKE_sculpt_cursor_addon_active();
+}
+
+void addon_active_set(bool active)
+{
+  BKE_sculpt_cursor_addon_active_set(active);
 }
 
 SculptCursorMode mode_get(const Scene &scene)
@@ -1089,6 +1105,350 @@ void SCULPT_OT_cursor_transform(wmOperatorType *ot)
 }
 
 /* ================================================================
+ * Operator for the user-defined buttons of the sculpt cursor gizmo
+ * ================================================================ */
+
+/** Find a cursor button by its stable #SculptCursorButton.unique_id. */
+static SculptCursorButton *sculpt_cursor_button_find_by_uid(UserDef *userdef, const int unique_id)
+{
+  for (SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+    if (btn.unique_id == unique_id) {
+      return &btn;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * Run the operator assigned to a cursor button (#UserDef.sculpt_cursor_buttons).
+ *
+ * Invoked by the cursor gizmo's buttons with the button's #SculptCursorButton.unique_id. The poll
+ * only requires an active window, so the assigned operator also stays reachable from keymaps and
+ * `bpy.ops` outside of Sculpt Mode.
+ */
+static wmOperatorStatus sculpt_cursor_button_exec_exec(bContext *C, wmOperator *op)
+{
+  const int unique_id = RNA_int_get(op->ptr, "unique_id");
+  UserDef *userdef = &U;
+
+  SculptCursorButton *btn = sculpt_cursor_button_find_by_uid(userdef, unique_id);
+  if (btn == nullptr) {
+    /* The gizmo may still hold a stale button after the button row was changed. */
+    BKE_reportf(op->reports,
+                RPT_WARNING,
+                "Sculpt cursor button %d no longer exists (the button row was changed)",
+                unique_id);
+    return OPERATOR_CANCELLED;
+  }
+
+  if (!(btn->flag & SCULPT_CURSOR_BUTTON_ENABLED)) {
+    return OPERATOR_PASS_THROUGH;
+  }
+
+  /* User-defined buttons are inert while the custom buttons extension is off. */
+  if (btn->builtin_id == SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM && !addon_active()) {
+    return OPERATOR_CANCELLED;
+  }
+
+  if (btn->operator_idname[0] == '\0') {
+    BKE_reportf(op->reports,
+                RPT_WARNING,
+                "Sculpt cursor button \"%s\" has no operator assigned",
+                btn->name);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Look the operator type up first: #WM_operator_name_call_with_properties does not check its own
+   * lookup result and dereferences #wmOperatorType.srna right away, so a missing operator type (a
+   * disabled add-on, a renamed operator) has to be caught here. */
+  wmOperatorType *ot = WM_operatortype_find(btn->operator_idname, true);
+  if (ot == nullptr) {
+    BKE_reportf(op->reports,
+                RPT_WARNING,
+                "Operator \"%s\" not found (is the add-on enabled?)",
+                btn->operator_idname);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* #wm_operator_create copies the passed properties group, so the button's DNA group is neither
+   * aliased nor modified by the invoked operator. Passing null is fine too (an empty group is
+   * created instead). */
+  const wmOperatorStatus result = WM_operator_name_call_with_properties(
+      C, btn->operator_idname, wm::OpCallContext::InvokeDefault, btn->properties, nullptr);
+  if (result == 0) {
+    /* The operator did not run: no active window, or its poll() failed. */
+    BKE_reportf(
+        op->reports, RPT_WARNING, "Operator %s could not be invoked", btn->operator_idname);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Forward the target's status unchanged, including #OPERATOR_RUNNING_MODAL (the target may have
+   * gone modal; the window manager keeps tracking it on its own). */
+  return result;
+}
+
+void SCULPT_OT_cursor_button_exec(wmOperatorType *ot)
+{
+  /* Identifiers */
+  ot->name = "Execute Sculpt Cursor Button";
+  ot->idname = "SCULPT_OT_cursor_button_exec";
+  ot->description = "Run the operator assigned to the given sculpt cursor button";
+
+  /* API callbacks */
+  ot->exec = sculpt_cursor_button_exec_exec;
+  ot->poll = WM_operator_winactive;
+
+  /* Flags */
+  /* No flags: this is a proxy, the invoked operator's own undo and registration behavior applies. */
+
+  /* Properties */
+  RNA_def_int(ot->srna,
+              "unique_id",
+              0,
+              INT_MIN,
+              INT_MAX,
+              "Unique ID",
+              "Unique id of the sculpt cursor button to invoke",
+              0,
+              INT_MAX);
+}
+
+/** Restore the default name, operator, icons and properties of a built-in cursor button, addressed
+ * by its index in #UserDef.sculpt_cursor_buttons. The visibility (enabled) state, the stable uid
+ * and the list position are preserved. */
+static void sculpt_cursor_button_builtin_init(SculptCursorButton *btn,
+                                              eSculptCursorButtonBuiltin builtin_id);
+
+static wmOperatorStatus sculpt_cursor_button_reset_exec(bContext * /*C*/, wmOperator *op)
+{
+  const int index = RNA_int_get(op->ptr, "index");
+  UserDef *userdef = &U;
+
+  int i = 0;
+  for (SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+    if (i++ != index) {
+      continue;
+    }
+    if (btn.builtin_id == SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM) {
+      BKE_report(op->reports, RPT_WARNING, "Only built-in buttons can be reset to defaults");
+      return OPERATOR_CANCELLED;
+    }
+    const bool enabled = (btn.flag & SCULPT_CURSOR_BUTTON_ENABLED) != 0;
+    /* The init function adds fresh id-properties to #SculptCursorButton.properties: replace the
+     * group first so no stale entries survive the reset. */
+    if (btn.properties != nullptr) {
+      IDP_FreeProperty(btn.properties);
+    }
+    btn.properties = bke::idprop::create_group("properties").release();
+    sculpt_cursor_button_builtin_init(&btn, eSculptCursorButtonBuiltin(btn.builtin_id));
+    if (enabled) {
+      btn.flag |= SCULPT_CURSOR_BUTTON_ENABLED;
+    }
+    else {
+      btn.flag &= ~SCULPT_CURSOR_BUTTON_ENABLED;
+    }
+
+    WM_main_add_notifier(NC_WINDOW, nullptr);
+    return OPERATOR_FINISHED;
+  }
+  return OPERATOR_CANCELLED;
+}
+
+void SCULPT_OT_cursor_button_reset(wmOperatorType *ot)
+{
+  /* Identifiers */
+  ot->name = "Reset Sculpt Cursor Button";
+  ot->idname = "SCULPT_OT_cursor_button_reset";
+  ot->description = "Restore the default name, operator and icons of a built-in cursor button";
+
+  /* API callbacks */
+  ot->exec = sculpt_cursor_button_reset_exec;
+  ot->poll = WM_operator_winactive;
+
+  /* Flags */
+  ot->flag = OPTYPE_INTERNAL;
+
+  /* Properties */
+  RNA_def_int(ot->srna,
+              "index",
+              0,
+              0,
+              INT_MAX,
+              "Index",
+              "Index of the button in the sculpt cursor buttons list",
+              0,
+              100);
+}
+
+/* ================================================================
+ * Built-in buttons of the sculpt cursor gizmo button row
+ * ================================================================ */
+
+/** True when \a uid is already taken by any button of \a userdef. */
+static bool sculpt_cursor_button_has_uid(const UserDef *userdef, const int uid)
+{
+  for (const SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+    if (btn.unique_id == uid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Assign a stable #SculptCursorButton.unique_id, guarding against counter overflow and against
+ * hand-edited files carrying duplicate ids. */
+static void sculpt_cursor_button_assign_uid(UserDef *userdef, SculptCursorButton *btn)
+{
+  /* Monotonically increasing stable identifiers, never re-issued after removal. */
+  int uid = ++userdef->sculpt_cursor_buttons_uid;
+  if (UNLIKELY(uid == INT_MAX || sculpt_cursor_button_has_uid(userdef, uid))) {
+    uid = 1;
+    while (sculpt_cursor_button_has_uid(userdef, uid)) {
+      uid++;
+    }
+    userdef->sculpt_cursor_buttons_uid = uid;
+  }
+  btn->unique_id = uid;
+}
+
+/** Display rank of a built-in button: the built-ins keep their fixed relative order (mode, pin,
+ * shared) ahead of all user-defined buttons. */
+static int sculpt_cursor_button_builtin_rank(const int builtin_id)
+{
+  switch (builtin_id) {
+    case SCULPT_CURSOR_BUTTON_BUILTIN_MODE:
+      return 0;
+    case SCULPT_CURSOR_BUTTON_BUILTIN_PIN:
+      return 1;
+    case SCULPT_CURSOR_BUTTON_BUILTIN_GLOBAL:
+      return 2;
+    default:
+      /* User-defined (or unknown) buttons come last. */
+      return 3;
+  }
+}
+
+/** Fill \a btn with the data of the built-in button \a builtin_id (the uid and the list position
+ * are handled by the caller). The icons match the hard-coded gizmo buttons: the off icon is drawn
+ * in the inactive state, the active icon in the active state. */
+static void sculpt_cursor_button_builtin_init(SculptCursorButton *btn,
+                                              const eSculptCursorButtonBuiltin builtin_id)
+{
+  btn->builtin_id = builtin_id;
+  btn->icon_source = SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON;
+  btn->icon_active_source = SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON;
+  btn->flag = SCULPT_CURSOR_BUTTON_ENABLED;
+  switch (builtin_id) {
+    case SCULPT_CURSOR_BUTTON_BUILTIN_MODE: {
+      STRNCPY(btn->name, "Mode (Set/Deform)");
+      STRNCPY(btn->operator_idname, "wm.context_cycle_enum");
+      /* Off variant = "Set" mode, active variant = "Deform" mode. */
+      btn->icon = ICON_PIVOT_CURSOR;
+      btn->icon_active = ICON_STICKY_UVS_DISABLE;
+      IDP_AddToGroup(
+          btn->properties,
+          bke::idprop::create("data_path", "tool_settings.sculpt.cursor.mode").release());
+      /* `wm.context_cycle_enum` only cycles a two-item enum when it wraps. */
+      IDP_AddToGroup(btn->properties, bke::idprop::create_bool("wrap", true).release());
+      /* The enum identifier at which the button reads as active (`cursor.mode` is set to
+       * "DEFORM", matching the active variant above). */
+      IDP_AddToGroup(btn->properties, bke::idprop::create("value_active", "DEFORM").release());
+      break;
+    }
+    case SCULPT_CURSOR_BUTTON_BUILTIN_PIN: {
+      STRNCPY(btn->name, "Pin Cursor");
+      STRNCPY(btn->operator_idname, "wm.context_toggle");
+      btn->icon = ICON_UNPINNED;
+      btn->icon_active = ICON_PINNED;
+      IDP_AddToGroup(
+          btn->properties,
+          bke::idprop::create("data_path", "tool_settings.sculpt.cursor.pin").release());
+      break;
+    }
+    case SCULPT_CURSOR_BUTTON_BUILTIN_GLOBAL: {
+      STRNCPY(btn->name, "Shared/Global Cursor");
+      STRNCPY(btn->operator_idname, "wm.context_toggle");
+      btn->icon = ICON_GHOST_DISABLED;
+      btn->icon_active = ICON_GHOST_ENABLED;
+      IDP_AddToGroup(
+          btn->properties,
+          bke::idprop::create("data_path", "tool_settings.sculpt.cursor.shared").release());
+      break;
+    }
+    case SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM:
+      BLI_assert_unreachable();
+      break;
+  }
+}
+
+void ED_sculpt_cursor_buttons_ensure_builtins()
+{
+  UserDef *userdef = &U;
+
+  const eSculptCursorButtonBuiltin builtins[3] = {
+      SCULPT_CURSOR_BUTTON_BUILTIN_MODE,
+      SCULPT_CURSOR_BUTTON_BUILTIN_PIN,
+      SCULPT_CURSOR_BUTTON_BUILTIN_GLOBAL,
+  };
+  for (const eSculptCursorButtonBuiltin builtin_id : builtins) {
+    SculptCursorButton *existing = nullptr;
+    for (SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+      if (btn.builtin_id == builtin_id) {
+        existing = &btn;
+        break;
+      }
+    }
+    if (existing != nullptr) {
+      /* Migrate paths written by earlier versions that used the flat tool settings. */
+      if (existing->properties != nullptr) {
+        IDProperty *path_prop = IDP_GetPropertyFromGroup(existing->properties, "data_path");
+        if (path_prop != nullptr && path_prop->type == IDP_STRING) {
+          const char *path = IDP_string_get(path_prop);
+          const char *new_path = nullptr;
+          if (STREQ(path, "tool_settings.sculpt.sculpt_cursor_mode")) {
+            new_path = "tool_settings.sculpt.cursor.mode";
+          }
+          else if (STREQ(path, "tool_settings.sculpt.pin_sculpt_cursor")) {
+            new_path = "tool_settings.sculpt.cursor.pin";
+          }
+          else if (STREQ(path, "tool_settings.sculpt.use_shared_sculpt_cursor")) {
+            new_path = "tool_settings.sculpt.cursor.shared";
+          }
+          if (new_path != nullptr) {
+            IDP_AssignString(path_prop, new_path);
+          }
+        }
+      }
+      continue;
+    }
+
+    SculptCursorButton *btn = MEM_new_zeroed<SculptCursorButton>(__func__);
+    /* Always allocate the group so that `btn.properties["key"]` works in Python. */
+    btn->properties = bke::idprop::create_group("properties").release();
+    sculpt_cursor_button_builtin_init(btn, builtin_id);
+    sculpt_cursor_button_assign_uid(userdef, btn);
+
+    /* Insert ahead of the first button that ranks later (user-defined buttons come last), so the
+     * row always reads [mode, pin, shared, ...user-defined]. Existing entries are never moved or
+     * modified: the user may have renamed or reordered them. */
+    const int rank = sculpt_cursor_button_builtin_rank(builtin_id);
+    SculptCursorButton *insert_before = nullptr;
+    for (SculptCursorButton &other : userdef->sculpt_cursor_buttons) {
+      if (sculpt_cursor_button_builtin_rank(other.builtin_id) > rank) {
+        insert_before = &other;
+        break;
+      }
+    }
+    if (insert_before != nullptr) {
+      BLI_insertlinkbefore(&userdef->sculpt_cursor_buttons, insert_before, btn);
+    }
+    else {
+      BLI_addtail(&userdef->sculpt_cursor_buttons, btn);
+    }
+  }
+}
+
+/* ================================================================
  * Registration
  * ================================================================ */
 
@@ -1096,6 +1456,7 @@ void ED_operatortypes_sculpt_cursor()
 {
   WM_operatortype_append(SCULPT_OT_cursor_set);
   WM_operatortype_append(SCULPT_OT_cursor_transform);
+  WM_operatortype_append(SCULPT_OT_cursor_button_reset);
 }
 
 }  // namespace blender::ed::sculpt_paint::cursor

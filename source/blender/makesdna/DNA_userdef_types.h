@@ -1099,6 +1099,76 @@ typedef enum eUserPref_CategoryTabsShape {
   USER_CATEGORY_TABS_SHAPE_CAPSULE = 1,
 } eUserPref_CategoryTabsShape;
 
+/** #SculptCursorButton::flag */
+enum eSculptCursorButtonFlag : int8_t {
+  /** The button is drawn on the gizmo. */
+  SCULPT_CURSOR_BUTTON_ENABLED = (1 << 0),
+  /** Draw the same icon regardless of the button's active state. */
+  SCULPT_CURSOR_BUTTON_USE_SINGLE_ICON = (1 << 1),
+};
+ENUM_OPERATORS(eSculptCursorButtonFlag)
+
+/** #SculptCursorButton.builtin_id */
+enum eSculptCursorButtonBuiltin {
+  SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM = 0, /* A user-defined button. */
+  SCULPT_CURSOR_BUTTON_BUILTIN_MODE = 1,   /* Sculpt cursor mode (SET/DEFORM) toggle. */
+  SCULPT_CURSOR_BUTTON_BUILTIN_PIN = 2,    /* Cursor pin toggle. */
+  SCULPT_CURSOR_BUTTON_BUILTIN_GLOBAL = 3, /* Shared (global) cursor toggle. */
+};
+
+/**
+ * Values for #SculptCursorButton.icon_source.
+ * Mirrors #eCategoryTagIconSource of the tabs system.
+ */
+typedef enum eSculptCursorButtonIconSource {
+  SCULPT_CURSOR_BUTTON_ICON_SOURCE_GLYPH = 0,
+  SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON = 1,
+  SCULPT_CURSOR_BUTTON_ICON_SOURCE_CUSTOM_FILE = 2,
+} eSculptCursorButtonIconSource;
+
+/** Button shown above the sculpt 3D cursor gizmo (#UserDef.sculpt_cursor_buttons). */
+struct SculptCursorButton {
+  SculptCursorButton *next, *prev;
+  /** Stable identifier, assigned from #UserDef.sculpt_cursor_buttons_uid. Does not change when
+   * other buttons are moved or removed. Never re-issued after removal. */
+  int unique_id;
+  /** #eSculptCursorButtonBuiltin: which built-in button this entry represents
+   * (0 = a user-defined button). Built-in entries cannot be removed through the API. */
+  int builtin_id;
+  /** Icon drawn on the button when it is not active (#BIFIconID value). */
+  int icon;
+  /** Icon drawn on the button when it is active. Only used when
+   * #SCULPT_CURSOR_BUTTON_USE_SINGLE_ICON is clear. */
+  int icon_active;
+  /** UI label (used as the gizmo button tooltip). */
+  char name[64];
+  /** Idname of the operator to invoke, e.g. "wm.context_toggle" or "myaddon.my_operator". */
+  char operator_idname[64];
+  /** IDProperty group passed to the invoked operator. Always allocated (may be empty). */
+  IDProperty *properties;
+  /** Icon source of the inactive state, see #eSculptCursorButtonIconSource. */
+  int icon_source;
+  /** Icon source of the active state, see #eSculptCursorButtonIconSource. Only used when
+   * #SCULPT_CURSOR_BUTTON_USE_SINGLE_ICON is clear. */
+  int icon_active_source;
+  /** #eSculptCursorButtonFlag */
+  int8_t flag;
+  /** Glyph (single UTF-8 character) drawn when #icon_source is
+   * #SCULPT_CURSOR_BUTTON_ICON_SOURCE_GLYPH. Empty falls back to the built-in icon. */
+  char glyph[8];
+  /** Image file drawn when #icon_source is #SCULPT_CURSOR_BUTTON_ICON_SOURCE_CUSTOM_FILE;
+   * a missing file draws a placeholder. */
+  char icon_path[1024];
+  /** Active state counterparts of #glyph and #icon_path, used by #icon_active_source. */
+  char glyph_active[8];
+  char icon_active_path[1024];
+  char _pad[7];
+};
+
+/** Maximum number of user-defined buttons over the sculpt 3D cursor gizmo
+ * (the built-in buttons are not counted). */
+#define SCULPT_CURSOR_CUSTOM_BUTTONS_MAX 12
+
 /**
  * Main user preferences data, typically accessed from #U.
  * See: #BKE_blendfile_userdef_from_defaults & #BKE_blendfile_userdef_read.
@@ -1558,6 +1628,18 @@ struct UserDef {
 
   /** Custom build features - always available. */
   UserDef_BuildFeatures build_features;
+
+  /** User-defined buttons shown above the sculpt 3D cursor gizmo
+   * (#VIEW3D_GGT_sculpt_cursor_buttons), including the built-in ones. List order is the
+   * display order. Saved to the preferences file. */
+  ListBaseT<SculptCursorButton> sculpt_cursor_buttons = {nullptr, nullptr};
+  /** Monotonic counter for #SculptCursorButton::unique_id. Never reset on removal. */
+  int sculpt_cursor_buttons_uid = 0;
+  /** Active item index for the management popover UIList. Valid range: [-1, list length - 1]. */
+  int sculpt_cursor_buttons_active = -1;
+  /** Maximum buttons in one row of the gizmo, further buttons wrap to a new row (0 = single row). */
+  int sculpt_cursor_buttons_per_row = 0;
+  char _pad_sculpt_cursor[4] = {};
 
   /** Runtime data (keep last). */
   UserDef_Runtime runtime;

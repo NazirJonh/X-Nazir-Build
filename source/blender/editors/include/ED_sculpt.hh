@@ -35,6 +35,7 @@ struct WorkSpace;
 struct bContext;
 struct wmKeyConfig;
 struct wmOperator;
+struct wmOperatorType;
 
 namespace ed::sculpt_paint {
 
@@ -91,6 +92,12 @@ struct CursorState {
   /** Object-space cursor rotation, as an `(x, y, z, w)` quaternion. */
   float4 rotation = float4(0.0f, 0.0f, 0.0f, 1.0f);
 };
+
+/** True when the XNazir 3D Cursor extension (user-defined custom buttons) is active (runtime only,
+ * never saved). Defaults to false. The cursor itself never depends on it. */
+bool addon_active();
+/** Called by the XNazir 3D Cursor extension's `register()`/`unregister()`. */
+void addon_active_set(bool active);
 
 /** True when the sculpt 3D cursor is enabled in \a scene's ToolSettings. */
 bool is_enabled(const Scene &scene);
@@ -149,6 +156,26 @@ float4x4 world_matrix_get(const Scene &scene, const Object &ob);
  * a multi-object session. Valid even when the sculpt cursor is disabled or uninitialized.
  */
 float4x4 symmetry_cursor_to_world(const Scene &scene, const Object &symm_reference_ob);
+
+/**
+ * Run the operator assigned to a button of the sculpt cursor gizmo
+ * (#UserDef.sculpt_cursor_buttons), looked up by the button's stable unique id.
+ */
+void SCULPT_OT_cursor_button_exec(wmOperatorType *ot);
+
+/** Restore the built-in defaults (name, operator, icons, properties) of one of the built-in
+ * sculpt cursor buttons, addressed by its index in #UserDef.sculpt_cursor_buttons. The visibility
+ * state and the stable uid are preserved. */
+void SCULPT_OT_cursor_button_reset(wmOperatorType *ot);
+
+/**
+ * Make sure the three built-in buttons (mode, pin, shared cursor) exist at the head of
+ * #UserDef.sculpt_cursor_buttons, in order, ahead of all user-defined buttons. Missing entries are
+ * inserted with their default data; existing ones are left untouched (the user may have renamed or
+ * reordered them). Operates on the global #U and is idempotent, so it is safe to call from the
+ * cursor buttons gizmo setup on every (re-)creation.
+ */
+void ED_sculpt_cursor_buttons_ensure_builtins();
 
 }  // namespace cursor
 

@@ -48,6 +48,8 @@
 #include "UI_interface.hh"
 #include "UI_interface_icons.hh"
 
+#include "BLF_api.hh"
+
 /* own includes */
 #include "../gizmo_library_intern.hh"
 
@@ -99,6 +101,8 @@ struct ButtonGizmo2D {
   bool is_init;
   /* Use an icon or shape */
   int icon;
+  /** A UTF-8 glyph drawn as text instead of the icon (takes priority when set). */
+  char text[16];
   gpu::Batch *shape_batch[2];
 };
 
@@ -177,10 +181,17 @@ static void button2d_draw_intern(const bContext *C,
   if (button->is_init == false) {
     button->is_init = true;
     button->icon = -1;
+    button->text[0] = '\0';
 
     PropertyRNA *icon_prop = RNA_struct_find_property(gz->ptr, "icon");
     PropertyRNA *icon_value_prop = RNA_struct_find_property(gz->ptr, "icon_value");
     PropertyRNA *shape_prop = RNA_struct_find_property(gz->ptr, "shape");
+    PropertyRNA *text_prop = RNA_struct_find_property(gz->ptr, "text");
+
+    /* The glyph takes priority: when it is set the icon is not drawn at all. */
+    if (RNA_property_is_set(gz->ptr, text_prop)) {
+      RNA_property_string_get(gz->ptr, text_prop, button->text);
+    }
 
     /* Same logic as in the RNA UI API, use icon_value only if icon is not defined. */
     if (RNA_property_is_set(gz->ptr, icon_prop)) {
@@ -300,6 +311,47 @@ static void button2d_draw_intern(const bContext *C,
       }
       GPU_line_smooth(false);
       GPU_polygon_smooth(true);
+    }
+    else if (button->text[0] != '\0') {
+      /* A UTF-8 glyph drawn as text, centered on the chip (the tag bar draws glyphs the same
+       * way; the text replaces the icon entirely). */
+      float pos[2];
+      if (is_3d) {
+        /* Inside the transformed space: centered on the chip origin. */
+        pos[0] = 0.0f;
+        pos[1] = 0.0f;
+      }
+      else {
+        /* Region space, like the icon path: pop the gizmo matrix first. */
+        GPU_matrix_pop();
+        need_to_pop = false;
+        pos[0] = gz->matrix_basis[3][0];
+        pos[1] = gz->matrix_basis[3][1];
+      }
+
+      const float alpha = (highlight) ? 1.0f : 0.6f;
+      uchar icon_color[4];
+      View3D *v3d = CTX_wm_view3d(C);
+      if (v3d) {
+        Scene *scene = CTX_data_scene(C);
+        float text_color[4], shadow_color[4];
+        ED_view3d_text_colors_get(scene, v3d, text_color, shadow_color);
+        rgba_float_to_uchar(icon_color, text_color);
+      }
+      else {
+        ui::theme::get_color_4ubv(highlight ? TH_TEXT_HI : TH_TEXT, icon_color);
+      }
+      icon_color[3] = uchar(float(icon_color[3]) * alpha);
+
+      const int font_id = BLF_default();
+      const float font_size = 16.0f * UI_SCALE_FAC;
+      BLF_size(font_id, font_size);
+      const size_t text_len = strlen(button->text);
+      const float text_width = BLF_width(font_id, button->text, text_len);
+      const float text_height = BLF_height(font_id, button->text, text_len);
+      BLF_color4ubv(font_id, icon_color);
+      BLF_position(font_id, pos[0] - text_width * 0.5f, pos[1] - text_height * 0.4f, 0.0f);
+      BLF_draw(font_id, button->text, text_len);
     }
     else if (button->icon != -1) {
       float pos[2];
@@ -490,6 +542,14 @@ static void GIZMO_GT_button_2d(wmGizmoType *gzt)
 
   /* Passed to 'GPU_batch_tris_from_poly_2d_encoded' */
   RNA_def_property(gzt->srna, "shape", PROP_STRING, PROP_BYTESTRING);
+
+  /* A UTF-8 glyph drawn instead of the icon (takes priority when set). */
+  RNA_def_string(gzt->srna,
+                 "text",
+                 nullptr,
+                 0,
+                 "Text",
+                 "Glyph drawn on the button instead of an icon");
 
   /* Currently only used for cursor display. */
   RNA_def_boolean(gzt->srna, "show_drag", true, "Show Drag", "");

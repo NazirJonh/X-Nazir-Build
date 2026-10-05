@@ -363,6 +363,23 @@ static void userdef_free_addons(UserDef *userdef)
   userdef->addons.clear_no_delete();
 }
 
+static void userdef_free_sculpt_cursor_buttons(UserDef *userdef)
+{
+  for (SculptCursorButton *btn = static_cast<SculptCursorButton *>(
+                              userdef->sculpt_cursor_buttons.first),
+                          *btn_next;
+       btn;
+       btn = btn_next)
+  {
+    btn_next = btn->next;
+    if (btn->properties) {
+      IDP_FreeProperty(btn->properties);
+    }
+    MEM_delete(btn);
+  }
+  userdef->sculpt_cursor_buttons.clear_no_delete();
+}
+
 void BKE_blender_userdef_data_free(UserDef *userdef, bool clear_fonts)
 {
 #define U BLI_STATIC_ASSERT(false, "Global 'U' not allowed, only use arguments passed in!")
@@ -374,6 +391,7 @@ void BKE_blender_userdef_data_free(UserDef *userdef, bool clear_fonts)
   userdef_free_keyconfig_prefs(userdef);
   userdef_free_user_menus(userdef);
   userdef_free_addons(userdef);
+  userdef_free_sculpt_cursor_buttons(userdef);
 
   if (clear_fonts) {
     for (uiFont &font : userdef->uifonts) {

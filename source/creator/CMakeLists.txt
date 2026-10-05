@@ -1897,6 +1897,22 @@ install(
   DESTINATION ${TARGETDIR_VER}
 )
 
+# Copy the bundled 3D cursor extension into the build tree on every build, so edits to its
+# sources show up without running the install step.
+if(WIN32 AND NOT WITH_PYTHON_MODULE)
+  set(_xnazir_ext_dst "$<TARGET_FILE_DIR:blender>/${TARGETDIR_VER}/extensions/system/xnazir_3d_cursor")
+  add_custom_target(
+    xnazir_3d_cursor_extension ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      ${CMAKE_SOURCE_DIR}/release/extensions/system/xnazir_3d_cursor
+      ${_xnazir_ext_dst}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${_xnazir_ext_dst}/__pycache__
+    COMMENT "Copying xnazir_3d_cursor extension"
+  )
+  add_dependencies(xnazir_3d_cursor_extension blender)
+  unset(_xnazir_ext_dst)
+endif()
+
 # Install more files specified elsewhere.
 delayed_do_install(${TARGETDIR_VER})
 

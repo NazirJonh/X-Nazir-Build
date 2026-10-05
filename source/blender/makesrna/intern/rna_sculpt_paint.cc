@@ -1639,6 +1639,17 @@ static int rna_PaintShapeSettings_fill_channels_length(PointerRNA * /*ptr*/)
 
 /** \} */
 
+static PointerRNA rna_Sculpt_cursor_get(PointerRNA *ptr)
+{
+  Sculpt *sd = static_cast<Sculpt *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_SculptCursor, sd);
+}
+
+static std::optional<std::string> rna_SculptCursor_path(const PointerRNA * /*ptr*/)
+{
+  return "tool_settings.sculpt.cursor";
+}
+
 
 }  // namespace blender
 
@@ -2512,6 +2523,121 @@ static void rna_def_mesh_automasking_settings(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_MeshAutomaskingSettings_update");
 }
 
+static const EnumPropertyItem sculpt_cursor_mode_items[] = {
+    {SCULPT_CURSOR_MODE_SET, "SET", 0, "Set", "Dragging the gizmo moves the sculpt cursor"},
+    {SCULPT_CURSOR_MODE_DEFORM,
+     "DEFORM",
+     0,
+     "Deform",
+     "Dragging the gizmo deforms the mesh around the sculpt cursor"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem sculpt_cursor_size_mode_items[] = {
+    {SCULPT_CURSOR_SIZE_SCREEN,
+     "SCREEN",
+     0,
+     "Screen",
+     "The gizmo keeps a constant size on screen"},
+    {SCULPT_CURSOR_SIZE_WORLD,
+     "WORLD",
+     0,
+     "World",
+     "The gizmo has a fixed size in the world, relative to the object"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void rna_def_sculpt_cursor(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SculptCursor", nullptr);
+  RNA_def_struct_sdna(srna, "Sculpt");
+  RNA_def_struct_path_func(srna, "rna_SculptCursor_path");
+  RNA_def_struct_ui_text(
+      srna, "Sculpt Cursor", "Sculpt 3D cursor settings of the XNazir 3D Cursor core extension");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_ENABLED);
+  RNA_def_property_ui_text(prop,
+                           "Enabled",
+                           "Sculpt 3D cursor drives pivots, filters and the Transform tool "
+                           "(the core extension must be active)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_cursor_mode");
+  RNA_def_property_enum_items(prop, sculpt_cursor_mode_items);
+  RNA_def_property_ui_text(prop, "Mode", "What dragging the sculpt cursor gizmo does");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "pin", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_PIN);
+  RNA_def_property_ui_text(
+      prop, "Pin", "Keep the sculpt cursor in place after deforming the mesh");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "shared", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_SHARED);
+  RNA_def_property_ui_text(prop,
+                           "Shared",
+                           "Follow the shared scene 3D cursor instead of the object's own sculpt "
+                           "cursor");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_use_shared_sculpt_cursor_update");
+
+  prop = RNA_def_property(srna, "size_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_cursor_size_mode");
+  RNA_def_property_enum_items(prop, sculpt_cursor_size_mode_items);
+  RNA_def_property_ui_text(prop, "Size Mode", "How the size of the 3D cursor gizmo is determined");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "size", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_Sculpt_sculpt_cursor_gizmo_size_get",
+                               "rna_Sculpt_sculpt_cursor_gizmo_size_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.25f, 2.0f);
+  RNA_def_property_ui_range(prop, 0.25f, 2.0f, 1, 2);
+  RNA_def_property_ui_text(prop, "Size", "Size of the 3D cursor gizmo");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "show_frame", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_HIDE_FRAME);
+  RNA_def_property_ui_text(prop,
+                           "Show Frame",
+                           "Show the corner frame around the gizmo that moves the cursor in "
+                           "screen space");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "show_buttons", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_HIDE_BUTTONS);
+  RNA_def_property_ui_text(
+      prop, "Show Buttons", "Show the mode, pin and shared cursor buttons above the gizmo");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "proportional", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_PROPORTIONAL);
+  RNA_def_property_ui_text(
+      prop,
+      "Proportional",
+      "Apply a smooth falloff around the cursor when deforming the mesh through the Transform "
+      "tool, instead of moving every vertex by the same amount");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "projected", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_PROJECTED);
+  RNA_def_property_ui_text(prop,
+                           "Projected",
+                           "Measure the proportional falloff in the view plane instead of in "
+                           "world space");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
 static void rna_def_sculpt(BlenderRNA *brna)
 {
   static const EnumPropertyItem detail_refine_items[] = {
@@ -2886,16 +3012,6 @@ static void rna_def_sculpt(BlenderRNA *brna)
       "enabled and Transform Mode set to \"All Vertices\"");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  static const EnumPropertyItem sculpt_cursor_mode_items[] = {
-      {SCULPT_CURSOR_MODE_SET, "SET", 0, "Set", "Dragging the gizmo moves the sculpt cursor"},
-      {SCULPT_CURSOR_MODE_DEFORM,
-       "DEFORM",
-       0,
-       "Deform",
-       "Dragging the gizmo deforms the mesh around the sculpt cursor"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-
   prop = RNA_def_property(srna, "use_sculpt_cursor", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_flag", SCULPT_CURSOR_ENABLED);
   RNA_def_property_ui_text(prop,
@@ -2941,19 +3057,6 @@ static void rna_def_sculpt(BlenderRNA *brna)
       prop, "Buttons", "Show the mode, pin and shared cursor buttons above the gizmo");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  static const EnumPropertyItem sculpt_cursor_size_mode_items[] = {
-      {SCULPT_CURSOR_SIZE_SCREEN,
-       "SCREEN",
-       0,
-       "Screen",
-       "The gizmo keeps a constant size on screen"},
-      {SCULPT_CURSOR_SIZE_WORLD,
-       "WORLD",
-       0,
-       "World",
-       "The gizmo has a fixed size in the world, relative to the object"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
   prop = RNA_def_property(srna, "sculpt_cursor_size_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "sculpt_cursor_size_mode");
   RNA_def_property_enum_items(prop, sculpt_cursor_size_mode_items);
@@ -3025,6 +3128,12 @@ static void rna_def_sculpt(BlenderRNA *brna)
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(
       prop, NC_SCENE | ND_TOOLSETTINGS, "rna_Sculpt_use_shared_sculpt_cursor_update");
+
+  prop = RNA_def_property(srna, "cursor", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "SculptCursor");
+  RNA_def_property_pointer_funcs(prop, "rna_Sculpt_cursor_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Sculpt Cursor", "Sculpt 3D cursor settings");
 
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);
@@ -5206,6 +5315,7 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_unified_paint_settings(brna);
   rna_def_mesh_automasking_settings(brna);
   rna_def_sculpt(brna);
+  rna_def_sculpt_cursor(brna);
   rna_def_uv_sculpt(brna);
   rna_def_gp_paint(brna);
   rna_def_gp_vertexpaint(brna);

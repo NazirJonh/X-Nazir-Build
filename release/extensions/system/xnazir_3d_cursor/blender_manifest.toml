@@ -1,0 +1,19 @@
+schema_version = "1.0.0"
+
+id = "xnazir_3d_cursor"
+name = "XNazir 3D Cursor"
+tagline = "Independent sculpt 3D cursor with transform, gizmo and custom buttons"
+type = "add-on"
+tags = ["Sculpt", "3D View"]
+version = "0.1.0"
+blender_version_min = "5.2.0"
+maintainer = "XNazir"
+license = [
+    "SPDX:GPL-2.0-or-later",
+]
+
+[build]
+paths_exclude_pattern = [
+    "__pycache__/",
+    ".*",
+]

@@ -3285,6 +3285,26 @@ void BKE_sculpt_toolsettings_data_ensure(Main *bmain, Scene *scene)
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Sculpt 3D Cursor Custom Buttons Extension State
+ * \{ */
+
+/* See #BKE_sculpt_cursor_addon_active for why this is process memory rather than DNA. Off by
+ * default: the cursor itself works without the extension, only custom buttons need it. */
+static bool g_sculpt_cursor_addon_active = false;
+
+bool BKE_sculpt_cursor_addon_active()
+{
+  return g_sculpt_cursor_addon_active;
+}
+
+void BKE_sculpt_cursor_addon_active_set(bool active)
+{
+  g_sculpt_cursor_addon_active = active;
+}
+
+/** \} */
+
 static bool check_sculpt_object_deformed(Object *object, const bool for_construction)
 {
   bool deformed = false;

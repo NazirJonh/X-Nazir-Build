@@ -326,6 +326,7 @@ static const EnumPropertyItem rna_enum_category_tabs_shape_items[] = {
 #  include "BKE_preferences.h"
 #  include "BKE_screen.hh"
 #  include "BKE_sound.hh"
+#  include "BKE_wm_runtime.hh"
 
 #  include "DEG_depsgraph.hh"
 
@@ -348,6 +349,8 @@ static const EnumPropertyItem rna_enum_category_tabs_shape_items[] = {
 #  include "UI_interface.hh"
 
 #  include "AS_asset_library.hh"
+
+#  include "WM_message.hh"
 
 namespace blender {
 
@@ -861,6 +864,181 @@ static void rna_userdef_asset_library_remove(bContext *C, ReportList *reports, P
   ptr->invalidate();
   USERDEF_TAG_DIRTY;
 }
+
+/** \name Sculpt cursor buttons (#UserDef.sculpt_cursor_buttons)
+ *
+ * Backing implementation of the #SculptCursorButtons RNA collection: the buttons drawn by the
+ * sculpt 3D cursor gizmo group. The buttons are stored in the preferences (the global #U) rather
+ * than in the scene, so the collection functions operate on the #UserDef itself.
+ * \{ */
+
+static void rna_SculptCursorButtons_notify(bContext *C, UserDef *userdef)
+{
+  wmWindowManager *wm = C ? CTX_wm_manager(C) :
+                            static_cast<wmWindowManager *>(G_MAIN->wm.first);
+  wmMsgBus *mbus = (wm && wm->runtime != nullptr) ? wm->runtime->message_bus : nullptr;
+  if (mbus != nullptr) {
+    WM_msg_publish_rna_prop(mbus, nullptr, userdef, Preferences, sculpt_cursor_buttons);
+  }
+  USERDEF_TAG_DIRTY;
+  WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+static void rna_SculptCursorButton_free(UserDef *userdef, SculptCursorButton *btn)
+{
+  BLI_remlink(&userdef->sculpt_cursor_buttons, btn);
+  if (btn->properties != nullptr) {
+    IDP_FreeProperty(btn->properties);
+  }
+  MEM_delete(btn);
+}
+
+static bool rna_SculptCursorButtons_has_uid(UserDef *userdef, const int uid)
+{
+  for (const SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+    if (btn.unique_id == uid) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Monotonically increasing stable identifiers, never re-issued after removal. Guards against
+ * counter overflow and against files carrying duplicate ids. */
+static int rna_SculptCursorButtons_next_uid(UserDef *userdef)
+{
+  int uid = ++userdef->sculpt_cursor_buttons_uid;
+  if (UNLIKELY(uid == INT_MAX || rna_SculptCursorButtons_has_uid(userdef, uid))) {
+    uid = 1;
+    while (rna_SculptCursorButtons_has_uid(userdef, uid)) {
+      uid++;
+    }
+    userdef->sculpt_cursor_buttons_uid = uid;
+  }
+  return uid;
+}
+
+static SculptCursorButton *rna_SculptCursorButtons_add(UserDef *userdef,
+                                                       bContext *C,
+                                                       ReportList *reports,
+                                                       const int builtin)
+{
+  /* Built-in entries are created and initialized by #ED_sculpt_cursor_buttons_ensure_builtins;
+   * adding one here would only produce an uninitialized duplicate. */
+  if (builtin != SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Built-in sculpt cursor button %d cannot be added, it is created automatically",
+                builtin);
+    return nullptr;
+  }
+
+  /* The limit only applies to user-defined buttons, the built-in ones are not counted. */
+  int custom_count = 0;
+  for (const SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+    if (btn.builtin_id == SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM) {
+      custom_count++;
+    }
+  }
+  if (builtin == SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM &&
+      custom_count >= SCULPT_CURSOR_CUSTOM_BUTTONS_MAX)
+  {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Cannot add more than %d sculpt cursor buttons",
+                SCULPT_CURSOR_CUSTOM_BUTTONS_MAX);
+    return nullptr;
+  }
+
+  SculptCursorButton *btn = MEM_new_zeroed<SculptCursorButton>(__func__);
+  btn->builtin_id = builtin;
+  btn->icon_source = SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON;
+  btn->icon_active_source = SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON;
+  btn->flag = SCULPT_CURSOR_BUTTON_ENABLED | SCULPT_CURSOR_BUTTON_USE_SINGLE_ICON;
+  btn->icon = ICON_DOT;
+  btn->icon_active = ICON_DOT;
+  STRNCPY(btn->name, "Button");
+  /* Always allocate the group so that `btn.properties["key"]` works in Python. */
+  btn->properties = bke::idprop::create_group("properties").release();
+  btn->unique_id = rna_SculptCursorButtons_next_uid(userdef);
+
+  BLI_addtail(&userdef->sculpt_cursor_buttons, btn);
+
+  /* The active index is left untouched, the new button is not selected automatically. */
+  rna_SculptCursorButtons_notify(C, userdef);
+  return btn;
+}
+
+static void rna_SculptCursorButtons_remove(UserDef *userdef,
+                                           bContext *C,
+                                           ReportList *reports,
+                                           const int index)
+{
+  const int len = userdef->sculpt_cursor_buttons.count();
+  if (index < 0 || index >= len) {
+    BKE_reportf(reports, RPT_ERROR, "Sculpt cursor button index %d out of range", index);
+    return;
+  }
+
+  SculptCursorButton *btn = static_cast<SculptCursorButton *>(
+      BLI_findlink(&userdef->sculpt_cursor_buttons, index));
+  if (btn->builtin_id != SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM) {
+    BKE_reportf(
+        reports, RPT_ERROR, "Cannot remove built-in sculpt cursor button \"%s\"", btn->name);
+    return;
+  }
+
+  rna_SculptCursorButton_free(userdef, btn);
+
+  /* The active index may become -1 when the last button is removed, which is valid. */
+  userdef->sculpt_cursor_buttons_active = min_ii(userdef->sculpt_cursor_buttons_active, len - 2);
+
+  rna_SculptCursorButtons_notify(C, userdef);
+}
+
+static void rna_SculptCursorButtons_move(UserDef *userdef,
+                                         bContext *C,
+                                         ReportList *reports,
+                                         const int from_index,
+                                         const int to_index)
+{
+  const int len = userdef->sculpt_cursor_buttons.count();
+  if (from_index < 0 || from_index >= len || to_index < 0 || to_index >= len) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Sculpt cursor button index %d or %d out of range",
+                from_index,
+                to_index);
+    return;
+  }
+  if (from_index == to_index) {
+    /* Silent no-op; the generic UI list calls move(0, 0) for single-item lists. */
+    return;
+  }
+
+  BLI_listbase_move_index(&userdef->sculpt_cursor_buttons, from_index, to_index);
+
+  rna_SculptCursorButtons_notify(C, userdef);
+}
+
+static void rna_SculptCursorButtons_clear(UserDef *userdef, bContext *C, ReportList * /*reports*/)
+{
+  for (SculptCursorButton &btn : userdef->sculpt_cursor_buttons.items_mutable()) {
+    if (btn.builtin_id == SCULPT_CURSOR_BUTTON_BUILTIN_CUSTOM) {
+      rna_SculptCursorButton_free(userdef, &btn);
+    }
+  }
+
+  /* The active index may become -1 when no button is left, which is valid. */
+  const int len_remaining = userdef->sculpt_cursor_buttons.count();
+  userdef->sculpt_cursor_buttons_active = min_ii(userdef->sculpt_cursor_buttons_active,
+                                                 len_remaining - 1);
+  /* The uid counter is deliberately not reset so that ids are never re-issued. */
+
+  rna_SculptCursorButtons_notify(C, userdef);
+}
+
+/** \} */
 
 static bool rna_NameMatchMapType_is_builtin_get(PointerRNA *ptr)
 {
@@ -8573,6 +8751,219 @@ static void rna_def_userdef_autoexec_path_collection(BlenderRNA *brna, PropertyR
   RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
 }
 
+static void rna_def_sculpt_cursor_button(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "SculptCursorButton", nullptr);
+  RNA_def_struct_sdna(srna, "SculptCursorButton");
+  RNA_def_struct_ui_text(srna,
+                         "Sculpt Cursor Button",
+                         "Button shown above the sculpt 3D cursor gizmo");
+
+  prop = RNA_def_property(srna, "unique_id", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "unique_id");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Unique ID", "Stable identifier of the button, used by 'sculpt.cursor_button_exec'");
+
+  prop = RNA_def_property(srna, "builtin", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "builtin_id");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Built-in", "0 = a user-defined button, otherwise a built-in button id");
+
+  prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_ui_text(prop, "Name", "Label of the button, shown as its tooltip");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "icon", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "icon");
+  RNA_def_property_enum_items(prop, rna_enum_icon_items);
+  RNA_def_property_ui_text(prop, "Icon", "Icon drawn on the button");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "icon_active", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "icon_active");
+  RNA_def_property_enum_items(prop, rna_enum_icon_items);
+  RNA_def_property_ui_text(prop,
+                           "Icon Active",
+                           "Icon drawn when the button is active; "
+                           "used when 'use_single_icon' is off");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "operator", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "operator_idname");
+  RNA_def_property_string_maxlength(prop, 64);
+  RNA_def_property_ui_text(prop,
+                           "Operator",
+                           "Idname of the operator to invoke, e.g. 'my_addon.my_operator'");
+  RNA_def_property_string_search_func(prop,
+                                      "WM_operatortype_idname_visit_for_search",
+                                      PROP_STRING_SEARCH_SORT | PROP_STRING_SEARCH_SUGGESTION);
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "properties", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "PropertyGroup");
+  RNA_def_property_pointer_sdna(prop, nullptr, "properties");
+  /* Read-only so the allocated group cannot be replaced (and leaked) through RNA; its content
+   * stays editable through the dictionary-style access of #PropertyGroup. */
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Properties", "IDProperty group with custom properties passed to the operator");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_CURSOR_BUTTON_ENABLED);
+  RNA_def_property_ui_text(prop, "Enabled", "Draw the button on the sculpt 3D cursor gizmo");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "use_single_icon", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SCULPT_CURSOR_BUTTON_USE_SINGLE_ICON);
+  RNA_def_property_ui_text(prop,
+                           "Use Single Icon",
+                           "Draw the same icon regardless of the button's active state");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  static const EnumPropertyItem icon_source_items[] = {
+      {SCULPT_CURSOR_BUTTON_ICON_SOURCE_GLYPH, "GLYPH", 0, "Glyph", "Draw a unicode glyph"},
+      {SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON,
+       "BLENDER_ICON",
+       0,
+       "Icon",
+       "Draw a built-in Blender icon"},
+      {SCULPT_CURSOR_BUTTON_ICON_SOURCE_CUSTOM_FILE,
+       "CUSTOM_FILE",
+       0,
+       "Custom",
+       "Draw an image file from disk"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "icon_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "icon_source");
+  RNA_def_property_enum_items(prop, icon_source_items);
+  RNA_def_property_ui_text(prop, "Icon Source", "Where the image drawn on the button comes from");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "glyph", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "glyph");
+  RNA_def_property_string_maxlength(prop, 8);
+  RNA_def_property_ui_text(
+      prop, "Glyph", "Unicode glyph drawn on the button (used by the Glyph icon source)");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "icon_path", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "icon_path");
+  RNA_def_property_string_maxlength(prop, 1024);
+  RNA_def_property_subtype(prop, PROP_FILEPATH);
+  RNA_def_property_ui_text(prop,
+                           "Icon Path",
+                           "Image file drawn on the button (used by the Custom icon source); "
+                           "a missing file draws a placeholder");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "icon_active_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "icon_active_source");
+  RNA_def_property_enum_items(prop, icon_source_items);
+  RNA_def_property_ui_text(prop,
+                           "Icon Active Source",
+                           "Where the image drawn on the button in its active state comes from");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "glyph_active", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "glyph_active");
+  RNA_def_property_string_maxlength(prop, 8);
+  RNA_def_property_ui_text(prop,
+                           "Glyph Active",
+                           "Unicode glyph drawn on the button in its active state (used by the "
+                           "Glyph icon active source)");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "icon_active_path", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "icon_active_path");
+  RNA_def_property_string_maxlength(prop, 1024);
+  RNA_def_property_subtype(prop, PROP_FILEPATH);
+  RNA_def_property_ui_text(prop,
+                           "Icon Active Path",
+                           "Image file drawn on the button in its active state (used by the "
+                           "Custom icon active source); a missing file draws a placeholder");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+}
+
+static void rna_def_sculpt_cursor_buttons(BlenderRNA *brna, PropertyRNA *cprop)
+{
+  StructRNA *srna;
+  FunctionRNA *func;
+  PropertyRNA *parm;
+
+  RNA_def_property_srna(cprop, "SculptCursorButtons");
+  srna = RNA_def_struct(brna, "SculptCursorButtons", nullptr);
+  RNA_def_struct_sdna(srna, "UserDef");
+  RNA_def_struct_ui_text(srna,
+                         "Sculpt Cursor Buttons",
+                         "Collection of user-defined and built-in cursor buttons");
+
+  func = RNA_def_function(srna, "add", "rna_SculptCursorButtons_add");
+  RNA_def_function_ui_description(func, "Add a new button to the collection");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT | FUNC_USE_REPORTS);
+  RNA_def_int(func,
+              "builtin",
+              0,
+              0,
+              SCULPT_CURSOR_BUTTON_BUILTIN_GLOBAL,
+              "Built-in",
+              "Built-in button id (0 = a user-defined button)",
+              0,
+              SCULPT_CURSOR_BUTTON_BUILTIN_GLOBAL);
+  /* return type */
+  parm = RNA_def_pointer(func, "button", "SculptCursorButton", "", "Newly created button");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "remove", "rna_SculptCursorButtons_remove");
+  RNA_def_function_ui_description(func, "Remove the button at the given index");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT | FUNC_USE_REPORTS);
+  parm = RNA_def_int(func,
+                     "index",
+                     -1,
+                     INT_MIN,
+                     INT_MAX,
+                     "Index",
+                     "Index of the button to remove",
+                     0,
+                     SCULPT_CURSOR_CUSTOM_BUTTONS_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "move", "rna_SculptCursorButtons_move");
+  RNA_def_function_ui_description(func, "Move a button to a new position in the list");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT | FUNC_USE_REPORTS);
+  parm = RNA_def_int(func,
+                     "from_index",
+                     -1,
+                     INT_MIN,
+                     INT_MAX,
+                     "From Index",
+                     "Index of the button to move",
+                     0,
+                     SCULPT_CURSOR_CUSTOM_BUTTONS_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func,
+                     "to_index",
+                     -1,
+                     INT_MIN,
+                     INT_MAX,
+                     "To Index",
+                     "Target index",
+                     0,
+                     SCULPT_CURSOR_CUSTOM_BUTTONS_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "clear", "rna_SculptCursorButtons_clear");
+  RNA_def_function_ui_description(func, "Remove all user-defined buttons");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT | FUNC_USE_REPORTS);
+}
+
 void RNA_def_userdef(BlenderRNA *brna)
 {
   USERDEF_TAG_DIRTY_PROPERTY_UPDATE_ENABLE;
@@ -8622,6 +9013,35 @@ void RNA_def_userdef(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "PathCompare");
   RNA_def_property_ui_text(prop, "Auto-Execution Paths", "");
   rna_def_userdef_autoexec_path_collection(brna, prop);
+
+  rna_def_sculpt_cursor_button(brna);
+
+  prop = RNA_def_property(srna, "sculpt_cursor_buttons", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "SculptCursorButton");
+  RNA_def_property_collection_sdna(prop, nullptr, "sculpt_cursor_buttons", nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Sculpt Cursor Buttons",
+                           "User-defined buttons shown above the sculpt 3D cursor gizmo, "
+                           "including the built-in ones. List order is the display order");
+  rna_def_sculpt_cursor_buttons(brna, prop);
+
+  prop = RNA_def_property(srna, "sculpt_cursor_buttons_active", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sculpt_cursor_buttons_active");
+  RNA_def_property_range(prop, -1, SCULPT_CURSOR_CUSTOM_BUTTONS_MAX - 1);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Active Sculpt Cursor Button",
+                           "Index of the active button in the list, -1 when none");
+
+  prop = RNA_def_property(srna, "sculpt_cursor_buttons_per_row", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sculpt_cursor_buttons_per_row");
+  RNA_def_property_range(prop, 0, 16);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "Buttons per Row",
+                           "Maximum number of cursor buttons in one row, further buttons wrap to a "
+                           "new row (0 keeps a single row)");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
 
   prop = RNA_def_property(srna, "use_recent_searches", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag", USER_FLAG_RECENT_SEARCHES_DISABLE);

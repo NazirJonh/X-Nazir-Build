@@ -2395,7 +2395,19 @@ class _defs_sculpt:
             layout.separator()
             layout.prop(sculpt, "transform_all_objects", text="Affect All Objects")
             layout.prop(sculpt, "transform_origin_correct", text="Correct Origin")
+
+            # Skin Pose chain editing mode: bend the chain or rotate the mesh around a pivot.
+            brush = sculpt.brush
+            if brush is not None and brush.sculpt_brush_type == 'SKIN_POSE':
+                col = layout.column(align=True)
+                col.label(text="Edit Mode")
+                col.row(align=True).prop(brush, "skin_pose_edit_mode", expand=True)
+
             layout.popover(panel="VIEW3D_PT_sculpt_cursor_gizmo", text="Gizmo Overlay", icon='OVERLAY')
+            # Provided by the optional XNazir 3D Cursor extension.
+            if hasattr(bpy.types, "VIEW3D_PT_sculpt_cursor_custom_buttons"):
+                layout.popover(panel="VIEW3D_PT_sculpt_cursor_custom_buttons",
+                               text="Custom Buttons", icon='TOOL_SETTINGS')
 
         return dict(
             idname="builtin.sculpt_cursor",

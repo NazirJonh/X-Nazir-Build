@@ -16,6 +16,7 @@
 #include "BLT_translation.hh"
 
 #include "BLI_time.h"
+#include "BLI_utildefines.h"
 
 namespace blender::ed::sculpt_paint::shape {
 
@@ -414,6 +415,7 @@ static bool shape_write_image(bContext *C,
                     BLI_assert(buffer_row_offset >= 0 &&
                                buffer_row_offset + pixel_row.num_pixels <=
                                    int64_t(image_buffer->x) * image_buffer->y);
+                    UNUSED_VARS_NDEBUG(buffer_row_offset);
 
                     const MutableSpan<float4> dst =
                         !float_buffer.is_empty() ?

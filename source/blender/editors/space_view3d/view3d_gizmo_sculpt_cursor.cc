@@ -9,6 +9,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include <cstring>
+
 #include "BLI_math_constants.h"
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
@@ -17,10 +19,13 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
+#include "BLI_listbase_iterator.hh"
+#include "BLI_map.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
+#include "BKE_idprop.hh"
 #include "BKE_layer.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -49,6 +54,7 @@
 #include "ED_view3d.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_c.hh"
 #include "UI_resources.hh"
 
 #include "WM_api.hh"
@@ -58,6 +64,9 @@
 #include "wm_cursors.hh"
 
 #include "RNA_access.hh"
+#include "RNA_path.hh"
+
+#include "view3d_gizmo_sculpt_cursor_intern.hh"
 
 namespace blender::ed::view3d {
 
@@ -467,9 +476,9 @@ static void gizmo_refresh_from_matrix(wmGizmo *axis,
   }
 }
 
-static void sculpt_cursor_world_matrix_get(const Scene &scene,
-                                           const Object &ob,
-                                           float r_mat[4][4])
+void sculpt_cursor_world_matrix_get(const Scene &scene,
+                                    const Object &ob,
+                                    float r_mat[4][4])
 {
   copy_m4_m4(r_mat, sculpt_paint::cursor::world_matrix_get(scene, ob).ptr());
 }
@@ -1376,10 +1385,10 @@ static void gizmogroup_refresh(const bContext *C, wmGizmoGroup *gzgroup)
  * compensation for the view distance that keeps the gizmo a fixed fraction of the object.
  * \param co: World location of the gizmo.
  */
-static float gizmo_size_factor_get(const Scene &scene,
-                                   const Object &ob,
-                                   const RegionView3D &rv3d,
-                                   const float co[3])
+float gizmo_size_factor_get(const Scene &scene,
+                            const Object &ob,
+                            const RegionView3D &rv3d,
+                            const float co[3])
 {
   const float size = sculpt_paint::cursor::gizmo_size_get(scene);
   if (!sculpt_paint::cursor::gizmo_size_is_world(scene)) {
@@ -1544,308 +1553,6 @@ void VIEW3D_GGT_sculpt_cursor(wmGizmoGroupType *gzgt)
   gzgt->draw_prepare = gizmogroup_draw_prepare;
   gzgt->invoke_prepare = gizmo_invoke_prepare;
   gzgt->message_subscribe = gizmogroup_message_subscribe;
-}
-
-/* -------------------------------------------------------------------- */
-/** \name Sculpt Cursor Viewport Buttons
- *
- * The Set/Deform and Pin buttons are plain `GIZMO_GT_button_2d` widgets, which are designed for
- * screen-space (non-3D) gizmo groups: their hit-test compares the region mouse position directly
- * against `matrix_basis[3]` (see #gizmo_button2d_test_select) and their scale is a plain UI-pixel
- * value (the #WM_GIZMOGROUPTYPE_SCALE path of #wm_gizmo_calculate_scale). Putting them in the 3D
- * cursor group would both mis-size them and break clicking, so they live in their own group whose
- * position is the cursor's projected screen coordinate.
- * \{ */
-
-struct SculptCursorButtonsGizmoGroup {
-  /** Two variants per slot (off/on). `GIZMO_GT_button_2d` caches its icon on the first draw, so
-   * switching the icon is done by toggling visibility between the two variants. */
-  wmGizmo *mode_button[2];
-  wmGizmo *pin_button[2];
-  wmGizmo *global_button[2];
-  /** Decorative outline layers drawn on top of the buttons (not selectable). */
-  wmGizmo *mode_outline;
-  wmGizmo *pin_outline;
-  wmGizmo *global_outline;
-};
-
-static bool sculpt_cursor_buttons_poll(const bContext *C, wmGizmoGroupType * /*gzgt*/)
-{
-  const Object *ob = CTX_data_active_object(C);
-  const Scene *scene = CTX_data_scene(C);
-  /* Like the gizmo handles, the buttons are usable from any tool while the cursor is on. */
-  if (!ob || !ob->runtime->sculpt_session || !scene || !sculpt_paint::cursor::is_enabled(*scene))
-  {
-    return false;
-  }
-
-  /* Hidden together with the "3D Cursor" viewport overlay toggle. */
-  const View3D *v3d = CTX_wm_view3d(C);
-  if (!v3d || (v3d->flag2 & V3D_HIDE_OVERLAYS) ||
-      (v3d->overlay.flag & V3D_OVERLAY_HIDE_CURSOR))
-  {
-    return false;
-  }
-
-  return true;
-}
-
-static wmGizmo *sculpt_cursor_screen_button_new(const wmGizmoType *gzt,
-                                                wmGizmoGroup *gzgroup,
-                                                wmOperatorType *ot,
-                                                const char *data_path,
-                                                const int icon)
-{
-  wmGizmo *gz = WM_gizmo_new_ptr(gzt, gzgroup, nullptr);
-  /* Screen-space group: `scale_final` is `scale_basis * UI_SCALE_FAC`, i.e. UI pixels. */
-  gz->scale_basis = 14.0f;
-  gz->flag |= WM_GIZMO_DRAW_OFFSET_SCALE;
-  RNA_enum_set(gz->ptr, "icon", icon);
-  RNA_enum_set(gz->ptr, "draw_options",
-               ED_GIZMO_BUTTON_SHOW_OUTLINE | ED_GIZMO_BUTTON_SHOW_BACKDROP);
-  RNA_boolean_set(gz->ptr, "show_drag", false);
-  /* Each button draws its own round backdrop; use the panel theme colors so it reads like a
-   * regular UI panel chip. */
-  ui::theme::get_color_4fv(TH_PANEL_BACK, gz->color);
-  ui::theme::get_color_4fv(TH_PANEL_HEADER, gz->color_hi);
-
-  if (ot != nullptr) {
-    /* The buttons drive the ToolSettings directly through `wm.context_toggle` /
-     * `wm.context_cycle_enum`, so their state and the top-bar settings are the same value. */
-    PointerRNA *ptr = WM_gizmo_operator_set(gz, 0, ot, nullptr);
-    RNA_string_set(ptr, "data_path", data_path);
-    /* `wm.context_cycle_enum` only toggles a two-item enum when it wraps. */
-    if (RNA_struct_find_property(ptr, "wrap")) {
-      RNA_boolean_set(ptr, "wrap", true);
-    }
-  }
-  return gz;
-}
-
-/**
- * Decorative circle outline drawn over a button. `GIZMO_GT_button_2d` draws its own outline in the
- * same color as the fill (so it is invisible); this separate, non-selectable layer adds a readable
- * border in a contrasting theme color.
- */
-static wmGizmo *sculpt_cursor_screen_outline_new(const wmGizmoType *gzt, wmGizmoGroup *gzgroup)
-{
-  wmGizmo *gz = WM_gizmo_new_ptr(gzt, gzgroup, nullptr);
-  gz->scale_basis = 14.0f;
-  gz->flag |= WM_GIZMO_DRAW_OFFSET_SCALE | WM_GIZMO_HIDDEN_SELECT;
-  gz->line_width = 1.5f;
-  RNA_enum_set(gz->ptr, "draw_options", ED_GIZMO_BUTTON_SHOW_BACKDROP);
-  RNA_float_set(gz->ptr, "backdrop_fill_alpha", 0.0f);
-  ui::theme::get_color_4fv(TH_PANEL_OUTLINE, gz->color);
-  copy_v4_v4(gz->color_hi, gz->color);
-  return gz;
-}
-
-static void sculpt_cursor_buttons_setup(const bContext * /*C*/, wmGizmoGroup *gzgroup)
-{
-  SculptCursorButtonsGizmoGroup *ggd = MEM_new<SculptCursorButtonsGizmoGroup>(__func__);
-  gzgroup->customdata = ggd;
-  for (int i = 0; i < 2; i++) {
-    ggd->mode_button[i] = nullptr;
-    ggd->pin_button[i] = nullptr;
-    ggd->global_button[i] = nullptr;
-  }
-  ggd->mode_outline = nullptr;
-  ggd->pin_outline = nullptr;
-  ggd->global_outline = nullptr;
-
-  const wmGizmoType *gzt_button = WM_gizmotype_find("GIZMO_GT_button_2d", true);
-  wmOperatorType *ot_toggle = WM_operatortype_find("WM_OT_context_toggle", true);
-  wmOperatorType *ot_cycle = WM_operatortype_find("WM_OT_context_cycle_enum", true);
-  if (gzt_button == nullptr || ot_toggle == nullptr || ot_cycle == nullptr) {
-    return;
-  }
-
-  const char *mode_path = "tool_settings.sculpt.sculpt_cursor_mode";
-  const char *pin_path = "tool_settings.sculpt.pin_sculpt_cursor";
-  const char *shared_path = "tool_settings.sculpt.use_shared_sculpt_cursor";
-
-  /* Two icon variants per slot; the active one is chosen in #sculpt_cursor_buttons_draw_prepare. */
-  ggd->mode_button[0] = sculpt_cursor_screen_button_new(
-      gzt_button, gzgroup, ot_cycle, mode_path, ICON_PIVOT_CURSOR);
-  ggd->mode_button[1] = sculpt_cursor_screen_button_new(
-      gzt_button, gzgroup, ot_cycle, mode_path, ICON_STICKY_UVS_DISABLE);
-  ggd->pin_button[0] = sculpt_cursor_screen_button_new(
-      gzt_button, gzgroup, ot_toggle, pin_path, ICON_UNPINNED);
-  ggd->pin_button[1] = sculpt_cursor_screen_button_new(
-      gzt_button, gzgroup, ot_toggle, pin_path, ICON_PINNED);
-  ggd->global_button[0] = sculpt_cursor_screen_button_new(
-      gzt_button, gzgroup, ot_toggle, shared_path, ICON_GHOST_DISABLED);
-  ggd->global_button[1] = sculpt_cursor_screen_button_new(
-      gzt_button, gzgroup, ot_toggle, shared_path, ICON_GHOST_ENABLED);
-
-  /* Created last so they are drawn on top of the buttons. */
-  ggd->mode_outline = sculpt_cursor_screen_outline_new(gzt_button, gzgroup);
-  ggd->pin_outline = sculpt_cursor_screen_outline_new(gzt_button, gzgroup);
-  ggd->global_outline = sculpt_cursor_screen_outline_new(gzt_button, gzgroup);
-}
-
-/** Style a button as active (the theme's toggle-button color) or inactive (panel color). */
-static void sculpt_cursor_button_set_active(wmGizmo *gz, const bool active)
-{
-  if (active) {
-    const bTheme *btheme = ui::theme::theme_get();
-    if (btheme) {
-      const uiWidgetColors &wcol = btheme->tui.wcol_toggle;
-      rgba_uchar_to_float(gz->color, wcol.inner_sel);
-      rgba_uchar_to_float(gz->color_hi, wcol.inner_sel);
-      return;
-    }
-  }
-  float color[4];
-  ui::theme::get_color_4fv(TH_PANEL_BACK, color);
-  copy_v4_v4(gz->color, color);
-  ui::theme::get_color_4fv(TH_PANEL_HEADER, color);
-  copy_v4_v4(gz->color_hi, color);
-}
-
-static void sculpt_cursor_buttons_draw_prepare(const bContext *C, wmGizmoGroup *gzgroup)
-{
-  SculptCursorButtonsGizmoGroup *ggd = static_cast<SculptCursorButtonsGizmoGroup *>(
-      gzgroup->customdata);
-
-  wmGizmo *slots[3][2] = {
-      {ggd->mode_button[0], ggd->mode_button[1]},
-      {ggd->pin_button[0], ggd->pin_button[1]},
-      {ggd->global_button[0], ggd->global_button[1]},
-  };
-  wmGizmo *outlines[3] = {ggd->mode_outline, ggd->pin_outline, ggd->global_outline};
-
-  const auto hide = [&]() {
-    for (int i = 0; i < 3; i++) {
-      for (int v = 0; v < 2; v++) {
-        if (slots[i][v]) {
-          WM_gizmo_set_flag(slots[i][v], WM_GIZMO_HIDDEN, true);
-        }
-      }
-      if (outlines[i]) {
-        WM_gizmo_set_flag(outlines[i], WM_GIZMO_HIDDEN, true);
-      }
-    }
-  };
-
-  ARegion *region = CTX_wm_region(C);
-  Object *ob = CTX_data_active_object(C);
-  const Scene *scene = CTX_data_scene(C);
-  if (!region || !ob || !ob->runtime->sculpt_session || !scene) {
-    hide();
-    return;
-  }
-
-  /* Checked here rather than in the poll: a poll is not re-run when the setting changes, so the
-   * buttons would never come back. */
-  if (!sculpt_paint::cursor::is_enabled(*scene) ||
-      !sculpt_paint::cursor::buttons_visible_get(*scene))
-  {
-    hide();
-    return;
-  }
-
-  float world_mat[4][4];
-  sculpt_cursor_world_matrix_get(*scene, *ob, world_mat);
-
-  /* While a cursor handle is dragged the buttons fade out so the result stays visible. In Deform
-   * mode the cursor itself is only written when the Transform session ends, so follow the live
-   * Transform pivot the handles are drawn at (see #sculpt_cursor_gizmo_modal) instead. */
-  bool is_dragging = false;
-  if (const wmGizmo *modal_gz = region->runtime->gizmo_map ?
-                                    WM_gizmomap_get_modal(region->runtime->gizmo_map) :
-                                    nullptr)
-  {
-    if (modal_gz->parent_gzgroup &&
-        STREQ(modal_gz->parent_gzgroup->type->idname, "VIEW3D_GGT_sculpt_cursor"))
-    {
-      is_dragging = true;
-      const wmGizmoOpElem *gzop = WM_gizmo_operator_get(const_cast<wmGizmo *>(modal_gz), 0);
-      if (gzop && gzop->type && STRPREFIX(gzop->type->idname, "TRANSFORM_OT_")) {
-        copy_v3_v3(world_mat[3], ob->runtime->sculpt_session->transform_pivot_pos_world);
-      }
-    }
-  }
-  const float drag_alpha = 0.25f;
-
-  float co[2];
-  if (ED_view3d_project_float_global(region, world_mat[3], co, V3D_PROJ_TEST_CLIP_NEAR) !=
-      V3D_PROJ_RET_OK)
-  {
-    hide();
-    return;
-  }
-
-  const sculpt_paint::cursor::SculptCursorMode mode = sculpt_paint::cursor::mode_get(*scene);
-  const bool pin = sculpt_paint::cursor::pin_get(*scene);
-  const bool global = sculpt_paint::cursor::is_shared(*scene);
-
-  /* Which variant (off=0 / on=1) to show per slot, and whether that slot reads as "active". */
-  const int active_variant[3] = {
-      mode == sculpt_paint::cursor::SculptCursorMode::Deform ? 1 : 0,
-      pin ? 1 : 0,
-      global ? 1 : 0,
-  };
-  const bool slot_on[3] = {active_variant[0] == 1, pin, global};
-
-  /* A single row of buttons above the gizmo: [mode] [pin] [shared]. The cursor gizmo handles
-   * extend roughly `U.gizmo_size` UI pixels from the center, so keep the row above them. */
-  const float spacing = 34.0f * UI_SCALE_FAC;
-  const RegionView3D *rv3d = static_cast<const RegionView3D *>(region->regiondata);
-  const float gizmo_size = rv3d ? gizmo_size_factor_get(*scene, *ob, *rv3d, world_mat[3]) : 1.0f;
-  const float y_off = (max_ff(float(U.gizmo_size), 1.0f) * gizmo_size * 1.6f + 18.0f) *
-                      UI_SCALE_FAC;
-  for (int i = 0; i < 3; i++) {
-    const float x = co[0] + (float(i) - 1.0f) * spacing;
-    const float y = co[1] + y_off;
-    for (int v = 0; v < 2; v++) {
-      wmGizmo *gz = slots[i][v];
-      if (!gz) {
-        continue;
-      }
-      gz->matrix_basis[3][0] = x;
-      gz->matrix_basis[3][1] = y;
-      gz->matrix_basis[3][2] = 0.0f;
-      const bool visible = (v == active_variant[i]);
-      WM_gizmo_set_flag(gz, WM_GIZMO_HIDDEN, !visible);
-      if (visible) {
-        sculpt_cursor_button_set_active(gz, slot_on[i]);
-        if (is_dragging) {
-          gz->color[3] *= drag_alpha;
-          gz->color_hi[3] *= drag_alpha;
-        }
-      }
-    }
-    if (outlines[i]) {
-      outlines[i]->matrix_basis[3][0] = x;
-      outlines[i]->matrix_basis[3][1] = y;
-      outlines[i]->matrix_basis[3][2] = 0.0f;
-      ui::theme::get_color_4fv(TH_PANEL_OUTLINE, outlines[i]->color);
-      if (is_dragging) {
-        outlines[i]->color[3] *= drag_alpha;
-      }
-      copy_v4_v4(outlines[i]->color_hi, outlines[i]->color);
-      WM_gizmo_set_flag(outlines[i], WM_GIZMO_HIDDEN, false);
-    }
-  }
-}
-
-/** \} */
-
-void VIEW3D_GGT_sculpt_cursor_buttons(wmGizmoGroupType *gzgt)
-{
-  gzgt->name = "Sculpt Cursor Buttons";
-  gzgt->idname = "VIEW3D_GGT_sculpt_cursor_buttons";
-
-  gzgt->flag = WM_GIZMOGROUPTYPE_PERSISTENT | WM_GIZMOGROUPTYPE_SCALE |
-               WM_GIZMOGROUPTYPE_DRAW_MODAL_ALL;
-
-  gzgt->gzmap_params.spaceid = SPACE_VIEW3D;
-  gzgt->gzmap_params.regionid = RGN_TYPE_WINDOW;
-
-  gzgt->poll = sculpt_cursor_buttons_poll;
-  gzgt->setup = sculpt_cursor_buttons_setup;
-  gzgt->draw_prepare = sculpt_cursor_buttons_draw_prepare;
 }
 
 }  // namespace blender::ed::view3d

@@ -2488,6 +2488,38 @@ static void rna_LightLinking_collection_update(Main *bmain, Scene * /*scene*/, P
   WM_main_add_notifier(NC_OBJECT | ND_DRAW, ptr->owner_id);
 }
 
+static PointerRNA rna_Object_sculpt_cursor_get(PointerRNA *ptr)
+{
+  Object *ob = static_cast<Object *>(ptr->data);
+  return RNA_pointer_create_with_parent(*ptr, RNA_ObjectSculptCursor, ob);
+}
+
+static std::optional<std::string> rna_ObjectSculptCursor_path(const PointerRNA * /*ptr*/)
+{
+  return "sculpt_cursor";
+}
+
+static void rna_ObjectSculptCursor_matrix_world_get(PointerRNA *ptr, float *values)
+{
+  const Object *ob = static_cast<const Object *>(ptr->data);
+  /* Same orthonormal construction as the editors' cursor world matrix, but for the object's own
+   * stored cursor only: RNA has no scene access, so in shared mode the effective cursor (which
+   * follows the scene 3D cursor) differs. Rotation is orthonormalized, there is no scale. */
+  float local_rot[3][3];
+  quat_to_mat3(local_rot, ob->sculpt_cursor_rotation);
+  float ob_rot[3][3];
+  copy_m3_m4(ob_rot, ob->object_to_world().ptr());
+  normalize_m3(ob_rot);
+  float world_rot[3][3];
+  mul_m3_m3m3(world_rot, ob_rot, local_rot);
+  normalize_m3(world_rot);
+  float mat[4][4];
+  unit_m4(mat);
+  copy_m4_m3(mat, world_rot);
+  mul_v3_m4v3(mat[3], ob->object_to_world().ptr(), ob->sculpt_cursor_location);
+  std::copy_n(&mat[0][0], 16, values);
+}
+
 }  // namespace blender
 
 #else
@@ -4053,6 +4085,12 @@ static void rna_def_object(BlenderRNA *brna)
       prop, "Sculpt Cursor Initialized", "Whether the sculpt 3D cursor has been positioned");
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
 
+  prop = RNA_def_property(srna, "sculpt_cursor", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ObjectSculptCursor");
+  RNA_def_property_pointer_funcs(prop, "rna_Object_sculpt_cursor_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Sculpt Cursor", "Per-object sculpt 3D cursor");
+
   /* Shadow terminator. */
   prop = RNA_def_property(srna, "shadow_terminator_normal_offset", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_range(prop, 0.0f, FLT_MAX);
@@ -4195,6 +4233,50 @@ static void rna_def_object_light_linking(BlenderRNA *brna)
   RNA_define_lib_overridable(false);
 }
 
+static void rna_def_object_sculpt_cursor(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "ObjectSculptCursor", nullptr);
+  RNA_def_struct_sdna(srna, "Object");
+  RNA_def_struct_path_func(srna, "rna_ObjectSculptCursor_path");
+  RNA_def_struct_ui_text(srna,
+                         "Object Sculpt Cursor",
+                         "Per-object sculpt 3D cursor of the XNazir 3D Cursor core extension");
+
+  prop = RNA_def_property(srna, "location", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_cursor_location");
+  RNA_def_property_ui_text(
+      prop, "Location", "Object-space location of the sculpt 3D cursor");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "rotation", PROP_FLOAT, PROP_QUATERNION);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_cursor_rotation");
+  RNA_def_property_ui_text(
+      prop, "Rotation", "Object-space rotation of the sculpt 3D cursor");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "initialized", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_cursor_initialized", 1);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Initialized", "Whether the sculpt 3D cursor has been positioned");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "matrix_world", PROP_FLOAT, PROP_MATRIX);
+  RNA_def_property_multi_array(prop, 2, rna_matrix_dimsize_4x4);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_override_clear_flag(prop, PROPOVERRIDE_OVERRIDABLE_LIBRARY);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_NO_COMPARISON);
+  RNA_def_property_float_funcs(prop, "rna_ObjectSculptCursor_matrix_world_get", nullptr, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Matrix World",
+                           "World matrix of the object's own sculpt 3D cursor (orthonormal, no "
+                           "scale); in shared mode the effective cursor follows the scene 3D "
+                           "cursor instead");
+}
+
 void RNA_def_object(BlenderRNA *brna)
 {
   rna_def_object(brna);
@@ -4204,6 +4286,7 @@ void RNA_def_object(BlenderRNA *brna)
   rna_def_material_slot(brna);
   rna_def_object_display(brna);
   rna_def_object_lineart(brna);
+  rna_def_object_sculpt_cursor(brna);
   rna_def_object_light_linking(brna);
   rna_def_curve_patch_session(brna);
   RNA_define_animate_sdna(true);

@@ -33,6 +33,7 @@
 #include "BKE_context.hh"
 #include "BKE_layer.hh"
 #include "BKE_linestyle.h"
+#include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
@@ -384,6 +385,21 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
   if (!brush || !brush->material_paint || !brush->material_paint->source_material) {
+    return false;
+  }
+
+  /* Brushes are not part of undo, so the source material may point at a data-block that was removed
+   * since (see #BKE_brush_material_paint_stale_ids_clear). Building an RNA pointer from it would
+   * dereference freed memory on every redraw of the tab, so only accept materials still in Main. */
+  const Main *bmain = CTX_data_main(C);
+  bool source_in_main = false;
+  for (const Material &ma : bmain->materials) {
+    if (&ma == brush->material_paint->source_material) {
+      source_in_main = true;
+      break;
+    }
+  }
+  if (!source_in_main) {
     return false;
   }
 

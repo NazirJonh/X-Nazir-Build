@@ -39,8 +39,12 @@ from bpy.app.translations import (
     contexts as i18n_contexts,
 )
 from bpy.props import (
+    IntProperty,
     StringProperty,
     EnumProperty,
+    BoolProperty,
+    PointerProperty,
+    FloatVectorProperty,
 )
 
 # Register temporary property for tag context menu communication

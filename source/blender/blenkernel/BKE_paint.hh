@@ -1181,6 +1181,15 @@ void BKE_sculpt_mask_layers_ensure(Depsgraph *depsgraph,
                                    MultiresModifierData *mmd);
 void BKE_sculpt_toolsettings_data_ensure(Main *bmain, Scene *scene);
 
+/**
+ * Whether the XNazir 3D Cursor extension (user-defined custom buttons) is currently active.
+ * Process-lifetime runtime state, never written to files: with the extension off the sculpt cursor
+ * works as usual, only custom buttons are hidden and inert. Set from Python by the extension's
+ * `register()`/`unregister()` through `WindowManager.sculpt_cursor_addon_active`.
+ */
+bool BKE_sculpt_cursor_addon_active();
+void BKE_sculpt_cursor_addon_active_set(bool active);
+
 void BKE_sculpt_sync_face_visibility_to_grids(const Mesh &mesh, SubdivCCG &subdiv_ccg);
 
 /**

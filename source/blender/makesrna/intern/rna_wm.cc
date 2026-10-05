@@ -23,6 +23,7 @@
 
 #include "BLT_translation.hh"
 
+#include "BKE_paint.hh"
 #include "BKE_screen.hh"
 
 #include "RNA_define.hh"
@@ -1908,6 +1909,27 @@ static bool rna_WindowManager_is_event_handling_break_get(PointerRNA *ptr)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(ptr->data);
   return wm->runtime->break_events_handling;
+}
+
+/* Runtime state of the XNazir 3D Cursor core extension, stored as process memory in blenkernel
+ * (see #BKE_sculpt_cursor_addon_active): the window manager is never written to files, so this
+ * property is inherently unsaved. Set by the extension's `register()`/`unregister()`. */
+static bool rna_WindowManager_sculpt_cursor_addon_active_get(PointerRNA * /*ptr*/)
+{
+  return BKE_sculpt_cursor_addon_active();
+}
+
+static void rna_WindowManager_sculpt_cursor_addon_active_set(PointerRNA * /*ptr*/, bool value)
+{
+  BKE_sculpt_cursor_addon_active_set(value);
+}
+
+static void rna_WindowManager_sculpt_cursor_addon_active_update(Main * /*bmain*/,
+                                                                Scene * /*scene*/,
+                                                                PointerRNA * /*ptr*/)
+{
+  /* Gizmo group polls are re-evaluated on redraw, so a full redraw applies the toggle. */
+  WM_main_add_notifier(NC_WINDOW, nullptr);
 }
 
 /* Thumbnail size of the brush-texture image grid. Shared by every host of the grid, so it lives on
@@ -4000,6 +4022,17 @@ static void rna_def_windowmanager(BlenderRNA *brna)
       "Runtime state of the sculpt-mode insert tools: hide the placement gizmo's aiming plane "
       "once the placement moves on from picking the surface (not part of undo)");
   RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  prop = RNA_def_property(srna, "sculpt_cursor_addon_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_WindowManager_sculpt_cursor_addon_active_get",
+                                 "rna_WindowManager_sculpt_cursor_addon_active_set");
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+  RNA_def_property_ui_text(prop,
+                            "Sculpt Cursor Extension Active",
+                            "Runtime state of the XNazir 3D Cursor core extension, "
+                            "set by its register/unregister (not saved)");
+  RNA_def_property_update(prop, 0, "rna_WindowManager_sculpt_cursor_addon_active_update");
 
   prop = RNA_def_property(srna, "xr_session_settings", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "xr.session_settings");

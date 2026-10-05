@@ -1917,6 +1917,26 @@ void blo_do_versions_userdef(UserDef *userdef)
     userdef->category_tabs_clipboard_use_default_dir = true;
   }
 
+  if (!USER_VERSION_ATLEAST(502, 81)) {
+    /* Enable the bundled 3D cursor extension once, so users can still disable it afterwards. */
+    BKE_addon_ensure(&userdef->addons, "bl_ext.system.xnazir_3d_cursor");
+  }
+
+  if (!USER_VERSION_ATLEAST(502, 82)) {
+    /* The glyph and the image file used to be shared by both states of a cursor button; keep the
+     * active state looking as before now that it has its own icon source. */
+    for (SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+      if (btn.icon_source != SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON) {
+        btn.icon_active_source = btn.icon_source;
+        STRNCPY(btn.glyph_active, btn.glyph);
+        STRNCPY(btn.icon_active_path, btn.icon_path);
+      }
+      else {
+        btn.icon_active_source = SCULPT_CURSOR_BUTTON_ICON_SOURCE_BLENDER_ICON;
+      }
+    }
+  }
+
   /* Seed core Principled BSDF map types when the list is empty.
    * Call unconditionally (not version-gated): #BKE_name_matching_userdef_ensure_defaults is
    * idempotent, and prefs may already be at the current subversion with an empty list

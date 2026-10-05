@@ -1238,6 +1238,13 @@ static void write_userdef(BlendWriter *writer, const UserDef *userdef)
     }
   }
 
+  for (const SculptCursorButton &btn : userdef->sculpt_cursor_buttons) {
+    writer->write_struct(&btn);
+    if (btn.properties) {
+      IDP_BlendWrite(writer, btn.properties);
+    }
+  }
+
   for (const bPathCompare &path_cmp : userdef->autoexec_paths) {
     writer->write_struct(&path_cmp);
   }

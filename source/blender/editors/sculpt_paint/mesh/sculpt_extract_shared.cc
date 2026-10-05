@@ -16,12 +16,14 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
+#include "BKE_multires.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_subdiv_ccg.hh"
 #include "BKE_unit.hh"
 
 #include "DNA_key_types.h"
@@ -122,6 +124,27 @@ BMesh *create_modal_bmesh(Object *obact, bke::pbvh::Type pbvh_type)
   BM_mesh_elem_index_ensure(bm, BM_VERT | BM_EDGE | BM_FACE);
   BM_mesh_elem_table_ensure(bm, BM_VERT | BM_EDGE | BM_FACE);
   return bm;
+}
+
+Array<float3> grids_vert_positions(const Object &obact)
+{
+  const SculptSession &ss = *obact.runtime->sculpt_session;
+  const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+
+  /* Each coarse vertex is shared by one grid corner per adjacent face; grid boundaries
+   * are stitched together (#BKE_subdiv_ccg_average_grids), so any one of them holds the
+   * vertex's current displaced position. */
+  Array<float3> positions(subdiv_ccg.adjacent_verts.size());
+  for (const int i : positions.index_range()) {
+    const Span<SubdivCCGCoord> corner_coords = subdiv_ccg.adjacent_verts[i].corner_coords;
+    if (corner_coords.is_empty()) {
+      positions[i] = float3(0.0f);
+      continue;
+    }
+    positions[i] = subdiv_ccg.positions[corner_coords[0].to_index(key)];
+  }
+  return positions;
 }
 
 /** \} */
@@ -419,6 +442,11 @@ bool extrude_begin(bContext &C,
     return false;
   }
 
+  /* #create_edit_bmesh_for_extrude builds straight from the base mesh, so on a Multires
+   * object its vertices start out at the undisplaced cage positions. Pull them onto the
+   * sculpted limit surface so the extrude starts from the surface the user actually sees. */
+  update_bmesh_positions_from_preview(shared, ex.edit_bm);
+
   tag_faces_on_bmesh(ex.edit_bm, region_faces);
 
   BMOperator bmo_op;
@@ -504,6 +532,12 @@ void extrude_commit(bContext &C, wmOperator *op, ExtractSharedData &shared, Extr
 
   undo::geometry_begin(scene, ob, op);
 
+  /* Flush any pending Multires CCG displacement into #CD_MDISPS while the base mesh
+   * topology still matches the grids, and clear the CCG dirty flags. Otherwise the
+   * depsgraph re-evaluation below would try to reshape the (now stale) CCG onto the
+   * mesh's new topology, evaluating out-of-range patches in OpenSubdiv. */
+  multires_force_sculpt_rebuild(&ob);
+
   BMeshToMeshParams bm_to_mesh_params{};
   bm_to_mesh_params.calc_object_remap = false;
   BM_mesh_bm_to_me(nullptr, ex.edit_bm, mesh, &bm_to_mesh_params);
@@ -546,15 +580,18 @@ BMesh *create_source_bmesh_for_new_object(const Mesh &mesh)
   return bm;
 }
 
-void update_bmesh_positions_from_preview(ExtractSharedData &shared)
+void update_bmesh_positions_from_preview(ExtractSharedData &shared, BMesh *target_bm)
 {
   if (shared.pbvh_type == bke::pbvh::Type::BMesh || shared.preview_positions.is_empty()) {
     return;
   }
+  if (!target_bm) {
+    target_bm = shared.bm;
+  }
 
   BMVert *v;
   BMIter iter;
-  BM_ITER_MESH (v, &iter, shared.bm, BM_VERTS_OF_MESH) {
+  BM_ITER_MESH (v, &iter, target_bm, BM_VERTS_OF_MESH) {
     const int idx = BM_elem_index_get(v);
     if (idx >= 0 && idx < shared.preview_positions.size()) {
       copy_v3_v3(v->co, shared.preview_positions[idx]);
@@ -692,10 +729,8 @@ void hover_refresh_preview_positions(bContext *C, ExtractSharedData &shared, Obj
     }
   }
   else if (shared.pbvh_type == bke::pbvh::Type::Grids) {
-    Mesh *mesh = BKE_object_get_original_mesh(obact);
-    if (mesh) {
-      shared.preview_positions = mesh->vert_positions();
-    }
+    shared.preview_positions_storage = grids_vert_positions(*obact);
+    shared.preview_positions = shared.preview_positions_storage;
   }
 }
 

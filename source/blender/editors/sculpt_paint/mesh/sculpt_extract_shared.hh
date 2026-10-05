@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include "BLI_array.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -38,9 +39,13 @@ namespace blender::ed::sculpt_paint::extract {
 struct ExtractSharedData {
   BMesh *bm = nullptr;
   bke::pbvh::Type pbvh_type = bke::pbvh::Type::Mesh;
-  /* Evaluated vertex positions for Mesh PBVH; cage positions for Grids PBVH;
-   * empty for BMesh PBVH (#vert_position falls back to #BMVert.co). */
+  /* Evaluated vertex positions for Mesh PBVH; multires limit surface with sculpted
+   * displacement for Grids PBVH (see #grids_vert_positions); empty for BMesh PBVH
+   * (#vert_position falls back to #BMVert.co). */
   Span<float3> preview_positions;
+  /* Backing storage for #preview_positions when it is computed rather than aliased
+   * (currently only the Grids PBVH case). Unused otherwise. */
+  Array<float3> preview_positions_storage;
 
   /* The region/strip of faces to extrude or extract. */
   Vector<BMFace *> preview_faces;
@@ -92,6 +97,9 @@ struct ExtrudeState {
 
 /* --- Modal BMesh construction (_shared.cc). --- */
 BMesh *create_modal_bmesh(Object *obact, bke::pbvh::Type pbvh_type);
+/* Per base-vertex positions on the multires limit surface with sculpted displacement
+ * applied, indexed like #Mesh::vert_positions (Grids PBVH only). */
+Array<float3> grids_vert_positions(const Object &obact);
 
 /* --- Face preview drawing (_shared.cc). --- */
 /* When \a boundary_only is true the outline is drawn only along the region
@@ -118,9 +126,11 @@ void extrude_update_status_text(bContext *C, const ExtrudeState &ex);
 /* Build a fresh tool-flagged BMesh from \a mesh, with index and element tables ensured so
  * callers can map preview data onto it by index. */
 BMesh *create_source_bmesh_for_new_object(const Mesh &mesh);
-/* Copy #preview_positions onto the vertices of #shared.bm, matched by vertex index.
- * A no-op for BMesh PBVH, where #BMVert.co already holds the live positions. */
-void update_bmesh_positions_from_preview(ExtractSharedData &shared);
+/* Copy #preview_positions onto the vertices of \a target_bm (defaults to #shared.bm),
+ * matched by vertex index. A no-op for BMesh PBVH, where #BMVert.co already holds the
+ * live positions. \a target_bm must be built from the same base mesh topology, e.g. by
+ * #create_modal_bmesh or #create_edit_bmesh_for_extrude, so indices line up. */
+void update_bmesh_positions_from_preview(ExtractSharedData &shared, BMesh *target_bm = nullptr);
 Mesh *build_extracted_mesh_from_faces(bContext &C, ExtractSharedData &shared);
 void create_mesh_in_new_object(bContext &C, ExtractSharedData &shared);
 

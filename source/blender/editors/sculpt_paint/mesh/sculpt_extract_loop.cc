@@ -413,8 +413,9 @@ static wmOperatorStatus gesture_invoke(bContext *C, wmOperator *op, const wmEven
                                                                          *data->shared.base.obact);
   }
   else if (data->shared.base.pbvh_type == bke::pbvh::Type::Grids) {
-    Mesh *mesh = id_cast<Mesh *>(data->shared.base.obact->data);
-    data->shared.base.preview_positions = mesh->vert_positions();
+    data->shared.base.preview_positions_storage = extract::grids_vert_positions(
+        *data->shared.base.obact);
+    data->shared.base.preview_positions = data->shared.base.preview_positions_storage;
   }
 
   rebuild_boundary_edge_cache(data->shared);

@@ -369,8 +369,8 @@ static wmOperatorStatus gesture_invoke(bContext *C, wmOperator *op, const wmEven
     data->shared.preview_positions = bke::pbvh::vert_positions_eval(depsgraph, *data->shared.obact);
   }
   else if (data->shared.pbvh_type == bke::pbvh::Type::Grids) {
-    Mesh *mesh = id_cast<Mesh *>(data->shared.obact->data);
-    data->shared.preview_positions = mesh->vert_positions();
+    data->shared.preview_positions_storage = extract::grids_vert_positions(*data->shared.obact);
+    data->shared.preview_positions = data->shared.preview_positions_storage;
   }
 
   op->customdata = data;

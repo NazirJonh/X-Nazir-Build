@@ -807,12 +807,24 @@ static float4x4 drop_preview_symmetry_flip_matrix(const ePaintSymmetryFlags symm
   return flip;
 }
 
-static float4x4 drop_preview_world_matrix_for_symmetry_pass(const Object &active_ob_eval,
-                                                           const float4x4 &snap_world,
-                                                           const ePaintSymmetryFlags symmpass)
+/**
+ * \a world_to_symm is #ed::sculpt_paint::symmetry_world_frame_get, the plane the drop operator
+ * itself mirrors across (Symmetry Space = World / Cursor); without it the mirror is across the
+ * active object's local axes. Both give the same result as `world_matrix_for_symmetry_pass` in
+ * `sculpt_asset_drop.cc`, so the preview matches what is inserted.
+ */
+static float4x4 drop_preview_world_matrix_for_symmetry_pass(
+    const Object &active_ob_eval,
+    const std::optional<float4x4> &world_to_symm,
+    const float4x4 &snap_world,
+    const ePaintSymmetryFlags symmpass)
 {
   if (symmpass == PAINT_SYMM_NONE) {
     return snap_world;
+  }
+  if (world_to_symm) {
+    return math::invert(*world_to_symm) * drop_preview_symmetry_flip_matrix(symmpass) *
+           *world_to_symm * snap_world;
   }
   const float4x4 local = active_ob_eval.world_to_object() * snap_world;
   const float4x4 local_flipped = drop_preview_symmetry_flip_matrix(symmpass) * local;
@@ -984,9 +996,12 @@ void preview_draw_paint_cursor(bContext *C,
           ePaintSymmetryFlags(id_cast<const Mesh *>(active_ob->data)->symmetry) :
           PAINT_SYMM_NONE;
   const Object *active_ob_eval = nullptr;
+  std::optional<float4x4> world_to_symm;
   if (symm != PAINT_SYMM_NONE) {
     Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
     active_ob_eval = DEG_get_evaluated(depsgraph, active_ob);
+    world_to_symm = ed::sculpt_paint::symmetry_world_frame_get(*CTX_data_scene(C),
+                                                               *active_ob_eval);
   }
 
   const float4x4 snap_world = float4x4(m_drop);
@@ -1003,7 +1018,7 @@ void preview_draw_paint_cursor(bContext *C,
     }
     else {
       const float4x4 world_mat = drop_preview_world_matrix_for_symmetry_pass(
-          *active_ob_eval, snap_world, ePaintSymmetryFlags(symmpass));
+          *active_ob_eval, world_to_symm, snap_world, ePaintSymmetryFlags(symmpass));
       copy_m4_m4(m_drop_pass, world_mat.ptr());
     }
 

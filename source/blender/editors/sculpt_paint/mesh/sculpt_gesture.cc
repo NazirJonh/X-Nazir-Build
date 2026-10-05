@@ -605,20 +605,18 @@ void apply(bContext &C, GestureData &gesture_data, wmOperator &op)
 
   /* Shared multi-object symmetry frame for Global World Origin / Global 3D Cursor
    * `symmetry_space` -- mirrors around world axes (optionally through the 3D cursor) instead of
-   * each object's own local origin. Gated on more than one object so single-object gestures stay
-   * bit-exact regardless of the symmetry_space setting, matching the brush-stroke
-   * `multi_object_stroke` discipline. The frame itself is constant across objects/passes; only
-   * `symmpass` (read separately per pass) varies the actual mirror. */
-  const ePaintSymmetrySpace symmetry_space = ePaintSymmetrySpace(
-      gesture_data.paint->symmetry_space);
-  gesture_data.use_shared_symmetry_frame = gesture_data.objects.size() > 1 &&
-                                           symmetry_space != PAINT_SYMM_SPACE_ACTIVE_OBJECT;
+   * each object's own local origin. Engaged for ANY object count in the non-local spaces, so a
+   * single-object gesture follows the same plane the overlays draw and the brush strokes mirror
+   * across (the plane placed with the sculpt cursor gizmo when Symmetry Cursor is Sculpt);
+   * Symmetry Space = Object keeps the historical per-object local mirror. The frame itself is
+   * constant across objects/passes; only `symmpass` (read separately per pass) varies the actual
+   * mirror. */
+  const std::optional<float4x4> world_to_symm_space = symmetry_world_frame_get(
+      *gesture_data.vc.scene, *gesture_data.objects.first());
+  gesture_data.use_shared_symmetry_frame = world_to_symm_space.has_value();
   if (gesture_data.use_shared_symmetry_frame) {
-    const float4x4 cursor_to_world = cursor::symmetry_cursor_to_world(
-        *gesture_data.vc.scene, *gesture_data.objects.first());
-    gesture_data.world_to_symm_space = symmetry_space_frame(
-        symmetry_space, gesture_data.objects.first()->world_to_object(), cursor_to_world);
-    gesture_data.symm_space_to_world = math::invert(gesture_data.world_to_symm_space);
+    gesture_data.world_to_symm_space = *world_to_symm_space;
+    gesture_data.symm_space_to_world = math::invert(*world_to_symm_space);
   }
 
   for (Object *object : gesture_data.objects) {

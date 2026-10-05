@@ -94,6 +94,7 @@
 #include "../paint_intern.hh"
 #include "sculpt_face_set.hh"
 #include "sculpt_intern.hh"
+#include "sculpt_multi_object.hh"
 
 namespace blender::ed::sculpt_paint::asset_drop {
 
@@ -164,10 +165,31 @@ static float4x4 symmetry_flip_matrix(const ePaintSymmetryFlags symmpass)
 }
 
 /**
- * Mirror a world-space placement through the active object's local symmetry axes.
+ * Reflection for one symmetry pass, expressed in the active object's local space.
+ *
+ * `world_to_symm` is the shared frame from #symmetry_world_frame_get (Symmetry Space = World /
+ * Cursor); the flip is applied in that space so the dropped copies mirror across the same plane
+ * as brush strokes, gestures and the overlays. Without it (Symmetry Space = Object) the flip is
+ * across the object's own local axes, as before.
+ */
+static float4x4 symmetry_local_mirror_matrix(const Object &active_ob,
+                                             const std::optional<float4x4> &world_to_symm,
+                                             const ePaintSymmetryFlags symmpass)
+{
+  const float4x4 flip = symmetry_flip_matrix(symmpass);
+  if (!world_to_symm) {
+    return flip;
+  }
+  const float4x4 to_symm = *world_to_symm * active_ob.object_to_world();
+  return math::invert(to_symm) * flip * to_symm;
+}
+
+/**
+ * Mirror a world-space placement across the symmetry plane of the active object.
  * Pass 0 (#PAINT_SYMM_NONE) returns `snap_world` unchanged.
  */
 static float4x4 world_matrix_for_symmetry_pass(const Object &active_ob_eval,
+                                              const std::optional<float4x4> &world_to_symm,
                                               const float4x4 &snap_world,
                                               const ePaintSymmetryFlags symmpass)
 {
@@ -175,7 +197,9 @@ static float4x4 world_matrix_for_symmetry_pass(const Object &active_ob_eval,
     return snap_world;
   }
   const float4x4 local = active_ob_eval.world_to_object() * snap_world;
-  const float4x4 local_flipped = symmetry_flip_matrix(symmpass) * local;
+  const float4x4 local_flipped = symmetry_local_mirror_matrix(
+                                     active_ob_eval, world_to_symm, symmpass) *
+                                 local;
   return active_ob_eval.object_to_world() * local_flipped;
 }
 
@@ -183,14 +207,18 @@ static float4x4 world_matrix_for_symmetry_pass(const Object &active_ob_eval,
  * Mirror mesh vertices already expressed in the active sculpt object's local space.
  * Odd numbers of axis flips reverse face winding, so faces are flipped to keep normals outward.
  */
-static void mesh_flip_positions_for_symmetry(Mesh &mesh, const ePaintSymmetryFlags symmpass)
+static void mesh_flip_positions_for_symmetry(Mesh &mesh,
+                                             const Object &active_ob,
+                                             const std::optional<float4x4> &world_to_symm,
+                                             const ePaintSymmetryFlags symmpass)
 {
   if (symmpass == PAINT_SYMM_NONE) {
     return;
   }
+  const float4x4 mirror = symmetry_local_mirror_matrix(active_ob, world_to_symm, symmpass);
   MutableSpan<float3> positions = mesh.vert_positions_for_write();
   for (float3 &co : positions) {
-    co = symmetry_flip(co, symmpass);
+    co = math::transform_point(mirror, co);
   }
   mesh.tag_positions_changed();
   if (count_bits_i(uint(symmpass) & uint(PAINT_SYMM_AXIS_ALL)) % 2 == 1) {
@@ -423,7 +451,8 @@ static void join_asset_into_active(Object &active_ob,
                                    const bool use_face_sets,
                                    const bool replace_face_sets,
                                    const std::optional<float3> face_set_color,
-                                   const bool apply_mask)
+                                   const bool apply_mask,
+                                   const std::optional<float4x4> &world_to_symm)
 {
   Mesh &sculpt_mesh = *id_cast<Mesh *>(active_ob.data);
 
@@ -459,7 +488,8 @@ static void join_asset_into_active(Object &active_ob,
       continue;
     }
     Mesh *copy = BKE_mesh_copy_for_eval(asset_mesh);
-    mesh_flip_positions_for_symmetry(*copy, ePaintSymmetryFlags(symmpass));
+    mesh_flip_positions_for_symmetry(
+        *copy, active_ob, world_to_symm, ePaintSymmetryFlags(symmpass));
     symmetry_copies.append(copy);
     geosets.append(bke::GeometrySet::from_mesh(copy, bke::GeometryOwnershipType::ReadOnly));
   }
@@ -670,6 +700,7 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
   Object *target_ob = &active_ob;
   Mesh *target_mesh = nullptr;
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(active_ob);
+  const std::optional<float4x4> world_to_symm = symmetry_world_frame_get(*scene, active_ob);
 
   if (join_to_active) {
     target_mesh = id_cast<Mesh *>(active_ob.data);
@@ -691,7 +722,8 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
         continue;
       }
       Mesh *copy = BKE_mesh_copy_for_eval(*dropped_mesh);
-      mesh_flip_positions_for_symmetry(*copy, ePaintSymmetryFlags(symmpass));
+      mesh_flip_positions_for_symmetry(
+          *copy, active_ob, world_to_symm, ePaintSymmetryFlags(symmpass));
       symmetry_copies.append(copy);
       all_geosets.append(bke::GeometrySet::from_mesh(copy, bke::GeometryOwnershipType::ReadOnly));
     }
@@ -779,7 +811,7 @@ static wmOperatorStatus sculpt_collection_drop_exec(bContext *C,
 
       if (has_placement) {
         const float4x4 world_mat = world_matrix_for_symmetry_pass(
-            *active_ob_eval, placement, ePaintSymmetryFlags(symmpass));
+            *active_ob_eval, world_to_symm, placement, ePaintSymmetryFlags(symmpass));
         BKE_object_apply_mat4(new_ob, world_mat.ptr(), false, true);
       }
 
@@ -912,7 +944,8 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
                            RNA_boolean_get(op->ptr, "use_face_sets"),
                            replace_face_sets,
                            face_set_color,
-                           apply_mask);
+                           apply_mask,
+                           symmetry_world_frame_get(*scene, *active_ob));
     BKE_id_free(nullptr, asset_mesh);
 
     /* Placement origin for the cursor: the snap matrix when set, else the asset's own world
@@ -974,6 +1007,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(*active_ob);
   const Object *active_ob_eval = DEG_get_evaluated(depsgraph, active_ob);
   const Object *asset_eval = DEG_get_evaluated(depsgraph, asset_ob);
+  const std::optional<float4x4> world_to_symm = symmetry_world_frame_get(*scene, *active_ob);
 
   float4x4 placement = float4x4::identity();
   bool has_placement = has_snap;
@@ -1021,7 +1055,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
 
     if (has_placement) {
       const float4x4 world_mat = world_matrix_for_symmetry_pass(
-          *active_ob_eval, placement, ePaintSymmetryFlags(symmpass));
+          *active_ob_eval, world_to_symm, placement, ePaintSymmetryFlags(symmpass));
       BKE_object_apply_mat4(ob, world_mat.ptr(), false, true);
       DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
     }
@@ -1301,6 +1335,7 @@ static bool asset_drop_batch_join(Depsgraph &depsgraph,
                                   const bool replace_face_sets,
                                   const std::optional<float3> face_set_color,
                                   const bool apply_mask,
+                                  const std::optional<float4x4> &world_to_symm,
                                   bool &r_partial)
 {
   Mesh &sculpt_mesh = *id_cast<Mesh *>(active_ob.data);
@@ -1357,7 +1392,8 @@ static bool asset_drop_batch_join(Depsgraph &depsgraph,
         continue;
       }
       Mesh *copy = BKE_mesh_copy_for_eval(*asset_mesh);
-      mesh_flip_positions_for_symmetry(*copy, ePaintSymmetryFlags(symmpass));
+      mesh_flip_positions_for_symmetry(
+          *copy, active_ob, world_to_symm, ePaintSymmetryFlags(symmpass));
       temp_meshes.append(copy);
       geosets.append(bke::GeometrySet::from_mesh(copy, bke::GeometryOwnershipType::ReadOnly));
     }
@@ -1413,6 +1449,7 @@ static void asset_drop_batch_place_separate(Main &bmain,
 {
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(active_ob);
   const Object *active_ob_eval = DEG_get_evaluated(&depsgraph, &active_ob);
+  const std::optional<float4x4> world_to_symm = symmetry_world_frame_get(scene, active_ob);
   const eDupli_ID_Flags dupflag = linked ? eDupli_ID_Flags{} : eDupli_ID_Flags(U.dupflag);
 
   BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
@@ -1454,7 +1491,7 @@ static void asset_drop_batch_place_separate(Main &bmain,
         copy_m4_m4(ob->parentinv, parent_inverse.ptr());
       }
       const float4x4 world_mat = world_matrix_for_symmetry_pass(
-          *active_ob_eval, placement.matrix, ePaintSymmetryFlags(symmpass));
+          *active_ob_eval, world_to_symm, placement.matrix, ePaintSymmetryFlags(symmpass));
       BKE_object_apply_mat4(ob, world_mat.ptr(), false, true);
       DEG_id_tag_update(&ob->id, ID_RECALC_TRANSFORM);
     }
@@ -1523,6 +1560,7 @@ static wmOperatorStatus sculpt_mesh_asset_drop_batch_exec(bContext *C, wmOperato
                                replace_face_sets,
                                face_set_color,
                                apply_mask,
+                               symmetry_world_frame_get(*scene, *active_ob),
                                partial))
     {
       return OPERATOR_CANCELLED;

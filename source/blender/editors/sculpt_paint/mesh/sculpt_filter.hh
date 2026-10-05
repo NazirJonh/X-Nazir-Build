@@ -91,6 +91,27 @@ struct TransformProportional {
   Array<bool> prev_nodes;
 };
 
+/**
+ * The shared symmetry frame captured once per object at Transform-session start (see
+ * #symmetry_world_frame_get): the mirror plane the whole session is reflected across, expressed
+ * per object as object-local -> symmetry-space. Engaged for Symmetry Space = World / Cursor -- the
+ * plane placed with the sculpt cursor gizmo when Symmetry Cursor is Sculpt -- so the Transform
+ * (and the cursor's DEFORM drag, which runs through it) mirrors across the same plane the overlays
+ * draw and brush strokes use. Inactive for Symmetry Space = Object, which keeps the historical
+ * per-object local mirror (octant/pivot-sign flips) bit-exact.
+ *
+ * Captured once instead of read per modal step because the cursor can be the transform pivot
+ * itself: in DEFORM cursor mode the drag writes the pivot back into the cursor, so a per-step read
+ * would make the mirror plane chase the deformed pivot.
+ */
+struct TransformSymmetryFrame {
+  bool active = false;
+  /** Object-local -> symmetry space. Identity (unused) when #active is false. */
+  float4x4 to_symm = float4x4::identity();
+  /** Inverse of #to_symm. */
+  float4x4 from_symm = float4x4::identity();
+};
+
 struct Cache {
   std::array<bool, 3> enabled_axis;
   int random_seed;
@@ -158,6 +179,9 @@ struct Cache {
 
   TransformDisplacementMode transform_displacement_mode;
   TransformProportional proportional;
+
+  /** Shared symmetry plane for World/Cursor Symmetry Space, see #TransformSymmetryFrame. */
+  TransformSymmetryFrame symmetry_frame;
 
   std::unique_ptr<auto_mask::Cache> automasking;
   float3 initial_normal;

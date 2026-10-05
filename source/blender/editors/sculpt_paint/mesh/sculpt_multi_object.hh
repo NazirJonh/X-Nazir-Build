@@ -17,6 +17,8 @@
 
 #include "DNA_scene_enums.h"
 
+#include "ED_sculpt.hh"
+
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -32,6 +34,8 @@ namespace blender::ed::sculpt_paint {
 float4x4 symmetry_space_frame(ePaintSymmetrySpace symmetry_space,
                               const float4x4 &reference_world_to_object,
                               const float4x4 &cursor_to_world);
+
+/* #symmetry_world_frame_get is declared in `ED_sculpt.hh`, shared with the RNA API. */
 
 /**
  * One symmetry pass's brush daub, in world space.

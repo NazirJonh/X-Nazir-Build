@@ -78,6 +78,7 @@ static const EnumPropertyItem space_items[] = {
 
 #  include "ED_object.hh"
 #  include "ED_screen.hh"
+#  include "ED_sculpt.hh"
 
 #  include "DNA_curve_types.h"
 #  include "DNA_key_types.h"
@@ -383,6 +384,21 @@ static void rna_Object_calc_matrix_camera(Object *ob,
   BKE_camera_params_compute_matrix(&params);
 
   copy_m4_m4(reinterpret_cast<float (*)[4]>(mat_ret), params.winmat);
+}
+
+static void rna_Object_sculpt_symmetry_frame(Object *ob,
+                                             Depsgraph *depsgraph,
+                                             Scene *scene,
+                                             float mat_ret[16])
+{
+  /* The evaluated object, like the insert operator, which mirrors through the evaluated transform
+   * (the original goes stale under animation, drivers or constraints). Symmetry Space = Object has
+   * no shared frame; `world_to_object` makes the object-local symmetry-space transform an
+   * identity, which is the per-object local mirror. */
+  const Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+  const float4x4 frame = ed::sculpt_paint::symmetry_world_frame_get(*scene, *ob_eval)
+                             .value_or(ob_eval->world_to_object());
+  memcpy(mat_ret, frame.ptr(), sizeof(float) * 16);
 }
 
 static void rna_Object_camera_fit_coords(Object *ob,
@@ -1037,6 +1053,24 @@ void RNA_api_object(StructRNA *srna)
       func, "scale_x", 1.0f, 1.0e-6f, FLT_MAX, "", "Width scaling factor", 1.0e-2f, 100.0f);
   parm = RNA_def_float(
       func, "scale_y", 1.0f, 1.0e-6f, FLT_MAX, "", "Height scaling factor", 1.0e-2f, 100.0f);
+
+  /* Sculpt symmetry. */
+  func = RNA_def_function(srna, "sculpt_symmetry_frame", "rna_Object_sculpt_symmetry_frame");
+  RNA_def_function_ui_description(
+      func,
+      "World to symmetry-space matrix the sculpt tools mirror across (Symmetry Space and Symmetry "
+      "Cursor resolved with this object as the reference). For Symmetry Space = Object it is the "
+      "object's own world to local matrix, so mirroring across the local axes is the same "
+      "expression");
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get the evaluated object from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "scene", "Scene", "", "Scene whose tool settings to read");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_property(func, "matrix_return", PROP_FLOAT, PROP_MATRIX);
+  RNA_def_property_multi_array(parm, 2, rna_matrix_dimsize_4x4);
+  RNA_def_property_ui_text(parm, "", "The world to symmetry-space matrix");
+  RNA_def_function_output(func, parm);
 
   func = RNA_def_function(srna, "camera_fit_coords", "rna_Object_camera_fit_coords");
   RNA_def_function_ui_description(func,

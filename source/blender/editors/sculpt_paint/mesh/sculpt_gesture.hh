@@ -136,14 +136,15 @@ struct GestureData {
   std::array<float3, 4> line_plane_points;
   std::array<float3, 2> line_offset_plane_points;
 
-  /* Shared multi-object symmetry frame for `Paint.symmetry_space` == Global World Origin / Global
-   * 3D Cursor (see #symmetry_space_frame in sculpt_multi_object.hh). True only when there is more
-   * than one object AND symmetry_space != Active Object -- single-object gestures and Active
-   * Object space keep the historical per-object local mirror (around each object's own origin),
-   * bit-exact. Recomputed once per #apply() call from the reference object (`objects[0]`); unlike
-   * `symmpass`, the frame itself does not vary between symmetry passes or objects. Consumed by
-   * #flip_for_symmetry_pass, #is_affected_lasso, and #mirror_world_point (also used by
-   * gesture operations that mirror their own generated geometry, e.g. Trim). */
+  /* Shared symmetry frame for `Paint.symmetry_space` == Global World Origin / Global 3D Cursor
+   * (resolved once by #symmetry_world_frame_get, which also reads the Symmetry Cursor source).
+   * True for ANY object count in those spaces, so a single-object gesture follows the same plane
+   * the overlays draw and the brush strokes mirror across; Active Object space keeps the
+   * historical per-object local mirror (around each object's own origin), bit-exact. Recomputed
+   * once per #apply() call from the reference object (`objects[0]`); unlike `symmpass`, the frame
+   * itself does not vary between symmetry passes or objects. Consumed by #flip_for_symmetry_pass,
+   * #is_affected_lasso, and #mirror_world_point (also used by gesture operations that mirror
+   * their own generated geometry, e.g. Trim). */
   bool use_shared_symmetry_frame = false;
   float4x4 world_to_symm_space = float4x4::identity();
   float4x4 symm_space_to_world = float4x4::identity();

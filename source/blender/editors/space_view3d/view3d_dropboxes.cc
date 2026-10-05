@@ -164,6 +164,13 @@ struct SculptDropFlags {
   /* Cursor placement mode (C key), carried over between drops like the flags above. */
   ed::view3d::sculpt_drop_preview::CursorPlacement cursor_placement =
       ed::view3d::sculpt_drop_preview::CursorPlacement::None;
+  /* Scale/rotation carry-over (T/R keys): a new drop starts from the last scale/rotation set by
+   * the user, so a batch of assets does not have to be re-adjusted one by one. The last values
+   * are tracked even while the toggle is off, see #view3d_sculpt_on_event_while_hover. */
+  bool keep_scale = true;
+  bool keep_rotation = true;
+  float last_scale_factor = 1.0f;
+  float last_rotation_angle = 0.0f;
 };
 static SculptDropFlags sculpt_drop_flags;
 
@@ -180,11 +187,12 @@ static SculptDropData *sculpt_drop_data_create(wmDropBox *drop)
   data->snap_state = ED_view3d_cursor_snap_state_create();
   data->snap_state->draw_plane = true;
   copy_v3_fl(data->base_box_dims, 1.0f);
-  data->scale_factor = 1.0f;
+  data->scale_factor = sculpt_drop_flags.keep_scale ? sculpt_drop_flags.last_scale_factor : 1.0f;
   data->is_scaling = false;
   data->scale_start_mval_x = 0;
-  data->scale_start_factor = 1.0f;
-  data->rotation_angle = 0.0f;
+  data->scale_start_factor = data->scale_factor;
+  data->rotation_angle = sculpt_drop_flags.keep_rotation ? sculpt_drop_flags.last_rotation_angle :
+                                                           0.0f;
   data->is_rotating = false;
   data->rotate_start_mval_x = 0;
   data->rotate_start_angle = 0.0f;
@@ -362,6 +370,8 @@ static void view3d_sculpt_ob_drop_on_enter(wmDropBox *drop, wmDrag *drag)
   if (!is_zero_v3(dimensions)) {
     mul_v3_v3fl(state->box_dimensions, dimensions, 0.5f);
     copy_v3_v3(data->base_box_dims, state->box_dimensions);
+    /* Start from the carried-over scale so the box matches the preview. */
+    mul_v3_fl(state->box_dimensions, data->scale_factor);
     ui::theme::get_color_4ubv(TH_GIZMO_PRIMARY, state->color_box);
     state->draw_box = true;
     data->has_box_dims = true;
@@ -434,6 +444,8 @@ static void view3d_sculpt_collection_drop_on_enter(wmDropBox *drop, wmDrag *drag
   if (has_dims) {
     mul_v3_v3fl(state->box_dimensions, bbox_extents, 0.5f);
     copy_v3_v3(data->base_box_dims, state->box_dimensions);
+    /* Start from the carried-over scale so the box matches the preview. */
+    mul_v3_fl(state->box_dimensions, data->scale_factor);
     ui::theme::get_color_4ubv(TH_GIZMO_PRIMARY, state->color_box);
     state->draw_box = true;
     data->has_box_dims = true;
@@ -499,7 +511,10 @@ static void view3d_sculpt_drop_on_exit(wmDropBox *drop, wmDrag *drag)
  *    the dropped-in geometry stays sculptable; when off, the active mesh's existing mask is left
  *    untouched entirely.
  * C: cycle cursor placement (Off → To Origin → At Cursor → Off).
- * ESC: resets scale and rotation to their defaults (placement-option toggles are left as-is).
+ * T: toggle Keep Scale (on by default) — a new drop starts from the last scale set.
+ * R: toggle Keep Rotation (on by default) — a new drop starts from the last rotation set.
+ * ESC: resets scale and rotation to their defaults, including the carried-over values
+ *      (placement-option toggles are left as-is).
  *
  * Placement options are decided here, before the drop runs, rather than via the operator's redo
  * panel afterward: by the time #copy hands them to #SCULPT_OT_mesh_asset_drop, the operator only
@@ -538,6 +553,12 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
                              true :
                              data->apply_mask;
   status.item_bool(IFACE_("Mask"), mask_show, ui::icon_from_event_type(EVT_MKEY, KM_PRESS));
+  status.item_bool(IFACE_("Keep Scale"),
+                   sculpt_drop_flags.keep_scale,
+                   ui::icon_from_event_type(EVT_TKEY, KM_PRESS));
+  status.item_bool(IFACE_("Keep Rotation"),
+                   sculpt_drop_flags.keep_rotation,
+                   ui::icon_from_event_type(EVT_RKEY, KM_PRESS));
   const char *cursor_text = IFACE_("Cursor: Off");
   switch (data->cursor_placement) {
     case ed::view3d::sculpt_drop_preview::CursorPlacement::CursorToOrigin:
@@ -558,6 +579,7 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
     case EVT_WKEY:
       if (event->val == KM_PRESS) {
         data->scale_factor = max_ff(0.01f, data->scale_factor * 0.95f);
+        sculpt_drop_flags.last_scale_factor = data->scale_factor;
         mul_v3_v3fl(state->box_dimensions, data->base_box_dims, data->scale_factor);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
@@ -565,6 +587,7 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
     case EVT_SKEY: {
       if (event->val == KM_PRESS) {
         data->scale_factor = max_ff(0.01f, data->scale_factor * 1.05f);
+        sculpt_drop_flags.last_scale_factor = data->scale_factor;
         mul_v3_v3fl(state->box_dimensions, data->base_box_dims, data->scale_factor);
         ED_region_tag_redraw(CTX_wm_region(C));
       }
@@ -575,12 +598,14 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
     case EVT_QKEY:
       if (event->val == KM_PRESS) {
         data->rotation_angle -= float(M_PI) / 36.0f;
+        sculpt_drop_flags.last_rotation_angle = data->rotation_angle;
         ED_region_tag_redraw(CTX_wm_region(C));
       }
       break;
     case EVT_EKEY: {
       if (event->val == KM_PRESS) {
         data->rotation_angle += float(M_PI) / 36.0f;
+        sculpt_drop_flags.last_rotation_angle = data->rotation_angle;
         ED_region_tag_redraw(CTX_wm_region(C));
       }
       break;
@@ -591,8 +616,25 @@ static void view3d_sculpt_on_event_while_hover(bContext *C,
         data->is_rotating = false;
         data->scale_factor = 1.0f;
         data->rotation_angle = 0.0f;
+        sculpt_drop_flags.last_scale_factor = 1.0f;
+        sculpt_drop_flags.last_rotation_angle = 0.0f;
         copy_v3_v3(state->box_dimensions, data->base_box_dims);
         ED_region_tag_redraw(CTX_wm_region(C));
+      }
+      break;
+    }
+    case EVT_TKEY: {
+      if (event->val == KM_PRESS) {
+        sculpt_drop_flags.keep_scale = !sculpt_drop_flags.keep_scale;
+        /* Turning it on adopts the current scale as the one to carry over. */
+        sculpt_drop_flags.last_scale_factor = data->scale_factor;
+      }
+      break;
+    }
+    case EVT_RKEY: {
+      if (event->val == KM_PRESS) {
+        sculpt_drop_flags.keep_rotation = !sculpt_drop_flags.keep_rotation;
+        sculpt_drop_flags.last_rotation_angle = data->rotation_angle;
       }
       break;
     }

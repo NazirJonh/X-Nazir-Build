@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
@@ -178,6 +179,28 @@ void SCULPT_OT_cursor_button_reset(wmOperatorType *ot);
 void ED_sculpt_cursor_buttons_ensure_builtins();
 
 }  // namespace cursor
+
+/* `mesh/sculpt_multi_object.cc` */
+
+/**
+ * The one authoritative world -> symmetry-space frame for the mode, resolving the full
+ * #Sculpt::paint.symmetry_space + #Sculpt::symmetry_cursor_source pair:
+ * - #PAINT_SYMM_SPACE_ACTIVE_OBJECT: nullopt -- every object mirrors across its own local axes,
+ *   so there is no shared frame to engage (this is the historical default).
+ * - #PAINT_SYMM_SPACE_GLOBAL_WORLD: world axes through the world origin.
+ * - #PAINT_SYMM_SPACE_GLOBAL_CURSOR: the cursor's full frame (location AND orientation), where the
+ *   cursor itself is chosen by #Sculpt::symmetry_cursor_source -- the scene 3D cursor, or the
+ *   sculpt cursor gizmo of \a symm_reference_ob (the active object, matching the stroke, the
+ *   gesture tools and the overlays).
+ *
+ * Every tool that mirrors across the shared plane has to derive its mirror matrices from THIS
+ * function (through #symmetry_space_frame), so a plane placed with the sculpt cursor gizmo is the
+ * same plane for brush strokes, gestures, transforms, the insert tool (and its Python preview, via
+ * `Object.sculpt_symmetry_frame`) and the overlays. The draw module keeps its own duplicate of the
+ * resolution because it must not depend on editors/.
+ */
+std::optional<float4x4> symmetry_world_frame_get(const Scene &scene,
+                                                 const Object &symm_reference_ob);
 
 /* `paint_curve_patch_edit.cc` */
 

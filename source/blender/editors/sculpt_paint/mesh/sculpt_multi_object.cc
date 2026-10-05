@@ -22,11 +22,31 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_sculpt.hh"
+
 #include "../paint_intern.hh"
 #include "sculpt_face_set.hh"
 #include "sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
+
+std::optional<float4x4> symmetry_world_frame_get(const Scene &scene,
+                                                 const Object &symm_reference_ob)
+{
+  const Sculpt *sculpt = scene.toolsettings ? scene.toolsettings->sculpt : nullptr;
+  if (sculpt == nullptr) {
+    return std::nullopt;
+  }
+  const ePaintSymmetrySpace symmetry_space = ePaintSymmetrySpace(sculpt->paint.symmetry_space);
+  if (symmetry_space == PAINT_SYMM_SPACE_ACTIVE_OBJECT) {
+    /* Every object mirrors across its own local axes; no shared frame exists. */
+    return std::nullopt;
+  }
+  return symmetry_space_frame(
+      symmetry_space,
+      symm_reference_ob.world_to_object(),
+      cursor::symmetry_cursor_to_world(scene, symm_reference_ob));
+}
 
 float4x4 symmetry_space_frame(const ePaintSymmetrySpace symmetry_space,
                               const float4x4 &reference_world_to_object,

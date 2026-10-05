@@ -152,20 +152,20 @@ def mirror_passes(active_ob):
     return passes
 
 
-def symmetry_pass_matrix(matrix_world, pass_bits):
-    """Reflection through the local axes of the object at `matrix_world` for one mirror
-    symmetry pass (matches the drag-and-drop placement, `world_matrix_for_symmetry_pass` in
-    sculpt_asset_drop.cc)."""
+def symmetry_pass_matrix(world_to_symm, pass_bits):
+    """World-space reflection across the sculpt symmetry plane for one mirror symmetry pass
+    (matches the drag-and-drop placement, `world_matrix_for_symmetry_pass` in
+    sculpt_asset_drop.cc). `world_to_symm` is `Object.sculpt_symmetry_frame`, the same frame the
+    brush, gestures and overlays mirror across, so the preview cannot drift from the result."""
     if pass_bits == 0:
         return Matrix.Identity(4)
-    to_local = matrix_world.inverted()
     flip = Matrix.Diagonal((
         -1.0 if pass_bits & 1 else 1.0,
         -1.0 if pass_bits & 2 else 1.0,
         -1.0 if pass_bits & 4 else 1.0,
         1.0,
     ))
-    return matrix_world @ (flip @ to_local)
+    return world_to_symm.inverted() @ flip @ world_to_symm
 
 
 def primary_matrix(loc, user_rot, base_rot, corr_offset, corr_rot, scale, anchor):
@@ -183,12 +183,12 @@ def primary_matrix(loc, user_rot, base_rot, corr_offset, corr_rot, scale, anchor
             Matrix.Translation(-anchor))
 
 
-def copy_matrices(matrix_world, primary, mirror_passes):
+def copy_matrices(world_to_symm, primary, mirror_passes):
     """Every copy's world matrix for one placement: the primary matrix mirrored per symmetry
     pass, in the order the drop operator itself applies. `mirror_passes` comes from
-    `mirror_passes` for the sculpt object at `matrix_world`."""
+    `mirror_passes` for the sculpt object, `world_to_symm` from `Object.sculpt_symmetry_frame`."""
     return [
-        symmetry_pass_matrix(matrix_world, pass_bits) @ primary
+        symmetry_pass_matrix(world_to_symm, pass_bits) @ primary
         for pass_bits in mirror_passes
     ]
 
@@ -564,10 +564,17 @@ class InsertSession:
         depsgraph = bpy.context.evaluated_depsgraph_get()
         return self.active_object.evaluated_get(depsgraph).matrix_world
 
+    def symmetry_frame(self):
+        """World to symmetry-space matrix resolved by the same C++ code the drop operator uses
+        (Symmetry Space and Symmetry Cursor included)."""
+        context = bpy.context
+        return self.active_object.sculpt_symmetry_frame(
+            depsgraph=context.evaluated_depsgraph_get(), scene=context.scene)
+
     def _mirror_flip_matrix(self, pass_bits):
-        """Reflection through the active object's local axes for one mirror symmetry pass, via
-        `symmetry_pass_matrix` with its evaluated transform."""
-        return symmetry_pass_matrix(self.active_matrix_world(), pass_bits)
+        """Reflection across the sculpt symmetry plane for one mirror symmetry pass, via
+        `symmetry_pass_matrix` with the shared symmetry frame."""
+        return symmetry_pass_matrix(self.symmetry_frame(), pass_bits)
 
     def primary_matrix(self):
         """World matrix placing the root frame for the current state (see `primary_matrix`)."""
@@ -577,9 +584,9 @@ class InsertSession:
 
     def copy_matrices(self, settings, primary):
         """Every copy's world matrix for the primary placement `primary` (see `copy_matrices`),
-        from the active object's symmetry axes."""
+        from the active object's symmetry axes and the shared symmetry frame."""
         return copy_matrices(
-            self.active_matrix_world(), primary, mirror_passes(self.active_object))
+            self.symmetry_frame(), primary, mirror_passes(self.active_object))
 
     def _refresh(self, settings):
         self.matrices = self.copy_matrices(settings, self.primary_matrix())

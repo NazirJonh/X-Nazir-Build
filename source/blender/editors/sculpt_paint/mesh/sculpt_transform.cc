@@ -50,6 +50,7 @@
 #include "paint_mask.hh"
 #include "sculpt_filter.hh"
 #include "sculpt_intern.hh"
+#include "sculpt_multi_object.hh"
 #include "sculpt_undo.hh"
 
 #include "RNA_access.hh"
@@ -111,6 +112,22 @@ static void init_transform_common(bContext *C, Object &ob, const float mval_fl[2
   vert_random_access_ensure(ob);
 
   filter::cache_init(C, ob, sd, undo::NodeDataFlag::Position, mval_fl, 5.0, 1.0f);
+
+  /* Capture the shared symmetry plane (Symmetry Space = World / Cursor, resolved through the
+   * Symmetry Cursor source) once for the whole session, per object, so every mesh in a
+   * multi-object Transform mirrors across the same world-space plane -- the one the overlays draw
+   * and the brush strokes use. Captured rather than read per modal step because the cursor can be
+   * the pivot itself: in DEFORM cursor mode the drag writes the pivot back into the cursor, so a
+   * per-step read would make the mirror plane chase the deformed pivot. Inactive (the historical
+   * per-object local mirror below stays bit-exact) for Symmetry Space = Object. */
+  if (std::optional<float4x4> world_to_symm = symmetry_world_frame_get(
+          *CTX_data_scene(C), *transform_target_objects(C).first()))
+  {
+    filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
+    frame.active = true;
+    frame.to_symm = *world_to_symm * ob.object_to_world();
+    frame.from_symm = math::invert(frame.to_symm);
+  }
 
   if (sd.transform_mode == SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC) {
     ss.filter_cache->transform_displacement_mode = TransformDisplacementMode::Incremental;
@@ -323,6 +340,80 @@ static std::array<TransformComponents, PAINT_SYMM_AREAS> transform_components_in
 }
 
 /**
+ * The un-mirrored components, shared by every symmetry area in the shared World/Cursor frame path:
+ * the per-area mirroring there is applied by conjugating the assembled matrix (see
+ * #transform_area_mirror_matrix), so no per-area component flips are needed. Same expressions as
+ * #transform_components_init without the octant/pivot-sign flips.
+ */
+static TransformComponents transform_components_raw_init(const SculptSession &ss,
+                                                         const TransformDisplacementMode t_mode)
+{
+  float start_pivot_pos[3], start_pivot_rot[4], start_pivot_scale[3];
+  switch (t_mode) {
+    case TransformDisplacementMode::Original:
+      copy_v3_v3(start_pivot_pos, ss.init_pivot_pos);
+      copy_v4_v4(start_pivot_rot, ss.init_pivot_rot);
+      copy_v3_v3(start_pivot_scale, ss.init_pivot_scale);
+      break;
+    case TransformDisplacementMode::Incremental:
+      copy_v3_v3(start_pivot_pos, ss.prev_pivot_pos);
+      copy_v4_v4(start_pivot_rot, ss.prev_pivot_rot);
+      copy_v3_v3(start_pivot_scale, ss.prev_pivot_scale);
+      break;
+  }
+
+  TransformComponents comp;
+  sub_v3_v3v3(comp.translation, ss.pivot_pos, start_pivot_pos);
+  sub_qt_qtqt(comp.rotation, ss.pivot_rot, start_pivot_rot);
+  normalize_qt(comp.rotation);
+  sub_v3_v3v3(comp.scale, ss.pivot_scale, start_pivot_scale);
+  add_v3_fl(comp.scale, 1.0f);
+  copy_v3_v3(comp.pivot, ss.pivot_pos);
+  return comp;
+}
+
+/**
+ * Object-local mirror for one symmetry area in the shared World/Cursor frame:
+ * `M = from_symm * F * to_symm`, with F flipping the symmetry axes the area's octant lies on the
+ * OPPOSITE side of from the pivot (expressed in symmetry space). So vertices on the pivot's own
+ * side of every enabled plane follow the raw transform and the other side gets the reflection --
+ * the shared-frame equivalent of the local path's octant/pivot-sign flip parity in
+ * #flip_v3_by_symm_area. M is an involution (F squared is identity), so conjugating by it needs
+ * no inverse.
+ */
+static float4x4 transform_area_mirror_matrix(const filter::TransformSymmetryFrame &frame,
+                                             const ePaintSymmetryFlags symm,
+                                             const ePaintSymmetryAreas area,
+                                             const float3 &pivot_symm)
+{
+  float4x4 reflection = float4x4::identity();
+  for (int axis = 0; axis < 3; axis++) {
+    if (!(symm & ePaintSymmetryFlags(1 << axis))) {
+      continue;
+    }
+    const bool area_negative = bool(area & ePaintSymmetryAreas(1 << axis));
+    if (area_negative != (pivot_symm[axis] < 0.0f)) {
+      reflection[axis][axis] = -1.0f;
+    }
+  }
+  return frame.from_symm * reflection * frame.to_symm;
+}
+
+/**
+ * Octant a vertex belongs to, relative to the mirror planes: the object's own axes (historical),
+ * or the shared World/Cursor frame's axes when the shared plane is engaged -- the same planes the
+ * overlays draw and brush strokes mirror across.
+ */
+static ePaintSymmetryAreas vertex_symm_area_get(const filter::TransformSymmetryFrame &frame,
+                                                const float3 &position)
+{
+  if (!frame.active) {
+    return get_vertex_symm_area(position);
+  }
+  return get_vertex_symm_area(float3(math::transform_point(frame.to_symm, position)));
+}
+
+/**
  * Assemble the full affine transform for one symmetry area from \a components. The rotation is
  * built via full conjugation (object orientation AND scale) instead of a naive local quaternion,
  * so a non-uniformly-scaled object rotates rigidly around the shared world pivot instead of
@@ -390,9 +481,6 @@ static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to
                                                        const ePaintSymmetryFlags symm,
                                                        const TransformDisplacementMode t_mode)
 {
-  const std::array<TransformComponents, PAINT_SYMM_AREAS> components =
-      transform_components_init(ss, symm, t_mode);
-
   /* The object's orientation/scale split (used by the rotation matrix) is invariant across all 8
    * symmetry areas -- the object doesn't move mid-step -- so compute it once here. \a
    * object_to_world is passed in explicitly (rather than read from an `Object &`) so a rigid-body
@@ -402,8 +490,33 @@ static std::array<float4x4, 8> transform_matrices_init(const float4x4 &object_to
   object_orientation_and_scale(
       object_to_world, orientation, orientation_inv, scale_mat, scale_inv_mat);
 
-  return transform_matrices_from_components(
-      components, orientation, orientation_inv, scale_mat, scale_inv_mat);
+  const filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
+  if (!frame.active) {
+    const std::array<TransformComponents, PAINT_SYMM_AREAS> components =
+        transform_components_init(ss, symm, t_mode);
+    return transform_matrices_from_components(
+        components, orientation, orientation_inv, scale_mat, scale_inv_mat);
+  }
+
+  /* Shared World/Cursor symmetry frame: build the un-mirrored pivot transform once, then
+   * conjugate it by each area's mirror (see #transform_area_mirror_matrix), so the deformation
+   * reflected across the shared plane is the mirror image of the main one -- including the object
+   * scale carried by both the transform assembly and the frame. For a rigid-body Origin Correct
+   * secondary this yields the mirrored RIGID motion: `orig_mat * (M * T * M)` collapses to
+   * `F * orig_mat * T * F` because the frame was captured from that same session-start matrix. */
+  const TransformComponents raw = transform_components_raw_init(ss, t_mode);
+  float4x4 main_mat;
+  build_symm_area_transform_matrix(
+      raw, orientation, orientation_inv, scale_mat, scale_inv_mat, main_mat.ptr());
+
+  const float3 pivot_symm = math::transform_point(frame.to_symm, float3(ss.init_pivot_pos));
+  std::array<float4x4, 8> transform_mats;
+  for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
+    const float4x4 mirror = transform_area_mirror_matrix(
+        frame, symm, ePaintSymmetryAreas(i), pivot_symm);
+    transform_mats[i] = mirror * main_mat * mirror;
+  }
+  return transform_mats;
 }
 
 static constexpr float transform_mirror_max_distance_eps = 0.00002f;
@@ -417,32 +530,76 @@ struct TransformLocalData {
 
 BLI_NOINLINE static void calc_symm_area_transform_translations(
     const Span<float3> positions,
+    const filter::TransformSymmetryFrame &frame,
     const std::array<float4x4, 8> &transform_mats,
     const MutableSpan<float3> translations)
 {
   for (const int i : positions.index_range()) {
-    const ePaintSymmetryAreas symm_area = get_vertex_symm_area(positions[i]);
+    const ePaintSymmetryAreas symm_area = vertex_symm_area_get(frame, positions[i]);
     const float3 transformed = math::transform_point(transform_mats[symm_area], positions[i]);
     translations[i] = transformed - positions[i];
   }
 }
 
-BLI_NOINLINE static void filter_translations_with_symmetry(const Span<float3> positions,
-                                                           const ePaintSymmetryFlags symm,
-                                                           const MutableSpan<float3> translations)
+BLI_NOINLINE static void filter_translations_with_symmetry(
+    const Span<float3> positions,
+    const ePaintSymmetryFlags symm,
+    const filter::TransformSymmetryFrame &frame,
+    const MutableSpan<float3> translations)
 {
   if ((symm & (PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z)) == 0) {
     return;
   }
+  if (!frame.active) {
+    for (const int i : positions.index_range()) {
+      if ((symm & PAINT_SYMM_X) &&
+          (std::abs(positions[i].x) < transform_mirror_max_distance_eps))
+      {
+        translations[i].x = 0.0f;
+      }
+      if ((symm & PAINT_SYMM_Y) &&
+          (std::abs(positions[i].y) < transform_mirror_max_distance_eps))
+      {
+        translations[i].y = 0.0f;
+      }
+      if ((symm & PAINT_SYMM_Z) &&
+          (std::abs(positions[i].z) < transform_mirror_max_distance_eps))
+      {
+        translations[i].z = 0.0f;
+      }
+    }
+    return;
+  }
+
+  /* Shared World/Cursor frame: pin vertices lying ON the (possibly rotated) mirror planes. The
+   * plane for a symmetry axis is {w : w[axis] = 0} in symmetry space, with `w = to_symm * co`;
+   * its object-space normal is the axis's row of `to_symm`'s linear part, and the row's length
+   * converts the position tolerance into symmetry-space units. Zeroing the translation component
+   * along that normal is the frame-general form of zeroing the axis component: the two sides'
+   * mirrored transforms agree tangentially on the plane and only pull along the normal. */
+  float3 plane_normals[3] = {float3(0.0f), float3(0.0f), float3(0.0f)};
+  float plane_tolerances[3] = {0.0f, 0.0f, 0.0f};
+  for (const int axis : IndexRange(3)) {
+    if (!(symm & ePaintSymmetryFlags(1 << axis))) {
+      continue;
+    }
+    /* Row `axis` of the linear part: element (row, col) is `m[col][row]`. */
+    const float3 row = float3(frame.to_symm[0][axis],
+                              frame.to_symm[1][axis],
+                              frame.to_symm[2][axis]);
+    plane_tolerances[axis] = transform_mirror_max_distance_eps * math::length(row);
+    plane_normals[axis] = math::normalize(row);
+  }
   for (const int i : positions.index_range()) {
-    if ((symm & PAINT_SYMM_X) && (std::abs(positions[i].x) < transform_mirror_max_distance_eps)) {
-      translations[i].x = 0.0f;
-    }
-    if ((symm & PAINT_SYMM_Y) && (std::abs(positions[i].y) < transform_mirror_max_distance_eps)) {
-      translations[i].y = 0.0f;
-    }
-    if ((symm & PAINT_SYMM_Z) && (std::abs(positions[i].z) < transform_mirror_max_distance_eps)) {
-      translations[i].z = 0.0f;
+    const float3 symm_co = math::transform_point(frame.to_symm, positions[i]);
+    for (const int axis : IndexRange(3)) {
+      if (!(symm & ePaintSymmetryFlags(1 << axis))) {
+        continue;
+      }
+      if (std::abs(symm_co[axis]) < plane_tolerances[axis]) {
+        translations[i] -= plane_normals[axis] *
+                           math::dot(translations[i], plane_normals[axis]);
+      }
     }
   }
 }
@@ -565,17 +722,71 @@ static ProportionalAreaTransform proportional_area_transform_init(
   return area;
 }
 
+/**
+ * Mirror one area's proportional transform by conjugating its parts with \a mirror (an involution,
+ * see #transform_area_mirror_matrix): the pivot is mirrored as a point, the translation as a
+ * direction, and the rotation generators `K` / `K^2` by the mirror's linear part. Conjugation
+ * preserves the algebra the Rodrigues interpolation relies on (`K^2 = K*K`, `K^3 = -K`), so the
+ * partial-rotation falloff stays exact at every factor; the scale is diagonal positive and shared,
+ * exactly as in the local path.
+ */
+static void proportional_area_transform_apply_mirror(ProportionalAreaTransform &area,
+                                                     const float4x4 &mirror)
+{
+  area.pivot = math::transform_point(mirror, area.pivot);
+  area.translation = math::transform_direction(mirror, area.translation);
+
+  float mirror_lin[3][3], tmp[3][3];
+  copy_m3_m4(mirror_lin, mirror.ptr());
+  mul_m3_m3m3(tmp, mirror_lin, area.rot_k);
+  mul_m3_m3m3(area.rot_k, tmp, mirror_lin);
+  mul_m3_m3m3(tmp, mirror_lin, area.rot_k2);
+  mul_m3_m3m3(area.rot_k2, tmp, mirror_lin);
+}
+
 static TransformStepData transform_step_data_init(const float4x4 &object_to_world,
                                                   const SculptSession &ss,
                                                   const ePaintSymmetryFlags symm,
                                                   const TransformDisplacementMode t_mode,
                                                   const bool proportional)
 {
-  const std::array<TransformComponents, PAINT_SYMM_AREAS> components =
-      transform_components_init(ss, symm, t_mode);
   float orientation[3][3], orientation_inv[3][3], scale_mat[3][3], scale_inv_mat[3][3];
   object_orientation_and_scale(
       object_to_world, orientation, orientation_inv, scale_mat, scale_inv_mat);
+
+  const filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
+  if (frame.active) {
+    /* Shared World/Cursor symmetry frame: every area starts from the raw (un-mirrored) transform,
+     * then mirrors it by conjugation -- see #transform_matrices_init for why that reproduces the
+     * mirrored deformation across the shared plane. */
+    const TransformComponents raw = transform_components_raw_init(ss, t_mode);
+    const float3 pivot_symm = math::transform_point(frame.to_symm, float3(ss.init_pivot_pos));
+
+    TransformStepData step;
+    if (proportional) {
+      for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
+        step.areas[i] = proportional_area_transform_init(
+            raw, orientation, orientation_inv, scale_mat, scale_inv_mat);
+        proportional_area_transform_apply_mirror(
+            step.areas[i],
+            transform_area_mirror_matrix(frame, symm, ePaintSymmetryAreas(i), pivot_symm));
+      }
+    }
+    else {
+      float4x4 main_mat;
+      build_symm_area_transform_matrix(
+          raw, orientation, orientation_inv, scale_mat, scale_inv_mat, main_mat.ptr());
+      for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
+        const float4x4 mirror = transform_area_mirror_matrix(
+            frame, symm, ePaintSymmetryAreas(i), pivot_symm);
+        step.mats[i] = mirror * main_mat * mirror;
+      }
+    }
+    return step;
+  }
+
+  const std::array<TransformComponents, PAINT_SYMM_AREAS> components =
+      transform_components_init(ss, symm, t_mode);
 
   TransformStepData step;
   if (proportional) {
@@ -639,6 +850,7 @@ static float proportional_vert_factor(const filter::TransformProportional &prop,
 
 BLI_NOINLINE static void calc_symm_area_transform_translations_proportional(
     const Span<float3> positions,
+    const filter::TransformSymmetryFrame &frame,
     const TransformStepData &step,
     const filter::TransformProportional &prop,
     const Span<int> vert_indices,
@@ -652,7 +864,7 @@ BLI_NOINLINE static void calc_symm_area_transform_translations_proportional(
       translations[i] = float3(0.0f);
       continue;
     }
-    const ePaintSymmetryAreas symm_area = get_vertex_symm_area(positions[i]);
+    const ePaintSymmetryAreas symm_area = vertex_symm_area_get(frame, positions[i]);
     translations[i] = proportional_transform_point(step.areas[symm_area], positions[i], factor) -
                       positions[i];
   }
@@ -718,17 +930,18 @@ static void transform_node_mesh(const Sculpt &sd,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
+  const filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
   if (prop.enabled) {
     calc_symm_area_transform_translations_proportional(
-        orig_data.positions, step, prop, verts, factors, translations);
+        orig_data.positions, frame, step, prop, verts, factors, translations);
   }
   else {
-    calc_symm_area_transform_translations(orig_data.positions, step.mats, translations);
+    calc_symm_area_transform_translations(orig_data.positions, frame, step.mats, translations);
     scale_translations(translations, factors);
   }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
-  filter_translations_with_symmetry(orig_data.positions, symm, translations);
+  filter_translations_with_symmetry(orig_data.positions, symm, frame, translations);
 
   clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
   position_data.deform(translations, verts);
@@ -756,18 +969,19 @@ static void transform_node_grids(const Sculpt &sd,
 
   tls.translations.resize(grid_verts_num);
   const MutableSpan<float3> translations = tls.translations;
+  const filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
   if (prop.enabled) {
     const Span<int> vert_indices = grids_node_vert_indices(grids, key.grid_area, tls.vert_indices);
     calc_symm_area_transform_translations_proportional(
-        orig_data.positions, step, prop, vert_indices, factors, translations);
+        orig_data.positions, frame, step, prop, vert_indices, factors, translations);
   }
   else {
-    calc_symm_area_transform_translations(orig_data.positions, step.mats, translations);
+    calc_symm_area_transform_translations(orig_data.positions, frame, step.mats, translations);
     scale_translations(translations, factors);
   }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
-  filter_translations_with_symmetry(orig_data.positions, symm, translations);
+  filter_translations_with_symmetry(orig_data.positions, symm, frame, translations);
 
   clip_and_lock_translations(sd, ss, orig_data.positions, translations);
   apply_translations(translations, grids, subdiv_ccg);
@@ -794,18 +1008,19 @@ static void transform_node_bmesh(const Sculpt &sd,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
+  const filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
   if (prop.enabled) {
     const Span<int> vert_indices = bmesh_node_vert_indices(verts, tls.vert_indices);
     calc_symm_area_transform_translations_proportional(
-        orig_positions, step, prop, vert_indices, factors, translations);
+        orig_positions, frame, step, prop, vert_indices, factors, translations);
   }
   else {
-    calc_symm_area_transform_translations(orig_positions, step.mats, translations);
+    calc_symm_area_transform_translations(orig_positions, frame, step.mats, translations);
     scale_translations(translations, factors);
   }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
-  filter_translations_with_symmetry(orig_positions, symm, translations);
+  filter_translations_with_symmetry(orig_positions, symm, frame, translations);
 
   clip_and_lock_translations(sd, ss, orig_positions, translations);
   apply_translations(translations, verts);
@@ -1006,13 +1221,22 @@ static void proportional_distances_build(const Depsgraph &depsgraph,
   const bool projected = prop.projected;
   const float3 view_normal = prop.view_normal;
 
+  const filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
   float3 world_pivots[PAINT_SYMM_AREAS];
+  const float3 init_pivot = float3(ss.init_pivot_pos);
+  const float3 pivot_symm = math::transform_point(frame.to_symm, init_pivot);
   for (int i = 0; i < PAINT_SYMM_AREAS; i++) {
     /* Mirror the initial pivot the same way the per-area transform does, so a vertex in a mirrored
-     * symmetry area measures its falloff from the mirrored pivot. */
-    world_pivots[i] = math::transform_point(
-        object_to_world,
-        flip_v3_by_symm_area(ss.init_pivot_pos, symm, ePaintSymmetryAreas(i), ss.init_pivot_pos));
+     * symmetry area measures its falloff from the mirrored pivot. In the shared World/Cursor
+     * frame that mirror is the plane conjugation (#transform_area_mirror_matrix); in the local
+     * path it is the historical octant/pivot-sign flip. */
+    const float3 area_pivot =
+        frame.active ?
+            math::transform_point(
+                transform_area_mirror_matrix(frame, symm, ePaintSymmetryAreas(i), pivot_symm),
+                init_pivot) :
+            flip_v3_by_symm_area(init_pivot, symm, ePaintSymmetryAreas(i), init_pivot);
+    world_pivots[i] = math::transform_point(object_to_world, area_pivot);
   }
 
   const int verts_num = vertex_count_get(object);
@@ -1040,7 +1264,7 @@ static void proportional_distances_build(const Depsgraph &depsgraph,
             continue;
           }
           const float3 world_co = math::transform_point(object_to_world, data.positions[j]);
-          const ePaintSymmetryAreas area = get_vertex_symm_area(data.positions[j]);
+          const ePaintSymmetryAreas area = vertex_symm_area_get(frame, data.positions[j]);
           float3 delta = world_co - world_pivots[area];
           if (projected) {
             delta -= view_normal * math::dot(delta, view_normal);
@@ -1389,14 +1613,24 @@ static void transform_radius_elastic(const Depsgraph &depsgraph,
   BKE_kelvinlet_init_params(&params, transform_radius, force, shear_modulus, poisson_ratio);
 
   threading::EnumerableThreadSpecific<TransformLocalData> all_tls;
+  const filter::TransformSymmetryFrame &frame = ss.filter_cache->symmetry_frame;
   for (ePaintSymmetryFlags symmpass = PAINT_SYMM_NONE; symmpass <= symm; symmpass++) {
     if (!is_symmetry_iteration_valid(symmpass, symm)) {
       continue;
     }
 
-    const float3 elastic_transform_pivot = symmetry_flip(ss.pivot_pos, symmpass);
+    /* The pass mirrors the pivot across the pass's planes: in the object's own local axes
+     * (historical), or through the shared World/Cursor frame. The matrix applied around it is the
+     * one vertices in the mirrored pivot's octant receive, classified in the same space. */
+    const float3 elastic_transform_pivot =
+        frame.active ?
+            math::transform_point(frame.from_symm,
+                                  symmetry_flip(math::transform_point(frame.to_symm,
+                                                                      float3(ss.pivot_pos)),
+                                                symmpass)) :
+            symmetry_flip(ss.pivot_pos, symmpass);
 
-    const int symm_area = get_vertex_symm_area(elastic_transform_pivot);
+    const int symm_area = vertex_symm_area_get(frame, elastic_transform_pivot);
     float4x4 elastic_transform_mat = transform_mats[symm_area];
     switch (pbvh.type()) {
       case bke::pbvh::Type::Mesh: {

@@ -1133,6 +1133,72 @@ TEST_F(PaintLayersGenerateTest, fill_constant_has_no_map)
   EXPECT_FALSE(roughness->directly_linked_links().is_empty());
 }
 
+TEST_F(PaintLayersGenerateTest, fill_without_base_color_builds_like_any_channel)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  const float color[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, color));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  const bNode *principled = BKE_paint_material_principled_find(*ma, reason);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *base_color = bke::node_find_socket(
+      const_cast<bNode &>(*principled), SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_FALSE(base_color->directly_linked_links().is_empty());
+
+  /* A switched-off Base Color unwires only Base Color: the row rebuilds like a row that never
+   * opted into the channel, and its other channels keep their constants. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  principled = BKE_paint_material_principled_find(*ma, reason);
+  ASSERT_NE(principled, nullptr);
+  base_color = bke::node_find_socket(const_cast<bNode &>(*principled), SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_TRUE(base_color->directly_linked_links().is_empty());
+  bNodeSocket *roughness = bke::node_find_socket(
+      const_cast<bNode &>(*principled), SOCK_IN, "Roughness"_ustr);
+  ASSERT_NE(roughness, nullptr);
+  EXPECT_FALSE(roughness->directly_linked_links().is_empty());
+  bNodeTree *fill_tree = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(fill_tree, nullptr);
+  EXPECT_EQ(group_input_find(*fill_tree, "Fill Base Color"), nullptr);
+  EXPECT_NE(group_input_find(*fill_tree, "Fill Roughness"), nullptr);
+
+  /* Enabling rewires the same record's constant; the stored colour never left the record. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  principled = BKE_paint_material_principled_find(*ma, reason);
+  ASSERT_NE(principled, nullptr);
+  base_color = bke::node_find_socket(const_cast<bNode &>(*principled), SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_FALSE(base_color->directly_linked_links().is_empty());
+  fill_tree = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(fill_tree, nullptr);
+  EXPECT_NE(group_input_find(*fill_tree, "Fill Base Color"), nullptr);
+
+  /* Removing the record takes the same path: Base Color unwired, Roughness untouched. */
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  principled = BKE_paint_material_principled_find(*ma, reason);
+  ASSERT_NE(principled, nullptr);
+  base_color = bke::node_find_socket(const_cast<bNode &>(*principled), SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_TRUE(base_color->directly_linked_links().is_empty());
+  roughness = bke::node_find_socket(const_cast<bNode &>(*principled), SOCK_IN, "Roughness"_ustr);
+  ASSERT_NE(roughness, nullptr);
+  EXPECT_FALSE(roughness->directly_linked_links().is_empty());
+  fill_tree = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(fill_tree, nullptr);
+  EXPECT_EQ(group_input_find(*fill_tree, "Fill Base Color"), nullptr);
+  EXPECT_NE(group_input_find(*fill_tree, "Fill Roughness"), nullptr);
+}
+
 TEST_F(PaintLayersGenerateTest, fill_correction_per_channel_value_is_a_value_input)
 {
   MaterialPaintLayer *owner = add_paint_layer("Paint", add_image("Bottom"));

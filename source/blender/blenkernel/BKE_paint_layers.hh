@@ -197,6 +197,17 @@ void BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel channel, float 
  */
 void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_color[4]);
 
+/**
+ * Whether the Base Color #BKE_paint_layers_base_color_get reads is a live one: a Layer-role row's
+ * Base-Color record exists and is ENABLED, while any other row's DNA field has no state to switch
+ * off and is always active.
+ *
+ * The UI asks this before drawing a colour control that would stand for a channel the row no longer
+ * paints with -- a swatch or picker over a removed or switched-off Base Color would claim the row
+ * still fills. The stored colour stays readable through #BKE_paint_layers_base_color_get either way.
+ */
+bool BKE_paint_layers_base_color_active(const MaterialPaintLayer &layer);
+
 /** Why a row of a layered material behaves differently than its settings suggest. */
 enum class PaintLayersIssueCode : int8_t {
   /**

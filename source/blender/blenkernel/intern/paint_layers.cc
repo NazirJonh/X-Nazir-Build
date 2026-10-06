@@ -2240,6 +2240,18 @@ void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_co
   copy_v4_v4(r_color, layer.fill_color);
 }
 
+bool BKE_paint_layers_base_color_active(const MaterialPaintLayer &layer)
+{
+  /* A Layer-role row's Base Color is a channel record like any other: active only while the record
+   * is live (present and ENABLED), whether the row fills or paints. Any other row keeps its colour
+   * in the DNA field, which has no state to switch off. */
+  if (BKE_paint_layers_role(layer) == PaintLayerRole::Layer) {
+    return paint_layer_channel_live(
+        paint_layer_channel_find(layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  }
+  return true;
+}
+
 namespace {
 
 /** Whether \a target is reachable from \a from through MATERIAL layers' source materials. */
@@ -2306,16 +2318,10 @@ bool BKE_paint_layers_channel_remove(Material &ma,
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
     return false;
   }
-  /* INVARIANT: a Layer-role Fill always carries its Base-Color record. Base Color is the row's
-   * constant, read through #paint_layer_channel_constant with no DNA `fill_color` fallback for a
-   * Layer-role row, so removing the record would silently make the Fill paint nothing. Other
-   * channels -- and a mask/Fill-effect correction's records -- are removed as before. */
-  if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
-      BKE_paint_layers_kind_info(layer->source).uses_fill_color &&
-      channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR)
-  {
-    return false;
-  }
+  /* A Layer-role Fill may drop its Base-Color record like any other channel: the participation
+   * helpers read a missing record the same way as a DISABLED one, so the Fill just stops painting
+   * Base Color while its remaining channels (and the stored colours of the rest of the stack) keep
+   * working. The material's global set is a separate invariant and always keeps Base Color. */
   MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer, channel);
   if (record == nullptr) {
     return false;
@@ -2348,15 +2354,10 @@ bool BKE_paint_layers_channel_set_enabled(Material &ma,
   if (record == nullptr) {
     return false;
   }
-  /* INVARIANT: a Layer-role Fill's Base Color cannot be switched off, the same way its record
-   * cannot be removed (#BKE_paint_layers_channel_remove). Base Color is the Fill's constant, so a
-   * disabled record would make the layer paint nothing while still claiming to take part. */
-  if (!enabled && BKE_paint_layers_role(*layer) == PaintLayerRole::Layer &&
-      BKE_paint_layers_kind_info(layer->source).uses_fill_color &&
-      channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR)
-  {
-    return false;
-  }
+  /* A Layer-role Fill may switch its Base Color off like any other channel: a DISABLED record keeps
+   * the stored colour (nothing is lost while the channel is off) but the participation helpers read
+   * it as dead, so the row paints nothing there -- the same contract every other channel of the row
+   * already had. The material's global set is a separate invariant and always keeps Base Color. */
   record->state = enabled ? MA_PAINT_LAYER_CHANNEL_ENABLED : MA_PAINT_LAYER_CHANNEL_DISABLED;
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -2448,17 +2449,20 @@ bool BKE_paint_layers_source_change(Material &ma,
     }
     MaterialPaintLayerChannel *base = paint_layer_channel_find(
         *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    if (base != nullptr && base->value[3] == 0.0f) {
+    /* A DISABLED record keeps the colour entered before the switch-off, so only a live one is
+     * normalized. */
+    if (base != nullptr && base->value[3] == 0.0f && paint_layer_channel_live(base)) {
       base->value[0] = base->value[1] = base->value[2] = 0.0f;
       base->value[3] = 1.0f;
     }
   }
   else {
     /* Fill's color becomes the starting point of the first stroke's map, not a map of its own. The
-     * Base-Color record is reset, not the DNA field: a Layer-role row keeps Base Color there. */
+     * Base-Color record is reset, not the DNA field: a Layer-role row keeps Base Color there. A
+     * DISABLED record is not the visible constant, so its stored value survives the flip. */
     MaterialPaintLayerChannel *base = paint_layer_channel_find(
         *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    if (base != nullptr) {
+    if (base != nullptr && paint_layer_channel_live(base)) {
       static const float fill_default[4] = {0.0f, 0.0f, 0.0f, 1.0f};
       copy_v4_v4(base->value, fill_default);
     }
@@ -2651,8 +2655,10 @@ bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, co
   /* A Layer-role row keeps Base Color in its channel record, like every other channel, so the
    * record is the single place a Fill's colour lives; the DNA field stays the constant of rows
    * without records (masks and Fill-effect corrections). The record is guaranteed to exist for a
-   * Fill (the default channel set creates Base Color), and created on demand for a Paint row that
-   * lost it, so a script cannot write into a field nothing reads. */
+   * Fill (the default channel set creates Base Color), and created on demand for a row that lost
+   * it, so a script cannot write into a field nothing reads. A DISABLED record only takes the new
+   * value -- #BKE_paint_layers_channel_set_value never touches the state -- so writing a colour
+   * does not silently switch the channel back on; enabling is the toggle's own operation. */
   if (BKE_paint_layers_role(*layer) == PaintLayerRole::Layer) {
     if (paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
       if (BKE_paint_layers_channel_add(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {

@@ -606,14 +606,18 @@ void paint_stack_rows_from_description_impl(const Material &material,
               /* A Fill is its colour: one swatch at preview size with the bucket drawn over it, and
                * no channel-texture slot -- the first channel is a generated map that would only add
                * an empty-texture placeholder next to the colour. Clicking the swatch activates the
-               * layer and its channel section, and opens the picker. */
-              StackRowPreview fill_swatch;
-              fill_swatch.is_color_swatch = true;
-              fill_swatch.icon = ICON_GP_DRAW_FILL;
-              fill_swatch.section_id = "CHANNELS";
-              BKE_paint_layers_base_color_get(layer, fill_swatch.color);
-              fill_swatch.label = IFACE_("Fill Color");
-              row.preview_slots.append(std::move(fill_swatch));
+               * layer and its channel section, and opens the picker. With the Base Color record
+               * removed or switched off the row paints no colour, so no swatch is drawn: the row's
+               * own fill icon stands alone instead of a colour the layer no longer lays. */
+              if (BKE_paint_layers_base_color_active(layer)) {
+                StackRowPreview fill_swatch;
+                fill_swatch.is_color_swatch = true;
+                fill_swatch.icon = ICON_GP_DRAW_FILL;
+                fill_swatch.section_id = "CHANNELS";
+                BKE_paint_layers_base_color_get(layer, fill_swatch.color);
+                fill_swatch.label = IFACE_("Fill Color");
+                row.preview_slots.append(std::move(fill_swatch));
+              }
             }
             else {
               StackRowPreview channels_slot;

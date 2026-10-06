@@ -3216,6 +3216,84 @@ TEST_F(PaintLayersGraphEvalTest, fill_isolating_folder_partial_alpha_matches_cpu
 }
 
 /**
+ * A Fill whose Base Color is switched off -- or whose Base Color record is removed entirely -- takes
+ * part nowhere in that channel: the graph and the CPU composite both show the stack below the Fill
+ * unchanged, and the Fill's remaining channels keep taking part (Roughness stays wired).
+ */
+TEST_F(PaintLayersGraphEvalTest, fill_without_base_color_matches_cpu)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+
+  ma = BKE_material_add(bmain, "FillNoBase");
+  ASSERT_NE(ma, nullptr);
+
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Bottom", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  MaterialPaintLayerChannel *bottom_record = BKE_paint_layers_channel_add(*ma, bottom, channel);
+  ASSERT_NE(bottom_record, nullptr);
+  bottom_record->image = add_solid_image("FillNoBaseBottom", size, 255, 0, 0, 255);
+  ASSERT_NE(bottom_record->image, nullptr);
+  bottom_record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  const float fill_color[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, fill_color));
+
+  const RGBA expected = {1.0f, 0.0f, 0.0f, 1.0f};
+  auto graph_and_cpu_show_the_bottom = [&](const char *what) {
+    GraphInterpreter root_interpreter;
+    root_interpreter.instance = find_instance();
+    root_interpreter.tree = ma->paint_layers_tree;
+    ASSERT_NE(root_interpreter.instance, nullptr) << what;
+    root_interpreter.tree->ensure_topology_cache();
+    for (int x = 0; x < size; x++) {
+      root_interpreter.x = x;
+      root_interpreter.y = 0;
+      const RGBA graph = eval_channel_result(root_interpreter, channel);
+      const RGBA cpu = cpu_pixel_at(channel, x, 0);
+      EXPECT_NEAR(graph.r, expected.r, tolerance) << what << " x=" << x;
+      EXPECT_NEAR(graph.g, expected.g, tolerance) << what << " x=" << x;
+      EXPECT_NEAR(graph.b, expected.b, tolerance) << what << " x=" << x;
+      EXPECT_NEAR(graph.a, expected.a, tolerance) << what << " x=" << x;
+      EXPECT_NEAR(cpu.r, expected.r, tolerance) << what << " x=" << x;
+      EXPECT_NEAR(cpu.g, expected.g, tolerance) << what << " x=" << x;
+      EXPECT_NEAR(cpu.b, expected.b, tolerance) << what << " x=" << x;
+      EXPECT_NEAR(cpu.a, expected.a, tolerance) << what << " x=" << x;
+    }
+  };
+
+  /* The switched-off Base Color: the Fill paints nothing there, while its Roughness record keeps
+   * taking part, so Roughness stays wired. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  const bNode *principled = BKE_paint_material_principled_find(*ma, reason);
+  ASSERT_NE(principled, nullptr);
+  bNodeSocket *roughness = bke::node_find_socket(
+      const_cast<bNode &>(*principled), SOCK_IN, "Roughness"_ustr);
+  ASSERT_NE(roughness, nullptr);
+  EXPECT_FALSE(roughness->directly_linked_links().is_empty());
+  graph_and_cpu_show_the_bottom("disabled");
+
+  /* The removed Base Color: the same answer, through both evaluators. */
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  graph_and_cpu_show_the_bottom("removed");
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
  * F2-C1: a Paint map and a Fill constant inside the same isolating folder. The map's content alpha
  * starts the chain and the Fill's partial opacity lays the constant over the accumulated alpha, so
  * graph, CPU and the closed-form accumulation agree on every component, not just RGB.

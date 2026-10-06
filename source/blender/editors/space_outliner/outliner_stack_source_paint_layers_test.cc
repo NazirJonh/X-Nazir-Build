@@ -668,6 +668,50 @@ TEST_F(OutlinerStackPaintLayersSourceTest, edit_fill_color_only_touches_fill_lay
   EXPECT_FALSE(paint_layers_edit_fill_color(*ma, paint, second));
 }
 
+TEST_F(OutlinerStackPaintLayersSourceTest, fill_without_base_color_draws_no_swatch)
+{
+  Material *ma = BKE_material_add(bmain, "FillSwatch");
+  StackAddArgs args;
+  const float color[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  args.color = color;
+  const int fill = paint_layers_edit_add(*ma, PAINT_STACK_ADD_FILL, -1, args);
+  ASSERT_GE(fill, 0);
+
+  const StackReadContext ctx{bmain, nullptr, nullptr};
+  Vector<StackRow> rows;
+  auto fill_swatch = [&]() -> const StackRowPreview * {
+    rows.clear();
+    if (!source().rows_build(ctx, {}, ma->id, rows)) {
+      return nullptr;
+    }
+    for (const StackRowPreview &slot : rows[fill].preview_slots) {
+      if (slot.is_color_swatch) {
+        return &slot;
+      }
+    }
+    return nullptr;
+  };
+
+  /* A live Fill shows its colour. */
+  const StackRowPreview *swatch = fill_swatch();
+  ASSERT_NE(swatch, nullptr);
+  EXPECT_NEAR(swatch->color[0], 0.25f, 1e-6f);
+
+  /* With the Base Color switched off (or removed) the row paints no colour, so no swatch is
+   * drawn; the swatch comes back with the same stored colour once the channel is re-enabled. */
+  MaterialPaintLayer *layer = paint_description_row_for_ordinal(*ma, fill);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  EXPECT_EQ(fill_swatch(), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_EQ(fill_swatch(), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  swatch = fill_swatch();
+  ASSERT_NE(swatch, nullptr);
+  EXPECT_NEAR(swatch->color[3], 0.0f, 1e-6f);
+}
+
 TEST_F(OutlinerStackPaintLayersSourceTest, edit_reorder_swaps_siblings)
 {
   Material *ma = BKE_material_add(bmain, "Reorder");

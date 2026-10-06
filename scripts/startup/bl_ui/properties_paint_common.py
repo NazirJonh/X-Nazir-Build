@@ -1138,15 +1138,12 @@ class PAINT_MT_material_layer_channel_socket(Menu):
             layout.prop(settings, "opacity", text="Opacity")
             drawn_any = True
 
-        # Parity with the old Channels box: remove the record from here. A Fill's Base Color is the
-        # row's constant and cannot be removed (BKE_paint_layers_channel_remove refuses), so the
-        # entry is shown disabled instead of offering a click that can never stick.
+        # Parity with the old Channels box: remove the record from here. Every channel of a layer
+        # removes the same way, a Fill's Base Color included (it only stops painting that channel;
+        # the material's global set is what always keeps Base Color).
         if drawn_any:
             layout.separator()
         row = layout.row()
-        row.enabled = not (
-            channel.channel == 'BASE_COLOR' and layer.role == 'LAYER' and
-            layer.source == 'CONSTANT')
         op = row.operator(
             "material.paint_layer_channel_remove", text="Remove Channel", icon='X')
         op.marker = layer.marker
@@ -2245,16 +2242,6 @@ def material_layer_visible_channels(material):
     ]
 
 
-def material_layer_channel_toggle_locked(layer, channel_id):
-    """Whether a layer channel's toggle is fixed on and cannot be switched off.
-
-    A Layer-role Fill's Base Color is the row's constant, so BKE refuses to disable or remove it
-    (#BKE_paint_layers_channel_set_enabled / _channel_remove): the widget shows it on but locked.
-    Matches BKE's `uses_fill_color`, which only the CONSTANT source sets.
-    """
-    return channel_id == 'BASE_COLOR' and layer.role == 'LAYER' and layer.source == 'CONSTANT'
-
-
 def material_layer_weight_record_count(material, layer):
     """How many of \a layer's channel records take part in \a material's set.
 
@@ -2321,8 +2308,6 @@ def draw_material_layer_channels(layout, context, material, layer):
         enabled = record is not None and record.use
         col = flow.column(align=False)
         col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
-        # A Fill's Base Color is fixed on; show it locked rather than offering a toggle BKE refuses.
-        col.enabled = not material_layer_channel_toggle_locked(layer, channel_id)
         op = col.operator(
             "material.paint_layer_channel_toggle",
             text=_MATERIAL_PAINT_CHANNEL_LABELS[channel_id],

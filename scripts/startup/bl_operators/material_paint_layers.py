@@ -385,8 +385,6 @@ class MATERIAL_OT_paint_layer_channel_remove(_PaintLayerOperator):
         layer = self._layer(context)
         if layer is None:
             return {'CANCELLED'}
-        # A Fill's Base Color is its constant and cannot be removed (see
-        # BKE_paint_layers_channel_remove); the RNA function reports it as an error.
         try:
             layer.channel_remove(channel=self.channel)
         except RuntimeError as ex:
@@ -427,12 +425,6 @@ class MATERIAL_OT_paint_layer_channel_toggle(_PaintLayerOperator):
                     record.use = True
             elif record is not None:
                 record.use = False
-                if record.use:
-                    # BKE refused the switch (a Layer-role Fill's Base Color is its constant), so the
-                    # record still reads enabled; report instead of claiming a change that did not
-                    # happen, the way channel_remove reports its own refusal.
-                    self.report({'WARNING'}, "This channel cannot be switched off")
-                    return {'CANCELLED'}
         except RuntimeError as ex:
             self.report({'WARNING'}, str(ex))
             return {'CANCELLED'}

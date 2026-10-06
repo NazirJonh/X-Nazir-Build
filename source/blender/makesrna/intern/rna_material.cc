@@ -1804,7 +1804,7 @@ static void rna_MaterialPaintLayerChannel_value_scalar_set(PointerRNA *ptr, floa
  * Whether the channel takes part. Mirrors #BrushMaterialPaintChannel.use so one widget can read a
  * brush channel and a layer channel the same way: on for ENABLED, off for DISABLED and ABSENT.
  * Writing goes through #BKE_paint_layers_channel_set_enabled, which owns the tags and rebuild; a
- * Layer-role Fill's Base Color refuses to switch off, the same way its record cannot be removed.
+ * switched-off record keeps its value and map, so re-enabling restores the channel untouched.
  */
 static bool rna_MaterialPaintLayerChannel_use_get(PointerRNA *ptr)
 {

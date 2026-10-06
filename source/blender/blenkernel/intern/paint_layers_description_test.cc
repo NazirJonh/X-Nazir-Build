@@ -1366,6 +1366,149 @@ TEST_F(PaintLayersDescription, channel_add_remove_and_set_enabled)
   EXPECT_EQ(layer->channels, nullptr);
 }
 
+TEST_F(PaintLayersDescription, fill_base_color_remove_and_restore_keeps_the_stored_value)
+{
+  Material *ma = BKE_material_add(bmain, "FillBaseToggle");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  const float color[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, color));
+
+  /* A Fill's Base Color toggles like any other channel: the row stops painting it, the stored
+   * colour survives, and the rest of the row is untouched. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  const MaterialPaintLayerChannel *base = paint_layer_channel_find(
+      *fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+  float stored[4];
+  BKE_paint_layers_base_color_get(*fill, stored);
+  EXPECT_FLOAT_EQ(stored[0], 0.2f);
+  EXPECT_FLOAT_EQ(stored[3], 1.0f);
+  EXPECT_FALSE(BKE_paint_layers_base_color_active(*fill));
+  /* A correction's DNA constant has no state to switch off, so it is always active. */
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, fill, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "C");
+  ASSERT_NE(corr, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_base_color_active(*corr));
+
+  /* Enabling brings the same record and its colour back. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+  base = paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+  BKE_paint_layers_base_color_get(*fill, stored);
+  EXPECT_FLOAT_EQ(stored[0], 0.2f);
+
+  /* Removing the record works too; a fresh Fill record starts transparent (the row lays nothing
+   * until its colour is set). The global set keeps Base Color regardless. */
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_EQ(fill->channels_num, 4);
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_FALSE(BKE_paint_layers_base_color_active(*fill));
+  float absent[4];
+  BKE_paint_layers_base_color_get(*fill, absent);
+  EXPECT_FLOAT_EQ(absent[3], 0.0f);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  base = paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+  EXPECT_FLOAT_EQ(base->value[3], 0.0f);
+}
+
+TEST_F(PaintLayersDescription, set_fill_color_on_an_off_base_color_only_writes_the_value)
+{
+  Material *ma = BKE_material_add(bmain, "FillColorOff");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  const float first[4] = {0.1f, 0.2f, 0.3f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, first));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+
+  /* Writing a colour into a switched-off record does not switch it back on: the value lands, the
+   * state stays DISABLED, and enabling is the toggle's own operation. */
+  const float second[4] = {0.9f, 0.8f, 0.7f, 1.0f};
+  EXPECT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, second));
+  const MaterialPaintLayerChannel *base = paint_layer_channel_find(
+      *fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+  float stored[4];
+  BKE_paint_layers_base_color_get(*fill, stored);
+  EXPECT_FLOAT_EQ(stored[0], 0.9f);
+  EXPECT_FALSE(BKE_paint_layers_base_color_active(*fill));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+  BKE_paint_layers_base_color_get(*fill, stored);
+  EXPECT_FLOAT_EQ(stored[0], 0.9f);
+
+  /* A missing record is still created on demand, so a scripted write always lands somewhere
+   * readable; the record comes back ENABLED and carrying the written colour. */
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  const float third[4] = {0.5f, 0.25f, 0.75f, 1.0f};
+  EXPECT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, third));
+  base = paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+  BKE_paint_layers_base_color_get(*fill, stored);
+  EXPECT_FLOAT_EQ(stored[0], 0.5f);
+  EXPECT_TRUE(BKE_paint_layers_base_color_active(*fill));
+}
+
+TEST_F(PaintLayersDescription, source_change_tolerates_a_missing_or_disabled_base_color)
+{
+  Material *ma = BKE_material_add(bmain, "KindFlipBase");
+  /* A Paint row without a Base Color record converts to a Fill without one: no record, nothing to
+   * normalize, nothing crashes. */
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_source_change(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(layer->channels_num, 0);
+  EXPECT_EQ(paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+
+  /* A DISABLED record is the colour entered before the switch-off, so neither flip touches it: a
+   * transparent stored value is not normalized into an opaque Fill default. */
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *fill);
+  /* The lookup hands back a const record; the test writes the stored state directly. */
+  auto find_base = [&]() {
+    return const_cast<MaterialPaintLayerChannel *>(
+        paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  };
+  MaterialPaintLayerChannel *base = find_base();
+  ASSERT_NE(base, nullptr);
+  const float stored_color[4] = {0.25f, 0.5f, 0.75f, 0.0f};
+  copy_v4_v4(base->value, stored_color);
+  base->state = MA_PAINT_LAYER_CHANNEL_DISABLED;
+
+  EXPECT_TRUE(BKE_paint_layers_source_change(*ma, fill, MA_PAINT_LAYER_SOURCE_IMAGE));
+  EXPECT_EQ(fill->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  base = find_base();
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+  EXPECT_FLOAT_EQ(base->value[0], 0.25f);
+  EXPECT_FLOAT_EQ(base->value[3], 0.0f);
+
+  EXPECT_TRUE(BKE_paint_layers_source_change(*ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(fill->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  base = find_base();
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->state, MA_PAINT_LAYER_CHANNEL_DISABLED);
+  EXPECT_FLOAT_EQ(base->value[0], 0.25f);
+  EXPECT_FLOAT_EQ(base->value[3], 0.0f);
+}
+
 TEST_F(PaintLayersDescription, fill_correction_record_overrides_constant_per_channel)
 {
   Material *ma = BKE_material_add(bmain, "FillCorrMat");
@@ -4125,6 +4268,8 @@ TEST_F(PaintLayersDescription, mapping_block_copies_with_the_row)
   const float offset[2] = {0.25f, 0.5f};
   const float scale[2] = {2.0f, 0.5f};
   ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
+  /* A new row starts with the scale axes locked together; uneven axes need the lock off. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
@@ -4162,6 +4307,8 @@ TEST_F(PaintLayersDescription, mapping_scale_keeps_a_negative_sign_through_the_s
       *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(fill, nullptr);
   const float mirror[2] = {-1.0f, 2.0f};
+  /* New rows lock the axes together, which would pull Y to X. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, mirror));
   EXPECT_FLOAT_EQ(fill->mapping.scale[0], -1.0f);
   EXPECT_FLOAT_EQ(fill->mapping.scale[1], 2.0f);
@@ -4173,6 +4320,9 @@ TEST_F(PaintLayersDescription, mapping_scale_lock_moves_both_axes_together)
   MaterialPaintLayer *fill = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(fill, nullptr);
+  /* Uniform scale is the common case, so a new row starts locked. */
+  EXPECT_TRUE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
   EXPECT_FALSE(BKE_paint_layers_mapping_scale_lock_get(*fill));
 
   /* Unlocked axes stay independent. */

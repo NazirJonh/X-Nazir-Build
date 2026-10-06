@@ -20,7 +20,6 @@
  * (called from the material evaluation too).
  */
 
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>

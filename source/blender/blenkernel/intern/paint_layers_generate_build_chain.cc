@@ -20,7 +20,6 @@
  * (called from the material evaluation too).
  */
 
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>
@@ -83,12 +82,16 @@
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 
+#include "CLG_log.h"
+
 #include "IMB_imbuf_types.hh"
 
 #include "paint_material_composite_internal.hh"
 
 /* The recursive chain builders: #PaintLayersChainBuilder::build_list and its row
  * builder. */
+
+static CLG_LogRef LOG = {"bke.paint_layers_generate"};
 
 namespace blender {
 namespace bke::paint_layers {
@@ -202,24 +205,6 @@ ChainResult PaintLayersChainBuilder::build_list(
       }
       row = build_row(layer, row_target, substituted, baked_color, premul, layer_group, channel);
     }
-    if (!row.valid) {
-      /* [PL-DIAG] Row-chain audit for the correction-visibility report: which rows take part
-       * per channel and how (live or bake-substituted). Prints only. Compare the Layer 1
-       * lines between the one-row and two-row states: identical lines prove the graph side. */
-      printf("[PL-DIAG] chain row='%s' channel=%d substituted=%d grouped=%d valid=0\n",
-             layer->name,
-             channel,
-             int(substituted),
-             int(layer_group != nullptr));
-      continue;
-    }
-    /* [PL-DIAG] See above: the taking-part counterpart of the skip line. */
-    printf("[PL-DIAG] chain row='%s' channel=%d substituted=%d grouped=%d valid=1\n",
-           layer->name,
-           channel,
-           int(substituted),
-           int(layer_group != nullptr));
-    ChainLayer current = row.current;
     if (row.grouped) {
       /* The parent chains the group through its instance: Color and Coverage are the row's
        * straight result, while Below/Blend/Result are the instance's own sockets. */
@@ -1090,10 +1075,6 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
       current.opacity_node = visible;
       current.opacity = socket_out(*visible, "Value");
     }
-    printf("[PL-DIAG] substituted enabled row='%s' channel=%d enabled_input=%d\n",
-           layer->name,
-           channel,
-           int(enabled_out != nullptr));
   }
   else {
     /* A constant answers first: it needs no sampler, so a channel the resolver calls Constant
@@ -1103,7 +1084,7 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
                        paint_layer_channel_image(ma, *layer, channel);
     if (live_constant) {
       /* The active Material row shows its source's live constant rather than its baked map.
-       * The value lives in another material, so it is not topology (ТЗ-26): it is read from
+       * The value lives in another material, so it is not topology (Spec-26): it is read from
        * this row's own group input, filled by #create_value_inputs and kept current by
        * #values_sync_socket, exactly like a row's own Fill constant. */
       bNodeTreeInterfaceSocket *live_constant_iface = nullptr;
@@ -1191,13 +1172,6 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
     else if (source_group_instance != nullptr) {
       /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output. No map, so
        * content coverage for this row comes from the wrapper's COVERAGE output below. */
-      if (source_group_socket == nullptr) {
-        PL_DEBUG_PRINTF(
-            "paint layers: row '%s' channel %d: wrapper has no COLOR output, row dropped\n",
-            layer->name,
-            channel);
-        return false;
-      }
       current.source_node = source_group_instance;
       current.source = source_group_socket;
     }
@@ -1440,75 +1414,6 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
    * (a map or a folder subtree); a constant leaf covers by common alone, as its live factor does. */
   if (r_content_node != nullptr) {
     *r_content_node = use_baked_content ? baked_color_node : nullptr;
-  }
-  /* [PL-DIAG] What a substituted row reads from its bake, for the correction-visibility report.
-   * Prints only (the pixel read goes through the same acquire the CPU composite and the GPU upload
-   * use). Compare `alpha_px` with the heavy-bake line: a value near zero here, with the bake line
-   * large, means the map lost its content after the commit. */
-  {
-    auto diag_image = [](const char *what, Image *image) {
-      if (image == nullptr) {
-        printf("[PL-DIAG]   %s: null\n", what);
-        return;
-      }
-      /* The full-pixel scan of two large maps ran on the main thread at every regen (about 35 ms
-       * of `groups_scratch_build`). It stays available behind an environment flag. */
-      static const bool scan = getenv("PL_DIAG_SCAN") != nullptr;
-      if (!scan) {
-        printf("[PL-DIAG]   %s: '%s' %p us=%d cs='%s' alpha_mode=%d flag=%d (set PL_DIAG_SCAN=1 "
-               "for the pixel scan)\n",
-               what,
-               image->id.name + 2,
-               static_cast<void *>(image),
-               image->id.us,
-               image->colorspace_settings.name,
-               int(image->alpha_mode),
-               int(image->flag));
-        return;
-      }
-      void *lock = nullptr;
-      ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
-      int64_t alpha_px = 0, rgb_px = 0;
-      int dirty = -1, width = 0, height = 0;
-      if (ibuf != nullptr && ibuf->byte_data() != nullptr) {
-        width = ibuf->x;
-        height = ibuf->y;
-        dirty = (ibuf->userflags & IB_BITMAPDIRTY) ? 1 : 0;
-        const uchar *px = ibuf->byte_data();
-        for (int64_t i = 0; i < int64_t(width) * height; i++) {
-          if (px[i * 4 + 3] > 0) {
-            alpha_px++;
-            rgb_px += (px[i * 4] | px[i * 4 + 1] | px[i * 4 + 2]) != 0 ? 1 : 0;
-          }
-        }
-      }
-      printf("[PL-DIAG]   %s: '%s' %p us=%d cs='%s' alpha_mode=%d flag=%d size=%dx%d ibuf_dirty=%d "
-             "alpha_px=%lld rgb_nonzero_where_alpha=%lld\n",
-             what,
-             image->id.name + 2,
-             static_cast<void *>(image),
-             image->id.us,
-             image->colorspace_settings.name,
-             int(image->alpha_mode),
-             int(image->flag),
-             width,
-             height,
-             dirty,
-             static_cast<long long>(alpha_px),
-             static_cast<long long>(rgb_px));
-      BKE_image_release_ibuf(image, ibuf, lock);
-    };
-    printf("[PL-DIAG] substituted source row='%s' content_alpha_from=baked_color.Alpha(%d) "
-           "factor=mean(coverage.RGB)(%d) live_correction_nodes=none\n",
-           layer->name,
-           int(current.content_alpha != nullptr),
-           int(current.opacity != nullptr));
-    printf("[PL-DIAG] substituted factor row='%s' channel=%d mode=%s\n",
-           layer->name,
-           channel,
-           use_baked_content ? "common x baked_alpha" : "common");
-    diag_image("color", baked_color);
-    diag_image("coverage", layer->bake->coverage);
   }
   /* Why after place: every source node above already sits on its grid spot, so the frame
    * only parents them. */

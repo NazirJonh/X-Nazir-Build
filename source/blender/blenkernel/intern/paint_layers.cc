@@ -1535,14 +1535,6 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
 {
-  // TODO(debug): remove
-  {
-    char dbg_old[UUID_STRING_SIZE];
-    char dbg_new[UUID_STRING_SIZE];
-    BLI_uuid_format(dbg_old, ma.active_layer_marker);
-    BLI_uuid_format(dbg_new, marker);
-    printf("[STACK_DBG] active_set old=%.8s new=%.8s\n", dbg_old, dbg_new);
-  }
   /* Leaving a row is when its deferred bake becomes due. The editor's Material-row planner reads
    * this after the depsgraph update; the CPU planner's #MA_PAINT_LAYERS_BAKE_STALE cannot carry the
    * signal because it is cleared at the K-1 point, before that update runs. */
@@ -2700,12 +2692,6 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
     return false;
   }
-  /* [PL-DIAG] Visibility edit: the hash of the row whose bake covers this item, before and after. */
-  const MaterialPaintLayer *diag_owner = paint_layer_correction_owner(ma.paint_layers, *layer);
-  const MaterialPaintLayer &diag_row = (diag_owner != nullptr) ? *diag_owner : *layer;
-  uint32_t diag_hash_before[2];
-  BKE_paint_layers_bake_hash(ma, diag_row, diag_hash_before);
-  const bool diag_regen_before = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0;
   /* Whether each baked ancestor replaces its row right now, before the edit changes its hash. */
   uint64_t bake_state_before = 0;
   paint_layer_ancestor_bake_state(ma, ma.paint_layers, layer, bake_state_before);
@@ -2747,64 +2733,6 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
   }
   /* The heavy re-bake waits for a pause in the toggling instead of starting per flip. */
   BKE_paint_layers_bake_debounce_extend(ma);
-  printf("[PL-DIAG] set_enabled toggle item='%s' value=%d regen_set=%d bake_stale_set=%d "
-         "ancestor_valid_bits %llx -> %llx (1 = substituted by bake) debounce_s=%.2f\n",
-         layer->name,
-         int(enabled),
-         int(substitution_flipped),
-         int((ma.paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE) != 0),
-         static_cast<unsigned long long>(bake_state_before),
-         static_cast<unsigned long long>(bake_state_after),
-         PAINT_LAYERS_BAKE_EDIT_QUIET_SECONDS);
-  {
-    uint32_t hash_after[2];
-    BKE_paint_layers_bake_hash(ma, diag_row, hash_after);
-    printf(
-        "[PL-DIAG] set_enabled item='%s' role=%d enabled=%d row='%s' row_has_bake=%d "
-        "row_bake_valid=%d hash %08x%08x -> %08x%08x regen %d -> %d active_row_in_subtree=%d\n",
-        layer->name,
-        int(layer->role),
-        int(enabled),
-        diag_row.name,
-        int(diag_row.bake != nullptr),
-        int(BKE_paint_layers_bake_is_valid(ma, diag_row)),
-        diag_hash_before[0],
-        diag_hash_before[1],
-        hash_after[0],
-        hash_after[1],
-        int(diag_regen_before),
-        int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
-        int(BKE_paint_layers_subtree_contains(diag_row, ma.active_layer_marker)));
-    printf("[PL-DIAG] set_enabled multiplier item='%s' value=%.1f regen_called=%d row_substituted=%d\n",
-           layer->name,
-           enabled ? 1.0 : 0.0,
-           int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
-           int(diag_row.bake != nullptr && BKE_paint_layers_bake_is_valid(ma, diag_row)));
-    /* [PL-DIAG] Which effect of the row was switched (the names are all alike) and what every
-     * effect of the row reads now; effect 0 is the head of the list. */
-    int toggled_index = -1;
-    int effect_index = 0;
-    for (const MaterialPaintLayer &effect : diag_row.effects) {
-      if (&effect == layer) {
-        toggled_index = effect_index;
-      }
-      effect_index++;
-    }
-    printf("[PL-DIAG] set_enabled effects row='%s' toggled_index=%d marker=%08x effect_num=%d\n",
-           diag_row.name,
-           toggled_index,
-           unsigned(layer->marker.time_low),
-           effect_index);
-    effect_index = 0;
-    for (const MaterialPaintLayer &effect : diag_row.effects) {
-      printf("[PL-DIAG]   effect[%d] marker=%08x enabled=%d opacity=%.3f effective=%.3f\n",
-             effect_index++,
-             unsigned(effect.marker.time_low),
-             int((effect.flag & MA_PAINT_LAYER_ENABLED) != 0),
-             effect.opacity,
-             BKE_paint_layers_effective_opacity(effect));
-    }
-  }
   return true;
 }
 

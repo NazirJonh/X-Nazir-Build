@@ -27,7 +27,6 @@
 #include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
-#include "BKE_paint_layers_debug.hh"
 
 #include "NOD_shader.h"
 #include "NOD_shader_nodes_inline.hh"
@@ -148,16 +147,7 @@ GPUMaterialFromNodeTreeResult GPU_material_from_nodetree(
     GPUMaterial *mat = static_cast<GPUMaterial *>(link.data);
     if (mat->uuid == shader_uuid && mat->engine == engine) {
       if (!deferred_compilation) {
-#if PAINT_LAYERS_DEBUG_LOG
-        const double pl_t0 = BLI_time_now_seconds();
-#endif
         GPU_pass_ensure_its_ready(mat->pass);
-#if PAINT_LAYERS_DEBUG_LOG
-        const double pl_ms = (BLI_time_now_seconds() - pl_t0) * 1000.0;
-        if (pl_ms > 5.0) {
-          printf("PL_TIMING: gpu_material wait ready '%s' %.2f ms\n", mat->name.c_str(), pl_ms);
-        }
-#endif
       }
       return {mat};
     }
@@ -201,21 +191,9 @@ GPUMaterialFromNodeTreeResult GPU_material_from_nodetree(
     mat->ubo = GPU_uniformbuf_create_ex(256, nullptr, "Dummy UBO");
   }
   else {
-#if PAINT_LAYERS_DEBUG_LOG
-    const double pl_t0 = BLI_time_now_seconds();
-#endif
     /* Create source code and search pass cache for an already compiled version. */
     mat->pass = GPU_generate_pass(
         mat, &mat->graph, mat->name.c_str(), engine, deferred_compilation, callback, thunk, false);
-#if PAINT_LAYERS_DEBUG_LOG
-    const double pl_ms = (BLI_time_now_seconds() - pl_t0) * 1000.0;
-    if (pl_ms > 5.0) {
-      printf("PL_TIMING: gpu_material generate pass '%s' deferred=%d %.2f ms\n",
-             mat->name.c_str(),
-             int(deferred_compilation),
-             pl_ms);
-    }
-#endif
   }
 
   /* Determine whether we should generate an optimized variant of the graph.

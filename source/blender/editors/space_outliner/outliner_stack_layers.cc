@@ -2083,8 +2083,6 @@ bool outliner_stack_focus_set(bContext *C,
 
 bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, const int ordinal)
 {
-  // TODO(debug): remove
-  printf("[STACK_DBG] row_activate ordinal=%d\n", ordinal);
   if (ordinal < 0) {
     return false;
   }
@@ -2100,8 +2098,6 @@ bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, con
   }
   const bool result = stack_source_for_space(space_outliner)
                           ->row_activate(*C, space_outliner.runtime->stack_focus, *owner, ordinal, *row);
-  // TODO(debug): remove
-  printf("[STACK_DBG] row_activate ordinal=%d result=%d\n", ordinal, int(result));
   return result;
 }
 
@@ -2125,11 +2121,6 @@ bool outliner_stack_row_preview_activate(bContext *C,
   }
   const bool result = stack_source_for_space(space_outliner)
                           ->preview_activate(*C, *owner, *row, section_id);
-  // TODO(debug): remove
-  printf("[STACK_DBG] row_preview_activate ordinal=%d section='%s' result=%d\n",
-         ordinal,
-         section_id.data(),
-         int(result));
   return result;
 }
 

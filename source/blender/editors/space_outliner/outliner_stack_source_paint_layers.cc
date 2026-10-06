@@ -972,12 +972,6 @@ bool paint_layers_edit_move(Material &material,
       target_index--;
     }
     edited = BKE_paint_layers_reorder(material, from, target_index);
-    /* [PL-DIAG] Print only: how a correction reorder resolved. */
-    printf("[PL-DIAG] correction reorder from=%d anchor=%d target=%d edited=%d\n",
-           from_index,
-           anchor_index,
-           target_index,
-           int(edited));
   }
   else
   {
@@ -1352,8 +1346,6 @@ class PaintLayersStackSource final : public StackSource,
       BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Unsupported layer cannot be activated");
       return false;
     }
-    // TODO(debug): remove
-    printf("[STACK_DBG] %s: call active_set\n", __func__);
     BKE_paint_layers_active_set(material, row.stable_id);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
@@ -1403,10 +1395,6 @@ class PaintLayersStackSource final : public StackSource,
     for (const StackContentSection &section : row.content_sections) {
       has_section |= section.identifier == section_id;
     }
-    // TODO(debug): remove
-    printf("[STACK_DBG] paint preview_activate section='%s' has_section=%d\n",
-           section_id.data(),
-           int(has_section));
     if (!has_section) {
       return false;
     }
@@ -1630,8 +1618,6 @@ class PaintLayersStackSource final : public StackSource,
       if (layer == nullptr) {
         return -1;
       }
-      // TODO(debug): remove
-      printf("[STACK_DBG] %s: call active_set\n", __func__);
       BKE_paint_layers_active_set(material, layer->marker);
       /* A new layer is painted on its content, not on the mask the previous layer was edited in. */
       layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
@@ -2206,8 +2192,6 @@ class PaintLayersStackSource final : public StackSource,
       if (created == nullptr) {
         return false;
       }
-      // TODO(debug): remove
-      printf("[STACK_DBG] %s: call active_set\n", __func__);
       BKE_paint_layers_active_set(material, created->marker);
       WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
       WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
@@ -2582,8 +2566,6 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     }
     return OPERATOR_CANCELLED;
   }
-  // TODO(debug): remove
-  printf("[STACK_DBG] %s: call active_set\n", __func__);
   BKE_paint_layers_active_set(material, layer->marker);
   WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &material.id);
   return OPERATOR_FINISHED;

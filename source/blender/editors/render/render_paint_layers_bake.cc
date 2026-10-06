@@ -25,7 +25,6 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_report.hh"
 
@@ -246,51 +245,6 @@ void paint_layers_bake_undo_post(Main *bmain,
   if (bmain == nullptr) {
     return;
   }
-  /* Diagnostic only: reports what survived the memfile undo, without touching anything. */
-  {
-    Set<const Image *> live_images;
-    for (const Image &image : bmain->images) {
-      live_images.add(&image);
-    }
-    Set<const bNodeTree *> live_trees;
-    for (const bNodeTree &ntree : bmain->nodetrees) {
-      live_trees.add(&ntree);
-    }
-    for (Material &ma : bmain->materials) {
-      if (!paint_layers_is_layered(ma)) {
-        continue;
-      }
-      Vector<const MaterialPaintLayer *> layers;
-      BKE_paint_layers_flatten_all(ma, layers);
-      int images_total = 0;
-      int images_dangling = 0;
-      for (const MaterialPaintLayer *layer : layers) {
-        for (int i = 0; i < layer->channels_num; i++) {
-          const Image *image = layer->channels[i].image;
-          if (image != nullptr) {
-            images_total++;
-            if (!live_images.contains(image)) {
-              images_dangling++;
-            }
-          }
-        }
-      }
-      printf(
-          "[PL-DIAG] undo_post material='%s' regen_flag=%d slots_stale=%d tree=%p tree_in_main=%d "
-          "nodetree=%p rows=%d channel_images=%d dangling=%d eval_copy=%p\n",
-          ma.id.name + 2,
-          int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
-          int((ma.paint_layers_flag & MA_PAINT_LAYERS_SLOTS_STALE) != 0),
-          static_cast<void *>(ma.paint_layers_tree),
-          int(ma.paint_layers_tree != nullptr && live_trees.contains(ma.paint_layers_tree)),
-          static_cast<void *>(ma.nodetree),
-          int(layers.size()),
-          images_total,
-          images_dangling,
-          static_cast<void *>(ma.id.orig_id));
-    }
-  }
-
   /* The snapshot restores the generated trees and their stored root hash, but the regeneration
    * flag it carries was already cleared, and the runtime that would notice the mismatch is not part
    * of it. Without this the restored graph stays out of step with the restored description until
@@ -396,9 +350,6 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
      * "bake now" callers already stamped it; this covers the backstop sweep after a file load, which
      * starts a heavy job that no arm preceded. */
     BKE_paint_layers_bake_scheduled_set(ma, true);
-    PL_DEBUG_PRINTF("paint layers bake: start kind=heavy material='%s' row='-' reason=stale\n",
-                    ma.id.name + 2);
-    WM_jobs_start(&wm, wm_job);
   }
 }
 
@@ -480,7 +431,6 @@ void paint_layers_bake_debounce_arm(wmWindowManager &wm, Material &ma)
    * rebuild's own shading tag causes, restarts the countdown with the rest of that window. */
   const double seconds = BKE_paint_layers_bake_debounce_seconds(
       ma, paint_layers_bake_debounce_seconds);
-  printf("[PL-DIAG] bake debounce armed material='%s' wait=%.2f s\n", ma.id.name + 2, seconds);
   paint_layers_bake_debounce_timer_handle() = WM_event_timer_add(
       &wm, nullptr, TIMERPAINTLAYERSBAKE, seconds);
 }
@@ -605,16 +555,8 @@ void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
       /* Checked before the poll, which sets the flag itself: a regeneration already requested and
        * not yet consumed must not be announced a second time. */
       const bool regen_pending = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0;
-      const bool diag_due = BKE_paint_layers_cold_tier_poll(ma, now);
-      printf("[PL-DIAG] cold tier scan material='%s' remaining=%.2f due=%d regen_pending=%d\n",
-             ma.id.name + 2,
-             remaining,
-             int(diag_due),
-             int(regen_pending));
-      if (diag_due && !regen_pending) {
-        printf("[PL-DIAG] cold tier: material='%s' drops rows hidden >= %.0f s\n",
-               ma.id.name + 2,
-               PAINT_LAYERS_COLD_TIER_SECONDS);
+      const bool cold_due = BKE_paint_layers_cold_tier_poll(ma, now);
+      if (cold_due && !regen_pending) {
         /* The flag alone is consumed by the next regenerate; the tag is what makes that happen
          * without a user action. */
         WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma.id);
@@ -641,7 +583,6 @@ void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
     paint_layers_cold_timer_handle() = WM_event_timer_add(
         &wm, nullptr, TIMERPAINTLAYERSCOLD, next + 0.05);
     paint_layers_cold_deadline() = deadline;
-    printf("[PL-DIAG] cold tier timer armed wait=%.1f s\n", next + 0.05);
   }
   else if (next < 0.0 && armed) {
     WM_event_timer_remove(&wm, nullptr, paint_layers_cold_timer_handle());
@@ -652,7 +593,6 @@ void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
 
 void paint_layers_cold_tier_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt)
 {
-  printf("[PL-DIAG] cold tier tick\n");
   if (paint_layers_cold_timer_handle() == &wt) {
     paint_layers_cold_timer_handle() = nullptr;
   }

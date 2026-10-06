@@ -847,7 +847,7 @@ class PaintLayersUiTest(unittest.TestCase):
         self.assertIn("column", layout.kinds())
 
     def test_layer_channel_socket_menu_offers_remove_record(self):
-        # Item 5(б): the layer channel's socket menu offers Remove record (parity with the old
+        # Item 5(b): the layer channel's socket menu offers Remove record (parity with the old
         # Channels box); a Fill's Base Color is refused by BKE, so the entry is disabled there and
         # enabled on an ordinary Paint channel.
         from bl_ui.properties_paint_common import PAINT_MT_material_layer_channel_socket
@@ -866,12 +866,12 @@ class PaintLayersUiTest(unittest.TestCase):
 
     def test_old_channels_box_parity_is_covered_by_the_widget(self):
         # Item 5: the old Channels box is gone; its five functions live on the layer widget now.
-        # (а) the channel/name widget is `draw_material_layer_channels`; (в) Add Channel is the
-        # per-channel toggle that creates a record lazily; (г/д) Add Effect, Add Mask and Add
+        # (a) the channel/name widget is `draw_material_layer_channels`; (c) Add Channel is the
+        # per-channel toggle that creates a record lazily; (d/e) Add Effect, Add Mask and Add
         # Custom Channel are operators the widget/boxes expose. Verify the plate is complete.
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         self.material.paint_layers.active = layer
-        # (в) toggle creates a record lazily, standing in for Add Channel. EMISSION is outside the
+        # (c) toggle creates a record lazily, standing in for Add Channel. EMISSION is outside the
         # default set of a fresh row, so it has no record yet.
         before = len(layer.channels)
         with bpy.context.temp_override(material=self.material):
@@ -880,19 +880,19 @@ class PaintLayersUiTest(unittest.TestCase):
                     marker=layer.marker, channel='EMISSION', enable=True),
                 {'FINISHED'})
         self.assertEqual(len(layer.channels), before + 1)
-        # (б) Remove record operator acts by marker+channel.
+        # (b) Remove record operator acts by marker+channel.
         with bpy.context.temp_override(material=self.material):
             self.assertEqual(
                 bpy.ops.material.paint_layer_channel_remove(
                     marker=layer.marker, channel='EMISSION'),
                 {'FINISHED'})
         self.assertNotIn('EMISSION', {record.channel for record in layer.channels})
-        # (г) Add Correction (Effect / Mask Item) and (д) Add Custom Channel are registered.
+        # (d) Add Correction (Effect / Mask Item) and (e) Add Custom Channel are registered.
         self.assertIsNotNone(
             bpy.ops.material.paint_layer_correction_add.get_rna_type())
         self.assertIsNotNone(
             bpy.ops.material.paint_layer_custom_channel_add.get_rna_type())
-        # (д) the NODE_GROUP section draws the Add Custom Channel entry.
+        # (e) the NODE_GROUP section draws the Add Custom Channel entry.
         from bl_ui.properties_paint_common import _draw_material_custom_channels
 
         group = self.material.paint_layers.new(source='NODE_GROUP', name="Group")

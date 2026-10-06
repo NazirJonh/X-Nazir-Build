@@ -19,7 +19,6 @@
  * (called from the material evaluation too).
  */
 
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>
@@ -154,10 +153,10 @@ inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";
 inline constexpr const char *ROLE_MAPPING_SCALE = "mapping_scale";
 /** #INPUT_ROLE_PROP value of a row's UV mapping rotation (a Vector input holding 0, 0, angle). */
 inline constexpr const char *ROLE_MAPPING_ROTATION = "mapping_rotation";
-/** #INPUT_ROLE_PROP value of a Hybrid Material row's live constant (ТЗ-26). */
+/** #INPUT_ROLE_PROP value of a Hybrid Material row's live constant (Spec-26). */
 inline constexpr const char *ROLE_LIVE_CONSTANT = "live_constant";
 
-/** On a source-group wrapper's interface inputs: the row mapping value each carries (ТЗ 2.2).
+/** On a source-group wrapper's interface inputs: the row mapping value each carries (Spec 2.2).
  * The wrapper is shared by every row of one source, so the values ride its interface; a row
  * without the mapping applied leaves them unlinked and the wrapper's Mapping reads its identity
  * defaults. The dot prefix keeps the names outside a source's own namespace, and the roles keep

@@ -205,7 +205,7 @@ class PaintLayersTreeBuilder {
 
   bNode *source_group_instance_get(const MaterialPaintLayer &layer, bNodeTree &tree);
   /**
-   * Wire the wrapper instance's mapping inputs from the row group's own (ТЗ 2.2): the row's
+   * Wire the wrapper instance's mapping inputs from the row group's own (Spec 2.2): the row's
    * offset/scale/rotation feed the shared wrapper's Mapping. Nothing is built when the row's
    * mapping does not apply; the wiring itself is idempotent.
    */

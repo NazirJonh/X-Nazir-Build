@@ -20,7 +20,6 @@
  * (called from the material evaluation too).
  */
 
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>
@@ -142,22 +141,9 @@ bool values_sync_socket(Material &ma,
     }
     /* A mask correction carries the row opacity on every channel socket. */
     const bool mask_correction = BKE_paint_layers_role(*layer) == PaintLayerRole::MaskItem;
-    const float old_value = static_cast<bNodeSocketValueFloat *>(socket.default_value)->value;
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value =
         mask_correction ? BKE_paint_layers_effective_opacity(*layer) :
                           BKE_paint_layers_channel_opacity_effective(*layer, channel);
-    if (old_value != static_cast<bNodeSocketValueFloat *>(socket.default_value)->value) {
-      /* [PL-DIAG] Which effect a changed correction opacity socket resolved to. Prints only. */
-      printf("[PL-DIAG] values_sync correction opacity socket='%s' id='%s' channel=%d "
-             "marker=%08x layer='%s' %.3f -> %.3f\n",
-             iface.name != nullptr ? iface.name : "",
-             iface.identifier != nullptr ? iface.identifier : "",
-             channel,
-             unsigned(marker.time_low),
-             layer->name,
-             old_value,
-             static_cast<bNodeSocketValueFloat *>(socket.default_value)->value);
-    }
     return true;
   }
   if (STREQ(role, ROLE_CORRECTION_FILL)) {

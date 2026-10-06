@@ -20,7 +20,6 @@
  * (called from the material evaluation too).
  */
 
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>
@@ -35,6 +34,8 @@
 #include <utility>
 
 #include "MEM_guardedalloc.h"
+
+#include "CLG_log.h"
 
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
@@ -85,6 +86,8 @@
 
 #include "paint_material_composite_internal.hh"
 
+
+static CLG_LogRef LOG = {"bke.paint_layers_generate"};
 
 namespace blender {
 using namespace bke::paint_layers;
@@ -701,16 +704,18 @@ bNode *PaintLayersTreeBuilder::source_group_instance_get(const MaterialPaintLaye
     }
   }
   if (instance == nullptr) {
-    PL_DEBUG_PRINTF("paint layers: row '%s': no wrapper instance (%s)\n",
-                    layer.name,
-                    (failure != nullptr) ? failure : "unknown");
+    /* The caller turns this into a refusal; the log names the failure for diagnosis. */
+    CLOG_WARN(&LOG,
+              "Row '%s': no source wrapper instance (%s)",
+              layer.name,
+              (failure != nullptr) ? failure : "unknown");
   }
   source_group_instances.add(&layer, instance);
   return instance;
 }
 
 /**
- * Wire a SourceGroup row's mapping values into the wrapper instance (ТЗ 2.2): the row group's own
+ * Wire a SourceGroup row's mapping values into the wrapper instance (Spec 2.2): the row group's own
  * offset/scale/rotation inputs feed the instance's inputs of the same roles, and the wrapper's
  * Mapping reads them inside. The wrapper is shared by every row of the source, so a row without
  * the mapping applied leaves the inputs unlinked and the Mapping sits at its identity defaults.
@@ -818,7 +823,7 @@ RowMaterialSource PaintLayersTreeBuilder::resolve_row_material_source(const Mate
       out.source_group_socket = source_group_output(
           *out.source_group_tree, *out.source_group_instance, channel, false);
     }
-    /* The row's mapping values travel into the wrapper's Mapping (ТЗ 2.2); a row without the
+    /* The row's mapping values travel into the wrapper's Mapping (Spec 2.2); a row without the
      * mapping applied leaves the instance's inputs at their identity defaults. */
     if (out.source_group_instance != nullptr) {
       source_group_mapping_wire(row, row_tree, *out.source_group_instance);
@@ -983,7 +988,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     }
   };
   add_mapping_inputs(layer, layer.name[0] != '\0' ? layer.name : "Layer");
-  /* A Hybrid Material row's live constant (ТЗ-26): the value lives on another material's node
+  /* A Hybrid Material row's live constant (Spec-26): the value lives on another material's node
    * tree, so it cannot travel through #BKE_paint_layers_custom_properties_sync like a row's own
    * Fill constant. It gets its own group input instead, filled here and kept current by
    * #values_sync_socket, so a source edit reaches the row without rebuilding its group. */
@@ -1052,7 +1057,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       add_mapping_inputs(correction, mapping_label);
     }
     /* An Effect correction with source Material gets the same per-channel live-constant input a
-     * Layer row of that source gets (ТЗ-26): the value lives on another material's node tree, so
+     * Layer row of that source gets (Spec-26): the value lives on another material's node tree, so
      * it travels through a group input kept current by #values_sync_socket. #ROLE_LIVE_CONSTANT
      * is reused as-is -- #values_sync_socket looks its row up by marker, and #BKE_paint_layers_find
      * walks the whole tree, so a correction's marker resolves to the correction itself. */

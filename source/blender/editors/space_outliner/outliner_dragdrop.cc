@@ -1391,15 +1391,6 @@ static bool stack_layer_drop_init(bContext *C, const wmEvent *event, wmDragStack
     }
     if (!drag_stack_row->parent_section_id.empty()) {
       if (!stack_rows_are_siblings(*drag_stack_row, *target_row)) {
-        /* [PL-DIAG] Print only: which rule refused an attached-row drop. */
-        printf("[PL-DIAG] drop refused: attached drag ordinal=%d (parent=%d section='%s') vs "
-               "target ordinal=%d (parent=%d section='%s')\n",
-               drag_stack_row->ordinal,
-               int(drag_stack_row->parent_ordinal),
-               drag_stack_row->parent_section_id.c_str(),
-               target_row->ordinal,
-               int(target_row->parent_ordinal),
-               target_row->parent_section_id.c_str());
         return false;
       }
       if (insert_type == TE_INSERT_INTO) {

@@ -4585,31 +4585,6 @@ static void outliner_draw_tree_element(ui::Block *block,
           active = OL_DRAWSEL_ACTIVE;
         }
       }
-      if (tselem->type == TSE_STACK_LAYER) {
-        const StackReadContext dbg_ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
-        const bool dbg_row_active = outliner_stack_row_is_active(
-            dbg_ctx, *space_outliner, tselem->nr);
-        const bool dbg_tse_active = (tselem->flag & TSE_ACTIVE) != 0;
-        // TODO(debug): remove
-        static int dbg_last_nr = -32768;
-        static bool dbg_last_row_active = false;
-        static bool dbg_last_tse_active = false;
-        if ((dbg_row_active || dbg_tse_active) &&
-            (dbg_last_nr != int(tselem->nr) || dbg_last_row_active != dbg_row_active ||
-             dbg_last_tse_active != dbg_tse_active))
-        {
-          printf(
-              "[STACK_DBG] draw active ordinal=%d row_is_active=%d TSE_ACTIVE=%d "
-              "tree_has_active=%d\n",
-              int(tselem->nr),
-              int(dbg_row_active),
-              int(dbg_tse_active),
-              int(stack_tree_has_active));
-          dbg_last_nr = int(tselem->nr);
-          dbg_last_row_active = dbg_row_active;
-          dbg_last_tse_active = dbg_tse_active;
-        }
-      }
       if (active != OL_DRAWSEL_NONE) {
         ui::theme::get_color_3ubv(TH_TEXT_HI, text_color);
         text_color[3] = 255;

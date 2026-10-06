@@ -12,7 +12,6 @@
 
 #include "BKE_global.hh"
 #include "BKE_object.hh"
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_scene.hh"
 
 #include "BLI_rect.h"
@@ -560,9 +559,6 @@ void Instance::render_sample()
     const bool release_context = render != nullptr && (scene->r.scemode & R_BUTS_PREVIEW) &&
                                  !GPU_use_main_context_workaround();
     while (materials.queued_shaders_count > 0 || materials.queued_textures_count > 0) {
-#if PAINT_LAYERS_DEBUG_LOG
-      const double pl_t0 = BLI_time_now_seconds();
-#endif
       if (release_context) {
         DRW_render_context_disable(render->re);
         GPU_shader_compiler_wait_for_all();
@@ -570,12 +566,6 @@ void Instance::render_sample()
       }
       /* With the context released this only runs the cache update, which needs the context. */
       GPU_pass_cache_wait_for_all();
-#if PAINT_LAYERS_DEBUG_LOG
-      const double pl_ms = (BLI_time_now_seconds() - pl_t0) * 1000.0;
-      if (pl_ms > 5.0) {
-        printf("PL_TIMING: eevee GPU_pass_cache_wait_for_all (render_sample) %.2f ms\n", pl_ms);
-      }
-#endif
       /** WORKAROUND: Re-sync now that all shaders are compiled. */
       /* This may need to happen more than once, since actual materials may require more passes
        * (eg. volume ones) than the fallback material used for queued passes. */

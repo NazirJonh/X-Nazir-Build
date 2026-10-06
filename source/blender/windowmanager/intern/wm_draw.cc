@@ -34,7 +34,6 @@
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_layer.hh"
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
 
@@ -1051,22 +1050,7 @@ static void wm_draw_area_offscreen(bContext *C, wmWindow *win, ScrArea *area, bo
       Scene *scene = WM_window_get_active_scene(win);
       wm_draw_region_buffer_create(scene, &region, false, use_viewport);
       wm_draw_region_bind(&region, 0);
-#if PAINT_LAYERS_DEBUG_LOG
-      const double pl_region_t0 = BLI_time_now_seconds();
-#endif
       ED_region_do_draw(C, &region);
-#if PAINT_LAYERS_DEBUG_LOG
-      {
-        const double pl_ms = (BLI_time_now_seconds() - pl_region_t0) * 1000.0;
-        if (pl_ms > 50.0) {
-          printf("PL_TIMING: region draw spacetype=%d regiontype=%d viewport=%d %.2f ms\n",
-                 int(area->spacetype),
-                 int(region.regiontype),
-                 int(use_viewport),
-                 pl_ms);
-        }
-      }
-#endif
       wm_draw_region_unbind(&region);
     }
 
@@ -1675,16 +1659,6 @@ void wm_draw_update(bContext *C)
 {
   PRF_scope(ProfileCategory::Draw);
 
-#if PAINT_LAYERS_DEBUG_LOG
-  /* Temporary diagnostic: only long gaps between frames are reported, to keep the log readable. */
-  static double pl_timing_last_call = 0.0;
-  const double pl_timing_call_start = BLI_time_now_seconds();
-  const double pl_timing_gap_ms = pl_timing_last_call > 0.0 ?
-                                      (pl_timing_call_start - pl_timing_last_call) * 1000.0 :
-                                      0.0;
-  pl_timing_last_call = pl_timing_call_start;
-#endif
-
   Main *bmain = CTX_data_main(C);
   wmWindowManager *wm = CTX_wm_manager(C);
   const bool rna_disallow_writes = true;
@@ -1728,18 +1702,7 @@ void wm_draw_update(bContext *C)
       /* Notifiers for screen redraw. */
       ED_screen_ensure_updated(C, wm, &win);
 
-#if PAINT_LAYERS_DEBUG_LOG
-      const double pl_window_t0 = BLI_time_now_seconds();
-#endif
       wm_draw_window(C, &win);
-#if PAINT_LAYERS_DEBUG_LOG
-      {
-        const double pl_ms = (BLI_time_now_seconds() - pl_window_t0) * 1000.0;
-        if (pl_ms > 50.0) {
-          printf("PL_TIMING: wm_draw_window %.2f ms\n", pl_ms);
-        }
-      }
-#endif
       wm_draw_update_clear_window(C, &win);
 
       wm_window_swap_buffer_release(&win);
@@ -1768,14 +1731,6 @@ void wm_draw_update(bContext *C)
   GPU_context_main_unlock();
 
   CTX_rna_disallow_write_set_p(C, nullptr);
-
-#if PAINT_LAYERS_DEBUG_LOG
-  if (pl_timing_gap_ms > 50.0) {
-    printf("PL_TIMING: frame gap=%.2f ms draw=%.2f ms\n",
-           pl_timing_gap_ms,
-           (BLI_time_now_seconds() - pl_timing_call_start) * 1000.0);
-  }
-#endif
 }
 
 void wm_draw_region_clear(wmWindow *win, ARegion * /*region*/)

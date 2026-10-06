@@ -20,7 +20,6 @@
  * (called from the material evaluation too).
  */
 
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>
@@ -471,7 +470,7 @@ bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const
 }
 
 /**
- * Add or find one of the wrapper's three row-mapping value inputs (ТЗ 2.2). The interface is
+ * Add or find one of the wrapper's three row-mapping value inputs (Spec 2.2). The interface is
  * found by role before anything is added, so a rebuild keeps the socket identifiers an instance
  * of the wrapper links into; the role marker is also what keeps the value sync from copying a
  * source interface input over it. \a default_value is the identity the Mapping reads while no
@@ -543,7 +542,7 @@ static void source_group_mapping_interface_remove(bNodeTree &tree)
  * Whether \a tree -- transitively through the group instances it instantiates -- reads the
  * object's UVs: a Texture Coordinate or UV Map node, an Image Texture with an open Vector input
  * (which samples the active UV), or a group that does any of that. This is what decides whether
- * a shared source group has to be copied privately (ТЗ 2.3): a group without UV readers stays
+ * a shared source group has to be copied privately (Spec 2.3): a group without UV readers stays
  * shared, its sampling is coordinate-driven and a mapping in front would be wrong.
  */
 static bool source_group_attribute_names_uv(const bNode &node, const SourceGroupUvPolicy &uv)
@@ -812,7 +811,7 @@ static void source_group_mapping_instance_wire(bNodeTree &tree,
 }
 
 /**
- * The private (copy-on-write) copy of the shared source group \a orig (ТЗ 2.3): a group whose
+ * The private (copy-on-write) copy of the shared source group \a orig (Spec 2.3): a group whose
  * tree reads the owner's UVs anywhere must not be shared with other users of the source, so it
  * is rebuilt here like a path copy -- private nodes, the owner's UV wiring, the row mapping in
  * front of the UV outputs and its three inputs on the interface, then the same treatment for the
@@ -1003,9 +1002,9 @@ bool source_group_wire_instance(bNodeTree &tree,
  * propagates the child's new outputs up to its own Group Output. Only \a is_root carries the
  * `COLOR:<CHANNEL>`/`COVERAGE` roles.
  *
- * With \a mapped, every level puts the row mapping in front of its UV outputs (ТЗ 2.2) and
+ * With \a mapped, every level puts the row mapping in front of its UV outputs (Spec 2.2) and
  * carries the three mapping inputs on its interface; shared groups off the path whose trees read
- * UVs are copied privately (ТЗ 2.3) so the mapping reaches them too.
+ * UVs are copied privately (Spec 2.3) so the mapping reaches them too.
  */
 bool source_group_build_level(Main &bmain,
                               bNodeTree &tree,
@@ -1733,7 +1732,6 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
   if (BLI_uuid_is_nil(owner.paint_layers_owner_uid)) {
     owner.paint_layers_owner_uid = BLI_uuid_generate_random();
   }
-  PL_HASH_CALLER("generate_source_group");
   const uint64_t source_values = BKE_paint_layers_source_material_tree_hash(source);
   uint64_t source_topology = BKE_paint_layers_source_material_topology_hash(source);
   /* The owner's UV layer name decides the UV Map wiring inside the wrapper, so it is part of what
@@ -1744,7 +1742,7 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
     /* Mixed only when set, so the flag-off hash stays what older files stored. */
     source_topology = topology_hash_mix(source_topology, 2);
   }
-  /* Whether the row mapping is applied at all (ТЗ 2.2): on means the wrapper carries Mapping
+  /* Whether the row mapping is applied at all (Spec 2.2): on means the wrapper carries Mapping
    * nodes and the three value inputs, off means none of them. Toggling the mapping on any row of
    * this source therefore rebuilds the wrapper once. */
   source_topology = topology_hash_mix(source_topology, mapped ? 1 : 0);
@@ -1783,10 +1781,6 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
       tree_hash_set(
           *existing, TREE_SOURCE_VALUES_LOW_PROP, TREE_SOURCE_VALUES_HIGH_PROP, source_values);
       DEG_id_tag_update(&owner.id, ID_RECALC_SYNC_TO_EVAL);
-      PL_DEBUG_PRINTF("paint layers: source group '%s' for owner '%s' values synced nodes=%d\n",
-                      source.id.name + 2,
-                      owner.id.name + 2,
-                      synced);
       if (r_values_synced != nullptr) {
         *r_values_synced = true;
       }
@@ -1818,7 +1812,6 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
     /* Several passes: deleting a copy frees the instance nodes inside it, which drops the user of
      * the next copy down and lets the following pass delete that one too. A new copy is still
      * referenced by its instance, so its real users keep it. */
-    int removed_copies = 0;
     for (int pass = 0; pass < PAINT_LAYERS_SOURCE_GROUP_MAX_DEPTH && !old_copies.is_empty(); pass++) {
       Vector<bNodeTree *> remaining;
       bool deleted = false;
@@ -1826,7 +1819,6 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
         if (ID_REAL_USERS(&copy->id) <= 0) {
           BKE_id_delete(&bmain, copy);
           deleted = true;
-          removed_copies++;
         }
         else {
           remaining.append(copy);
@@ -1837,15 +1829,6 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
         break;
       }
     }
-    PL_DEBUG_PRINTF(
-        "paint layers: source group '%s' for owner '%s' %s hash=%llx path_depth=%d "
-        "removed_copies=%d\n",
-        source.id.name + 2,
-        owner.id.name + 2,
-        "rebuilt",
-        static_cast<unsigned long long>(source_topology),
-        int(group_path.size()),
-        removed_copies);
     if (r_changed != nullptr) {
       *r_changed = true;
     }
@@ -1868,15 +1851,6 @@ bNodeTree *BKE_paint_layers_source_group_ensure(Main &bmain,
     r_refusal = PaintLayersSourceGroupRefusal::BuildFailed;
     return nullptr;
   }
-  PL_DEBUG_PRINTF(
-      "paint layers: source group '%s' for owner '%s' %s hash=%llx path_depth=%d "
-      "removed_copies=%d\n",
-      source.id.name + 2,
-      owner.id.name + 2,
-      "created",
-      static_cast<unsigned long long>(source_topology),
-      int(group_path.size()),
-      0);
   if (r_changed != nullptr) {
     *r_changed = true;
   }

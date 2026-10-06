@@ -5982,7 +5982,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_computes_and_commits)
 }
 
 /**
- * ТЗ-29, test #3: unlike #heavy_bake_job_computes_and_commits, this row is never given an explicit
+ * Spec-29, test #3: unlike #heavy_bake_job_computes_and_commits, this row is never given an explicit
  * bake structure -- AUTO mode, #MaterialPaintLayer::bake null. #BKE_paint_layers_bake_job_create is
  * now the only place allowed to allocate one, and only for a row that passed every gate and is
  * about to be queued. Before the fix, the job-create gate required `layer->bake != nullptr` up
@@ -6031,7 +6031,7 @@ TEST_F(PaintLayersGraphEvalTest, heavy_bake_job_allocates_bake_for_a_row_with_no
 }
 
 /**
- * ТЗ-29, test #6: #BKE_paint_layers_bake_heavy_pending is a pure predicate -- it must see a row that
+ * Spec-29, test #6: #BKE_paint_layers_bake_heavy_pending is a pure predicate -- it must see a row that
  * is heavy purely by subtree weight and has no bake structure at all, without allocating anything.
  * Before the fix, its combined gate required `layer->bake != nullptr` before it would even look at
  * `is_heavy`, so this row was invisible to it; this test must fail on that old code.
@@ -6460,7 +6460,7 @@ TEST_F(PaintLayersGraphEvalTest, custom_stale_bake_still_substitutes)
 }
 
 /**
- * ТЗ-F2-C3: a Custom row inside an isolating folder has no live path at all -- it only ever reaches
+ * Spec-F2-C3: a Custom row inside an isolating folder has no live path at all -- it only ever reaches
  * the generator through the substituted branch (#row_channel_substituted). Before the fix that
  * branch built no content-alpha chain for any kind, so the folder's own "Content Alpha Base Color"
  * output was always null and the row's partial alpha never reached the Result's alpha. With the
@@ -6564,7 +6564,7 @@ TEST_F(PaintLayersGraphEvalTest, custom_layer_isolating_folder_partial_alpha_mat
 }
 
 /**
- * ТЗ-F2-C3 regression: the same hole also hit a Paint row that switches to substituted mode via its
+ * Spec-F2-C3 regression: the same hole also hit a Paint row that switches to substituted mode via its
  * own valid cache bake (an "inactive" row shown from its bake instead of its live map). Before the
  * fix its content alpha was dropped exactly like the Custom case, even though the row's kind is one
  * the live path already tracks. Unlike the Custom sibling, a Paint row's content enters the
@@ -6764,7 +6764,7 @@ TEST_F(PaintLayersGraphEvalTest, material_layer_semi_transparent_bake_matches_cp
 }
 
 /**
- * ТЗ-25c: a Material row whose source's Alpha is a plain constant below 1. The real bake path
+ * Spec-25c: a Material row whose source's Alpha is a plain constant below 1. The real bake path
  * (#BKE_paint_layers_material_bake_apply) diverts that channel into the row's #coverage, never
  * into #MaterialPaintLayerBake::images[ALPHA] -- no pipeline fills that slot. Before the fix
  * #paint_layer_material_source_map read Alpha from `images[]` regardless, so it always answered
@@ -7792,7 +7792,7 @@ static Material *make_live_image_source(Main *bmain,
 }
 
 /**
- * ТЗ: a Hybrid live-map Material row must stay in the generated graph. The early drop checked
+ * Spec: a Hybrid live-map Material row must stay in the generated graph. The early drop checked
  * `live_constant` and `source_group_instance` but not `live_map`, so a row whose source shows a
  * texture (no constant) vanished from the graph entirely. Top level, source Base Color a live image
  * with a uniform partial alpha and its Alpha input left at the constant 1: a Material row's
@@ -7861,7 +7861,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_row_participates_at_top_lev
 }
 
 /**
- * ТЗ: the same live-map row inside an isolating folder. A Material row's transparency is its Alpha
+ * Spec: the same live-map row inside an isolating folder. A Material row's transparency is its Alpha
  * input (the constant 1 here), so its factor is 1 and its content alpha is 1; the channel map's own
  * alpha is ignored. The folder's isolated colour is the source's straight colour and the isolated
  * content alpha is 1, laid over the bottom at `folder_opacity * 1`. Graph, CPU, the closed form and
@@ -7951,7 +7951,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_in_isolating_folder_content
 }
 
 /**
- * ТЗ: the live-map row on the Normal channel, which has no content alpha of its own, must still take
+ * Spec: the live-map row on the Normal channel, which has no content alpha of its own, must still take
  * part rather than drop. Source Normal goes through a Normal Map over a flat data texture, so it is
  * a trivial live map; the row combines its decode against the flat bottom's. Graph, CPU and the
  * decode-combine-normalize-encode closed form agree, and the result leaves the flat bottom. The
@@ -8059,7 +8059,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_on_normal_channel_participa
 }
 
 /**
- * ТЗ (material alpha): one source, one texture with a=0.25 on Base Color AND Alpha, op=0.5, over an
+ * Spec (material alpha): one source, one texture with a=0.25 on Base Color AND Alpha, op=0.5, over an
  * opaque bottom. A Material row's transparency is the Alpha input, so Hybrid live_map and Baked (a
  * real opaque channel map plus coverage = a) must both give the Principled's `op * a`, and the graph
  * must agree with the CPU on all four components. This is the double-count regression guard: before
@@ -8151,7 +8151,7 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_alpha_input_matches_baked)
 }
 
 /**
- * ТЗ (material alpha): a Hybrid live_map row on the Normal channel whose normal map has alpha 200
+ * Spec (material alpha): a Hybrid live_map row on the Normal channel whose normal map has alpha 200
  * while the Alpha input is the constant 1. Normal-map alpha is data, not transparency, so it must
  * not influence the row's contribution: rewriting it to 255 changes nothing, and the graph still
  * matches the CPU.
@@ -10650,7 +10650,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_correction_opacity_matches_the_f
 }
 
 /**
- * ТЗ-F2-C4a / material-alpha semantics: a Material row read from its baked maps (Baked mode), on a
+ * Spec-F2-C4a / material-alpha semantics: a Material row read from its baked maps (Baked mode), on a
  * non-ALPHA tracked channel, inside an isolating folder. A Material row's transparency is its Alpha
  * input, and a real bake map is opaque; the channel map's own alpha (kept partial here on purpose,
  * in a data-space map) is therefore ignored -- neither its `content_cov` nor its content alpha. The
@@ -10771,7 +10771,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_isolating_folder_partial_alpha_m
 }
 
 /**
- * ТЗ-F2-C4a guard: a Material row read from its baked maps, on the ALPHA channel itself. Alpha has
+ * Spec-F2-C4a guard: a Material row read from its baked maps, on the ALPHA channel itself. Alpha has
  * no bake slot of its own (#paint_layer_material_source_map answers it from
  * #MaterialPaintLayerBake::coverage), and that same image already feeds the row's own coverage
  * factor, so folding it in again as this channel's content alpha would double-count it. The

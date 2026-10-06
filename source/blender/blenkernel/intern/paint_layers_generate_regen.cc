@@ -20,7 +20,6 @@
  * (called from the material evaluation too).
  */
 
-#include "BKE_paint_layers_debug.hh"
 #include "BKE_paint_layers_generate.hh"
 
 #include <algorithm>
@@ -88,198 +87,6 @@
 namespace blender {
 namespace bke::paint_layers {
 
-#if PAINT_LAYERS_DEBUG_LOG
-
-const char *material_mode_name(const PaintLayerMaterialMode mode)
-{
-  switch (mode) {
-    case PaintLayerMaterialMode::Hybrid:
-      return "Hybrid";
-    case PaintLayerMaterialMode::SourceGroup:
-      return "SourceGroup";
-    case PaintLayerMaterialMode::Baked:
-      return "Baked";
-  }
-  return "Baked";
-}
-
-const char *source_group_refusal_name(const PaintLayersSourceGroupRefusal refusal)
-{
-  return BKE_paint_layers_source_group_refusal_name(refusal);
-}
-
-/**
- * The previous pass's per-row modes, keyed by material `session_uid`, so the diagnostic below logs
- * a row only when its state changed. A static map rather than material runtime: the state has to
- * survive a runtime free and is a debug aid, and a session holds only a handful of layered
- * materials.
- */
-Map<uint32_t, Vector<PaintLayersRegenerateReport::MaterialRowModeReport>> &previous_row_modes()
-{
-  static Map<uint32_t, Vector<PaintLayersRegenerateReport::MaterialRowModeReport>> map;
-  return map;
-}
-
-const PaintLayersRegenerateReport::MaterialRowModeReport *find_previous_row_mode(
-    const Vector<PaintLayersRegenerateReport::MaterialRowModeReport> &rows, const bUUID &marker)
-{
-  for (const PaintLayersRegenerateReport::MaterialRowModeReport &row : rows) {
-    if (BLI_uuid_equal(row.marker, marker)) {
-      return &row;
-    }
-  }
-  return nullptr;
-}
-
-/** Log one line per Material row whose mode, wrapper, refusal or deferred state changed. */
-void material_row_modes_log(
-    const Material &ma, const Vector<PaintLayersRegenerateReport::MaterialRowModeReport> &rows)
-{
-  Vector<PaintLayersRegenerateReport::MaterialRowModeReport> &previous =
-      previous_row_modes().lookup_or_add_default(ma.id.session_uid);
-  for (const PaintLayersRegenerateReport::MaterialRowModeReport &row : rows) {
-    const PaintLayersRegenerateReport::MaterialRowModeReport *old = find_previous_row_mode(
-        previous, row.marker);
-    if (old != nullptr && old->mode == row.mode && old->wrapper_built == row.wrapper_built &&
-        old->refusal == row.refusal && old->deferred == row.deferred)
-    {
-      continue;
-    }
-    char group_depth[16];
-    if (row.mode == PaintLayerMaterialMode::SourceGroup) {
-      SNPRINTF(group_depth, "%d", row.group_depth);
-    }
-    else {
-      STRNCPY(group_depth, "-");
-    }
-    printf("paint layers: row '%s' owner='%s' owner_tag=0x%x source='%s' source_uid=%u "
-           "deferred=%d mode=%s wrapper=%s refusal=%s group_depth=%s\n",
-           row.name,
-           ma.id.name + 2,
-           static_cast<unsigned int>(ma.id.tag),
-           row.source_name,
-           row.source_uid,
-           row.deferred ? 1 : 0,
-           material_mode_name(row.mode),
-           row.wrapper_built ? "yes" : "no",
-           source_group_refusal_name(row.refusal),
-           group_depth);
-  }
-  previous_row_modes().add_overwrite(ma.id.session_uid, rows);
-}
-
-/** What a SourceGroup row actually embedded, kept to log only the rows whose state changed. */
-struct SourceGroupEmbedState {
-  bUUID marker;
-  char name[64];
-  char layer_tree[MAX_ID_NAME - 2];
-  int wrapper_instances = 0;
-  int linked_color_outputs = 0;
-  int linked_coverage = 0;
-};
-
-Map<uint32_t, Vector<SourceGroupEmbedState>> &previous_source_group_embeds()
-{
-  static Map<uint32_t, Vector<SourceGroupEmbedState>> map;
-  return map;
-}
-
-const SourceGroupEmbedState *find_previous_embed(const Vector<SourceGroupEmbedState> &states,
-                                                 const bUUID &marker)
-{
-  for (const SourceGroupEmbedState &state : states) {
-    if (BLI_uuid_equal(state.marker, marker)) {
-      return &state;
-    }
-  }
-  return nullptr;
-}
-
-/**
- * Log what a SourceGroup row actually embedded: its layer group, how many instances of the source
- * wrapper it holds and how many of the wrapper's `COLOR:<CHANNEL>`/`COVERAGE` outputs are linked.
- * A row that is live but shows nothing is the exact failure this diagnostic is meant to catch.
- */
-void source_group_instances_log(
-    const Material &ma,
-    const Map<const MaterialPaintLayer *, bNodeTree *> &layer_trees,
-    const Map<const Material *, bNodeTree *> &source_groups,
-    const PaintLayersRegenCache *cache)
-{
-  Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(ma, layers);
-  Vector<SourceGroupEmbedState> states;
-  for (const MaterialPaintLayer *layer : layers) {
-    if (layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL ||
-        BKE_paint_layers_material_mode(ma, *layer, cache) != PaintLayerMaterialMode::SourceGroup)
-    {
-      continue;
-    }
-    SourceGroupEmbedState state;
-    state.marker = layer->marker;
-    STRNCPY(state.name, layer->name);
-    bNodeTree *layer_tree = layer_trees.lookup_default(layer, nullptr);
-    bNodeTree *wrapper = (layer->material != nullptr) ?
-                             source_groups.lookup_default(layer->material, nullptr) :
-                             nullptr;
-    STRNCPY(state.layer_tree, (layer_tree != nullptr) ? layer_tree->id.name + 2 : "none");
-    if (layer_tree != nullptr && wrapper != nullptr) {
-      layer_tree->ensure_topology_cache();
-      wrapper->ensure_interface_cache();
-      for (bNode &node : layer_tree->nodes) {
-        if (!node.is_group() || node.id != &wrapper->id) {
-          continue;
-        }
-        state.wrapper_instances++;
-        for (bNodeSocket &out : node.outputs) {
-          const bNodeTreeInterfaceSocket *iface = nullptr;
-          for (const bNodeTreeInterfaceSocket *candidate : wrapper->interface_outputs()) {
-            if (candidate->identifier != nullptr && STREQ(candidate->identifier, out.identifier)) {
-              iface = candidate;
-              break;
-            }
-          }
-          if (iface == nullptr) {
-            continue;
-          }
-          const char *role = prop_string_get(iface->properties, PAINT_LAYERS_CUSTOM_ROLE_PROP);
-          if (role == nullptr || out.directly_linked_links().is_empty()) {
-            continue;
-          }
-          if (STRPREFIX(role, "COLOR:")) {
-            state.linked_color_outputs++;
-          }
-          else if (STREQ(role, "COVERAGE")) {
-            state.linked_coverage++;
-          }
-        }
-      }
-    }
-    states.append(state);
-  }
-  Vector<SourceGroupEmbedState> &previous =
-      previous_source_group_embeds().lookup_or_add_default(ma.id.session_uid);
-  for (const SourceGroupEmbedState &state : states) {
-    const SourceGroupEmbedState *old = find_previous_embed(previous, state.marker);
-    if (old != nullptr && STREQ(old->layer_tree, state.layer_tree) &&
-        old->wrapper_instances == state.wrapper_instances &&
-        old->linked_color_outputs == state.linked_color_outputs &&
-        old->linked_coverage == state.linked_coverage)
-    {
-      continue;
-    }
-    printf("paint layers: row '%s' layer_tree='%s' wrapper_instances=%d linked_color_outputs=%d "
-           "linked_coverage=%d\n",
-           state.name,
-           state.layer_tree,
-           state.wrapper_instances,
-           state.linked_color_outputs,
-           state.linked_coverage);
-  }
-  previous_source_group_embeds().add_overwrite(ma.id.session_uid, states);
-}
-
-#endif /* PAINT_LAYERS_DEBUG_LOG */
 uint64_t topology_hash_layer(uint64_t hash,
                              const Material &ma,
                              const MaterialPaintLayer &layer,
@@ -497,7 +304,7 @@ uint64_t topology_hash_correction(uint64_t hash,
       /* Mirrors the Layer-row hash (#topology_hash_layer): a live constant or live map is topology
        * (it decides whether the group carries a live-constant input, or shows a texture instead of
        * the baked one), and so is the Baked/Hybrid/SourceGroup mode and, in SourceGroup, the
-       * source's own topology. The value behind a live constant is not topology (ТЗ-26): it syncs
+       * source's own topology. The value behind a live constant is not topology (Spec-26): it syncs
        * through the group input in place. */
       float live_value[4];
       const bool live_constant = BKE_paint_layers_material_live_constant(
@@ -550,19 +357,6 @@ uint64_t topology_hash_correction(uint64_t hash,
   return hash;
 }
 
-#if PAINT_LAYERS_DEBUG_LOG
-/** Set while #paint_layers_layer_topology_hash hashes a Material row, so its parts are printed. */
-static thread_local bool topology_hash_trace_active = false;
-#  define PL_HASH_TRACE(...) \
-    do { \
-      if (topology_hash_trace_active) { \
-        printf(__VA_ARGS__); \
-      } \
-    } while (false)
-#else
-#  define PL_HASH_TRACE(...) ((void)0)
-#endif
-
 /**
  * The full topology hash of one row, recursing into its effects, mask items and -- for a folder --
  * its children. A folder's own chain is a function of which children take part in which channel and
@@ -594,10 +388,6 @@ uint64_t topology_hash_layer(uint64_t hash,
   hash = topology_hash_mix(hash, row_is_substituted(ma, layer) ? 1 : 0);
   /* The name reaches the mirror input names a preserved group carries, so a rename invalidates. */
   topology_hash_string(hash, layer.name);
-  PL_HASH_TRACE("paint layers hash: '%s' head=%llx substituted=%d\n",
-                layer.name,
-                static_cast<unsigned long long>(hash),
-                int(row_is_substituted(ma, layer)));
 
   for (const int channel : wired_channels) {
     Image *baked = nullptr;
@@ -645,7 +435,7 @@ uint64_t topology_hash_layer(uint64_t hash,
         hash,
         image_wired ? topology_hash_map_id(paint_layer_channel_image(ma, layer, channel)) : 0);
     /* Whether the channel is currently shown live as a constant is topology (it decides whether the
-     * row's group carries a live-constant input at all); the constant's own value is not (ТЗ-26): it
+     * row's group carries a live-constant input at all); the constant's own value is not (Spec-26): it
      * is a group input, filled by #create_value_inputs and kept current by #values_sync_socket via
      * #BKE_paint_layers_material_live_constant, so a source slider move syncs in place instead of
      * rebuilding this group. */
@@ -668,41 +458,14 @@ uint64_t topology_hash_layer(uint64_t hash,
           hash,
           (layer.bake != nullptr) ? topology_hash_map_id(layer.bake->coverage) : 0);
     }
-    PL_HASH_TRACE(
-        "paint layers hash: '%s' ch=%d subst=%d part=%d blend=%d live_const=%d live_map=%d "
-        "image_wired=%d map=%s mode=%d run=%llx\n",
-        layer.name,
-        channel,
-        int(substituted),
-        int(participates),
-        int(BKE_paint_layers_channel_blend_effective(layer, channel)),
-        int(live_constant),
-        int(live_map_probe),
-        int(image_wired),
-        paint_layer_channel_image(ma, layer, channel) != nullptr ?
-            paint_layer_channel_image(ma, layer, channel)->id.name + 2 :
-            "-",
-        int(material_mode),
-        static_cast<unsigned long long>(hash));
   }
   /* The warm items stand in the chain like real ones, so consuming or replenishing one moves the
    * group's hash and rebuilds it. */
   for (const MaterialPaintLayer *effect : paint_layers_build_effects(ma, layer)) {
     hash = topology_hash_correction(hash, ma, *effect, wired_channels, false, cache);
-    PL_HASH_TRACE("paint layers hash: '%s' effect '%s' src=%d run=%llx\n",
-                  layer.name,
-                  effect->name,
-                  int(effect->source),
-                  static_cast<unsigned long long>(hash));
   }
   for (const MaterialPaintLayer *mask_item : paint_layers_build_mask_items(ma, layer)) {
     hash = topology_hash_correction(hash, ma, *mask_item, wired_channels, true, cache);
-    PL_HASH_TRACE("paint layers hash: '%s' mask item '%s' src=%d flag=%d run=%llx\n",
-                  layer.name,
-                  mask_item->name,
-                  int(mask_item->source),
-                  int(mask_item->flag),
-                  static_cast<unsigned long long>(hash));
   }
   for (const MaterialPaintLayer &child :
        layer.children)
@@ -1298,21 +1061,6 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
   /* The UV layer a group's Image Texture nodes read is topology: changing it must rebuild them. */
   topology_hash_string(hash, BKE_paint_layers_uv_map_name(ma));
-#if PAINT_LAYERS_DEBUG_LOG
-  /* Only Material rows are traced: the extra regeneration after adding one is what is being chased. */
-  const bool trace = layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
-  const bool trace_before = topology_hash_trace_active;
-  topology_hash_trace_active = trace;
-  const uint64_t result = topology_hash_layer(hash, ma, layer, wired_channels, cache);
-  PL_HASH_TRACE("paint layers hash: '%s' FINAL=%llx wired=%d\n",
-                layer.name,
-                static_cast<unsigned long long>(result),
-                int(wired_channels.size()));
-  topology_hash_trace_active = trace_before;
-  return result;
-#else
-  return topology_hash_layer(hash, ma, layer, wired_channels, cache);
-#endif
 }
 
 /**
@@ -1545,11 +1293,6 @@ static Image *warm_image_ensure(Main &bmain, const char *name, const bool is_col
 void BKE_paint_layers_generate_runtime_free(Material &ma)
 {
   bke::paint_layers_runtime_free(ma);
-#if PAINT_LAYERS_DEBUG_LOG
-  /* The diagnostic maps only exist with the log on; in a quiet build there is nothing to drop. */
-  previous_row_modes().remove(ma.id.session_uid);
-  previous_source_group_embeds().remove(ma.id.session_uid);
-#endif
 }
 
 bool BKE_paint_layers_regenerate(Main &bmain,
@@ -1557,12 +1300,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                                  PaintLayersRegenerateReport *r_report)
 {
   PaintLayersRegenerateReport report;
-#if PAINT_LAYERS_DEBUG_LOG
-  const double regen_start = BLI_time_now_seconds();
-#endif
-  /* [PL-DIAG] Phase stamps (print only): the cost of a regeneration split by phase. */
-  const double pl_diag_start = BLI_time_now_seconds();
-  double pl_diag_mark[10] = {};
   if (!paint_layers_is_layered(ma) || ma.nodetree == nullptr) {
     if (r_report != nullptr) {
       *r_report = report;
@@ -1658,7 +1395,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * recorded for the report; a refused source keeps its row on the baked maps. */
   Map<const Material *, bNodeTree *> source_groups;
   Map<const Material *, PaintLayersSourceGroupRefusal> source_group_refusals;
-  /* Whether any row of one source applies its mapping (ТЗ 2.2): the wrapper carries the Mapping
+  /* Whether any row of one source applies its mapping (Spec 2.2): the wrapper carries the Mapping
    * nodes and the value inputs when at least one does, and neither when none does. Filled by a
    * pre-pass over every row before any wrapper is built, so the row order cannot cache a wrapper
    * without the mapping a later row needs. */
@@ -1766,7 +1503,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     }
   };
   populate_material_rows();
-  pl_diag_mark[0] = BLI_time_now_seconds();
   /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
   const auto source_group_lookup = [&source_groups](const Material &source) -> bNodeTree * {
     return source_groups.lookup_default(&source, nullptr);
@@ -2270,10 +2006,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   regen_cache.modes_frozen = true;
   /* The modes may have moved (forced bake, hidden cleanup): refresh the report before building. */
   populate_material_rows();
-  pl_diag_mark[1] = BLI_time_now_seconds();
-#if PAINT_LAYERS_DEBUG_LOG
-  material_row_modes_log(ma, report.material_rows);
-#endif
 
   /* The factory hands each layer a tree of its own, reusing an old one by layer marker. It outlives
    * the build, which only holds a non-owning reference to it. A reused tree whose stored topology
@@ -2323,20 +2055,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         /* Clear the nodes but keep the interface: a rebuilt group reuses its sockets by name, so
          * their identifiers -- and the parent's links into them -- survive. Unused sockets are
          * pruned at the end of the build. */
-        PL_DEBUG_PRINTF(
-            "paint layers regen diff: layer '%s' source=%d role=%d old=%llx new=%llx warm(base=%d "
-            "mask=%d effect=%d) mode=%d deferred=%d wired=%d\n",
-            layer.name,
-            int(layer.source),
-            int(layer.role),
-            static_cast<unsigned long long>(stored),
-            static_cast<unsigned long long>(topology),
-            int(paint_layers_warm_item(ma, layer, WarmKind::MaskBase) != nullptr),
-            int(paint_layers_warm_item(ma, layer, WarmKind::Mask) != nullptr),
-            int(paint_layers_warm_item(ma, layer, WarmKind::Effect) != nullptr),
-            int(BKE_paint_layers_material_mode(ma, layer, &regen_cache)),
-            int(BKE_paint_layers_bake_row_is_deferred(ma, layer)),
-            int(wired_channels.size()));
         tree_clear_nodes(bmain, *candidate);
         layer_groups_rebuilt++;
         if (!STREQ(candidate->id.name + 2, name)) {
@@ -2427,7 +2145,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   bNodeTree *scratch = bke::node_tree_add_tree(nullptr, "PBR Layers Scratch", "ShaderNodeTree");
   bNodeTree &build_target = (scratch != nullptr) ? *scratch : *tree;
   paint_layers_tree_build(ma, build_target, ctx);
-  pl_diag_mark[2] = BLI_time_now_seconds();
   /* The build may have grown a group's interface (a new effect or mask). Every instance of that
    * group, in the real root included, must have matching sockets before any tree update: an update
    * of a layer tree also visits the trees that use it, and the node tree update's interface pass
@@ -2457,10 +2174,8 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       DEG_id_tag_update(&layer_tree->id, ID_RECALC_SYNC_TO_EVAL);
     }
   }
-  pl_diag_mark[3] = BLI_time_now_seconds();
   const uint64_t root_hash = paint_layers_root_topology_hash(
       ma, wired_channels, layer_trees, &regen_cache);
-  pl_diag_mark[4] = BLI_time_now_seconds();
   uint64_t stored_root = 0;
   const bool have_stored_root = !created_tree && tree_root_hash_get(*tree, stored_root);
   /* Undo safety net: a row recorded as removed but enabled again (memfile undo preserves the row
@@ -2483,14 +2198,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                          stored_root == root_hash;
   report.root_rebuilt = !keep_root;
   report.layer_groups_rebuilt = layer_groups_rebuilt;
-#if PAINT_LAYERS_DEBUG_LOG
-  if (!keep_root && have_stored_root) {
-    printf("paint layers regen diff: root old=%llx new=%llx undo=%d\n",
-           static_cast<unsigned long long>(stored_root),
-           static_cast<unsigned long long>(root_hash),
-           int(undo_forces_rebuild));
-  }
-#endif
   if (keep_root) {
     /* The root's nodes, links and interface already match: discard the scratch and leave it. */
     if (scratch != nullptr) {
@@ -2537,41 +2244,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_tag_all(tree);
     BKE_ntree_update_after_single_tree_change(bmain, *tree);
   }
-  pl_diag_mark[5] = BLI_time_now_seconds();
-#if PAINT_LAYERS_DEBUG_LOG
-  printf("paint layers regen: root=%s groups_created=%d groups_deleted=%d groups_rebuilt=%d "
-         "source_groups_changed=%d total=%.2fms\n",
-         keep_root ? "kept" : "rebuilt",
-         int(groups_created),
-         int(groups_deleted),
-         layer_groups_rebuilt,
-         int(source_groups_changed),
-         (BLI_time_now_seconds() - regen_start) * 1000.0);
-  std::function<void(const ListBaseT<MaterialPaintLayer> &, const char *)> log_layers =
-      [&](const ListBaseT<MaterialPaintLayer> &list, const char *path) {
-        for (const MaterialPaintLayer &layer :
-             list)
-        {
-          char full[192];
-          SNPRINTF(full, "%s%s", path, layer.name);
-          const char *state = "none";
-          if (layer_trees.contains(&layer)) {
-            state = unchanged_layers.contains(&layer) ? "kept" : "rebuilt";
-          }
-          printf("paint layers regen: %s '%s'=%s\n",
-                 BKE_paint_layers_is_folder(layer) ? "folder" : "layer",
-                 full,
-                 state);
-          if (BKE_paint_layers_is_folder(layer)) {
-            char child_path[192];
-            SNPRINTF(child_path, "%s/", full);
-            log_layers(layer.children, child_path);
-          }
-        }
-      };
-  log_layers(ma.paint_layers, "");
-#endif
-
   for (bNodeTree *layer_tree : old_layer_trees) {
     if (used_layer_trees.contains(layer_tree)) {
       continue;
@@ -2643,10 +2315,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   /* Source-group wrappers are pruned by the same rule: no row of this owner reads their source any
    * more, so nothing keeps them. */
   source_groups_prune(bmain, ma);
-  pl_diag_mark[6] = BLI_time_now_seconds();
-#if PAINT_LAYERS_DEBUG_LOG
-  source_group_instances_log(ma, layer_trees, source_groups, &regen_cache);
-#endif
 
   /* The instance: found by marker, re-pointed when it names a different tree. */
   bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
@@ -2677,7 +2345,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     BKE_ntree_update_tag_node_property(ma.nodetree, instance);
   }
   BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
-  pl_diag_mark[7] = BLI_time_now_seconds();
 
   /* The owner's own node tree is rewritten from here. Only a row that reads its owner as its source
    * could have cached an answer about it, but dropping it costs one resolve and is always right. */
@@ -2689,9 +2356,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * only grows its sockets once the updater is told, and the plain update above does not always do
    * it for inputs. */
   nodes::update_node_declaration_and_sockets(*ma.nodetree, *instance);
-  pl_diag_mark[8] = BLI_time_now_seconds();
   values_sync_with_cache(ma, &regen_cache);
-  pl_diag_mark[9] = BLI_time_now_seconds();
 
   BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
 
@@ -2706,25 +2371,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * so a caller (and the tests) can compare it with the finished count. */
   sampler_estimate_value = sampler_estimate();
   report.sampler_estimate = sampler_estimate_value;
-#if PAINT_LAYERS_DEBUG_LOG
-  if (!keep_root) {
-    const int max_textures = sampler_runtime().max_textures;
-    const int sampler_count = BKE_paint_layers_sampler_count(ma);
-    const int estimate = sampler_estimate_value;
-    const int over = (budget > 0 && sampler_count > budget) ? sampler_count - budget : 0;
-    printf("paint layers samplers: material='%s' count=%d estimate=%d budget=%d max=%d over=%d "
-           "fallback_rows=%d removed_hidden=%d%s.\n",
-           ma.id.name + 2,
-           sampler_count,
-           estimate,
-           budget,
-           max_textures,
-           over,
-           fallback_rows,
-           removed_hidden,
-           (sampler_count != estimate) ? " MISMATCH" : "");
-  }
-#endif
 
   /* Debug-only: a kept root's interface must still be exactly what a full build would produce, so
    * its value inputs and every group's interface signature hash the same as before. values_sync
@@ -2790,30 +2436,6 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     DEG_relations_tag_update(&bmain);
     report.relations_changed = true;
   }
-  {
-    const double pl_diag_end = BLI_time_now_seconds();
-    printf(
-        "[PL-DIAG] regen phases ms: warm+populate=%.2f estimate+budget=%.2f groups_scratch_build=%.2f "
-        "group_refresh=%.2f root_hash=%.2f root_%s=%.2f cleanup=%.2f instance=%.2f "
-        "principled+wire=%.2f values_sync=%.2f tail=%.2f total=%.2f groups_rebuilt=%d "
-        "groups_created=%d groups_deleted=%d\n",
-        (pl_diag_mark[0] - pl_diag_start) * 1000.0,
-        (pl_diag_mark[1] - pl_diag_mark[0]) * 1000.0,
-        (pl_diag_mark[2] - pl_diag_mark[1]) * 1000.0,
-        (pl_diag_mark[3] - pl_diag_mark[2]) * 1000.0,
-        (pl_diag_mark[4] - pl_diag_mark[3]) * 1000.0,
-        keep_root ? "kept" : "rebuild",
-        (pl_diag_mark[5] - pl_diag_mark[4]) * 1000.0,
-        (pl_diag_mark[6] - pl_diag_mark[5]) * 1000.0,
-        (pl_diag_mark[7] - pl_diag_mark[6]) * 1000.0,
-        (pl_diag_mark[8] - pl_diag_mark[7]) * 1000.0,
-        (pl_diag_mark[9] - pl_diag_mark[8]) * 1000.0,
-        (pl_diag_end - pl_diag_mark[9]) * 1000.0,
-        (pl_diag_end - pl_diag_start) * 1000.0,
-        layer_groups_rebuilt,
-        int(groups_created),
-        int(groups_deleted));
-  }
   if (r_report != nullptr) {
     *r_report = report;
   }
@@ -2848,18 +2470,8 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain, const PaintModeSettings *pa
     /* Drain the bake subscriptions: a pixel edit to a source map shows up here and marks the
      * material for the planner, the same point the tree and slots are brought current. Then the
      * planner re-bakes the rows whose stored hash no longer matches, on the main thread. */
-    const double pl_diag_notice_start = BLI_time_now_seconds();
     BKE_paint_layers_bake_notice_changes(ma);
-    const double pl_diag_plan_start = BLI_time_now_seconds();
     BKE_paint_layers_bake_plan_run(bmain, ma);
-    const double pl_diag_plan_ms = (BLI_time_now_seconds() - pl_diag_plan_start) * 1000.0;
-    /* Quiet for the idle sweep: only a pass that did measurable work or will regenerate reports. */
-    if (pl_diag_plan_ms > 0.5 || (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0) {
-      printf("[PL-DIAG] regen tagged: bake_notice=%.2f ms bake_plan_run=%.2f ms regen_flag=%d\n",
-             (pl_diag_plan_start - pl_diag_notice_start) * 1000.0,
-             pl_diag_plan_ms,
-             int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0));
-    }
     const bool needs_regen = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0 ||
                              ma.paint_layers_tree == nullptr;
     const bool needs_slots = (ma.paint_layers_flag & MA_PAINT_LAYERS_SLOTS_STALE) != 0;

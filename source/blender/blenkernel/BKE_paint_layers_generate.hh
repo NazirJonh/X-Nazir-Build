@@ -233,7 +233,7 @@ struct PaintLayersRegenerateReport {
     /** The row is the active one, or an ancestor of it, so its source stays live. */
     bool deferred;
     /**
-     * The row asks for a UV mapping its mode cannot apply (ТЗ 2.2): the mode shows the baked
+     * The row asks for a UV mapping its mode cannot apply (Spec 2.2): the mode shows the baked
      * maps (a forced bake from the sampler budget, say), so the mapping toggle sits inert until
      * the mode changes. Reported for Layer rows only. A BAKE_NEVER row stays live and keeps its mapping.
      * Reported rather than silently dropped -- the UI can tell the user why nothing moved.
@@ -306,7 +306,7 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
  * \return null when the source cannot be expressed per channel -- see
  *         #PaintLayersSourceGroupRefusal -- and the row must stay on its baked maps.
  *
- * \param mapped: whether the row mapping applies to any row of this source (ТЗ 2.2). It is part
+ * \param mapped: whether the row mapping applies to any row of this source (Spec 2.2). It is part
  *                of the wrapper's topology hash: turning it on rebuilds the wrapper with Mapping
  *                nodes in front of the UV outputs and the three value inputs on the interface;
  *                turning it off rebuilds it without. Toggling it is therefore a one-time rebuild,

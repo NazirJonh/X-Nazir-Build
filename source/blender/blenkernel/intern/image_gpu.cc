@@ -30,7 +30,6 @@
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
 #include "BKE_main.hh"
-#include "BKE_paint_layers_debug.hh"
 
 #include "GPU_capabilities.hh"
 #include "GPU_state.hh"
@@ -251,9 +250,6 @@ static gpu::Texture *gpu_texture_create_tile_array(Image *ima, ImBuf *main_ibuf)
 
     if (ibuf) {
       const bool store_premultiplied = BKE_image_has_gpu_texture_premultiplied_alpha(ima, ibuf);
-#if PAINT_LAYERS_DEBUG_LOG
-      const double pl_t0 = BLI_time_now_seconds();
-#endif
       IMB_update_gpu_texture_sub(tex,
                                  ibuf,
                                  UNPACK2(tileoffset),
@@ -263,19 +259,6 @@ static gpu::Texture *gpu_texture_create_tile_array(Image *ima, ImBuf *main_ibuf)
                                  use_grayscale,
                                  store_premultiplied,
                                  store_linear_float);
-#if PAINT_LAYERS_DEBUG_LOG
-      {
-        const double pl_ms = (BLI_time_now_seconds() - pl_t0) * 1000.0;
-        if (pl_ms > 5.0) {
-          printf("PL_TIMING: image_gpu tile upload '%s' %dx%d %s %.2f ms\n",
-                 ima->id.name + 2,
-                 ibuf->x,
-                 ibuf->y,
-                 ibuf->float_buffer.data ? "float" : "byte",
-                 pl_ms);
-        }
-      }
-#endif
     }
 
     BKE_image_release_ibuf(ima, ibuf, nullptr);
@@ -516,28 +499,12 @@ static ImageGPUTextures image_get_gpu_texture(Image *ima,
     const bool use_high_bitdepth = (ima->flag & IMA_HIGH_BITDEPTH);
     const bool store_premultiplied = BKE_image_has_gpu_texture_premultiplied_alpha(ima, ibuf);
 
-#if PAINT_LAYERS_DEBUG_LOG
-    const double pl_t0 = BLI_time_now_seconds();
-#endif
     *result.texture = IMB_create_gpu_texture(ima->id.name + 2,
                                              ibuf,
                                              use_high_bitdepth,
                                              store_premultiplied,
                                              true,
                                              (ima->flag & IMA_GPU_LINEAR_PREMUL) != 0);
-#if PAINT_LAYERS_DEBUG_LOG
-    {
-      const double pl_ms = (BLI_time_now_seconds() - pl_t0) * 1000.0;
-      if (pl_ms > 5.0) {
-        printf("PL_TIMING: image_gpu create '%s' %dx%d %s %.2f ms\n",
-               ima->id.name + 2,
-               ibuf->x,
-               ibuf->y,
-               ibuf->float_buffer.data ? "float" : "byte",
-               pl_ms);
-      }
-    }
-#endif
 
     if (*result.texture) {
       GPU_texture_extend_mode(*result.texture, GPU_SAMPLER_EXTEND_MODE_REPEAT);

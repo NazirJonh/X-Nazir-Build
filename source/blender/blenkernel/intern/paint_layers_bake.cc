@@ -11,7 +11,6 @@
  */
 
 #include "BKE_paint_layers.hh"
-#include "BKE_paint_layers_debug.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -45,9 +44,10 @@
 #include "BLI_string.h"
 #include "BLI_threads.h"
 #include "BLI_ustring.hh"
-#include "BLI_utildefines.h"
 #include "BLI_uuid.h"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
+#include "CLG_log.h"
 
 #include "DEG_depsgraph.hh"
 
@@ -65,6 +65,8 @@
 
 #include "paint_layers_intern.hh"
 #include "paint_layers_runtime.hh"
+
+static CLG_LogRef LOG = {"bke.paint_layers_bake"};
 
 namespace blender {
 int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
@@ -430,93 +432,6 @@ static void bake_subscription_user_drain(Image &image, PartialUpdateUser *user)
   }
 }
 
-/** The visibility of each effect of \a layer as "name=0/1" pairs. For the diagnostic only. */
-static std::string bake_diag_effects_state(const MaterialPaintLayer &layer)
-{
-  std::string text = "[";
-  for (const MaterialPaintLayer &effect : layer.effects) {
-    text += std::string(effect.name) + "=" +
-            (((effect.flag & MA_PAINT_LAYER_ENABLED) != 0) ? "1" : "0") + " ";
-  }
-  return text + "]";
-}
-
-/**
- * Print what a heavy-bake render of \a layer in \a channel holds inside and outside the row's own
- * base map alpha, and how many enabled content corrections reach it. For the diagnostic only: it
- * reads, never writes, so it cannot change what is baked.
- */
-static void bake_diag_channel_stats(const Material &ma,
-                                    const MaterialPaintLayer &layer,
-                                    const int channel,
-                                    const int size,
-                                    const Vector<float> &color,
-                                    const Vector<float> &coverage)
-{
-  int corrections_with_map = 0;
-  int corrections_enabled = 0;
-  for (const MaterialPaintLayer *effect : BKE_paint_layers_effects(layer)) {
-    if ((effect->flag & MA_PAINT_LAYER_ENABLED) == 0) {
-      continue;
-    }
-    corrections_enabled++;
-    if (paint_layer_channel_image(ma, *effect, channel) != nullptr) {
-      corrections_with_map++;
-    }
-  }
-  /* Base alpha per texel: the row's own map, or fully covering when it has none. */
-  Image *base_image = paint_layer_channel_image(ma, layer, channel);
-  void *lock = nullptr;
-  ImBuf *base = nullptr;
-  if (base_image != nullptr) {
-    base = BKE_image_acquire_ibuf(base_image, nullptr, &lock);
-  }
-  int64_t cov_in = 0, cov_out = 0, alpha_in = 0, alpha_out = 0;
-  float cov_max = 0.0f;
-  double cov_sum = 0.0;
-  for (int y = 0; y < size; y++) {
-    for (int x = 0; x < size; x++) {
-      const int64_t i = int64_t(y) * size + x;
-      bool in_base = true;
-      if (base != nullptr) {
-        const int bx = std::min(int(int64_t(x) * base->x / size), base->x - 1);
-        const int by = std::min(int(int64_t(y) * base->y / size), base->y - 1);
-        const int64_t b = int64_t(by) * base->x + bx;
-        if (base->float_data() != nullptr) {
-          in_base = base->float_data()[b * 4 + 3] > 0.0f;
-        }
-        else if (base->byte_data() != nullptr) {
-          in_base = base->byte_data()[b * 4 + 3] > 0;
-        }
-      }
-      const bool has_cov = coverage[i] > 0.002f;
-      const bool has_alpha = color[i * 4 + 3] > 0.002f;
-      (in_base ? cov_in : cov_out) += has_cov ? 1 : 0;
-      (in_base ? alpha_in : alpha_out) += has_alpha ? 1 : 0;
-      cov_max = std::max(cov_max, coverage[i]);
-      cov_sum += double(coverage[i]);
-    }
-  }
-  if (base != nullptr) {
-    BKE_image_release_ibuf(base_image, base, lock);
-  }
-  printf(
-      "[PL-DIAG] heavy bake row='%s' channel=%d size=%d corrections_enabled=%d with_map=%d "
-      "cov_in_base=%lld cov_outside_base=%lld alpha_in_base=%lld alpha_outside_base=%lld "
-      "cov_max=%.3f cov_sum=%.1f\n",
-      layer.name,
-      channel,
-      size,
-      corrections_enabled,
-      corrections_with_map,
-      static_cast<long long>(cov_in),
-      static_cast<long long>(cov_out),
-      static_cast<long long>(alpha_in),
-      static_cast<long long>(alpha_out),
-      cov_max,
-      cov_sum);
-}
-
 void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
 {
   /* The subscription users are created outside the lock: they only touch the image partial-update
@@ -557,21 +472,6 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
 }
 
-#if PAINT_LAYERS_DEBUG_LOG
-/** The name of the row \a marker belongs to, or a placeholder. For the diagnostic only. */
-static const char *bake_subscription_row_name(const Material &ma, const bUUID &marker)
-{
-  Vector<const MaterialPaintLayer *> layers;
-  BKE_paint_layers_flatten(ma, layers);
-  for (const MaterialPaintLayer *layer : layers) {
-    if (BLI_uuid_equal(layer->marker, marker)) {
-      return layer->name;
-    }
-  }
-  return "<unknown>";
-}
-#endif
-
 void BKE_paint_layers_bake_notice_changes(Material &ma)
 {
   std::lock_guard lock(bake_subscriptions_mutex());
@@ -585,9 +485,6 @@ void BKE_paint_layers_bake_notice_changes(Material &ma)
       const auto result = bke::image::partial_update::BKE_image_partial_update_collect_changes(
           src.image, src.user);
       if (result == bke::image::partial_update::ePartialUpdateCollectResult::FullUpdateNeeded) {
-        PL_DEBUG_PRINTF("paint layers bake: subscription changed row='%s' image='%s' result=Full\n",
-                        bake_subscription_row_name(ma, entry.marker),
-                        src.image->id.name + 2);
         /* No rectangle to trust: the planner re-bakes the whole row. */
         entry.changed = true;
         entry.has_region = false;
@@ -596,10 +493,6 @@ void BKE_paint_layers_bake_notice_changes(Material &ma)
       else if (result ==
                bke::image::partial_update::ePartialUpdateCollectResult::PartialChangesDetected)
       {
-        PL_DEBUG_PRINTF(
-            "paint layers bake: subscription changed row='%s' image='%s' result=Partial\n",
-            bake_subscription_row_name(ma, entry.marker),
-            src.image->id.name + 2);
         entry.changed = true;
         any = true;
         bke::image::partial_update::PartialUpdateRegion region;
@@ -1178,9 +1071,6 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
         bake->size = size;
       }
 
-      PL_DEBUG_PRINTF("paint layers bake: start kind=sync material='%s' row='%s' reason=stale\n",
-                      ma.id.name + 2,
-                      layer.name);
       /* A changed rectangle may update only that part of an existing cache; a fresh cache needs
        * the whole render. */
       int region[4];
@@ -1194,18 +1084,6 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       if (has_region && structure_changed) {
         has_region = false;
       }
-      const bool reuse_cache = bake->coverage != nullptr;
-      printf("[PL-DIAG] sync bake start row='%s' row_enabled=%d effects=%s structure_changed=%d "
-             "partial=%d hash %08x%08x stored %08x%08x\n",
-             layer.name,
-             int((layer.flag & MA_PAINT_LAYER_ENABLED) != 0),
-             bake_diag_effects_state(layer).c_str(),
-             int(structure_changed),
-             int(has_region && reuse_cache),
-             diag_hash[0],
-             diag_hash[1],
-             bake->hash[0],
-             bake->hash[1]);
       int src_width = 0;
       int src_height = 0;
       bool have_source_dims = false;
@@ -1290,11 +1168,6 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       BKE_paint_layers_bake_hash(ma, layer, hash);
       bake->hash[0] = hash[0];
       bake->hash[1] = hash[1];
-      printf("[PL-DIAG] sync bake done row='%s' effects=%s hash %08x%08x\n",
-             layer.name,
-             bake_diag_effects_state(layer).c_str(),
-             hash[0],
-             hash[1]);
       BKE_paint_layers_bake_subscribe(ma, layer);
       changed = true;
     }
@@ -1319,10 +1192,6 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           !BKE_paint_layers_bake_is_valid(ma, *layer))
       {
         /* A hidden row stays stale without holding the signal: showing it marks it again. */
-        if (bake_row_is_hidden(ma, *layer)) {
-          printf("[PL-DIAG] bake skipped hidden row='%s' stale=1\n", layer->name);
-          continue;
-        }
         pending = true;
         break;
       }
@@ -2030,14 +1899,6 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
     MEM_delete(job);
     return nullptr;
   }
-  for (const PaintLayersBakeJob::RowResult &row : job->rows) {
-    if (const MaterialPaintLayer *queued = BKE_paint_layers_find(ma, row.marker)) {
-      printf("[PL-DIAG] heavy bake create row='%s' row_enabled=%d effects=%s\n",
-             queued->name,
-             int((queued->flag & MA_PAINT_LAYER_ENABLED) != 0),
-             bake_diag_effects_state(*queued).c_str());
-    }
-  }
   return job;
 }
 
@@ -2073,11 +1934,6 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
       if (report_progress) {
         report_progress(total_pairs > 0 ? float(done_pairs) / float(total_pairs) : 1.0f);
       }
-      if (!rendered) {
-        printf("[PL-DIAG] heavy bake row='%s' channel=%d render=failed\n", layer->name, channel);
-        continue;
-      }
-      bake_diag_channel_stats(ma, *layer, channel, row.size, color, coverage);
       PaintLayersBakeJob::ChannelResult result;
       result.channel = channel;
       result.is_color = info.is_color;
@@ -2113,10 +1969,6 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     visibility_moved = !BLI_uuid_equal(enabled_now[i].first, job.enabled_at_create[i].first) ||
                        enabled_now[i].second != job.enabled_at_create[i].second;
   }
-  printf("[PL-DIAG] heavy bake commit material='%s' rows=%d visibility_moved=%d\n",
-         ma->id.name + 2,
-         int(job.rows.size()),
-         int(visibility_moved));
   for (PaintLayersBakeJob::RowResult &row : job.rows) {
     MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, row.marker);
     /* The row was removed, its bake dropped or switched off while the worker ran: nothing to
@@ -2152,57 +2004,12 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
         bake_write_coverage_image(*coverage_image, common.data(), nullptr);
       }
     }
-    /* [PL-DIAG] The shared coverage map keeps only the last written channel; the union is what
-     * every channel together covered. Prints only. */
-    {
-      const int64_t pixel_num = int64_t(row.size) * row.size;
-      int64_t last_nonzero = 0, union_nonzero = 0, common_nonzero = 0;
-      Vector<float> diag_common(pixel_num);
-      bake_common_from_job_channels(row.channels, pixel_num, diag_common.data());
-      for (int64_t i = 0; i < pixel_num; i++) {
-        float union_value = 0.0f;
-        for (const PaintLayersBakeJob::ChannelResult &channel : row.channels) {
-          union_value = std::max(union_value, channel.coverage[i]);
-        }
-        union_nonzero += int64_t(union_value > 0.002f);
-        last_nonzero += int64_t(row.channels.last().coverage[i] > 0.002f);
-        common_nonzero += int64_t(diag_common[i] > 0.002f);
-      }
-      printf("[PL-DIAG] coverage final row='%s' nonzero=%lld union_of_channels=%lld\n",
-             layer->name,
-             static_cast<long long>(last_nonzero),
-             static_cast<long long>(union_nonzero));
-      printf("[PL-DIAG] coverage final row='%s' common_nonzero=%lld channels_union=%lld\n",
-             layer->name,
-             static_cast<long long>(common_nonzero),
-             static_cast<long long>(union_nonzero));
-    }
     uint32_t hash[2];
     BKE_paint_layers_bake_hash(*ma, *layer, hash);
     layer->bake->hash[0] = hash[0];
     layer->bake->hash[1] = hash[1];
     BKE_paint_layers_bake_subscribe(*ma, *layer);
     changed = true;
-    /* [PL-DIAG] The commit writes pixels straight into the ibuf and sets only
-     * MA_PAINT_LAYERS_REGEN: no BKE_image_mark_dirty, no partial-update mark, no ID_RECALC tag on
-     * the Images or the Material. This prints what each written Image looks like afterwards. */
-    for (Image *image : layer->bake->images) {
-      if (image == nullptr) {
-        continue;
-      }
-      void *diag_lock = nullptr;
-      ImBuf *diag_ibuf = BKE_image_acquire_ibuf(image, nullptr, &diag_lock);
-      printf("[PL-DIAG] commit image '%s' %p us=%d id.tag=0x%x recalc=0x%x ibuf_dirty=%d "
-             "has_ibuf=%d\n",
-             image->id.name + 2,
-             static_cast<void *>(image),
-             image->id.us,
-             unsigned(image->id.tag),
-             unsigned(image->id.recalc),
-             (diag_ibuf != nullptr) ? int((diag_ibuf->userflags & IB_BITMAPDIRTY) != 0) : -1,
-             int(diag_ibuf != nullptr));
-      BKE_image_release_ibuf(image, diag_ibuf, diag_lock);
-    }
   }
   if (changed) {
     ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
@@ -2600,118 +2407,6 @@ static void source_tree_values_hash_recursive(const bNodeTree &tree,
                                               Set<const bNodeTree *> &visited,
                                               uint64_t &r_hash);
 
-/** Set to 1 to print the storage hash of every node the values hash visits (spammy). */
-#define PL_HASH_TRACE_NODES 0
-
-#if PAINT_LAYERS_DEBUG_LOG
-
-/**
- * Remembers the last content hash of a few source materials so the diagnostic below can name the
- * trees whose `previews_refresh_state` moved it. A fixed POD table rather than a `blender::Map`:
- * a lazily allocated global container is reported as a leak at exit by guardedalloc, because its
- * destructor runs after the leak check. The hash may be asked from a job thread as well as the main
- * one, so the table is guarded by #g_source_hash_trace_mutex.
- */
-struct SourceHashTrace {
-  uint32_t session_uid = 0;
-  uint64_t hash = 0;
-  int tree_num = 0;
-  const bNodeTree *trees[64] = {};
-  uint32_t previews[64] = {};
-};
-static SourceHashTrace g_source_hash_trace[8];
-static std::mutex g_source_hash_trace_mutex;
-
-/** Trace, named in the log, of which nested tree an update came from. */
-static void source_hash_trace(const Material &ma,
-                              const uint64_t hash,
-                              const uint64_t topology_hash,
-                              const uint64_t values_hash,
-                              const Set<const bNodeTree *> &visited)
-{
-  const char *caller = g_source_hash_caller != nullptr ? g_source_hash_caller : "?";
-  const int thread_main = BLI_thread_is_main() ? 1 : 0;
-  /* Localized copies (preview renders) outside Main may carry `session_uid == 0`, which would
-   * match the empty table slot and make every copy share one entry. */
-  if (ma.id.session_uid == 0 || (ma.id.tag & (ID_TAG_NO_MAIN | ID_TAG_LOCALIZED)) != 0) {
-    printf(
-        "paint layers hash: source='%s' COPY uid=%u ptr=%p tag=0x%x hash=%llx topo=%llx "
-        "values=%llx caller=%s thread_main=%d\n",
-        ma.id.name + 2,
-        uint32_t(ma.id.session_uid),
-        static_cast<const void *>(&ma),
-        uint32_t(ma.id.tag),
-        static_cast<unsigned long long>(hash),
-        static_cast<unsigned long long>(topology_hash),
-        static_cast<unsigned long long>(values_hash),
-        caller,
-        thread_main);
-    return;
-  }
-  std::lock_guard<std::mutex> lock(g_source_hash_trace_mutex);
-  SourceHashTrace *slot = nullptr;
-  SourceHashTrace *empty = nullptr;
-  for (SourceHashTrace &candidate : g_source_hash_trace) {
-    if (candidate.session_uid == ma.id.session_uid) {
-      slot = &candidate;
-      break;
-    }
-    if (candidate.session_uid == 0 && empty == nullptr) {
-      empty = &candidate;
-    }
-  }
-  if (slot == nullptr) {
-    slot = empty;
-    if (slot == nullptr) {
-      /* More dirty sources than the table holds; the trace is best-effort. */
-      return;
-    }
-    slot->session_uid = ma.id.session_uid;
-  }
-  if (slot->hash != 0 && slot->hash != hash) {
-    printf(
-        "paint layers hash: source='%s' uid=%u ptr=%p old=%llx new=%llx topo=%llx values=%llx "
-        "caller=%s thread_main=%d changed_trees=",
-        ma.id.name + 2,
-        uint32_t(ma.id.session_uid),
-        static_cast<const void *>(&ma),
-        static_cast<unsigned long long>(slot->hash),
-        static_cast<unsigned long long>(hash),
-        static_cast<unsigned long long>(topology_hash),
-        static_cast<unsigned long long>(values_hash),
-        caller,
-        thread_main);
-    bool any = false;
-    for (const bNodeTree *tree : visited) {
-      const uint32_t now = tree->runtime->previews_refresh_state;
-      bool changed = true;
-      for (int i = 0; i < slot->tree_num; i++) {
-        if (slot->trees[i] == tree) {
-          changed = slot->previews[i] != now;
-          break;
-        }
-      }
-      if (changed) {
-        printf("%s%s", any ? ", " : "", tree->id.name + 2);
-        any = true;
-      }
-    }
-    printf("%s\n", any ? "" : "<none>");
-  }
-  slot->hash = hash;
-  slot->tree_num = 0;
-  for (const bNodeTree *tree : visited) {
-    if (slot->tree_num >= int(ARRAY_SIZE(slot->trees))) {
-      break;
-    }
-    slot->trees[slot->tree_num] = tree;
-    slot->previews[slot->tree_num] = tree->runtime->previews_refresh_state;
-    slot->tree_num++;
-  }
-}
-
-#endif /* PAINT_LAYERS_DEBUG_LOG */
-
 /** The content hash of \a ma's node tree, or zero when it has none. */
 uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma)
 {
@@ -2725,13 +2420,6 @@ uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma)
   uint64_t hash = bake_hash_mix(0, topology_hash);
   Set<const bNodeTree *> value_visited;
   source_tree_values_hash_recursive(*ma.nodetree, value_visited, hash);
-#if PAINT_LAYERS_DEBUG_LOG
-  /* Values alone, recomputed only for the trace so the returned hash is untouched. */
-  uint64_t values_only = 0;
-  Set<const bNodeTree *> trace_visited;
-  source_tree_values_hash_recursive(*ma.nodetree, trace_visited, values_only);
-  source_hash_trace(ma, hash, topology_hash, values_only, visited);
-#endif
   return hash;
 }
 
@@ -2838,14 +2526,6 @@ static void source_tree_values_hash_recursive(const bNodeTree &tree,
     r_hash = node->id != nullptr ? source_hash_string(r_hash, node->id->name) :
                                    bake_hash_mix(r_hash, 0);
     r_hash = source_hash_node_storage(r_hash, *node);
-#if PAINT_LAYERS_DEBUG_LOG && PL_HASH_TRACE_NODES
-    printf("paint layers hash node: tree='%s' node='%s' idname=%s storage=%llx\n",
-           tree.id.name + 2,
-           node->name,
-           node->idname,
-           static_cast<unsigned long long>(
-               source_hash_node_storage(1469598103934665603ull, *node)));
-#endif
     for (const bNodeSocket &socket : node->inputs) {
       r_hash = source_hash_socket_value(r_hash, socket.type, socket.default_value);
     }
@@ -2910,7 +2590,7 @@ static uint64_t bake_hash_layer(uint64_t h,
                                 const MaterialPaintLayer &layer,
                                 const bool is_child)
 {
-  /* Variant C (ТЗ-H): the shared coverage changed meaning from per-channel content coverage to
+  /* Variant C (Spec-H): the shared coverage changed meaning from per-channel content coverage to
    * the channel-independent `common = mask x opacity`, and Normal color maps carry content in
    * alpha now. Old caches hold the previous meaning, so they invalidate once here; no DNA or
    * file-format change, only pixels are re-rendered. */
@@ -2922,8 +2602,7 @@ static uint64_t bake_hash_layer(uint64_t h,
     h = bake_hash_mix(h, uint8_t(layer.source));
     h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
     if (layer.material != nullptr) {
-      PL_HASH_CALLER("bake_hash_layer_a");
-      h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
+        h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
     }
     h = bake_hash_mix(h, layer.bake != nullptr ? uint32_t(layer.bake->size) : 0);
     /* A parent's bake renders this row through its maps, and they can appear or be replaced after
@@ -3012,7 +2691,6 @@ static uint64_t bake_hash_layer(uint64_t h,
   /* A Material layer's bake follows edits to the source graph, which do not change its session
    * UID, so the source tree's state is part of what the bake is valid for. */
   if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
-    PL_HASH_CALLER("bake_hash_layer_b");
     h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
   }
   h = bake_hash_mix(h, layer.custom_group != nullptr ? layer.custom_group->id.session_uid : 0);

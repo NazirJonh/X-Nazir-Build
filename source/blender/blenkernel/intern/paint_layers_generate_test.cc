@@ -7178,7 +7178,7 @@ TEST_F(PaintLayersGenerateTest, mask_channel_change_rebuilds_the_group)
 }
 
 /**
- * A Material mask's own coverage-source value edit, by contrast, is not topology (ТЗ-26): editing
+ * A Material mask's own coverage-source value edit, by contrast, is not topology (Spec-26): editing
  * the source's Roughness with `mask_channel` unchanged must sync in place, exactly like a Layer
  * row's or an Effect correction's own live constant.
  */
@@ -7839,7 +7839,7 @@ TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_rna_reaches_its_gra
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name ТЗ-29: no bake, no schedule -- the light-row gate
+/** \name Spec-29: no bake, no schedule -- the light-row gate
  *
  * A non-folder row's bake structure may only be allocated the instant it is about to render or be
  * queued, never eagerly. A row light enough to stay live (#PAINT_LAYERS_AUTO_BAKE_NODES) keeps
@@ -7904,7 +7904,7 @@ TEST_F(PaintLayersGenerateTest, light_row_opacity_edit_does_not_regen_or_rebuild
 }
 
 /**
- * Test #4, defect Б: two light rows that never get a bake structure must not stall the
+ * Test #4, defect B: two light rows that never get a bake structure must not stall the
  * #MA_PAINT_LAYERS_BAKE_STALE drain -- the pending scan (unchanged by this task) already skips a
  * row with a null bake, so it is blind to them, exactly as it must be. One real candidate (ALWAYS
  * mode, explicit size) actually bakes and is the only row the drain has to see settle. A rejected
@@ -10239,7 +10239,7 @@ TEST_F(PaintLayersGenerateTest, inactive_material_row_is_live_until_its_bake_lan
 }
 
 /**
- * ТЗ-25b, defect 1: a hand-over (#BKE_paint_layers_material_bake_apply's
+ * Spec-25b, defect 1: a hand-over (#BKE_paint_layers_material_bake_apply's
  * #BKE_paint_layers_bake_set_map calls, as #material_bake_layered_rows_ensure's before_render does
  * on the main thread ahead of the job) attaches fresh target images to an inactive row before any
  * pixel exists behind them. It must not finalise the row on its own any more, so a job cancelled
@@ -10308,7 +10308,7 @@ TEST_F(PaintLayersGenerateTest, cancelled_bake_hand_over_leaves_row_live_not_bak
 }
 
 /**
- * ТЗ-25b, defect 2: the row's topology hash used to fold in the identity of its bake-map Image
+ * Spec-25b, defect 2: the row's topology hash used to fold in the identity of its bake-map Image
  * data-blocks (#paint_layer_channel_image, which for a Material row is
  * #paint_layer_material_source_map -- #MaterialPaintLayer::bake::images) unconditionally, even for
  * a channel the generator shows live from the source and never reads that map for (see the build's
@@ -10517,7 +10517,7 @@ TEST_F(PaintLayersGenerateTest, sampler_runtime_state_is_dropped_with_its_materi
 }
 
 /**
- * ТЗ-23: #BKE_paint_layers_material_live_status answers what the UI shows for a Material row --
+ * Spec-23: #BKE_paint_layers_material_live_status answers what the UI shows for a Material row --
  * the same function the RNA getter calls. Live while the row shows its source (SourceGroup and
  * Hybrid), Baking while it stays live only because its bake cannot be shown yet, Baked on valid
  * maps, and Refused with the wrapper refusal when the source cannot be wrapped. Every status is
@@ -10632,7 +10632,7 @@ TEST_F(PaintLayersGenerateTest, build_failed_row_reports_refused_without_main)
 }
 
 /**
- * ТЗ-27: freeing a material drops the generator's runtime state keyed by its `session_uid`, so a
+ * Spec-27: freeing a material drops the generator's runtime state keyed by its `session_uid`, so a
  * reused uid cannot inherit the removed-rows set. The per-marker clear is the observable probe: it
  * reports whether the marker is still recorded.
  */
@@ -10759,7 +10759,7 @@ TEST_F(PaintLayersGenerateTest, sampler_runtime_survives_release_of_a_same_uid_o
 }
 
 /* -------------------------------------------------------------------- */
-/** \name Paint Layers cold tier (ТЗ-I2)
+/** \name Paint Layers cold tier (Spec-I2)
  * \{ */
 
 /** (a) A row hidden under the cold tier survives a rebuild: the off/on stays a value edit. */
@@ -11315,7 +11315,7 @@ TEST_F(PaintLayersGenerateTest, mesh_map_atlas_without_a_loaded_buffer_still_bui
  * Phase 4: a Stack (content) correction's topology hash follows its children's structure, exactly
  * like #topology_hash_layer follows a Layer folder's own children -- adding a second child, or
  * changing a child's source, moves the owner row's hash; editing a child's *value* (opacity, a Fill
- * constant) does not, mirroring ТЗ-26 for every other row kind.
+ * constant) does not, mirroring Spec-26 for every other row kind.
  */
 TEST_F(PaintLayersGenerateTest, stack_effect_correction_hash_follows_subtree_structure)
 {

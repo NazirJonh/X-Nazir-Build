@@ -185,18 +185,6 @@ bool BKE_paint_layers_target_is_frozen(const PaintLayersTarget &target);
 const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target);
 
 /**
- * Whether newly created Layer color maps skip #IMA_GPU_LINEAR_PREMUL and stay straight 8 bit.
- *
- * Premultiplied filtering hides the black-background contour, but doubles GPU memory per map
- * (half float RGBA instead of bytes). The bleed alternative dilates painted RGB into the empty
- * texels around each stroke, so bilinear taps find paint instead of black. A map created without
- * the flag always gets the bleed pass on strokes; corrections and masks always keep the flag.
- * Off by default: the premultiplied path is the user-confirmed one until the bleed path is.
- */
-bool BKE_paint_layers_bleed_enabled();
-void BKE_paint_layers_bleed_set_enabled(bool enabled);
-
-/**
  * Make \a target hold a writable map, growing the description on the first stroke.
  *
  * Content mode: a Paint row gets its channel record and a map filled with the channel's current

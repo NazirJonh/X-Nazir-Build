@@ -649,8 +649,6 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
 {
   Material *ma = static_cast<Material *>(ptr->data);
   if (value.data == nullptr) {
-    // TODO(debug): remove
-    printf("[STACK_DBG] %s: call active_set\n", __func__);
     BKE_paint_layers_active_set(*ma, {});
     return;
   }
@@ -662,8 +660,6 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
                 ma->id.name + 2);
     return;
   }
-  // TODO(debug): remove
-  printf("[STACK_DBG] %s: call active_set\n", __func__);
   BKE_paint_layers_active_set(*ma, layer->marker);
 }
 
@@ -677,8 +673,6 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
     /* The default channel set a freshly authored Paint or Fill row takes part in. */
     BKE_paint_layers_default_channels_apply(*ma, *layer);
     /* A fresh row becomes the cursor, mirroring what the UI does when it adds one. */
-    // TODO(debug): remove
-    printf("[STACK_DBG] %s: call active_set\n", __func__);
     BKE_paint_layers_active_set(*ma, layer->marker);
     /* BKE only tags DEG; the Outliner and the Layer Material tab need the WM notifier too. */
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
@@ -836,16 +830,6 @@ static void rna_Material_paint_layers_remap_all_uv_update(Main * /*bmain*/,
 
 /* Process-wide creation switch, not per-material state: every layered material reads the same
  * value, so it is documented on the property itself. */
-static bool rna_Material_paint_layers_bleed_get(PointerRNA * /*ptr*/)
-{
-  return BKE_paint_layers_bleed_enabled();
-}
-
-static void rna_Material_paint_layers_bleed_set(PointerRNA * /*ptr*/, bool value)
-{
-  BKE_paint_layers_bleed_set_enabled(value);
-}
-
 /* The effective set, not the raw field: an unauthored field reads the derived set. */
 static int rna_Material_paint_layers_channels_get(PointerRNA *ptr)
 {
@@ -2515,7 +2499,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
 
   /* Read-only: whether the mapping is actually applied right now. A Material row whose mode
    * cannot build it (a forced bake) reads false while the toggle is on, which is what
-   * the panel reports as "mapping ignored" (ТЗ 2.4). */
+   * the panel reports as "mapping ignored" (Spec 2.4). */
   prop = RNA_def_property(srna, "mapping_applies", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_mapping_applies_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
@@ -4208,17 +4192,6 @@ void RNA_def_material(BlenderRNA *brna)
       "Locked",
       "The generator owns the node tree and overwrites manual edits; unlock for debugging, then "
       "Regenerate explicitly");
-
-  prop = RNA_def_property(srna, "paint_layers_bleed", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_funcs(prop,
-                                 "rna_Material_paint_layers_bleed_get",
-                                 "rna_Material_paint_layers_bleed_set");
-  RNA_def_property_ui_text(
-      prop,
-      "Bleed New Color Maps",
-      "Process-wide comparison switch: newly created Layer color maps stay straight 8-bit and "
-      "each stroke dilates paint into the empty texels around it, instead of premultiplied "
-      "half-float filtering; off keeps the confirmed premultiplied path");
 
   prop = RNA_def_property(srna, "paint_layers_uv_map", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "paint_layers_uv_map");

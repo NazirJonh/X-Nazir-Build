@@ -9,9 +9,6 @@
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 
-/* TEMP: diagnostics, imbuf cannot see the blenkernel debug header. */
-#define PL_TIMING_LOG 1
-
 #include "MEM_guardedalloc.h"
 
 #include "CLG_log.h"
@@ -355,28 +352,6 @@ void IMB_update_gpu_texture_sub(gpu::Texture *tex,
 
   bool freebuf = false;
 
-  eGPUDataFormat data_format;
-#if PL_TIMING_LOG
-  const double pl_t0 = BLI_time_now_seconds();
-#endif
-  void *data = imb_gpu_get_data(ibuf,
-                                do_rescale,
-                                size,
-                                use_premult,
-                                use_grayscale,
-                                &freebuf,
-                                &data_format,
-                                store_linear_float);
-#if PL_TIMING_LOG
-  const double pl_t1 = BLI_time_now_seconds();
-  if ((pl_t1 - pl_t0) * 1000.0 > 5.0) {
-    printf("PL_TIMING: imb_gpu_get_data (sub) %dx%d rescale=%d %.2f ms\n",
-           ibuf->x,
-           ibuf->y,
-           int(do_rescale),
-           (pl_t1 - pl_t0) * 1000.0);
-  }
-#endif
 
   /* Update Texture. */
   GPU_texture_update_sub(tex, data_format, data, x, y, z, w, h, 1);
@@ -477,34 +452,6 @@ gpu::Texture *IMB_create_gpu_texture(const char *name,
     do_rescale = true;
   }
   BLI_assert(tex != nullptr);
-  eGPUDataFormat data_format;
-#if PL_TIMING_LOG
-  const double pl_t0 = BLI_time_now_seconds();
-#endif
-  void *data = imb_gpu_get_data(ibuf,
-                                do_rescale,
-                                size,
-                                use_premult,
-                                true,
-                                &freebuf,
-                                &data_format,
-                                store_linear_float);
-#if PL_TIMING_LOG
-  const double pl_t1 = BLI_time_now_seconds();
-#endif
-  GPU_texture_update(tex, data_format, data);
-#if PL_TIMING_LOG
-  {
-    const double pl_t2 = BLI_time_now_seconds();
-    if ((pl_t2 - pl_t0) * 1000.0 > 5.0) {
-      printf("PL_TIMING: IMB_create_gpu_texture %dx%d convert %.2f ms, upload %.2f ms\n",
-             ibuf->x,
-             ibuf->y,
-             (pl_t1 - pl_t0) * 1000.0,
-             (pl_t2 - pl_t1) * 1000.0);
-    }
-  }
-#endif
 
   GPU_texture_swizzle_set(tex, imb_gpu_get_swizzle(ibuf));
   GPU_texture_anisotropic_filter(tex, true);

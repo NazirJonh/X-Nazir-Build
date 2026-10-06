@@ -1231,6 +1231,51 @@ static void rna_MaterialPaintLayer_custom_group_set(PointerRNA *ptr,
   }
 }
 
+/**
+ * A Fill mask item keeps its map in the Base Color record of the item itself (the same record
+ * #paint_layer_mask_correction_image reads), so this property is the one slot the UI drops an image
+ * on without having to create that record first.
+ */
+static PointerRNA rna_MaterialPaintLayer_mask_image_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+      layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT)
+  {
+    for (const int i : blender::IndexRange(layer->channels_num)) {
+      const MaterialPaintLayerChannel &record = layer->channels[i];
+      if (record.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        return RNA_id_pointer_create(record.image ? &record.image->id : nullptr);
+      }
+    }
+  }
+  return PointerRNA_NULL;
+}
+
+static void rna_MaterialPaintLayer_mask_image_set(PointerRNA *ptr,
+                                                  PointerRNA value,
+                                                  ReportList * /*reports*/)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer->role != MA_PAINT_LAYER_ROLE_MASK_ITEM ||
+      layer->source != MA_PAINT_LAYER_SOURCE_CONSTANT)
+  {
+    return;
+  }
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    return;
+  }
+  Image *image = static_cast<Image *>(value.data);
+  /* Clearing never creates a record; assigning creates it lazily, like the channel toggle. */
+  if (image != nullptr &&
+      BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr)
+  {
+    return;
+  }
+  BKE_paint_layers_channel_set_image(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image);
+}
+
 static void rna_MaterialPaintLayer_material_set(PointerRNA *ptr,
                                                PointerRNA value,
                                                ReportList * /*reports*/)
@@ -2572,6 +2617,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, nullptr, "rna_MaterialPaintLayer_material_set", nullptr, nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Source Material", "Material a Material layer is built from");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mask_image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_MaterialPaintLayer_mask_image_get",
+                                 "rna_MaterialPaintLayer_mask_image_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Mask Image", "Map of a Fill mask item, or none to use its constant value");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "properties", PROP_POINTER, PROP_NONE);

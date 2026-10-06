@@ -2443,7 +2443,20 @@ def draw_material_mask_item(layout, item):
     same map a MESH_MAP row reads, so it shows a preview instead of a Drop image picker.
     """
     if item.source == 'CONSTANT':
-        _draw_material_constant_value(layout, item, item.mask_channel)
+        # The map replaces the constant, so the value reads inactive while one is assigned.
+        value = layout.column()
+        value.active = item.mask_image is None
+        _draw_material_constant_value(value, item, item.mask_channel)
+        row = layout.row(align=True)
+        row.template_ID_browser(
+            item,
+            "mask_image",
+            open="image.open",
+            text="Drop image: Mask",
+            image_filter='PAINT_SOURCE',
+            use_unlink=True,
+            use_users=False,
+        )
     elif item.source == 'IMAGE':
         row = layout.row(align=True)
         row.prop(item, "mask_channel", text="")

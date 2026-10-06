@@ -1765,25 +1765,97 @@ class PaintLayersStackSource final : public StackSource,
     return true;
   }
 
-  bool can_paste_into(const StackReadContext & /*ctx*/,
-                      const StackFocus & /*focus*/,
-                      const ID & /*owner*/,
-                      const StackItemIdentity & /*source*/,
-                      const int /*target_ordinal*/) const override
+  /**
+   * The effect or mask item \a source names, in whichever material it lives: a copy carries across
+   * materials, so the clipboard may still hold a row of a stack the user has since left.
+   */
+  static const MaterialPaintLayer *paste_source_row(Main &bmain, const StackItemIdentity &source)
   {
-    /* Cross-material copy of a description row is not implemented yet. */
-    return false;
+    if (source.source_type != SO_STACK_SRC_PAINT_MATERIAL || BLI_uuid_is_nil(source.row_id)) {
+      return nullptr;
+    }
+    for (Material *ma = static_cast<Material *>(bmain.materials.first); ma != nullptr;
+         ma = static_cast<Material *>(ma->id.next))
+    {
+      if (ma->id.session_uid == source.owner_uid) {
+        return BKE_paint_layers_find(*ma, source.row_id);
+      }
+    }
+    return nullptr;
   }
 
-  bool rows_paste_into(bContext & /*C*/,
-                       const StackFocus & /*focus*/,
-                       ID & /*owner*/,
-                       const Span<StackItemIdentity> /*sources*/,
-                       const int /*target_ordinal*/,
-                       Vector<StackItemIdentity> & /*r_created*/,
-                       ReportList * /*reports*/) const override
+  bool can_paste_into(const StackReadContext &ctx,
+                      const StackFocus & /*focus*/,
+                      const ID &owner,
+                      const StackItemIdentity &source,
+                      const int target_ordinal) const override
   {
-    return false;
+    if (ctx.bmain == nullptr) {
+      return false;
+    }
+    const MaterialPaintLayer *from = paste_source_row(*ctx.bmain, source);
+    MaterialPaintLayer *target = paint_description_row_for_ordinal(
+        const_cast<Material &>(layers_owner(owner)), target_ordinal);
+    return from != nullptr && target != nullptr &&
+           BKE_paint_layers_correction_can_paste(*from, *target);
+  }
+
+  bool rows_paste_into(bContext &C,
+                       const StackFocus & /*focus*/,
+                       ID &owner,
+                       const Span<StackItemIdentity> sources,
+                       const int target_ordinal,
+                       Vector<StackItemIdentity> &r_created,
+                       ReportList *reports) const override
+  {
+    Main *bmain = CTX_data_main(&C);
+    if (bmain == nullptr) {
+      return false;
+    }
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *target = paint_description_row_for_ordinal(material, target_ordinal);
+    if (target == nullptr) {
+      return false;
+    }
+
+    /* Why two passes: a base mask must land first, or the items copied after it would find no base
+     * to sit over and be refused. */
+    int skipped = 0;
+    bool any = false;
+    for (const bool base_pass : {true, false}) {
+      for (const StackItemIdentity &identity : sources) {
+        const MaterialPaintLayer *from = paste_source_row(*bmain, identity);
+        if (from == nullptr) {
+          if (base_pass) {
+            skipped++;
+          }
+          continue;
+        }
+        const bool is_base = (from->flag & MA_PAINT_LAYER_MASK_BASE) != 0;
+        if (is_base != base_pass) {
+          continue;
+        }
+        MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, material, *from, target);
+        if (copy == nullptr) {
+          skipped++;
+          continue;
+        }
+        StackItemIdentity created;
+        created.owner_uid = owner.session_uid;
+        created.source_type = SO_STACK_SRC_PAINT_MATERIAL;
+        created.row_id = copy->marker;
+        created.ordinal_hint = int16_t(layers_ordinal_of(material, copy));
+        r_created.append(created);
+        any = true;
+      }
+    }
+    if (skipped > 0) {
+      BKE_reportf(reports, RPT_INFO, "Skipped %d item(s) that cannot be pasted here", skipped);
+    }
+    if (any) {
+      WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    }
+    return any;
   }
 
   /* ---------------------------------------------------------------- */

@@ -788,6 +788,160 @@ TEST_F(PaintLayersDescription, duplicate_copies_branch_with_fresh_markers_and_im
   EXPECT_EQ(BKE_paint_layers_find(*ma, folder->marker), folder);
 }
 
+TEST_F(PaintLayersDescription, duplicate_takes_a_user_of_its_own_and_never_shares_the_bake)
+{
+  Material *ma = BKE_material_add(bmain, "DupUsersMat");
+  Material *source = BKE_material_add(bmain, "DupUsersSource");
+  bNodeTree *group = static_cast<bNodeTree *>(BKE_id_new(bmain, ID_NT, "DupUsersGroup"));
+  Image *baked = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "DupUsersBaked"));
+
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Layer", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  layer->material = source;
+  id_us_plus(&source->id);
+  layer->custom_group = group;
+  id_us_plus(&group->id);
+  layer->bake = MEM_new<MaterialPaintLayerBake>(__func__);
+  layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = baked;
+  id_us_plus(&baked->id);
+
+  const int source_users = source->id.us;
+  const int group_users = group->id.us;
+  const int baked_users = baked->id.us;
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, layer);
+  ASSERT_NE(copy, nullptr);
+
+  /* Both stay shared, and each owner holds a user: removing the copy gives exactly its own back. */
+  EXPECT_EQ(copy->material, source);
+  EXPECT_EQ(copy->custom_group, group);
+  EXPECT_EQ(source->id.us, source_users + 1);
+  EXPECT_EQ(group->id.us, group_users + 1);
+
+  /* The bake is a cache: sharing one struct between two rows would free it twice. */
+  EXPECT_EQ(copy->bake, nullptr);
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_EQ(layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], baked);
+
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, copy));
+  EXPECT_EQ(source->id.us, source_users);
+  EXPECT_EQ(group->id.us, group_users);
+  EXPECT_EQ(baked->id.us, baked_users);
+  EXPECT_EQ(layer->material, source);
+}
+
+TEST_F(PaintLayersDescription, correction_paste_copies_an_effect_with_its_own_image)
+{
+  Material *ma = BKE_material_add(bmain, "PasteEffectMat");
+  Material *other = BKE_material_add(bmain, "PasteEffectOtherMat");
+  Image *image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "PasteEffectImage"));
+
+  MaterialPaintLayer *from_row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "From", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *to_row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "To", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(from_row, nullptr);
+  ASSERT_NE(to_row, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, from_row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_CONSTANT, "Effect");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image));
+  effect->opacity = 0.4f;
+
+  /* Onto another row of the same material: a new effect on top of that row's own. */
+  ASSERT_TRUE(BKE_paint_layers_correction_can_paste(*effect, *to_row));
+  MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, *ma, *effect, to_row);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(to_row->effects.last, copy);
+  EXPECT_EQ(BLI_listbase_count(&to_row->effects), 1);
+  EXPECT_EQ(copy->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_FLOAT_EQ(copy->opacity, 0.4f);
+  EXPECT_FALSE(BLI_uuid_equal(copy->marker, effect->marker));
+  EXPECT_STREQ(copy->name, "Effect");
+
+  /* The map is a copy: painting the pasted effect must not paint the original. */
+  ASSERT_EQ(copy->channels_num, 1);
+  EXPECT_NE(copy->channels[0].image, nullptr);
+  EXPECT_NE(copy->channels[0].image, image);
+  EXPECT_EQ(paint_layer_mask_map(*effect), image);
+  EXPECT_EQ(BLI_listbase_count(&from_row->effects), 1);
+
+  /* The paste lands on the same row too, beside the original, and onto a row of another material. */
+  EXPECT_NE(BKE_paint_layers_correction_paste(*bmain, *ma, *effect, from_row), nullptr);
+  EXPECT_EQ(BLI_listbase_count(&from_row->effects), 2);
+  MaterialPaintLayer *foreign_row = BKE_paint_layers_add(
+      *other, MA_PAINT_LAYER_SOURCE_CONSTANT, "Foreign", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(foreign_row, nullptr);
+  MaterialPaintLayer *foreign_copy = BKE_paint_layers_correction_paste(
+      *bmain, *other, *effect, foreign_row);
+  ASSERT_NE(foreign_copy, nullptr);
+  EXPECT_EQ(BKE_paint_layers_find(*other, foreign_copy->marker), foreign_copy);
+  EXPECT_EQ(BKE_paint_layers_find(*ma, foreign_copy->marker), nullptr);
+
+  /* A row is not a correction, a correction takes no corrections, and a target outside the
+   * material is refused. */
+  EXPECT_FALSE(BKE_paint_layers_correction_can_paste(*from_row, *to_row));
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, *ma, *from_row, to_row), nullptr);
+  EXPECT_FALSE(BKE_paint_layers_correction_can_paste(*effect, *copy));
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, *ma, *effect, copy), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, *ma, *effect, foreign_row), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, *ma, *effect, nullptr), nullptr);
+}
+
+TEST_F(PaintLayersDescription, correction_paste_keeps_one_base_mask_per_row)
+{
+  Material *ma = BKE_material_add(bmain, "PasteMaskMat");
+  MaterialPaintLayer *from_row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "From", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *to_row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "To", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(from_row, nullptr);
+  ASSERT_NE(to_row, nullptr);
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, from_row, 0.5f);
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE((base->flag & MA_PAINT_LAYER_MASK_BASE), 0);
+  MaterialPaintLayer *item = BKE_paint_layers_correction_add(
+      *ma, from_row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "Item");
+  ASSERT_NE(item, nullptr);
+  ASSERT_EQ((item->flag & MA_PAINT_LAYER_MASK_BASE), 0);
+
+  auto base_count = [](const MaterialPaintLayer &row) {
+    int count = 0;
+    for (const MaterialPaintLayer &mask_item : row.mask_stack) {
+      count += (mask_item.flag & MA_PAINT_LAYER_MASK_BASE) != 0;
+    }
+    return count;
+  };
+
+  /* An item with no base to sit over is refused; the base itself is welcome and leads the stack. */
+  EXPECT_FALSE(BKE_paint_layers_correction_can_paste(*item, *to_row));
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, *ma, *item, to_row), nullptr);
+  EXPECT_TRUE(BLI_listbase_is_empty(&to_row->mask_stack));
+  MaterialPaintLayer *pasted_base = BKE_paint_layers_correction_paste(*bmain, *ma, *base, to_row);
+  ASSERT_NE(pasted_base, nullptr);
+  EXPECT_EQ(to_row->mask_stack.first, pasted_base);
+  EXPECT_NE((pasted_base->flag & MA_PAINT_LAYER_MASK_BASE), 0);
+  EXPECT_FLOAT_EQ(pasted_base->fill_color[0], 0.5f);
+
+  /* With a base in place the item goes on top of it. */
+  MaterialPaintLayer *pasted_item = BKE_paint_layers_correction_paste(*bmain, *ma, *item, to_row);
+  ASSERT_NE(pasted_item, nullptr);
+  EXPECT_EQ(to_row->mask_stack.last, pasted_item);
+  EXPECT_EQ((pasted_item->flag & MA_PAINT_LAYER_MASK_BASE), 0);
+
+  /* A second base becomes a plain item: the row keeps the one base a stroke lands on. */
+  MaterialPaintLayer *second_base = BKE_paint_layers_correction_paste(*bmain, *ma, *base, to_row);
+  ASSERT_NE(second_base, nullptr);
+  EXPECT_EQ((second_base->flag & MA_PAINT_LAYER_MASK_BASE), 0);
+  EXPECT_EQ(to_row->mask_stack.last, second_base);
+  EXPECT_EQ(base_count(*to_row), 1);
+  EXPECT_EQ(BLI_listbase_count(&to_row->mask_stack), 3);
+  EXPECT_EQ(base_count(*from_row), 1);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

@@ -75,10 +75,10 @@
 #ifdef WITH_FREESTYLE
 #  include "BKE_freestyle.h"
 #  include "FRS_freestyle.h"
-#  include "RNA_enum_types.hh"
 #endif
 
 #include "RNA_access.hh"
+#include "RNA_enum_types.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -97,6 +97,7 @@
 #include "RNA_prototypes.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_layout.hh"
 
 #include "RE_engine.h"
 #include "RE_pipeline.h"
@@ -872,11 +873,69 @@ void MATERIAL_OT_new(wmOperatorType *ot)
 }
 
 /**
+ * The channels the dialog offers, one checkbox each, in the order the panels list them. CUSTOM is a
+ * vertex-painting attribute and HEIGHT has no write backend yet, so a toggle for either would
+ * silently no-op -- the same reason the channel panels never offer them.
+ *
+ * Why booleans rather than one flag enum: an expanded flag enum is a row of exclusive buttons, and
+ * adding a second one takes Shift; a checkbox per channel needs no key at all.
+ */
+struct NewLayeredChannel {
+  eMaterialPaintChannel channel;
+  const char *prop_name;
+  const char *ui_name;
+};
+
+static const NewLayeredChannel new_layered_channels[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "channel_base_color", N_("Base Color")},
+    {PAINT_MATERIAL_CHANNEL_METALLIC, "channel_metallic", N_("Metallic")},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "channel_roughness", N_("Roughness")},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "channel_specular", N_("Specular")},
+    {PAINT_MATERIAL_CHANNEL_NORMAL, "channel_normal", N_("Normal")},
+    {PAINT_MATERIAL_CHANNEL_ALPHA, "channel_alpha", N_("Alpha")},
+    {PAINT_MATERIAL_CHANNEL_AO, "channel_ao", N_("AO")},
+    {PAINT_MATERIAL_CHANNEL_EMISSION, "channel_emission", N_("Emission")},
+};
+
+static uint16_t new_layered_material_channel_mask(wmOperator *op)
+{
+  uint16_t mask = 0;
+  for (const NewLayeredChannel &entry : new_layered_channels) {
+    if (RNA_boolean_get(op->ptr, entry.prop_name)) {
+      mask |= uint16_t(1) << int(entry.channel);
+    }
+  }
+  return mask;
+}
+
+static void new_layered_material_ui(bContext * /*C*/, wmOperator *op)
+{
+  ui::Layout &col = op->layout->column(false);
+  for (const NewLayeredChannel &entry : new_layered_channels) {
+    ui::Layout &row = col.row(true);
+    /* Base Color is the material's constant and BKE keeps it in the set, so it reads as ticked but
+     * offers no toggle that could never stick. */
+    row.enabled_set(entry.channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    row.prop(op->ptr, entry.prop_name, UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+}
+
+/**
  * Create a fresh layered material and give it its first Paint layer. The material is otherwise an
  * ordinary one: the stack is the DNA description, the node tree is generated from it, and the
  * generator owns the tree (Locked) until the user unlocks it.
+ *
+ * The invoke opens a dialog first: the channels the user ticks there are the global channel set
+ * the stack starts with, written before any record is authored.
  */
-static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator * /*op*/)
+static wmOperatorStatus new_layered_material_invoke(bContext *C,
+                                                    wmOperator *op,
+                                                    const wmEvent * /*event*/)
+{
+  return WM_operator_props_dialog_popup(C, op, 300, std::nullopt, IFACE_("Create"));
+}
+
+static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
   PointerRNA ptr;
@@ -898,8 +957,11 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator * /*op
    * or into its mask. */
   MaterialPaintLayer *base = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_CONSTANT, "Base Color", nullptr, PaintLayerPlace::Above);
-  /* #BKE_paint_layers_add already materialized the global channel set from the build default, so
-   * the fresh stack reaches the Principled BSDF immediately. */
+  /* The dialog's set takes the place of the build default #BKE_paint_layers_add materialized:
+   * written before any record is authored, so the base Fill takes part in the chosen channels
+   * only and the generated tree wires just those to the Principled BSDF. BKE forces Base Color
+   * back in, so the material keeps its constant whatever the dialog said. */
+  BKE_paint_layers_channel_set_mask_set(*ma, new_layered_material_channel_mask(op));
   BKE_paint_layers_default_channels_apply(*ma, *base);
   const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
   BKE_paint_layers_set_fill_color(*ma, base, base_color);
@@ -947,11 +1009,24 @@ void MATERIAL_OT_new_layered(wmOperatorType *ot)
   ot->description = "Add a new paint-layer stack material, generated from its layer description";
 
   /* API callbacks. */
+  ot->invoke = new_layered_material_invoke;
   ot->exec = new_layered_material_exec;
+  ot->ui = new_layered_material_ui;
   ot->poll = object_materials_supported_poll;
 
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  /* The channels the stack works with; the base layer takes part in the ticked ones only. Base
+   * Color is always in the set, whatever its checkbox says. */
+  const uint16_t default_set = BKE_paint_layers_default_channel_set();
+  for (const NewLayeredChannel &entry : new_layered_channels) {
+    RNA_def_boolean(ot->srna,
+                    entry.prop_name,
+                    (default_set & (uint16_t(1) << int(entry.channel))) != 0,
+                    entry.ui_name,
+                    "Let the new material's stack work with this channel");
+  }
 }
 
 /** \} */

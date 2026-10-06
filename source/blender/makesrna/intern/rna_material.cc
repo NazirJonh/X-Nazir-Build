@@ -2271,23 +2271,6 @@ static PointerRNA rna_Material_mesh_map_settings_get(PointerRNA *ptr)
 
 namespace blender {
 
-/* Bit-flag values for #Material.paint_layers_channels: the set is a bitmask keyed by
- * #eMaterialPaintChannel, so each item must be a unique power-of-two bit. This must not reuse
- * #rna_enum_material_paint_channel_items, which stores plain channel indices (0..9). */
-static const EnumPropertyItem rna_enum_material_paint_channel_flag_items[] = {
-    {1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_NORMAL, "NORMAL", 0, "Normal", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_CUSTOM, "CUSTOM", 0, "Custom", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", ""},
-    {1 << PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
     {MA_PAINT_LAYER_SOURCE_CONSTANT, "CONSTANT", 0, "Constant", "A flat colour"},

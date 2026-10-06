@@ -991,8 +991,25 @@ static int outliner_id_copy_tag(SpaceOutliner *space_outliner,
   return num_ids;
 }
 
+/**
+ * In Stack Layers the clipboard is the stack's: there are no data-blocks on screen to copy or
+ * paste, so the data-block operators hand over to the Stack Layers pair. Anything that calls them
+ * for the Outliner's copy and paste -- an add-on's Ctrl+V wrapper included -- then lands on the
+ * stack instead of pasting data-blocks into the file.
+ */
+static bool outliner_is_stack_layers(bContext *C)
+{
+  const SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  return space_outliner != nullptr && space_outliner->outlinevis == SO_STACK_LAYERS;
+}
+
 static wmOperatorStatus outliner_id_copy_exec(bContext *C, wmOperator *op)
 {
+  if (outliner_is_stack_layers(C)) {
+    return WM_operator_name_call(
+        C, "OUTLINER_OT_stack_layer_copy", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+  }
+
   using namespace blender::bke::blendfile;
 
   Main *bmain = CTX_data_main(C);
@@ -1038,6 +1055,10 @@ void OUTLINER_OT_id_copy(wmOperatorType *ot)
 
 static wmOperatorStatus outliner_id_paste_exec(bContext *C, wmOperator *op)
 {
+  if (outliner_is_stack_layers(C)) {
+    return WM_operator_name_call(
+        C, "OUTLINER_OT_stack_layer_paste", wm::OpCallContext::ExecDefault, nullptr, nullptr);
+  }
   char filepath[FILE_MAX];
   const short flag = FILE_AUTOSELECT | FILE_ACTIVE_COLLECTION;
 

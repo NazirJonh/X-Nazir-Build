@@ -1030,6 +1030,27 @@ class LAYER_MATERIAL_PT_mesh_maps(LayerMaterialButtonsPanel, Panel):
         layout.operator("object.mesh_map_refresh", text="Refresh Status", icon='FILE_REFRESH')
 
 
+class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
+    """The owner material's global paint channel set: which channels the stack works with.
+
+    A channel removed here leaves each row's record and map untouched; the rows simply stop
+    showing it. Base Color is the material's constant and is always in the set. The stack starts
+    with the set chosen in the New Layered Material dialog.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_channels"
+    bl_label = "Channels"
+
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        draw_material_channel_set(layout, self._owner_material(context))
+
+
 classes = (
     MATERIAL_MT_context_menu,
     MATERIAL_UL_matslots,
@@ -1061,6 +1082,7 @@ classes = (
     LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_custom_layer,
     LAYER_MATERIAL_PT_mesh_maps,
+    LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_custom_props,
 )
 

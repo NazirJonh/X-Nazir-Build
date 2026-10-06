@@ -290,7 +290,7 @@ void paint_layer_mark_owned(Material &ma)
 /**
  * Deep copy of the branch at \a src: fresh markers for every row, a copy of the IDProperty group,
  * and -- only where \a copy_images asks for it -- copies of the channel and mask images. The
- * custom group pointer is carried over as-is; its user count is the caller's business.
+ * custom group and source material stay shared, each with a user of its own taken here.
  */
 MaterialPaintLayer *paint_layer_branch_duplicate(Main &bmain,
                                                  const Material &ma,
@@ -305,6 +305,11 @@ MaterialPaintLayer *paint_layer_branch_duplicate(Main &bmain,
   dst->effects = {nullptr, nullptr};
   dst->mask_stack = {nullptr, nullptr};
   dst->channels = nullptr;
+  dst->channels_num = 0;
+  /* Why null: the bake is a cache keyed by the description hash, and a shallow copy would put one
+   * #MaterialPaintLayerBake under two owners (freed twice, its maps' users counted once). The copy
+   * rebakes on demand like any row that has not been baked yet. */
+  dst->bake = nullptr;
   dst->properties = nullptr;
 
   for (const MaterialPaintLayer &child : src.children) {
@@ -331,6 +336,14 @@ MaterialPaintLayer *paint_layer_branch_duplicate(Main &bmain,
   }
   if (src.properties != nullptr) {
     dst->properties = IDP_CopyProperty(src.properties);
+  }
+  /* Why a user each: both stay shared, and #paint_layer_release_users takes one back per owner, so
+   * a copy that holds none would drive the count below the real number of owners. */
+  if (dst->material != nullptr) {
+    id_us_plus(&dst->material->id);
+  }
+  if (dst->custom_group != nullptr) {
+    id_us_plus(&dst->custom_group->id);
   }
 
   return dst;
@@ -1769,6 +1782,58 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   return copy;
 }
 
+bool BKE_paint_layers_correction_can_paste(const MaterialPaintLayer &source,
+                                           const MaterialPaintLayer &target)
+{
+  if (BKE_paint_layers_role(target) != PaintLayerRole::Layer) {
+    return false;
+  }
+  switch (BKE_paint_layers_role(source)) {
+    case PaintLayerRole::Effect:
+      return true;
+    case PaintLayerRole::MaskItem:
+      /* A mask is a stack over its base, so an item that is not the base needs one to sit over; the
+       * base itself is always welcome, becoming the target's base or a plain item over it. */
+      return (source.flag & MA_PAINT_LAYER_MASK_BASE) != 0 ||
+             BKE_paint_layers_mask_base(target) != nullptr;
+    default:
+      return false;
+  }
+}
+
+MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
+                                                      Material &ma,
+                                                      const MaterialPaintLayer &source,
+                                                      MaterialPaintLayer *target)
+{
+  if (target == nullptr || paint_layer_owner_list(&ma.paint_layers, target) == nullptr ||
+      !BKE_paint_layers_correction_can_paste(source, *target))
+  {
+    return nullptr;
+  }
+
+  /* Why copy the images: a map is painted in place, so a pasted correction sharing its source's
+   * image would turn every stroke on one into a stroke on the other. */
+  MaterialPaintLayer *copy = paint_layer_branch_duplicate(bmain, ma, source, true);
+  if (BKE_paint_layers_role(source) == PaintLayerRole::MaskItem) {
+    if (BKE_paint_layers_mask_base(*target) == nullptr) {
+      /* The first item of an empty stack is its base, whatever it was in its old home. */
+      copy->flag |= MA_PAINT_LAYER_MASK_BASE;
+      BLI_addhead(&target->mask_stack, copy);
+    }
+    else {
+      /* One base per layer: the target's own stays, the copy is a plain item over it. */
+      copy->flag = int16_t(copy->flag & ~MA_PAINT_LAYER_MASK_BASE);
+      BLI_addtail(&target->mask_stack, copy);
+    }
+  }
+  else {
+    BLI_addtail(&target->effects, copy);
+  }
+  paint_layer_mark_owned(ma);
+  return copy;
+}
+
 MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *layer, float value)
 {
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
@@ -1967,6 +2032,11 @@ constexpr uint16_t PAINT_LAYERS_DEFAULT_CHANNEL_SET =
     (uint16_t(1) << PAINT_MATERIAL_CHANNEL_AO);
 
 }  // namespace
+
+uint16_t BKE_paint_layers_default_channel_set()
+{
+  return PAINT_LAYERS_DEFAULT_CHANNEL_SET;
+}
 
 uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
 {

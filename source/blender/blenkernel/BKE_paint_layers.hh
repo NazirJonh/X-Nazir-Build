@@ -386,6 +386,13 @@ bool BKE_paint_layers_channel_set_enable(Material &ma,
 void BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
 
 /**
+ * The channel set a fresh stack offers before any set is authored: the build default (Base Color,
+ * Metallic, Roughness, Normal, AO). The default #MATERIAL_OT_new_layered proposes in its dialog,
+ * and what a zero #Material::paint_layers_channels field derives.
+ */
+uint16_t BKE_paint_layers_default_channel_set();
+
+/**
  * Freeze the derived channel set into #Material::paint_layers_channels when the field is still zero.
  *
  * While the field is zero #BKE_paint_layers_channel_set_mask_get recomputes the union of every
@@ -496,6 +503,28 @@ bool BKE_paint_layers_ungroup(Material &ma, MaterialPaintLayer *folder);
 MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
                                                Material &ma,
                                                MaterialPaintLayer *layer);
+
+/**
+ * Whether #BKE_paint_layers_correction_paste can attach a copy of the effect or mask item \a source
+ * to \a target: \a target must be a stack row, and a mask item that is not a base needs a base on
+ * \a target to sit over.
+ */
+bool BKE_paint_layers_correction_can_paste(const MaterialPaintLayer &source,
+                                           const MaterialPaintLayer &target);
+
+/**
+ * Attach a deep copy of the effect or mask item \a source -- which may belong to another material
+ * -- to the top of \a target's own corrections. The copy and everything under it gets fresh markers
+ * unique within \a ma and copies of the images its channels hold (never the shared image); a source
+ * material or node group stays shared with a user of its own.
+ *
+ * \return the copy, or null when \a target is not a row of \a ma or #BKE_paint_layers_correction_can_paste
+ * refuses.
+ */
+MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
+                                                      Material &ma,
+                                                      const MaterialPaintLayer &source,
+                                                      MaterialPaintLayer *target);
 
 /**
  * Give \a layer a new base mask item of strength \a value, inserted first in its mask stack.

@@ -2410,6 +2410,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     uid_prop_set(fresh->id.properties, TREE_LAYER_PROP, row.marker);
     prop_string_set(fresh->id.properties, TREE_SUBKIND_PROP, TREE_SUBKIND_MASK);
     used_subgroup_trees.append_non_duplicates(fresh);
+    /* Why: a new data-block is a new ID reference of its row's group, so the depsgraph needs its
+     * relations rebuilt or the evaluated row keeps pointing at the original tree. */
+    groups_created = true;
     return fresh;
   };
   ctx.layer_tree_get = layer_tree_get;

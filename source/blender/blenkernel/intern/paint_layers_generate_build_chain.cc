@@ -68,6 +68,7 @@
 #include "paint_layers_intern.hh"
 
 #include "paint_layers_generate_build_intern.hh"
+#include "paint_layers_generate_layout.hh"
 
 #include "NOD_socket.hh"
 
@@ -601,8 +602,8 @@ ChainResult PaintLayersChainBuilder::build_list(
       if (combine != nullptr) {
         combine->id = &ctx.normal_combine_group->id;
         id_us_plus(&ctx.normal_combine_group->id);
-        combine->location[0] = location_x;
-        combine->location[1] = location_y;
+        /* Why extra: the combine instance owns no named grid slot per channel. */
+        layout::place_extra(*combine);
         /* A hand-assigned group only grows its instance sockets once its declaration is built;
          * this instantiates them from the group's interface without needing #Main or a whole
          * tree update. */
@@ -1026,6 +1027,10 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
 
   ChainLayer &current = r_current;
   bNode *&leaf_map_node = r_leaf_map_node;
+  /* The nodes this row's own source built, framed as `Source` once placed. Shared nodes
+   * (the group input, a wrapper instance, the row Mapping) never join: they outlive one
+   * row and must not hang under its frame. */
+  Vector<bNode *> source_nodes;
   current.layer = layer;
   if (Map<int, bNodeTreeInterfaceSocket *> *opacity_by_channel =
           opacity_inputs.lookup_ptr(layer))
@@ -1079,6 +1084,7 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
       visible->custom1 = NODE_MATH_MULTIPLY;
       visible->location[0] = location_x + 90.0f;
       visible->location[1] = location_y - 160.0f;
+      source_nodes.append(visible);
       bke::node_add_link(tree, *current.opacity_node, *current.opacity, *visible, *visible_a);
       bke::node_add_link(tree, *group_input, *enabled_out, *visible, *visible_b);
       current.opacity_node = visible;
@@ -1131,6 +1137,7 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
       }
       map->id = &live_map_image->id;
       id_us_plus(&live_map_image->id);
+      source_nodes.append(map);
       map->location[0] = location_x;
       map->location[1] = location_y;
       if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
@@ -1208,8 +1215,9 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
       }
       map->id = &image->id;
       id_us_plus(&image->id);
-      map->location[0] = location_x;
-      map->location[1] = location_y;
+      /* Why grid: the row source opens the Source column at the origin. */
+      layout::place(*map, layout::Column::Source, 0);
+      source_nodes.append(map);
       /* A MESH_MAP atlas is sampled with Extend (clamp to the edge), the mode the CPU's own
        * bilinear resample uses, so a differently sized atlas agrees at its borders. A painted
        * map keeps its Repeat default. Read through the shared resolver so the two sides cannot
@@ -1268,6 +1276,8 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
             bke::node_add_link(tree, *separate, *sep_x, *combine, *combine_z);
             current.source_node = combine;
             current.source = socket_out(*combine, "Vector");
+            source_nodes.append(separate);
+            source_nodes.append(combine);
           }
         }
       }
@@ -1311,8 +1321,9 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
         if (alpha_value != nullptr && alpha_out != nullptr &&
             alpha_out->default_value != nullptr)
         {
-          alpha_value->location[0] = location_x - 90.0f;
-          alpha_value->location[1] = location_y - 40.0f;
+          /* Why grid: the constant alpha sits in Source past the map row. */
+          layout::place(*alpha_value, layout::Column::Source, 2);
+          source_nodes.append(alpha_value);
           static_cast<bNodeSocketValueFloat *>(alpha_out->default_value)->value = constant[3];
           current.content_alpha_node = alpha_value;
           current.content_alpha = alpha_out;
@@ -1322,6 +1333,11 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
   }
   if (current.source == nullptr) {
     return false;
+  }
+  /* Why after place: every source node above already sits on its grid spot, so the frame
+   * only parents them. A constant or wrapper row builds no nodes, so it frames nothing. */
+  if (!source_nodes.is_empty()) {
+    layout::frame_add(tree, "Source", source_nodes);
   }
   return true;
 }
@@ -1335,9 +1351,11 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
                                                        ChainLayer &r_current,
                                                        const int channel,
                                                        const bool use_baked_content,
-                                                       bNode **r_content_node)
+                                                        bNode **r_content_node)
 {
   ChainLayer &current = r_current;
+  /* The nodes this substituted read built, framed as `Source` once placed. */
+  Vector<bNode *> source_nodes;
   bNode *baked_color_node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
   bNode *baked_coverage_node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
   if (baked_color_node == nullptr || baked_coverage_node == nullptr) {
@@ -1362,6 +1380,8 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
   baked_coverage_node->location[1] = location_y - 160.0f;
   current.source_node = baked_color_node;
   current.source = socket_out(*baked_color_node, "Color");
+  source_nodes.append(baked_color_node);
+  source_nodes.append(baked_coverage_node);
   /* The coverage map stores the scalar in grey RGB (alpha = 1, mask-correction convention);
    * the factor is the mean of the three channels, exactly as the CPU reads it. */
   bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
@@ -1372,6 +1392,16 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
     add_xy->custom1 = NODE_MATH_ADD;
     add_z->custom1 = NODE_MATH_ADD;
     divide->custom1 = NODE_MATH_DIVIDE;
+    /* Why grid: the substituted grey mean had no positions and sat at the origin;
+     * it now spreads in the Content column clear of the mask rows. */
+    layout::place(*separate, layout::Column::Content, 1);
+    layout::place(*add_xy, layout::Column::Content, 2);
+    layout::place(*add_z, layout::Column::Content, 3);
+    layout::place(*divide, layout::Column::Content, 4);
+    source_nodes.append(separate);
+    source_nodes.append(add_xy);
+    source_nodes.append(add_z);
+    source_nodes.append(divide);
     bNodeSocket *sep_vector = socket_in(*separate, "Vector");
     bNodeSocket *sep_x = socket_out(*separate, "X");
     bNodeSocket *sep_y = socket_out(*separate, "Y");
@@ -1480,6 +1510,11 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
     diag_image("color", baked_color);
     diag_image("coverage", layer->bake->coverage);
   }
+  /* Why after place: every source node above already sits on its grid spot, so the frame
+   * only parents them. */
+  if (!source_nodes.is_empty()) {
+    layout::frame_add(tree, "Source", source_nodes);
+  }
   return true;
 }
 
@@ -1511,8 +1546,8 @@ void PaintLayersChainBuilder::resolve_row_factor(const MaterialPaintLayer *layer
     bNode *value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
     bNodeSocket *value_out = (value != nullptr) ? socket_out(*value, "Value") : nullptr;
     if (value != nullptr && value_out != nullptr && value_out->default_value != nullptr) {
-      value->location[0] = location_x - 90.0f;
-      value->location[1] = location_y - 320.0f;
+      /* Why grid: the live factor base sits in the Output column clear of masks. */
+      layout::place(*value, layout::Column::Output, 0);
       static_cast<bNodeSocketValueFloat *>(value_out->default_value)->value = live_alpha[0];
       layer_factor_node = value;
       layer_factor_socket = value_out;
@@ -1534,8 +1569,8 @@ void PaintLayersChainBuilder::resolve_row_factor(const MaterialPaintLayer *layer
     if (map != nullptr && map_alpha != nullptr) {
       map->id = &live_alpha_image->id;
       id_us_plus(&live_alpha_image->id);
-      map->location[0] = location_x - 90.0f;
-      map->location[1] = location_y - 320.0f;
+      /* Why grid: the live coverage map sits in the Output column clear of masks. */
+      layout::place(*map, layout::Column::Output, 0);
       if (NodeTexImage *dst = static_cast<NodeTexImage *>(map->storage)) {
         if (live_alpha_iuser != nullptr) {
           dst->iuser = *live_alpha_iuser;
@@ -1632,8 +1667,8 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
       bNode *empty_cov = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
       bNodeSocket *empty_out = (empty_cov != nullptr) ? socket_out(*empty_cov, "Value") : nullptr;
       if (empty_out != nullptr && empty_out->default_value != nullptr) {
-        empty_cov->location[0] = location_x - 90.0f;
-        empty_cov->location[1] = location_y - 80.0f;
+        /* Why grid: the empty coverage sits in the Output column clear of masks. */
+        layout::place(*empty_cov, layout::Column::Output, 1);
         static_cast<bNodeSocketValueFloat *>(empty_out->default_value)->value = 0.0f;
         content_cov_node = empty_cov;
         content_cov = empty_out;
@@ -1675,8 +1710,8 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
       bNodeSocket *p_out = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
       if (p_a != nullptr && p_b != nullptr && p_out != nullptr) {
         product->custom1 = NODE_MATH_MULTIPLY;
-        product->location[0] = location_x + 350.0f;
-        product->location[1] = location_y - 420.0f;
+        /* Why grid: the content-times-mask product sits in Output past the masks. */
+        layout::place(*product, layout::Column::Output, 2);
         bke::node_add_link(tree, *layer_factor_node, *layer_factor_socket, *product, *p_a);
         bke::node_add_link(tree, *content_cov_node, *content_cov, *product, *p_b);
         layer_factor_node = product;
@@ -1690,9 +1725,11 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
    * `C` is the mean of the map's raw Color (a Non-Color map reads un-premultiplied, so this is the
    * pre-multiplied color) and `A` its Alpha, and `op` the row's own opacity. Mix is the plain over
    * the chain always used. Later list entries lay over earlier ones; the opacity is row-level, not
-   * per channel. */
+   * per channel. A substituted row passes that flag so its mask chain stays flat (never packed into
+   * `.PL Mask`), exactly as HEAD built it. */
   build_mask_item(layer,
                   channel,
+                  substituted,
                   tree,
                   group_input,
                   location_x,
@@ -1710,8 +1747,8 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
     bNode *opacity_multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
     if (opacity_multiply != nullptr) {
       opacity_multiply->custom1 = NODE_MATH_MULTIPLY;
-      opacity_multiply->location[0] = location_x + 200.0f;
-      opacity_multiply->location[1] = location_y - 320.0f;
+      /* Why grid: the opacity fold sits in Output past the masks. */
+      layout::place(*opacity_multiply, layout::Column::Output, 3);
       bNodeSocket *value_a = socket_in(*opacity_multiply, "Value");
       bNodeSocket *value_b = socket_in(*opacity_multiply, "Value_001");
       bNodeSocket *value_out = socket_out(*opacity_multiply, "Value");
@@ -1722,6 +1759,13 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
             tree, *layer_factor_node, *layer_factor_socket, *opacity_multiply, *value_b);
         current.factor_node = opacity_multiply;
         current.factor = value_out;
+        /* Why after place: the fold already sits in the Output column, so the frame only
+         * parents it. */
+        {
+          Vector<bNode *> factor_nodes;
+          factor_nodes.append(opacity_multiply);
+          layout::frame_add(tree, "Opacity x Factor", factor_nodes);
+        }
       }
     }
   }
@@ -1735,8 +1779,8 @@ void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *l
     bNode *coverage_multiply = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
     if (coverage_multiply != nullptr) {
       coverage_multiply->custom1 = NODE_MATH_MULTIPLY;
-      coverage_multiply->location[0] = location_x + 150.0f;
-      coverage_multiply->location[1] = location_y - 400.0f;
+      /* Why grid: the folder coverage fold sits in Output past the masks. */
+      layout::place(*coverage_multiply, layout::Column::Output, 4);
       bNodeSocket *cv_a = socket_in(*coverage_multiply, "Value");
       bNodeSocket *cv_b = socket_in(*coverage_multiply, "Value_001");
       bNodeSocket *cv_out = socket_out(*coverage_multiply, "Value");
@@ -1873,8 +1917,8 @@ bool PaintLayersChainBuilder::build_grouped_row_result(const MaterialPaintLayer 
         }
         combine->id = &ctx.normal_combine_group->id;
         id_us_plus(&ctx.normal_combine_group->id);
-        combine->location[0] = location_x;
-        combine->location[1] = location_y;
+        /* Why extra: the combine instance owns no named grid slot per channel. */
+        layout::place_extra(*combine);
         nodes::update_node_declaration_and_sockets(tree, *combine);
         bNodeSocket *a_in = bke::node_find_socket(
             *combine, SOCK_IN, UString::from_ptr_noinline(NORMAL_COMBINE_ID_A));
@@ -1906,6 +1950,9 @@ bool PaintLayersChainBuilder::build_grouped_row_result(const MaterialPaintLayer 
       if (mix == nullptr) {
         return {nullptr, nullptr};
       }
+      /* Why grid: the legacy cursor spot (`location_x`) lands on the Source column's first node;
+       * the row's own Mix sits in the free Output rows instead, keeping the channel's y. */
+      layout::place(*mix, layout::Column::Output, 6, 0.0f, location_y);
       bNodeSocket *a_in = socket_in(*mix, "A_Color");
       bNodeSocket *b_in = socket_in(*mix, "B_Color");
       bNodeSocket *f_in = socket_in(*mix, "Factor_Float");
@@ -1930,13 +1977,20 @@ bool PaintLayersChainBuilder::build_grouped_row_result(const MaterialPaintLayer 
     }
     bke::node_add_link(
         tree, *result_node, *result_source, *layer_group->group_output, *result_out);
+    Vector<bNode *> blend_nodes;
+    blend_nodes.append(result_node);
     if (premul) {
       auto [blend_node, blend_source] = add_row_blend(nullptr, 1.0f);
       if (blend_source != nullptr) {
         bke::node_add_link(
             tree, *blend_node, *blend_source, *layer_group->group_output, *blend_out);
+        blend_nodes.append(blend_node);
       }
     }
+    /* Why after place: the blend already sits on the row origin, so the frame only
+     * parents it. A Normal Combine instance joins like a Mix: its own tree is shared
+     * and untouched, only the instance hangs under the frame. */
+    layout::frame_add(tree, "Blend", blend_nodes);
 
     result.grouped = true;
     result.group_instance = layer_group->instance;

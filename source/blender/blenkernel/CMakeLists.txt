@@ -266,6 +266,10 @@ set(SRC
     intern/paint_layers_generate_build_chain.cc
     intern/paint_layers_generate_build_correction.cc
     intern/paint_layers_generate_build_intern.hh
+    intern/paint_layers_generate_layout.cc
+    intern/paint_layers_generate_layout.hh
+    intern/paint_layers_generate_subgroup.cc
+    intern/paint_layers_generate_subgroup.hh
     intern/paint_layers_generate_regen.cc
     intern/paint_layers_generate_warm.cc
     intern/paint_layers_generate_source_group.cc

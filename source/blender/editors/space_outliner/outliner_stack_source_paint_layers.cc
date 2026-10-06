@@ -1997,10 +1997,10 @@ class PaintLayersStackSource final : public StackSource,
   /** \name StackDropHandler
    *
    * Three drops, as in the graph-truth source this replaced: a row of this stack is moved; an image
-   * dropped onto a Paint row becomes that row's map for the channel the user picks, and beside a
-   * row (or over empty space) becomes a new Paint layer of its own; a material is baked into a new
-   * Material layer. Images and materials may come from the file, an asset library or, for images,
-   * a file dropped from outside Blender (#drop_resolve).
+   * dropped onto a Fill row becomes that row's map for the channel the user picks, and beside a
+   * row (or over empty space) becomes a new Fill layer of its own reading it; a material is baked
+   * into a new Material layer. Images and materials may come from the file, an asset library or,
+   * for images, a file dropped from outside Blender (#drop_resolve).
    * \{ */
 
   bool can_accept(const StackReadContext & /*ctx*/,
@@ -2036,9 +2036,9 @@ class PaintLayersStackSource final : public StackSource,
       *r_disabled_hint = (BKE_paint_layers_role(*row) == PaintLayerRole::Layer &&
                           row->source == MA_PAINT_LAYER_SOURCE_IMAGE) ?
                              TIP_("The maps of a Paint layer cannot be replaced; drop the image "
-                                  "between rows to add a layer") :
+                                  "between rows to add a Fill layer") :
                              TIP_("Only a Fill row takes an image; drop it between rows to add "
-                                  "a layer");
+                                  "a Fill layer");
       return false;
     }
     /* A dropped material becomes a Material layer baked from it; the same gesture the tab's "New
@@ -2286,18 +2286,18 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* An image, or a drag that only resolves at drop time: a bare file can only become an image. */
     if (row_name.is_empty()) {
-      return fmt::format(fmt::runtime(TIP_("Add {} as a new layer on top")), item_name);
+      return fmt::format(fmt::runtime(TIP_("Add {} as a new Fill layer on top")), item_name);
     }
     switch (target.place) {
       case StackMovePlace::Into:
         return fmt::format(fmt::runtime(TIP_("Assign {} to {}")), item_name, row_name);
       case StackMovePlace::Below:
         return fmt::format(
-            fmt::runtime(TIP_("Add {} as a new layer below {}")), item_name, row_name);
+            fmt::runtime(TIP_("Add {} as a new Fill layer below {}")), item_name, row_name);
       case StackMovePlace::Above:
         break;
     }
-    return fmt::format(fmt::runtime(TIP_("Add {} as a new layer above {}")), item_name, row_name);
+    return fmt::format(fmt::runtime(TIP_("Add {} as a new Fill layer above {}")), item_name, row_name);
   }
 };
 
@@ -2479,7 +2479,8 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     }
   }
   else {
-    /* A layer of its own, named after the image without the file extension it may carry. */
+    /* A Fill layer of its own, named after the image without the file extension it may carry. The
+     * channel record below carries the image, so the Fill reads it instead of its constant. */
     char name[MAX_NAME];
     STRNCPY(name, image->id.name + 2);
     BLI_path_extension_strip(name);
@@ -2487,7 +2488,7 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     const PaintLayerPlace place = (anchor != nullptr && RNA_boolean_get(op->ptr, "below")) ?
                                       PaintLayerPlace::Below :
                                       PaintLayerPlace::Above;
-    layer = BKE_paint_layers_add(material, MA_PAINT_LAYER_SOURCE_IMAGE, name, anchor, place);
+    layer = BKE_paint_layers_add(material, MA_PAINT_LAYER_SOURCE_CONSTANT, name, anchor, place);
     if (layer == nullptr) {
       BKE_report(op->reports, RPT_ERROR, "Could not add a layer for the image");
       return OPERATOR_CANCELLED;
@@ -2515,8 +2516,8 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
 void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot)
 {
   ot->name = "Assign Image to Channel";
-  ot->description =
-      "Assign the dropped image to a channel of the layer, or add a new layer for it";
+  ot->description = "Assign the dropped image to a channel of the layer, or add a new Fill layer "
+                    "for it";
   ot->idname = "OUTLINER_OT_stack_layer_channel_image_assign";
 
   ot->invoke = stack_channel_image_assign_invoke;
@@ -2533,7 +2534,8 @@ void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot)
                  nullptr,
                  UUID_STRING_SIZE,
                  "Layer",
-                 "Marker of the Paint layer the image was dropped on; empty adds a layer of its own");
+                 "Marker of the Paint layer the image was dropped on; empty adds a Fill layer "
+                 "of its own");
   RNA_def_string(ot->srna,
                  "anchor",
                  nullptr,

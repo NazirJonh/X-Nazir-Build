@@ -68,6 +68,7 @@
 #include "paint_layers_intern.hh"
 
 #include "paint_layers_generate_build_intern.hh"
+#include "paint_layers_generate_layout.hh"
 
 #include "NOD_socket.hh"
 
@@ -501,7 +502,16 @@ void PaintLayersTreeBuilder::build()
   auto &layer_groups = layer_groups_;
 
   float location_y = 0.0f;
-  for (const int channel : wired_channels) {
+  /* Why reset: the lane bases and heights are per-pass state, so a previous regeneration's grid
+   * must not leak into this one. */
+  layout::reset_lanes();
+  for (const int lane : wired_channels.index_range()) {
+    const int channel = wired_channels[lane];
+    /* Why one lane per channel: every channel's chain is built into the same row groups, so its
+     * nodes must not share the grid cells of the channel before it. The lane is the channel's
+     * ordinal among the wired channels, not its channel number; the scope is per iteration, so a
+     * `continue` below still restores the previous lane. */
+    layout::ChannelLaneScope lane_scope(lane);
     bNodeTreeInterfaceSocket *const *result_iface = result_outputs.lookup_ptr(channel);
     if (result_iface == nullptr || (*result_iface)->identifier == nullptr) {
       continue;
@@ -1314,14 +1324,14 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
   };
   set_madd(*decode, 2.0f, -1.0f);
   set_madd(*encode, 0.5f, 0.5f);
-  decode->location[0] = location_x;
-  decode->location[1] = location_y;
-  sign->location[0] = location_x;
-  sign->location[1] = location_y - 160.0f;
-  remap->location[0] = location_x + 120.0f;
-  remap->location[1] = location_y;
-  encode->location[0] = location_x + 300.0f;
-  encode->location[1] = location_y;
+  /* Why grid: the Normal remap chain sits in Content/Output columns on fixed rows,
+   * clear of the mask rows, with positions only and no link changes. */
+  (void)location_x;
+  (void)location_y;
+  layout::place(*decode, layout::Column::Content, 6);
+  layout::place(*sign, layout::Column::Content, 7);
+  layout::place(*remap, layout::Column::Content, 8);
+  layout::place(*encode, layout::Column::Output, 8);
   bNodeSocket *decode_in = socket_in(*decode, "Vector");
   bNodeSocket *decode_out = socket_out(*decode, "Vector");
   bNodeSocket *sign_in = socket_in(*sign, "Vector");

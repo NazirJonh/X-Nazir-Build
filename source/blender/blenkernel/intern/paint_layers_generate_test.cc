@@ -28,6 +28,7 @@
 
 /* The D1 root-hash/reload tests below need the stored root hash accessors. */
 #include "paint_layers_generate_intern.hh"
+#include "paint_layers_generate_layout.hh"
 #include "BKE_paint_material_resolve.hh"
 #include "BKE_scene.hh"
 
@@ -38,6 +39,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
@@ -161,6 +163,21 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     return make_tree(name);
   }
 
+  /** The subgroup factory a pure build needs: an empty `.PL Mask <row>` tree per row on the
+   * fixture's #Main. */
+  bNodeTree *subgroup_tree_for(const MaterialPaintLayer &row, StringRef kind)
+  {
+    if (!STREQ(kind.data(), "mask")) {
+      return nullptr;
+    }
+    char name[64];
+    BLI_snprintf(name,
+                 sizeof(name),
+                 ".PL Mask %s",
+                 row.name[0] != '\0' ? row.name : "Layer");
+    return make_tree(name);
+  }
+
   /** The `.PL Layer <name>` group in \a bmain, or null. */
   static bNodeTree *layer_tree_find(Main &bmain, const char *layer_name)
   {
@@ -247,6 +264,25 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     }
   }
 
+  /**
+   * #collect_group_instances without a row's packed `.PL Mask` group: those groups are nested
+   * under the row's own group and are not part of the folder/row chain a test walks.
+   */
+  static void collect_chain_group_instances(bNodeTree &parent, Vector<bNodeTree *> &r_instances)
+  {
+    Vector<bNodeTree *> all;
+    collect_group_instances(parent, all);
+    for (bNodeTree *group : all) {
+      const IDProperty *props = IDP_GetProperties(&group->id);
+      if (props != nullptr &&
+          IDP_GetPropertyTypeFromGroup(props, "pbr_paint_layers_subkind", IDP_STRING) != nullptr)
+      {
+        continue;
+      }
+      r_instances.append(group);
+    }
+  }
+
   static bool interface_has_socket(bNodeTree &tree, const char *name, const bool output)
   {
     tree.ensure_interface_cache();
@@ -292,6 +328,25 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
       count++;
     }
     return count;
+  }
+
+  /**
+   * Visit \a tree's nodes and every node of the layer/folder groups it instances, packed `.PL Mask`
+   * groups included; \a fn gets the owning tree with each node so it can read that tree's links.
+   * The normal-combine group is skipped like the other recursive helpers.
+   */
+  template<typename Fn> static void walk_nodes_recursive(bNodeTree &tree, Fn &&fn)
+  {
+    for (bNode &node : tree.nodes) {
+      fn(tree, node);
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+          !BKE_paint_material_is_normal_combine_group(node))
+      {
+        if (bNodeTree *group = id_cast<bNodeTree *>(node.id)) {
+          walk_nodes_recursive(*group, fn);
+        }
+      }
+    }
   }
 
   /** Whether every Image Texture in \a tree (nested layer groups included) reads a UV Map node. */
@@ -605,6 +660,113 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
     }
     return nullptr;
   }
+
+  /** The `.PL Layer <name>` group built for a row, via the real finder. */
+  bNodeTree *find_row_group(const char *name)
+  {
+    return layer_tree_find(*bmain, name);
+  }
+
+  /** A node's spot in tree space: its own plus every parent frame's own. */
+  static float2 node_global_location(const bNode &node)
+  {
+    float2 global(node.location[0], node.location[1]);
+    for (const bNode *parent = node.parent; parent != nullptr; parent = parent->parent) {
+      global.x += parent->location[0];
+      global.y += parent->location[1];
+    }
+    return global;
+  }
+
+  /** Whether two nodes overlap as 140x160 boxes, the layout grid assumption. */
+  static bool nodes_overlap(const bNode &a,
+                            const bNode &b,
+                            const float width = 140.0f,
+                            const float height = 160.0f)
+  {
+    /* Why global: framed children store their spot relative to the frame, so the check
+     * reads them in tree space and frames cannot break the invariant. */
+    const float2 ga = node_global_location(a);
+    const float2 gb = node_global_location(b);
+    const float dx = ga.x - gb.x;
+    const float dy = ga.y - gb.y;
+    const float adx = dx < 0.0f ? -dx : dx;
+    const float ady = dy < 0.0f ? -dy : dy;
+    return adx < width && ady < height;
+  }
+
+  /**
+   * Pairwise overlap check of every layout node in \a tree. Frames and the group
+   * input/output are packing only and are skipped; each node is read in its own
+   * tree's space because a nested `.PL Mask` group has its own origin. Returns
+   * how many nodes were checked, so callers can assert the tree is not empty.
+   */
+  static int tree_nodes_do_not_overlap(bNodeTree &tree)
+  {
+    Vector<const bNode *> nodes;
+    for (bNode &node : tree.nodes) {
+      if (node.type_legacy == NODE_FRAME) {
+        continue;
+      }
+      if (node.is_group_input() || node.is_group_output()) {
+        continue;
+      }
+      nodes.append(&node);
+    }
+    for (int i = 0; i < nodes.size(); i++) {
+      for (int j = i + 1; j < nodes.size(); j++) {
+        EXPECT_FALSE(nodes_overlap(*nodes[i], *nodes[j]))
+            << "nodes " << i << " (" << nodes[i]->idname << ") and " << j << " ("
+            << nodes[j]->idname << ") overlap at (" << nodes[i]->location[0] << ", "
+            << nodes[i]->location[1] << ") vs (" << nodes[j]->location[0] << ", "
+            << nodes[j]->location[1] << ")";
+      }
+    }
+    return nodes.size();
+  }
+
+  /**
+   * The densest row for the layout test: a Fill mask (constant Mix only), an
+   * Image mask (map plus the four-node grey mean plus Mix and factor) and an
+   * Image Effect correction, all on Base Color. Built from the same setters the
+   * mask/correction tests above use.
+   */
+  MaterialPaintLayer *build_row_with_two_masks_and_effect()
+  {
+    MaterialPaintLayer *row = add_paint_layer("Row", add_image("RowBase"));
+    EXPECT_NE(row, nullptr);
+    if (row == nullptr) {
+      return nullptr;
+    }
+    MaterialPaintLayer *fill_mask = BKE_paint_layers_mask_add(*ma, row, 0.5f);
+    EXPECT_NE(fill_mask, nullptr);
+    MaterialPaintLayer *image_mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+    EXPECT_NE(image_mask, nullptr);
+    if (image_mask != nullptr) {
+      EXPECT_NE(BKE_paint_layers_channel_add(
+                    *ma, image_mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                nullptr);
+      EXPECT_TRUE(BKE_paint_layers_channel_set_image(*ma,
+                                                     image_mask,
+                                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                     add_image("RowMask")));
+      EXPECT_TRUE(BKE_paint_layers_correction_source_set(
+          *ma, image_mask, MA_PAINT_LAYER_SOURCE_IMAGE));
+    }
+    MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+        *ma, row, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "RowEffect");
+    EXPECT_NE(effect, nullptr);
+    if (effect != nullptr) {
+      MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+          *ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+      EXPECT_NE(record, nullptr);
+      if (record != nullptr) {
+        record->image = add_image("RowEffectMap");
+        record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+      }
+    }
+    return row;
+  }
 };
 
 TEST_F(PaintLayersGenerateTest, color_chain_builds_one_mix_over_two_maps)
@@ -621,6 +783,10 @@ TEST_F(PaintLayersGenerateTest, color_chain_builds_one_mix_over_two_maps)
     return layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   paint_layers_tree_build(*ma, *tree, ctx);
 
   /* One Color channel is wired here (Base Color). The chain starts from a transparent constant, so
@@ -644,6 +810,10 @@ TEST_F(PaintLayersGenerateTest, build_is_deterministic)
     return layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   paint_layers_tree_build(*ma, *first, ctx);
   paint_layers_tree_build(*ma, *second, ctx);
 
@@ -1091,6 +1261,10 @@ TEST_F(PaintLayersGenerateTest, mask_item_map_builds_its_chain)
   PaintLayersBuildContext ctx;
   auto layer_tree_factory = [this](const MaterialPaintLayer &l) { return layer_tree_for(l); };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
 
   /* The same layer built without a mask first, so the item's own nodes are measured as a delta. */
   bNodeTree *without_mask = make_tree("Without Mask");
@@ -1124,6 +1298,10 @@ TEST_F(PaintLayersGenerateTest, constant_mask_item_adds_no_map)
   PaintLayersBuildContext ctx;
   auto layer_tree_factory = [this](const MaterialPaintLayer &l) { return layer_tree_for(l); };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
 
   bNodeTree *without_mask = make_tree("Without Mask");
   ASSERT_NE(without_mask, nullptr);
@@ -1295,6 +1473,10 @@ TEST_F(PaintLayersGenerateTest, mapping_builds_one_node_on_one_coordinate_source
     return layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   paint_layers_tree_build(*ma, *tree, ctx);
 
   bNodeTree *group = layer_tree_find(*bmain, "Bottom");
@@ -1367,6 +1549,10 @@ TEST_F(PaintLayersGenerateTest, mapping_applies_to_fill_mask_map)
     return layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   paint_layers_tree_build(*ma, *tree, ctx);
 
   bNodeTree *group = layer_tree_find(*bmain, "Bottom");
@@ -1379,18 +1565,34 @@ TEST_F(PaintLayersGenerateTest, mapping_applies_to_fill_mask_map)
   ASSERT_NE(mapping, nullptr);
   bool map_through_mapping = false;
   bool map_repeat = false;
-  for (bNode &node : group->nodes) {
-    if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id != &record->image->id) {
-      continue;
+  /* Why nested: the mask stack packs into its own `.PL Mask` group, so the mapped image lives
+   * there instead of flat in the row group. */
+  Vector<bNodeTree *> mask_groups;
+  collect_group_instances(*group, mask_groups);
+  auto check_tree = [&](bNodeTree &tree) {
+    for (bNode &node : tree.nodes) {
+      if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id != &record->image->id) {
+        continue;
+      }
+      bNodeSocket *vector = bke::node_find_socket(node, SOCK_IN, "Vector"_ustr);
+      ASSERT_NE(vector, nullptr);
+      ASSERT_FALSE(vector->directly_linked_links().is_empty());
+      if (vector->directly_linked_links()[0]->fromnode == mapping) {
+        map_through_mapping = true;
+      }
+      if (const NodeTexImage *storage = static_cast<const NodeTexImage *>(node.storage)) {
+        map_repeat = map_repeat || storage->extension == SHD_IMAGE_EXTENSION_REPEAT;
+      }
     }
-    bNodeSocket *vector = bke::node_find_socket(node, SOCK_IN, "Vector"_ustr);
-    ASSERT_NE(vector, nullptr);
-    ASSERT_FALSE(vector->directly_linked_links().is_empty());
-    if (vector->directly_linked_links()[0]->fromnode == mapping) {
-      map_through_mapping = true;
-    }
-    if (const NodeTexImage *storage = static_cast<const NodeTexImage *>(node.storage)) {
-      map_repeat = map_repeat || storage->extension == SHD_IMAGE_EXTENSION_REPEAT;
+  };
+  check_tree(*group);
+  for (bNodeTree *sub : mask_groups) {
+    if (sub != nullptr) {
+      /* Why: the nested group was built without a topology update either, and the link queries in
+       * #check_tree read that cache. */
+      BKE_ntree_update_tag_all(sub);
+      BKE_ntree_update_after_single_tree_change(*bmain, *sub);
+      check_tree(*sub);
     }
   }
   EXPECT_TRUE(map_through_mapping);
@@ -1418,6 +1620,10 @@ TEST_F(PaintLayersGenerateTest, mapping_without_a_map_builds_no_node)
     return layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   paint_layers_tree_build(*ma, *tree, ctx);
 
   bNodeTree *group = layer_tree_find(*bmain, "Bottom");
@@ -1690,6 +1896,10 @@ TEST_F(PaintLayersGenerateTest, pure_build_instantiates_normal_combine_with_link
     return layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   /* No #Main reachable from the build itself: the group sockets come from the node declaration. */
   paint_layers_tree_build(*ma, *tree, ctx);
 
@@ -1732,6 +1942,10 @@ TEST_F(PaintLayersGenerateTest, pure_build_matches_regenerate_topology)
     return layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   bNodeTree *pure = make_tree("PBR Layers Pure");
   ASSERT_NE(pure, nullptr);
   paint_layers_tree_build(*ma, *pure, ctx);
@@ -2004,15 +2218,15 @@ TEST_F(PaintLayersGenerateTest, copied_material_owns_nested_trees)
   ASSERT_NE(copy, nullptr);
 
   Vector<bNodeTree *> level1;
-  collect_group_instances(*copy->paint_layers_tree, level1);
+  collect_chain_group_instances(*copy->paint_layers_tree, level1);
   ASSERT_EQ(level1.size(), 1);
   bNodeTree *copy_outer = level1[0];
   Vector<bNodeTree *> level2;
-  collect_group_instances(*copy_outer, level2);
+  collect_chain_group_instances(*copy_outer, level2);
   ASSERT_EQ(level2.size(), 1);
   bNodeTree *copy_inner = level2[0];
   Vector<bNodeTree *> level3;
-  collect_group_instances(*copy_inner, level3);
+  collect_chain_group_instances(*copy_inner, level3);
   ASSERT_EQ(level3.size(), 1);
   bNodeTree *copy_leaf = level3[0];
 
@@ -8342,6 +8556,9 @@ TEST_F(PaintLayersGenerateTest, deleting_a_child_source_invalidates_the_parent_b
 static uint64_t code_shape_signature(const bNodeTree &tree)
 {
   const auto mix = [](uint64_t h, const uint64_t v) { return (h ^ v) * 1099511628211ull; };
+  /* Why here: a nested `.PL Mask` group is reached only through its instance, so no regenerate
+   * step has built its topology cache, and the socket/link accessors below read it. */
+  const_cast<bNodeTree &>(tree).ensure_topology_cache();
   Vector<uint64_t> keys;
   for (const bNode &node : tree.nodes) {
     uint64_t key = 1469598103934665603ull;
@@ -11137,9 +11354,10 @@ void snapshot_interface(std::string &out,
     const IDProperty *marker = snapshot_iprop(props, "pbr_paint_layers_layer", IDP_STRING);
     out += "  IFACE ";
     out += ((socket.flag & NODE_INTERFACE_SOCKET_INPUT) != 0) ? "in" : "out";
+    /* Why no name/id: the interface name is uniquified ("Factor 2") and the identifier is a
+     * creation-order label, so both move when another socket is added; the type, direction and the
+     * paint-layer role properties are what the shader and the value sync actually read. */
     out += " type=" + std::string((socket.socket_type != nullptr) ? socket.socket_type : "-");
-    out += " name=" + std::string((socket.name != nullptr) ? socket.name : "-");
-    out += " id=" + std::string((socket.identifier != nullptr) ? socket.identifier : "-");
     out += " role=" + std::string((role != nullptr) ? IDP_string_get(role) : "-");
     out += " channel=" + std::to_string((channel != nullptr) ? IDP_int_get(channel) : -1);
     out += " mirror=" + std::to_string((mirror != nullptr) ? IDP_int_get(mirror) : 0);
@@ -11267,10 +11485,16 @@ void snapshot_tree(std::string &out,
   Map<const bNode *, int> index;
   int i = 0;
   for (bNode &node : tree.nodes) {
+    /* Why skip frames: a NODE_FRAME only groups nodes for the editor and carries no shader code,
+     * and the shader inlines every nested group. Leaving it out of the index keeps it out of the
+     * links too, since a frame never owns a socket. The node's own `name` and `label` are likewise
+     * editor cosmetics, so they are not serialized. */
+    if (node.type_legacy == NODE_FRAME) {
+      continue;
+    }
     index.add(&node, i);
     out += "  NODE " + std::to_string(i) + " type=" + std::to_string(node.type_legacy) +
-           " idname=" + std::string(node.idname) + " name=" + std::string(node.name) +
-           " label=" + std::string(node.label) +
+           " idname=" + std::string(node.idname) +
            " id=" + std::string((node.id != nullptr) ? node.id->name + 2 : "-") +
            " custom1=" + std::to_string(node.custom1) +
            " custom2=" + std::to_string(node.custom2) +
@@ -11281,11 +11505,15 @@ void snapshot_tree(std::string &out,
     i++;
   }
   for (bNode &node : tree.nodes) {
+    if (node.type_legacy == NODE_FRAME) {
+      continue;
+    }
     int si = 0;
     for (bNodeSocket *sock : node.input_sockets()) {
-      out += "    IN " + std::to_string(si) + " id=" + std::string(sock->identifier) +
-             " name=" + std::string(sock->name);
-      /* The current value of an unlinked input (what value-sync leaves on the root instance). */
+      /* Why no inline name/id: a socket identifier is a creation-order label and moves when an
+       * unrelated node is added, while a socket's position and its unlinked default are what the
+       * generated code reads. */
+      out += "    IN " + std::to_string(si);
       if (sock->directly_linked_links().is_empty()) {
         out += " default=" + snapshot_socket_default(*sock);
       }
@@ -11294,8 +11522,7 @@ void snapshot_tree(std::string &out,
     }
     si = 0;
     for (bNodeSocket *sock : node.output_sockets()) {
-      out += "    OUT " + std::to_string(si) + " id=" + std::string(sock->identifier) +
-             " name=" + std::string(sock->name) + "\n";
+      out += "    OUT " + std::to_string(si) + "\n";
       si++;
     }
   }
@@ -11327,10 +11554,8 @@ void snapshot_tree(std::string &out,
         k++;
       }
     }
-    out += "  LINK " + std::to_string(fi) + ":" + std::to_string(fs) + ":" +
-           std::string((link.fromsock != nullptr) ? link.fromsock->identifier : "-") + " -> " +
-           std::to_string(ti) + ":" + std::to_string(ts) + ":" +
-           std::string((link.tosock != nullptr) ? link.tosock->identifier : "-") + "\n";
+    out += "  LINK " + std::to_string(fi) + ":" + std::to_string(fs) + " -> " +
+           std::to_string(ti) + ":" + std::to_string(ts) + "\n";
   }
 
   /* Depth-first into the group instances, in node order, so a nested tree's serialization sits
@@ -11413,7 +11638,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_simple_layer)
   add_paint_layer("Bottom", add_image("Bottom"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   /* +warm: root layers carry warm chains. */
-  snapshot_expect(*ma, 0x88217e8fe6ccd684ull, "simple_layer"); /* +warm: slots and spare names. */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xa338c95bf0e23c59ull, "simple_layer"); /* +warm: slots and spare names. */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_fill_layer)
@@ -11427,7 +11653,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_fill_layer)
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   /* The Fill default set is five channels now: the extra Normal and AO selectors are the only
    * change to the serialized tree (see the report's fill_layer diff). */
-  snapshot_expect(*ma, 0x281a44432ac8cd8aull, "fill_layer"); /* +warm, +Normal/AO default */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xc485ecea1b70df87ull, "fill_layer"); /* +warm, +Normal/AO default */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_isolating)
@@ -11442,7 +11669,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_isolati
   /* Opacity below one keeps the folder isolating. */
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x983f3e1ae7f09ff6ull, "folder_isolating"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x1963da51706e9920ull, "folder_isolating"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_pass_through)
@@ -11456,7 +11684,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_pass_th
   add_channel(*child, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Child"));
   /* Default opacity and MIX blend make the folder pass through (children inlined). */
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xb7e6a353eed4ffaeull, "folder_pass_through"); /* +warm: rows inside a Pass Through folder carry warm chains. */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xacad6511920367daull, "folder_pass_through"); /* +warm: rows inside a Pass Through folder carry warm chains. */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_nested_folder_value_mirrors)
@@ -11474,7 +11703,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_nested_folder_
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, outer, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, 0.5f));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x955f17fff2d525a1ull, "nested_folder_value_mirrors"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xa1a2acfa0b365ca1ull, "nested_folder_value_mirrors"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_content_correction_image)
@@ -11485,7 +11715,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_content_correc
   ASSERT_NE(correction, nullptr);
   add_channel(*correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Correction"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x97c3f81c5fc475d8ull, "content_correction_image"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x759a5f1c02229ed0ull, "content_correction_image"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_correction)
@@ -11498,7 +11729,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_correcti
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  snapshot_expect(*ma, 0x09c3a172cefdf180ull, "stack_correction"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xef806788062af624ull, "stack_correction"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mask_image)
@@ -11511,7 +11743,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mask_image)
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  snapshot_expect(*ma, 0x9389951f02f59b9eull, "mask_image"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xafcbf0dc03d66cceull, "mask_image"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_mask_channel)
@@ -11525,7 +11758,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_stack_mask_cha
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  snapshot_expect(*ma, 0x357462d398462b03ull, "stack_mask_channel"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xcf9007e0ac9a1c1aull, "stack_mask_channel"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_normal_layer)
@@ -11533,7 +11767,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_normal_layer)
   MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
   add_channel(*bottom, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x1a372c505167737cull, "normal_layer"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xce452a20c3d113a0ull, "normal_layer"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_hybrid)
@@ -11552,7 +11787,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_h
       *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("HybridBaked")));
   BKE_paint_layers_active_set(*ma, row->marker);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x703376411243ed9bull, "material_row_hybrid"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0xde2501a0313a272bull, "material_row_hybrid"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_source_group)
@@ -11569,7 +11805,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_material_row_s
                      channel_bit(PAINT_MATERIAL_CHANNEL_ALPHA) |
                      channel_bit(PAINT_MATERIAL_CHANNEL_EMISSION));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x97c2879344f39406ull, "material_row_source_group"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x6c50977783ee991bull, "material_row_source_group"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_with_mask_and_effect)
@@ -11593,7 +11830,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_folder_with_ma
   add_channel(*mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("MK"));
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x17e0ba8cc432ed92ull, "folder_with_mask_and_effect"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x66f4b804f9ac0f02ull, "folder_with_mask_and_effect"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_disabled_row)
@@ -11608,7 +11846,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_disabled_row)
   /* snapshot_expect's own unchanged regeneration must then keep the root (D1: the stored hash
    * describes what was built). */
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0x6f88403e126b5ab9ull, "disabled_row"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x47f3715b125acb5full, "disabled_row"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_multi_channel_overrides)
@@ -11626,7 +11865,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_multi_channel_
   layer->channel_settings[PAINT_MATERIAL_CHANNEL_METALLIC].blend = MA_PAINT_LAYER_BLEND_ADD;
   layer->channel_settings[PAINT_MATERIAL_CHANNEL_METALLIC].opacity = 0.25f;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xda13cd10011b7689ull, "multi_channel_overrides"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x9f9a12f6fbfebc8cull, "multi_channel_overrides"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_custom_node_group_row)
@@ -11644,7 +11884,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_custom_node_gr
   PaintLayersRegenerateReport report;
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
   EXPECT_EQ(report.sampler_estimate, BKE_paint_layers_sampler_count(*ma));
-  snapshot_expect(*ma, 0x43bf0140e84d6a0bull, "custom_node_group_row"); /* +warm */
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x69145f30a6792f4cull, "custom_node_group_row"); /* +warm */
 }
 
 TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mesh_map_row)
@@ -11658,7 +11899,8 @@ TEST_F(PaintLayersGenerateTest, generated_tree_snapshot_is_stable_mesh_map_row)
             nullptr);
   ASSERT_TRUE(BKE_mesh_maps_slot_image_set(*ma, MA_MESH_MAP_AO, atlas));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
-  snapshot_expect(*ma, 0xd4b0017a64e0e684ull, "mesh_map_row");
+  /* Snapshot signature is code only (no label/frame/names/ids); the mask is packed into .PL Mask. */
+  snapshot_expect(*ma, 0x2bbb938ca6f55d18ull, "mesh_map_row");
 }
 
 /** A Fill layer carrying a map and a Fill mask carrying a map, with a bake that stands in for the
@@ -11921,6 +12163,10 @@ static bNodeTree *mapping_row_build(PaintLayersGenerateTest &test,
     return test.layer_tree_for(layer);
   };
   ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [&test](const MaterialPaintLayer &row, StringRef kind) {
+    return test.subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
   paint_layers_tree_build(ma, *tree, ctx);
   return PaintLayersGenerateTest::layer_tree_find(*test.bmain, row_name);
 }
@@ -11939,35 +12185,42 @@ static Vector<const bNode *> vector_link_sources(const bNodeTree &tree, bNode &t
 }
 
 /** Every Image Texture in \a group reads its Vector through exactly one link, from a Mapping node
- * that the tree's one coordinate source feeds (no coordinate source reaches a texture directly). */
+ * that the tree's one coordinate source feeds (no coordinate source reaches a texture directly).
+ * A packed `.PL Mask` panel holds its own texture and Mapping, and the panel's Group Input stands
+ * for the row's coordinate source. */
 static void expect_maps_read_through_mapping(bNodeTree &group, const bool named)
 {
+  const int source_type = named ? SH_NODE_UVMAP : SH_NODE_TEX_COORD;
   int textures = 0;
-  for (bNode &node : group.nodes) {
-    /* The owner's own layer texture shares the group and is not mapped; only the row's map is. */
-    if (node.type_legacy != SH_NODE_TEX_IMAGE || node.id == nullptr ||
-        !STRPREFIX(node.id->name + 2, "RowMap"))
-    {
-      continue;
-    }
-    textures++;
-    const Vector<const bNode *> sources = vector_link_sources(group, node);
-    ASSERT_EQ(sources.size(), 1);
-    EXPECT_EQ(sources[0]->type_legacy, SH_NODE_MAPPING);
-  }
+  int direct_sources = 0;
+  PaintLayersGenerateTest::walk_nodes_recursive(
+      group, [&](bNodeTree &owner, bNode &node) {
+        if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id != nullptr &&
+            STRPREFIX(node.id->name + 2, "RowMap"))
+        {
+          textures++;
+          const Vector<const bNode *> sources = vector_link_sources(owner, node);
+          ASSERT_EQ(sources.size(), 1);
+          EXPECT_EQ(sources[0]->type_legacy, SH_NODE_MAPPING);
+        }
+        else if (node.type_legacy == SH_NODE_MAPPING) {
+          const Vector<const bNode *> sources = vector_link_sources(owner, node);
+          ASSERT_EQ(sources.size(), 1);
+          if (sources[0]->type_legacy == source_type) {
+            direct_sources++;
+            return;
+          }
+          /* Inside a packed panel the Mapping reads its UV from that panel's Group Input, which
+           * the row group wires to the row's own coordinate source. */
+          EXPECT_TRUE(sources[0]->is_group_input());
+        }
+      });
   EXPECT_GE(textures, 1);
 
-  const int source_type = named ? SH_NODE_UVMAP : SH_NODE_TEX_COORD;
-  bNode *mapping = nullptr;
-  for (bNode &node : group.nodes) {
-    if (node.type_legacy == SH_NODE_MAPPING) {
-      mapping = &node;
-    }
+  if (direct_sources == 0) {
+    /* The packed mask's coordinate source still stands in the row group, feeding the panel. */
+    EXPECT_GT(PaintLayersGenerateTest::count_type(group, source_type), 0);
   }
-  ASSERT_NE(mapping, nullptr);
-  const Vector<const bNode *> mapping_sources = vector_link_sources(group, *mapping);
-  ASSERT_EQ(mapping_sources.size(), 1);
-  EXPECT_EQ(mapping_sources[0]->type_legacy, source_type);
 }
 
 /** A map read through a Mapping node never gets a second link on its Vector input: a stale
@@ -12172,6 +12425,684 @@ TEST_F(PaintLayersGenerateTest, normal_remap_shares_the_mapping_inputs_and_ignor
   ASSERT_NE(after, nullptr);
   EXPECT_EQ(BLI_listbase_count(&after->nodes), nodes_before);
   EXPECT_EQ(BLI_listbase_count(&after->links), links_before);
+}
+
+/**
+ * Step 0 layout: the densest row (Fill mask plus Image mask plus Effect) places
+ * every node of its group without overlaps. Frames and the group
+ * input/output are packing only and are skipped.
+ */
+TEST_F(PaintLayersGenerateTest, row_group_nodes_do_not_overlap)
+{
+  ASSERT_NE(build_row_with_two_masks_and_effect(), nullptr);
+
+  bNodeTree *tree = make_tree("PBR Layers Layout");
+  ASSERT_NE(tree, nullptr);
+  PaintLayersBuildContext ctx;
+  auto layer_tree_factory = [this](const MaterialPaintLayer &layer) {
+    return layer_tree_for(layer);
+  };
+  ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
+  paint_layers_tree_build(*ma, *tree, ctx);
+
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+  /* Why nested: the mask stack packs into its own `.PL Mask` group with its own origin, so each
+   * tree is checked in its own space. */
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  ASSERT_EQ(nested.size(), 1);
+  bNodeTree *mask_group = nested[0];
+  ASSERT_NE(mask_group, nullptr);
+  EXPECT_GT(tree_nodes_do_not_overlap(*group), 0);
+  /* The dense row really builds something inside: source, grey chains, two Mixes. */
+  EXPECT_GT(tree_nodes_do_not_overlap(*mask_group), 5);
+}
+
+/**
+ * M1/R5: a Fill mask that carries a map packs its Mapping node one column left of
+ * its Image Texture, so neither the row group nor the nested `.PL Mask` tree has
+ * overlaps. The same kind of row without a mapping passes the older test above;
+ * this one is the regression that catches two nodes sharing the Mask base+0 slot.
+ */
+TEST_F(PaintLayersGenerateTest, row_group_mapped_mask_nodes_do_not_overlap)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("RowBase"));
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *fill_mask = BKE_paint_layers_mask_add(*ma, row, 0.5f);
+  ASSERT_NE(fill_mask, nullptr);
+  MaterialPaintLayer *image_mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(image_mask, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      *ma, image_mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  record->image = add_image("RowMask");
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  /* Only a Fill source that carries a map is remappable, so the Constant source
+   * stays and the record's image makes it the mapped item. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, image_mask, true));
+
+  bNodeTree *tree = make_tree("PBR Layers Mapped Mask Layout");
+  ASSERT_NE(tree, nullptr);
+  PaintLayersBuildContext ctx;
+  auto layer_tree_factory = [this](const MaterialPaintLayer &layer) {
+    return layer_tree_for(layer);
+  };
+  ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
+  paint_layers_tree_build(*ma, *tree, ctx);
+
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+  /* Why nested: the mask stack packs into its own `.PL Mask` group with its own origin, so each
+   * tree is checked in its own space. */
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  ASSERT_EQ(nested.size(), 1);
+  bNodeTree *mask_group = nested[0];
+  ASSERT_NE(mask_group, nullptr);
+  /* The mapping really is built, so the check below exercises the two-node slot. */
+  EXPECT_GE(count_type(*mask_group, SH_NODE_MAPPING), 1);
+  EXPECT_GT(tree_nodes_do_not_overlap(*group), 0);
+  EXPECT_GT(tree_nodes_do_not_overlap(*mask_group), 5);
+}
+
+/**
+ * R5: a stack of three Fill masks lays its Mix nodes out in stack order, element 0
+ * at the top; each item owns kMaskItemRows rows, so their y coordinates strictly
+ * fall by kMaskItemRows * kRowPitch per element.
+ */
+TEST_F(PaintLayersGenerateTest, mask_stack_mix_rows_follow_stack_order)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("RowBase"));
+  ASSERT_NE(row, nullptr);
+  for (int i = 0; i < 3; i++) {
+    ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  }
+
+  bNodeTree *tree = make_tree("PBR Layers Mask Stack Order");
+  ASSERT_NE(tree, nullptr);
+  PaintLayersBuildContext ctx;
+  auto layer_tree_factory = [this](const MaterialPaintLayer &layer) {
+    return layer_tree_for(layer);
+  };
+  ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
+  paint_layers_tree_build(*ma, *tree, ctx);
+
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  ASSERT_EQ(nested.size(), 1);
+  bNodeTree *mask_group = nested[0];
+  ASSERT_NE(mask_group, nullptr);
+
+  Vector<const bNode *> mixes;
+  for (bNode &node : mask_group->nodes) {
+    if (node.type_legacy == SH_NODE_MIX &&
+        (STREQ(node.label, "Mask: Fill") || STREQ(node.label, "Mask: Image")))
+    {
+      mixes.append(&node);
+    }
+  }
+  ASSERT_EQ(mixes.size(), 3);
+  /* Order the Mixes by their row: element 0 is the highest, so its y is the largest. */
+  std::sort(mixes.begin(), mixes.end(), [](const bNode *a, const bNode *b) {
+    return a->location[1] > b->location[1];
+  });
+  for (int i = 0; i < mixes.size(); i++) {
+    const float expected = -float(i * bke::paint_layers::layout::kMaskItemRows) *
+                           bke::paint_layers::layout::kRowPitch;
+    EXPECT_FLOAT_EQ(mixes[i]->location[1], expected)
+        << "element " << i << " should sit " << i << " item blocks below the top";
+  }
+  EXPECT_GT(mixes[0]->location[1], mixes[1]->location[1]);
+  EXPECT_GT(mixes[1]->location[1], mixes[2]->location[1]);
+}
+
+/** Step 0 labels: the Fill mask Mix, the grey Divide and the factor Multiply. */
+TEST_F(PaintLayersGenerateTest, row_group_mask_labels)
+{
+  ASSERT_NE(build_row_with_two_masks_and_effect(), nullptr);
+
+  bNodeTree *tree = make_tree("PBR Layers Labels");
+  ASSERT_NE(tree, nullptr);
+  PaintLayersBuildContext ctx;
+  auto layer_tree_factory = [this](const MaterialPaintLayer &layer) {
+    return layer_tree_for(layer);
+  };
+  ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
+  paint_layers_tree_build(*ma, *tree, ctx);
+
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+  /* Why nested: the mask nodes live in the packed `.PL Mask` group now, not flat in the row. */
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  ASSERT_EQ(nested.size(), 1);
+  bNodeTree *mask_group = nested[0];
+  ASSERT_NE(mask_group, nullptr);
+  bool has_fill = false;
+  bool has_grey = false;
+  bool has_opacity = false;
+  for (bNode &node : mask_group->nodes) {
+    const char *label = node.label;
+    if (label[0] == '\0') {
+      continue;
+    }
+    if (STREQ(label, "Mask: Fill")) {
+      EXPECT_EQ(node.type_legacy, SH_NODE_MIX);
+      has_fill = true;
+    }
+    if (STREQ(label, "Mask grey")) {
+      EXPECT_EQ(node.type_legacy, SH_NODE_MATH);
+      EXPECT_EQ(node.custom1, NODE_MATH_DIVIDE);
+      has_grey = true;
+    }
+    if (STREQ(label, "Mask opacity")) {
+      EXPECT_EQ(node.type_legacy, SH_NODE_MATH);
+      EXPECT_EQ(node.custom1, NODE_MATH_MULTIPLY);
+      has_opacity = true;
+    }
+  }
+  EXPECT_TRUE(has_fill);
+  EXPECT_TRUE(has_grey);
+  EXPECT_TRUE(has_opacity);
+}
+
+/**
+ * Step 1 frames: the same dense row packs each mask item into its own `Mask <N>` frame,
+ * and the shared Normal Combine group holds no frames of its own.
+ */
+TEST_F(PaintLayersGenerateTest, row_group_mask_frames)
+{
+  ASSERT_NE(build_row_with_two_masks_and_effect(), nullptr);
+
+  bNodeTree *tree = make_tree("PBR Layers Mask Frames");
+  ASSERT_NE(tree, nullptr);
+  PaintLayersBuildContext ctx;
+  auto layer_tree_factory = [this](const MaterialPaintLayer &layer) {
+    return layer_tree_for(layer);
+  };
+  ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
+  paint_layers_tree_build(*ma, *tree, ctx);
+
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+  /* Why nested: `Mask <N>` frames live inside the packed group now; the row itself keeps none. */
+  for (bNode &node : group->nodes) {
+    if (node.type_legacy == NODE_FRAME && StringRef(node.label).startswith("Mask")) {
+      EXPECT_TRUE(false) << "row group keeps a Mask frame '" << node.label << "'";
+    }
+  }
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  ASSERT_EQ(nested.size(), 1);
+  bNodeTree *mask_group = nested[0];
+  ASSERT_NE(mask_group, nullptr);
+  Vector<bNode *> mask_frames;
+  for (bNode &node : mask_group->nodes) {
+    if (node.type_legacy == NODE_FRAME && StringRef(node.label).startswith("Mask")) {
+      mask_frames.append(&node);
+    }
+  }
+  /* The Fill item and the Image item, one frame each, in stack order. */
+  ASSERT_EQ(mask_frames.size(), 2);
+  for (bNode *frame : mask_frames) {
+    bool has_mix = false;
+    for (bNode &node : mask_group->nodes) {
+      if (node.parent == frame && node.type_legacy == SH_NODE_MIX) {
+        has_mix = true;
+      }
+    }
+    EXPECT_TRUE(has_mix) << "frame '" << frame->label << "' parents no Mix";
+  }
+  /* Only instances hang under frames: the shared combine tree itself stays frameless. */
+  for (bNode &node : group->nodes) {
+    if (!BKE_paint_material_is_normal_combine_group(node)) {
+      continue;
+    }
+    ASSERT_NE(node.id, nullptr);
+    const bNodeTree &combine = *reinterpret_cast<const bNodeTree *>(node.id);
+    for (const bNode &inner : combine.nodes) {
+      EXPECT_NE(inner.type_legacy, NODE_FRAME)
+          << "Normal Combine tree holds a frame '" << inner.label << "'";
+    }
+  }
+}
+
+/**
+ * Step 0 version: the row hash is stable across identical builds, while the
+ * layout version itself moves the hash, so the one-time grid rebuild happens
+ * and later passes keep unchanged groups.
+ */
+TEST_F(PaintLayersGenerateTest, layout_version_moves_topology_hash)
+{
+  MaterialPaintLayer *row = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_NE(row, nullptr);
+  const int wired[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t hash_first = paint_layers_layer_topology_hash(*ma, *row, Span<int>(wired, 1));
+  EXPECT_EQ(paint_layers_layer_topology_hash(*ma, *row, Span<int>(wired, 1)), hash_first);
+  uint64_t without_version = hash_first;
+  /* The version participates through the same mixer the hash uses. */
+  EXPECT_NE(bke::paint_layers::topology_hash_mix(without_version,
+                                                 uint64_t(bke::paint_layers::layout::kLayoutVersion)),
+            bke::paint_layers::topology_hash_mix(
+                without_version, uint64_t(bke::paint_layers::layout::kLayoutVersion - 1)));
+  EXPECT_GT(bke::paint_layers::layout::kLayoutVersion, 0);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = find_row_group("Bottom");
+  ASSERT_NE(group, nullptr);
+  ASSERT_TRUE(group_io_sentinel_set(*group, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = find_row_group("Bottom");
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(group_io_sentinel_get(*group, 0.5f));
+}
+
+/* Task 4 Step 2: the mask stack packs into one nested group per row. */
+TEST_F(PaintLayersGenerateTest, mask_stack_is_packed_into_a_nested_group)
+{
+  ASSERT_NE(build_row_with_two_masks_and_effect(), nullptr);
+
+  bNodeTree *tree = make_tree("PBR Layers Mask Packed");
+  ASSERT_NE(tree, nullptr);
+  PaintLayersBuildContext ctx;
+  auto layer_tree_factory = [this](const MaterialPaintLayer &layer) {
+    return layer_tree_for(layer);
+  };
+  ctx.layer_tree_get = layer_tree_factory;
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.subgroup_tree_get = subgroup_tree_factory;
+  paint_layers_tree_build(*ma, *tree, ctx);
+
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  ASSERT_EQ(nested.size(), 1);
+  bNodeTree *mask_group = nested[0];
+  ASSERT_NE(mask_group, nullptr);
+  EXPECT_TRUE(StringRef(mask_group->id.name + 2).startswith(".PL Mask "));
+  EXPECT_TRUE(interface_has_socket(*mask_group, "Factor", false));
+  EXPECT_TRUE(interface_has_socket(*mask_group, "Factor", true));
+}
+
+/* R2: a pure build packs the mask subgroup without any G_MAIN, so no code path depends on the
+ * global Main any more. */
+TEST_F(PaintLayersGenerateTest, mask_subgroup_build_needs_no_g_main)
+{
+  ASSERT_NE(build_row_with_two_masks_and_effect(), nullptr);
+  bNodeTree *tree = make_tree("PBR Layers No GMain");
+  ASSERT_NE(tree, nullptr);
+  PaintLayersBuildContext ctx;
+  auto layer_tree_factory = [this](const MaterialPaintLayer &layer) {
+    return layer_tree_for(layer);
+  };
+  auto subgroup_tree_factory = [this](const MaterialPaintLayer &row, StringRef kind) {
+    return subgroup_tree_for(row, kind);
+  };
+  ctx.layer_tree_get = layer_tree_factory;
+  ctx.subgroup_tree_get = subgroup_tree_factory;
+  Main *saved_main = G_MAIN;
+  G_MAIN = nullptr;
+  paint_layers_tree_build(*ma, *tree, ctx);
+  G_MAIN = saved_main;
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  EXPECT_EQ(nested.size(), 1);
+}
+
+/* Task 4 Step 2 lifecycle: dropping the mask or the row deletes its `.PL Mask` tree, and an
+ * unchanged regen creates none. */
+TEST_F(PaintLayersGenerateTest, mask_nested_group_lifecycle)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_STACK, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *top = add_paint_layer_into(folder, "Top", add_image("TopMap"));
+  ASSERT_NE(top, nullptr);
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, top, 0.5f);
+  ASSERT_NE(mask, nullptr);
+
+  auto mask_tree_find = [&]() -> bNodeTree * {
+    for (bNodeTree &candidate : bmain->nodetrees) {
+      if (STREQ(candidate.id.name + 2, ".PL Mask Top")) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+  auto nodetree_count = [&]() {
+    int count = 0;
+    for (bNodeTree &candidate : bmain->nodetrees) {
+      (void)candidate;
+      count++;
+    }
+    return count;
+  };
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(mask_tree_find(), nullptr);
+
+  /* User decision (TZ-5): removing one mask leaves the `.PL Mask` tree standing while the row's
+   * `Warm Mask` spare is there, because that spare is what the next added mask reuses. The tree
+   * goes only with the whole row. */
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, mask));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_NE(mask_tree_find(), nullptr);
+  EXPECT_NE(paint_layers_warm_item(*ma, *top, WarmKind::Mask), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, top));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(mask_tree_find(), nullptr);
+
+  const int before = nodetree_count();
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(nodetree_count(), before);
+}
+
+/* Task 4 Step 2 warm: a Paint mask taking the Warm Mask slot keeps the nested interface shape. */
+TEST_F(PaintLayersGenerateTest, mask_nested_group_warm_slot_keeps_interface)
+{
+  MaterialPaintLayer *row = add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  auto mask_tree_find = [&]() -> bNodeTree * {
+    for (bNodeTree &candidate : bmain->nodetrees) {
+      if (STREQ(candidate.id.name + 2, ".PL Mask Bottom")) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+  auto socket_count = [](bNodeTree *tree) {
+    if (tree == nullptr) {
+      return -1;
+    }
+    tree->ensure_interface_cache();
+    return int(tree->interface_inputs().size() + tree->interface_outputs().size());
+  };
+  auto input_count = [](bNodeTree *tree) {
+    if (tree == nullptr) {
+      return -1;
+    }
+    tree->ensure_interface_cache();
+    return int(tree->interface_inputs().size());
+  };
+  auto output_count = [](bNodeTree *tree) {
+    if (tree == nullptr) {
+      return -1;
+    }
+    tree->ensure_interface_cache();
+    return int(tree->interface_outputs().size());
+  };
+  /* Links landing on the `.PL Mask` instance's own inputs in the row group: the interface itself
+   * stays the same, so the wiring of this instance's sockets must too. */
+  auto instance_input_links = [&](bNodeTree *tree) {
+    if (tree == nullptr) {
+      return -1;
+    }
+    bNodeTree *row_group = layer_tree_find(*bmain, "Bottom");
+    if (row_group == nullptr) {
+      return -1;
+    }
+    for (bNode &node : row_group->nodes) {
+      if (node.is_group() && node.id == &tree->id) {
+        int links = 0;
+        for (bNodeSocket *socket : node.input_sockets()) {
+          for (const bNodeLink *link : socket->directly_linked_links()) {
+            UNUSED_VARS(link);
+            links++;
+          }
+        }
+        return links;
+      }
+    }
+    return -1;
+  };
+
+  bNodeTree *before_tree = mask_tree_find();
+  ASSERT_NE(before_tree, nullptr);
+  const int before_sockets = socket_count(before_tree);
+  const int before_inputs = input_count(before_tree);
+  const int before_outputs = output_count(before_tree);
+  const int before_links = instance_input_links(before_tree);
+  EXPECT_GT(before_sockets, 0);
+  EXPECT_GT(before_inputs, 0);
+  EXPECT_EQ(before_outputs, 1);
+  EXPECT_GE(before_links, 0);
+
+  MaterialPaintLayer *real = BKE_paint_layers_correction_add(
+      *ma, row, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_IMAGE, "Mask");
+  ASSERT_NE(real, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, real, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, real, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("RealMaskMap")));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *after_tree = mask_tree_find();
+  ASSERT_NE(after_tree, nullptr);
+  EXPECT_EQ(socket_count(after_tree), before_sockets);
+  EXPECT_EQ(input_count(after_tree), before_inputs);
+  EXPECT_EQ(output_count(after_tree), before_outputs);
+  EXPECT_EQ(instance_input_links(after_tree), before_links);
+}
+
+/* Task 4 Step 2 normal: a Normal row with a mask still packs exactly one group besides the
+ * Normal Combine instances. */
+TEST_F(PaintLayersGenerateTest, mask_nested_group_with_normal_row)
+{
+  MaterialPaintLayer *row = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Top", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      *ma, row, PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_NE(record, nullptr);
+  record->image = add_image("TopNormal");
+  record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.5f), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = find_row_group("Top");
+  ASSERT_NE(group, nullptr);
+  Vector<bNodeTree *> nested;
+  collect_group_instances(*group, nested);
+  ASSERT_EQ(nested.size(), 1);
+  EXPECT_TRUE(StringRef(nested[0]->id.name + 2).startswith(".PL Mask "));
+}
+
+/* Task 4: a row whose mask takes part in four channels keeps one `.PL Mask` tree with one instance
+ * per channel, told apart by `custom1`; each instance reads its own channel's factor and the shared
+ * interface never grows a second Factor per channel. */
+TEST_F(PaintLayersGenerateTest, mask_row_in_four_channels_keeps_one_group_and_one_instance_each)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("RowBase"));
+  ASSERT_NE(row, nullptr);
+  for (const eMaterialPaintChannel channel : {PAINT_MATERIAL_CHANNEL_METALLIC,
+                                              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                              PAINT_MATERIAL_CHANNEL_NORMAL})
+  {
+    ASSERT_NE(add_channel(*row, channel, add_image("RowChannel")), nullptr);
+  }
+  /* The base mask is the Fill item: one grey constant the shared subgroup reduces on every
+   * channel. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.5f), nullptr);
+
+  /* Why regenerate: the real factory tags the shared `.PL Mask` tree (owner, marker, subkind), so
+   * the second channel reuses it; a pure build's bare factory would make one tree per channel and
+   * hide the bug this test guards. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = find_row_group("Row");
+  ASSERT_NE(group, nullptr);
+
+  bNodeTree *mask_group = nullptr;
+  Vector<bNode *> instances;
+  for (bNode &node : group->nodes) {
+    if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *nested = id_cast<bNodeTree *>(node.id);
+    if (nested == nullptr || !StringRef(nested->id.name + 2).startswith(".PL Mask ")) {
+      continue;
+    }
+    if (mask_group == nullptr) {
+      mask_group = nested;
+    }
+    /* Every instance must reference the one shared tree. */
+    EXPECT_EQ(nested, mask_group);
+    instances.append(&node);
+  }
+  ASSERT_NE(mask_group, nullptr);
+  /* One tree, one instance per participating channel. */
+  ASSERT_EQ(instances.size(), 4);
+  uint16_t seen = 0;
+  for (bNode *instance : instances) {
+    seen |= uint16_t(1) << int(instance->custom1);
+  }
+  EXPECT_NE(seen & (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)), 0);
+  EXPECT_NE(seen & (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)), 0);
+  EXPECT_NE(seen & (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)), 0);
+  EXPECT_NE(seen & (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_NORMAL)), 0);
+
+  /* Every instance's Factor input is fed from a different upstream chain. */
+  mask_group->ensure_interface_cache();
+  bNodeTreeInterfaceSocket *factor_in = nullptr;
+  for (bNodeTreeInterfaceSocket *socket : mask_group->interface_inputs()) {
+    if (socket->name != nullptr && STREQ(socket->name, "Factor")) {
+      factor_in = socket;
+    }
+  }
+  ASSERT_NE(factor_in, nullptr);
+  int factor_links = 0;
+  Vector<const bNode *> from_nodes;
+  for (bNode *instance : instances) {
+    bNodeSocket *input = bke::node_find_socket(
+        *instance, SOCK_IN, UString::from_ptr_noinline(factor_in->identifier));
+    ASSERT_NE(input, nullptr);
+    for (const bNodeLink *link : input->directly_linked_links()) {
+      factor_links++;
+      if (!from_nodes.contains(link->fromnode)) {
+        from_nodes.append(link->fromnode);
+      }
+    }
+  }
+  EXPECT_EQ(factor_links, 4);
+  EXPECT_EQ(from_nodes.size(), 4);
+
+  /* The interface did not grow a second Factor per channel. */
+  int factor_inputs = 0;
+  int factor_outputs = 0;
+  for (bNodeTreeInterfaceSocket *socket : mask_group->interface_inputs()) {
+    if (socket->name != nullptr && STREQ(socket->name, "Factor")) {
+      factor_inputs++;
+    }
+  }
+  for (bNodeTreeInterfaceSocket *socket : mask_group->interface_outputs()) {
+    if (socket->name != nullptr && STREQ(socket->name, "Factor")) {
+      factor_outputs++;
+    }
+  }
+  EXPECT_EQ(factor_inputs, 1);
+  EXPECT_EQ(factor_outputs, 1);
+
+  /* Task 4: each instance carries its channel number in `custom1` and sits on its own Y lane, so no
+   * two instances share a row. */
+  for (const int i : instances.index_range()) {
+    EXPECT_TRUE(ELEM(instances[i]->custom1,
+                     int16_t(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                     int16_t(PAINT_MATERIAL_CHANNEL_METALLIC),
+                     int16_t(PAINT_MATERIAL_CHANNEL_ROUGHNESS),
+                     int16_t(PAINT_MATERIAL_CHANNEL_NORMAL)))
+        << "instance custom1 " << instances[i]->custom1 << " is not a wired channel";
+    for (const int j : instances.index_range()) {
+      if (i < j) {
+        EXPECT_NE(instances[i]->location[1], instances[j]->location[1])
+            << "Mask ch" << instances[i]->custom1 << " and ch" << instances[j]->custom1
+            << " share a lane row";
+      }
+    }
+  }
+
+  /* Task 3: the four `Mask chN` instances sit on their own Mask-column rows, one per channel, so
+   * no two instances and no row Mix run into each other; the packed tree is checked in its own
+   * space too. */
+  EXPECT_GT(tree_nodes_do_not_overlap(*group), 0);
+  EXPECT_GT(tree_nodes_do_not_overlap(*mask_group), 0);
+}
+
+/* Task 4: the lane bases are per-pass state, so a second rebuild with the same description lays the
+ * channel instances exactly where the first pass did; growing lane 0 (more mask rows) must move
+ * lane 1 down, proving the base is recomputed rather than kept from the previous pass. */
+TEST_F(PaintLayersGenerateTest, channel_lanes_reset_between_regenerations)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("RowBase"));
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(add_channel(*row, PAINT_MATERIAL_CHANNEL_METALLIC, add_image("RowMetal")), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The `.PL Mask` instance of \a channel in the row group, or null. */
+  auto instance_of = [&](const int channel) -> bNode * {
+    bNodeTree *group = find_row_group("Row");
+    if (group == nullptr) {
+      return nullptr;
+    }
+    for (bNode &node : group->nodes) {
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+          StringRef(id_cast<bNodeTree *>(node.id)->id.name + 2).startswith(".PL Mask ") &&
+          int(node.custom1) == channel)
+      {
+        return &node;
+      }
+    }
+    return nullptr;
+  };
+
+  bNode *first_metallic = instance_of(int(PAINT_MATERIAL_CHANNEL_METALLIC));
+  ASSERT_NE(first_metallic, nullptr);
+  const float first_metallic_y = first_metallic->location[1];
+
+  /* Forcing a rebuild with the same description must not move the lane: a stale base would. */
+  BKE_paint_layers_generate_runtime_free(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNode *rebuilt_metallic = instance_of(int(PAINT_MATERIAL_CHANNEL_METALLIC));
+  ASSERT_NE(rebuilt_metallic, nullptr);
+  EXPECT_EQ(rebuilt_metallic->location[1], first_metallic_y);
+
+  /* Two more Fill masks make lane 0 taller, so lane 1 starts lower. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNode *grown_metallic = instance_of(int(PAINT_MATERIAL_CHANNEL_METALLIC));
+  ASSERT_NE(grown_metallic, nullptr);
+  EXPECT_LT(grown_metallic->location[1], first_metallic_y);
 }
 
 }  // namespace blender::bke::tests

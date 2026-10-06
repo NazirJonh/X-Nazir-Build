@@ -1808,6 +1808,11 @@ bool BKE_paint_layers_channel_set_value(Material &ma,
     return false;
   }
   copy_v4_v4(record->value, value);
+  /* A scalar constant is stored spread across RGB: the group output is a color that reaches a float
+   * socket through a luminance conversion, so stale G/B would skew the result. */
+  if (BKE_paint_material_channel_is_scalar(channel)) {
+    record->value[1] = record->value[2] = record->value[0];
+  }
   /* A Layer-role Constant row and a Fill-effect correction both carry their per-channel constant
    * on a group input, so a value edit is value-only and must not rebuild the tree. A mask item's
    * record is not read this way (its strength lives in fill_color), and a Paint row's value alpha
@@ -2145,6 +2150,10 @@ void paint_layer_channel_constant(const MaterialPaintLayer &layer,
   const MaterialPaintLayerChannel *entry = paint_layer_channel_find(layer, channel);
   if (entry != nullptr) {
     copy_v4_v4(r_color, entry->value);
+    /* Files saved before the setter spread scalars hold stale G/B; R is the scalar's value. */
+    if (BKE_paint_material_channel_is_scalar(eMaterialPaintChannel(channel))) {
+      r_color[1] = r_color[2] = r_color[0];
+    }
     return;
   }
   zero_v4(r_color);

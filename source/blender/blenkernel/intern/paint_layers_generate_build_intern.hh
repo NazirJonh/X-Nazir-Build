@@ -281,6 +281,16 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNodeTree *> source_group_trees_;
 };
 
+/** How #PaintLayersChainBuilder::build_mask_element_chain reduces an item's source to grey. */
+enum class MaskElementGrey {
+  /** The source socket is already a scalar: a Material/Node Group value or coverage. */
+  AlreadyScalar,
+  /** A scalar or atlas stored across R=G=B: Separate X reads it directly. */
+  SeparateX,
+  /** A full colour: the weighted mean (Separate + Add + Add + Divide). */
+  Mean,
+};
+
 /**
  * One channel's chain: the two mutually recursive builders and the per-channel cursor they share.
  * A recursive call (a folder's children, a Stack correction/mask subtree) re-enters the *same*
@@ -457,6 +467,7 @@ class PaintLayersChainBuilder {
   /** The Mask Items of \a layer: a coverage stack over \a layer_factor_node/socket. */
   void build_mask_item(const MaterialPaintLayer *layer,
                        int channel,
+                       bool substituted,
                        bNodeTree &tree,
                        bNode *group_input,
                        float location_x,
@@ -465,6 +476,37 @@ class PaintLayersChainBuilder {
                        ChainLayer &current,
                        bNode *&layer_factor_node,
                        bNodeSocket *&layer_factor_socket);
+
+  /**
+   * The shared body of one mask element, built on already resolved sockets: reduce \a gray_source
+   * to grey (see \a grey_mode), blend it over the running factor with the item's blend mode, fold
+   * the item's opacity -- and, when \a multiply_socket is set, the map alpha or the source's own
+   * coverage -- into the Mix factor, and straighten a data map by its alpha. The flat and packed
+   * mask paths both route through here, so node order, `custom1` values, labels and grid rows stay
+   * identical between them.
+   *
+   * \a multiply_socket null means the factor is the opacity alone (a Fill, a MeshMap atlas, or the
+   * Alpha channel whose grey already is that number). \a straighten_grey builds the data-map
+   * Divide, fed by \a map_node / \a map_alpha. Returns false where a required socket or node is
+   * missing, so the caller skips the element exactly as its own null checks did.
+   */
+  bool build_mask_element_chain(bNodeTree &tree,
+                                const MaterialPaintLayer &correction,
+                                int mask_base_row,
+                                MaskElementGrey grey_mode,
+                                bNode *gray_source_node,
+                                bNodeSocket *gray_source_color,
+                                bNode *opacity_node,
+                                bNodeSocket *opacity_socket,
+                                bNode *multiply_node,
+                                bNodeSocket *multiply_socket,
+                                bNode *map_node,
+                                bNodeSocket *map_alpha,
+                                bool fill,
+                                bool straighten_grey,
+                                Vector<bNode *> &frame_nodes,
+                                bNode *&factor_node,
+                                bNodeSocket *&factor_socket);
 
   PaintLayersTreeBuilder &outer_;
   float location_x_;

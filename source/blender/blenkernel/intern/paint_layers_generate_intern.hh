@@ -92,6 +92,11 @@ inline constexpr const char *INSTANCE_OWNER_PROP = "pbr_paint_layers_instance";
 /** On a layer's own node group: the marker of the layer it holds. The tree also carries
  * #TREE_OWNER_PROP of the material, so a copy never adopts the source's groups. */
 inline constexpr const char *TREE_LAYER_PROP = "pbr_paint_layers_layer_tree";
+/* Why subkind: a row's mask stack lives in its own `.PL Mask …` group owned by the same row
+ * marker, so the layer factory must tell the two apart when it reuses trees by marker. */
+inline constexpr const char *TREE_SUBKIND_PROP = "pbr_paint_layers_subkind";
+/* #TREE_SUBKIND_PROP value of a row's packed mask stack. */
+inline constexpr const char *TREE_SUBKIND_MASK = "mask";
 /** On a layer's own node group: its topology hash, low and high 32-bit words. The factory compares
  * it with #paint_layers_layer_topology_hash and skips the rebuild when they agree. */
 inline constexpr const char *TREE_TOPOLOGY_LOW_PROP = "pbr_paint_layers_topology";

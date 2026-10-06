@@ -8,6 +8,7 @@
 
 #include "BLI_function_ref.hh"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 #include "DNA_uuid_types.h"
 
@@ -67,6 +68,11 @@ struct PaintLayersBuildContext {
    * #PaintLayerMaterialMode::SourceGroup falls back to its baked maps.
    */
   FunctionRef<bNodeTree *(const Material &source)> source_group_get;
+  /**
+   * Optional: hands out the empty shader node tree for \a row's subgroup of \a kind, tagged with
+   * the row's owner, marker and subkind. When empty, a row with subkind groups builds flat.
+   */
+  FunctionRef<bNodeTree *(const MaterialPaintLayer &row, StringRef kind)> subgroup_tree_get;
   /**
    * Optional: what the regeneration that runs this build has already learned (a source's resolve, a
    * row's mode, the Pass Through scales). A caller that is not a regeneration leaves it null and

@@ -67,6 +67,8 @@
 
 #include "paint_layers_intern.hh"
 
+#include "paint_layers_generate_layout.hh"
+
 #include "NOD_socket.hh"
 
 #include "DEG_depsgraph.hh"
@@ -837,6 +839,12 @@ void layer_trees_collect(bNodeTree &tree,
     if (!layer_tree_marker_get(*group, marker) || r_trees.contains(group)) {
       continue;
     }
+    /* Why skip: a `.PL Mask` subgroup shares its row's marker, so collecting it here would hand
+     * the layer factory a mask tree for a row; masks are owned by their row and pruned with it. */
+    const char *subkind = prop_string_get(group->id.properties, TREE_SUBKIND_PROP);
+    if (subkind != nullptr && STREQ(subkind, TREE_SUBKIND_MASK)) {
+      continue;
+    }
     r_trees.append(group);
     layer_trees_collect(*group, owner_uid, r_trees);
   }
@@ -1285,6 +1293,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const PaintLayersRegenCache *cache)
 {
   uint64_t hash = 1469598103934665603ull;
+  /* Why layout version: positions moved to the deterministic grid without touching
+   * the shader, so every group rebuilds once and unchanged groups are kept after. */
+  hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
   /* The UV layer a group's Image Texture nodes read is topology: changing it must rebuild them. */
   topology_hash_string(hash, BKE_paint_layers_uv_map_name(ma));
 #if PAINT_LAYERS_DEBUG_LOG
@@ -2272,6 +2283,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   const Vector<int> wired_channels = paint_layers_wired_channels(ma, &regen_cache);
   Set<const MaterialPaintLayer *> unchanged_layers;
   Vector<bNodeTree *> used_layer_trees;
+  /* `.PL Mask` trees built this pass. Nothing else references them from a tagged tree, so without an
+   * explicit update their Math nodes keep every socket available and the shader inliner asserts on
+   * the parameter count. */
+  Vector<bNodeTree *> used_subgroup_trees;
   Map<const MaterialPaintLayer *, bNodeTree *> layer_trees;
   bool groups_created = false;
   bool groups_deleted = false;
@@ -2288,6 +2303,12 @@ bool BKE_paint_layers_regenerate(Main &bmain,
         ma, layer, wired_channels, &regen_cache);
     for (bNodeTree *candidate : old_layer_trees) {
       if (used_layer_trees.contains(candidate)) {
+        continue;
+      }
+      /* Why skip: a `.PL Mask` subgroup shares its row's marker, so it must never stand in for the
+       * row's own group; masks are rebuilt with their row and pruned with it below. */
+      const char *candidate_subkind = prop_string_get(candidate->id.properties, TREE_SUBKIND_PROP);
+      if (candidate_subkind != nullptr && STREQ(candidate_subkind, TREE_SUBKIND_MASK)) {
         continue;
       }
       bUUID marker = BLI_uuid_nil();
@@ -2345,8 +2366,55 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   auto layer_tree_unchanged = [&](const MaterialPaintLayer &layer) {
     return unchanged_layers.contains(&layer);
   };
+  auto subgroup_tree_get = [&](const MaterialPaintLayer &row, StringRef kind) -> bNodeTree * {
+    if (!STREQ(kind.data(), TREE_SUBKIND_MASK)) {
+      return nullptr;
+    }
+    /* Why reuse: the subgroup has no topology hash, so it always rebuilds with its row; taking a
+     * free same-marker tree back avoids leaking one data-block per regen. */
+    for (bNodeTree &candidate : bmain.nodetrees) {
+      if (!StringRef(candidate.id.name + 2).startswith(".PL Mask ")) {
+        continue;
+      }
+      if (!BLI_uuid_equal(tree_owner_uid_get(candidate), ma.paint_layers_owner_uid)) {
+        continue;
+      }
+      const char *subkind = prop_string_get(candidate.id.properties, TREE_SUBKIND_PROP);
+      if (subkind == nullptr || !STREQ(subkind, TREE_SUBKIND_MASK)) {
+        continue;
+      }
+      bUUID marker = BLI_uuid_nil();
+      if (!layer_tree_marker_get(candidate, marker) || !BLI_uuid_equal(marker, row.marker)) {
+        continue;
+      }
+      if (ID_REAL_USERS(&candidate.id) > 0) {
+        continue;
+      }
+      tree_clear(bmain, candidate);
+      char name[MAX_ID_NAME - 2];
+      SNPRINTF(name, ".PL Mask %s", row.name[0] != '\0' ? row.name : "Layer");
+      if (!STREQ(candidate.id.name + 2, name)) {
+        BKE_id_rename(bmain, candidate.id, name);
+      }
+      used_subgroup_trees.append_non_duplicates(&candidate);
+      return &candidate;
+    }
+    char name[MAX_ID_NAME - 2];
+    SNPRINTF(name, ".PL Mask %s", row.name[0] != '\0' ? row.name : "Layer");
+    bNodeTree *fresh = bke::node_tree_add_tree(&bmain, name, "ShaderNodeTree");
+    if (fresh == nullptr) {
+      return nullptr;
+    }
+    id_us_min(&fresh->id);
+    tree_owner_uid_set(*fresh, ma.paint_layers_owner_uid);
+    uid_prop_set(fresh->id.properties, TREE_LAYER_PROP, row.marker);
+    prop_string_set(fresh->id.properties, TREE_SUBKIND_PROP, TREE_SUBKIND_MASK);
+    used_subgroup_trees.append_non_duplicates(fresh);
+    return fresh;
+  };
   ctx.layer_tree_get = layer_tree_get;
   ctx.layer_tree_unchanged = layer_tree_unchanged;
+  ctx.subgroup_tree_get = subgroup_tree_get;
 
   /* Build once with the final modes and cleanup. This rebuilds the groups whose hash moved (in
    * place) and gives their final interfaces without touching the real root. The scratch is a
@@ -2370,6 +2438,13 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * again for a change that is not there (a click that only re-tagged a regeneration was enough). */
   const bool groups_touched = groups_created || groups_deleted || layer_groups_rebuilt > 0 ||
                               source_groups_changed;
+  /* Children before the layer trees that instance them. */
+  for (bNodeTree *sub_tree : used_subgroup_trees) {
+    BKE_ntree_update_tag_all(sub_tree);
+    BKE_ntree_update_after_single_tree_change(bmain, *sub_tree);
+    DEG_id_tag_update(&sub_tree->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  used_subgroup_trees.clear();
   for (bNodeTree *layer_tree : used_layer_trees) {
     Set<bNodeTree *> refreshed;
     refresh_generated_instances(*layer_tree, ma.paint_layers_owner_uid, refreshed);
@@ -2508,6 +2583,57 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     /* The build asked for a group but did not instantiate it, so nothing owns it. */
     if (ID_REAL_USERS(&layer_tree->id) <= 0) {
       BKE_id_delete(&bmain, layer_tree);
+      groups_deleted = true;
+    }
+  }
+  /* Why masks: a `.PL Mask` subgroup belongs to its row and rebuilds with it, so a mask whose row
+   * dropped its stack (or the row itself) stands unused in Main once its instance is gone. */
+  {
+    Vector<bNodeTree *> used_mask_trees;
+    for (bNodeTree *row_tree : used_layer_trees) {
+      if (row_tree == nullptr) {
+        continue;
+      }
+      for (bNode &node : row_tree->nodes) {
+        if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+          continue;
+        }
+        bNodeTree *group = id_cast<bNodeTree *>(node.id);
+        if (group == nullptr ||
+            !BLI_uuid_equal(tree_owner_uid_get(*group), ma.paint_layers_owner_uid))
+        {
+          continue;
+        }
+        const char *subkind = prop_string_get(group->id.properties, TREE_SUBKIND_PROP);
+        if (subkind == nullptr || !STREQ(subkind, TREE_SUBKIND_MASK)) {
+          continue;
+        }
+        if (!used_mask_trees.contains(group)) {
+          used_mask_trees.append(group);
+        }
+      }
+    }
+    Vector<bNodeTree *> mask_orphans;
+    for (bNodeTree &candidate : bmain.nodetrees) {
+      if (!StringRef(candidate.id.name + 2).startswith(".PL Mask ")) {
+        continue;
+      }
+      if (!BLI_uuid_equal(tree_owner_uid_get(candidate), ma.paint_layers_owner_uid)) {
+        continue;
+      }
+      const char *subkind = prop_string_get(candidate.id.properties, TREE_SUBKIND_PROP);
+      if (subkind == nullptr || !STREQ(subkind, TREE_SUBKIND_MASK)) {
+        continue;
+      }
+      if (used_mask_trees.contains(&candidate)) {
+        continue;
+      }
+      if (ID_REAL_USERS(&candidate.id) <= 0) {
+        mask_orphans.append(&candidate);
+      }
+    }
+    for (bNodeTree *orphan : mask_orphans) {
+      BKE_id_delete(&bmain, orphan);
       groups_deleted = true;
     }
   }

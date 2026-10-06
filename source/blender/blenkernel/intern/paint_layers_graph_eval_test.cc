@@ -3791,6 +3791,120 @@ TEST_F(PaintLayersGraphEvalTest, mask_item_multiply_matches_the_cpu)
   ma = nullptr;
 }
 
+/**
+ * A black Fill mask item over an unpainted (map-less) Image base mask must hide the row: the top
+ * Image layer is blue, the bottom is red, so the result is red and both sides agree.
+ */
+TEST_F(PaintLayersGraphEvalTest, fill_mask_black_over_unpainted_image_mask_hides_the_row)
+{
+  const int size = 4;
+  ma = BKE_material_add(bmain, "FillMaskBlackHidesRow");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer(
+      "Top", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Top", size, 0, 0, 255, 255));
+  /* Base mask without a map: white coverage, so the row shows until the Fill zeroes it. */
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, top, 1.0f);
+  ASSERT_NE(base, nullptr);
+  /* Why Image without a map: the log case, where the builder skips a map-less base mask. */
+  ASSERT_TRUE(BKE_paint_layers_correction_source_set(*ma, base, MA_PAINT_LAYER_SOURCE_IMAGE));
+  /* Black Fill mask item, default MIX: the row coverage becomes zero. */
+  MaterialPaintLayer *fill = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill");
+  ASSERT_NE(fill, nullptr);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, black));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  const RGBA cpu = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const float tolerance = 1e-4f;
+  EXPECT_NEAR(graph.r, cpu.r, tolerance);
+  EXPECT_NEAR(graph.g, cpu.g, tolerance);
+  EXPECT_NEAR(graph.b, cpu.b, tolerance);
+  /* The blue top is hidden, the red bottom shows through. */
+  EXPECT_NEAR(graph.r, 1.0f, tolerance);
+  EXPECT_NEAR(graph.g, 0.0f, tolerance);
+  EXPECT_NEAR(graph.b, 0.0f, tolerance);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * The same black-Fill-hides-the-row case over a map-less Image base mask, but the hidden row reads
+ * a live Material source (a blue Principled constant) instead of an image: the masked row drops
+ * out, the red bottom shows, and the graph agrees with the CPU.
+ */
+TEST_F(PaintLayersGraphEvalTest, fill_mask_black_hides_a_material_row)
+{
+  const int size = 4;
+  ma = BKE_material_add(bmain, "FillMaskBlackHidesMaterial");
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, add_solid_image("Bottom", size, 255, 0, 0, 255));
+
+  Material *source = BKE_material_add(bmain, "FillMaskBlueSource");
+  ASSERT_NE(source, nullptr);
+  ASSERT_NE(source->nodetree, nullptr);
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  ASSERT_NE(principled, nullptr);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  ASSERT_NE(output, nullptr);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  const float source_color[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  bNodeSocket *base_color = bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
+  ASSERT_NE(base_color, nullptr);
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(base_color->default_value)->value, source_color);
+
+  MaterialPaintLayer *top = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Top", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(top, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_material(*ma, top, source));
+  /* Base mask without a map: white coverage, so the row shows until the Fill zeroes it. */
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, top, 1.0f);
+  ASSERT_NE(base, nullptr);
+  /* Why Image without a map: the log case, where the builder skips a map-less base mask. */
+  ASSERT_TRUE(BKE_paint_layers_correction_source_set(*ma, base, MA_PAINT_LAYER_SOURCE_IMAGE));
+  /* Black Fill mask item, default MIX: the row coverage becomes zero. */
+  MaterialPaintLayer *fill = BKE_paint_layers_correction_add(
+      *ma, top, MA_PAINT_LAYER_ROLE_MASK_ITEM, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill");
+  ASSERT_NE(fill, nullptr);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, black));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA graph = interpreter.eval_result(result_name(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  const RGBA cpu = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const float tolerance = 1e-4f;
+  EXPECT_NEAR(graph.r, cpu.r, tolerance);
+  EXPECT_NEAR(graph.g, cpu.g, tolerance);
+  EXPECT_NEAR(graph.b, cpu.b, tolerance);
+  /* The blue Material row is hidden, the red bottom shows through. */
+  EXPECT_NEAR(graph.r, 1.0f, tolerance);
+  EXPECT_NEAR(graph.g, 0.0f, tolerance);
+  EXPECT_NEAR(graph.b, 0.0f, tolerance);
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
 /** Give \a image the storage every paint-layer map uses and a straight soft edge:
  * grey \a straight in RGB with alpha 0.25 / 0.5 / 0.75 / 1.0 across a row of \a size. */
 void fill_straight_soft_edge(Image *image, const int size, const float straight)
@@ -3893,6 +4007,69 @@ TEST_F(PaintLayersGraphEvalTest, mask_item_color_space_partial_alpha_matches_the
     EXPECT_NEAR(graph.r, cpu.r, tolerance) << "x=" << x;
     EXPECT_NEAR(graph.g, cpu.g, tolerance) << "x=" << x;
     EXPECT_NEAR(graph.b, cpu.b, tolerance) << "x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
+ * A Fill mask on a row that takes part in four channels must apply to each of them: the graph and
+ * the CPU composite have to agree per channel. That only holds if every channel's row chain feeds
+ * its own factor into the one shared `.PL Mask` tree, the multi-channel counterpart of the packed
+ * single-channel mask tests.
+ */
+TEST_F(PaintLayersGraphEvalTest, mask_row_in_four_channels_matches_the_cpu)
+{
+  const int size = 4;
+  const eMaterialPaintChannel channels[] = {
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+  };
+  auto result_name_for = [](const int ch) {
+    return std::string("Result ") +
+           BKE_paint_material_channel_info(eMaterialPaintChannel(ch)).ui_name;
+  };
+  ma = BKE_material_add(bmain, "MaskFourChannels");
+
+  MaterialPaintLayer *row = add_layer("Row",
+                                      MA_PAINT_LAYER_SOURCE_IMAGE,
+                                      add_solid_image("RowBC", size, 200, 100, 50, 255),
+                                      channels[0]);
+  ASSERT_NE(row, nullptr);
+  const uchar extra_pixels[3][3] = {{60, 60, 60}, {90, 90, 90}, {128, 128, 128}};
+  for (int i = 1; i < 4; i++) {
+    MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(*ma, row, channels[i]);
+    ASSERT_NE(record, nullptr);
+    record->image = add_solid_image("RowChannel",
+                                    size,
+                                    extra_pixels[i - 1][0],
+                                    extra_pixels[i - 1][1],
+                                    extra_pixels[i - 1][2],
+                                    255);
+    record->state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  }
+  /* The base Fill mask: one grey constant the shared subgroup reduces on every channel. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 0.5f), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.x = 1;
+  interpreter.y = 1;
+  ASSERT_NE(interpreter.instance, nullptr);
+
+  const float tolerance = 1e-4f;
+  for (const eMaterialPaintChannel channel : channels) {
+    const RGBA graph = interpreter.eval_result(result_name_for(channel).c_str());
+    const RGBA cpu = cpu_pixel(channel);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << result_name_for(channel);
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << result_name_for(channel);
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << result_name_for(channel);
   }
 
   BKE_id_free(bmain, ma);

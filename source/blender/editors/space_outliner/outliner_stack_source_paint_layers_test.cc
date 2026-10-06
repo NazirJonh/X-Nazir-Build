@@ -1212,5 +1212,39 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_policy_parity_between_outliner_ve
   EXPECT_FALSE(BLI_listbase_is_empty(&bke_folder->children));
 }
 
+
+/**
+ * Phase 3, addressing: an ordinal is the row's position at the time of the call, and an edit
+ * above it renumbers it; the row's marker is its identity and does not move. Removing the row a
+ * marker names, after another row was inserted above it, has to remove that row -- not whatever
+ * now sits at the remembered ordinal.
+ */
+TEST_F(OutlinerStackPaintLayersSourceTest, marker_addressing_survives_a_renumbering_insert)
+{
+  Material *ma = BKE_material_add(bmain, "MarkerRemoval");
+  const int bottom_ordinal = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, -1, {});
+  ASSERT_GE(bottom_ordinal, 0);
+  MaterialPaintLayer *bottom = paint_description_row_for_ordinal(*ma, bottom_ordinal);
+  ASSERT_NE(bottom, nullptr);
+
+  const int top_ordinal = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, -1, {});
+  ASSERT_GE(top_ordinal, 0);
+  MaterialPaintLayer *top = paint_description_row_for_ordinal(*ma, top_ordinal);
+  ASSERT_NE(top, nullptr);
+  /* The add landed above: every row below it shifted down by one. */
+  ASSERT_EQ(layers_ordinal_of(*ma, bottom), 1);
+
+  /* The remembered ordinal now names the other row; the marker still names ours. */
+  MaterialPaintLayer *by_marker = BKE_paint_layers_find(*ma, bottom->marker);
+  ASSERT_NE(by_marker, nullptr);
+  EXPECT_EQ(by_marker, bottom);
+
+  /* Removing through the marker's fresh ordinal removes the same row, and only it. */
+  const int fresh_ordinal = layers_ordinal_of(*ma, *by_marker);
+  ASSERT_TRUE(paint_layers_edit_remove(*ma, fresh_ordinal));
+  EXPECT_EQ(BKE_paint_layers_find(*ma, bottom->marker), nullptr);
+  EXPECT_EQ(paint_description_row_for_ordinal(*ma, fresh_ordinal), top);
+}
+
 }  // namespace tests
 }  // namespace blender::ed::outliner

@@ -159,7 +159,9 @@ struct StackContentSection {
    * Source-defined stable identifier for this section, used to remember which section is
    * currently active when the tree rebuilds.
    *
-   * Must be unique among sections of the same row. Paint layers use "CHANNELS" and "MASK".
+   * Must be unique among sections of the same row. The identifiers a source's rows use are the
+   * source's own business: it declares the default one (#StackEditor::default_section_id) and the
+   * one its grouping's mask content lives in (#StackGroupingEditor::mask_section_id).
    */
   std::string identifier;
   /** Human-readable section name shown in UI, or empty if the source has no name for it. */
@@ -226,6 +228,12 @@ struct StackRow {
    */
   bool supported = true;
   const char *unsupported_reason = nullptr;
+  /**
+   * Whether this row's sub-rows take the pair striping (#SO_SL_PAIR_SUB_ROWS), when the user
+   * turns it on. Which sub-rows read as a pair is the source's call -- they are not the same
+   * thing on every stack -- so the draw asks the row instead of guessing from the row's shape.
+   */
+  bool pairs_sub_rows = false;
 
   std::string name;
   /**
@@ -434,6 +442,37 @@ struct StackSubSelection {
 Object *outliner_stack_focus_object_get(const StackReadContext &ctx, const StackFocus &focus);
 
 /**
+ * What a row remains, once its ordinal has moved on.
+ *
+ * An ordinal is a position, and any edit above it in the stack changes it. Everything that has to
+ * survive an edit -- a drag, restoring a selection, a preview cache key -- is addressed by this
+ * instead. It is a lightweight POD struct on purpose, suitable for drag data and other
+ * cross-module contexts.
+ */
+struct StackItemIdentity {
+  /** #ID.session_uid of the stack's owner. 0 means unset. */
+  uint32_t owner_uid = 0;
+  /**
+   * Which source issued it: a row of one stack does not address a row of another. Default is
+   * #SO_STACK_SRC_NONE, so a half-filled identity can never be mistaken for a row of whichever
+   * source happens to sort first.
+   */
+  eSpaceOutliner_StackSource source_type = SO_STACK_SRC_NONE;
+  /** #StackRow::stable_id. Nil when the source gives no identity for this row. */
+  bUUID row_id = {};
+  /**
+   * Position at the time this was issued -- a hint for the resolver, and the fallback used in
+   * place of a nil #row_id.
+   */
+  int16_t ordinal_hint = -1;
+
+  bool is_valid() const
+  {
+    return owner_uid != 0;
+  }
+};
+
+/**
  * What is being dropped, in terms the seam can name.
  *
  * Owns its data: a drag outlives more than one rebuild, and the row or data-block it started from
@@ -576,6 +615,17 @@ struct StackColumnLayout {
 class StackGroupingEditor {
  public:
   virtual ~StackGroupingEditor() = default;
+
+  /**
+   * The section identifier the row's mask content lives in, or empty when this editor's mask has
+   * no section of its own. The generic mask UI -- the thumbnail on a row, the child rows a mask
+   * section holds, the section a row switches to while the mask is being worked on -- keys off it,
+   * so the generic code never names a source's identifiers itself.
+   */
+  virtual StringRefNull mask_section_id() const
+  {
+    return "";
+  }
 
   /**
    * Give the row at \a ordinal a mask filled with \a initial_color, or take its mask away.
@@ -795,6 +845,16 @@ class StackColorEditor {
 class StackEditor {
  public:
   virtual ~StackEditor() = default;
+
+  /**
+   * The section identifier a row of this stack shows by default, or empty when its rows have no
+   * sections to switch between. The row verbs switch a row back to it when the section it showed
+   * is gone -- after a removed mask, for one.
+   */
+  virtual StringRefNull default_section_id() const
+  {
+    return "";
+  }
 
   /**
    * Whether the rows of \a owner can change places at all.
@@ -1198,8 +1258,8 @@ class StackSource {
 
 /* The built-in sources. Defined in their own files, listed by `outliner_stack_source.cc`. */
 /**
- * The paint stack source, built on the DNA description (`Material.paint_layers`). It is the only
- * paint source: the old graph-truth source was removed in phase 6.
+ * The stack source over the owner material's DNA layer description. It is the only paint source:
+ * the old graph-truth source was removed in phase 6.
  */
 std::unique_ptr<StackSource> stack_source_paint_layers_create();
 std::unique_ptr<StackSource> stack_source_shape_keys_create();
@@ -1210,5 +1270,20 @@ Span<const StackSource *> stack_sources_get();
 const StackSource *stack_source_get(eSpaceOutliner_StackSource type);
 /** The source a space is currently set to. */
 const StackSource *stack_source_for_space(const SpaceOutliner &space_outliner);
+
+/** The section identifier the space's grouping editor keys its mask content by, or empty. */
+inline StringRefNull stack_mask_section_id(const SpaceOutliner &space_outliner)
+{
+  const StackEditor *editor = stack_source_for_space(space_outliner)->editor();
+  const StackGroupingEditor *grouping = (editor != nullptr) ? editor->grouping() : nullptr;
+  return (grouping != nullptr) ? grouping->mask_section_id() : StringRefNull("");
+}
+
+/** The section identifier a row of the space's stack shows by default, or empty. */
+inline StringRefNull stack_default_section_id(const SpaceOutliner &space_outliner)
+{
+  const StackEditor *editor = stack_source_for_space(space_outliner)->editor();
+  return (editor != nullptr) ? editor->default_section_id() : StringRefNull("");
+}
 
 }  // namespace blender::ed::outliner

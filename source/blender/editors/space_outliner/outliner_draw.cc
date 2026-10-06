@@ -1141,8 +1141,8 @@ static void namebutton_fn(bContext *C,
           break;
         }
         case TSE_STACK_LAYER: {
-          /* The field typed into one channel's node label; a layer is the same row in every
-           * channel it appears in, so the edit API is what carries the name to the rest of them.
+          /* The field typed into one #TSE_STACK_ITEM's node label; a row is the same row in every
+           * sub-row it appears in, so the edit API is what carries the name to the rest of them.
            * Restore the old one first, the way the other cases here do, so that a name the source
            * refuses -- an empty one, most of all -- leaves the row as it was.
            *
@@ -2366,11 +2366,12 @@ static int stack_child_start_x(const SpaceOutliner &space_outliner,
   if (tselem->type == TSE_STACK_LAYER) {
     const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
     if (row != nullptr && !row->parent_section_id.empty()) {
-      /* A mask item lines up under the parent's Mask preview: its toggle, one unit in from its
-       * start, then sits right below that button. Without previews there is nothing to line up
-       * with. */
-      if (row->parent_section_id == "MASK" && child.parent != nullptr &&
-          (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) != 0)
+      /* A row under the grouping's mask section lines up under the parent's mask preview: its
+       * toggle, one unit in from its start, then sits right below that button. Without previews
+       * there is nothing to line up with. */
+      const StringRefNull mask_section = stack_mask_section_id(space_outliner);
+      if (!mask_section.is_empty() && row->parent_section_id == mask_section &&
+          child.parent != nullptr && (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) != 0)
       {
         const TreeStoreElem *parent_tselem = TREESTORE(child.parent);
         const StackRow *parent_row = (parent_tselem->type == TSE_STACK_LAYER) ?
@@ -2379,7 +2380,7 @@ static int stack_child_start_x(const SpaceOutliner &space_outliner,
                                          nullptr;
         if (parent_row != nullptr && !parent_row->compact) {
           for (const int slot_index : parent_row->preview_slots.index_range()) {
-            if (parent_row->preview_slots[slot_index].section_id == "MASK") {
+            if (parent_row->preview_slots[slot_index].section_id == mask_section) {
               const rctf mask_rect = outliner_stack_row_preview_rect(
                   *parent_row, float(parent_startx), 0.0f, slot_index);
               return int(mask_rect.xmin) - int(UI_UNIT_X);
@@ -4406,10 +4407,10 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
 }
 
 /**
- * Whether a Stack Layers layer row should read as selected -- either because its own row is, or
- * because one of the channel rows it holds is. Switching which channel is open is a detail of
- * working inside the layer, not a different selection, so the layer's own highlight should not
- * blink out when the click lands on one of its maps instead of on the layer itself.
+ * Whether a Stack Layers #TSE_STACK_LAYER row should read as selected -- either because its own
+ * row is, or because one of the #TSE_STACK_ITEM rows it holds is. Switching which sub-row is open
+ * is a detail of working inside the row, not a different selection, so the row's own highlight
+ * should not blink out when the click lands on one of its sub-rows instead of on the row itself.
  */
 static bool stack_layer_row_selected(const TreeElement &te)
 {
@@ -4462,8 +4463,9 @@ static bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner)
 }
 
 /**
- * Whether a Stack Layers folder directly holds the row that is open right now -- a nested layer
- * that is itself active, or one holding the active channel. Only one level down: a folder's own
+ * Whether a Stack Layers folder directly holds the row that is open right now -- a nested
+ * #TSE_STACK_LAYER that is itself active, or one holding the active #TSE_STACK_ITEM. Only one
+ * level down: a folder's own
  * activity comes from what it directly contains, the same way a Collection is only "active"
  * through the object directly inside it, not through everything nested further down.
  */
@@ -4577,7 +4579,7 @@ static void outliner_draw_tree_element(ui::Block *block,
        * If TSE_ACTIVE is set anywhere in the tree, it wins -- the source-level activity is ignored
        * to prevent two rows lighting up at once (e.g., when a folder is created, it gets
        * TSE_ACTIVE, but the previously active layer still answers row_is_active = true). Folders
-       * cannot be active at the source level (they have no channel maps), so TSE_ACTIVE is the
+       * cannot be active at the source level (they have no content sub-rows), so TSE_ACTIVE is the
        * only way a folder can be active, and it must take precedence. */
       if (tselem->type == TSE_STACK_LAYER && !stack_tree_has_active) {
         const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
@@ -4591,14 +4593,13 @@ static void outliner_draw_tree_element(ui::Block *block,
       }
 
       /* Stack Layers rows read their own tree selection for this, on top of whatever the paint
-       * target above already decided. The row actually open right now -- a layer with no channel
-       * drilled into, or the channel itself -- takes the colour the active object gets elsewhere
-       * in
-       * the Outliner; a layer lit only because a channel it holds is open keeps the plain
-       * highlighted colour, so the eye still goes to what is actually open. A folder that directly
-       * holds that open row gets the same plain colour a Collection gets for directly holding the
-       * active object -- one level only, the same way a Collection's own container does not light
-       * up
+       * target above already decided. The row actually open right now -- a #TSE_STACK_LAYER with
+       * no sub-row drilled into, or the #TSE_STACK_ITEM itself -- takes the colour the active
+       * object gets elsewhere in the Outliner; a row lit only because a sub-row it holds is open
+       * keeps the plain highlighted colour, so the eye still goes to what is actually open. A
+       * folder that directly holds that open row gets the same plain colour a Collection gets for
+       * directly holding the active object -- one level only, the same way a Collection's own
+       * container does not light
        * in turn. */
       if (space_outliner->outlinevis == SO_STACK_LAYERS) {
         if (ELEM(tselem->type, TSE_STACK_LAYER, TSE_STACK_ITEM) && (tselem->flag & TSE_ACTIVE)) {
@@ -4669,7 +4670,7 @@ static void outliner_draw_tree_element(ui::Block *block,
     /* Whether to draw the empty texture icon instead of preview. */
     bool draw_empty_texture = false;
     /* A group holds no map of its own: its slot is the folder icon's, and the empty texture icon
-     * -- which stands for a texture layer with no data in any channel -- is not for it. */
+     * -- which stands for a textured row with no data in any of its maps -- is not for it. */
     bool stack_row_is_group = false;
     int preview_slots_drawn = 0;
     bool icon_drawn = false;
@@ -5189,17 +5190,15 @@ static void outliner_draw_highlights(const ARegion *region,
                   start_y + row_height - ufac);
     draw_roundbox_corner_set(ui::CNR_ALL);
 
-    /* Only the layer rows fold in their channels' state: the maps a layer holds are ordinary rows
-     * and are selected the way rows are selected everywhere else in the Outliner, but a layer's
-     * own
-     * highlight should not disappear just because the click that opened one of its channels moved
-     * the tree's selection onto that channel row instead. */
+    /* Only the #TSE_STACK_LAYER rows fold in their sub-rows' state: the sub-rows a row holds are
+     * ordinary rows and are selected the way rows are selected everywhere else in the Outliner,
+     * but the row's own highlight should not disappear just because the click that opened one of
+     * its sub-rows moved the tree's selection onto that sub-row instead. */
     const bool is_stack_layer = space_outliner->outlinevis == SO_STACK_LAYERS &&
                                tselem->type == TSE_STACK_LAYER;
-    /* Activeness itself never propagates up -- a layer lit only because a channel it holds is open
+    /* Activeness itself never propagates up -- a row lit only because a sub-row it holds is open
      * reads as an ordinary selected row (the darker fill), the same as an Object's row does while
-     * a
-     * data-block nested under it is what is actually active, rather than repeating the brighter
+     * a data-block nested under it is what is actually active, rather than repeating the brighter
      * active fill on both rows. */
     const bool row_active = (tselem->flag & TSE_ACTIVE) != 0;
     const bool row_selected = is_stack_layer ? stack_layer_row_selected(*te) :
@@ -5274,18 +5273,19 @@ static void outliner_draw_highlights(const ARegion *region,
 }
 
 /**
- * Draw alternating Stack Layers backgrounds and the rule between a layer's channel rows, from
- * the actual row geometry.
+ * Draw alternating Stack Layers backgrounds and the rule between a row's sub-rows, from the
+ * actual row geometry.
  *
- * The regular Outliner background uses a fixed one-unit pitch. That cuts a two-unit layer row in
- * half, so Stack Layers alternates after complete tree elements instead. Channel rows are one unit
- * high and are therefore handled naturally. In pair mode, direct channel rows are grouped as
- * [1+2], [3+4], ...; for an odd count the first row is kept on its own: [1], [2+3], [4+5], ... .
+ * The regular Outliner background uses a fixed one-unit pitch. That cuts a two-unit row in half,
+ * so Stack Layers alternates after complete tree elements instead. Sub-rows are one unit high and
+ * are therefore handled naturally. In pair mode, the sub-rows a #StackRow pairs (see
+ * #StackRow::pairs_sub_rows) are grouped as [1+2], [3+4], ...; for an odd count the first row is
+ * kept on its own: [1], [2+3], [4+5], ... .
  */
 static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
                                                     const SpaceOutliner *space_outliner,
                                                     const ListBaseT<TreeElement> *lb,
-                                                    const bool pair_channels,
+                                                    const bool pair_sub_rows,
                                                     const uint pos,
                                                     const float col_alternate[4],
                                                     const float col_divider[4],
@@ -5373,46 +5373,49 @@ static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
       continue;
     }
 
-    if (tselem->type == TSE_STACK_LAYER && pair_channels) {
-      int channel_count = 0;
+    const StackRow *striped_row = (tselem->type == TSE_STACK_LAYER) ?
+                                      outliner_stack_row_find(*space_outliner, tselem->nr) :
+                                      nullptr;
+    if (striped_row != nullptr && pair_sub_rows && striped_row->pairs_sub_rows) {
+      int sub_row_count = 0;
       for (const TreeElement &child : te.subtree) {
-        channel_count += TREESTORE(&child)->type == TSE_STACK_ITEM;
+        sub_row_count += TREESTORE(&child)->type == TSE_STACK_ITEM;
       }
 
-      if (channel_count > 0) {
-        const int channel_x = startx + UI_UNIT_X;
-        int channel_index = 0;
-        const int channel_stripe_index = *stripe_index;
+      if (sub_row_count > 0) {
+        const int sub_row_x = startx + UI_UNIT_X;
+        int sub_row_index = 0;
+        const int sub_row_stripe_index = *stripe_index;
         for (const TreeElement &child : te.subtree) {
           if (TREESTORE(&child)->type != TSE_STACK_ITEM) {
             continue;
           }
 
-          const int group = (channel_count & 1) ?
-                                (channel_index == 0 ? 0 : 1 + (channel_index - 1) / 2) :
-                                channel_index / 2;
-          const int channel_row_height = outliner_tree_element_height(*space_outliner, child);
-          const int channel_start_y = *io_start_y + UI_UNIT_Y - channel_row_height;
-          if (((channel_stripe_index + group) & 1) != 0) {
+          const int group = (sub_row_count & 1) ?
+                                (sub_row_index == 0 ? 0 : 1 + (sub_row_index - 1) / 2) :
+                                sub_row_index / 2;
+          const int sub_row_height = outliner_tree_element_height(*space_outliner, child);
+          const int sub_row_start_y = *io_start_y + UI_UNIT_Y - sub_row_height;
+          if (((sub_row_stripe_index + group) & 1) != 0) {
             immUniformColor4fv(col_alternate);
             immRectf(pos,
                      float(region->v2d.cur.xmin),
-                     float(channel_start_y),
+                     float(sub_row_start_y),
                      float(region->v2d.cur.xmax),
-                     float(channel_start_y + channel_row_height));
+                     float(sub_row_start_y + sub_row_height));
           }
-          if (channel_index != 0) {
+          if (sub_row_index != 0) {
             immUniformColor4fv(col_divider);
             immRectf(pos,
-                     float(channel_x),
-                     float(channel_start_y + channel_row_height) - U.pixelsize,
+                     float(sub_row_x),
+                     float(sub_row_start_y + sub_row_height) - U.pixelsize,
                      float(region->v2d.cur.xmax),
-                     float(channel_start_y + channel_row_height));
+                     float(sub_row_start_y + sub_row_height));
           }
-          channel_index++;
-          *io_start_y -= channel_row_height;
+          sub_row_index++;
+          *io_start_y -= sub_row_height;
         }
-        *stripe_index = channel_stripe_index + (channel_count + 1) / 2;
+        *stripe_index = sub_row_stripe_index + (sub_row_count + 1) / 2;
         draw_run_end_rule();
         continue;
       }
@@ -5421,7 +5424,7 @@ static void outliner_draw_stack_row_bands_recursive(const ARegion *region,
     outliner_draw_stack_row_bands_recursive(region,
                                             space_outliner,
                                             &te.subtree,
-                                            pair_channels,
+                                            pair_sub_rows,
                                             pos,
                                             col_alternate,
                                             col_divider,
@@ -5471,7 +5474,7 @@ static void outliner_draw_stack_row_bands(const ARegion *region,
                                           space_outliner,
                                           &space_outliner->runtime->tree,
                                           (space_outliner->stack_layers_flag &
-                                           SO_SL_PAIR_CHANNELS) != 0,
+                                           SO_SL_PAIR_SUB_ROWS) != 0,
                                           pos,
                                           col_alternate,
                                           col_divider,

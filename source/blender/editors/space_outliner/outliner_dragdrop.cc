@@ -53,6 +53,7 @@
 #include "WM_types.hh"
 
 #include "outliner_intern.hh"
+#include "ED_outliner_stack_drag.hh"
 #include "outliner_stack_source.hh"
 #include "tree/tree_iterator.hh"
 
@@ -1225,6 +1226,7 @@ static void stack_layer_drop_data_init(SpaceOutliner &space_outliner,
             });
 
   drag->poin = drop_data;
+  drag->poin_free_fn = stack_layer_drag_payload_free;
   drag->flags |= WM_DRAG_FREE_DATA;
 }
 

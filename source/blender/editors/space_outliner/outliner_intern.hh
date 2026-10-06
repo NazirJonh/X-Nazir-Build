@@ -707,8 +707,9 @@ StringRef outliner_stack_row_active_section_get(const SpaceOutliner &space_outli
 /**
  * Set the active content section for the given row.
  *
- * \param section_id: Identifier of the section to activate (e.g., "CHANNELS" or "MASK").
- *                   Must match a section in the row's #StackRow::content_sections.
+ * \param section_id: Identifier of the section to activate; the source declares the identifiers
+ *                   its rows use (#StackEditor::default_section_id). Must match a section in the
+ *                   row's #StackRow::content_sections.
  * \return true if the section was set, false if the section does not exist in the row.
  */
 bool outliner_stack_row_active_section_set(SpaceOutliner &space_outliner,
@@ -722,6 +723,18 @@ void outliner_stack_rows_ensure(const ed::outliner::StackReadContext &ctx,
 /** The row with this ordinal, or null. */
 const ed::outliner::StackRow *outliner_stack_row_find(const SpaceOutliner &space_outliner,
                                                       int ordinal);
+
+/**
+ * The row an identity names: the row whose #StackRow::stable_id is \a row_id, else the row at the
+ * \a ordinal_hint, else null.
+ *
+ * Ordinals shift with every edit above a row -- especially across an undo or an operator repeat --
+ * while the identity does not, so a caller carrying both reads the identity as the address and
+ * keeps the ordinal as the hint for a row the current model knows nothing about.
+ */
+const ed::outliner::StackRow *outliner_stack_row_resolve(const SpaceOutliner &space_outliner,
+                                                         const bUUID &row_id,
+                                                         int ordinal_hint);
 
 /**
  * How much larger than an icon a Stack Layers preview draws: the draw paints a thumbnail this many

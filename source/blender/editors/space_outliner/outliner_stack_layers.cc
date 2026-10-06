@@ -67,6 +67,9 @@ namespace blender::ed::outliner {
 
 /** Defined below: the shared resolver of the operators that address one row, marker first. */
 int stack_operator_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op);
+const ed::outliner::StackRow *outliner_stack_row_resolve(const SpaceOutliner &space_outliner,
+                                                         const bUUID &row_id,
+                                                         int ordinal_hint);
 
 namespace {
 
@@ -334,12 +337,8 @@ static int stack_operator_marker_ordinal_get(bContext &C,
     return -1;
   }
   outliner_stack_rows_ensure(ctx, space_outliner, *owner);
-  for (const StackRow &row : space_outliner.runtime->stack_rows) {
-    if (BLI_uuid_equal(row.stable_id, marker)) {
-      return row.ordinal;
-    }
-  }
-  return -1;
+  const StackRow *row = outliner_stack_row_resolve(space_outliner, marker, -1);
+  return (row != nullptr) ? row->ordinal : -1;
 }
 
 /**
@@ -772,7 +771,9 @@ wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op)
     const bool is_active = target_ordinal == outliner_stack_active_ordinal_get(
                                                  outliner_stack_read_context(*C), *space_outliner);
     if (is_active && target_row != nullptr && target_row->parent_section_id.empty() &&
-        outliner_stack_row_active_section_get(*space_outliner, *target_row) == "MASK")
+        !stack_mask_section_id(*space_outliner).is_empty() &&
+        outliner_stack_row_active_section_get(*space_outliner, *target_row) ==
+            stack_mask_section_id(*space_outliner))
     {
       const bool mask_removed = stack_mutate(
           *C,
@@ -791,7 +792,11 @@ wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op)
         /* The row is still there, with nothing left to switch to: show its content again. */
         /* The mutation rebuilt the rows, so the row is looked up again. */
         if (const StackRow *rebuilt = outliner_stack_row_find(*space_outliner, target_ordinal)) {
-          outliner_stack_row_active_section_set(*space_outliner, *rebuilt, "CHANNELS");
+          const StringRefNull default_section = stack_default_section_id(*space_outliner);
+          if (!default_section.is_empty()) {
+            outliner_stack_row_active_section_set(
+                *space_outliner, *rebuilt, default_section);
+          }
         }
         return OPERATOR_FINISHED;
       }
@@ -1355,8 +1360,11 @@ wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
   if (ok && add) {
     /* The row now has a MASK section; show it, as a click on the mask thumbnail would. The mutation
      * rebuilt the rows, so the row is looked up again. */
+    const StringRefNull mask_section = stack_mask_section_id(*space_outliner);
     if (const StackRow *rebuilt = outliner_stack_row_find(*space_outliner, ordinal)) {
-      outliner_stack_row_active_section_set(*space_outliner, *rebuilt, "MASK");
+      if (!mask_section.is_empty()) {
+        outliner_stack_row_active_section_set(*space_outliner, *rebuilt, mask_section);
+      }
     }
   }
   return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
@@ -1703,6 +1711,21 @@ StringRef outliner_stack_row_active_section_get(const SpaceOutliner &space_outli
 
   /* Stored section no longer exists (e.g., mask was deleted): fall back to first section. */
   return row.content_sections[0].identifier;
+}
+
+/** See #outliner_stack_row_resolve. */
+const ed::outliner::StackRow *outliner_stack_row_resolve(const SpaceOutliner &space_outliner,
+                                                         const bUUID &row_id,
+                                                         const int ordinal_hint)
+{
+  if (!BLI_uuid_is_nil(row_id)) {
+    for (const StackRow &row : space_outliner.runtime->stack_rows) {
+      if (BLI_uuid_equal(row.stable_id, row_id)) {
+        return &row;
+      }
+    }
+  }
+  return outliner_stack_row_find(space_outliner, ordinal_hint);
 }
 
 bool outliner_stack_row_active_section_set(SpaceOutliner &space_outliner,

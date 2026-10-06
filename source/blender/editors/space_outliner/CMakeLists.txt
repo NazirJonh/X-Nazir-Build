@@ -91,6 +91,7 @@ set(SRC
 
   outliner_intern.hh
   outliner_stack_source.hh
+  ED_outliner_stack_drag.hh
   tree/common.hh
   tree/tree_display.hh
   tree/tree_element.hh

@@ -489,6 +489,9 @@ void paint_stack_rows_from_description_impl(const Material &material,
           const bool has_mask = mask_base != nullptr;
           row.mask_enabled = !has_mask || ((mask_base->flag & MA_PAINT_LAYER_ENABLED) != 0);
           row.supported = true;
+          /* A layer's content sub-rows are its channel maps, the one kind of sub-row that reads
+           * as a pair. */
+          row.pairs_sub_rows = BKE_paint_layers_role(layer) == PaintLayerRole::Layer;
           row.name = layer.name[0] != '\0' ? layer.name :
                      folder                      ? "Folder" :
                                                    "Layer";
@@ -1132,6 +1135,16 @@ class PaintLayersStackSource final : public StackSource,
   const StackEditor *editor() const override
   {
     return this;
+  }
+
+  StringRefNull default_section_id() const override
+  {
+    return "CHANNELS";
+  }
+
+  StringRefNull mask_section_id() const override
+  {
+    return "MASK";
   }
 
   const StackGroupingEditor *grouping() const override

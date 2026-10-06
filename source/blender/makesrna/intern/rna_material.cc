@@ -173,6 +173,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_mapping_space_items[
 #  include "BKE_mesh_maps.hh"
 #  include "BKE_paint_layers.hh"
 #  include "BKE_paint_layers_composite.hh"
+#  include "BKE_paint_layers_edit.hh"
 #  include "BKE_paint_layers_generate.hh"
 #  include "BKE_paint_layers_target.hh"
 #  include "BKE_report.hh"
@@ -667,11 +668,44 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                                                          int source,
                                                          const char *name)
 {
-  MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, eMaterialPaintLayerSource(source), name, nullptr, PaintLayerPlace::Above);
+  /* The authoring policy is the shared BKE one (#BKE_paint_layers_add_with_policy): the same
+   * default names and channels the Outliner Add uses, so an add-on-built stack matches a
+   * UI-built one. An empty name means the unique default. */
+  PaintLayerAddParams params;
+  params.name = (name[0] != '\0') ? name : nullptr;
+  std::optional<PaintLayerAddKind> kind;
+  switch (eMaterialPaintLayerSource(source)) {
+    case MA_PAINT_LAYER_SOURCE_IMAGE:
+      kind = PaintLayerAddKind::Paint;
+      break;
+    case MA_PAINT_LAYER_SOURCE_CONSTANT:
+      kind = PaintLayerAddKind::Fill;
+      break;
+    case MA_PAINT_LAYER_SOURCE_STACK:
+      kind = PaintLayerAddKind::Folder;
+      break;
+    default:
+      /* A Material, Node Group or Mesh Map row takes its ID through a picker; a plain add
+       * creates the empty row, like the Outliner's kinds without a source do. */
+      break;
+  }
+  MaterialPaintLayer *layer = nullptr;
+  if (kind.has_value()) {
+    params.kind = *kind;
+    layer = BKE_paint_layers_add_with_policy(*ma, params);
+  }
+  else {
+    /* The fallback has no unique default of its own; keep the generic name for an empty one. */
+    layer = BKE_paint_layers_add(*ma,
+                                 eMaterialPaintLayerSource(source),
+                                 (name[0] != '\0') ? name : "Layer",
+                                 nullptr,
+                                 PaintLayerPlace::Above);
+    if (layer != nullptr) {
+      BKE_paint_layers_default_channels_apply(*ma, *layer);
+    }
+  }
   if (layer != nullptr) {
-    /* The default channel set a freshly authored Paint or Fill row takes part in. */
-    BKE_paint_layers_default_channels_apply(*ma, *layer);
     /* A fresh row becomes the cursor, mirroring what the UI does when it adds one. */
     BKE_paint_layers_active_set(*ma, layer->marker);
     /* BKE only tags DEG; the Outliner and the Layer Material tab need the WM notifier too. */
@@ -1410,8 +1444,38 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_correction_add(PointerRNA ptr,
 {
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
-    MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
-        *ma, layer, role, source, name);
+    /* The same shared policy the Outliner's Add uses, so the base mask, the default channels and
+     * the source wiring match what the UI does for the same kind. */
+    const bool mask = (role == MA_PAINT_LAYER_ROLE_MASK_ITEM);
+    PaintLayerAddKind kind;
+    switch (eMaterialPaintLayerSource(source)) {
+      case MA_PAINT_LAYER_SOURCE_IMAGE:
+        kind = mask ? PaintLayerAddKind::MaskPaint : PaintLayerAddKind::EffectPaint;
+        break;
+      case MA_PAINT_LAYER_SOURCE_CONSTANT:
+        kind = mask ? PaintLayerAddKind::MaskFill : PaintLayerAddKind::EffectFill;
+        break;
+      case MA_PAINT_LAYER_SOURCE_MESH_MAP:
+        kind = mask ? PaintLayerAddKind::MaskMeshMap : PaintLayerAddKind::EffectMeshMap;
+        break;
+      case MA_PAINT_LAYER_SOURCE_MATERIAL:
+        kind = mask ? PaintLayerAddKind::MaskMaterial : PaintLayerAddKind::EffectMaterial;
+        break;
+      case MA_PAINT_LAYER_SOURCE_NODE_GROUP:
+        kind = mask ? PaintLayerAddKind::MaskNodeGroup : PaintLayerAddKind::EffectNodeGroup;
+        break;
+      case MA_PAINT_LAYER_SOURCE_STACK:
+        kind = mask ? PaintLayerAddKind::MaskStack : PaintLayerAddKind::EffectStack;
+        break;
+      default:
+        BKE_report(reports, RPT_ERROR, "Unknown paint layer source");
+        return nullptr;
+    }
+    PaintLayerAddParams params;
+    params.kind = kind;
+    params.anchor = layer;
+    params.name = (name[0] != '\0') ? name : nullptr;
+    MaterialPaintLayer *correction = BKE_paint_layers_add_with_policy(*ma, params);
     if (correction != nullptr) {
       WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
       return correction;
@@ -2800,8 +2864,12 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                       MA_PAINT_LAYER_SOURCE_IMAGE,
                       "Source",
                       "What the correction applies");
-  RNA_def_string(
-      func, "name", "Correction", MAX_NAME, "Name", "Name of the new correction");
+  RNA_def_string(func,
+                 "name",
+                 "",
+                 MAX_NAME,
+                 "Name",
+                 "Name of the new correction, empty for the default");
   parm = RNA_def_pointer(
       func, "correction", "MaterialPaintLayer", "", "The newly created correction");
   RNA_def_function_return(func, parm);
@@ -3074,7 +3142,12 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                       "Source",
                       "Source of the new layer");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
-  RNA_def_string(func, "name", "Layer", MAX_NAME, "Name", "Name of the new layer");
+  RNA_def_string(func,
+                 "name",
+                 "",
+                 MAX_NAME,
+                 "Name",
+                 "Name of the new layer, empty for the unique default");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
   RNA_def_function_return(func, parm);
 

@@ -116,29 +116,9 @@ static void material_init_data(ID *id)
  * walk and serialize it.
  * \{ */
 
-/**
- * Call \a fn for each of a layer's three sub-lists, in the fixed order the file writer, the readers
- * and the ID walk rely on: #MaterialPaintLayer::children, then #effects, then #mask_stack. This is
- * the one place the traversal order lives, so the serialization order cannot drift between passes.
- */
-template<typename Fn>
-static void material_paint_layer_foreach_sublist(MaterialPaintLayer &layer, Fn &&fn)
-{
-  fn(layer.children);
-  fn(layer.effects);
-  fn(layer.mask_stack);
-}
-template<typename Fn>
-static void material_paint_layer_foreach_sublist(const MaterialPaintLayer &layer, Fn &&fn)
-{
-  fn(layer.children);
-  fn(layer.effects);
-  fn(layer.mask_stack);
-}
-
 void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
 {
-  material_paint_layer_foreach_sublist(*layer, [](ListBaseT<MaterialPaintLayer> &list) {
+  BKE_paint_layers_foreach_sublist(*layer, [](ListBaseT<MaterialPaintLayer> &list) {
     /* Free every element of the sub-list. The mutable iterator caches the next pointer, so freeing
      * the current element is safe; the list itself is discarded with \a layer. */
     for (MaterialPaintLayer &item : list.items_mutable()) {
@@ -184,7 +164,7 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
   dst->properties = nullptr;
 
   int sublist_index = 0;
-  material_paint_layer_foreach_sublist(
+  BKE_paint_layers_foreach_sublist(
       src, [&](const ListBaseT<MaterialPaintLayer> &src_list) {
         ListBaseT<MaterialPaintLayer> *dst_list = nullptr;
         switch (sublist_index++) {
@@ -239,7 +219,7 @@ static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryFo
         BKE_lib_query_idpropertiesForeachIDLink_callback(prop, data);
       }));
 
-  material_paint_layer_foreach_sublist(*layer, [&](ListBaseT<MaterialPaintLayer> &list) {
+  BKE_paint_layers_foreach_sublist(*layer, [&](ListBaseT<MaterialPaintLayer> &list) {
     for (MaterialPaintLayer &item : list) {
       BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&item, data));
     }
@@ -248,7 +228,7 @@ static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryFo
 
 static void material_paint_layer_blend_write(BlendWriter *writer, const MaterialPaintLayer &layer)
 {
-  material_paint_layer_foreach_sublist(layer, [&](const ListBaseT<MaterialPaintLayer> &list) {
+  BKE_paint_layers_foreach_sublist(layer, [&](const ListBaseT<MaterialPaintLayer> &list) {
     writer->write_struct_list(&list);
     for (const MaterialPaintLayer &item : list) {
       material_paint_layer_blend_write(writer, item);
@@ -268,7 +248,7 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
 
 static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPaintLayer &layer)
 {
-  material_paint_layer_foreach_sublist(layer, [&](ListBaseT<MaterialPaintLayer> &list) {
+  BKE_paint_layers_foreach_sublist(layer, [&](ListBaseT<MaterialPaintLayer> &list) {
     BLO_read_struct_list(reader, MaterialPaintLayer, &list);
     for (MaterialPaintLayer &item : list) {
       material_paint_layer_blend_read(reader, item);

@@ -865,22 +865,27 @@ class MATERIAL_PT_paint_layers_channels(MaterialButtonsPanel, Panel):
         draw_material_channel_set(layout, context.material)
 
 
-_MESH_MAP_TYPES = (
-    ('AO', "Ambient Occlusion"),
-    ('CURVATURE', "Curvature"),
-    ('NORMAL_WORLD', "Normal (World)"),
-    ('NORMAL_OBJECT', "Normal (Object)"),
-    ('ID_OBJECT', "Object ID"),
-    ('ID_MATERIAL', "Material ID"),
-    ('EDGE', "Edge"),
+# The mesh map types come straight from the RNA enum (#MaterialPaintLayer.mesh_map_type), so a
+# type added in DNA shows up here without touching this file.
+_MESH_MAP_TYPES = tuple(
+    (item.identifier, item.name)
+    for item in bpy.types.MaterialPaintLayer.bl_rna.properties['mesh_map_type'].enum_items
+    if item.identifier != ''
 )
 
-_MESH_MAP_STATUS = {
+# The status keys come from the RNA enum (#ObjectMeshMapState.status); the label and icon pairs
+# stay a UI mapping of their own.
+_MESH_MAP_STATUS_LABEL_ICON = {
     'NONE': ("Not baked", 'DOT'),
     'VALID': ("Valid", 'CHECKMARK'),
     'STALE': ("Stale", 'FILE_REFRESH'),
     'BAKING': ("Baking", 'FILE_REFRESH'),
     'ERROR': ("Error", 'ERROR'),
+}
+_MESH_MAP_STATUS = {
+    item.identifier: _MESH_MAP_STATUS_LABEL_ICON[item.identifier]
+    for item in bpy.types.ObjectMeshMapState.bl_rna.properties['status'].enum_items
+    if item.identifier != ''
 }
 
 

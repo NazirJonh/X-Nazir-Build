@@ -2,8 +2,9 @@
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-"""The thin operators behind the paint-layer RNA: add, remove, move, group, mask, channels,
-corrections. UI-only code lives in bl_ui; these operate on Material.paint_layers by marker."""
+"""The thin operators behind the paint-layer RNA: the channel records and the rebake. Stack
+edits (add, remove, move, group, mask, corrections) live in the RNA and the Outliner; UI-only code
+lives in bl_ui. These operate on Material.paint_layers by marker."""
 
 import bpy
 from bpy.app.handlers import persistent
@@ -32,14 +33,6 @@ def _paint_layers_active_layer(context):
     return mat.paint_layers.active
 
 
-def _paint_layers_uv_autofill(context):
-    """Name the stack's UV layer after the object's active UV map when it is still empty."""
-    mat = context.material
-    obj = context.object
-    if mat is not None and obj is not None:
-        mat.paint_layers_uv_map_autofill(object=obj)
-
-
 class _PaintLayerOperator(Operator):
     """Base for the thin layer operators: undo, a report and the RNA notifier, and the row they
     act on taken from the operator or the material's active layer (a marker lookup).
@@ -66,249 +59,6 @@ class _PaintLayerOperator(Operator):
     def poll(cls, context):
         mat = context.material
         return mat is not None and mat.is_layered
-
-
-class MATERIAL_OT_paint_layer_add(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_add"
-    bl_label = "Add Paint Layer"
-    bl_description = "Add a row on top of the stack"
-
-    source: bpy.props.EnumProperty(
-        name="Source",
-        items=(
-            ('IMAGE', "Paint", "A painted layer"),
-            ('CONSTANT', "Fill", "A flat fill layer"),
-            ('STACK', "Folder", "A folder grouping other layers"),
-        ),
-        default='IMAGE',
-    )
-    name: bpy.props.StringProperty(name="Name")
-
-    def execute(self, context):
-        layers = context.material.paint_layers
-        _paint_layers_uv_autofill(context)
-        layer = layers.new(source=self.source, name=self.name)
-        if layer is not None:
-            layers.active = layer
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_remove(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_remove"
-    bl_label = "Remove Paint Layer"
-    bl_description = "Remove this row and everything nested under it"
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        context.material.paint_layers.remove(layer)
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_rename(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_rename"
-    bl_label = "Rename Paint Layer"
-
-    name: bpy.props.StringProperty(name="Name")
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        layer.name = self.name
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_duplicate(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_duplicate"
-    bl_label = "Duplicate Paint Layer"
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        layers = context.material.paint_layers
-        copy = layers.duplicate(layer)
-        if copy is not None:
-            layers.active = copy
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_group(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_group"
-    bl_label = "Group Paint Layers"
-    bl_description = "Fold this row and another into a new folder"
-
-    with_marker: bpy.props.StringProperty(
-        name="With",
-        description="UUID marker of the other row to fold in with",
-        options={'SKIP_SAVE'},
-    )
-
-    def execute(self, context):
-        layer = self._layer(context)
-        with_layer = (
-            context.material.paint_layers.find(self.with_marker) if self.with_marker else None
-        )
-        if layer is None or with_layer is None:
-            return {'CANCELLED'}
-        folder = context.material.paint_layers.group(layer, with_layer)
-        if folder is not None:
-            context.material.paint_layers.active = folder
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_ungroup(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_ungroup"
-    bl_label = "Ungroup Paint Layer"
-    bl_description = "Lift the rows of this folder into its parent and free the folder"
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        context.material.paint_layers.ungroup(layer)
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_move(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_move"
-    bl_label = "Move Paint Layer"
-
-    anchor_marker: bpy.props.StringProperty(
-        name="Anchor",
-        description="UUID marker of the row to move relative to; the top of the stack when unset",
-        options={'SKIP_SAVE'},
-    )
-    place: bpy.props.EnumProperty(
-        name="Place",
-        items=(
-            ('ABOVE', "Above", "Directly above the anchor"),
-            ('BELOW', "Below", "Directly below the anchor"),
-            ('INTO', "Into", "Inside the anchor folder"),
-        ),
-        default='ABOVE',
-    )
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        anchor = (
-            context.material.paint_layers.find(self.anchor_marker) if self.anchor_marker else None
-        )
-        context.material.paint_layers.move(layer, anchor, self.place)
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_mask_add(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_mask_add"
-    bl_label = "Add Paint Layer Mask"
-
-    value: bpy.props.FloatProperty(name="Value", min=0.0, max=1.0, default=1.0)
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        layer.mask_add(value=self.value)
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_correction_remove(_PaintLayerOperator):
-    """Remove a correction: an effect or a mask item, addressed by marker.
-
-    One operator for both (the removal itself is the same generic `layers.remove()` either way),
-    named and worded for a correction in general so the tooltip on an Effects-box button does not
-    lie about removing a mask; the Mask box passes a mask item's marker, the Effects box an
-    effect's, same as `paint_layer_correction_select` already does for "make active"."""
-
-    bl_idname = "material.paint_layer_correction_remove"
-    bl_label = "Remove Paint Layer Correction"
-
-    item_marker: bpy.props.StringProperty(
-        name="Correction",
-        description="UUID marker of the effect or mask item to remove; the layer's first mask "
-                    "item when unset",
-        options={'SKIP_SAVE'},
-    )
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        layers = context.material.paint_layers
-        item = layers.find(self.item_marker) if self.item_marker else None
-        if item is None:
-            # Unset only ever means "the layer's own first mask item" (e.g. a keymap shortcut with
-            # no explicit target); an Effects-box button always passes a marker.
-            item = layer.mask_stack[0] if len(layer.mask_stack) else None
-        if item is None:
-            return {'CANCELLED'}
-        layers.remove(item)
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_mask_toggle(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_mask_toggle"
-    bl_label = "Toggle Paint Layer Mask"
-
-    item_marker: bpy.props.StringProperty(
-        name="Mask Item",
-        description="UUID marker of the mask item to toggle; the first one when unset",
-        options={'SKIP_SAVE'},
-    )
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        layers = context.material.paint_layers
-        item = layers.find(self.item_marker) if self.item_marker else None
-        if item is None:
-            item = layer.mask_stack[0] if len(layer.mask_stack) else None
-        if item is None:
-            return {'CANCELLED'}
-        item.enabled = not item.enabled
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_correction_select(Operator):
-    """Make a correction or mask item the material's active row.
-
-    A plain `layout.prop` write in a panel's `draw()` is against the rules this add-on follows
-    (CLAUDE.md: never change data in draw()), so the Effect/Mask rows in the Layer Material tab
-    call this instead of assigning `paint_layers.active` straight from the UI. Reused by the
-    Effects and Mask boxes alike: an effect and a mask item are addressed by marker the same way.
-    """
-
-    bl_idname = "material.paint_layer_correction_select"
-    bl_label = "Select Paint Layer Row"
-    bl_options = {'UNDO', 'REGISTER'}
-
-    marker: bpy.props.StringProperty(
-        name="Row",
-        description="UUID marker of the correction or mask item to make active",
-        options={'SKIP_SAVE'},
-    )
-
-    @classmethod
-    def poll(cls, context):
-        mat = context.material
-        return mat is not None and mat.is_layered
-
-    def execute(self, context):
-        item = context.material.paint_layers.find(self.marker) if self.marker else None
-        if item is None:
-            return {'CANCELLED'}
-        context.material.paint_layers.active = item
-        return {'FINISHED'}
-
-
-# Dynamic enum items must stay referenced from Python: Blender keeps raw pointers to the strings of
-# the last returned list, so a list rebuilt on every call leaves the UI reading freed memory.
-_ENUM_ITEMS_CACHE = {}
 
 
 def _rna_enum_items_cached(struct, prop, keep=None):
@@ -428,51 +178,6 @@ class MATERIAL_OT_paint_layer_channel_toggle(_PaintLayerOperator):
         except RuntimeError as ex:
             self.report({'WARNING'}, str(ex))
             return {'CANCELLED'}
-        return {'FINISHED'}
-
-
-class MATERIAL_OT_paint_layer_correction_add(_PaintLayerOperator):
-    bl_idname = "material.paint_layer_correction_add"
-    bl_label = "Add Paint Layer Correction"
-
-    role: bpy.props.EnumProperty(
-        name="Role",
-        # A correction is Effect or Mask Item; Layer is a stack row, not something this operator
-        # ever creates.
-        items=lambda self, context: _rna_enum_items_cached(
-            "MaterialPaintLayer", "role", keep=('EFFECT', 'MASK_ITEM')),
-    )
-    source: bpy.props.EnumProperty(
-        name="Source",
-        # A correction reads a Material, a Node Group or a Stack exactly like a Layer row of the
-        # same kind (BKE_paint_layers_correction_add, phase 4).
-        items=lambda self, context: _rna_enum_items_cached("MaterialPaintLayer", "source"),
-    )
-    # Only meaningful when source is Mesh Map; the Mesh Map correction otherwise has no way to
-    # pick its map type at creation (the dedicated mesh_map_add_mask operator sets it the same
-    # way, after the fact, for the mask-only path this operator now covers for both roles).
-    mesh_map_type: bpy.props.EnumProperty(
-        name="Map Type",
-        items=lambda self, context: _rna_enum_items_cached("MaterialPaintLayer", "mesh_map_type"),
-    )
-    name: bpy.props.StringProperty(name="Name")
-
-    def execute(self, context):
-        layer = self._layer(context)
-        if layer is None:
-            return {'CANCELLED'}
-        _paint_layers_uv_autofill(context)
-        correction = layer.correction_add(role=self.role, source=self.source, name=self.name)
-        if correction is None:
-            return {'CANCELLED'}
-        if self.source == 'MESH_MAP':
-            correction.mesh_map_type = self.mesh_map_type
-        # Material and Node Group sources are picked afterward, through the same Source
-        # Material / Custom Group panels a Layer row uses (they key off the active row, whatever
-        # its role, not just the active Layer). Becoming the active row is what makes those panels
-        # (and the mask_channel field) show up for it at all, mirroring what paint_layer_add does
-        # for a fresh Layer row.
-        context.material.paint_layers.active = correction
         return {'FINISHED'}
 
 
@@ -947,21 +652,9 @@ def unregister():
 
 classes = (
     MATERIAL_OT_paint_layers_regenerate,
-    MATERIAL_OT_paint_layer_add,
-    MATERIAL_OT_paint_layer_remove,
-    MATERIAL_OT_paint_layer_rename,
-    MATERIAL_OT_paint_layer_duplicate,
-    MATERIAL_OT_paint_layer_group,
-    MATERIAL_OT_paint_layer_ungroup,
-    MATERIAL_OT_paint_layer_move,
-    MATERIAL_OT_paint_layer_mask_add,
-    MATERIAL_OT_paint_layer_correction_remove,
-    MATERIAL_OT_paint_layer_mask_toggle,
-    MATERIAL_OT_paint_layer_correction_select,
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
     MATERIAL_OT_paint_layer_channel_toggle,
-    MATERIAL_OT_paint_layer_correction_add,
     MATERIAL_OT_paint_layer_rebake,
     OBJECT_OT_mesh_map_refresh,
     MATERIAL_OT_mesh_map_add_layer,

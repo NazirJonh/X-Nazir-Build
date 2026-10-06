@@ -150,6 +150,50 @@ MaterialPaintLayer *BKE_paint_layers_mask_base(MaterialPaintLayer &layer);
 const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &layer);
 
 /**
+ * Call \a fn for each of \a layer's three sub-lists in the fixed order the file writer, the
+ * readers and the ID walk rely on: #MaterialPaintLayer::children, then #effects, then
+ * #mask_stack. This is the one place that traversal order lives, so the serialization order
+ * cannot drift between passes.
+ */
+template<typename Layer, typename Fn>
+inline void BKE_paint_layers_foreach_sublist(Layer &layer, Fn &&fn)
+{
+  fn(layer.children);
+  fn(layer.effects);
+  fn(layer.mask_stack);
+}
+
+/**
+ * Depth-first walk of \a ma's stack in the order the Outliner numbers its rows: a row, then its
+ * content corrections, then its mask corrections -- a Stack-sourced folder correction recursing
+ * into its own children exactly like a folder row -- then, for a folder, its children. \a fn
+ * receives the row and the layer it hangs on (null at the top level, its owning correction or
+ * folder otherwise; the base mask item is visited like any mask item). Return false from \a fn
+ * to stop the walk.
+ *
+ * This is the one definition of that order: the Outliner's ordinal arithmetic and its
+ * ordinal-to-row lookup are built on it, and the row builder's append order has to match.
+ */
+void BKE_paint_layers_foreach(
+    const Material &ma,
+    FunctionRef<bool(const MaterialPaintLayer &layer, const MaterialPaintLayer *parent)> fn);
+void BKE_paint_layers_foreach(
+    Material &ma, FunctionRef<bool(MaterialPaintLayer &layer, MaterialPaintLayer *parent)> fn);
+
+/**
+ * The list whose direct members include \a layer -- the top-level list, a folder's children or a
+ * layer's corrections -- or null when \a layer is not part of \a ma's description.
+ */
+ListBaseT<MaterialPaintLayer> *BKE_paint_layers_owner_list(Material &ma,
+                                                           const MaterialPaintLayer &layer);
+
+/**
+ * The layer whose children or corrections directly hold \a layer, or null when it hangs on the
+ * top level (or is not part of \a ma's description).
+ */
+MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer);
+
+/**
  * A flat walk of \a ma's description, bottom to top, with folders emitted and then their children.
  *
  * This is a traversal for identity and participation only, *not* the compositing parser: folders

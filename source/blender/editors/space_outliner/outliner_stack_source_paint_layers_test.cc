@@ -4,6 +4,7 @@
 
 #include "testing/testing.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_string.h"
 #include "BLI_uuid.h"
@@ -13,6 +14,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_target.hh"
 
 #include "DNA_image_types.h"
@@ -1099,6 +1101,115 @@ TEST_F(OutlinerStackPaintLayersSourceTest, stack_correction_and_mask_children_be
   const uint64_t before = source().state_hash(ctx, ma->id);
   effect_child->opacity = 0.5f;
   EXPECT_NE(source().state_hash(ctx, ma->id), before);
+}
+
+
+/**
+ * Phase 2, parity: the Outliner's Add verb is a thin ordinal adapter over the shared BKE policy
+ * (#BKE_paint_layers_add_with_policy), so two materials built by the same sequence of adds -- one
+ * through the adapter, one through BKE directly -- must come out structurally identical: the same
+ * sources, roles, default names, default channels and the same auto-created base mask.
+ */
+TEST_F(OutlinerStackPaintLayersSourceTest, add_policy_parity_between_outliner_verb_and_bke)
+{
+  Material *ma_outliner = BKE_material_add(bmain, "ParityOutliner");
+  Material *ma_bke = BKE_material_add(bmain, "ParityBKE");
+
+  auto expect_rows_match = [](const MaterialPaintLayer &a,
+                              const MaterialPaintLayer &b,
+                              const char *what) {
+    EXPECT_EQ(a.source, b.source) << what;
+    EXPECT_EQ(a.role, b.role) << what;
+    EXPECT_STREQ(a.name, b.name) << what;
+    EXPECT_EQ(a.channels_num, b.channels_num) << what;
+    EXPECT_EQ(bool(a.flag & MA_PAINT_LAYER_ENABLED), bool(b.flag & MA_PAINT_LAYER_ENABLED)) << what;
+    EXPECT_EQ(bool(a.flag & MA_PAINT_LAYER_MASK_BASE), bool(b.flag & MA_PAINT_LAYER_MASK_BASE))
+        << what;
+  };
+
+  MaterialPaintLayer *outliner_paint = nullptr;
+  MaterialPaintLayer *bke_paint = nullptr;
+  MaterialPaintLayer *outliner_folder = nullptr;
+  MaterialPaintLayer *bke_folder = nullptr;
+
+  /* The same sequence on both sides, compared step by step. */
+  const int paint_ordinal = paint_layers_edit_add(*ma_outliner, PAINT_STACK_ADD_PAINT, -1, {});
+  ASSERT_GE(paint_ordinal, 0);
+  outliner_paint = paint_description_row_for_ordinal(*ma_outliner, paint_ordinal);
+  PaintLayerAddParams paint_params;
+  paint_params.kind = PaintLayerAddKind::Paint;
+  bke_paint = BKE_paint_layers_add_with_policy(*ma_bke, paint_params);
+  ASSERT_NE(bke_paint, nullptr);
+  expect_rows_match(*outliner_paint, *bke_paint, "Paint layer");
+
+  const int fill_ordinal = paint_layers_edit_add(*ma_outliner, PAINT_STACK_ADD_FILL, -1, {});
+  ASSERT_GE(fill_ordinal, 0);
+  PaintLayerAddParams fill_params;
+  fill_params.kind = PaintLayerAddKind::Fill;
+  MaterialPaintLayer *bke_fill = BKE_paint_layers_add_with_policy(*ma_bke, fill_params);
+  ASSERT_NE(bke_fill, nullptr);
+  expect_rows_match(*paint_description_row_for_ordinal(*ma_outliner, fill_ordinal),
+                    *bke_fill,
+                    "Fill layer");
+  /* A fresh Fill starts with Base Color on, on both paths. */
+  bool fill_has_base_color = false;
+  for (const int i : IndexRange(bke_fill->channels_num)) {
+    fill_has_base_color |= bke_fill->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  }
+  EXPECT_TRUE(fill_has_base_color);
+
+  const int folder_ordinal = paint_layers_edit_add(*ma_outliner, PAINT_STACK_ADD_FOLDER, -1, {});
+  ASSERT_GE(folder_ordinal, 0);
+  outliner_folder = paint_description_row_for_ordinal(*ma_outliner, folder_ordinal);
+  PaintLayerAddParams folder_params;
+  folder_params.kind = PaintLayerAddKind::Folder;
+  bke_folder = BKE_paint_layers_add_with_policy(*ma_bke, folder_params);
+  ASSERT_NE(bke_folder, nullptr);
+  expect_rows_match(*outliner_folder, *bke_folder, "Folder");
+  EXPECT_TRUE(BKE_paint_layers_is_folder(*bke_folder));
+
+  /* A Paint correction under the Paint layer, with its full default channel set. */
+  const int effect_ordinal = paint_layers_edit_add(
+      *ma_outliner, PAINT_STACK_ADD_CORRECTION_PAINT, paint_ordinal, {});
+  ASSERT_GE(effect_ordinal, 0);
+  PaintLayerAddParams effect_params;
+  effect_params.kind = PaintLayerAddKind::EffectPaint;
+  effect_params.anchor = bke_paint;
+  MaterialPaintLayer *bke_effect = BKE_paint_layers_add_with_policy(*ma_bke, effect_params);
+  ASSERT_NE(bke_effect, nullptr);
+  expect_rows_match(*paint_description_row_for_ordinal(*ma_outliner, effect_ordinal),
+                    *bke_effect,
+                    "Paint correction");
+  EXPECT_EQ(BKE_paint_layers_effects(*bke_paint).size(), 1);
+
+  /* The first mask correction auto-creates the base mask on both paths. */
+  const int mask_ordinal = paint_layers_edit_add(
+      *ma_outliner, PAINT_STACK_ADD_MASK_CORRECTION_PAINT, paint_ordinal, {});
+  ASSERT_GE(mask_ordinal, 0);
+  PaintLayerAddParams mask_params;
+  mask_params.kind = PaintLayerAddKind::MaskPaint;
+  mask_params.anchor = bke_paint;
+  MaterialPaintLayer *bke_mask = BKE_paint_layers_add_with_policy(*ma_bke, mask_params);
+  ASSERT_NE(bke_mask, nullptr);
+  expect_rows_match(*paint_description_row_for_ordinal(*ma_outliner, mask_ordinal),
+                    *bke_mask,
+                    "Mask correction");
+  ASSERT_NE(BKE_paint_layers_mask_base(*bke_paint), nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_items(*bke_paint).size(), 2);
+
+  /* A layer added onto the folder nests inside it on both paths. */
+  const int child_ordinal = paint_layers_edit_add(
+      *ma_outliner, PAINT_STACK_ADD_PAINT, folder_ordinal, {});
+  ASSERT_GE(child_ordinal, 0);
+  PaintLayerAddParams child_params;
+  child_params.kind = PaintLayerAddKind::Paint;
+  child_params.anchor = bke_folder;
+  MaterialPaintLayer *bke_child = BKE_paint_layers_add_with_policy(*ma_bke, child_params);
+  ASSERT_NE(bke_child, nullptr);
+  expect_rows_match(*paint_description_row_for_ordinal(*ma_outliner, child_ordinal),
+                    *bke_child,
+                    "Folder child");
+  EXPECT_FALSE(BLI_listbase_is_empty(&bke_folder->children));
 }
 
 }  // namespace tests

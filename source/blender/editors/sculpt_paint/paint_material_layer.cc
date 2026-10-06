@@ -45,36 +45,6 @@
 
 namespace blender::ed::sculpt_paint::material_layer {
 
-/** Whether \a marker names \a layer or anything nested under it (children, effects, mask items). */
-static bool paint_layer_subtree_has_marker(const MaterialPaintLayer &layer, const bUUID &marker)
-{
-  if (BLI_uuid_equal(layer.marker, marker)) {
-    return true;
-  }
-  for (const MaterialPaintLayer &child :
-       layer.children)
-  {
-    if (paint_layer_subtree_has_marker(child, marker)) {
-      return true;
-    }
-  }
-  for (const MaterialPaintLayer &effect :
-       layer.effects)
-  {
-    if (paint_layer_subtree_has_marker(effect, marker)) {
-      return true;
-    }
-  }
-  for (const MaterialPaintLayer &mask_item :
-       layer.mask_stack)
-  {
-    if (paint_layer_subtree_has_marker(mask_item, marker)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool mask_target_is_removed(const Material &ma, const bUUID &removed_marker, const int8_t target_mode)
 {
   if (target_mode != PAINT_LAYER_TARGET_MASK || BLI_uuid_is_nil(ma.active_layer_marker)) {
@@ -82,7 +52,7 @@ bool mask_target_is_removed(const Material &ma, const bUUID &removed_marker, con
   }
   const MaterialPaintLayer *removed = BKE_paint_layers_find(
       const_cast<Material &>(ma), removed_marker);
-  return removed != nullptr && paint_layer_subtree_has_marker(*removed, ma.active_layer_marker);
+  return removed != nullptr && BKE_paint_layers_subtree_contains(*removed, ma.active_layer_marker);
 }
 
 MaterialPaintLayer *add_material_layer_from_material(bContext &C,
@@ -94,6 +64,18 @@ MaterialPaintLayer *add_material_layer_from_material(bContext &C,
   using namespace ed::material_bake;
   Main *bmain = CTX_data_main(&C);
   if (bmain == nullptr) {
+    return nullptr;
+  }
+  /* The cycle check comes before anything else: the make-local below can swap the linked source
+   * for its local copy, and the refusal has to name the material the user picked. */
+  if (&source == &owner) {
+    BKE_report(CTX_wm_reports(&C), RPT_ERROR, "A layered material cannot bake itself");
+    return nullptr;
+  }
+  if (BKE_paint_layers_material_depends_on(source, owner)) {
+    BKE_report(CTX_wm_reports(&C),
+               RPT_ERROR,
+               "That material already bakes this one; it would form a cycle");
     return nullptr;
   }
   /* The layer re-bakes from its source, so a linked source has to be local first; the same the
@@ -141,8 +123,12 @@ MaterialPaintLayer *add_material_layer_from_material(bContext &C,
   if (layer == nullptr) {
     return nullptr;
   }
-  layer->material = picked;
-  id_us_plus(&picked->id);
+  if (!BKE_paint_layers_set_material(owner, layer, picked)) {
+    /* The only refusal left here is a cycle through the local copy of a linked source; a row
+     * without a source must not be left behind. */
+    BKE_paint_layers_remove(owner, layer);
+    return nullptr;
+  }
 
   wmWindowManager *wm = CTX_wm_manager(&C);
   if (wm != nullptr) {

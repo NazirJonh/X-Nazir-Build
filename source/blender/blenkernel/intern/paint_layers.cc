@@ -40,6 +40,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 
+#include "BLI_function_ref.hh"
 #include "BLI_hash.hh"
 #include "BLI_set.hh"
 #include "BLI_time.h"
@@ -631,6 +632,104 @@ void paint_layers_flatten_all_list(const ListBaseT<MaterialPaintLayer> &list,
 void BKE_paint_layers_flatten_all(const Material &ma, Vector<const MaterialPaintLayer *> &r_rows)
 {
   paint_layers_flatten_all_list(ma.paint_layers, r_rows);
+}
+
+namespace {
+
+/** The one implementation of the Outliner's row order; see #BKE_paint_layers_foreach. */
+bool paint_layers_foreach_list(
+    const ListBaseT<MaterialPaintLayer> &list,
+    const MaterialPaintLayer *parent,
+    FunctionRef<bool(const MaterialPaintLayer &, const MaterialPaintLayer *)> fn)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    if (!fn(layer, parent)) {
+      return false;
+    }
+    for (const MaterialPaintLayer *correction : BKE_paint_layers_effects(layer)) {
+      if (!fn(*correction, &layer)) {
+        return false;
+      }
+      if (BKE_paint_layers_is_folder(*correction)) {
+        if (!paint_layers_foreach_list(correction->children, correction, fn)) {
+          return false;
+        }
+      }
+    }
+    for (const MaterialPaintLayer *correction : BKE_paint_layers_mask_items(layer)) {
+      if (!fn(*correction, &layer)) {
+        return false;
+      }
+      if (BKE_paint_layers_is_folder(*correction)) {
+        if (!paint_layers_foreach_list(correction->children, correction, fn)) {
+          return false;
+        }
+      }
+    }
+    if (BKE_paint_layers_is_folder(layer)) {
+      if (!paint_layers_foreach_list(layer.children, &layer, fn)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** The layer whose sub-lists directly hold \a target, or null at the top level. */
+const MaterialPaintLayer *paint_layers_parent_of(const ListBaseT<MaterialPaintLayer> &list,
+                                                 const MaterialPaintLayer &target)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    for (const ListBaseT<MaterialPaintLayer> *sublist :
+         {&layer.children, &layer.effects, &layer.mask_stack})
+    {
+      for (const MaterialPaintLayer &item : *sublist) {
+        if (&item == &target) {
+          return &layer;
+        }
+      }
+    }
+    for (const ListBaseT<MaterialPaintLayer> *sublist :
+         {&layer.children, &layer.effects, &layer.mask_stack})
+    {
+      if (const MaterialPaintLayer *found = paint_layers_parent_of(*sublist, target)) {
+        return found;
+      }
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+void BKE_paint_layers_foreach(
+    const Material &ma,
+    FunctionRef<bool(const MaterialPaintLayer &layer, const MaterialPaintLayer *parent)> fn)
+{
+  paint_layers_foreach_list(ma.paint_layers, nullptr, fn);
+}
+
+void BKE_paint_layers_foreach(
+    Material &ma, FunctionRef<bool(MaterialPaintLayer &layer, MaterialPaintLayer *parent)> fn)
+{
+  paint_layers_foreach_list(ma.paint_layers,
+                            nullptr,
+                            [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *parent)
+                                -> bool {
+                              return fn(const_cast<MaterialPaintLayer &>(layer),
+                                        const_cast<MaterialPaintLayer *>(parent));
+                            });
+}
+
+ListBaseT<MaterialPaintLayer> *BKE_paint_layers_owner_list(Material &ma,
+                                                           const MaterialPaintLayer &layer)
+{
+  return paint_layer_owner_list(&ma.paint_layers, &layer);
+}
+
+MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer)
+{
+  return const_cast<MaterialPaintLayer *>(paint_layers_parent_of(ma.paint_layers, layer));
 }
 
 float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer)

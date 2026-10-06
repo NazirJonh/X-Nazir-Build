@@ -45,6 +45,7 @@
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
@@ -141,120 +142,28 @@ int paint_stack_selected_channel(const StackReadContext &ctx)
 }
 
 /**
- * The list whose direct members include \a target -- the top-level list, a folder's children or a
- * layer's corrections -- or null when \a target is not part of \a list.
+ * The ordinal #paint_stack_rows_from_description would give \a target, or -1. The order is the one
+ * #BKE_paint_layers_foreach defines, which is what the row builder's #append_corrections appends
+ * in; the base mask item consumes an ordinal without a row of its own here too.
  */
-ListBaseT<MaterialPaintLayer> *layers_owner_list(ListBaseT<MaterialPaintLayer> *list,
-                                                 const MaterialPaintLayer *target)
-{
-  for (MaterialPaintLayer &layer : *list) {
-    if (&layer == target) {
-      return list;
-    }
-    if (ListBaseT<MaterialPaintLayer> *found = layers_owner_list(&layer.children, target)) {
-      return found;
-    }
-    if (ListBaseT<MaterialPaintLayer> *found = layers_owner_list(&layer.effects, target)) {
-      return found;
-    }
-    if (ListBaseT<MaterialPaintLayer> *found = layers_owner_list(&layer.mask_stack, target)) {
-      return found;
-    }
-  }
-  return nullptr;
-}
-
-/** The layer whose children or corrections directly hold \a target, or null at the top level. */
-MaterialPaintLayer *layers_parent_layer(ListBaseT<MaterialPaintLayer> &list,
-                                        const MaterialPaintLayer *target)
-{
-  for (MaterialPaintLayer &layer : list) {
-    for (const MaterialPaintLayer &child : layer.children) {
-      if (&child == target) {
-        return &layer;
-      }
-    }
-    for (const MaterialPaintLayer &effect : layer.effects) {
-      if (&effect == target) {
-        return &layer;
-      }
-    }
-    for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-      if (&mask_item == target) {
-        return &layer;
-      }
-    }
-    if (MaterialPaintLayer *found = layers_parent_layer(layer.children, target)) {
-      return found;
-    }
-    if (MaterialPaintLayer *found = layers_parent_layer(layer.effects, target)) {
-      return found;
-    }
-    if (MaterialPaintLayer *found = layers_parent_layer(layer.mask_stack, target)) {
-      return found;
-    }
-  }
-  return nullptr;
-}
-
-/**
- * The ordinal #paint_stack_rows_from_description would give \a target, or -1. Walks in the same
- * order the rows are built: a row, then its content corrections, its mask corrections, then its
- * children.
- */
-int layers_ordinal_of(const ListBaseT<MaterialPaintLayer> &list,
-                      const MaterialPaintLayer *target,
-                      int &r_index)
-{
-  for (const MaterialPaintLayer &layer : list) {
-    if (&layer == target) {
-      return r_index;
-    }
-    r_index++;
-    for (const MaterialPaintLayer *correction : BKE_paint_layers_effects(layer)) {
-      if (correction == target) {
-        return r_index;
-      }
-      r_index++;
-      /* A Stack-sourced effect is a folder like any other (Phase 6, goal 4): its own children
-       * consume ordinals here, in lockstep with #paint_stack_rows_from_description_impl's
-       * #append_corrections, which is what actually numbers the rows the Outliner hands back. */
-      if (BKE_paint_layers_is_folder(*correction)) {
-        const int found = layers_ordinal_of(correction->children, target, r_index);
-        if (found >= 0) {
-          return found;
-        }
-      }
-    }
-    for (const MaterialPaintLayer *correction : BKE_paint_layers_mask_items(layer)) {
-      if (correction == target) {
-        return r_index;
-      }
-      r_index++;
-      if (BKE_paint_layers_is_folder(*correction)) {
-        const int found = layers_ordinal_of(correction->children, target, r_index);
-        if (found >= 0) {
-          return found;
-        }
-      }
-    }
-    if (BKE_paint_layers_is_folder(layer)) {
-      const int found = layers_ordinal_of(layer.children, target, r_index);
-      if (found >= 0) {
-        return found;
-      }
-    }
-  }
-  return -1;
-}
-
 int layers_ordinal_of(const Material &ma, const MaterialPaintLayer *target)
 {
   if (target == nullptr) {
     return -1;
   }
   int index = 0;
-  return layers_ordinal_of(ma.paint_layers, target, index);
+  int found = -1;
+  BKE_paint_layers_foreach(ma,
+                           [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/)
+                               -> bool {
+                             if (&layer == target) {
+                               found = index;
+                               return false;
+                             }
+                             index++;
+                             return true;
+                           });
+  return found;
 }
 
 /** Set a layered material's target mode, resolving the active Paint the same way the operator
@@ -723,42 +632,48 @@ void paint_stack_rows_from_description_impl(const Material &material,
  * notifiers on top.
  * \{ */
 
-/** Highest N among the rows named `"<base> N"` in \a list and everything nested under it. */
-static int paint_layer_name_number_max(const ListBaseT<MaterialPaintLayer> &list,
-                                       const StringRef base)
+namespace {
+/** The Add policy lives in BKE (#BKE_paint_layers_add_with_policy); this only translates the
+ * source's Add vocabulary and the anchor ordinal into the BKE call's terms. */
+PaintLayerAddKind stack_add_kind_to_paint_kind(const int kind)
 {
-  int highest = 0;
-  for (const MaterialPaintLayer &layer : list) {
-    const StringRef name = layer.name;
-    if (name.startswith(base) && name.size() > base.size() + 1 && name[base.size()] == ' ') {
-      const StringRef digits = name.drop_prefix(base.size() + 1);
-      int number = 0;
-      bool all_digits = true;
-      for (const char c : digits) {
-        all_digits &= (c >= '0' && c <= '9');
-        number = (number < 100000) ? number * 10 + (c - '0') : number;
-      }
-      if (all_digits) {
-        highest = std::max(highest, number);
-      }
-    }
-    highest = std::max(highest, paint_layer_name_number_max(layer.children, base));
-    highest = std::max(highest, paint_layer_name_number_max(layer.effects, base));
-    highest = std::max(highest, paint_layer_name_number_max(layer.mask_stack, base));
+  switch (kind) {
+    case PAINT_STACK_ADD_PAINT:
+      return PaintLayerAddKind::Paint;
+    case PAINT_STACK_ADD_FILL:
+      return PaintLayerAddKind::Fill;
+    case PAINT_STACK_ADD_MATERIAL:
+      return PaintLayerAddKind::Material;
+    case PAINT_STACK_ADD_FOLDER:
+      return PaintLayerAddKind::Folder;
+    case PAINT_STACK_ADD_CORRECTION_PAINT:
+      return PaintLayerAddKind::EffectPaint;
+    case PAINT_STACK_ADD_CORRECTION_FILL:
+      return PaintLayerAddKind::EffectFill;
+    case PAINT_STACK_ADD_CORRECTION_MESH_MAP:
+      return PaintLayerAddKind::EffectMeshMap;
+    case PAINT_STACK_ADD_CORRECTION_MATERIAL:
+      return PaintLayerAddKind::EffectMaterial;
+    case PAINT_STACK_ADD_CORRECTION_NODE_GROUP:
+      return PaintLayerAddKind::EffectNodeGroup;
+    case PAINT_STACK_ADD_CORRECTION_STACK:
+      return PaintLayerAddKind::EffectStack;
+    case PAINT_STACK_ADD_MASK_CORRECTION_PAINT:
+      return PaintLayerAddKind::MaskPaint;
+    case PAINT_STACK_ADD_MASK_CORRECTION_FILL:
+      return PaintLayerAddKind::MaskFill;
+    case PAINT_STACK_ADD_MASK_CORRECTION_MESH_MAP:
+      return PaintLayerAddKind::MaskMeshMap;
+    case PAINT_STACK_ADD_MASK_CORRECTION_MATERIAL:
+      return PaintLayerAddKind::MaskMaterial;
+    case PAINT_STACK_ADD_MASK_CORRECTION_NODE_GROUP:
+      return PaintLayerAddKind::MaskNodeGroup;
+    case PAINT_STACK_ADD_MASK_CORRECTION_STACK:
+      return PaintLayerAddKind::MaskStack;
   }
-  return highest;
+  return PaintLayerAddKind::Paint;
 }
-
-/**
- * The next default name for a new row: `"<base> N"`, one past the highest N in use. Rows are
- * identified by their marker, never by name, so this only keeps the list readable and two rows
- * sharing a name (after a rename or a paste) is fine.
- */
-static std::string paint_layer_next_name(const Material &material, const StringRef base)
-{
-  const int next = paint_layer_name_number_max(material.paint_layers, base) + 1;
-  return std::string(base) + " " + std::to_string(next);
-}
+}  // namespace
 
 int paint_layers_edit_add(Material &material,
                           const int kind,
@@ -770,147 +685,13 @@ int paint_layers_edit_add(Material &material,
   if (ordinal >= 0 && anchor == nullptr) {
     return -1;
   }
-
-  const bool is_mesh_map_correction = ELEM(
-      kind, PAINT_STACK_ADD_CORRECTION_MESH_MAP, PAINT_STACK_ADD_MASK_CORRECTION_MESH_MAP);
-  const bool is_material_correction = ELEM(
-      kind, PAINT_STACK_ADD_CORRECTION_MATERIAL, PAINT_STACK_ADD_MASK_CORRECTION_MATERIAL);
-  const bool is_node_group_correction = ELEM(
-      kind, PAINT_STACK_ADD_CORRECTION_NODE_GROUP, PAINT_STACK_ADD_MASK_CORRECTION_NODE_GROUP);
-  const bool is_stack_correction = ELEM(
-      kind, PAINT_STACK_ADD_CORRECTION_STACK, PAINT_STACK_ADD_MASK_CORRECTION_STACK);
-  const bool is_correction = ELEM(kind,
-                                  PAINT_STACK_ADD_CORRECTION_PAINT,
-                                  PAINT_STACK_ADD_CORRECTION_FILL,
-                                  PAINT_STACK_ADD_MASK_CORRECTION_PAINT,
-                                  PAINT_STACK_ADD_MASK_CORRECTION_FILL) ||
-                             is_mesh_map_correction || is_material_correction ||
-                             is_node_group_correction || is_stack_correction;
-  MaterialPaintLayer *created = nullptr;
-  if (is_correction) {
-    if (anchor == nullptr) {
-      return -1;
-    }
-    MaterialPaintLayer *layer = (BKE_paint_layers_role(*anchor) != PaintLayerRole::Layer) ?
-                                    layers_parent_layer(material.paint_layers, anchor) :
-                                    anchor;
-    /* A folder takes corrections too: content corrections edit its isolated result, mask
-     * corrections edit its coverage, exactly as they do for a leaf. */
-    if (layer == nullptr) {
-      return -1;
-    }
-    const bool mask_section = ELEM(kind,
-                                   PAINT_STACK_ADD_MASK_CORRECTION_PAINT,
-                                   PAINT_STACK_ADD_MASK_CORRECTION_FILL,
-                                   PAINT_STACK_ADD_MASK_CORRECTION_MESH_MAP,
-                                   PAINT_STACK_ADD_MASK_CORRECTION_MATERIAL,
-                                   PAINT_STACK_ADD_MASK_CORRECTION_NODE_GROUP,
-                                   PAINT_STACK_ADD_MASK_CORRECTION_STACK);
-    const bool fill_effect = ELEM(
-        kind, PAINT_STACK_ADD_CORRECTION_FILL, PAINT_STACK_ADD_MASK_CORRECTION_FILL);
-    int source = MA_PAINT_LAYER_SOURCE_IMAGE;
-    if (fill_effect) {
-      source = MA_PAINT_LAYER_SOURCE_CONSTANT;
-    }
-    else if (is_mesh_map_correction) {
-      source = MA_PAINT_LAYER_SOURCE_MESH_MAP;
-    }
-    else if (is_material_correction) {
-      source = MA_PAINT_LAYER_SOURCE_MATERIAL;
-    }
-    else if (is_node_group_correction) {
-      source = MA_PAINT_LAYER_SOURCE_NODE_GROUP;
-    }
-    else if (is_stack_correction) {
-      source = MA_PAINT_LAYER_SOURCE_STACK;
-    }
-    if (mask_section && BKE_paint_layers_mask_base(*layer) == nullptr) {
-      /* A correction layers over the base mask; make the base first, so the user can paint in the
-       * mask without adding one by hand and the hierarchy never shifts afterwards. */
-      BKE_paint_layers_mask_add(material, layer, 1.0f);
-    }
-    created = BKE_paint_layers_correction_add(material,
-                                              layer,
-                                              mask_section ? MA_PAINT_LAYER_ROLE_MASK_ITEM :
-                                                             MA_PAINT_LAYER_ROLE_EFFECT,
-                                              source,
-                                              source == MA_PAINT_LAYER_SOURCE_CONSTANT ? "Fill" :
-                                              source == MA_PAINT_LAYER_SOURCE_IMAGE    ? "Paint" :
-                                                                                         "Correction",
-                                              anchor);
-    /* A fresh Fill starts with Base Color on; without any record it would be the legacy constant in
-     * every channel, which fills channels the user never switched on. */
-    if (created != nullptr && !mask_section && source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
-      BKE_paint_layers_channel_add(material, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    }
-    /* A fresh Paint correction has every channel of the set on, like a Paint layer. */
-    if (created != nullptr && !mask_section && source == MA_PAINT_LAYER_SOURCE_IMAGE) {
-      BKE_paint_layers_default_channels_apply(material, *created);
-    }
-    /* Material and Node Group take their source the same way #PAINT_STACK_ADD_MATERIAL does
-     * (#StackAddArgs::source), but unlike a Layer row this is not an eager bake: the correction is
-     * left empty when no source is given (or the wrong ID type is), pickable afterward through the
-     * same Source Material / Custom Group panel a Layer row of that source already reuses (Phase
-     * 6, goal 2). */
-    if (created != nullptr && is_material_correction && args.source != nullptr &&
-        GS(args.source->name) == ID_MA)
-    {
-      BKE_paint_layers_set_material(material, created, id_cast<Material *>(args.source));
-    }
-    else if (created != nullptr && is_node_group_correction && args.source != nullptr &&
-             GS(args.source->name) == ID_NT)
-    {
-      BKE_paint_layers_set_custom_group(material, created, id_cast<bNodeTree *>(args.source));
-    }
-  }
-  else {
-    PaintLayerPlace place = PaintLayerPlace::Above;
-    if (anchor != nullptr && BKE_paint_layers_is_folder(*anchor)) {
-      place = PaintLayerPlace::Into;
-    }
-    if (kind == PAINT_STACK_ADD_MATERIAL) {
-      /* A Material layer bakes a source material; the source arrives in #StackAddArgs. The bake
-       * itself is requested by the caller that has a context (see the Add verb), so this stays
-       * description-only. */
-      Material *source = (args.source != nullptr && GS(args.source->name) == ID_MA) ?
-                             id_cast<Material *>(args.source) :
-                             nullptr;
-      if (source == nullptr) {
-        return -1;
-      }
-      created = BKE_paint_layers_add(
-          material, MA_PAINT_LAYER_SOURCE_MATERIAL, source->id.name + 2, anchor, place);
-      if (created != nullptr && !BKE_paint_layers_set_material(material, created, source)) {
-        BKE_paint_layers_remove(material, created);
-        created = nullptr;
-      }
-      return (created != nullptr) ? layers_ordinal_of(material, created) : -1;
-    }
-    eMaterialPaintLayerSource layer_source = MA_PAINT_LAYER_SOURCE_IMAGE;
-    const char *name_base = "Layer";
-    if (kind == PAINT_STACK_ADD_FILL) {
-      layer_source = MA_PAINT_LAYER_SOURCE_CONSTANT;
-      name_base = "Fill";
-    }
-    else if (kind == PAINT_STACK_ADD_FOLDER) {
-      layer_source = MA_PAINT_LAYER_SOURCE_STACK;
-      name_base = "Folder";
-    }
-    const std::string name = paint_layer_next_name(material, name_base);
-    created = BKE_paint_layers_add(material, layer_source, name.c_str(), anchor, place);
-    if (created != nullptr) {
-      /* The default channel set is a policy of its own (see the BKE helper); the Add only places
-       * the row. */
-      BKE_paint_layers_default_channels_apply(material, *created);
-    }
-    if (created != nullptr && kind == PAINT_STACK_ADD_FILL && args.color != nullptr) {
-      BKE_paint_layers_set_fill_color(material, created, args.color);
-    }
-  }
-  if (created == nullptr) {
-    return -1;
-  }
-  return layers_ordinal_of(material, created);
+  PaintLayerAddParams params;
+  params.kind = stack_add_kind_to_paint_kind(kind);
+  params.anchor = anchor;
+  params.source = args.source;
+  params.fill_color = args.color;
+  MaterialPaintLayer *created = BKE_paint_layers_add_with_policy(material, params);
+  return (created != nullptr) ? layers_ordinal_of(material, created) : -1;
 }
 
 bool paint_layers_edit_remove(Material &material, const int ordinal)
@@ -932,59 +713,10 @@ bool paint_layers_edit_move(Material &material,
   if (from == nullptr || (anchor_ordinal >= 0 && anchor == nullptr)) {
     return false;
   }
-  bool edited = false;
-  /* Effect and mask-item rows are children of a layer, not stack members: they move only within
-   * their owner's corrections and never into a folder. */
-  auto is_correction = [](const MaterialPaintLayer *layer) {
-    return layer != nullptr && BKE_paint_layers_role(*layer) != PaintLayerRole::Layer;
-  };
-  if (place == StackMovePlace::Into && anchor != nullptr && !BKE_paint_layers_is_folder(*anchor)) {
-    if (is_correction(from) || is_correction(anchor)) {
-      return false;
-    }
-    Vector<MaterialPaintLayer *> to_group{anchor, from};
-    edited = BKE_paint_layers_group(material, to_group) != nullptr;
-  }
-  else if (is_correction(from) || is_correction(anchor))
-  {
-    if (!is_correction(from) || anchor == nullptr || !is_correction(anchor) ||
-        place == StackMovePlace::Into)
-    {
-      return false;
-    }
-    ListBase *owner_list = layers_owner_list(&material.paint_layers, from);
-    if (owner_list == nullptr ||
-        layers_owner_list(&material.paint_layers, anchor) != owner_list)
-    {
-      return false;
-    }
-    const int anchor_index = BLI_findindex(owner_list, anchor);
-    const int from_index = BLI_findindex(owner_list, from);
-    if (anchor_index < 0 || from_index < 0) {
-      return false;
-    }
-    /* The screen lists attached rows top first (#outliner_stack_attached_rows_plan walks them
-     * backward), so the row drawn above the anchor sits later in storage, and the row drawn below it
-     * earlier. #BKE_paint_layers_reorder takes the index the row ends up at, after it left its old
-     * slot, so an anchor behind the row has shifted one place by the time the row is put back. */
-    int target_index = (place == StackMovePlace::Below) ? anchor_index : anchor_index + 1;
-    if (from_index < target_index) {
-      target_index--;
-    }
-    edited = BKE_paint_layers_reorder(material, from, target_index);
-  }
-  else
-  {
-    PaintLayerPlace layer_place = PaintLayerPlace::Above;
-    if (place == StackMovePlace::Below) {
-      layer_place = PaintLayerPlace::Below;
-    }
-    else if (place == StackMovePlace::Into) {
-      layer_place = PaintLayerPlace::Into;
-    }
-    edited = BKE_paint_layers_move(material, from, anchor, layer_place);
-  }
-  if (!edited) {
+  const PaintLayerPlace layer_place = (place == StackMovePlace::Below) ? PaintLayerPlace::Below :
+                                      (place == StackMovePlace::Into) ? PaintLayerPlace::Into :
+                                                                        PaintLayerPlace::Above;
+  if (!BKE_paint_layers_edit_move(material, *from, anchor, layer_place)) {
     return false;
   }
   if (r_ordinal != nullptr) {
@@ -1018,24 +750,7 @@ bool paint_layers_edit_rename(Material &material, const int ordinal, const char 
 bool paint_layers_edit_mask_set(Material &material, const int ordinal, const bool add)
 {
   MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
-  /* A correction's own coverage is its mask stack; a folder takes a mask like any row. */
-  if (layer == nullptr || BKE_paint_layers_role(*layer) != PaintLayerRole::Layer) {
-    return false;
-  }
-  if (add) {
-    /* One base mask per layer: a second Add Mask would move the base out from under the user. */
-    if (BKE_paint_layers_mask_base(*layer) != nullptr) {
-      return false;
-    }
-    return BKE_paint_layers_mask_add(material, layer, 1.0f) != nullptr;
-  }
-  /* Remove Mask takes the base together with every correction over it: the mask is gone. */
-  const Vector<MaterialPaintLayer *> items = BKE_paint_layers_mask_items(*layer);
-  bool removed = false;
-  for (MaterialPaintLayer *item : items) {
-    removed |= BKE_paint_layers_remove(material, item);
-  }
-  return removed;
+  return layer != nullptr && BKE_paint_layers_edit_mask_set(material, *layer, add);
 }
 
 bool paint_layers_edit_mask_toggle(Material &material, const int ordinal)
@@ -1059,20 +774,10 @@ int paint_layers_edit_merge_down(Material &material, const int ordinal)
   MaterialPaintLayer *lower = (ordinal > 0) ?
                                   paint_description_row_for_ordinal(material, ordinal - 1) :
                                   nullptr;
-  if (upper == nullptr || lower == nullptr ||
-      BKE_paint_layers_role(*upper) != PaintLayerRole::Layer ||
-      BKE_paint_layers_role(*lower) != PaintLayerRole::Layer)
-  {
+  if (upper == nullptr || lower == nullptr) {
     return -1;
   }
-  ListBase *owner_list = layers_owner_list(&material.paint_layers, upper);
-  if (owner_list == nullptr ||
-      layers_owner_list(&material.paint_layers, lower) != owner_list)
-  {
-    return -1;
-  }
-  Vector<MaterialPaintLayer *> to_group{lower, upper};
-  MaterialPaintLayer *folder = BKE_paint_layers_group(material, to_group);
+  MaterialPaintLayer *folder = BKE_paint_layers_edit_merge_down(material, *upper, *lower);
   return (folder != nullptr) ? layers_ordinal_of(material, folder) : -1;
 }
 
@@ -1086,15 +791,12 @@ int paint_layers_edit_group_range(Material &material, const int from_ordinal, co
   Vector<MaterialPaintLayer *> to_group;
   for (int ordinal = low; ordinal <= high; ordinal++) {
     MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
-    if (layer == nullptr || BKE_paint_layers_role(*layer) != PaintLayerRole::Layer) {
+    if (layer == nullptr) {
       return -1;
     }
     to_group.append(layer);
   }
-  if (to_group.is_empty()) {
-    return -1;
-  }
-  MaterialPaintLayer *folder = BKE_paint_layers_group(material, to_group);
+  MaterialPaintLayer *folder = BKE_paint_layers_edit_group_range(material, to_group);
   return (folder != nullptr) ? layers_ordinal_of(material, folder) : -1;
 }
 
@@ -1115,9 +817,7 @@ int paint_layers_edit_group_add(Material &material, const int ordinal)
   if (ordinal >= 0 && anchor == nullptr) {
     return -1;
   }
-  const std::string name = paint_layer_next_name(material, "Folder");
-  MaterialPaintLayer *folder = BKE_paint_layers_add(
-      material, MA_PAINT_LAYER_SOURCE_STACK, name.c_str(), anchor, PaintLayerPlace::Above);
+  MaterialPaintLayer *folder = BKE_paint_layers_edit_group_add(material, anchor);
   return (folder != nullptr) ? layers_ordinal_of(material, folder) : -1;
 }
 
@@ -1138,20 +838,10 @@ bool paint_layers_edit_reorder(Material &material, const int from_ordinal, const
 {
   MaterialPaintLayer *from = paint_description_row_for_ordinal(material, from_ordinal);
   MaterialPaintLayer *to = paint_description_row_for_ordinal(material, to_ordinal);
-  if (from == nullptr || to == nullptr || from == to ||
-      BKE_paint_layers_role(*from) != PaintLayerRole::Layer ||
-      BKE_paint_layers_role(*to) != PaintLayerRole::Layer)
-  {
+  if (from == nullptr || to == nullptr) {
     return false;
   }
-  ListBase *owner_list = layers_owner_list(&material.paint_layers, from);
-  if (owner_list == nullptr ||
-      layers_owner_list(&material.paint_layers, to) != owner_list)
-  {
-    return false;
-  }
-  const int index = BLI_findindex(owner_list, to);
-  return index >= 0 && BKE_paint_layers_reorder(material, from, index);
+  return BKE_paint_layers_edit_reorder(material, *from, *to);
 }
 
 /** \} */
@@ -1598,14 +1288,8 @@ class PaintLayersStackSource final : public StackSource,
         BKE_report(reports, RPT_ERROR, "Choose a material to bake from");
         return -1;
       }
-      if (source == &material) {
-        BKE_report(reports, RPT_ERROR, "A layered material cannot bake itself");
-        return -1;
-      }
-      if (BKE_paint_layers_material_depends_on(*source, material)) {
-        BKE_report(reports, RPT_ERROR, "That material already bakes this one; it would form a cycle");
-        return -1;
-      }
+      /* Self and cycle sources are refused by #add_material_layer_from_material itself: one
+       * report path for every authoring entry. */
       MaterialPaintLayer *anchor = (ordinal < 0) ?
                                        nullptr :
                                        paint_description_row_for_ordinal(material, ordinal);
@@ -2065,7 +1749,7 @@ class PaintLayersStackSource final : public StackSource,
    * for images, a file dropped from outside Blender (#drop_resolve).
    * \{ */
 
-  bool can_accept(const StackReadContext & /*ctx*/,
+  bool can_accept(const StackReadContext &ctx,
                   const ID &owner,
                   const StackDropPayload &payload,
                   const StackDropTarget &target,
@@ -2109,6 +1793,23 @@ class PaintLayersStackSource final : public StackSource,
       if (!this->can_reorder(owner)) {
         *r_disabled_hint = TIP_("The layered material is linked or overridden");
         return false;
+      }
+      /* The same refusals the Add verb reports: the drop states them up front, as a hint on the
+       * gesture the user is making right now. */
+      const Material &material = layers_owner(owner);
+      for (Material &candidate : ctx.bmain->materials) {
+        if (candidate.id.session_uid == payload.id_uid) {
+          if (&candidate == &material) {
+            *r_disabled_hint = TIP_("A layered material cannot bake itself");
+            return false;
+          }
+          if (BKE_paint_layers_material_depends_on(candidate, material)) {
+            *r_disabled_hint = TIP_(
+                "That material already bakes this one; it would form a cycle");
+            return false;
+          }
+          break;
+        }
       }
       return true;
     }
@@ -2370,53 +2071,21 @@ void paint_stack_rows_from_description(const Material &material,
 
 MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, const int ordinal)
 {
+  /* The inverse of #layers_ordinal_of: both count the same #BKE_paint_layers_foreach order. The
+   * base mask item consumes an ordinal in the builder without a row of its own, and this hands
+   * the item back for that ordinal -- the same answer both lookups agree on. */
   int index = 0;
   MaterialPaintLayer *found = nullptr;
-  std::function<void(ListBaseT<MaterialPaintLayer> &)> walk =
-      [&](ListBaseT<MaterialPaintLayer> &list) {
-        for (MaterialPaintLayer &layer : list) {
-      if (found != nullptr) {
-        return;
-      }
-      if (index == ordinal) {
-        found = &layer;
-        return;
-      }
-      index++;
-      for (MaterialPaintLayer *correction : BKE_paint_layers_effects(layer)) {
-        if (found != nullptr) {
-          return;
-        }
-        if (index == ordinal) {
-          found = correction;
-          return;
-        }
-        index++;
-        /* Symmetric with #layers_ordinal_of: a Stack-sourced effect's own children consume
-         * ordinals here too, in lockstep with #append_corrections (Phase 6, goal 4). */
-        if (BKE_paint_layers_is_folder(*correction)) {
-          walk(correction->children);
-        }
-      }
-      for (MaterialPaintLayer *correction : BKE_paint_layers_mask_items(layer)) {
-        if (found != nullptr) {
-          return;
-        }
-        if (index == ordinal) {
-          found = correction;
-          return;
-        }
-        index++;
-        if (BKE_paint_layers_is_folder(*correction)) {
-          walk(correction->children);
-        }
-      }
-      if (BKE_paint_layers_is_folder(layer)) {
-        walk(layer.children);
-      }
-    }
-  };
-  walk(material.paint_layers);
+  BKE_paint_layers_foreach(material,
+                           [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/)
+                               -> bool {
+                             if (index == ordinal) {
+                               found = &layer;
+                               return false;
+                             }
+                             index++;
+                             return true;
+                           });
   return found;
 }
 

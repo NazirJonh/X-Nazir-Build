@@ -261,6 +261,7 @@ set(SRC
     intern/paint_layers.cc
     intern/paint_layers_bake.cc
     intern/paint_layers_composite.cc
+    intern/paint_layers_edit.cc
     intern/paint_layers_generate_common.cc
     intern/paint_layers_generate_build.cc
     intern/paint_layers_generate_build_chain.cc
@@ -538,6 +539,7 @@ set(SRC
   BKE_paint_bvh_pixels.hh
   BKE_paint_layers.hh
   BKE_paint_layers_composite.hh
+  BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh

@@ -852,28 +852,6 @@ Image *BKE_paint_layers_below_image(Main &bmain,
   return image;
 }
 
-/** The list that directly owns \a target, or null. */
-static ListBaseT<MaterialPaintLayer> *paint_layer_owner_list_for(ListBaseT<MaterialPaintLayer> *list,
-                                                                 const MaterialPaintLayer *target)
-{
-  for (MaterialPaintLayer &layer : *list) {
-    if (&layer == target) {
-      return list;
-    }
-    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list_for(&layer.children, target)) {
-      return found;
-    }
-    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list_for(&layer.effects, target)) {
-      return found;
-    }
-    if (ListBaseT<MaterialPaintLayer> *found = paint_layer_owner_list_for(&layer.mask_stack,
-                                                                          target)) {
-      return found;
-    }
-  }
-  return nullptr;
-}
-
 /**
  * The stack entry that stands for \a layer's own content in \a channel, for the bake: \a layer
  * itself when it is a Layer row (found among its siblings, isolated), or -- for a Stack
@@ -901,7 +879,7 @@ static bool paint_layer_bake_entry_for(const Material &ma,
     r_entry.marker = layer.marker;
     return true;
   }
-  ListBaseT<MaterialPaintLayer> *owner = paint_layer_owner_list_for(
+  ListBaseT<MaterialPaintLayer> *owner = paint_layer_owner_list(
       &const_cast<Material &>(ma).paint_layers, &layer);
   if (owner == nullptr) {
     return false;

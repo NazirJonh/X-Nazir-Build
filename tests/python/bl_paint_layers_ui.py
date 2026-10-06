@@ -358,9 +358,9 @@ class PaintLayersUiTest(unittest.TestCase):
 
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         self.material.paint_layers.active = layer
-        with bpy.context.temp_override(material=self.material):
-            self.assertEqual(bpy.ops.material.paint_layer_mask_add(value=1.0), {'FINISHED'})
-        mask = layer.mask_stack[-1]
+        mask = layer.mask_add(value=1.0)
+        self.assertIsNotNone(mask)
+        self.assertEqual(mask, layer.mask_stack[-1])
         self.assertEqual(mask.source, 'CONSTANT')
         self.assertAlmostEqual(mask.fill_color[0], 1.0, places=4)
 
@@ -605,31 +605,27 @@ class PaintLayersUiTest(unittest.TestCase):
                 self.assertEqual(correction.source, source)
                 self.assertEqual(correction.role, role)
 
-    def test_paint_layer_correction_add_operator_offers_every_source(self):
+    def test_paint_layer_correction_add_rna_mesh_map_and_activation(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         self.material.paint_layers.active = layer
-        with bpy.context.temp_override(material=self.material):
-            op = bpy.ops.material.paint_layer_correction_add
-            sources = {item.identifier for item in op.get_rna_type().properties['source'].enum_items}
-            self.assertEqual(sources, {'IMAGE', 'CONSTANT', 'MESH_MAP', 'MATERIAL', 'NODE_GROUP',
-                                       'STACK'})
-            result = op(role='MASK_ITEM', source='MESH_MAP', mesh_map_type='CURVATURE', name="M")
-            self.assertEqual(result, {'FINISHED'})
-            mask = layer.mask_stack[-1]
-            self.assertEqual(mask.source, 'MESH_MAP')
-            self.assertEqual(mask.mesh_map_type, 'CURVATURE')
-            # The operator also makes the new row active, so the reused Source Material / Custom
-            # Group / mask_channel UI (keyed off paint_layers.active) shows up for it right away.
-            self.assertEqual(self.material.paint_layers.active.marker, mask.marker)
+        mask = layer.correction_add(role='MASK_ITEM', source='MESH_MAP', name="M")
+        self.assertIsNotNone(mask)
+        self.assertEqual(mask.source, 'MESH_MAP')
+        self.assertEqual(mask.mesh_map_type, 'CURVATURE')
+        # Making the new row active is what shows the reused Source Material / Custom Group /
+        # mask_channel UI (keyed off paint_layers.active) for it right away.
+        self.material.paint_layers.active = mask
+        self.assertEqual(self.material.paint_layers.active.marker, mask.marker)
 
-    def test_paint_layer_correction_select_operator_sets_active(self):
+    def test_paint_layer_find_by_marker_and_set_active(self):
         layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
         mask = layer.mask_add(value=1.0)
         self.material.paint_layers.active = layer
         self.assertNotEqual(self.material.paint_layers.active.marker, mask.marker)
-        with bpy.context.temp_override(material=self.material):
-            result = bpy.ops.material.paint_layer_correction_select(marker=mask.marker)
-            self.assertEqual(result, {'FINISHED'})
+        found = self.material.paint_layers.find(marker=mask.marker)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.marker, mask.marker)
+        self.material.paint_layers.active = found
         self.assertEqual(self.material.paint_layers.active.marker, mask.marker)
 
     def test_mask_channel_excludes_normal(self):
@@ -887,9 +883,9 @@ class PaintLayersUiTest(unittest.TestCase):
                     marker=layer.marker, channel='EMISSION'),
                 {'FINISHED'})
         self.assertNotIn('EMISSION', {record.channel for record in layer.channels})
-        # (d) Add Correction (Effect / Mask Item) and (e) Add Custom Channel are registered.
-        self.assertIsNotNone(
-            bpy.ops.material.paint_layer_correction_add.get_rna_type())
+        # (d) Add Correction (Effect / Mask Item) is the RNA function; (e) Add Custom Channel is
+        # registered.
+        self.assertTrue(hasattr(layer, "correction_add"))
         self.assertIsNotNone(
             bpy.ops.material.paint_layer_custom_channel_add.get_rna_type())
         # (e) the NODE_GROUP section draws the Add Custom Channel entry.

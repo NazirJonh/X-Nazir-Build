@@ -854,6 +854,16 @@ if(WITH_GTESTS)
     intern/paint_layers_generate_extended_test.cc
     intern/paint_layers_test_util.cc
     intern/paint_layers_graph_eval_test.cc
+    intern/paint_layers_graph_eval_multisource_test.cc
+    intern/paint_layers_graph_eval_masks_test.cc
+    intern/paint_layers_graph_eval_blends_test.cc
+    intern/paint_layers_graph_eval_bake_test.cc
+    intern/paint_layers_graph_eval_live_test.cc
+    intern/paint_layers_graph_eval_normal_test.cc
+    intern/paint_layers_graph_eval_passthrough_test.cc
+    intern/paint_layers_graph_eval_formulas_test.cc
+    intern/paint_layers_graph_eval_fullstack_test.cc
+    intern/paint_layers_graph_eval_meshes_test.cc
     intern/paint_layers_target_test.cc
     intern/paint_material_combined_cache_test.cc
     intern/paint_material_combined_test.cc

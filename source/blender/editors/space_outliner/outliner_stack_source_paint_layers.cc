@@ -762,13 +762,8 @@ bool paint_layers_edit_mask_toggle(Material &material, const int ordinal)
   if (layer == nullptr) {
     return false;
   }
-  /* The layer's mask is its base item. */
-  MaterialPaintLayer *item = BKE_paint_layers_mask_base(*layer);
-  if (item == nullptr) {
-    return false;
-  }
-  const bool enable = (item->flag & MA_PAINT_LAYER_ENABLED) == 0;
-  return BKE_paint_layers_set_enabled(material, item, enable);
+  /* The layer's mask is its base item (BKE owns the toggle). */
+  return BKE_paint_layers_edit_mask_toggle(material, *layer);
 }
 
 int paint_layers_edit_merge_down(Material &material, const int ordinal)

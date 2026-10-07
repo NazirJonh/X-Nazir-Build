@@ -106,6 +106,12 @@ bool BKE_paint_layers_edit_move(Material &ma,
 bool BKE_paint_layers_edit_mask_set(Material &ma, MaterialPaintLayer &layer, bool add);
 
 /**
+ * Turn \a layer's mask off or on, keeping the mask image and its paint content: flips the base
+ * item's enabled flag. Refused when the layer has no mask.
+ */
+bool BKE_paint_layers_edit_mask_toggle(Material &ma, MaterialPaintLayer &layer);
+
+/**
  * Reorder \a from to where \a to sits, within their shared owner list: both rows must be Layer
  * rows hanging on the same list.
  */

@@ -665,14 +665,27 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
 }
 
 static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
+                                                         ReportList *reports,
                                                          int source,
-                                                         const char *name)
+                                                         const char *name,
+                                                         PointerRNA *anchor_ptr,
+                                                         int place,
+                                                         bool make_active)
 {
   /* The authoring policy is the shared BKE one (#BKE_paint_layers_add_with_policy): the same
    * default names and channels the Outliner Add uses, so an add-on-built stack matches a
    * UI-built one. An empty name means the unique default. */
   PaintLayerAddParams params;
   params.name = (name[0] != '\0') ? name : nullptr;
+  params.anchor = static_cast<MaterialPaintLayer *>(anchor_ptr->data);
+  if (params.anchor != nullptr &&
+      BKE_paint_layers_find(*ma, params.anchor->marker) != params.anchor)
+  {
+    /* A stale pointer (a row freed since the caller held it, or one of another material's):
+     * refuse rather than link under a row that is not ours. */
+    return nullptr;
+  }
+  params.place = PaintLayerPlace(place);
   std::optional<PaintLayerAddKind> kind;
   switch (eMaterialPaintLayerSource(source)) {
     case MA_PAINT_LAYER_SOURCE_IMAGE:
@@ -706,12 +719,18 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
     }
   }
   if (layer != nullptr) {
-    /* A fresh row becomes the cursor, mirroring what the UI does when it adds one. */
-    BKE_paint_layers_active_set(*ma, layer->marker);
+    /* A fresh row becomes the cursor, mirroring what the UI does when it adds one, unless the
+     * caller builds a stack unattended (2.5.2: pass make_active=False to leave the cursor alone).
+     * The default keeps the long-standing behaviour the RNA suite asserts. */
+    if (make_active) {
+      BKE_paint_layers_active_set(*ma, layer->marker);
+    }
     /* BKE only tags DEG; the Outliner and the Layer Material tab need the WM notifier too. */
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+    return layer;
   }
-  return layer;
+  BKE_report(reports, RPT_ERROR, "Cannot add a paint layer here");
+  return nullptr;
 }
 
 static void rna_Material_paint_layers_remove(Material *ma,
@@ -780,7 +799,9 @@ static void rna_Material_paint_layers_regenerate(Material *ma, Main *bmain)
   if (bmain == nullptr || ma == nullptr) {
     return;
   }
-  BKE_paint_layers_regenerate(*bmain, *ma);
+  if (BKE_paint_layers_regenerate(*bmain, *ma)) {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
 }
 
 static bool rna_Material_is_layered_get(PointerRNA *ptr)
@@ -931,7 +952,9 @@ static void rna_Material_paint_layers_move(Material *ma,
                 "Cannot move paint layer '%s' relative to '%s'",
                 layer->name,
                 anchor != nullptr ? anchor->name : "the top of the stack");
+    return;
   }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
 static void rna_Material_paint_layers_reorder(Material *ma,
@@ -942,7 +965,9 @@ static void rna_Material_paint_layers_reorder(Material *ma,
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
   if (!BKE_paint_layers_reorder(*ma, layer, index)) {
     BKE_reportf(reports, RPT_ERROR, "Cannot reorder paint layer '%s'", layer->name);
+    return;
   }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
 static MaterialPaintLayer *rna_Material_paint_layers_duplicate(Material *ma,
@@ -956,6 +981,7 @@ static MaterialPaintLayer *rna_Material_paint_layers_duplicate(Material *ma,
     BKE_reportf(reports, RPT_ERROR, "Cannot duplicate paint layer '%s'", layer->name);
     return nullptr;
   }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
   return copy;
 }
 
@@ -979,6 +1005,7 @@ static MaterialPaintLayer *rna_Material_paint_layers_group(Material *ma,
     BKE_report(reports, RPT_ERROR, "Cannot group paint layers of different lists");
     return nullptr;
   }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
   return folder;
 }
 
@@ -992,6 +1019,33 @@ static void rna_Material_paint_layers_ungroup(Material *ma,
     return;
   }
   folder_ptr->invalidate();
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+static MaterialPaintLayer *rna_Material_paint_layers_merge_down(Material *ma,
+                                                                ReportList *reports,
+                                                                PointerRNA *upper_ptr,
+                                                                PointerRNA *lower_ptr)
+{
+  MaterialPaintLayer *upper = static_cast<MaterialPaintLayer *>(upper_ptr->data);
+  MaterialPaintLayer *lower = static_cast<MaterialPaintLayer *>(lower_ptr->data);
+  if (BKE_paint_layers_find(*ma, upper->marker) != upper ||
+      BKE_paint_layers_find(*ma, lower->marker) != lower)
+  {
+    BKE_report(reports, RPT_ERROR, "Merged rows must belong to this material");
+    return nullptr;
+  }
+  MaterialPaintLayer *folder = BKE_paint_layers_edit_merge_down(*ma, *upper, *lower);
+  if (folder == nullptr) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Cannot merge paint layer '%s' down into '%s'",
+                upper->name,
+                lower->name);
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  return folder;
 }
 
 static void rna_MaterialPaintLayer_name_set(PointerRNA *ptr, const char *value)
@@ -1622,6 +1676,18 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_mask_add(PointerRNA ptr,
   }
   BKE_report(reports, RPT_ERROR, "Cannot add a mask to this paint layer");
   return nullptr;
+}
+
+static void rna_MaterialPaintLayer_mask_toggle(PointerRNA ptr, ReportList *reports)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    if (BKE_paint_layers_edit_mask_toggle(*ma, *layer)) {
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+      return;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "This paint layer has no mask to toggle");
 }
 
 static MaterialPaintLayerChannel *rna_MaterialPaintLayer_channel_add(PointerRNA ptr,
@@ -2881,6 +2947,11 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   parm = RNA_def_pointer(func, "mask", "MaterialPaintLayer", "", "The new mask item");
   RNA_def_function_return(func, parm);
 
+  func = RNA_def_function(srna, "mask_toggle", "rna_MaterialPaintLayer_mask_toggle");
+  RNA_def_function_ui_description(
+      func, "Turn the layer's mask on or off, keeping the mask image and its paint content");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+
   func = RNA_def_function(srna, "channel_add", "rna_MaterialPaintLayer_channel_add");
   RNA_def_function_ui_description(func, "Add a channel record to the layer");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
@@ -3134,7 +3205,8 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   /* The functions operate on the owning #Material, so every structural change can go through the
    * BKE description API rather than writing DNA from RNA. */
   func = RNA_def_function(srna, "new", "rna_Material_paint_layers_new");
-  RNA_def_function_ui_description(func, "Add a paint layer on top of the stack");
+  RNA_def_function_ui_description(func, "Add a paint layer relative to an anchor row");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
   parm = RNA_def_enum(func,
                       "source",
                       rna_enum_material_paint_layer_source_items,
@@ -3148,6 +3220,18 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                  MAX_NAME,
                  "Name",
                  "Name of the new layer, empty for the unique default");
+  parm = RNA_def_pointer(
+      func, "anchor", "MaterialPaintLayer", "", "Anchor row, or none for the top of the stack");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_enum(func,
+                      "place",
+                      rna_enum_material_paint_layer_place_items,
+                      0,
+                      "Place",
+                      "Where to put the layer relative to the anchor");
+  RNA_def_boolean(
+      func, "make_active", true, "Make Active", "Move the active-layer cursor onto the new row");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
   RNA_def_function_return(func, parm);
 
@@ -3242,6 +3326,21 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "Paint Layer", "The folder");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
   RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "merge_down", "rna_Material_paint_layers_merge_down");
+  RNA_def_function_ui_description(
+      func, "Group two neighbouring paint layers into a new folder, which takes their place");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "upper", "MaterialPaintLayer", "Paint Layer", "The upper of the two layers");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(
+      func, "lower", "MaterialPaintLayer", "Paint Layer", "The lower of the two layers");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "", "The new folder");
+  RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "regenerate", "rna_Material_paint_layers_regenerate");
   RNA_def_function_ui_description(

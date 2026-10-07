@@ -288,6 +288,16 @@ bool BKE_paint_layers_edit_mask_set(Material &ma, MaterialPaintLayer &layer, con
   return removed;
 }
 
+bool BKE_paint_layers_edit_mask_toggle(Material &ma, MaterialPaintLayer &layer)
+{
+  /* The layer's mask is its base item; corrections over it keep their own flags. */
+  MaterialPaintLayer *base = BKE_paint_layers_mask_base(layer);
+  if (base == nullptr) {
+    return false;
+  }
+  return BKE_paint_layers_set_enabled(ma, base, (base->flag & MA_PAINT_LAYER_ENABLED) == 0);
+}
+
 bool BKE_paint_layers_edit_reorder(Material &ma,
                                    MaterialPaintLayer &from,
                                    MaterialPaintLayer &to)

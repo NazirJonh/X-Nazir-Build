@@ -81,6 +81,12 @@ struct ShapeCoverage {
    */
   Array<float> stroke_len;
   /**
+   * Signed across-stroke coordinate in [-1, 1]: 0 at the centerline, +/-1 at the band's sides
+   * (negative toward the shape's interior on closed outlines). The unsigned #stroke_t is its
+   * absolute value. Zero where the stroke coverage is zero.
+   */
+  Array<float> stroke_v;
+  /**
    * Local coordinates of the shape in [0, 1]^2. For Rect/Ellipse it is the rotated, centered
    * parametric frame normalized by #PaintShape::half_size (the frame corners map to (0,0) and
    * (1,1)); for spline shapes it is the geometry's axis-aligned bbox. Zero outside every shape.
@@ -103,7 +109,7 @@ struct ShapeCoverage {
 
 /** Which quantities rasterization computes (the expensive gradient/distance outputs are
  * skipped unless a caller needs them for Height, Normal or fill-profile shading). */
-enum class ShapeRasterOutputs : uint8_t {
+enum class ShapeRasterOutputs : uint16_t {
   Fill = (1 << 0),
   Stroke = (1 << 1),
   StrokeT = (1 << 2),
@@ -116,6 +122,9 @@ enum class ShapeRasterOutputs : uint8_t {
   StrokeS = (1 << 6),
   /** Local shape coordinates in [0, 1]^2 (bbox or parametric frame; texture fill). Opt-in. */
   ShapeUV = (1 << 7),
+  /** Signed across-stroke coordinate in [-1, 1] (texture across the stroke). Opt-in (request
+   * #Stroke alongside it). */
+  StrokeV = (1 << 8),
 };
 ENUM_OPERATORS(ShapeRasterOutputs);
 
@@ -124,9 +133,9 @@ ENUM_OPERATORS(ShapeRasterOutputs);
  * not ask for them gets no buffer and no computation, and the 3D texel path (which uses this
  * constant) never pays for them. */
 constexpr ShapeRasterOutputs SHAPE_RASTER_OUTPUTS_ALL = ShapeRasterOutputs(
-    uint8_t(ShapeRasterOutputs::Fill) | uint8_t(ShapeRasterOutputs::Stroke) |
-    uint8_t(ShapeRasterOutputs::StrokeT) | uint8_t(ShapeRasterOutputs::StrokeDir) |
-    uint8_t(ShapeRasterOutputs::FillD) | uint8_t(ShapeRasterOutputs::FillDir));
+    uint16_t(ShapeRasterOutputs::Fill) | uint16_t(ShapeRasterOutputs::Stroke) |
+    uint16_t(ShapeRasterOutputs::StrokeT) | uint16_t(ShapeRasterOutputs::StrokeDir) |
+    uint16_t(ShapeRasterOutputs::FillD) | uint16_t(ShapeRasterOutputs::FillDir));
 
 /** The decoded #ShapeRasterOutputs mask, computed once from it and passed down: the evaluation
  * paths read plain booleans instead of re-testing the bits per shape and per pixel. */
@@ -138,18 +147,20 @@ struct ShapeRasterWants {
   bool fill_d = false;
   bool fill_dir = false;
   bool stroke_s = false;
+  bool stroke_v = false;
   bool shape_uv = false;
 
   ShapeRasterWants() = default;
   explicit ShapeRasterWants(const ShapeRasterOutputs outputs)
-      : fill((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::Fill)) != 0),
-        stroke((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::Stroke)) != 0),
-        stroke_t((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::StrokeT)) != 0),
-        stroke_dir((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::StrokeDir)) != 0),
-        fill_d((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::FillD)) != 0),
-        fill_dir((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::FillDir)) != 0),
-        stroke_s((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::StrokeS)) != 0),
-        shape_uv((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::ShapeUV)) != 0)
+      : fill((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::Fill)) != 0),
+        stroke((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::Stroke)) != 0),
+        stroke_t((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::StrokeT)) != 0),
+        stroke_dir((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::StrokeDir)) != 0),
+        fill_d((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::FillD)) != 0),
+        fill_dir((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::FillDir)) != 0),
+        stroke_s((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::StrokeS)) != 0),
+        stroke_v((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::StrokeV)) != 0),
+        shape_uv((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::ShapeUV)) != 0)
   {
   }
 };
@@ -215,6 +226,8 @@ struct ShapeSample {
    * #ShapeCoverage::stroke_len. */
   float stroke_s = 0.0f;
   float stroke_len = 0.0f;
+  /** Signed across-stroke coordinate in [-1, 1]; see #ShapeCoverage::stroke_v. */
+  float stroke_v = 0.0f;
   /** Local shape coordinates in [0, 1]^2; see #ShapeCoverage::shape_uv. */
   float2 shape_uv = float2(0.0f);
 };
@@ -265,6 +278,10 @@ enum class ShapePart : int8_t {
   Stroke = 1,
 };
 
+/** Per-shape frame the texture mappings position against (paint_shape_texture.hh); the shader
+ * only passes it through, so a forward declaration keeps the include graph acyclic. */
+struct ShapeTexFrame;
+
 /** Which consumer asks the shader for a source color. The stroke Ramp is a canvas-color concept;
  * the PBR channels keep their per-channel solid values until texture sourcing is wired. */
 enum class ShapeSourceConsumer : int8_t {
@@ -278,18 +295,20 @@ enum class ShapeSourceConsumer : int8_t {
  * - Solid: returns \a solid (the canvas color or the channel entry).
  * - Stroke Ramp: the stroke ramp sampled at the across-stroke coordinate; canvas only, a channel
  *   keeps its solid value.
- * - Fill Gradient: returns \a solid here -- the bbox-mapped gradient is applied by
- *   #shade_fill_gradient where the bbox is known.
- * - Texture / CurvePattern: not implemented yet (TODO); aborts.
+ * - Texture / CurvePattern: the part's resolved #ShapeTexture sampled at the mapping's UVs
+ *   (falling back to \a solid when no texture resolved or the point leaves a non-tiling one).
  *
- * \param p: shape-space position; unused until the texture sources land.
+ * \param p: shape-space position of the shaded point (the Mask mapping anchors to it).
+ * \param frame: the shaded shape's texture frame; null in the combined passes, where the Mask
+ * mappings anchor to the space origin and the Fit fill is not active.
  */
 float4 shade_source(const ShapeStyle &style,
                     const ShapeSample &sample,
                     ShapePart part,
                     const float2 &p,
                     const float4 &solid,
-                    ShapeSourceConsumer consumer);
+                    ShapeSourceConsumer consumer,
+                    const ShapeTexFrame *frame = nullptr);
 
 /**
  * Coverage of \a part in \a sample with the profile-as-coverage factor applied. It is a shading
@@ -302,12 +321,14 @@ float shape_part_coverage(const ShapeStyle &style, const ShapeSample &sample, Sh
  * Canvas color for \a sample (unpremultiplied, intrinsic alpha in `w`); the caller scales `w`
  * by the coverage and its own masks and blends premultiplied.
  *
- * \param p: shape-space position, used by the gradient/texture fills once they land.
+ * \param p: shape-space position, used by the texture fills.
+ * \param frame: the shaded shape's texture frame (see #shade_source); null in the combined pass.
  */
 float4 shade_canvas(const ShapeStyle &style,
                     const ShapeSample &sample,
                     ShapePart part,
-                    const float2 &p);
+                    const float2 &p,
+                    const ShapeTexFrame *frame = nullptr);
 
 /** One PBR channel write: the value, its alpha, and how to blend it. */
 struct ChannelWrite {
@@ -325,24 +346,16 @@ struct ChannelWrite {
 /**
  * Value of PBR \a channel for \a sample. Returns zero alpha when the channel override is off
  * or the part disables the channel, so backends can skip the write.
+ *
+ * \param p: shape-space position of the shaded point (the texture mappings sample at it).
+ * \param frame: the shaded shape's texture frame (see #shade_source); null in the combined pass.
  */
 ChannelWrite shade_channel(const ShapeStyle &style,
                            const ShapeSample &sample,
                            ShapePart part,
-                           eMaterialPaintChannel channel);
-
-/** Gradient parameter of \a p over a fill bounding box (linear along X, 0 at \a bbox_lo). */
-float fill_gradient_param(const float2 &p, const float2 &bbox_lo, const float2 &bbox_hi);
-
-/**
- * Gradient fill color at \a p within the shape's fill bounding box (linear ColorBand ramp
- * along X). Backends that composite per shape (bbox known) use this; the union rasterizer
- * path keeps solid fills.
- */
-float4 shade_fill_gradient(const ShapeStyle &style,
-                           const float2 &p,
-                           const float2 &bbox_lo,
-                           const float2 &bbox_hi);
+                           eMaterialPaintChannel channel,
+                           const float2 &p = float2(0.0f),
+                           const ShapeTexFrame *frame = nullptr);
 
 /** \} */
 
@@ -355,15 +368,6 @@ float4 shade_fill_gradient(const ShapeStyle &style,
  * is what lets the same arithmetic serve every target unchanged.
  * \{ */
 
-
-/**
- * Fill bounding box in shape space for the gradient fill path. The 2D compositor builds it per
- * shape; the 3D image backend uses the union bounds of the shapes it rasterizes.
- */
-struct ShapeFillGradient {
-  float2 bbox_lo;
-  float2 bbox_hi;
-};
 
 /**
  * The decal-space -> tangent-space frame a Normal channel write is expressed in. The defaults
@@ -388,8 +392,10 @@ struct ShapeBlendContext {
   bool alpha_active = false;
   /** Normal write basis; null means the identity (the 2D compositor). */
   const NormalWriteBasis *normal_basis = nullptr;
-  /** Fill gradient box; null keeps the solid / ramp #shade_canvas fill. */
-  const ShapeFillGradient *fill_gradient = nullptr;
+  /** Texture frame of the single shape this pass shades (the per-shape texture passes); null in
+   * the combined passes, where the Mask mappings anchor to the space origin and the Fit fill is
+   * not active. */
+  const ShapeTexFrame *tex_frame = nullptr;
 };
 
 /**
@@ -397,7 +403,7 @@ struct ShapeBlendContext {
  * mask, face sets) and scales every write's alpha.
  *
  * \param dst: destination pixel in the caller's working space (see the file comment).
- * \param p_shape: shape-space position of the pixel; used by the gradient fill.
+ * \param p_shape: shape-space position of the pixel; used by the texture mappings.
  */
 void shape_blend_pixel(float4 &dst,
                        const ShapeBlendContext &ctx,

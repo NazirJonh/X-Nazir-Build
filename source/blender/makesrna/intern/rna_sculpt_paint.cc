@@ -1476,13 +1476,6 @@ static PointerRNA rna_PaintShapeSettings_stroke_ramp_get(PointerRNA *ptr)
   return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, settings->stroke_ramp);
 }
 
-static PointerRNA rna_PaintShapeSettings_fill_gradient_get(PointerRNA *ptr)
-{
-  PaintShapeSettings *settings = static_cast<PaintShapeSettings *>(ptr->data);
-  /* Allocated by #BKE_paint_shape_settings_init, like the stroke ramp. */
-  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, settings->fill_gradient);
-}
-
 /** Poll for #PaintShapeSettings::curve_source_object: legacy 2D curve objects only. */
 static bool rna_PaintShapeSettings_curve_object_poll(PointerRNA * /*ptr*/,
                                                           const PointerRNA value)
@@ -1493,6 +1486,23 @@ static bool rna_PaintShapeSettings_curve_object_poll(PointerRNA * /*ptr*/,
   }
   const Curve *curve = id_cast<const Curve *>(ob->data);
   return (curve->flag & CU_3D) == 0;
+}
+
+/**
+ * Keep #PaintShapeSettings::use_stroke_ramp in sync with #stroke_type: files written before
+ * stroke_type existed carry their RAMP choice only in use_stroke_ramp, so the RAMP value sets it
+ * and SOLID clears it (values >= 2 leave it untouched).
+ */
+static void rna_PaintShapeSettings_stroke_type_set(PointerRNA *ptr, const int value)
+{
+  PaintShapeSettings *settings = static_cast<PaintShapeSettings *>(ptr->data);
+  settings->stroke_type = value;
+  if (value == PAINT_SHAPE_STROKE_RAMP) {
+    settings->use_stroke_ramp = true;
+  }
+  else if (value == PAINT_SHAPE_STROKE_SOLID) {
+    settings->use_stroke_ramp = false;
+  }
 }
 
 /** Bit mask of #eMaterialPaintChannel the shape bake writes for \a kind (0 = image maps,
@@ -3540,6 +3550,353 @@ static void rna_def_paint_shape_channel_value(BlenderRNA *brna)
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 }
 
+static void rna_def_paint_shape_texture(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem shape_tex_mapping_items[] = {
+      {PAINT_SHAPE_TEX_MAP_FIT,
+       "FIT",
+       0,
+       "Fit",
+       "Fit the texture to the shape's frame (stretch, cover or contain)"},
+      {PAINT_SHAPE_TEX_MAP_MASK,
+       "MASK",
+       0,
+       "Mask",
+       "The shape only masks a freely placed, tiled and rotated texture"},
+      {PAINT_SHAPE_TEX_MAP_ALONG,
+       "ALONG",
+       0,
+       "Along",
+       "Run the texture along the stroke (strokes only)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_tex_source_items[] = {
+      {PAINT_SHAPE_TEX_SRC_BRUSH,
+       "BRUSH",
+       0,
+       "Brush",
+       "The active brush's PBR channel sources (texture maps or material)"},
+      {PAINT_SHAPE_TEX_SRC_MATERIAL,
+       "MATERIAL",
+       0,
+       "Material",
+       "A material's Principled maps, baked on demand"},
+      {PAINT_SHAPE_TEX_SRC_IMAGE, "IMAGE", 0, "Image", "A single image"},
+      {PAINT_SHAPE_TEX_SRC_CURVE_PATTERN,
+       "CURVE_PATTERN",
+       0,
+       "Curve Pattern",
+       "2D curves of the scene rasterized into a pattern tile"},
+      {PAINT_SHAPE_TEX_SRC_TEXTURE,
+       "TEXTURE",
+       0,
+       "Texture",
+       "A procedural texture. TODO: not composited yet"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_tex_fit_items[] = {
+      {PAINT_SHAPE_TEX_FIT_STRETCH, "STRETCH", 0, "Stretch", "Stretch the texture to the frame"},
+      {PAINT_SHAPE_TEX_FIT_COVER,
+       "COVER",
+       0,
+       "Cover",
+       "Scale the texture uniformly until it covers the frame (crops the overflow)"},
+      {PAINT_SHAPE_TEX_FIT_CONTAIN,
+       "CONTAIN",
+       0,
+       "Contain",
+       "Scale the texture uniformly until it fits inside the frame (leaves gaps)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_tex_anchor_items[] = {
+      {PAINT_SHAPE_TEX_ANCHOR_SHAPE, "SHAPE", 0, "Shape", "Anchor the texture to the shape"},
+      {PAINT_SHAPE_TEX_ANCHOR_CANVAS,
+       "CANVAS",
+       0,
+       "Canvas",
+       "Anchor the texture to the canvas origin: the pattern continues between shapes"},
+      {PAINT_SHAPE_TEX_ANCHOR_VIEW, "VIEW", 0, "View", "Anchor the texture to the view (3D)"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "PaintShapeTexture", nullptr);
+  RNA_def_struct_sdna(srna, "PaintShapeTexture");
+  RNA_def_struct_ui_text(srna,
+                         "Paint Shape Texture",
+                         "Texture mapping and source of a paint shape's stroke or fill part");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "mapping", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mapping");
+  RNA_def_property_enum_items(prop, shape_tex_mapping_items);
+  RNA_def_property_ui_text(prop, "Mapping", "How the texture is mapped onto the part");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "source");
+  RNA_def_property_enum_items(prop, shape_tex_source_items);
+  RNA_def_property_ui_text(prop, "Source", "Where the texture's pixels come from");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "fit_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "fit_mode");
+  RNA_def_property_enum_items(prop, shape_tex_fit_items);
+  RNA_def_property_ui_text(prop, "Fit Mode", "How the Fit mapping scales the texture");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "anchor", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "anchor");
+  RNA_def_property_enum_items(prop, shape_tex_anchor_items);
+  RNA_def_property_ui_text(
+      prop, "Anchor", "What the Mask mapping positions the texture relative to");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "tile_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_TILE_X);
+  RNA_def_property_ui_text(prop, "Tile X", "Repeat the texture along its X axis");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "tile_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_TILE_Y);
+  RNA_def_property_ui_text(prop, "Tile Y", "Repeat the texture along its Y axis");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "mirror", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_MIRROR);
+  RNA_def_property_ui_text(prop, "Mirror", "Repeat the texture mirrored instead of wrapping");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_uniform_scale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_UNIFORM);
+  RNA_def_property_ui_text(prop, "Uniform Scale", "Keep the X and Y scales equal");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "flip_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_FLIP_X);
+  RNA_def_property_ui_text(prop, "Flip X", "Mirror the texture horizontally");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "flip_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_FLIP_Y);
+  RNA_def_property_ui_text(prop, "Flip Y", "Mirror the texture vertically");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "follow_shape_rotation", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_FOLLOW_SHAPE_ROTATION);
+  RNA_def_property_ui_text(prop,
+                           "Follow Shape Rotation",
+                           "Rotate the texture with the shape's own rotation");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "whole_repeats", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_WHOLE_REPEATS);
+  RNA_def_property_ui_text(
+      prop,
+      "Fit Whole Repeats",
+      "Round the repeat count on closed strokes so the seam of the texture matches");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "rotate_90", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_ROTATE_90);
+  RNA_def_property_ui_text(
+      prop, "Rotate 90°", "Swap the along-stroke and across-stroke axes of the texture");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "invert", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_INVERT);
+  RNA_def_property_ui_text(prop, "Invert", "Invert scalar channel values (1 - value)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "normal_flip_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_NORMAL_FLIP_Y);
+  RNA_def_property_ui_text(prop, "DirectX Normal", "Normal texture follows the DirectX convention");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_tint", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEX_USE_TINT);
+  RNA_def_property_ui_text(prop, "Tint", "Multiply the texture color by the part color");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "image_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "image_channel");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_ui_text(
+      prop, "Image Channel", "Which channel the single-image source writes to");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "scale", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "scale");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_range(prop, 0.001f, 10000.0f);
+  RNA_def_property_ui_range(prop, 0.01f, 100.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Scale", "Texture scale relative to its native size, per axis");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "offset", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "offset");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_range(prop, -100.0f, 100.0f);
+  RNA_def_property_ui_range(prop, -1.0f, 1.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Offset", "Texture shift in fractions of a tile");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "repeat", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "repeat");
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_range(prop, 0.001f, 10000.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 64.0f, 1.0f, 1);
+  RNA_def_property_ui_text(
+      prop, "Repeat", "Texture repeats per shape in the Fit mapping, per axis");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "angle", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_range(prop, -M_PI, M_PI);
+  RNA_def_property_ui_text(prop, "Angle", "Extra texture rotation around the mapped frame");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "tile_length", PROP_FLOAT, PROP_PIXEL);
+  RNA_def_property_range(prop, 0.0f, 100000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 4096.0f, 1.0f, 1);
+  RNA_def_property_ui_text(
+      prop, "Tile Length", "Length of one repeat along the stroke in pixels (0 = native size)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "height_mid", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Height Mid", "Height value the texture's zero level maps to (0 or 0.5)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Opacity", "How strongly the texture mixes with the part's solid value");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "image", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "image");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_struct_type(prop, "Image");
+  RNA_def_property_ui_text(prop, "Image", "Single-image texture source");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "material");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_ui_text(prop, "Material", "Material whose Principled maps feed the texture");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "texture", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "tex");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_struct_type(prop, "Texture");
+  RNA_def_property_ui_text(prop, "Texture", "Procedural texture source. TODO: not composited yet");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+}
+
+static void rna_def_paint_shape_curve_pattern(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  static const EnumPropertyItem shape_curve_pattern_mode_items[] = {
+      {PAINT_SHAPE_CURVE_PATTERN_FILL,
+       "FILL",
+       0,
+       "Fill",
+       "Rasterize the closed curves' interiors"},
+      {PAINT_SHAPE_CURVE_PATTERN_STROKE,
+       "STROKE",
+       0,
+       "Stroke",
+       "Rasterize every curve as a stroke of the line width"},
+      {PAINT_SHAPE_CURVE_PATTERN_BOTH, "BOTH", 0, "Both", "Fill and stroke the curves"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  srna = RNA_def_struct(brna, "PaintShapeCurvePattern", nullptr);
+  RNA_def_struct_sdna(srna, "PaintShapeCurvePattern");
+  RNA_def_struct_ui_text(
+      srna, "Paint Shape Curve Pattern", "2D curves of the scene rasterized into a pattern tile");
+  RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+  prop = RNA_def_property(srna, "crop_min_x", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "crop_min[0]");
+  RNA_def_property_range(prop, -1000.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Crop Min X", "Left edge of the crop frame");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "crop_min_y", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "crop_min[1]");
+  RNA_def_property_range(prop, -1000.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Crop Min Y", "Bottom edge of the crop frame");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "crop_max_x", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "crop_max[0]");
+  RNA_def_property_range(prop, -1000.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Crop Max X", "Right edge of the crop frame");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "crop_max_y", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "crop_max[1]");
+  RNA_def_property_range(prop, -1000.0f, 1000.0f);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop, "Crop Max Y", "Top edge of the crop frame");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "resolution", PROP_INT, PROP_PIXEL);
+  RNA_def_property_int_sdna(prop, nullptr, "resolution");
+  RNA_def_property_range(prop, 8, 8192);
+  RNA_def_property_ui_range(prop, 64, 2048, 1, 0);
+  RNA_def_property_ui_text(prop, "Resolution", "Side of the pattern tile in pixels");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "line_width", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "line_width");
+  RNA_def_property_range(prop, 0.0001f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.001f, 0.5f, 1.0f, 3);
+  RNA_def_property_ui_text(
+      prop, "Line Width", "Stroke width of the STROKE modes, as a fraction of the tile side");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mode");
+  RNA_def_property_enum_items(prop, shape_curve_pattern_mode_items);
+  RNA_def_property_ui_text(prop, "Mode", "How the curves are rasterized into the tile");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "wrap_crossing", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_CURVE_PATTERN_WRAP_CROSSING);
+  RNA_def_property_ui_text(
+      prop, "Wrap Crossing", "Wrap strokes crossing the crop border so the tile repeats seamlessly");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "use_sdf_relief", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_CURVE_PATTERN_USE_SDF_RELIEF);
+  RNA_def_property_ui_text(
+      prop, "Relief", "Store a signed-distance relief for Height/Normal stamping");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "world_space", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_CURVE_PATTERN_WORLD_SPACE);
+  RNA_def_property_ui_text(
+      prop,
+      "World Space",
+      "Interpret the crop frame in world space instead of the curve objects' local space");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+}
+
 static void rna_def_paint_shape_settings(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3632,17 +3989,33 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
 
   static const EnumPropertyItem shape_fill_type_items[] = {
       {PAINT_SHAPE_FILL_SOLID, "SOLID", 0, "Solid", "Solid fill color"},
-      {PAINT_SHAPE_FILL_GRADIENT,
-       "GRADIENT",
+      {PAINT_SHAPE_FILL_TEXTURE,
+       "TEXTURE",
        0,
-       "Gradient",
-       "Gradient fill along the shape's bounding box, linear left to right"},
+       "Texture",
+       "Texture fill (see the fill texture mapping below)"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
   static const EnumPropertyItem shape_fill_rule_items[] = {
       {PAINT_SHAPE_FILL_NONZERO, "NONZERO", 0, "Non-Zero", "Non-zero winding fill rule"},
       {PAINT_SHAPE_FILL_EVENODD, "EVENODD", 0, "Even-Odd", "Even-odd fill rule for holes"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_stroke_type_items[] = {
+      {PAINT_SHAPE_STROKE_SOLID, "SOLID", 0, "Solid", "Solid stroke color"},
+      {PAINT_SHAPE_STROKE_RAMP, "RAMP", 0, "Ramp", "Color ramp along the stroke profile"},
+      {PAINT_SHAPE_STROKE_TEXTURE,
+       "TEXTURE",
+       0,
+       "Texture",
+       "Texture along or over the stroke (see the stroke texture mapping below)"},
+      {PAINT_SHAPE_STROKE_CURVE_PATTERN,
+       "CURVE_PATTERN",
+       0,
+       "Curve Pattern",
+       "The Curve Pattern tile along or over the stroke"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -4006,11 +4379,33 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
                            "of profiling independently");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
-  prop = RNA_def_property(srna, "fill_gradient", PROP_POINTER, PROP_NEVER_NULL);
-  RNA_def_property_struct_type(prop, "ColorRamp");
-  RNA_def_property_pointer_funcs(
-      prop, "rna_PaintShapeSettings_fill_gradient_get", nullptr, nullptr, nullptr);
-  RNA_def_property_ui_text(prop, "Fill Gradient", "Gradient ramp of the fill");
+  prop = RNA_def_property(srna, "fill_texture", PROP_POINTER, PROP_NEVER_NULL);
+  RNA_def_property_pointer_sdna(prop, nullptr, "fill_texture");
+  RNA_def_property_struct_type(prop, "PaintShapeTexture");
+  RNA_def_property_ui_text(
+      prop, "Fill Texture", "Texture mapping and source of the fill (Texture fill type)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_texture", PROP_POINTER, PROP_NEVER_NULL);
+  RNA_def_property_pointer_sdna(prop, nullptr, "stroke_texture");
+  RNA_def_property_struct_type(prop, "PaintShapeTexture");
+  RNA_def_property_ui_text(
+      prop, "Stroke Texture", "Texture mapping and source of the stroke (Texture stroke type)");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "curve_pattern", PROP_POINTER, PROP_NEVER_NULL);
+  RNA_def_property_pointer_sdna(prop, nullptr, "curve_pattern");
+  RNA_def_property_struct_type(prop, "PaintShapeCurvePattern");
+  RNA_def_property_ui_text(
+      prop, "Curve Pattern", "2D curves of the scene rasterized into the shared pattern tile");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "stroke_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stroke_type");
+  RNA_def_property_enum_items(prop, shape_stroke_type_items);
+  RNA_def_property_enum_funcs(
+      prop, nullptr, "rna_PaintShapeSettings_stroke_type_set", nullptr);
+  RNA_def_property_ui_text(prop, "Stroke Type", "How the stroke is painted");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
   /* The channel set a bake writes is resolved by the shared BKE rule; exposing it keeps the tool
@@ -5347,6 +5742,8 @@ void RNA_def_sculpt_paint(BlenderRNA *brna)
   rna_def_paint_mode(brna);
   rna_def_operator_shape_point(brna);
   rna_def_paint_shape_channel_value(brna);
+  rna_def_paint_shape_texture(brna);
+  rna_def_paint_shape_curve_pattern(brna);
   rna_def_paint_shape_settings(brna);
   rna_def_image_paint(brna);
   rna_def_particle_edit(brna);

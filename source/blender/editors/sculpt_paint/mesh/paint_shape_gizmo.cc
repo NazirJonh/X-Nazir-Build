@@ -483,7 +483,11 @@ void paint_shape_gizmo_group_refresh(const bContext *C, wmGizmoGroup *gzgroup)
   wmGizmo *modal_gz = gzmap ? WM_gizmomap_get_modal(gzmap) : nullptr;
   const bool is_our_modal = modal_gz != nullptr &&
                             (modal_gz == ggd->gz_cage || modal_gz == ggd->gz_anchor);
-  if (ggd->was_modal_tweak && !is_our_modal && ggd->drag_active) {
+  /* No "was modal on an earlier redraw" requirement: a quick click (or a slow redraw, as with a
+   * textured shape) can press and release between two refreshes, and the drag would then stay
+   * armed forever, freezing every handle. The handle is armed and the modal started within one
+   * event, so a refresh that finds a drag without our modal always means it is over. */
+  if (!is_our_modal && ggd->drag_active) {
     std::unique_ptr<VectorEditHost> host = ggd->adapter->host_create(const_cast<bContext &>(*C));
     if (host != nullptr) {
       paint_shape_gizmo_end_drag(ggd, host.get(), const_cast<bContext *>(C), false, false);

@@ -11,6 +11,8 @@
 
 #include "sculpt_paint_shape_intern.hh"
 
+#include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_lib_id.hh"
 
 #include "BLT_translation.hh"
@@ -144,6 +146,21 @@ static bool shape_write_image(bContext *C,
   }
 
   style_channels_from_brush(paint, style);
+  /* The texture parts resolve per bake/preview, never sampling the write targets directly. */
+  {
+    Vector<const Image *> protected_images;
+    for (const ShapeImageTarget &target : targets) {
+      if (target.data != nullptr && target.data->image != nullptr) {
+        protected_images.append(target.data->image);
+      }
+    }
+    style_textures_resolve(C,
+                           paint,
+                           toolsettings.paint_mode,
+                           BKE_paint_shape_settings_get(toolsettings),
+                           protected_images,
+                           style);
+  }
 
   rctf domain;
   BLI_rctf_init(&domain, FLT_MAX, -FLT_MAX, FLT_MAX, -FLT_MAX);
@@ -167,18 +184,13 @@ static bool shape_write_image(bContext *C,
   const bool alpha_active = (style.stroke_channels[PAINT_MATERIAL_CHANNEL_ALPHA].use != 0) ||
                             (style.fill_channels[PAINT_MATERIAL_CHANNEL_ALPHA].use != 0);
 
-  /* Gradient fill: the union bounds of the shapes are the domain. One shape plus mesh symmetry is
-   * the current case; several shapes would need a per-shape box like the 2D compositor. */
-  ShapeFillGradient fill_gradient;
-  const ShapeFillGradient *gradient = nullptr;
-  if (style.use_fill() && style.fill_type == PAINT_SHAPE_FILL_GRADIENT && style.use_fill_gradient) {
-    fill_gradient = ShapeFillGradient{float2(domain.xmin, domain.ymin),
-                                      float2(domain.xmax, domain.ymax)};
-    gradient = &fill_gradient;
-  }
+  /* The texture mappings evaluate against one frame here: the union bounds (exact for the
+   * common single-shape bake; the 2D compositor runs per-shape passes instead). */
+  ShapeTexFrame tex_frame = shape_tex_frame_calc_union(shapes);
+  const ShapeTexFrame *tex_frame_ptr = style_textures_need_frame(style) ? &tex_frame : nullptr;
 
-  /* Normal and Height need the distance/direction outputs, so everything is requested here. */
-  const ShapeEvaluator evaluator(shapes, style, domain, SHAPE_RASTER_OUTPUTS_ALL);
+  /* The evaluator requests the base outputs plus the texture opt-ins the mappings need. */
+  const ShapeEvaluator evaluator(shapes, style, domain, shape_raster_outputs_for(style));
 
   Vector<ePaintSymmetryFlags> passes;
   const int symmetry_flags = int(mesh_symmetry_xyz_get(ob));
@@ -269,7 +281,7 @@ static bool shape_write_image(bContext *C,
   ShapeBlendContext base_ctx;
   base_ctx.style = &style;
   base_ctx.alpha_active = alpha_active;
-  base_ctx.fill_gradient = gradient;
+  base_ctx.tex_frame = tex_frame_ptr;
   /* The undo step opens lazily, with the first tile it backs up: a bake that reaches no node must
    * not leave an empty step on the stack. */
   bool undo_step_open = false;
@@ -336,6 +348,21 @@ static bool shape_write_image(bContext *C,
               byte_buffer = MutableSpan(
                   reinterpret_cast<uchar4 *>(image_buffer->byte_data_for_write()),
                   image_buffer->x * image_buffer->y);
+            }
+
+            /* The canvas's runtime selection mask limits the shape like a brush stroke (same
+             * weights as #apply_paint_channel). A canvas borrowed by a floating selection session
+             * paints unmasked. Resolved here, sequentially, so the parallel loop never takes the
+             * mask mutex. */
+            ImagePaintSelectionTileSampler selection_sampler;
+            bool apply_selection = false;
+            if (image_data.image->runtime != nullptr &&
+                image_data.image->runtime->paint_selection_borrowed_by == nullptr &&
+                BKE_image_paint_selection_is_active(image_data.image))
+            {
+              selection_sampler = BKE_image_paint_selection_tile_sampler_get(image_data.image,
+                                                                             tile.tile_number);
+              apply_selection = !selection_sampler.is_unrestricted();
             }
 
             Array<bool> rows_changed(tile.pixel_rows.size(), false);
@@ -441,7 +468,12 @@ static bool shape_write_image(bContext *C,
                         vertex_mask = w0 * mask[tri_verts[0]] + w1 * mask[tri_verts[1]] +
                                       w2 * mask[tri_verts[2]];
                       }
-                      const float factor = 1.0f - math::clamp(vertex_mask, 0.0f, 1.0f);
+                      float factor = 1.0f - math::clamp(vertex_mask, 0.0f, 1.0f);
+                      if (apply_selection) {
+                        factor *= selection_sampler.sample(
+                            int(pixel_row.start_image_coordinate.x) + px,
+                            int(pixel_row.start_image_coordinate.y));
+                      }
                       if (factor <= 0.0f) {
                         continue;
                       }

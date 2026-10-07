@@ -179,7 +179,7 @@ static ShapeGeom shape_geometry_build(const PaintShape &shape,
   const bool needs_path_stroke = style.use_stroke() &&
                                  (style.join_type != PAINT_SHAPE_JOIN_ROUND || style.use_dash());
   const bool force_polyline = shape.has_analytic_sdf() &&
-                              ((uint8_t(outputs) & uint8_t(ShapeRasterOutputs::StrokeS)) != 0 ||
+                              ((uint16_t(outputs) & uint16_t(ShapeRasterOutputs::StrokeS)) != 0 ||
                                needs_path_stroke);
   if (shape.has_analytic_sdf()) {
     /* ShapeUV keeps using the parametric frame even when StrokeS densifies the coverage. */
@@ -493,6 +493,7 @@ struct PixelCoverage {
   float2 fill_dir = float2(0.0f);
   float stroke_s = 0.0f;
   float stroke_len = 0.0f;
+  float stroke_v = 0.0f;
   float2 shape_uv = float2(0.0f);
 };
 
@@ -569,6 +570,11 @@ static void shape_eval_pixel(const ShapeGeom &geom,
       r_cov.stroke = aa_coverage(halfw - math::abs(dc), style.feather);
       if (want.stroke_t) {
         r_cov.stroke_t = math::clamp(math::abs(dc) / halfw, 0.0f, 1.0f);
+      }
+      if (want.stroke_v) {
+        /* The SDF's sign separates the interior (negative) from the exterior: the same
+         * across-stroke convention the polyline path derives from the winding. */
+        r_cov.stroke_v = math::clamp(dc / halfw, -1.0f, 1.0f);
       }
       /* Gradient of the analytic SDF, oriented away from the stroke centerline. */
       if (want.stroke_dir && math::abs(dc) > ON_EDGE_EPSILON) {
@@ -670,6 +676,11 @@ static void shape_eval_pixel(const ShapeGeom &geom,
     }
     r_cov.stroke_s = s_out;
     r_cov.stroke_len = poly.length;
+  }
+  if (want.stroke_v) {
+    /* The signed across-stroke coordinate: negative on the winding's inside for closed
+     * outlines, on the tangent's left for open ones (the same sign the distance field uses). */
+    r_cov.stroke_v = math::clamp(dc / halfw, -1.0f, 1.0f);
   }
 
   if (!poly.cyclic) {
@@ -888,6 +899,9 @@ ShapeCoverage ShapeRasterizer::rasterize(const rcti &rect) const
     cov.stroke_s = Array<float>(pixel_num, 0.0f);
     cov.stroke_len = Array<float>(pixel_num, 0.0f);
   }
+  if (want.stroke_v) {
+    cov.stroke_v = Array<float>(pixel_num, 0.0f);
+  }
   if (want.shape_uv) {
     cov.shape_uv = Array<float2>(pixel_num, float2(0.0f));
   }
@@ -947,6 +961,7 @@ ShapeCoverage ShapeRasterizer::rasterize(const rcti &rect) const
             acc.stroke_dir = part.stroke_dir;
             acc.stroke_s = part.stroke_s;
             acc.stroke_len = part.stroke_len;
+            acc.stroke_v = part.stroke_v;
           }
           const float part_w = std::max(part.fill, part.stroke);
           if (part_w > acc_uv_weight) {
@@ -977,6 +992,9 @@ ShapeCoverage ShapeRasterizer::rasterize(const rcti &rect) const
         if (want.stroke_s) {
           cov.stroke_s[idx] = acc.stroke_s;
           cov.stroke_len[idx] = acc.stroke_len;
+        }
+        if (want.stroke_v) {
+          cov.stroke_v[idx] = acc.stroke_v;
         }
         if (want.shape_uv) {
           cov.shape_uv[idx] = acc.shape_uv;
@@ -1066,6 +1084,7 @@ ShapeSample ShapeEvaluator::sample(const float2 &p) const
       acc.stroke_dir = part.stroke_dir;
       acc.stroke_s = part.stroke_s;
       acc.stroke_len = part.stroke_len;
+      acc.stroke_v = part.stroke_v;
     }
     const float part_w = std::max(part.fill, part.stroke);
     if (part_w > shape_uv_weight) {

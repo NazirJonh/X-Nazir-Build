@@ -46,7 +46,7 @@ namespace blender {
 
 /* Every shallow copy of a #PaintVectorItem or #PaintShapeSettings below relies on the whole
  * struct being bitwise copyable, and on the copy sites then re-duplicating every owned pointer
- * (points / splines, stroke_profile / fill_profile / stroke_ramp / fill_gradient). Adding an
+ * (points / splines, stroke_profile / fill_profile / stroke_ramp). Adding an
  * owned field to either DNA struct requires updating all of those sites; these asserts keep the
  * bitwise assumption explicit so a non-trivial member cannot sneak in silently. */
 static_assert(std::is_trivially_copyable_v<PaintVectorItem>,
@@ -79,7 +79,6 @@ void BKE_paint_vector_style_free(PaintShapeSettings &style)
     style.fill_profile = nullptr;
   }
   MEM_SAFE_DELETE(style.stroke_ramp);
-  MEM_SAFE_DELETE(style.fill_gradient);
 }
 
 void BKE_paint_vector_style_copy(PaintShapeSettings &dst, const PaintShapeSettings &src)
@@ -87,7 +86,6 @@ void BKE_paint_vector_style_copy(PaintShapeSettings &dst, const PaintShapeSettin
   const CurveMapping *stroke_profile = src.stroke_profile;
   const CurveMapping *fill_profile = src.fill_profile;
   const ColorBand *stroke_ramp = src.stroke_ramp;
-  const ColorBand *fill_gradient = src.fill_gradient;
 
   /* Shallow copy first, then duplicate every owned pointer so both snapshots stay independent. */
   dst = src;
@@ -96,9 +94,6 @@ void BKE_paint_vector_style_copy(PaintShapeSettings &dst, const PaintShapeSettin
   dst.fill_profile = fill_profile ? BKE_curvemapping_copy(fill_profile) : nullptr;
   if (stroke_ramp != nullptr) {
     dst.stroke_ramp = MEM_dupalloc(stroke_ramp);
-  }
-  if (fill_gradient != nullptr) {
-    dst.fill_gradient = MEM_dupalloc(fill_gradient);
   }
 }
 
@@ -352,7 +347,6 @@ static void paint_vector_copy_data(Main * /*bmain*/,
     dst.style.stroke_profile = nullptr;
     dst.style.fill_profile = nullptr;
     dst.style.stroke_ramp = nullptr;
-    dst.style.fill_gradient = nullptr;
 
     if (points_num > 0) {
       dst.points = MEM_dupalloc(points);
@@ -377,10 +371,16 @@ static void paint_vector_foreach_id(ID *id, LibraryForeachIDData *data)
   PaintVector *pv = id_cast<PaintVector *>(id);
   for (int i = 0; i < pv->items_num; i++) {
     PaintShapeSettings &style = pv->items[i].style;
-    /* The curve source is a snapshot reference used only to redraw the imported outline; it is
-     * not owned by the vector document, so keep it a non-counting reference. */
+    /* The curve source and texture assignments are snapshot references used only to redraw the
+     * item; they are not owned by the vector document, so keep them non-counting references. */
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.curve_source_collection, IDWALK_CB_NOP);
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.curve_source_object, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.fill_texture.image, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.fill_texture.material, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.fill_texture.tex, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.stroke_texture.image, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.stroke_texture.material, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.stroke_texture.tex, IDWALK_CB_NOP);
   }
 }
 
@@ -414,9 +414,6 @@ static void paint_vector_blend_write(BlendWriter *writer, ID *id, const void *id
     if (item.style.stroke_ramp != nullptr) {
       writer->write_struct(item.style.stroke_ramp);
     }
-    if (item.style.fill_gradient != nullptr) {
-      writer->write_struct(item.style.fill_gradient);
-    }
   }
 }
 
@@ -442,15 +439,16 @@ static void paint_vector_blend_read_data(BlendDataReader *reader, ID *id)
       BKE_curvemapping_init(item.style.fill_profile);
     }
     BLO_read_struct(reader, ColorBand, &item.style.stroke_ramp);
-    BLO_read_struct(reader, ColorBand, &item.style.fill_gradient);
   }
 }
 
 IDTypeInfo IDType_ID_PV = {
     .id_code = PaintVector::id_type,
     .id_filter = FILTER_ID_PV,
-    /* Curve source snapshot references only; the ID itself owns no images or materials. */
-    .dependencies_id_types = FILTER_ID_GR | FILTER_ID_OB,
+    /* Curve source and texture snapshot references only; the ID itself owns no images or
+     * materials. */
+    .dependencies_id_types = FILTER_ID_GR | FILTER_ID_OB | FILTER_ID_IM | FILTER_ID_MA |
+                             FILTER_ID_TE,
     .main_listbase_index = INDEX_ID_PV,
     .struct_size = sizeof(PaintVector),
     .name = "PaintVector",

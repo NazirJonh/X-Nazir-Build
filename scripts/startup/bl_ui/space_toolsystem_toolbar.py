@@ -38,7 +38,7 @@ from bl_ui.space_toolsystem_common import (
 from bl_ui.properties_paint_common import (
     BrushAssetShelf,
     UnifiedPaintPanel,
-    draw_paint_shape_extra_options,
+    draw_paint_shape_options_subpanel,
     draw_shape_color_row,
     paint_shape_settings,
     paint_shape_tool_has_angle,
@@ -3158,7 +3158,7 @@ class _defs_image_paint_shape:
             row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
         if paint_shape_tool_has_angle(context):
             layout.prop(shape, "rotation", text="Angle")
-        draw_paint_shape_extra_options(context, layout, shape)
+        draw_paint_shape_options_subpanel(context, layout, shape)
 
 
 # The Image Editor tools come from the shared base.
@@ -3241,7 +3241,6 @@ class _defs_sculpt_paint_shape:
                 row.prop(shape, "use_stroke", text="Stroke", toggle=True, icon='SELECT_SET')
             if paint_shape_tool_has_angle(context):
                 layout.prop(shape, "rotation", text="Angle")
-            draw_paint_shape_extra_options(context, layout, shape)
 
         # The PBR channel toggles, exactly as the Color Gradient tool shows them for the same
         # canvases (the shape tools write the same Sculpt paint channels).
@@ -3253,6 +3252,11 @@ class _defs_sculpt_paint_shape:
                 layout, settings.brush, settings,
                 show_custom=(canvas_source == 'MATERIAL_PAINT'),
             )
+
+        # Last, so the collapsible Shape Options sits below the channel toggles instead of
+        # looking like it owns them.
+        if not region_is_header:
+            draw_paint_shape_options_subpanel(context, layout, shape)
 
 
 # The Sculpt Mode tools come from the same base; the cursor is the only other difference.

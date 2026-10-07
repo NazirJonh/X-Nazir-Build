@@ -17,6 +17,7 @@
 #include "DNA_space_types.h"
 #include "DNA_view2d_types.h"
 
+#include "BLI_array.hh"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_math_constants.h"
 #include "BLI_math_vector_types.hh"
@@ -467,11 +468,23 @@ static constexpr double SELECTION_MASK_DASH_SPEED = 1.0;
  * animated dashes appear to travel around the selection in a consistent direction.
  */
 static void image_selection_outline_build_tile(const ImBuf *mask,
+                                               const int2 bounds_min,
+                                               const int2 bounds_max,
                                                const float2 &uv_origin,
                                                Vector<float3> &r_verts)
 {
   const float *data = mask->float_buffer.data;
   if (!data) {
+    return;
+  }
+  /* Edges only exist next to selected pixels, so only the selection's bounds (the exclusive upper
+   * corner doubles as the terminating line) are scanned, not the whole tile: the scan runs on every
+   * mask revision, i.e. on every step of a selection drag. */
+  const int x_begin = std::clamp(bounds_min.x, 0, mask->x);
+  const int x_end = std::clamp(bounds_max.x, 0, mask->x);
+  const int y_begin = std::clamp(bounds_min.y, 0, mask->y);
+  const int y_end = std::clamp(bounds_max.y, 0, mask->y);
+  if (x_end <= x_begin || y_end <= y_begin) {
     return;
   }
 
@@ -485,25 +498,22 @@ static void image_selection_outline_build_tile(const ImBuf *mask,
       r_verts.append(float3(b.x, b.y, 0.0f));
     }
   };
+  const auto selected = [&](const int x, const int y) {
+    return x >= 0 && y >= 0 && x < mask->x && y < mask->y && data[size_t(y) * mask->x + x] > 0.5f;
+  };
 
   /* Horizontal edges - borders between selected and unselected rows. */
-  for (int y = 0; y <= mask->y; y++) {
+  for (int y = y_begin; y <= y_end; y++) {
     int x_start = -1;
     bool current_bot_sel = false;
-    for (int x = 0; x <= mask->x; x++) {
+    for (int x = x_begin; x <= x_end; x++) {
       bool is_edge = false;
       bool bot_sel = false;
       if (x < mask->x) {
-        if (y < mask->y) {
-          const bool top_sel = (y > 0) && (data[(y - 1) * mask->x + x] > 0.5f);
-          bot_sel = (data[y * mask->x + x] > 0.5f);
-          is_edge = (top_sel != bot_sel);
-        }
-        else {
-          /* Top image boundary: edge exists if the topmost pixel is selected. */
-          is_edge = (data[(y - 1) * mask->x + x] > 0.5f);
-          bot_sel = false;
-        }
+        /* Beyond the image the pixel counts as unselected: the image border is an edge. */
+        const bool top_sel = selected(x, y - 1);
+        bot_sel = selected(x, y);
+        is_edge = (top_sel != bot_sel);
       }
 
       if (is_edge) {
@@ -531,47 +541,44 @@ static void image_selection_outline_build_tile(const ImBuf *mask,
     }
   }
 
-  /* Vertical edges - borders between selected and unselected columns. */
-  for (int x = 0; x <= mask->x; x++) {
-    int y_start = -1;
-    bool current_right_sel = false;
-    for (int y = 0; y <= mask->y; y++) {
+  /* Vertical edges - borders between selected and unselected columns. Walked row by row with the
+   * run state kept per column, so the mask is read sequentially instead of down a column with a
+   * full-row stride per step. */
+  const int column_num = x_end - x_begin + 1;
+  Array<int> y_start(column_num, -1);
+  Array<bool> current_right_sel(column_num, false);
+  const auto flush_column = [&](const int x, const int column, const int y) {
+    const float fx = uv_origin.x + (float(x) / float(mask->x));
+    append_segment({fx, uv_origin.y + (float(y_start[column]) / float(mask->y))},
+                   {fx, uv_origin.y + (float(y) / float(mask->y))},
+                   !current_right_sel[column]);
+  };
+  for (int y = y_begin; y <= y_end; y++) {
+    for (int x = x_begin; x <= x_end; x++) {
+      const int column = x - x_begin;
       bool is_edge = false;
       bool right_sel = false;
       if (y < mask->y) {
-        if (x < mask->x) {
-          const bool left_sel = (x > 0) && (data[y * mask->x + (x - 1)] > 0.5f);
-          right_sel = (data[y * mask->x + x] > 0.5f);
-          is_edge = (left_sel != right_sel);
-        }
-        else {
-          /* Right image boundary: edge exists if the rightmost pixel is selected. */
-          is_edge = (data[y * mask->x + (x - 1)] > 0.5f);
-          right_sel = false;
-        }
+        const bool left_sel = selected(x - 1, y);
+        right_sel = selected(x, y);
+        is_edge = (left_sel != right_sel);
       }
 
       if (is_edge) {
-        if (y_start < 0) {
-          y_start = y;
-          current_right_sel = right_sel;
+        if (y_start[column] < 0) {
+          y_start[column] = y;
+          current_right_sel[column] = right_sel;
         }
-        else if (current_right_sel != right_sel) {
+        else if (current_right_sel[column] != right_sel) {
           /* Edge type changed (Left vs Right), emit previous segment. */
-          const float fx = uv_origin.x + (float(x) / float(mask->x));
-          append_segment({fx, uv_origin.y + (float(y_start) / float(mask->y))},
-                         {fx, uv_origin.y + (float(y) / float(mask->y))},
-                         !current_right_sel);
-          y_start = y;
-          current_right_sel = right_sel;
+          flush_column(x, column, y);
+          y_start[column] = y;
+          current_right_sel[column] = right_sel;
         }
       }
-      else if (y_start >= 0) {
-        const float fx = uv_origin.x + (float(x) / float(mask->x));
-        append_segment({fx, uv_origin.y + (float(y_start) / float(mask->y))},
-                       {fx, uv_origin.y + (float(y) / float(mask->y))},
-                       !current_right_sel);
-        y_start = -1;
+      else if (y_start[column] >= 0) {
+        flush_column(x, column, y);
+        y_start[column] = -1;
       }
     }
   }
@@ -606,9 +613,15 @@ static void image_selection_outline_batch_ensure(ed::image::SpaceImage_Runtime &
     if (!mask) {
       continue;
     }
+    int bounds_min[2];
+    int bounds_max[2];
+    if (!BKE_image_paint_selection_mask_bounds(ima, tile->tile_number, bounds_min, bounds_max)) {
+      continue;
+    }
     const float2 uv_origin(float((tile->tile_number - 1001) % 10),
                            float((tile->tile_number - 1001) / 10));
-    image_selection_outline_build_tile(mask, uv_origin, verts);
+    image_selection_outline_build_tile(
+        mask, int2(bounds_min[0], bounds_min[1]), int2(bounds_max[0], bounds_max[1]), uv_origin, verts);
   }
 
   if (verts.is_empty()) {

@@ -26,6 +26,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 #include "BLI_math_color.h"
@@ -35,6 +36,10 @@
 #include "BLI_vector.hh"
 
 #include "DNA_scene_types.h"
+
+namespace ocio {
+class ColorSpace;
+}  // namespace ocio
 
 namespace blender::ed::sculpt_paint::bezier_input {
 class BezierInput;
@@ -165,26 +170,78 @@ struct PaintShape {
   }
 };
 
-/** Stroke color source (Texture is TODO). */
+/** Stroke color source (Texture/CurvePattern wire to #PaintShapeSettings::stroke_texture). */
 enum class ShapeStrokeSource : int8_t {
   /** #ShapeStyle::stroke_color / #ShapeStyle::stroke_channels. */
   Solid = 0,
   /** #ShapeStyle::stroke_ramp_table sampled along the across-stroke coordinate. */
   Ramp = 1,
-  /** A brush/asset texture mapped along the stroke (TODO). */
+  /** A texture mapped along or over the stroke (#ShapeStyle::stroke_texture). */
   Texture = 2,
-  /** A Curve Patch pattern mapped along the stroke (TODO). */
+  /** A Curve Pattern tile mapped along or over the stroke. */
   CurvePattern = 3,
 };
 
-/** Fill color source (Texture is TODO). */
+/** Fill color source (Texture is wired to #PaintShapeSettings::fill_texture). */
 enum class ShapeFillSource : int8_t {
   /** #ShapeStyle::fill_color / #ShapeStyle::fill_channels. */
   Solid = 0,
-  /** #ShapeStyle::fill_gradient_table over the shape bbox. */
-  Gradient = 1,
-  /** A brush/asset texture over the shape (TODO). */
+  /** A texture mapped over the shape (#ShapeStyle::fill_texture). */
   Texture = 2,
+};
+
+class ShapeTexture;
+
+/** Pointer-free snapshot of one part's texture mapping (#PaintShapeTexture DNA). The DNA scalars
+ * copy verbatim (the uniform-scale flag already folded into #scale by #style_from_settings); the
+ * resolved texture's native size is filled in by #style_textures_resolve and scaled with the
+ * geometry by #style_scale_to_target, so a MASK pattern lands on the same UVs on maps of any
+ * resolution. */
+struct ShapeTextureMapping {
+  ePaintShapeTexMapping mapping = PAINT_SHAPE_TEX_MAP_FIT;
+  ePaintShapeTexFit fit = PAINT_SHAPE_TEX_FIT_STRETCH;
+  ePaintShapeTexAnchor anchor = PAINT_SHAPE_TEX_ANCHOR_SHAPE;
+  bool tile_x = true;
+  bool tile_y = true;
+  bool mirror = false;
+  bool flip_x = false;
+  bool flip_y = false;
+  bool follow_rotation = true;
+  bool whole_repeats = false;
+  bool rotate_90 = false;
+  bool invert = false;
+  bool normal_flip_y = false;
+  bool use_tint = false;
+  /** Texture scale relative to the source's native size, per axis (uniform when the DNA flag is
+   * set). Never zero: #style_from_settings clamps to a tiny positive value. */
+  float2 scale = float2(1.0f);
+  /** Texture shift in fractions of a tile. */
+  float2 offset = float2(0.0f);
+  /** FIT mapping: texture repeats per shape, per axis. */
+  float2 repeat = float2(1.0f);
+  /** Extra texture rotation around the mapped frame's center, radians. */
+  float angle = 0.0f;
+  /** ALONG mapping: one repeat's length along the stroke in pixels (0 = native size). */
+  float tile_length = 0.0f;
+  /** Height value the texture's zero level maps to. */
+  float height_mid = 0.0f;
+  /** How strongly the texture mixes with the part's solid value. */
+  float opacity = 1.0f;
+  /** Native tile size of the resolved texture, in reference-tile pixels (the scale reference;
+   * (0, 0) when no texture is resolved). */
+  float2 ref_tex_size_px = float2(0.0f);
+
+  friend bool operator==(const ShapeTextureMapping &a, const ShapeTextureMapping &b)
+  {
+    return a.mapping == b.mapping && a.fit == b.fit && a.anchor == b.anchor && a.tile_x == b.tile_x &&
+           a.tile_y == b.tile_y && a.mirror == b.mirror && a.flip_x == b.flip_x &&
+           a.flip_y == b.flip_y && a.follow_rotation == b.follow_rotation &&
+           a.whole_repeats == b.whole_repeats && a.rotate_90 == b.rotate_90 &&
+           a.invert == b.invert && a.normal_flip_y == b.normal_flip_y && a.use_tint == b.use_tint &&
+           a.scale == b.scale && a.offset == b.offset && a.repeat == b.repeat &&
+           a.angle == b.angle && a.tile_length == b.tile_length && a.height_mid == b.height_mid &&
+           a.opacity == b.opacity && a.ref_tex_size_px == b.ref_tex_size_px;
+  }
 };
 
 /** Pointer-free snapshot of #PaintShapeSettings (profiles evaluated to tables). */
@@ -235,15 +292,28 @@ struct ShapeStyle {
   /** Color ramp along the stroke profile (Canvas mode), sampled at #PROFILE_TABLE_SIZE steps. */
   std::array<float4, PROFILE_TABLE_SIZE> stroke_ramp_table{};
   bool use_stroke_ramp = false;
-  /** Fill gradient ramp (GRADIENT fill), sampled at #PROFILE_TABLE_SIZE steps. */
-  std::array<float4, PROFILE_TABLE_SIZE> fill_gradient_table{};
-  bool use_fill_gradient = false;
 
   /** Which source feeds each part's color. Derived from the flags above by
    * #style_from_settings / #style_from_op_props; model-only (not DNA), the shader has one switch
-   * over it; the Texture branches are filled when texture sourcing lands. */
+   * over it. */
   ShapeStrokeSource stroke_source = ShapeStrokeSource::Solid;
   ShapeFillSource fill_source = ShapeFillSource::Solid;
+
+  /** Texture mapping snapshots and the immutable resolved texture of each part (null = no
+   * texture; the shader falls back to the part's solid values). The mappings are populated by
+   * #style_from_settings, the textures per session by #style_textures_resolve (a shared_ptr so
+   * copies of the style stay cheap and the immutable buffers are read-only from the workers). */
+  ShapeTextureMapping fill_tex_map;
+  ShapeTextureMapping stroke_tex_map;
+  std::shared_ptr<const ShapeTexture> fill_texture;
+  std::shared_ptr<const ShapeTexture> stroke_texture;
+  /** Colorspace the sampled texture colors are converted to before they are written, for a byte
+   * color buffer that is not scene linear (null: the buffer is linear, or holds data). The 2D
+   * compositor sets it per tile, like the part colors it converts; textures decode to scene
+   * linear, so without it an sRGB tile would show them too dark. */
+  const ocio::ColorSpace *texture_colorspace = nullptr;
+  /** #texture_colorspace is sRGB: the conversion takes the fast analytic path. */
+  bool texture_colorspace_is_srgb = false;
 
   /** PBR channel values per part, copied from the DNA settings (already pointer-free). */
   std::array<PaintShapeChannelValue, PAINT_MATERIAL_CHANNEL_NUM> stroke_channels{};
@@ -293,6 +363,28 @@ struct ShapeStyle {
   {
     return use_profile() && ELEM(profile_mode, PAINT_SHAPE_PROFILE_HEIGHT, PAINT_SHAPE_PROFILE_BOTH);
   }
+  /** The fill's texture needs the rasterizer's local shape coordinates (#ShapeRasterOutputs::
+   * ShapeUV). The Mask mapping works from the pixel position alone; the Along mapping is
+   * stroke-only. */
+  bool fill_uses_shape_uv() const
+  {
+    return use_fill() && fill_source == ShapeFillSource::Texture &&
+           fill_tex_map.mapping == PAINT_SHAPE_TEX_MAP_FIT;
+  }
+  /** The stroke's texture needs the along-stroke arc length and the signed across-stroke
+   * coordinate (#ShapeRasterOutputs::StrokeS | #ShapeRasterOutputs::StrokeV). */
+  bool stroke_uses_along_coords() const
+  {
+    return use_stroke() &&
+           ELEM(stroke_source, ShapeStrokeSource::Texture, ShapeStrokeSource::CurvePattern) &&
+           stroke_tex_map.mapping == PAINT_SHAPE_TEX_MAP_ALONG;
+  }
+  /** The rasterizer must be asked for the texture opt-in outputs (see #shape_raster_outputs_for).
+   * MASK mappings need none of them. */
+  bool needs_texture_coords() const
+  {
+    return fill_uses_shape_uv() || stroke_uses_along_coords();
+  }
 
   /** Linear sample of the stroke profile at \a t in [0, 1]. */
   float stroke_profile_sample(float t) const;
@@ -300,8 +392,6 @@ struct ShapeStyle {
   float fill_profile_sample(float t) const;
   /** Linear sample of the stroke color ramp at \a t in [0, 1]. */
   float4 stroke_ramp_sample(float t) const;
-  /** Linear sample of the fill gradient at \a t in [0, 1]. */
-  float4 fill_gradient_sample(float t) const;
 };
 
 /**

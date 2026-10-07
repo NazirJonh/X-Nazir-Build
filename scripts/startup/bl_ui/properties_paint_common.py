@@ -3248,9 +3248,9 @@ def paint_shape_settings(context):
 
 
 def draw_paint_shape_extra_options(context, layout, shape):
-    """The rarer Shape settings, shown in the Shape tool's popover and (all of them) in the
-    N-panel: the rectangle/ellipse default size, the stroke alignment and the non-uniform corner
-    radii. The tool header shows only the main fields."""
+    """The rarer Shape settings, shown in the header's Options popover and in the Active Tool's
+    Shape Options subpanel: the rectangle/ellipse default size, the stroke alignment, the
+    non-uniform corner radii and the textures. The tool header shows only the main fields."""
     is_line, is_rect, is_sized = paint_shape_tool_flags(context)
     if is_sized:
         sub = layout.column(align=True)
@@ -3266,6 +3266,135 @@ def draw_paint_shape_extra_options(context, layout, shape):
             sub.prop(shape, "corner_radius", index=2, text="Bottom Right")
             sub.prop(shape, "corner_radius", index=3, text="Bottom Left")
         layout.prop(shape, "use_uniform_corners", text="Uniform Corners")
+
+    draw_paint_shape_texture_options(context, layout, shape)
+
+
+def draw_paint_shape_options_subpanel(context, layout, shape):
+    """The Shape Options subpanel of the Active Tool panel: the rarer settings of
+    #draw_paint_shape_extra_options, collapsed under the main fields."""
+    header, panel = layout.panel("paint_shape_options", default_closed=True)
+    header.label(text="Shape Options")
+    if panel:
+        draw_paint_shape_extra_options(context, panel, shape)
+
+
+def draw_paint_shape_texture_options(context, layout, shape):
+    """The texture fill/stroke and the shared Curve Pattern of the Shape tools, shown in the
+    tool popover and the Active Tool subpanel (through #draw_paint_shape_extra_options)."""
+    if shape.use_fill:
+        draw_paint_shape_texture_part(layout, shape, "fill_texture")
+    if shape.use_stroke:
+        draw_paint_shape_texture_part(layout, shape, "stroke_texture")
+    if (shape.fill_type == 'TEXTURE' and shape.fill_texture.source == 'CURVE_PATTERN') or \
+       (shape.stroke_type == 'CURVE_PATTERN' and shape.use_stroke):
+        draw_paint_shape_curve_pattern(layout, shape)
+
+
+def draw_paint_shape_texture_part(layout, shape, texture_prop):
+    """One part's Texture section: the type selector, the source picker and, in a Settings
+    subpanel, the mapping controls."""
+    col = layout.column(align=True)
+    is_fill = texture_prop == "fill_texture"
+    if is_fill:
+        # Two buttons in one row (Solid / Texture) instead of a dropdown.
+        col.label(text="Fill")
+        col.row(align=True).prop(shape, "fill_type", expand=True)
+        if shape.fill_type != 'TEXTURE':
+            return
+    else:
+        col.prop(shape, "stroke_type", text="Stroke")
+        if shape.stroke_type not in ('TEXTURE', 'CURVE_PATTERN'):
+            return
+
+    tex = getattr(shape, texture_prop)
+    col.prop(tex, "source", text="Source")
+    if tex.source == 'IMAGE':
+        # The Image Browser row: click opens the asset shelf popover, dropping an image on it
+        # (Asset Browser, Outliner, file system) assigns it.
+        col.template_ID_browser(
+            tex,
+            "image",
+            new="image.new",
+            open="image.open",
+            text=iface_("Drop image: {:s}").format(iface_("Fill") if is_fill else iface_("Stroke")),
+            image_filter='PAINT_SOURCE',
+            use_users=False,
+        )
+    elif tex.source == 'MATERIAL':
+        col.template_ID_browser(
+            tex,
+            "material",
+            text=iface_("Drop material"),
+            use_users=False,
+        )
+    elif tex.source == 'BRUSH':
+        col.label(text="Uses the brush's channel sources", icon='INFO')
+    elif tex.source == 'CURVE_PATTERN':
+        # The tile itself is drawn by draw_paint_shape_curve_pattern.
+        return
+    elif tex.source == 'TEXTURE':
+        col.label(text="Procedural textures are not composited yet", icon='ERROR')
+        return
+
+    header, panel = layout.panel("paint_shape_{:s}_settings".format(texture_prop), default_closed=True)
+    header.label(text="Settings")
+    if not panel:
+        return
+    col = panel.column(align=True)
+    if tex.source == 'IMAGE':
+        col.prop(tex, "image_channel", text="Channel")
+    col.prop(tex, "mapping", text="Mapping")
+    if tex.mapping == 'FIT':
+        col.prop(tex, "fit_mode", text="Fit")
+        col.prop(tex, "repeat", index=0, text="Repeat X")
+        col.prop(tex, "repeat", index=1, text="Repeat Y")
+    elif tex.mapping == 'MASK':
+        col.prop(tex, "anchor", text="Anchor")
+        row = col.row(align=True)
+        row.prop(tex, "scale", index=0, text="Scale X")
+        row.prop(tex, "scale", index=1, text="Y")
+        col.prop(tex, "use_uniform_scale", text="Uniform Scale")
+        col.prop(tex, "tile_x", text="Tile X")
+        col.prop(tex, "tile_y", text="Tile Y")
+        col.prop(tex, "mirror", text="Mirror")
+    elif tex.mapping == 'ALONG':
+        col.prop(tex, "tile_length", text="Tile Length")
+        col.prop(tex, "whole_repeats", text="Fit Whole Repeats")
+        col.prop(tex, "rotate_90", text="Rotate 90°")
+
+    col.prop(tex, "angle", text="Angle")
+    col.prop(tex, "offset", index=0, text="Offset X")
+    col.prop(tex, "offset", index=1, text="Offset Y")
+    col.prop(tex, "flip_x", text="Flip X")
+    col.prop(tex, "flip_y", text="Flip Y")
+    col.prop(tex, "opacity", text="Opacity", slider=True)
+    col.prop(tex, "use_tint", text="Tint")
+
+
+def draw_paint_shape_curve_pattern(layout, shape):
+    """The shared Curve Pattern tile settings."""
+    header, panel = layout.panel("paint_shape_curve_pattern", default_closed=True)
+    header.label(text="Curve Pattern")
+    if not panel:
+        return
+    pattern = shape.curve_pattern
+    col = panel.column()
+    col.prop(shape, "curve_source_mode", text="Source")
+    if shape.curve_source_mode == 'OBJECT':
+        col.prop(shape, "curve_source_object")
+    else:
+        col.prop(shape, "curve_source_collection")
+    col.prop(pattern, "mode", expand=True)
+    col.prop(pattern, "line_width", text="Line Width", slider=True)
+    col.prop(pattern, "resolution")
+    col.prop(pattern, "crop_min_x", text="Crop Min X")
+    col.prop(pattern, "crop_min_y", text="Crop Min Y")
+    col.prop(pattern, "crop_max_x", text="Crop Max X")
+    col.prop(pattern, "crop_max_y", text="Crop Max Y")
+    col.prop(pattern, "wrap_crossing", text="Wrap Crossing")
+    col.prop(pattern, "use_sdf_relief", text="Relief")
+    col.prop(pattern, "world_space", text="World Space")
 
 
 def _brush_texture_for_slot(brush, tex_slot):

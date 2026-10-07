@@ -2043,7 +2043,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   /* Apply selection mask to the curve mask in-place after it has been recreated. The curve mask
    * must not be shared after this step: every material target may use a different image selection. */
   if (has_selection_mask) {
-    const Scene *scene = s->scene;
     const int tile_number = tile->iuser.tile;
     const ImBuf *sel_mask = BKE_image_paint_selection_mask_lookup(
         const_cast<const Image *>(s->image), tile_number);
@@ -2054,6 +2053,9 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       const int brush_origin_xi = int(floorf(pos[0] - float(diameter / 2)));
       const int brush_origin_yi = int(floorf(pos[1] - float(diameter / 2)));
       ushort *curve_mask = cache->curve_mask_cache.curve_mask;
+      /* One lock-free view per dab: the per-pixel API re-resolves the masks every call. */
+      const ImagePaintSelectionTileSampler selection_sampler =
+          BKE_image_paint_selection_tile_sampler_get(s->image, tile_number);
       for (int y = 0; y < diameter; y++) {
         const int my = brush_origin_yi + y;
         for (int x = 0; x < diameter; x++, curve_mask++) {
@@ -2061,12 +2063,9 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
             continue;
           }
           const int mx = brush_origin_xi + x;
-          *curve_mask = ushort(float(*curve_mask) * paint_2d_selection_blend_sample_bilinear(
-                                                   scene,
-                                                   s->image,
-                                                   tile_number,
-                                                   float(mx) + 0.5f,
-                                                   float(my) + 0.5f));
+          *curve_mask = ushort(float(*curve_mask) *
+                               selection_sampler.sample_bilinear(float(mx) + 0.5f,
+                                                                 float(my) + 0.5f));
         }
       }
     }
@@ -3586,6 +3585,11 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
                                   paint_2d_color_jitter_active(painter);
   const bool has_selection_mask = BKE_image_paint_selection_is_active(s->image);
   const int tile_number = tile->iuser.tile;
+  /* Resolved once; the per-pixel API re-resolves the masks on every call. */
+  ImagePaintSelectionTileSampler selection_sampler;
+  if (has_selection_mask) {
+    selection_sampler = BKE_image_paint_selection_tile_sampler_get(s->image, tile_number);
+  }
   /* Coverage is shared between material channels, but selection masks belong to an Image. Keep
    * the filter here, where the destination image and its tile are known, rather than baking it
    * into #AreaPlaneTriCoverage for the first channel. */
@@ -3597,8 +3601,7 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
     const int x = cov.x0 + int(pixel.lx);
     const int y = cov.y0 + int(pixel.ly);
     /* Combines the user-authored mask with the derived face-selection masks. */
-    return ushort(float(strength) *
-                  BKE_image_paint_selection_blend_sample(s->image, tile_number, x, y));
+    return ushort(float(strength) * selection_sampler.sample(x, y));
   };
 
   ImBuf *raster_buf = paint_2d_area_plane_ensure_scratch(

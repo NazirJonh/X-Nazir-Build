@@ -87,12 +87,7 @@ void shape_blend_pixel(float4 &dst,
         continue;
       }
       const float opacity = shape_part_opacity(style, part);
-      float4 color = (part == ShapePart::Fill && ctx.fill_gradient != nullptr) ?
-                         shade_fill_gradient(style,
-                                             p_shape,
-                                             ctx.fill_gradient->bbox_lo,
-                                             ctx.fill_gradient->bbox_hi) :
-                         shade_canvas(style, sample, part, p_shape);
+      float4 color = shade_canvas(style, sample, part, p_shape, ctx.tex_frame);
       color.w *= opacity * coverage * factor;
       if (color.w <= 0.0f) {
         continue;
@@ -108,8 +103,16 @@ void shape_blend_pixel(float4 &dst,
   float alpha_cov = 1.0f;
   if (material::channel_uses_alpha_mask(ctx.alpha_active, pbr_channel)) {
     alpha_cov = std::max(
-        shade_channel(style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ALPHA).alpha,
-        shade_channel(style, sample, ShapePart::Stroke, PAINT_MATERIAL_CHANNEL_ALPHA).alpha);
+        shade_channel(
+            style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ALPHA, p_shape, ctx.tex_frame)
+            .alpha,
+        shade_channel(style,
+                      sample,
+                      ShapePart::Stroke,
+                      PAINT_MATERIAL_CHANNEL_ALPHA,
+                      p_shape,
+                      ctx.tex_frame)
+            .alpha);
     if (alpha_cov <= 0.0f) {
       return;
     }
@@ -118,7 +121,7 @@ void shape_blend_pixel(float4 &dst,
   if (pbr_channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     float3 result = math::normalize(float3(dst.x, dst.y, dst.z) * 2.0f - float3(1.0f));
     for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
-      const ChannelWrite write = shade_channel(style, sample, part, pbr_channel);
+      const ChannelWrite write = shade_channel(style, sample, part, pbr_channel, p_shape, ctx.tex_frame);
       const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
       if (alpha <= 0.0f) {
         continue;
@@ -138,7 +141,7 @@ void shape_blend_pixel(float4 &dst,
 
   if (pbr_channel == PAINT_MATERIAL_CHANNEL_HEIGHT) {
     for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
-      const ChannelWrite write = shade_channel(style, sample, part, pbr_channel);
+      const ChannelWrite write = shade_channel(style, sample, part, pbr_channel, p_shape, ctx.tex_frame);
       const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
       if (alpha <= 0.0f) {
         continue;
@@ -157,7 +160,7 @@ void shape_blend_pixel(float4 &dst,
   }
 
   for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
-    const ChannelWrite write = shade_channel(style, sample, part, pbr_channel);
+    const ChannelWrite write = shade_channel(style, sample, part, pbr_channel, p_shape, ctx.tex_frame);
     const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
     if (alpha <= 0.0f) {
       continue;

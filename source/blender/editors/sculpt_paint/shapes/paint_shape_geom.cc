@@ -115,25 +115,55 @@ ShapeStyle style_from_settings(const PaintShapeSettings &settings)
     style.stroke_ramp_table.fill(style.stroke_color);
   }
 
-  style.use_fill_gradient = (settings.fill_type == PAINT_SHAPE_FILL_GRADIENT) &&
-                            (settings.fill_gradient != nullptr);
-  if (settings.fill_gradient) {
-    for (const int i : IndexRange(ShapeStyle::PROFILE_TABLE_SIZE)) {
-      const float t = (i == 0) ? 0.0f : float(i) / (ShapeStyle::PROFILE_TABLE_SIZE - 1);
-      float rgba[4];
-      BKE_colorband_evaluate(settings.fill_gradient, t, rgba);
-      style.fill_gradient_table[i] = to_float4(rgba);
-    }
+  /* Record the selected color source so the shader dispatches once. The stroke's RAMP choice
+   * rides in #use_stroke_ramp for files written before stroke_type existed (and stays the
+   * fallback below); the texture and Curve Pattern types are explicit. */
+  const ePaintShapeStrokeType stroke_type = ePaintShapeStrokeType(settings.stroke_type);
+  if (stroke_type == PAINT_SHAPE_STROKE_CURVE_PATTERN) {
+    style.stroke_source = ShapeStrokeSource::CurvePattern;
+  }
+  else if (stroke_type == PAINT_SHAPE_STROKE_TEXTURE) {
+    style.stroke_source = ShapeStrokeSource::Texture;
   }
   else {
-    style.fill_gradient_table.fill(style.fill_color);
+    style.stroke_source = style.use_stroke_ramp ? ShapeStrokeSource::Ramp :
+                                                  ShapeStrokeSource::Solid;
   }
+  style.fill_source = (settings.fill_type == PAINT_SHAPE_FILL_TEXTURE) ? ShapeFillSource::Texture :
+                                                                         ShapeFillSource::Solid;
 
-  /* Record the selected color source so the shader dispatches once (the Texture sources are not wired yet; the
-   * flags above stay the source of truth for now). */
-  style.stroke_source = style.use_stroke_ramp ? ShapeStrokeSource::Ramp :
-                                                ShapeStrokeSource::Solid;
-  style.fill_source = style.use_fill_gradient ? ShapeFillSource::Gradient : ShapeFillSource::Solid;
+  /* Texture mapping snapshots: the DNA scalars copy verbatim, with the uniform-scale flag folded
+   * into the scale and the zero scales of a never-defaulted settings block clamped away. */
+  const auto texture_mapping_from_dna = [](const PaintShapeTexture &tex) {
+    ShapeTextureMapping map;
+    map.mapping = ePaintShapeTexMapping(tex.mapping);
+    map.fit = ePaintShapeTexFit(tex.fit_mode);
+    map.anchor = ePaintShapeTexAnchor(tex.anchor);
+    map.tile_x = (tex.flag & PAINT_SHAPE_TEX_TILE_X) != 0;
+    map.tile_y = (tex.flag & PAINT_SHAPE_TEX_TILE_Y) != 0;
+    map.mirror = (tex.flag & PAINT_SHAPE_TEX_MIRROR) != 0;
+    map.flip_x = (tex.flag & PAINT_SHAPE_TEX_FLIP_X) != 0;
+    map.flip_y = (tex.flag & PAINT_SHAPE_TEX_FLIP_Y) != 0;
+    map.follow_rotation = (tex.flag & PAINT_SHAPE_TEX_FOLLOW_SHAPE_ROTATION) != 0;
+    map.whole_repeats = (tex.flag & PAINT_SHAPE_TEX_WHOLE_REPEATS) != 0;
+    map.rotate_90 = (tex.flag & PAINT_SHAPE_TEX_ROTATE_90) != 0;
+    map.invert = (tex.flag & PAINT_SHAPE_TEX_INVERT) != 0;
+    map.normal_flip_y = (tex.flag & PAINT_SHAPE_TEX_NORMAL_FLIP_Y) != 0;
+    map.use_tint = (tex.flag & PAINT_SHAPE_TEX_USE_TINT) != 0;
+    const float scale_x = std::max(tex.scale[0], 1e-4f);
+    const float scale_y = (tex.flag & PAINT_SHAPE_TEX_UNIFORM) ? scale_x :
+                                                                 std::max(tex.scale[1], 1e-4f);
+    map.scale = float2(scale_x, scale_y);
+    map.offset = float2(tex.offset[0], tex.offset[1]);
+    map.repeat = float2(std::max(tex.repeat[0], 1e-4f), std::max(tex.repeat[1], 1e-4f));
+    map.angle = tex.angle;
+    map.tile_length = tex.tile_length;
+    map.height_mid = tex.height_mid;
+    map.opacity = tex.opacity;
+    return map;
+  };
+  style.fill_tex_map = texture_mapping_from_dna(settings.fill_texture);
+  style.stroke_tex_map = texture_mapping_from_dna(settings.stroke_texture);
 
   /* PBR channel values are plain structs: copied verbatim into the snapshot, except the colors,
    * which the settings store as picked (PROP_COLOR_GAMMA) while the channel compositing works in
@@ -175,15 +205,6 @@ float4 ShapeStyle::stroke_ramp_sample(const float t) const
   const int j = std::min(i + 1, PROFILE_TABLE_SIZE - 1);
   const float f = x - float(i);
   return stroke_ramp_table[i] * (1.0f - f) + stroke_ramp_table[j] * f;
-}
-
-float4 ShapeStyle::fill_gradient_sample(const float t) const
-{
-  const float x = math::clamp(t, 0.0f, 1.0f) * (PROFILE_TABLE_SIZE - 1);
-  const int i = int(x);
-  const int j = std::min(i + 1, PROFILE_TABLE_SIZE - 1);
-  const float f = x - float(i);
-  return fill_gradient_table[i] * (1.0f - f) + fill_gradient_table[j] * f;
 }
 
 /** \} */
@@ -819,6 +840,13 @@ ShapeStyle style_scale_to_target(const ShapeStyle &style, const float2 &scale)
   scaled.gap_length *= scale_avg;
   scaled.dash_offset *= scale_avg;
   scaled.fill_profile_width *= scale_avg;
+  /* The texture mappings carry pixel lengths too: the Mask mapping's native size scales per
+   * axis (so a MASK pattern lands on the same UVs on maps of any resolution) and the Along
+   * mapping's tile length follows the widths. */
+  scaled.fill_tex_map.ref_tex_size_px *= scale;
+  scaled.stroke_tex_map.ref_tex_size_px *= scale;
+  scaled.fill_tex_map.tile_length *= scale_avg;
+  scaled.stroke_tex_map.tile_length *= scale_avg;
   return scaled;
 }
 

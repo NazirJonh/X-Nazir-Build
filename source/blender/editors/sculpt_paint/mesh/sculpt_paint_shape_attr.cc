@@ -92,6 +92,8 @@ static Vector<ShapeAttrTarget> shape_attr_targets_resolve(
  * part, or 1 when the channel is not active. */
 static bool shape_alpha_coverage(const ShapeStyle &style,
                                  const ShapeSample &sample,
+                                 const float2 &p,
+                                 const ShapeTexFrame *frame,
                                  const bool use_alpha_mask,
                                  float &r_alpha)
 {
@@ -100,9 +102,9 @@ static bool shape_alpha_coverage(const ShapeStyle &style,
     return true;
   }
   const ChannelWrite fill_alpha = shade_channel(
-      style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ALPHA);
+      style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ALPHA, p, frame);
   const ChannelWrite stroke_alpha = shade_channel(
-      style, sample, ShapePart::Stroke, PAINT_MATERIAL_CHANNEL_ALPHA);
+      style, sample, ShapePart::Stroke, PAINT_MATERIAL_CHANNEL_ALPHA, p, frame);
   r_alpha = std::max(fill_alpha.alpha, stroke_alpha.alpha);
   return r_alpha > 0.0f;
 }
@@ -118,6 +120,7 @@ static void shape_write_color_attribute(const Array<ShapeVertexSample> &samples,
                                         const FaceSelectionMask &face_selection_mask,
                                         const ShapeStyle &style,
                                         const eMaterialPaintChannel channel,
+                                        const ShapeTexFrame *frame,
                                         const bool use_alpha_mask)
 {
   threading::parallel_for(candidates.index_range(), 1, [&](const IndexRange node_range) {
@@ -133,7 +136,7 @@ static void shape_write_color_attribute(const Array<ShapeVertexSample> &samples,
         const int vert = verts[k];
 
         float alpha_cov;
-        if (!shape_alpha_coverage(style, sample.sample, use_alpha_mask, alpha_cov)) {
+        if (!shape_alpha_coverage(style, sample.sample, sample.co, frame, use_alpha_mask, alpha_cov)) {
           continue;
         }
 
@@ -145,7 +148,7 @@ static void shape_write_color_attribute(const Array<ShapeVertexSample> &samples,
                                              vert,
                                              face_selection_mask.select_poly);
         for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
-          const ChannelWrite write = shade_channel(style, sample.sample, part, channel);
+          const ChannelWrite write = shade_channel(style, sample.sample, part, channel, sample.co, frame);
           const float alpha = write.alpha * sample.factor * alpha_cov;
           if (alpha <= 0.0f) {
             continue;
@@ -175,6 +178,7 @@ static void shape_write_scalar_attribute(const Array<ShapeVertexSample> &samples
                                          const ShapeStyle &style,
                                          const eMaterialPaintChannel channel,
                                          const float2 value_range,
+                                         const ShapeTexFrame *frame,
                                          const bool use_alpha_mask)
 {
   const MutableSpan<float> values = writer.span;
@@ -191,13 +195,13 @@ static void shape_write_scalar_attribute(const Array<ShapeVertexSample> &samples
         const int vert = verts[k];
 
         float alpha_cov;
-        if (!shape_alpha_coverage(style, sample.sample, use_alpha_mask, alpha_cov)) {
+        if (!shape_alpha_coverage(style, sample.sample, sample.co, frame, use_alpha_mask, alpha_cov)) {
           continue;
         }
 
         float result = values[vert];
         for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
-          const ChannelWrite write = shade_channel(style, sample.sample, part, channel);
+          const ChannelWrite write = shade_channel(style, sample.sample, part, channel, sample.co, frame);
           const float alpha = write.alpha * sample.factor * alpha_cov;
           if (alpha <= 0.0f) {
             continue;
@@ -373,6 +377,7 @@ static void shape_material_paint_write(Object &ob,
                                   face_selection_mask,
                                   style,
                                   target.channel,
+                                  bake.frame(),
                                   use_alpha_mask);
       writer.finish();
       bke::object::pbvh_get(ob)->tag_attribute_changed(node_mask, target.name);
@@ -394,6 +399,7 @@ static void shape_material_paint_write(Object &ob,
                                    style,
                                    target.channel,
                                    range,
+                                   bake.frame(),
                                    use_alpha_mask);
       writer.finish();
       bke::object::pbvh_get(ob)->tag_attribute_changed(node_mask, target.name);
@@ -467,10 +473,8 @@ static bool shape_color_attribute_write(Object &ob,
           }
           const float opacity = part == ShapePart::Stroke ? style.stroke_opacity :
                                                             style.fill_opacity;
-          /* p = 0 for now: the gradient fill (fill_type) needs the shape's bounding box and its
-           * own mapping, which this backend does not compute yet. Until then a GRADIENT fill
-           * draws `fill_color` because #shade_canvas ignores the position. */
-          float4 color = shade_canvas(style, sample.sample, part, float2(0.0f));
+          /* The texture mappings evaluate against the vertex's projected position. */
+          float4 color = shade_canvas(style, sample.sample, part, sample.co, bake.frame());
           color.w *= opacity * coverage * sample.factor;
           if (color.w <= 0.0f) {
             continue;
@@ -513,6 +517,12 @@ static bool shape_apply_material_paint(bContext *C,
 {
   PaintModeSettings &mode_settings = toolsettings.paint_mode;
   style_channels_from_brush(paint, style);
+  style_textures_resolve(C,
+                         paint,
+                         mode_settings,
+                         settings,
+                         {},
+                         style);
 
   Vector<std::string> created_names_storage;
   bool any_created = false;
@@ -629,6 +639,7 @@ bool SculptMaterialPaintBackend::preview(bContext *C,
   PaintModeSettings &mode_settings = ctx_.toolsettings->paint_mode;
   ShapeStyle bake_style = style;
   style_channels_from_brush(*ctx_.paint, bake_style);
+  style_textures_resolve(C, *ctx_.paint, mode_settings, *ctx_.settings, {}, bake_style);
   Vector<std::string> created_names_storage;
   bool any_created = false;
   const Vector<ShapeAttrTarget> targets = shape_attr_targets_resolve(reports,

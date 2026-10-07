@@ -66,9 +66,10 @@ constexpr double SHAPE_PREVIEW_SHADING_TAG_INTERVAL = 0.1;
 
 /**
  * True when the brush-derived preview fields of \a a and \a b are equal: the stroke/fill opacity
- * and blend (#style_brush_values_from_brush) and the per-channel values (#style_channels_from_brush).
- * A brush / settings notifier can then skip the re-composite: a changed brush size (not part of the
- * style) or an unrelated setting no longer re-bakes the live preview.
+ * and blend (#style_brush_values_from_brush), the per-channel values (#style_channels_from_brush)
+ * and the resolved texture mappings and handles. A brush / settings notifier can then skip the
+ * re-composite: a changed brush size (not part of the style) or an unrelated setting no longer
+ * re-bakes the live preview.
  */
 bool shape_brush_style_equal(const ShapeStyle &a, const ShapeStyle &b);
 
@@ -158,6 +159,23 @@ const char *shape_targets_refusal_message(bContext *C, Object *ob);
  */
 void style_channels_from_brush(Paint &paint, ShapeStyle &style);
 
+/**
+ * Resolve the fill/stroke texture parts of \a settings into \a style's immutable
+ * #ShapeTexture handles (brush maps, a standalone material, a single image or the Curve Pattern
+ * tile) and fill each mapping's native texture size. Call once per style refresh / bake, after
+ * #style_from_settings; main thread only (it pins buffers and may start a material bake job).
+ *
+ * \param paint: the brush the Brush sources resolve from.
+ * \param protected_images: images that must never be sampled directly because they are also
+ * write targets of this bake; those are sampled from a copy.
+ */
+void style_textures_resolve(bContext *C,
+                            Paint &paint,
+                            const PaintModeSettings &mode_settings,
+                            const PaintShapeSettings &settings,
+                            Span<const Image *> protected_images,
+                            ShapeStyle &style);
+
 /** Set the overall opacity and canvas blend from the active brush: the brush/unified Strength as
  * both stroke and fill opacity, and the brush's blend mode for both parts. The shape colors are
  * NOT touched here: they come from #PaintShapeSettings (#style_from_settings). PBR channels keep
@@ -246,6 +264,10 @@ class ImageTilesBackend : public ShapeTargetBackend {
               const ShapeStyle &style,
               const char *undo_name) override;
   void cancel() override;
+
+  /** The resolved target images, so a session's texture resolve can duplicate a source that is
+   * also a write target (the pattern must never sample its own output). */
+  void target_images(Vector<const Image *> &r_images) const override;
 
   /** Whether every resolved target Image is still the one the session resolved at #begin.
    * A dead target means an undo / material edit replaced it, and the session must not write. */

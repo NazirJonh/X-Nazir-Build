@@ -65,9 +65,11 @@ set(SRC
   shapes/paint_shape_edit.cc
   shapes/paint_shape_geom.cc
   shapes/paint_shape_op_props.cc
+  shapes/paint_shape_pattern.cc
   shapes/paint_shape_raster.cc
   shapes/paint_shape_shade.cc
   shapes/paint_shape_space.cc
+  shapes/paint_shape_texture.cc
   shapes/paint_shape_uv_trace.cc
   paint_texture_ops.cc
   shapes/paint_vector_document.cc
@@ -257,8 +259,10 @@ paint_intern.hh
   shapes/paint_shape_create.hh
   shapes/paint_shape_edit.hh
   shapes/paint_shape_op_props.hh
+  shapes/paint_shape_pattern.hh
   shapes/paint_shape_render.hh
   shapes/paint_shape_space.hh
+  shapes/paint_shape_texture.hh
   shapes/paint_shape_uv_trace.hh
   shapes/paint_shape_target.hh
   shapes/paint_vector_document.hh
@@ -397,8 +401,10 @@ if(WITH_GTESTS)
     paint_curve_patch_session_test.cc
     tests/paint_shape_blend_test.cc
     tests/paint_shape_edit_test.cc
+    tests/paint_shape_pattern_test.cc
     tests/paint_shape_raster_test.cc
     tests/paint_shape_shade_test.cc
+    tests/paint_shape_texture_test.cc
     tests/paint_shape_uv_trace_test.cc
     tests/paint_vector_editor_test.cc
     tests/paint_vector_serialize_test.cc

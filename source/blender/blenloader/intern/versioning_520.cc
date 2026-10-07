@@ -2232,6 +2232,28 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* Files written before the texture fills/strokes and the Curve Pattern existed carry the older
+   * layout: the appended `PaintShapeTexture` / `PaintShapeCurvePattern` structs are zero-filled,
+   * while the DNA defaults (scale 1, repeat 1, opacity 1, tiling flags) are what a texture part
+   * needs to be usable. A file that saved the old "Brush Texture" fill type (value 2, renamed to
+   * "Texture") must come out of the load with a working default mapping instead of a zero scale.
+   * Keyed on one of the appended members like the blocks above. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "PaintShapeSettings", "char", "stroke_type"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (!scene.toolsettings) {
+        continue;
+      }
+      PaintShapeSettings &settings = scene.toolsettings->imapaint.shape;
+      const PaintShapeSettings defaults{};
+      settings.fill_texture = defaults.fill_texture;
+      settings.stroke_texture = defaults.stroke_texture;
+      settings.curve_pattern = defaults.curve_pattern;
+      settings.stroke_type = defaults.stroke_type;
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

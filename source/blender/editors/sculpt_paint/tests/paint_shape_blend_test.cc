@@ -17,7 +17,6 @@ static ShapeStyle flat_style()
   style.stroke_profile_table.fill(1.0f);
   style.fill_profile_table.fill(1.0f);
   style.stroke_ramp_table.fill(float4(1.0f));
-  style.fill_gradient_table.fill(float4(1.0f));
   style.feather = 1.0f;
   style.fill_color = float4(1.0f, 0.0f, 0.0f, 1.0f);
   style.stroke_color = float4(0.0f, 0.0f, 1.0f, 1.0f);
@@ -57,43 +56,6 @@ TEST(ShapeBlend, CanvasSolidFillReplacesAtFullCoverage)
   EXPECT_NEAR(dst.y, 0.0f, 1e-5f);
   EXPECT_NEAR(dst.z, 0.0f, 1e-5f);
   EXPECT_NEAR(dst.w, 1.0f, 1e-5f);
-}
-
-TEST(ShapeBlend, CanvasGradientFillSamplesBox)
-{
-  ShapeStyle style = flat_style();
-  style.flag = PAINT_SHAPE_USE_FILL;
-  style.fill_blend = IMB_BLEND_MIX;
-  /* Red to blue across the whole table, linearly: the sample at t maps to t directly. */
-  const int n = ShapeStyle::PROFILE_TABLE_SIZE;
-  for (const int i : IndexRange(n)) {
-    const float t = float(i) / float(n - 1);
-    style.fill_gradient_table[i] = float4(1.0f - t, 0.0f, t, 1.0f);
-  }
-
-  const ShapeFillGradient gradient{float2(0.0f, 0.0f), float2(100.0f, 0.0f)};
-  ShapeBlendContext ctx;
-  ctx.style = &style;
-  ctx.channel = -1;
-  ctx.fill_gradient = &gradient;
-
-  const auto sample_at_x = [&](const float x) {
-    float4 dst(0.0f);
-    shape_blend_pixel(dst, ctx, ShapeSample{.fill = 1.0f}, 1.0f, float2(x, 0.0f));
-    return dst;
-  };
-
-  const float4 left = sample_at_x(0.0f);
-  EXPECT_NEAR(left.x, 1.0f, 1e-4f);
-  EXPECT_NEAR(left.z, 0.0f, 1e-4f);
-
-  const float4 middle = sample_at_x(50.0f);
-  EXPECT_NEAR(middle.x, 0.5f, 1e-4f);
-  EXPECT_NEAR(middle.z, 0.5f, 1e-4f);
-
-  const float4 right = sample_at_x(100.0f);
-  EXPECT_NEAR(right.x, 0.0f, 1e-4f);
-  EXPECT_NEAR(right.z, 1.0f, 1e-4f);
 }
 
 TEST(ShapeBlend, ScalarChannelWritesValue)

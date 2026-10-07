@@ -51,7 +51,7 @@ PaintVector *make_two_item_vector(Main *bmain, const char *name)
   b.type = PAINT_VECTOR_ITEM_SHAPE;
   b.shape_type = PAINT_SHAPE_ELLIPSE;
   BKE_paint_vector_item_style_init(b);
-  b.style.fill_type = PAINT_SHAPE_FILL_GRADIENT;
+  b.style.fill_type = PAINT_SHAPE_FILL_TEXTURE;
 
   pv->active_item = 1;
   return pv;
@@ -136,14 +136,14 @@ TEST_F(PaintVectorTest, StyleSnapshotDeepCopyRoundTrip)
   PaintShapeSettings original = {};
   BKE_paint_shape_settings_init(&original);
   original.stroke_width = 5.0f;
-  original.fill_type = PAINT_SHAPE_FILL_GRADIENT;
+  original.fill_type = PAINT_SHAPE_FILL_TEXTURE;
   original.stroke_channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].color[0] = 0.25f;
 
   /* This is exactly the save/restore path of the tool settings around a `vector_edit` session. */
   PaintShapeSettings copy = {};
   BKE_paint_vector_style_copy(copy, original);
   EXPECT_FLOAT_EQ(copy.stroke_width, 5.0f);
-  EXPECT_EQ(copy.fill_type, PAINT_SHAPE_FILL_GRADIENT);
+  EXPECT_EQ(copy.fill_type, PAINT_SHAPE_FILL_TEXTURE);
   EXPECT_FLOAT_EQ(copy.stroke_channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].color[0], 0.25f);
   EXPECT_NE(copy.stroke_profile, nullptr);
   EXPECT_NE(copy.fill_profile, nullptr);

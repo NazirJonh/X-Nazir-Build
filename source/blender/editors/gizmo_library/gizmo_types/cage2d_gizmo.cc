@@ -797,6 +797,10 @@ static void gizmo_cage2d_draw_intern(wmGizmo *gz,
             gz->color, transform_part, size, margin, gz->line_width, true, draw_options);
       }
       if (transform_flag & ED_GIZMO_CAGE_XFORM_FLAG_ROTATE) {
+        /* Without its own id the handle is picked as whichever part was loaded last (Move), so a
+         * cage in a 3D gizmo group, which is picked through the selection buffer rather than
+         * #gizmo_cage2d_test_select, could never highlight or start a rotation. */
+        GPU_select_load_id(select_id | ED_GIZMO_CAGE2D_PART_ROTATE);
         cage2d_draw_box_interaction(gz->color,
                                     ED_GIZMO_CAGE2D_PART_ROTATE,
                                     size_real,

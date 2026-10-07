@@ -15,7 +15,10 @@
 #include <cstdint>
 #include <cstring>
 
+#include "BLI_math_base.hh"
+#include "BLI_math_constants.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_string.h"
 
 #include "DNA_scene_types.h"
 #include "DNA_windowmanager_types.h"
@@ -28,6 +31,7 @@
 
 #include "paint_shape.hh"
 #include "paint_shape_op_props.hh"
+#include "paint_shape_texture.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 
@@ -190,11 +194,43 @@ void style_to_op_props(wmOperator *op, const ShapeStyle &style)
   RNA_float_set(op->ptr, "height_depth", style.height_depth);
   RNA_float_set(op->ptr, "normal_strength", style.normal_strength);
   RNA_boolean_set(op->ptr, "use_stroke_ramp", style.use_stroke_ramp);
-  RNA_boolean_set(op->ptr, "use_fill_gradient", style.use_fill_gradient);
   RNA_int_set(op->ptr, "stroke_blend", style.stroke_blend);
   RNA_int_set(op->ptr, "fill_blend", style.fill_blend);
   RNA_float_set(op->ptr, "stroke_opacity", style.stroke_opacity);
   RNA_float_set(op->ptr, "fill_opacity", style.fill_opacity);
+
+  /* The texture mappings replay like the other appearance fields; the sources themselves are
+   * not operator data (they resolve from the settings at bake time). */
+  RNA_int_set(op->ptr, "stroke_type", int(style.stroke_source));
+  const auto mapping_to_props = [&](const char *prefix, const ShapeTextureMapping &map) {
+    char prop_name[64];
+    SNPRINTF(prop_name, "%s_mapping", prefix);
+    RNA_int_set(op->ptr, prop_name, int(map.mapping));
+    SNPRINTF(prop_name, "%s_fit", prefix);
+    RNA_int_set(op->ptr, prop_name, int(map.fit));
+    SNPRINTF(prop_name, "%s_anchor", prefix);
+    RNA_int_set(op->ptr, prop_name, int(map.anchor));
+    SNPRINTF(prop_name, "%s_flag", prefix);
+    RNA_int_set(op->ptr, prop_name, int(shape_tex_mapping_flags(map)));
+    SNPRINTF(prop_name, "%s_scale", prefix);
+    const float scale[2] = {map.scale.x, map.scale.y};
+    RNA_float_set_array(op->ptr, prop_name, scale);
+    SNPRINTF(prop_name, "%s_offset", prefix);
+    const float offset[2] = {map.offset.x, map.offset.y};
+    RNA_float_set_array(op->ptr, prop_name, offset);
+    SNPRINTF(prop_name, "%s_repeat", prefix);
+    const float repeat[2] = {map.repeat.x, map.repeat.y};
+    RNA_float_set_array(op->ptr, prop_name, repeat);
+    SNPRINTF(prop_name, "%s_angle", prefix);
+    RNA_float_set(op->ptr, prop_name, map.angle);
+    SNPRINTF(prop_name, "%s_tile_length", prefix);
+    RNA_float_set(op->ptr, prop_name, map.tile_length);
+    SNPRINTF(prop_name, "%s_opacity", prefix);
+    RNA_float_set(op->ptr, prop_name, map.opacity);
+  };
+  mapping_to_props("fill_tex", style.fill_tex_map);
+  mapping_to_props("stroke_tex", style.stroke_tex_map);
+
   /* The picked (sRGB) form is stored, so the Redo panel edits it like the settings' colors; the
    * scene-linear forms are derived back in `from_op_props`. */
   const float stroke_color[4] = {style.stroke_color_picked.x,
@@ -234,17 +270,71 @@ bool style_from_op_props(wmOperator *op, ShapeStyle &r_style)
   r_style.height_depth = RNA_float_get(op->ptr, "height_depth");
   r_style.normal_strength = RNA_float_get(op->ptr, "normal_strength");
   r_style.use_stroke_ramp = RNA_boolean_get(op->ptr, "use_stroke_ramp");
-  r_style.use_fill_gradient = RNA_boolean_get(op->ptr, "use_fill_gradient");
-  /* Keep the source selection in sync with the replayed flags (otherwise F9 would drop a
-   * stroke ramp / fill gradient). */
-  r_style.stroke_source = r_style.use_stroke_ramp ? ShapeStrokeSource::Ramp :
-                                                    ShapeStrokeSource::Solid;
-  r_style.fill_source = r_style.use_fill_gradient ? ShapeFillSource::Gradient :
-                                                    ShapeFillSource::Solid;
+  /* Keep the source selection in sync with the replayed flags and the texture type (otherwise F9
+   * would drop a stroke ramp / texture source). */
+  const ePaintShapeStrokeType stroke_type = ePaintShapeStrokeType(RNA_int_get(op->ptr, "stroke_type"));
+  if (stroke_type == PAINT_SHAPE_STROKE_TEXTURE) {
+    r_style.stroke_source = ShapeStrokeSource::Texture;
+  }
+  else if (stroke_type == PAINT_SHAPE_STROKE_CURVE_PATTERN) {
+    r_style.stroke_source = ShapeStrokeSource::CurvePattern;
+  }
+  else if (stroke_type == PAINT_SHAPE_STROKE_RAMP) {
+    r_style.stroke_source = ShapeStrokeSource::Ramp;
+  }
+  else {
+    r_style.stroke_source = r_style.use_stroke_ramp ? ShapeStrokeSource::Ramp :
+                                                      ShapeStrokeSource::Solid;
+  }
+  r_style.fill_source = (r_style.fill_type == PAINT_SHAPE_FILL_TEXTURE) ? ShapeFillSource::Texture :
+                                                                          ShapeFillSource::Solid;
   r_style.stroke_blend = short(RNA_int_get(op->ptr, "stroke_blend"));
   r_style.fill_blend = short(RNA_int_get(op->ptr, "fill_blend"));
   r_style.stroke_opacity = RNA_float_get(op->ptr, "stroke_opacity");
   r_style.fill_opacity = RNA_float_get(op->ptr, "fill_opacity");
+
+  const auto mapping_from_props = [&](const char *prefix, ShapeTextureMapping &map) {
+    char prop_name[64];
+    SNPRINTF(prop_name, "%s_mapping", prefix);
+    map.mapping = ePaintShapeTexMapping(RNA_int_get(op->ptr, prop_name));
+    SNPRINTF(prop_name, "%s_fit", prefix);
+    map.fit = ePaintShapeTexFit(RNA_int_get(op->ptr, prop_name));
+    SNPRINTF(prop_name, "%s_anchor", prefix);
+    map.anchor = ePaintShapeTexAnchor(RNA_int_get(op->ptr, prop_name));
+    SNPRINTF(prop_name, "%s_flag", prefix);
+    const short flag = short(RNA_int_get(op->ptr, prop_name));
+    map.tile_x = (flag & PAINT_SHAPE_TEX_TILE_X) != 0;
+    map.tile_y = (flag & PAINT_SHAPE_TEX_TILE_Y) != 0;
+    map.mirror = (flag & PAINT_SHAPE_TEX_MIRROR) != 0;
+    map.flip_x = (flag & PAINT_SHAPE_TEX_FLIP_X) != 0;
+    map.flip_y = (flag & PAINT_SHAPE_TEX_FLIP_Y) != 0;
+    map.follow_rotation = (flag & PAINT_SHAPE_TEX_FOLLOW_SHAPE_ROTATION) != 0;
+    map.whole_repeats = (flag & PAINT_SHAPE_TEX_WHOLE_REPEATS) != 0;
+    map.rotate_90 = (flag & PAINT_SHAPE_TEX_ROTATE_90) != 0;
+    map.invert = (flag & PAINT_SHAPE_TEX_INVERT) != 0;
+    map.normal_flip_y = (flag & PAINT_SHAPE_TEX_NORMAL_FLIP_Y) != 0;
+    map.use_tint = (flag & PAINT_SHAPE_TEX_USE_TINT) != 0;
+    SNPRINTF(prop_name, "%s_scale", prefix);
+    float scale[2];
+    RNA_float_get_array(op->ptr, prop_name, scale);
+    map.scale = math::max(float2(scale[0], scale[1]), float2(1e-4f));
+    SNPRINTF(prop_name, "%s_offset", prefix);
+    float offset[2];
+    RNA_float_get_array(op->ptr, prop_name, offset);
+    map.offset = float2(offset[0], offset[1]);
+    SNPRINTF(prop_name, "%s_repeat", prefix);
+    float repeat[2];
+    RNA_float_get_array(op->ptr, prop_name, repeat);
+    map.repeat = math::max(float2(repeat[0], repeat[1]), float2(1e-4f));
+    SNPRINTF(prop_name, "%s_angle", prefix);
+    map.angle = RNA_float_get(op->ptr, prop_name);
+    SNPRINTF(prop_name, "%s_tile_length", prefix);
+    map.tile_length = RNA_float_get(op->ptr, prop_name);
+    SNPRINTF(prop_name, "%s_opacity", prefix);
+    map.opacity = RNA_float_get(op->ptr, prop_name);
+  };
+  mapping_from_props("fill_tex", r_style.fill_tex_map);
+  mapping_from_props("stroke_tex", r_style.stroke_tex_map);
 
   float stroke_color[4];
   RNA_float_get_array(op->ptr, "stroke_color", stroke_color);
@@ -363,6 +453,42 @@ void shape_op_properties_register(wmOperatorType *ot)
   RNA_def_property_flag(prop, PropertyFlag(PROP_HIDDEN | PROP_SKIP_SAVE));
 }
 
+/* #RNA_def_* keeps the identifier pointer instead of copying it, so the texture property names
+ * must be static strings (a formatted stack buffer would leave every property dangling). */
+struct TexPropNames {
+  const char *mapping;
+  const char *fit;
+  const char *anchor;
+  const char *flag;
+  const char *scale;
+  const char *offset;
+  const char *repeat;
+  const char *angle;
+  const char *tile_length;
+  const char *opacity;
+};
+
+static constexpr TexPropNames FILL_TEX_PROP_NAMES = {"fill_tex_mapping",
+                                                     "fill_tex_fit",
+                                                     "fill_tex_anchor",
+                                                     "fill_tex_flag",
+                                                     "fill_tex_scale",
+                                                     "fill_tex_offset",
+                                                     "fill_tex_repeat",
+                                                     "fill_tex_angle",
+                                                     "fill_tex_tile_length",
+                                                     "fill_tex_opacity"};
+static constexpr TexPropNames STROKE_TEX_PROP_NAMES = {"stroke_tex_mapping",
+                                                       "stroke_tex_fit",
+                                                       "stroke_tex_anchor",
+                                                       "stroke_tex_flag",
+                                                       "stroke_tex_scale",
+                                                       "stroke_tex_offset",
+                                                       "stroke_tex_repeat",
+                                                       "stroke_tex_angle",
+                                                       "stroke_tex_tile_length",
+                                                       "stroke_tex_opacity"};
+
 void style_op_properties_register(wmOperatorType *ot)
 {
   PropertyRNA *prop;
@@ -395,6 +521,64 @@ void style_op_properties_register(wmOperatorType *ot)
   RNA_def_property_flag(prop, PROP_HIDDEN);
   prop = RNA_def_int(ot->srna, "fill_type", 0, 0, 2, "Fill Type", "", 0, 2);
   RNA_def_property_flag(prop, PROP_HIDDEN);
+  prop = RNA_def_int(ot->srna, "stroke_type", 0, 0, 3, "Stroke Type", "", 0, 3);
+  RNA_def_property_flag(prop, PROP_HIDDEN);
+
+  /* Texture mappings of both parts (the Redo panel replays them like the other appearance
+   * fields; the sources resolve from the settings at bake time). */
+  const auto tex_props_register = [&](const TexPropNames &names) {
+    prop = RNA_def_int(ot->srna, names.mapping, 0, 0, 2, "Texture Mapping", "", 0, 2);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_int(ot->srna, names.fit, 0, 0, 2, "Texture Fit", "", 0, 2);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_int(ot->srna, names.anchor, 0, 0, 2, "Texture Anchor", "", 0, 2);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_int(ot->srna, names.flag, 0, 0, INT16_MAX, "Texture Flags", "", 0, INT16_MAX);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_float_array(
+        ot->srna, names.scale, 2, nullptr, 0.001f, FLT_MAX, "Texture Scale", "", 0.001f, 1000.0f);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_float_array(ot->srna,
+                               names.offset,
+                               2,
+                               nullptr,
+                               -FLT_MAX,
+                               FLT_MAX,
+                               "Texture Offset",
+                               "",
+                               -10.0f,
+                               10.0f);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_float_array(ot->srna,
+                               names.repeat,
+                               2,
+                               nullptr,
+                               0.001f,
+                               FLT_MAX,
+                               "Texture Repeat",
+                               "",
+                               0.001f,
+                               1000.0f);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_float(ot->srna,
+                         names.angle,
+                         0.0f,
+                         -M_PI * 2.0f,
+                         M_PI * 2.0f,
+                         "Texture Angle",
+                         "",
+                         -M_PI * 2.0f,
+                         M_PI * 2.0f);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_float(
+        ot->srna, names.tile_length, 0.0f, 0.0f, FLT_MAX, "Texture Tile Length", "", 0.0f, 100000.0f);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+    prop = RNA_def_float(
+        ot->srna, names.opacity, 1.0f, 0.0f, 1.0f, "Texture Opacity", "", 0.0f, 1.0f);
+    RNA_def_property_flag(prop, PROP_HIDDEN);
+  };
+  tex_props_register(FILL_TEX_PROP_NAMES);
+  tex_props_register(STROKE_TEX_PROP_NAMES);
   prop = RNA_def_int(ot->srna, "fill_rule", 0, 0, 1, "Fill Rule", "", 0, 1);
   RNA_def_property_flag(prop, PROP_HIDDEN);
   prop = RNA_def_float(
@@ -409,8 +593,6 @@ void style_op_properties_register(wmOperatorType *ot)
       ot->srna, "normal_strength", 1.0f, 0.0f, 10.0f, "Normal Strength", "", 0.0f, 10.0f);
   RNA_def_property_flag(prop, PROP_HIDDEN);
   prop = RNA_def_boolean(ot->srna, "use_stroke_ramp", false, "Use Stroke Ramp", "");
-  RNA_def_property_flag(prop, PROP_HIDDEN);
-  prop = RNA_def_boolean(ot->srna, "use_fill_gradient", false, "Use Fill Gradient", "");
   RNA_def_property_flag(prop, PROP_HIDDEN);
   prop = RNA_def_int(ot->srna, "stroke_blend", 0, 0, INT16_MAX, "Stroke Blend", "", 0, INT16_MAX);
   RNA_def_property_flag(prop, PROP_HIDDEN);

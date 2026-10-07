@@ -447,7 +447,7 @@ static void paint_shape_session_free(Object &ob)
 /** \name 3D edit host
  * \{ */
 
-static ShapeVector3DInput paint_shape_3d_prepare_input(PaintShapeSession &session)
+static ShapeVector3DInput paint_shape_3d_prepare_input(PaintShapeSession &session, bContext *C)
 {
   ShapeVector3DInput input;
   input.style = style_from_settings(session.settings);
@@ -456,6 +456,17 @@ static ShapeVector3DInput paint_shape_3d_prepare_input(PaintShapeSession &sessio
     Paint &paint = ts.sculpt != nullptr ? ts.sculpt->paint : ts.imapaint.paint;
     style_brush_values_from_brush(paint, input.style);
     style_channels_from_brush(paint, input.style);
+    /* The texture parts resolve per refresh, never sampling the write targets directly. */
+    Vector<const Image *> protected_images;
+    if (session.backend) {
+      session.backend->target_images(protected_images);
+    }
+    style_textures_resolve(C,
+                           paint,
+                           ts.paint_mode,
+                           session.settings,
+                           protected_images,
+                           input.style);
   }
   /* The session style still holds what the last refresh used. */
   shape_apply_style_edits_to_active(session.edit, session.style, input.style);
@@ -482,7 +493,7 @@ static void paint_shape_session_refresh(PaintShapeSession &session, bContext *C)
   if (session.uv_trace != nullptr) {
     session.uv_trace->mark_shape_dirty();
   }
-  const ShapeVector3DInput input = paint_shape_3d_prepare_input(session);
+  const ShapeVector3DInput input = paint_shape_3d_prepare_input(session, C);
   if (input.expanded.is_empty()) {
     return;
   }
@@ -669,16 +680,43 @@ static void paint_shape_session_overlay_draw(const bContext *C, ARegion *region,
    * session space's live projection (the shared overlay draws in region pixels, above the mesh). */
   const float4x4 object_to_world(session->object != nullptr ? session->object->object_to_world() :
                                                              float4x4::identity());
+  const auto to_region = [session, region, &object_to_world](const PaintShape & /*shape*/,
+                                                             const float2 &p) {
+    float2 r_region = p;
+    if (session->space != nullptr) {
+      session->space->to_region(p, *region, object_to_world, r_region);
+    }
+    return r_region;
+  };
   shape_draw_session_overlay(
-      session->edit.items(),
-      session->edit.active_index(),
-      [session, region, &object_to_world](const PaintShape & /*shape*/, const float2 &p) {
-        float2 r_region = p;
-        if (session->space != nullptr) {
-          session->space->to_region(p, *region, object_to_world, r_region);
+      session->edit.items(), session->edit.active_index(), to_region);
+
+  /* The Curve Pattern crop frame (a square in world XY): projected through the same space so the
+   * user sees exactly which slice of the scene the pattern tile cuts out. */
+  if (session->space != nullptr) {
+    const PaintShapeSettings &settings = session->settings;
+    const bool pattern_active =
+        settings.stroke_type == PAINT_SHAPE_STROKE_CURVE_PATTERN ||
+        (settings.fill_type == PAINT_SHAPE_FILL_TEXTURE &&
+         settings.fill_texture.source == PAINT_SHAPE_TEX_SRC_CURVE_PATTERN);
+    if (pattern_active) {
+      const PaintShapeCurvePattern &pattern = settings.curve_pattern;
+      const float2 corners_world[4] = {{pattern.crop_min[0], pattern.crop_min[1]},
+                                       {pattern.crop_max[0], pattern.crop_min[1]},
+                                       {pattern.crop_max[0], pattern.crop_max[1]},
+                                       {pattern.crop_min[0], pattern.crop_max[1]}};
+      Vector<float2> frame_region;
+      for (const float2 &corner : corners_world) {
+        float2 co;
+        if (session->space->project_point(float3(corner.x, corner.y, 0.0f), float3(0.0f), co)) {
+          frame_region.append(to_region(PaintShape{}, co));
         }
-        return r_region;
-      });
+      }
+      if (frame_region.size() == 4) {
+        shape_draw_plain_outline(frame_region, true);
+      }
+    }
+  }
 }
 
 /** \} */
@@ -776,7 +814,7 @@ void paint_shape_session_begin(bContext *C,
                                                       REGION_DRAW_POST_PIXEL);
   }
 
-  const ShapeVector3DInput input = paint_shape_3d_prepare_input(*session);
+  const ShapeVector3DInput input = paint_shape_3d_prepare_input(*session, C);
   if (input.expanded.is_empty() || !session->backend->preview(C, nullptr, input.expanded, input.style)) {
     if (session->draw_handle != nullptr) {
       ED_region_draw_cb_exit(session->owner_region_type, session->draw_handle);
@@ -812,7 +850,7 @@ bool paint_shape_session_commit(bContext *C, Object &ob)
     }
     return false;
   }
-  const ShapeVector3DInput input = paint_shape_3d_prepare_input(*session);
+  const ShapeVector3DInput input = paint_shape_3d_prepare_input(*session, C);
   bool baked = false;
   if (input.expanded.is_empty()) {
     /* Nothing to bake: drop the preview instead of leaving it (the backend contract). */
@@ -985,6 +1023,13 @@ bool paint_shape_brush_update_3d(const Main *bmain, const Scene *scene, const Br
       Paint &paint = ts.sculpt != nullptr ? ts.sculpt->paint : ts.imapaint.paint;
       style_brush_values_from_brush(paint, candidate);
       style_channels_from_brush(paint, candidate);
+      /* The session style carries resolved textures, so the candidate must too. */
+      Vector<const Image *> protected_images;
+      if (session.backend) {
+        session.backend->target_images(protected_images);
+      }
+      style_textures_resolve(
+          nullptr, paint, ts.paint_mode, session.settings, protected_images, candidate);
     }
     if (shape_brush_style_equal(candidate, session.style)) {
       return;

@@ -47,9 +47,11 @@ struct CustomData_MeshMasks;
 struct Depsgraph;
 struct Editing;
 struct Image;
+struct Material;
 struct MovieClip;
 struct Object;
 struct Scene;
+struct Tex;
 struct World;
 struct bGPdata;
 struct bNodeTree;
@@ -1579,9 +1581,9 @@ enum ePaintShapeProfileMode : int8_t {
 /** #PaintShapeSettings::fill_type */
 enum ePaintShapeFillType : int8_t {
   PAINT_SHAPE_FILL_SOLID = 0,
-  PAINT_SHAPE_FILL_GRADIENT = 1,
-  /** Reserved: no longer exposed in RNA; kept so stored values stay valid. */
-  PAINT_SHAPE_FILL_BRUSH_TEXTURE = 2,
+  /* 1 was the bounding-box gradient fill; the value is retired so stored files stay valid (a
+   * stored 1 is read as Solid). */
+  PAINT_SHAPE_FILL_TEXTURE = 2,
 };
 
 /** #PaintShapeSettings::fill_rule */
@@ -1623,6 +1625,96 @@ enum ePaintShapeCurveFitMode : int8_t {
   PAINT_SHAPE_CURVE_FIT_ORIGINAL = 2,
 };
 
+/** #PaintShapeSettings::stroke_type */
+enum ePaintShapeStrokeType : int8_t {
+  PAINT_SHAPE_STROKE_SOLID = 0,
+  PAINT_SHAPE_STROKE_RAMP = 1,
+  PAINT_SHAPE_STROKE_TEXTURE = 2,
+  PAINT_SHAPE_STROKE_CURVE_PATTERN = 3,
+};
+
+/** #PaintShapeTexture::mapping */
+enum ePaintShapeTexMapping : int8_t {
+  /** Fit the texture to the shape's local frame (#ShapeSample::shape_uv). */
+  PAINT_SHAPE_TEX_MAP_FIT = 0,
+  /** The shape only masks a freely tiled, rotated texture. */
+  PAINT_SHAPE_TEX_MAP_MASK = 1,
+  /** Stroke only: the texture runs along the outline. */
+  PAINT_SHAPE_TEX_MAP_ALONG = 2,
+};
+
+/** #PaintShapeTexture::source */
+enum ePaintShapeTexSource : int8_t {
+  /** The active brush's PBR channel sources. */
+  PAINT_SHAPE_TEX_SRC_BRUSH = 0,
+  /** A standalone material (its Principled maps, baked on demand). */
+  PAINT_SHAPE_TEX_SRC_MATERIAL = 1,
+  /** A single image written to #PaintShapeTexture::image_channel. */
+  PAINT_SHAPE_TEX_SRC_IMAGE = 2,
+  /** 2D curves of the scene rasterized into a pattern tile. */
+  PAINT_SHAPE_TEX_SRC_CURVE_PATTERN = 3,
+  /** A procedural #Tex (later milestone). */
+  PAINT_SHAPE_TEX_SRC_TEXTURE = 4,
+};
+
+/** #PaintShapeTexture::fit_mode */
+enum ePaintShapeTexFit : int8_t {
+  PAINT_SHAPE_TEX_FIT_STRETCH = 0,
+  PAINT_SHAPE_TEX_FIT_COVER = 1,
+  PAINT_SHAPE_TEX_FIT_CONTAIN = 2,
+};
+
+/** #PaintShapeTexture::anchor */
+enum ePaintShapeTexAnchor : int8_t {
+  /** The texture is anchored to the shape (its effective origin). */
+  PAINT_SHAPE_TEX_ANCHOR_SHAPE = 0,
+  /** The texture is anchored to the canvas origin: the pattern continues between shapes. */
+  PAINT_SHAPE_TEX_ANCHOR_CANVAS = 1,
+  /** The texture is anchored to the view (3D pixel mode). */
+  PAINT_SHAPE_TEX_ANCHOR_VIEW = 2,
+};
+
+/** #PaintShapeTexture::flag */
+enum ePaintShapeTexFlag : short {
+  PAINT_SHAPE_TEX_TILE_X = (1 << 0),
+  PAINT_SHAPE_TEX_TILE_Y = (1 << 1),
+  PAINT_SHAPE_TEX_MIRROR = (1 << 2),
+  /** Keep the X and Y scales equal. */
+  PAINT_SHAPE_TEX_UNIFORM = (1 << 3),
+  PAINT_SHAPE_TEX_FLIP_X = (1 << 4),
+  PAINT_SHAPE_TEX_FLIP_Y = (1 << 5),
+  /** Rotate the texture with the shape's own rotation (Mask mapping). */
+  PAINT_SHAPE_TEX_FOLLOW_SHAPE_ROTATION = (1 << 6),
+  /** Round the number of repeats on closed strokes so the seam matches. */
+  PAINT_SHAPE_TEX_WHOLE_REPEATS = (1 << 7),
+  PAINT_SHAPE_TEX_ROTATE_90 = (1 << 8),
+  /** Invert scalar channel values (1 - value). */
+  PAINT_SHAPE_TEX_INVERT = (1 << 9),
+  /** Normal texture follows the DirectX convention (inverted green). */
+  PAINT_SHAPE_TEX_NORMAL_FLIP_Y = (1 << 10),
+  /** Multiply the texture color by the part color (#fill_color / #stroke_color). */
+  PAINT_SHAPE_TEX_USE_TINT = (1 << 11),
+};
+
+/** #PaintShapeCurvePattern::mode */
+enum ePaintShapeCurvePatternMode : int8_t {
+  /** Rasterize closed curves' interiors. */
+  PAINT_SHAPE_CURVE_PATTERN_FILL = 0,
+  /** Rasterize every curve as a stroke of #PaintShapeCurvePattern::line_width. */
+  PAINT_SHAPE_CURVE_PATTERN_STROKE = 1,
+  PAINT_SHAPE_CURVE_PATTERN_BOTH = 2,
+};
+
+/** #PaintShapeCurvePattern::flag */
+enum ePaintShapeCurvePatternFlag : char {
+  /** Rasterize a 3x3 neighborhood so crossings of the crop border tile seamlessly. */
+  PAINT_SHAPE_CURVE_PATTERN_WRAP_CROSSING = (1 << 0),
+  /** Store a signed-distance relief in the tile's G channel (Height/Normal stamping). */
+  PAINT_SHAPE_CURVE_PATTERN_USE_SDF_RELIEF = (1 << 1),
+  /** Interpret the crop frame in the curve objects' local space instead of world space. */
+  PAINT_SHAPE_CURVE_PATTERN_WORLD_SPACE = (1 << 2),
+};
+
 /**
  * One PBR paint channel value for a shape's Stroke or Fill part.
  *
@@ -1641,6 +1733,69 @@ struct PaintShapeChannelValue {
   float color[3] = {1.0f, 1.0f, 1.0f};
   /** Height amplitude / Normal strength. */
   float strength = 1.0f;
+};
+
+/**
+ * Texture mapping and source of one shape part (Fill or Stroke).
+ *
+ * Embedded twice in #PaintShapeSettings (`fill_texture` / `stroke_texture`). Only POD plus ID
+ * pointers, so a shallow copy is a complete copy (no owned allocation to free) and the ID
+ * pointers are walked by the owner's foreach_id / lib-link.
+ */
+struct PaintShapeTexture {
+  /** #ePaintShapeTexMapping */
+  char mapping = PAINT_SHAPE_TEX_MAP_FIT;
+  /** #ePaintShapeTexSource */
+  char source = PAINT_SHAPE_TEX_SRC_BRUSH;
+  /** #ePaintShapeTexFit */
+  char fit_mode = PAINT_SHAPE_TEX_FIT_STRETCH;
+  /** #ePaintShapeTexAnchor */
+  char anchor = PAINT_SHAPE_TEX_ANCHOR_SHAPE;
+  /** #ePaintShapeTexFlag */
+  short flag = PAINT_SHAPE_TEX_TILE_X | PAINT_SHAPE_TEX_TILE_Y | PAINT_SHAPE_TEX_UNIFORM |
+               PAINT_SHAPE_TEX_FOLLOW_SHAPE_ROTATION;
+  /** #eMaterialPaintChannel the single-image source writes to (0 = Base Color). */
+  short image_channel = 0;
+  /** Texture scale relative to the source's native size, per axis. */
+  float scale[2] = {1.0f, 1.0f};
+  /** Texture shift in fractions of a tile. */
+  float offset[2] = {0.0f, 0.0f};
+  /** FIT mapping: texture repeats per shape, per axis. */
+  float repeat[2] = {1.0f, 1.0f};
+  /** Extra texture rotation around the mapped frame's center, radians. */
+  float angle = 0.0f;
+  /** ALONG mapping: one repeat's length along the stroke in pixels (0 = native size). */
+  float tile_length = 0.0f;
+  /** Height value the texture's zero level maps to (0 or 0.5). */
+  float height_mid = 0.0f;
+  /** How strongly the texture mixes with the part's solid value. */
+  float opacity = 1.0f;
+  /** #PAINT_SHAPE_TEX_SRC_IMAGE source. */
+  struct Image *image = nullptr;
+  /** #PAINT_SHAPE_TEX_SRC_MATERIAL source. */
+  struct Material *material = nullptr;
+  /** #PAINT_SHAPE_TEX_SRC_TEXTURE source (later milestone). */
+  struct Tex *tex = nullptr;
+};
+
+/**
+ * Curve Pattern source: 2D curves of the scene rasterized into a pattern tile that fills and
+ * strokes sample like an image texture. Shared by both parts (one curve pool, one tile).
+ */
+struct PaintShapeCurvePattern {
+  /** Crop frame minimum corner in curve space (the tile covers [crop_min, crop_max]). */
+  float crop_min[2] = {-0.5f, -0.5f};
+  /** Crop frame maximum corner in curve space. */
+  float crop_max[2] = {0.5f, 0.5f};
+  /** Tile resolution (square), in pixels. */
+  int resolution = 512;
+  /** Stroke width of the STROKE/BOTH modes, as a fraction of the tile side. */
+  float line_width = 0.05f;
+  /** #ePaintShapeCurvePatternMode */
+  char mode = PAINT_SHAPE_CURVE_PATTERN_FILL;
+  /** #ePaintShapeCurvePatternFlag */
+  char flag = 0;
+  char _pad[6] = {};
 };
 
 /**
@@ -1742,10 +1897,20 @@ struct PaintShapeSettings {
   float height_depth = 1.0f;
   /** Normal relief strength. */
   float normal_strength = 1.0f;
-  /* Pad so the owned #ColorBand pointer starts on an 8-byte boundary. */
+  /* Keeps #fill_texture on an 8-byte boundary (it holds ID pointers). */
   char _pad5[4] = {};
-  /** Fill gradient ramp (GRADIENT fill). Owned; may be null. */
-  struct ColorBand *fill_gradient = nullptr;
+
+  /* Texture fills and strokes, and the shared Curve Pattern tile (appended last). */
+  /** Texture of the fill (#PAINT_SHAPE_FILL_TEXTURE). */
+  PaintShapeTexture fill_texture;
+  /** Texture of the stroke (#PAINT_SHAPE_STROKE_TEXTURE / #PAINT_SHAPE_STROKE_CURVE_PATTERN). */
+  PaintShapeTexture stroke_texture;
+  /** Curve Pattern tile source shared by both parts. */
+  PaintShapeCurvePattern curve_pattern;
+  /** #ePaintShapeStrokeType; #use_stroke_ramp stays the truth for RAMP files written before
+   * this field existed (it only takes priority for values >= 2). */
+  char stroke_type = PAINT_SHAPE_STROKE_SOLID;
+  char _pad6[7] = {};
 };
 
 /** #ImagePaintSettings::select_component */

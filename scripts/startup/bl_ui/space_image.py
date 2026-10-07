@@ -2517,13 +2517,15 @@ class IMAGE_AST_brush_paint(ImageAssetShelf, AssetShelf):
         return context.space_data and context.space_data.mode == 'PAINT'
 
 
-class IMAGE_PT_tools_shape_options(Panel, ImagePaintPanel):
-    """Popover of the rare Shape tool settings (size, alignment, non-uniform corners). The tool
-    header shows the main fields; the Active Tool panel shows everything."""
-    bl_context = ".paint_common_2d"
-    bl_category = "Tool"
+class IMAGE_PT_tools_shape_options(Panel):
+    """Popover of the rare Shape tool settings (size, alignment, non-uniform corners, textures).
+    The tool header shows the main fields; the Active Tool panel shows the same settings in its
+    own Shape Options subpanel."""
+    # Popover only, registered in the topbar header so it doesn't duplicate the Active Tool
+    # subpanel as an extra sidebar panel.
     bl_label = "Shape Options"
-    bl_options = {'DEFAULT_CLOSED'}
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
     bl_ui_units_x = 10
 
     @classmethod

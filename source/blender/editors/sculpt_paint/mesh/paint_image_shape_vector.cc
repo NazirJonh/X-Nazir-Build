@@ -287,7 +287,7 @@ class ImageShapeVectorHost : public VectorEditHost {
    * so it shows exactly what the commit will write. The prepared style is kept on the session for
    * the next hit test.
    */
-  ShapeVectorInput prepare_input()
+  ShapeVectorInput prepare_input(bContext *C)
   {
     ShapeVectorInput input;
     /* The style comes from the session's own settings copy, never the shared global block. The
@@ -296,6 +296,18 @@ class ImageShapeVectorHost : public VectorEditHost {
     if (scene_ && scene_->toolsettings) {
       shape::style_brush_values_from_brush(scene_->toolsettings->imapaint.paint, input.style);
       shape::style_channels_from_brush(scene_->toolsettings->imapaint.paint, input.style);
+      /* The texture parts resolve per refresh, never sampling the write targets directly; the
+       * immutable handles ride the style, so the preview and the commit sample the same pixels. */
+      Vector<const Image *> protected_images;
+      if (session_.backend) {
+        session_.backend->target_images(protected_images);
+      }
+      shape::style_textures_resolve(C,
+                                    scene_->toolsettings->imapaint.paint,
+                                    scene_->toolsettings->paint_mode,
+                                    session_.settings,
+                                    protected_images,
+                                    input.style);
     }
     /* The session style still holds the values the last refresh used. */
     shape::shape_apply_style_edits_to_active(session_.edit, session_.style, input.style);
@@ -319,7 +331,7 @@ class ImageShapeVectorHost : public VectorEditHost {
     if (!session_.backend) {
       return false;
     }
-    const ShapeVectorInput input = this->prepare_input();
+    const ShapeVectorInput input = this->prepare_input(C);
     if (input.expanded.is_empty()) {
       return false;
     }
@@ -669,7 +681,7 @@ static void image_shape_vector_commit(bContext *C, ImageShapeVectorState *state)
    * session's stored scene. */
   Scene *scene = C ? CTX_data_scene(C) : state->owner_scene;
   ImageShapeVectorHost host(*state, scene, 0.0f);
-  const ShapeVectorInput input = host.prepare_input();
+  const ShapeVectorInput input = host.prepare_input(C);
 
   /* An ID-backed session writes the document back before baking. If the ID was removed
    * (undo / deletion) during the session, never touch it: cancel the preview and report. The
@@ -1222,6 +1234,14 @@ void ED_paint_shape_brush_update(const Main *bmain, const Scene *scene, const Br
     shape::ShapeStyle candidate = shape::style_from_settings(state->settings);
     shape::style_brush_values_from_brush(ts.imapaint.paint, candidate);
     shape::style_channels_from_brush(ts.imapaint.paint, candidate);
+    /* The session style carries resolved textures, so the candidate must too; a texture that
+     * did not change resolves to the same signature. */
+    Vector<const Image *> protected_images;
+    if (state->backend) {
+      state->backend->target_images(protected_images);
+    }
+    shape::style_textures_resolve(
+        nullptr, ts.imapaint.paint, ts.paint_mode, state->settings, protected_images, candidate);
     if (shape::shape_brush_style_equal(candidate, state->style) &&
         image_shape_symmetry_equal(*state, ts))
     {

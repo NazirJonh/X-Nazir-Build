@@ -201,12 +201,10 @@ void BKE_paint_shape_settings_init(PaintShapeSettings *settings)
   CurveMapping *stroke_profile = settings->stroke_profile;
   CurveMapping *fill_profile = settings->fill_profile;
   ColorBand *stroke_ramp = settings->stroke_ramp;
-  ColorBand *fill_gradient = settings->fill_gradient;
   *settings = defaults;
   settings->stroke_profile = stroke_profile;
   settings->fill_profile = fill_profile;
   settings->stroke_ramp = stroke_ramp;
-  settings->fill_gradient = fill_gradient;
 
   if (!settings->stroke_profile) {
     settings->stroke_profile = shape_profile_new_flat();
@@ -226,13 +224,6 @@ void BKE_paint_shape_settings_init(PaintShapeSettings *settings)
   }
   else {
     BKE_colorband_init(settings->stroke_ramp, true);
-  }
-
-  if (!settings->fill_gradient) {
-    settings->fill_gradient = BKE_colorband_add(true);
-  }
-  else {
-    BKE_colorband_init(settings->fill_gradient, true);
   }
 
   /* PBR Paint defaults: Base Color follows the canvas part colors, the Height/Normal strengths
@@ -812,6 +803,36 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     reader,
                                                     &toolsett_old->imapaint.shape.curve_source_object,
                                                     IDWALK_CB_USER);
+  /* Shape tool texture sources (fill and stroke): user-counted like the curve sources (the RNA
+   * image/material/texture properties carry #PROP_ID_REFCOUNT). */
+  for (int texture_i = 0; texture_i < 2; texture_i++) {
+    PaintShapeTexture *texture = (texture_i == 0) ? &toolsett->imapaint.shape.fill_texture :
+                                                    &toolsett->imapaint.shape.stroke_texture;
+    PaintShapeTexture *texture_old = (texture_i == 0) ?
+                                         &toolsett_old->imapaint.shape.fill_texture :
+                                         &toolsett_old->imapaint.shape.stroke_texture;
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &texture->image,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_RESTORE,
+                                                      reader,
+                                                      &texture_old->image,
+                                                      IDWALK_CB_USER);
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &texture->material,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_RESTORE,
+                                                      reader,
+                                                      &texture_old->material,
+                                                      IDWALK_CB_USER);
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &texture->tex,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_RESTORE,
+                                                      reader,
+                                                      &texture_old->tex,
+                                                      IDWALK_CB_USER);
+  }
 
   /* Poly Paint: the canvas Image and the per-channel Image overrides an add-on can bind. Without
    * these the pointers are never remapped and are left dangling when the Image is deleted - the
@@ -1513,9 +1534,6 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
   if (ts->imapaint.shape.stroke_ramp) {
     writer->write_struct(ts->imapaint.shape.stroke_ramp);
   }
-  if (ts->imapaint.shape.fill_gradient) {
-    writer->write_struct(ts->imapaint.shape.fill_gradient);
-  }
 
   Editing *ed = sce->ed;
   if (ed) {
@@ -1683,7 +1701,6 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
       BKE_curvemapping_init(sce->toolsettings->imapaint.shape.fill_profile);
     }
     BLO_read_struct(reader, ColorBand, &sce->toolsettings->imapaint.shape.stroke_ramp);
-    BLO_read_struct(reader, ColorBand, &sce->toolsettings->imapaint.shape.fill_gradient);
 
     BLO_read_struct_list(
         reader, ColorPickerPalette, &sce->toolsettings->color_picker_palettes);
@@ -2100,9 +2117,6 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
   if (toolsettings->imapaint.shape.stroke_ramp) {
     ts->imapaint.shape.stroke_ramp = MEM_dupalloc(toolsettings->imapaint.shape.stroke_ramp);
   }
-  if (toolsettings->imapaint.shape.fill_gradient) {
-    ts->imapaint.shape.fill_gradient = MEM_dupalloc(toolsettings->imapaint.shape.fill_gradient);
-  }
   ts->particle.paintcursor = nullptr;
   ts->particle.scene = nullptr;
   ts->particle.object = nullptr;
@@ -2202,9 +2216,6 @@ void BKE_toolsettings_free(ToolSettings *toolsettings)
   }
   if (toolsettings->imapaint.shape.stroke_ramp) {
     MEM_delete(toolsettings->imapaint.shape.stroke_ramp);
-  }
-  if (toolsettings->imapaint.shape.fill_gradient) {
-    MEM_delete(toolsettings->imapaint.shape.fill_gradient);
   }
 
   /* Color jitter curves in unified paint settings. */

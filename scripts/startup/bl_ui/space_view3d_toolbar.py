@@ -3057,13 +3057,15 @@ class VIEW3D_OT_face_set_colors_swap(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class VIEW3D_PT_tools_shape_options(Panel, View3DPaintPanel):
-    """Popover of the rare Shape tool settings (size, alignment, non-uniform corners). The tool
-    header shows the main fields; the Active Tool panel shows everything."""
-    bl_context = ".paint_common"
-    bl_category = "Tool"
+class VIEW3D_PT_tools_shape_options(Panel):
+    """Popover of the rare Shape tool settings (size, alignment, non-uniform corners, textures).
+    The tool header shows the main fields; the Active Tool panel shows the same settings in its
+    own Shape Options subpanel."""
+    # Popover only, registered in the topbar header so it doesn't duplicate the Active Tool
+    # subpanel as an extra sidebar panel.
     bl_label = "Shape Options"
-    bl_options = {'DEFAULT_CLOSED'}
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
     bl_ui_units_x = 10
 
     @classmethod

@@ -4,10 +4,13 @@
 
 #include "../shapes/paint_shape_render.hh"
 
+#include <memory>
+
 #include "BLI_math_base.hh"
 #include "BLI_math_vector.hh"
 
 #include "../mesh/paint_material_blend.hh"
+#include "../shapes/paint_shape_texture.hh"
 
 #include "testing/testing.h"
 
@@ -19,7 +22,6 @@ static ShapeStyle flat_style()
   style.stroke_profile_table.fill(1.0f);
   style.fill_profile_table.fill(1.0f);
   style.stroke_ramp_table.fill(float4(1.0f, 1.0f, 1.0f, 1.0f));
-  style.fill_gradient_table.fill(float4(1.0f, 1.0f, 1.0f, 1.0f));
   style.feather = 1.0f;
   style.fill_color = float4(1.0f, 0.0f, 0.0f, 1.0f);
   style.stroke_color = float4(0.0f, 0.0f, 1.0f, 1.0f);
@@ -92,25 +94,6 @@ TEST(ShapeShade, NormalFlatIsUp)
   EXPECT_NEAR(normal.value.x, 0.0f, 1e-5);
   EXPECT_NEAR(normal.value.y, 0.0f, 1e-5);
   EXPECT_NEAR(normal.value.z, 1.0f, 1e-5);
-}
-
-TEST(ShapeShade, FillGradientLinear)
-{
-  ShapeStyle style = flat_style();
-  /* Red-to-blue ramp over the bbox: edges sample the stops, the middle mixes. */
-  style.fill_gradient_table.fill(float4(1.0f, 0.0f, 0.0f, 1.0f));
-  style.fill_gradient_table[ShapeStyle::PROFILE_TABLE_SIZE - 1] = float4(0.0f, 0.0f, 1.0f, 1.0f);
-  const float2 lo(10.0f, 10.0f);
-  const float2 hi(110.0f, 60.0f);
-  EXPECT_FLOAT_EQ(fill_gradient_param(float2(10.0f, 30.0f), lo, hi), 0.0f);
-  EXPECT_FLOAT_EQ(fill_gradient_param(float2(110.0f, 30.0f), lo, hi), 1.0f);
-  EXPECT_FLOAT_EQ(fill_gradient_param(float2(60.0f, 30.0f), lo, hi), 0.5f);
-  const float4 edge = shade_fill_gradient(style, float2(10.0f, 30.0f), lo, hi);
-  EXPECT_FLOAT_EQ(edge.x, 1.0f);
-  EXPECT_FLOAT_EQ(edge.z, 0.0f);
-  const float4 far = shade_fill_gradient(style, float2(110.0f, 30.0f), lo, hi);
-  EXPECT_FLOAT_EQ(far.x, 0.0f);
-  EXPECT_FLOAT_EQ(far.z, 1.0f);
 }
 
 TEST(ShapeShade, RnmBlend)
@@ -208,5 +191,182 @@ TEST(ShapeShade, HeightNormalLink)
       style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_NORMAL);
   EXPECT_LT(height_driven.value.x, 0.0f);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Texture sourcing
+ * \{ */
+
+namespace {
+
+/** A style whose fill carries a texture with one constant channel. */
+ShapeStyle texture_style(const eMaterialPaintChannel channel, const float4 value)
+{
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_FILL;
+  auto texture = std::make_shared<ShapeTexture>();
+  texture->native_size = int2(64, 64);
+  texture->channels[channel].kind = ShapeTextureChannel::Kind::Constant;
+  texture->channels[channel].constant = value;
+  style.fill_texture = texture;
+  style.fill_source = ShapeFillSource::Texture;
+  style.fill_channels[channel].use = true;
+  return style;
+}
+
+/** A 2x1 texture: the left texel black (a = 0), the right one white (a = 1). Registered as the
+ * Base Color and the Alpha channel source (an IMAGE-style resolve). */
+std::shared_ptr<ShapeTexture> split_texture()
+{
+  auto texture = std::make_shared<ShapeTexture>();
+  texture->native_size = int2(2, 1);
+  auto *pixels = new float[8]{0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+  ShapeTextureChannel channel;
+  channel.kind = ShapeTextureChannel::Kind::Buffer;
+  channel.size = int2(2, 1);
+  channel.float_px = pixels;
+  channel.is_linear = true;
+  texture->channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = channel;
+  texture->channels[PAINT_MATERIAL_CHANNEL_ALPHA] = channel;
+  /* The buffer dies with the texture. */
+  std::shared_ptr<void> guard(pixels, [](void *data) { delete[] static_cast<float *>(data); });
+  texture->keeper = std::move(guard);
+  return texture;
+}
+
+}  // namespace
+
+TEST(ShapeShade, TextureChannelColorAndFallback)
+{
+  /* A constant texture channel mixes with the solid entry by the mapping opacity. */
+  ShapeStyle style = texture_style(PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                   float4(0.0f, 1.0f, 0.0f, 1.0f));
+  ShapeSample sample{.fill = 1.0f, .stroke = 0.0f};
+  sample.shape_uv = float2(0.5f, 0.5f);
+
+  const ChannelWrite write = shade_channel(style, sample, ShapePart::Fill,
+                                           PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(write.value.y, 1.0f, 1e-6f);
+  EXPECT_NEAR(write.alpha, 1.0f, 1e-6f);
+
+  /* No texture: the solid entry stands (the pre-texture behavior). */
+  ShapeStyle plain = flat_style();
+  plain.flag = PAINT_SHAPE_USE_FILL;
+  plain.fill_source = ShapeFillSource::Texture;
+  plain.fill_channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = true;
+  const ChannelWrite fallback = shade_channel(
+      plain, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(fallback.value.x, 1.0f, 1e-6f); /* the flat fill color is red */
+}
+
+TEST(ShapeShade, TextureStampOutsideWritesNothing)
+{
+  /* A non-tiling Mask mapping: a point outside the texture writes zero alpha. */
+  ShapeStyle style = texture_style(PAINT_MATERIAL_CHANNEL_ROUGHNESS, float4(1.0f, 1.0f, 1.0f, 1.0f));
+  style.fill_tex_map.mapping = PAINT_SHAPE_TEX_MAP_MASK;
+  style.fill_tex_map.tile_x = false;
+  style.fill_tex_map.tile_y = false;
+  style.fill_tex_map.ref_tex_size_px = float2(10.0f, 10.0f);
+
+  ShapeSample sample{.fill = 1.0f, .stroke = 0.0f};
+  /* The texture frame spans p in [0, 10]; (15, 5) is outside. */
+  const ChannelWrite outside = shade_channel(
+      style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, float2(15.0f, 5.0f));
+  EXPECT_NEAR(outside.alpha, 0.0f, 1e-6f);
+  const ChannelWrite inside = shade_channel(
+      style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, float2(5.0f, 5.0f));
+  EXPECT_NEAR(inside.alpha, 1.0f, 1e-6f);
+}
+
+TEST(ShapeShade, TextureScalarInvertAndOpacity)
+{
+  ShapeStyle style = texture_style(PAINT_MATERIAL_CHANNEL_ROUGHNESS, float4(0.8f, 0.8f, 0.8f, 1.0f));
+  style.fill_tex_map.invert = true;
+  style.fill_tex_map.opacity = 0.5f;
+  const ShapeSample sample{.fill = 1.0f, .stroke = 0.0f};
+  sample.shape_uv = float2(0.5f, 0.5f);
+
+  const ChannelWrite write = shade_channel(
+      style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  /* The constant 0.8 reads as a white buffer value (constant feeds rgba directly), inverted to
+   * 0.2, then mixed with the solid entry (0) at 0.5 opacity -> 0.1. */
+  EXPECT_NEAR(write.value.x, 0.1f, 1e-4f);
+}
+
+TEST(ShapeShade, TextureAlphaMasksCoverage)
+{
+  /* The Alpha channel multiplies its write by the texture's alpha: the black (a=0) half of the
+   * split texture erases the coverage. */
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_FILL;
+  style.fill_texture = split_texture();
+  style.fill_source = ShapeFillSource::Texture;
+  style.fill_channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = true;
+
+  ShapeSample transparent_half{.fill = 1.0f, .stroke = 0.0f};
+  transparent_half.shape_uv = float2(0.25f, 0.5f);
+  ShapeSample opaque_half{.fill = 1.0f, .stroke = 0.0f};
+  opaque_half.shape_uv = float2(0.75f, 0.5f);
+
+  const ChannelWrite erased = shade_channel(
+      style, transparent_half, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ALPHA);
+  EXPECT_NEAR(erased.alpha, 0.0f, 1e-4f);
+  const ChannelWrite kept = shade_channel(
+      style, opaque_half, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_ALPHA);
+  EXPECT_NEAR(kept.alpha, 1.0f, 1e-4f);
+}
+
+TEST(ShapeShade, TextureNormalReplacesProfileSlope)
+{
+  /* With a usable normal texture the write carries the sampled (unpacked) normal, not the
+   * profile slope. */
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_FILL;
+  auto texture = std::make_shared<ShapeTexture>();
+  texture->native_size = int2(1, 1);
+  auto *pixels = new float[4]{0.75f, 0.5f, 1.0f, 1.0f}; /* encoded +X */
+  ShapeTextureChannel &channel = texture->channels[PAINT_MATERIAL_CHANNEL_NORMAL];
+  channel.kind = ShapeTextureChannel::Kind::Buffer;
+  channel.size = int2(1, 1);
+  channel.float_px = pixels;
+  channel.is_linear = true;
+  std::shared_ptr<void> guard(pixels, [](void *data) { delete[] static_cast<float *>(data); });
+  texture->keeper = std::move(guard);
+  style.fill_texture = texture;
+  style.fill_source = ShapeFillSource::Texture;
+  style.fill_channels[PAINT_MATERIAL_CHANNEL_NORMAL].use = true;
+
+  ShapeSample sample{.fill = 1.0f, .stroke = 0.0f};
+  sample.shape_uv = float2(0.5f, 0.5f);
+  sample.fill_d = 4.0f;
+  sample.fill_dir = float2(1.0f, 0.0f);
+  const ChannelWrite write = shade_channel(
+      style, sample, ShapePart::Fill, PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_NEAR(write.value.x, 0.5f, 1e-5f);
+  EXPECT_NEAR(write.value.y, 0.0f, 1e-5f);
+  EXPECT_NEAR(write.value.z, 1.0f, 1e-5f);
+}
+
+TEST(ShapeShade, TextureCanvasColorAndTint)
+{
+  /* The canvas consumer reads the texture's canvas color (or the Base Color source) and tints
+   * it with the part color. */
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_FILL;
+  style.fill_texture = split_texture();
+  style.fill_source = ShapeFillSource::Texture;
+  style.fill_tex_map.use_tint = true;
+  style.fill_color = float4(1.0f, 0.0f, 0.0f, 1.0f);
+
+  ShapeSample opaque_half{.fill = 1.0f, .stroke = 0.0f};
+  opaque_half.shape_uv = float2(0.75f, 0.5f);
+  const float4 canvas = shade_canvas(style, opaque_half, ShapePart::Fill, float2(0.0f));
+  /* White texture * red tint = red, with the texture's alpha in w. */
+  EXPECT_NEAR(canvas.x, 1.0f, 1e-5f);
+  EXPECT_NEAR(canvas.y, 0.0f, 1e-5f);
+  EXPECT_NEAR(canvas.z, 0.0f, 1e-5f);
+  EXPECT_NEAR(canvas.w, 1.0f, 1e-5f);
+}
+
+/** \} */
 
 }  // namespace blender::ed::sculpt_paint::shape

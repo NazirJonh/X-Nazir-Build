@@ -3474,7 +3474,24 @@ void overlay_rebuild(const bContext *C, const Object &ob, OverlayCache &cache)
    * below covers exactly where the mask may have changed. */
   overlay_mask_texture_update(cache, *image);
 
+  /* A selection drag changes the mask every step but rarely the set of triangles around it: when
+   * the covered triangles (and their layers) are the same as before, the batch already holds the
+   * right static attributes, and the world positions are refreshed by #overlay_draw only when the
+   * mesh or object really moved. Skipping the full position upload per step is what keeps a drag
+   * smooth on heavy meshes. */
+  Vector<int3> previous_corners = std::move(cache.tri_corners);
+  Vector<float> previous_layers = std::move(cache.tri_layers);
+  cache.tri_corners = {};
+  cache.tri_layers = {};
   overlay_tri_topology_update(ob, *image, cache);
+  if (cache.tris_batch != nullptr && cache.tris_verts != nullptr &&
+      previous_corners.size() == cache.tri_corners.size() &&
+      previous_layers.size() == cache.tri_layers.size() &&
+      std::equal(previous_corners.begin(), previous_corners.end(), cache.tri_corners.begin()) &&
+      std::equal(previous_layers.begin(), previous_layers.end(), cache.tri_layers.begin()))
+  {
+    return;
+  }
   overlay_tri_batch_ensure(cache);
   if (cache.tris_batch == nullptr) {
     /* Nothing covers the selection (e.g. an empty boundary): keep the texture, nothing to draw.

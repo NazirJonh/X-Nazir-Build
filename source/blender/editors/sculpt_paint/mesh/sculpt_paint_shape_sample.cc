@@ -61,11 +61,14 @@ bool shape_bake_prepare(Object &ob,
     return false;
   }
 
-  /* Dir/distance outputs are only needed for the profile-driven shading that vertex channels
-   * use (fill profile coverage reads fill_d, the stroke profile reads stroke_t); Normal and
-   * Height are map-only and never reach this backend. */
-  const ShapeRasterOutputs outputs = ShapeRasterOutputs::Fill | ShapeRasterOutputs::Stroke |
-                                     ShapeRasterOutputs::StrokeT | ShapeRasterOutputs::FillD;
+  r_bake.tex_frame = shape_tex_frame_calc_union(shapes);
+  r_bake.use_tex_frame = style_textures_need_frame(style);
+
+  /* Base outputs plus the texture opt-ins the style's mappings need. */
+  const ShapeRasterOutputs outputs = shape_raster_outputs_for(
+      style,
+      ShapeRasterOutputs::Fill | ShapeRasterOutputs::Stroke | ShapeRasterOutputs::StrokeT |
+          ShapeRasterOutputs::FillD);
   const ShapeEvaluator evaluator(shapes, style, domain, outputs);
 
   Vector<ePaintSymmetryFlags> passes;
@@ -167,6 +170,7 @@ bool shape_bake_prepare(Object &ob,
         const float3 normal = vert_normals[vert];
         float best_score = 0.0f;
         float3 best_position = float3(0.0f);
+        float2 best_co = float2(0.0f);
         ShapeSample best;
         for (const ePaintSymmetryFlags pass : passes) {
           const float3 mirrored = symmetry_flip(position, pass);
@@ -186,6 +190,7 @@ bool shape_bake_prepare(Object &ob,
             best_score = score;
             best = candidate;
             best_position = mirrored;
+            best_co = co;
           }
         }
         if (best_score <= 0.0f) {
@@ -198,6 +203,7 @@ bool shape_bake_prepare(Object &ob,
         }
         result.sample = best;
         result.factor = factor;
+        result.co = best_co;
         painted.fetch_add(1, std::memory_order_relaxed);
       }
     }

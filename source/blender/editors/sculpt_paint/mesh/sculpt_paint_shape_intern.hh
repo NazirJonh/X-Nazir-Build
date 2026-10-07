@@ -71,6 +71,7 @@
 #include "../shapes/paint_shape_render.hh"
 #include "../shapes/paint_shape_space.hh"
 #include "../shapes/paint_shape_target.hh"
+#include "../shapes/paint_shape_texture.hh"
 #include "mesh_brush_common.hh"
 #include "../selection/paint_face_selection_mask.hh"
 #include "paint_image_shape_composite.hh"
@@ -92,6 +93,9 @@ namespace blender::ed::sculpt_paint::shape {
 struct ShapeVertexSample {
   ShapeSample sample;
   float factor = 0.0f;
+  /** The shape-space position \a sample was taken at (the winning symmetry pass's projection):
+   * the coordinate the texture mappings evaluate against. */
+  float2 co = float2(0.0f);
 };
 
 /** Everything the write loops need: the affected nodes, their per-vertex samples and the flat
@@ -101,6 +105,15 @@ struct ShapeBakeData {
   Array<int> node_offset;
   Array<ShapeVertexSample> samples;
   int painted = 0;
+  /** Frame the texture mappings position against (the union of the shapes, exact for one shape):
+   * without it a shape-anchored or Fit texture would ignore the shape's rotation and aspect. */
+  ShapeTexFrame tex_frame;
+  bool use_tex_frame = false;
+
+  const ShapeTexFrame *frame() const
+  {
+    return this->use_tex_frame ? &this->tex_frame : nullptr;
+  }
 };
 
 /** Copy \a bounds's corner \a corner (0..7) into a vector. */

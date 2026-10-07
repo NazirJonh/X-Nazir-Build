@@ -576,6 +576,72 @@ TEST(ShapeRaster, UnrequestedStrokeSAndShapeUVAreEmpty)
   EXPECT_TRUE(cov.stroke_s.is_empty());
   EXPECT_TRUE(cov.stroke_len.is_empty());
   EXPECT_TRUE(cov.shape_uv.is_empty());
+  EXPECT_TRUE(cov.stroke_v.is_empty());
+}
+
+TEST(ShapeRaster, StrokeVSignAcrossTheBand)
+{
+  /* An open line (10, 50) -> (110, 50): the signed across-stroke coordinate is negative on one
+   * side of the centerline and positive on the other, zero on it, and its absolute value is the
+   * unsigned coordinate. For a left-to-right line the cross-product convention puts the
+   * positive side above. */
+  PaintShape shape = shape_line(float2(10.0f, 50.0f), float2(110.0f, 50.0f));
+
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_STROKE;
+  style.stroke_width = 10.0f;
+
+  rcti rect;
+  BLI_rcti_init(&rect, 0, 120, 40, 61);
+  const ShapeRasterOutputs outputs = ShapeRasterOutputs::Stroke | ShapeRasterOutputs::StrokeT |
+                                     ShapeRasterOutputs::StrokeV;
+  const ShapeCoverage cov = shape_rasterize(
+      Span<PaintShape>(&shape, 1), style, rect, float2(0.0f), outputs);
+
+  /* ~4 px above the line (y = 54) vs ~3.5 px below (y = 46): both well covered, opposite
+   * signs, and the absolute value matches stroke_t. */
+  const int64_t above = cov.index(60, 54);
+  const int64_t below = cov.index(60, 46);
+  const int64_t on_line = cov.index(60, 50);
+  EXPECT_GT(cov.stroke[above], 0.0f);
+  EXPECT_GT(cov.stroke[below], 0.0f);
+  EXPECT_LT(cov.stroke_v[above] * cov.stroke_v[below], 0.0f) << "the two sides disagree in sign";
+  EXPECT_GT(cov.stroke_v[above], 0.0f);
+  EXPECT_LT(cov.stroke_v[below], 0.0f);
+  /* The line runs at y = 50, the pixel row's center is 0.5 px off. */
+  EXPECT_NEAR(cov.stroke_v[on_line], 0.1f, 0.05f);
+  /* The absolute value is the unsigned coordinate. */
+  EXPECT_NEAR(math::abs(cov.stroke_v[above]), cov.stroke_t[above], 1e-4f);
+  EXPECT_NEAR(math::abs(cov.stroke_v[below]), cov.stroke_t[below], 1e-4f);
+}
+
+TEST(ShapeRaster, StrokeVClosedRectInteriorNegative)
+{
+  /* A closed Rect's stroke band: the interior side carries the negative sign, the exterior the
+   * positive one (the winding convention, independent of the outline direction). */
+  PaintShape shape;
+  shape.type = PAINT_SHAPE_RECT;
+  shape.center = float2(60.0f, 60.0f);
+  shape.half_size = float2(40.0f, 30.0f);
+
+  ShapeStyle style = flat_style();
+  style.flag = PAINT_SHAPE_USE_STROKE;
+  style.stroke_width = 8.0f;
+
+  rcti rect;
+  BLI_rcti_init(&rect, 0, 120, 0, 120);
+  const ShapeRasterOutputs outputs = ShapeRasterOutputs::Stroke | ShapeRasterOutputs::StrokeV;
+  const ShapeCoverage cov = shape_rasterize(
+      Span<PaintShape>(&shape, 1), style, rect, float2(0.0f), outputs);
+
+  /* The bottom edge's band spans y in [26, 34]; the shape's interior is y > 30 (toward the
+   * center at 60). */
+  const int64_t inside_px = cov.index(60, 33);
+  const int64_t outside_px = cov.index(60, 27);
+  EXPECT_GT(cov.stroke[inside_px], 0.0f);
+  EXPECT_GT(cov.stroke[outside_px], 0.0f);
+  EXPECT_LT(cov.stroke_v[inside_px], 0.0f);
+  EXPECT_GT(cov.stroke_v[outside_px], 0.0f);
 }
 
 }  // namespace blender::ed::sculpt_paint::shape

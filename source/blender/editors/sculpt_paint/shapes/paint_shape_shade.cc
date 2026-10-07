@@ -13,19 +13,92 @@
 #include <algorithm>
 
 #include "BLI_assert.h"
+#include "BLI_index_range.hh"
 
 #include "BLI_math_base.hh"
+#include "BLI_math_color.h"
 #include "BLI_math_vector.hh"
 
+#include "IMB_colormanagement.hh"
+
+#include "paint_shape_texture.hh"
+
 namespace blender::ed::sculpt_paint::shape {
+
+/* -------------------------------------------------------------------- */
+/** \name Texture sourcing
+ * \{ */
+
+static const ShapeTexture *part_texture(const ShapeStyle &style, const ShapePart part)
+{
+  return (part == ShapePart::Stroke) ? style.stroke_texture.get() : style.fill_texture.get();
+}
+
+static const ShapeTextureMapping &part_texture_map(const ShapeStyle &style, const ShapePart part)
+{
+  return (part == ShapePart::Stroke) ? style.stroke_tex_map : style.fill_tex_map;
+}
+
+/** A sampled (scene-linear) texture color in the space the destination buffer stores colors in;
+ * the part colors were converted once per tile, the texture's cannot be. */
+static float3 texture_rgb_to_output(const ShapeStyle &style, const float3 &rgb)
+{
+  if (style.texture_colorspace == nullptr) {
+    return rgb;
+  }
+  float3 out = rgb;
+  if (style.texture_colorspace_is_srgb) {
+    linearrgb_to_srgb_v3_v3(out, rgb);
+  }
+  else {
+    IMB_colormanagement_scene_linear_to_colorspace_v3(out, style.texture_colorspace);
+  }
+  return out;
+}
+
+/** The part's texture color over \a solid (tint and opacity applied); \a solid itself when no
+ * texture resolved or the point is not mapped, so the stamp paints its plain color there. */
+static float4 shade_texture_color(const ShapeStyle &style,
+                                  const ShapeSample &sample,
+                                  const ShapePart part,
+                                  const float2 &p,
+                                  const float4 &solid,
+                                  const ShapeSourceConsumer consumer,
+                                  const ShapeTexFrame *frame)
+{
+  const TextureSample tex = shape_texture_sample_part(style, part, sample, p, frame, -1, consumer);
+  if (!tex.usable) {
+    return solid;
+  }
+  const ShapeTextureMapping &map = part_texture_map(style, part);
+  float3 rgb = texture_rgb_to_output(style, float3(tex.rgba.x, tex.rgba.y, tex.rgba.z));
+  if (map.use_tint) {
+    rgb *= float3(solid.x, solid.y, solid.z);
+  }
+  const float opacity = math::clamp(map.opacity, 0.0f, 1.0f);
+  const float3 mixed = math::interpolate(float3(solid.x, solid.y, solid.z), rgb, opacity);
+  return float4(mixed.x, mixed.y, mixed.z, math::interpolate(1.0f, tex.rgba.w, opacity));
+}
+
+/** \} */
 
 float4 shade_source(const ShapeStyle &style,
                     const ShapeSample &sample,
                     const ShapePart part,
-                    const float2 & /*p*/,
+                    const float2 &p,
                     const float4 &solid,
-                    const ShapeSourceConsumer consumer)
+                    const ShapeSourceConsumer consumer,
+                    const ShapeTexFrame *frame)
 {
+  /* A PBR channel samples its own texture source in #shade_channel; this fallback must not feed
+   * it the canvas color (it would paint the Base Color texture into Roughness, Metallic, ...). */
+  if (consumer == ShapeSourceConsumer::Channel &&
+      (part == ShapePart::Stroke ?
+           ELEM(style.stroke_source, ShapeStrokeSource::Texture, ShapeStrokeSource::CurvePattern) :
+           style.fill_source == ShapeFillSource::Texture))
+  {
+    return solid;
+  }
   if (part == ShapePart::Stroke) {
     switch (style.stroke_source) {
       case ShapeStrokeSource::Solid:
@@ -38,25 +111,15 @@ float4 shade_source(const ShapeStyle &style,
         return solid;
       case ShapeStrokeSource::Texture:
       case ShapeStrokeSource::CurvePattern:
-        /* TODO: sample a brush/asset texture or a Curve Patch pattern.
-         * When the UI is wired to these sources, replace the assert with the real sampling --
-         * otherwise a Debug build aborts as soon as the user picks that source. */
-        BLI_assert_unreachable();
-        return solid;
+        return shade_texture_color(style, sample, part, p, solid, consumer, frame);
     }
     return solid;
   }
   switch (style.fill_source) {
     case ShapeFillSource::Solid:
-    case ShapeFillSource::Gradient:
-      /* The bbox-mapped gradient is applied by #shade_fill_gradient where the bbox is known. */
       return solid;
     case ShapeFillSource::Texture:
-      /* TODO: sample a brush/asset texture over the shape.
-       * When the UI maps PAINT_SHAPE_FILL_BRUSH_TEXTURE to ShapeFillSource::Texture, replace the
-       * assert with the real sampling -- otherwise a Debug build aborts on pick in the UI. */
-      BLI_assert_unreachable();
-      return solid;
+      return shade_texture_color(style, sample, part, p, solid, consumer, frame);
   }
   return solid;
 }
@@ -82,12 +145,11 @@ float shape_part_coverage(const ShapeStyle &style, const ShapeSample &sample, co
 float4 shade_canvas(const ShapeStyle &style,
                     const ShapeSample &sample,
                     const ShapePart part,
-                    const float2 &p)
+                    const float2 &p,
+                    const ShapeTexFrame *frame)
 {
   const float4 solid = (part == ShapePart::Stroke) ? style.stroke_color : style.fill_color;
-  /* Gradient fills composite through #shade_fill_gradient (the fill bounding box is only known
-   * by the per-shape composite pass). */
-  return shade_source(style, sample, part, p, solid, ShapeSourceConsumer::Canvas);
+  return shade_source(style, sample, part, p, solid, ShapeSourceConsumer::Canvas, frame);
 }
 
 /** Height amplitude h(t) in [0, 1] of \a part at \a sample (profile or flat). */
@@ -107,7 +169,9 @@ static float part_height(const ShapeStyle &style, const ShapeSample &sample, con
 ChannelWrite shade_channel(const ShapeStyle &style,
                            const ShapeSample &sample,
                            const ShapePart part,
-                           const eMaterialPaintChannel channel)
+                           const eMaterialPaintChannel channel,
+                           const float2 &p,
+                           const ShapeTexFrame *frame)
 {
   ChannelWrite result;
   const PaintShapeChannelValue &entry = (part == ShapePart::Stroke) ?
@@ -121,14 +185,39 @@ ChannelWrite shade_channel(const ShapeStyle &style,
     return result;
   }
 
+  /* The part's texture, sampled once for every branch that reads it. When the part sources a
+   * texture this channel could read but the point is unmapped, the stamp writes nothing (zero
+   * alpha); a texture without a source for the channel falls back to the solid entry value. */
+  const ShapeTexture *texture = part_texture(style, part);
+  const TextureSample tex = shape_texture_sample_part(
+      style, part, sample, p, frame, int(channel), ShapeSourceConsumer::Channel);
+  const ShapeTextureMapping &map = part_texture_map(style, part);
+  const float tex_opacity = math::clamp(map.opacity, 0.0f, 1.0f);
+  if (texture != nullptr && !tex.mapped) {
+    return result;
+  }
+
   switch (channel) {
     case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
     case PAINT_MATERIAL_CHANNEL_EMISSION: {
       const float4 solid(entry.color[0], entry.color[1], entry.color[2], 1.0f);
-      const float4 src = shade_source(
-          style, sample, part, float2(0.0f), solid, ShapeSourceConsumer::Channel);
-      result.value = float4(src.x, src.y, src.z, 1.0f);
-      result.alpha = coverage;
+      float3 rgb;
+      float alpha = 1.0f;
+      if (tex.usable) {
+        rgb = texture_rgb_to_output(style, float3(tex.rgba.x, tex.rgba.y, tex.rgba.z));
+        if (map.use_tint) {
+          rgb *= float3(solid.x, solid.y, solid.z);
+        }
+        rgb = math::interpolate(float3(solid.x, solid.y, solid.z), rgb, tex_opacity);
+        alpha = math::interpolate(1.0f, tex.rgba.w, tex_opacity);
+      }
+      else {
+        const float4 src = shade_source(
+            style, sample, part, p, solid, ShapeSourceConsumer::Channel, frame);
+        rgb = float3(src.x, src.y, src.z);
+      }
+      result.value = float4(rgb.x, rgb.y, rgb.z, 1.0f);
+      result.alpha = coverage * alpha;
       result.blend_mode = IMB_BlendMode(entry.blend);
       break;
     }
@@ -137,29 +226,73 @@ ChannelWrite shade_channel(const ShapeStyle &style,
     case PAINT_MATERIAL_CHANNEL_SPECULAR:
     case PAINT_MATERIAL_CHANNEL_AO:
     case PAINT_MATERIAL_CHANNEL_CUSTOM: {
-      const float4 src = shade_source(
-          style, sample, part, float2(0.0f), float4(entry.value), ShapeSourceConsumer::Channel);
-      result.value = float4(src.x, src.x, src.x, 1.0f);
+      float scalar = entry.value;
+      if (tex.usable) {
+        float tex_value = tex.scalar;
+        if (map.invert) {
+          tex_value = 1.0f - tex_value;
+        }
+        scalar = math::interpolate(entry.value, tex_value, tex_opacity);
+      }
+      else {
+        const float4 src = shade_source(
+            style, sample, part, p, float4(entry.value), ShapeSourceConsumer::Channel, frame);
+        scalar = src.x;
+      }
+      result.value = float4(scalar, scalar, scalar, 1.0f);
       result.alpha = coverage;
       result.blend_mode = IMB_BlendMode(entry.blend);
       break;
     }
     case PAINT_MATERIAL_CHANNEL_ALPHA: {
-      /* Alpha masks every other channel but never its own write. */
+      /* Alpha masks every other channel but never its own write; a texture's own alpha
+       * modulates the coverage (a stamped cutout erases the other channels where it is
+       * transparent). */
       result.value = float4(1.0f);
-      result.alpha = coverage;
+      result.alpha = coverage *
+                     (tex.usable ? math::interpolate(1.0f, tex.rgba.w, tex_opacity) : 1.0f);
       result.blend_mode = IMB_BLEND_MIX;
       break;
     }
     case PAINT_MATERIAL_CHANNEL_HEIGHT: {
-      /* Relative relief: the backend combines it with #ShapeStyle::height_blend. */
-      const float delta = part_height(style, sample, part) * entry.strength * style.height_depth;
+      /* Relative relief: the backend combines it with #ShapeStyle::height_blend. The texture
+       * carries the relief (its value over #height_mid; the Curve Pattern tile's G channel is
+       * the SDF relief), the profile scales its amplitude. */
+      float relief = 1.0f;
+      if (tex.usable) {
+        const float tex_value = (texture->is_tile) ?
+                                    shape_texture_sample_component(texture->channels[channel],
+                                                                   tex.uv, 1) :
+                                    tex.scalar;
+        relief = math::interpolate(1.0f, tex_value - map.height_mid, tex_opacity);
+      }
+      const float delta = part_height(style, sample, part) * entry.strength * style.height_depth *
+                          relief;
       result.value = float4(delta, delta, delta, 1.0f);
       result.alpha = coverage;
       result.blend_mode = IMB_BLEND_MIX;
       break;
     }
     case PAINT_MATERIAL_CHANNEL_NORMAL: {
+      if (tex.usable) {
+        /* The texture's tangent-space normal (rotated into the mapped frame) replaces the
+         * analytic profile slope as the detail; the blend core RNM-merges it with the
+         * destination. The mapping flips mirror their texture axes, the DirectX flag flips
+         * green (the source-level convention rides in the channel's own flag). */
+        float2 axis_flip = tex.axis_flip;
+        if (map.normal_flip_y) {
+          axis_flip.y = -axis_flip.y;
+        }
+        float3 normal = shape_texture_sample_normal(
+            texture->channels[channel], tex.uv, tex.frame_angle, axis_flip);
+        /* Opacity fades the texture's tilt back to the flat normal. */
+        normal = math::normalize(
+            float3(normal.x * tex_opacity, normal.y * tex_opacity, normal.z));
+        result.value = float4(normal.x, normal.y, normal.z, entry.strength);
+        result.alpha = coverage;
+        result.blend_mode = IMB_BLEND_MIX;
+        break;
+      }
       /* Analytic normal from the profile slope along the distance gradient: the stroke slopes
        * over the across-stroke coordinate, the fill over the inward fill distance (its gradient
        * is #ShapeSample::fill_dir). With the height-to-normal link the relief follows the
@@ -204,22 +337,6 @@ ChannelWrite shade_channel(const ShapeStyle &style,
       break;
   }
   return result;
-}
-
-float fill_gradient_param(const float2 &p, const float2 &bbox_lo, const float2 &bbox_hi)
-{
-  const float width = std::max(bbox_hi.x - bbox_lo.x, 1e-6f);
-  return math::clamp((p.x - bbox_lo.x) / width, 0.0f, 1.0f);
-}
-
-float4 shade_fill_gradient(const ShapeStyle &style,
-                           const float2 &p,
-                           const float2 &bbox_lo,
-                           const float2 &bbox_hi)
-{
-  /* TODO: radial gradients and brush-texture fills need their own mapping and sampling
-   * context; the ramp lookup below already serves both once those land. */
-  return style.fill_gradient_sample(fill_gradient_param(p, bbox_lo, bbox_hi));
 }
 
 }  // namespace blender::ed::sculpt_paint::shape

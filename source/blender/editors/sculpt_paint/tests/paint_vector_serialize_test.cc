@@ -76,8 +76,82 @@ static PaintShapeSettings test_settings()
 {
   PaintShapeSettings settings = {};
   settings.stroke_width = 42.0f;
-  settings.fill_type = PAINT_SHAPE_FILL_GRADIENT;
+  settings.fill_type = PAINT_SHAPE_FILL_TEXTURE;
   return settings;
+}
+
+TEST(PaintVectorSerialize, RoundTripTextureSettings)
+{
+  /* The texture parts and the Curve Pattern are plain PODs inside the style snapshot: a
+   * document round-trip must carry them verbatim. */
+  PaintShapeSettings settings = test_settings();
+  settings.fill_type = PAINT_SHAPE_FILL_TEXTURE;
+  settings.stroke_type = PAINT_SHAPE_STROKE_TEXTURE;
+  settings.fill_texture.mapping = PAINT_SHAPE_TEX_MAP_MASK;
+  settings.fill_texture.fit_mode = PAINT_SHAPE_TEX_FIT_COVER;
+  settings.fill_texture.anchor = PAINT_SHAPE_TEX_ANCHOR_CANVAS;
+  settings.fill_texture.flag = PAINT_SHAPE_TEX_TILE_X | PAINT_SHAPE_TEX_MIRROR |
+                               PAINT_SHAPE_TEX_NORMAL_FLIP_Y;
+  settings.fill_texture.image_channel = 3;
+  settings.fill_texture.scale[0] = 2.5f;
+  settings.fill_texture.scale[1] = 0.5f;
+  settings.fill_texture.offset[0] = 0.25f;
+  settings.fill_texture.offset[1] = -0.125f;
+  settings.fill_texture.repeat[0] = 3.0f;
+  settings.fill_texture.repeat[1] = 4.0f;
+  settings.fill_texture.angle = 0.125f;
+  settings.fill_texture.tile_length = 64.0f;
+  settings.fill_texture.height_mid = 0.5f;
+  settings.fill_texture.opacity = 0.75f;
+  settings.stroke_texture.source = PAINT_SHAPE_TEX_SRC_CURVE_PATTERN;
+  settings.stroke_texture.mapping = PAINT_SHAPE_TEX_MAP_ALONG;
+  settings.stroke_texture.flag = PAINT_SHAPE_TEX_WHOLE_REPEATS;
+  settings.curve_pattern.crop_min[0] = -0.75f;
+  settings.curve_pattern.crop_max[0] = 0.75f;
+  settings.curve_pattern.resolution = 256;
+  settings.curve_pattern.line_width = 0.02f;
+  settings.curve_pattern.mode = PAINT_SHAPE_CURVE_PATTERN_BOTH;
+  settings.curve_pattern.flag = PAINT_SHAPE_CURVE_PATTERN_WRAP_CROSSING |
+                                PAINT_SHAPE_CURVE_PATTERN_USE_SDF_RELIEF;
+
+  VectorDocument doc;
+  doc.items.append(make_spline_item());
+  PaintVector pv = {};
+  paint_vector_from_document(pv, doc, settings);
+  ASSERT_EQ(pv.items_num, 1);
+
+  const PaintShapeSettings &style = pv.items[0].style;
+  EXPECT_EQ(style.fill_type, PAINT_SHAPE_FILL_TEXTURE);
+  EXPECT_EQ(style.stroke_type, PAINT_SHAPE_STROKE_TEXTURE);
+  EXPECT_EQ(style.fill_texture.mapping, PAINT_SHAPE_TEX_MAP_MASK);
+  EXPECT_EQ(style.fill_texture.fit_mode, PAINT_SHAPE_TEX_FIT_COVER);
+  EXPECT_EQ(style.fill_texture.anchor, PAINT_SHAPE_TEX_ANCHOR_CANVAS);
+  EXPECT_EQ(style.fill_texture.flag,
+            PAINT_SHAPE_TEX_TILE_X | PAINT_SHAPE_TEX_MIRROR | PAINT_SHAPE_TEX_NORMAL_FLIP_Y);
+  EXPECT_EQ(style.fill_texture.image_channel, 3);
+  EXPECT_FLOAT_EQ(style.fill_texture.scale[0], 2.5f);
+  EXPECT_FLOAT_EQ(style.fill_texture.scale[1], 0.5f);
+  EXPECT_FLOAT_EQ(style.fill_texture.offset[0], 0.25f);
+  EXPECT_FLOAT_EQ(style.fill_texture.offset[1], -0.125f);
+  EXPECT_FLOAT_EQ(style.fill_texture.repeat[0], 3.0f);
+  EXPECT_FLOAT_EQ(style.fill_texture.repeat[1], 4.0f);
+  EXPECT_FLOAT_EQ(style.fill_texture.angle, 0.125f);
+  EXPECT_FLOAT_EQ(style.fill_texture.tile_length, 64.0f);
+  EXPECT_FLOAT_EQ(style.fill_texture.height_mid, 0.5f);
+  EXPECT_FLOAT_EQ(style.fill_texture.opacity, 0.75f);
+  EXPECT_EQ(style.stroke_texture.source, PAINT_SHAPE_TEX_SRC_CURVE_PATTERN);
+  EXPECT_EQ(style.stroke_texture.mapping, PAINT_SHAPE_TEX_MAP_ALONG);
+  EXPECT_EQ(int(style.stroke_texture.flag), int(PAINT_SHAPE_TEX_WHOLE_REPEATS));
+  EXPECT_FLOAT_EQ(style.curve_pattern.crop_min[0], -0.75f);
+  EXPECT_FLOAT_EQ(style.curve_pattern.crop_max[0], 0.75f);
+  EXPECT_EQ(style.curve_pattern.resolution, 256);
+  EXPECT_FLOAT_EQ(style.curve_pattern.line_width, 0.02f);
+  EXPECT_EQ(style.curve_pattern.mode, PAINT_SHAPE_CURVE_PATTERN_BOTH);
+  EXPECT_EQ(int(style.curve_pattern.flag),
+            int(PAINT_SHAPE_CURVE_PATTERN_WRAP_CROSSING |
+                PAINT_SHAPE_CURVE_PATTERN_USE_SDF_RELIEF));
+
+  BKE_paint_vector_items_clear(pv);
 }
 
 static void expect_space_equal(const ShapeSpaceDesc &a, const ShapeSpaceDesc &b)
@@ -155,7 +229,7 @@ TEST(PaintVectorSerialize, RoundTripPreservesItems)
   ASSERT_EQ(pv.items_num, 2);
   EXPECT_EQ(pv.active_item, 1);
   EXPECT_FLOAT_EQ(pv.items[0].style.stroke_width, 42.0f);
-  EXPECT_EQ(pv.items[1].style.fill_type, PAINT_SHAPE_FILL_GRADIENT);
+  EXPECT_EQ(pv.items[1].style.fill_type, PAINT_SHAPE_FILL_TEXTURE);
   EXPECT_EQ(pv.items[0].shape_type, PAINT_SHAPE_LINE);
   EXPECT_EQ(pv.items[1].shape_type, PAINT_SHAPE_ELLIPSE);
 

@@ -4884,6 +4884,21 @@ def _template_paintcurve_edit_core_items(mouse_key, *, sculpt_pick=False, delete
     return items
 
 
+def km_image_paint_selection_floating_3d(_params):
+    # Confirm / cancel / step back while an image-selection fragment floats in the 3D Viewport. The
+    # keymap is polled down to a live floating session in C, so these do nothing otherwise.
+    return (
+        "Image Paint Selection Floating (3D Viewport)",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_floating_undo_step", {"type": 'Z', "value": 'PRESS', "ctrl": True}, None),
+            ("paint.image_select_view3d_floating_confirm", {"type": 'RET', "value": 'PRESS', "any": True}, None),
+            ("paint.image_select_view3d_floating_cancel", {"type": 'ESC', "value": 'PRESS', "any": True}, None),
+            ("paint.image_select_view3d_preview_channel", {"type": 'Q', "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_paint_curve(params):
     items = []
     keymap = (
@@ -5532,6 +5547,9 @@ def km_sculpt(params):
          {"properties": [("mode", 'GROW')]}),
         ("sculpt.face_set_edit", {"type": 'W', "value": 'PRESS', "ctrl": True, "alt": True},
          {"properties": [("mode", 'SHRINK')]}),
+        # Paint selection tools: cycles Box / Circle / Lasso / Polyline, polls only while the
+        # Sculpt Mode toolbar shows the Paint group.
+        ("view3d.sculpt_paint_select_tool_cycle", {"type": 'W', "value": 'PRESS'}, None),
         # Subdivision levels
         *_template_items_object_subdivision_set(),
         ("object.subdivision_set", {"type": 'ONE', "value": 'PRESS', "alt": True, "repeat": True},
@@ -8817,6 +8835,108 @@ def km_3d_view_tool_edit_curve_extrude_to_cursor(params):
 # ------------------------------------------------------------------------------
 # Tool System (3D View, Sculpt)
 
+def km_3d_view_tool_sculpt_image_select_box(params):
+    return (
+        "3D View Tool: Sculpt, Image Select Box",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_box", params.tool_maybe_tweak_event, None),
+            ("paint.image_select_view3d_box",
+             {**params.tool_maybe_tweak_event, "shift": True},
+             {"properties": [("mode", 'ADD')]}),
+            ("paint.image_select_view3d_box",
+             {**params.tool_maybe_tweak_event, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            # A plain click (no drag) clears the selection.
+            ("paint.image_select_view3d_none", {"type": params.tool_mouse, "value": 'CLICK'}, None),
+        ]},
+    )
+
+
+def km_3d_view_tool_sculpt_image_select_circle(params):
+    return (
+        "3D View Tool: Sculpt, Image Select Circle",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_circle", params.tool_maybe_tweak_event, None),
+            ("paint.image_select_view3d_circle",
+             {**params.tool_maybe_tweak_event, "shift": True},
+             {"properties": [("mode", 'ADD')]}),
+            ("paint.image_select_view3d_circle",
+             {**params.tool_maybe_tweak_event, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            # A plain click (no drag) clears the selection.
+            ("paint.image_select_view3d_none", {"type": params.tool_mouse, "value": 'CLICK'}, None),
+        ]},
+    )
+
+
+def km_3d_view_tool_sculpt_image_select_lasso(params):
+    return (
+        "3D View Tool: Sculpt, Image Select Lasso",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_lasso", params.tool_maybe_tweak_event, None),
+            ("paint.image_select_view3d_lasso",
+             {**params.tool_maybe_tweak_event, "shift": True},
+             {"properties": [("mode", 'ADD')]}),
+            ("paint.image_select_view3d_lasso",
+             {**params.tool_maybe_tweak_event, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            # A plain click (no drag) clears the selection.
+            ("paint.image_select_view3d_none", {"type": params.tool_mouse, "value": 'CLICK'}, None),
+        ]},
+    )
+
+
+def km_3d_view_tool_sculpt_image_select_polyline(params):
+    return (
+        "3D View Tool: Sculpt, Image Select Polyline",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_polyline", params.tool_maybe_tweak_event, None),
+            ("paint.image_select_view3d_polyline",
+             {**params.tool_maybe_tweak_event, "shift": True},
+             {"properties": [("mode", 'ADD')]}),
+            ("paint.image_select_view3d_polyline",
+             {**params.tool_maybe_tweak_event, "ctrl": True},
+             {"properties": [("mode", 'SUB')]}),
+            # A plain click (no drag) clears the selection.
+            ("paint.image_select_view3d_none", {"type": params.tool_mouse, "value": 'CLICK'}, None),
+        ]},
+    )
+
+
+def km_3d_view_tool_sculpt_image_select_move(params):
+    return (
+        "3D View Tool: Sculpt, Image Select Move",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_move", params.tool_maybe_tweak_event, None),
+        ]},
+    )
+
+
+def km_3d_view_tool_sculpt_image_select_transform(params):
+    return (
+        "3D View Tool: Sculpt, Image Select Transform",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_transform", params.tool_maybe_tweak_event, None),
+        ]},
+    )
+
+
+def km_3d_view_tool_sculpt_image_select_warp(params):
+    return (
+        "3D View Tool: Sculpt, Image Select Warp",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("paint.image_select_view3d_warp", params.tool_maybe_tweak_event, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_box_mask(params):
     return (
         "3D View Tool: Sculpt, Box Mask",
@@ -9791,6 +9911,7 @@ def generate_keymaps(params=None):
         km_pose(params),
         # Object paint modes.
         km_paint_curve(params),
+        km_image_paint_selection_floating_3d(params),
         km_image_paint(params),
         km_vertex_paint(params),
         km_weight_paint(params),
@@ -9988,6 +10109,13 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),
         km_3d_view_tool_sculpt_color_gradient(params),
+        km_3d_view_tool_sculpt_image_select_box(params),
+        km_3d_view_tool_sculpt_image_select_circle(params),
+        km_3d_view_tool_sculpt_image_select_lasso(params),
+        km_3d_view_tool_sculpt_image_select_polyline(params),
+        km_3d_view_tool_sculpt_image_select_move(params),
+        km_3d_view_tool_sculpt_image_select_transform(params),
+        km_3d_view_tool_sculpt_image_select_warp(params),
         *(_km_3d_view_tool_sculpt_paint_shape("3D View Tool: Sculpt, Shape " + name, shape_type, params)
           for name, shape_type in (
               ("Line", 'LINE'),

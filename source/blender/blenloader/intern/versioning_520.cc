@@ -1803,7 +1803,7 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
       imapaint.gradient_blend_mode = 0;
       imapaint.gradient_opacity = 1.0f;
       imapaint.warp_grid_size = 4;
-      imapaint.warp_interpolation = IMAGE_PAINT_WARP_INTERP_LINEAR;
+      imapaint.warp_interpolation = IMAGE_PAINT_WARP_INTERP_SMOOTH;
       BKE_colorband_init(&imapaint.gradient_colorband, true);
     }
   }

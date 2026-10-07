@@ -45,6 +45,7 @@
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_image_wrappers.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
@@ -601,6 +602,9 @@ struct PaintLocalData {
   Vector<float3> pixel_positions;
   Vector<float> distances;
   Vector<float> factors;
+  /** Chunk-local copy of the brush factors scaled by the selection-mask weight; kept out of the
+   * shared #RowFactorCache so it stays read-only across channel passes. */
+  Vector<float> selection_factors;
 
   Vector<float4> byte_to_float_pixels;
   Vector<float4> paint_pixels;
@@ -1243,6 +1247,17 @@ static Array<RowFactorCache> compute_paint_row_factors(
   return tile_caches;
 }
 
+/**
+ * Whether the image's runtime selection mask constrains painting. A canvas borrowed by a floating
+ * selection session paints unmasked (its lifted holes are being edited elsewhere).
+ */
+static bool image_paint_selection_mask_active(const Image *image)
+{
+  return image != nullptr && image->runtime != nullptr &&
+         image->runtime->paint_selection_borrowed_by == nullptr &&
+         BKE_image_paint_selection_is_active(image);
+}
+
 /** Apply cached brush factors to one Material paint channel's image (read/blend/write only). */
 static void apply_paint_channel(ImageData &image_data,
                                 const Brush &brush,
@@ -1295,6 +1310,11 @@ static void apply_paint_channel(ImageData &image_data,
 #endif
 
   bool pixels_updated = false;
+  /* Selection-mask state of this target's image, hoisted per channel pass: lazily built and
+   * mutex-guarded inside BKE, safe to sample per pixel from the parallel loops below. A canvas
+   * borrowed by a floating selection session paints unmasked (its lifted holes are being edited
+   * elsewhere). */
+  const bool selection_mask_active = image_paint_selection_mask_active(image_data.image);
   threading::EnumerableThreadSpecific<PaintLocalData> all_tls;
   for (const int tile_i : pixel_node.tiles.index_range()) {
     UDIMTilePixels &tile_data = pixel_node.tiles[tile_i];
@@ -1330,6 +1350,18 @@ static void apply_paint_channel(ImageData &image_data,
       continue;
     }
 
+    /* Resolve the per-tile selection weights here, in the sequential tile pass, so the parallel
+     * pixel loop below reads them without touching the BKE mask mutex. */
+    bool apply_selection = false;
+    ImagePaintSelectionTileSampler selection_sampler;
+    if (selection_mask_active) {
+      selection_sampler = BKE_image_paint_selection_tile_sampler_get(image_data.image,
+                                                                     tile_data.tile_number);
+      apply_selection = !selection_sampler.is_unrestricted();
+    }
+    threading::EnumerableThreadSpecific<Bounds<int2>> selection_dirty_bounds_tls(
+        []() { return negative_bounds(); });
+
       tile_cache.valid_rows.foreach_index(
         [&](const int row_i) {
 #if PBR_PAINT_IMAGE_PROFILE
@@ -1346,6 +1378,36 @@ static void apply_paint_channel(ImageData &image_data,
 #endif
           const PackedPixelRow pixel_row = tile_data.pixel_rows[row_i];
           const int row_size = pixel_row.num_pixels;
+
+          /* Resolve the selection weights once per row, so a row fully outside the selection is
+           * dropped before its tangent basis and the parallel dispatch below are set up. */
+          Array<float> row_selection_weights;
+          if (apply_selection) {
+            row_selection_weights.reinitialize(row_size);
+            if (!selection_sampler.sample_row(int(pixel_row.start_image_coordinate.x),
+                                              int(pixel_row.start_image_coordinate.y),
+                                              row_selection_weights.as_mutable_span()))
+            {
+              paint_material_channel_perf::add_rows_skipped(1);
+              return;
+            }
+            const Span<float> weights = row_selection_weights.as_span();
+            int first = 0;
+            while (weights[first] == 0.0f) {
+              first++;
+            }
+            int last = row_size - 1;
+            while (weights[last] == 0.0f) {
+              last--;
+            }
+            /* Same end convention as #compute_paint_row_factors. */
+            const int2 start(int(pixel_row.start_image_coordinate.x) + first,
+                             int(pixel_row.start_image_coordinate.y));
+            const int2 end(int(pixel_row.start_image_coordinate.x) + last + 2, start.y);
+            selection_dirty_bounds_tls.local() = bounds::merge(
+                selection_dirty_bounds_tls.local(), Bounds<int2>(start, end));
+          }
+
           Span<float> row_factors = tile_cache.row_factors[row_i];
           if (material::channel_uses_alpha_mask(alpha_masking_active, channel) &&
               sampler != nullptr)
@@ -1393,16 +1455,44 @@ static void apply_paint_channel(ImageData &image_data,
           }
 
           threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
-            Span<float> factors = row_factors.slice(range);
+            /* The row-factor cache feeds every channel pass of this application, so it stays
+             * read-only: the selection-mask weighting below goes into a chunk-local copy. */
+            const Span<float> cached_factors = row_factors.slice(range);
             /* Chunk may still be all-zero even though the row has some nonzero factor
              * elsewhere; skip it exactly like the un-cached path used to. */
-            if (std::ranges::all_of(factors, [](const float factor) { return factor == 0.0f; })) {
+            if (std::ranges::all_of(cached_factors,
+                                    [](const float factor) { return factor == 0.0f; }))
+            {
               paint_material_channel_perf::add_rows_skipped(1);
               return;
             }
-            paint_material_channel_perf::add_pixels_painted(range.size());
 
             PaintLocalData &tls = all_tls.local();
+
+            /* Selection mask: a stroke only paints where the canvas's runtime selection mask
+             * allows it (the same per-texel weight the 2D painter and the shape composite use;
+             * see paint_image_2d.cc). Skipped while a floating selection session borrows the
+             * canvas, so the lifted holes do not fight the stroke. The weight is folded into a
+             * chunk-local buffer, leaving the shared row-factor cache read-only. A chunk fully
+             * outside the selection is dropped here, before the costly source sampling and the
+             * pixel read/blend/write. */
+            Span<float> factors = cached_factors;
+            if (apply_selection) {
+              const Span<float> chunk_weights = row_selection_weights.as_span().slice(range);
+              if (std::ranges::all_of(chunk_weights,
+                                      [](const float weight) { return weight == 0.0f; }))
+              {
+                paint_material_channel_perf::add_rows_skipped(1);
+                return;
+              }
+              tls.selection_factors.resize(cached_factors.size());
+              for (const int i : range.index_range()) {
+                tls.selection_factors[i] = cached_factors[i] * chunk_weights[i];
+              }
+              factors = tls.selection_factors.as_span();
+            }
+
+            paint_material_channel_perf::add_pixels_painted(range.size());
 #if PBR_PAINT_IMAGE_PROFILE
             const double sample_phase_start = BLI_time_now_seconds();
 #endif
@@ -1512,8 +1602,17 @@ static void apply_paint_channel(ImageData &image_data,
         },
         exec_mode::grain_size(2));
 
-    if (!tile_cache.dirty_bounds.is_empty()) {
-      tile_data.mark_dirty(tile_cache.dirty_bounds);
+    Bounds<int2> selection_dirty_bounds = negative_bounds();
+    for (const Bounds<int2> &local_bounds : selection_dirty_bounds_tls) {
+      selection_dirty_bounds = bounds::merge(selection_dirty_bounds, local_bounds);
+    }
+
+    /* The cached bounds ignore the selection mask; with one active, only the rows and spans that
+     * actually received weight are dirty, which keeps the partial update and GPU upload small. */
+    const Bounds<int2> dirty_bounds = apply_selection ? selection_dirty_bounds :
+                                                        tile_cache.dirty_bounds;
+    if (!dirty_bounds.is_empty()) {
+      tile_data.mark_dirty(dirty_bounds);
     }
 
     if (tile_data.flags.dirty) {
@@ -1727,6 +1826,20 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
       }
     }
 
+    /* Every destination keeps its own image's selection mask (grouped images share the pixel
+     * layout, not necessarily the mask), resolved here in the sequential tile pass so the
+     * parallel loop never touches the BKE mask mutex. */
+    Array<ImagePaintSelectionTileSampler> selection_samplers(dest_num);
+    Array<bool> dest_apply_selection(dest_num, false);
+    for (const int dest_i : dests.index_range()) {
+      Image *dest_image = dests[dest_i].image_data->image;
+      if (image_paint_selection_mask_active(dest_image)) {
+        selection_samplers[dest_i] = BKE_image_paint_selection_tile_sampler_get(dest_image,
+                                                                                tile.tile_number);
+        dest_apply_selection[dest_i] = !selection_samplers[dest_i].is_unrestricted();
+      }
+    }
+
     tile_cache.valid_rows.foreach_index(
         [&](const int row_i) {
           if (!tile_cache.row_changed[row_i]) {
@@ -1761,11 +1874,30 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
             const Span<material::TexelSampleContext> range_contexts =
                 sampler != nullptr ? contexts.slice(range) : Span<material::TexelSampleContext>();
             const int thread_id = BLI_task_parallel_thread_id(nullptr);
-            const Span<float> range_factors = factors.slice(range);
+            const Span<float> cached_range_factors = factors.slice(range);
 
             for (const int dest_i : dests.index_range()) {
               const PaintChannelWriteDest &dest = dests[dest_i];
               PaintLocalData &tls = gtls.channels[dest_i];
+
+              /* Same weighting as #apply_paint_channel, into a destination-local copy so the
+               * shared row-factor cache stays read-only. */
+              Span<float> range_factors = cached_range_factors;
+              if (dest_apply_selection[dest_i]) {
+                tls.selection_factors.resize(range.size());
+                if (!selection_samplers[dest_i].sample_row(
+                        int(pixel_row.start_image_coordinate.x) + int(range.start()),
+                        int(pixel_row.start_image_coordinate.y),
+                        tls.selection_factors.as_mutable_span()))
+                {
+                  continue;
+                }
+                for (const int i : range.index_range()) {
+                  tls.selection_factors[i] *= cached_range_factors[i];
+                }
+                range_factors = tls.selection_factors.as_span();
+              }
+
               prepare_channel_samples(tls,
                                       sampler,
                                       dest.channel,

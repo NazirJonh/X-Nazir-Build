@@ -156,7 +156,9 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_targets_get(const bConte
       continue;
     }
     targets.append({material_target.image,
-                    material_target.iuser ? *material_target.iuser : sima->iuser});
+                    material_target.iuser ? *material_target.iuser : sima->iuser,
+                    material_target.is_color_channel,
+                    material_target.channel});
   }
 
   /* A temporarily unresolved Material canvas must not make selection tools unusable. It retains
@@ -191,7 +193,14 @@ void image_paint_selection_targets_update(bContext *C,
 {
   for (const ImagePaintSelectionTarget &target : targets) {
     BKE_image_paint_selection_blend_mask_invalidate(target.image);
-    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, target.image);
+    if (C != nullptr) {
+      WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, target.image);
+    }
+  }
+  if (C == nullptr) {
+    /* A teardown without a context (a Viewport freed while a session floats, file load, exit):
+     * there is no window or scene to notify, and the notifier would dereference a null window. */
+    return;
   }
   if (Scene *scene = CTX_data_scene(C)) {
     DEG_id_tag_update(&scene->id, ID_RECALC_EDITORS);

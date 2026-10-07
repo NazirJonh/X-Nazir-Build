@@ -743,6 +743,8 @@ struct WarpTriangleHit {
   bool found = false;
   /* Source position in continuous capture-pixel space (same convention as \a WarpTriangle). */
   float2 src_px = {0.0f, 0.0f};
+  /* The triangle that was hit, for the local rotation of a normal map. */
+  const WarpTriangle *triangle = nullptr;
 };
 
 /**
@@ -857,6 +859,7 @@ static WarpTriangleHit warp_find_triangle(const Vector<WarpTriangle> &tris,
     if (warp_barycentric(tri.d0, tri.d1, tri.d2, p, &u, &v, &w)) {
       hit.found = true;
       hit.src_px = tri.s0 * u + tri.s1 * v + tri.s2 * w;
+      hit.triangle = &tri;
       return hit;
     }
   }
@@ -870,6 +873,8 @@ struct WarpCommitTaskData {
   ImBuf *dst_ibuf = nullptr;
   ImBuf *dst_mask_ibuf = nullptr;
   int2 dst_origin_px = {0, 0};
+  /** Tangent-space normal map: the stored vectors follow the local rotation of the warp. */
+  bool is_normal_map = false;
 
   /* Write pointers, resolved once in image_select_warp_commit() before the parallel dispatch --
    * see the comment there for why resolving them per-row (from worker threads) is unsafe. */
@@ -914,6 +919,7 @@ static void image_select_warp_commit_row_task(void *__restrict userdata,
     float src_fy = float(y);
     float mask_weight = 0.0f;
     bool is_restore = true;
+    const WarpTriangle *warp_triangle = nullptr;
 
     const float2 p_px = float2(float(x) + 0.5f, float(y) + 0.5f);
     const WarpTriangleHit hit = warp_find_triangle(*data.triangles, *data.triangle_grid, p_px);
@@ -948,6 +954,7 @@ static void image_select_warp_commit_row_task(void *__restrict userdata,
         src_fy = warp_src_fy;
         mask_weight = warp_mask_weight;
         is_restore = false;
+        warp_triangle = hit.triangle;
       }
     }
 
@@ -1005,6 +1012,23 @@ static void image_select_warp_commit_row_task(void *__restrict userdata,
                          float(src[(by1 * cap_w + bx0) * 4 + c]) * wx0 * wy1 +
                          float(src[(by1 * cap_w + bx1) * 4 + c]) * wx1 * wy1) /
                         255.0f;
+      }
+    }
+    if (data.is_normal_map && warp_triangle != nullptr) {
+      /* `dest = L * src` over the hit triangle; its rotation part turns the stored vectors. */
+      float2x2 src_edges;
+      src_edges[0] = warp_triangle->s1 - warp_triangle->s0;
+      src_edges[1] = warp_triangle->s2 - warp_triangle->s0;
+      float2x2 dst_edges;
+      dst_edges[0] = warp_triangle->d1 - warp_triangle->d0;
+      dst_edges[1] = warp_triangle->d2 - warp_triangle->d0;
+      bool invert_ok = false;
+      const float2x2 src_inv = math::invert(src_edges, invert_ok);
+      if (invert_ok) {
+        float4 color(frag_color[0], frag_color[1], frag_color[2], frag_color[3]);
+        image_select_normal_color_rotate(color, image_select_normal_rotation(dst_edges * src_inv));
+        frag_color[0] = color[0];
+        frag_color[1] = color[1];
       }
     }
     const float frag_alpha = (is_float && channels < 4) ? 1.0f : frag_color[3];
@@ -1205,6 +1229,14 @@ static void image_select_warp_commit_write_final(bContext *C,
                "selection was left unchanged");
   }
   task_data.dst_origin_px = state->fragment.geom.origin_px;
+  for (const ImagePaintSelectionTarget &target :
+       image_paint_selection_targets_get(C, state->owner_sima))
+  {
+    if (target.image == ima) {
+      task_data.is_normal_map = target.channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+      break;
+    }
+  }
 
   /* Resolve write pointers once, here on the calling thread, before the parallel dispatch.
    * ImBuf::float_data_for_write()/byte_data_for_write() are not safe to call concurrently: they

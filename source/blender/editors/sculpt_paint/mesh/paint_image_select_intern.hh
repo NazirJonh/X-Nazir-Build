@@ -42,6 +42,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_image_types.h"
+#include "DNA_scene_types.h"
 
 #include "BKE_customdata.hh"
 #include "BKE_image.hh"
@@ -88,6 +89,13 @@ constexpr float SELECTION_MASK_THRESHOLD = IMAGE_PAINT_SELECTION_MASK_THRESHOLD;
 struct ImagePaintSelectionTarget {
   Image *image = nullptr;
   ImageUser iuser;
+  /** Material canvases: the target is the base-color map (the one that reads as the surface's
+   * appearance, so the 3D move preview shows it rather than a roughness / normal map). */
+  bool is_color_channel = false;
+  /** Material canvases: which Principled map the target image feeds (the 3D warp preview
+   * composites the PBR maps it finds into one shaded patch). Non-Material targets keep the
+   * Base Color default; combined with #is_color_channel above it is informational there. */
+  eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 };
 
 /**

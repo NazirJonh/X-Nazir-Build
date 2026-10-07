@@ -104,68 +104,19 @@ struct ImageSelectMoveState : public PaintSelectFloatingSession {
   blender::Vector<float2> drag_position_history;
 };
 
-/**
- * Clipboard state for copy/paste of selection mask fragments.
- * Persists across operations; freed on app shutdown.
- */
-struct ImageClipboardState {
-  blender::Vector<SelectionTileFragment> fragments;
-  bool has_mask = false;
-};
-
-/* Global clipboard buffer. Cleared on app exit via WM_exit_handler.
- * Main-thread only: accessed exclusively from operator callbacks, so it needs no locking. */
-static ImageClipboardState *g_clipboard_state = nullptr;
-static bool g_clipboard_atexit_registered = false;
-static void image_clipboard_state_free();
-
-static void image_clipboard_atexit(void * /*user_data*/)
-{
-  image_clipboard_state_free();
-}
-
 /** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Clipboard State Management
- * \{ */
-
-/**
- * Free all buffers in the clipboard state and deallocate it.
- * Safe to call even if g_clipboard_state is null.
- */
-static void image_clipboard_state_free()
-{
-  if (!g_clipboard_state) {
-    return;
-  }
-  selection_tile_fragments_free(g_clipboard_state->fragments);
-  MEM_delete(g_clipboard_state);
-  g_clipboard_state = nullptr;
-}
-
-static void image_clipboard_state_set(blender::Vector<SelectionTileFragment> &&fragments,
-                                      bool has_mask)
-{
-  image_clipboard_state_free();
-  g_clipboard_state = MEM_new<ImageClipboardState>(__func__);
-  g_clipboard_state->fragments = std::move(fragments);
-  g_clipboard_state->has_mask = has_mask;
-}
+ *
+ * The copy/paste clipboard is shared with the 3D Viewport selection tools
+ * (#image_select_clipboard_get, see paint_image_select_fragment.hh); a copy in one editor pastes
+ * into the other. \{ */
 
 void image_paint_clipboard_ensure_atexit_handler()
 {
-  if (g_clipboard_atexit_registered) {
-    return;
-  }
-
-  BKE_blender_atexit_register(image_clipboard_atexit, nullptr);
-  g_clipboard_atexit_registered = true;
-}
-
-static const ImageClipboardState *clipboard_get()
-{
-  return g_clipboard_state;
+  /* Forces the lazy creation, which registers the shared clipboard's app-exit handler. */
+  image_select_clipboard_get();
 }
 
 /** \} */
@@ -1474,7 +1425,14 @@ static wmOperatorStatus image_select_copy_exec(bContext *C, wmOperator *op)
     }
   }
 
-  image_clipboard_state_set(std::move(fragments), true);
+  /* One group per copy: the Image Editor copies from its single active image. */
+  ImageSelectClipboard *clipboard = image_select_clipboard_get();
+  image_select_clipboard_clear();
+  ImageSelectClipboardGroup group;
+  group.image_uid = uint32_t(ima->id.session_uid);
+  group.fragments = std::move(fragments);
+  clipboard->groups.append(std::move(group));
+  clipboard->has_mask = true;
 
   BKE_report(op->reports, RPT_INFO, "Selection copied");
   return OPERATOR_FINISHED;
@@ -1496,7 +1454,7 @@ static bool image_select_paste_poll(bContext *C)
   }
 
   /* Have local clipboard with mask. */
-  const ImageClipboardState *cb = clipboard_get();
+  const ImageSelectClipboard *cb = image_select_clipboard_get();
   if (cb && cb->has_mask) {
     return true;
   }
@@ -1520,13 +1478,28 @@ static wmOperatorStatus image_select_paste_exec(bContext *C, wmOperator *op)
 
   Image *ima = sima->image;
 
-  const ImageClipboardState *cb = clipboard_get();
+  const ImageSelectClipboard *cb = image_select_clipboard_get();
+  /* Prefer the group copied from this very image; a cross-editor paste (the clipboard was filled
+   * by the 3D Viewport, or by another image) falls back to the first group. */
+  const ImageSelectClipboardGroup *group = nullptr;
+  if (cb && cb->has_mask && !cb->groups.is_empty()) {
+    const uint32_t target_uid = uint32_t(ima->id.session_uid);
+    for (const ImageSelectClipboardGroup &candidate : cb->groups) {
+      if (candidate.image_uid == target_uid) {
+        group = &candidate;
+        break;
+      }
+    }
+    if (group == nullptr) {
+      group = &cb->groups.first();
+    }
+  }
   ImageUser iuser = sima->iuser;
   blender::Vector<SelectionTileFragment> paste_frags;
 
-  if (cb && cb->has_mask) {
-    paste_frags.reserve(cb->fragments.size());
-    for (const SelectionTileFragment &src_frag : cb->fragments) {
+  if (group != nullptr) {
+    paste_frags.reserve(group->fragments.size());
+    for (const SelectionTileFragment &src_frag : group->fragments) {
       SelectionTileFragment dst_frag;
       dst_frag.pixels.fragment_ibuf = src_frag.pixels.fragment_ibuf ?
                                           IMB_dupImBuf(src_frag.pixels.fragment_ibuf) :

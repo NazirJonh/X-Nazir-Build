@@ -2252,6 +2252,11 @@ class _defs_sculpt:
             layout.prop(settings, "gradient_opacity", text="Opacity", slider=True)
             layout.prop(settings, "gradient_blend_mode", text="Blend")
             layout.prop(settings, "gradient_repeat", text="Repeat")
+            if settings.gradient_type != 'CURVE':
+                # Interactive editing: the gradient stays live with draggable handles after the
+                # drag ends; confirmed with Enter, cancelled with Esc.
+                props = layout.operator_properties("sculpt.color_gradient")
+                layout.prop(props, "interactive")
             if (
                     not region_is_header and
                     context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
@@ -2593,6 +2598,151 @@ class _defs_texture_paint:
             options={'USE_BRUSHES'},
             brush_type='MASK',
         )
+
+
+class _defs_image_paint_select_view3d:
+    """Selection-mask tools for Sculpt Mode texture painting in the 3D Viewport.
+
+    The operators anchor a tangent plane under the first click and project the gesture onto the
+    mesh (the same surface-anchored model the 3D paint-shape tools use), so a selection drawn on
+    the surface constrains painting in both the 3D Viewport and the Image Editor.
+    """
+
+    @staticmethod
+    def draw_select_mode_expand(context, layout, props, *, show_space=False):
+        imapaint = context.tool_settings.image_paint
+        row = layout.row(align=True)
+        row.use_property_split = False
+        row.prop(props, "mode", text="", expand=True, icon_only=True)
+        layout.separator()
+        row = layout.row(align=True)
+        row.use_property_split = False
+        row.prop(imapaint, "selection_expand", text="", expand=True)
+        if show_space:
+            layout.separator()
+            row = layout.row(align=True)
+            row.use_property_split = False
+            row.prop(imapaint, "selection_space", expand=True)
+
+    @ToolDef.from_fn
+    def box():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_view3d_box")
+            _defs_image_paint_select_view3d.draw_select_mode_expand(context, layout, props, show_space=True)
+
+        return dict(
+            idname="builtin.image_paint_select_box",
+            label="Select Box",
+            cursor='PAINT_CROSS',
+            icon="ops.generic.select_box",
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Box",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def circle():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_view3d_circle")
+            _defs_image_paint_select_view3d.draw_select_mode_expand(context, layout, props, show_space=True)
+
+        return dict(
+            idname="builtin.image_paint_select_circle",
+            label="Select Circle",
+            cursor='PAINT_CROSS',
+            icon="ops.generic.select_circle",
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Circle",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def lasso():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_view3d_lasso")
+            _defs_image_paint_select_view3d.draw_select_mode_expand(context, layout, props)
+
+        return dict(
+            idname="builtin.image_paint_select_lasso",
+            label="Select Lasso",
+            cursor='PAINT_CROSS',
+            icon="ops.generic.select_lasso",
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Lasso",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def polyline():
+        def draw_settings(context, layout, tool):
+            props = tool.operator_properties("paint.image_select_view3d_polyline")
+            _defs_image_paint_select_view3d.draw_select_mode_expand(context, layout, props)
+
+        return dict(
+            idname="builtin.image_paint_select_polyline",
+            label="Select Polyline",
+            cursor='PAINT_CROSS',
+            icon="ops.sculpt.polyline_mask",
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Polyline",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def move():
+        return dict(
+            idname="builtin.image_paint_select_move",
+            label="Move Selection",
+            icon="ops.transform.translate",
+            cursor='PAINT_CROSS',
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Move",
+        )
+
+    @ToolDef.from_fn
+    def transform():
+        return dict(
+            idname="builtin.image_paint_select_transform",
+            label="Transform Selection",
+            icon="ops.transform.transform",
+            cursor='PAINT_CROSS',
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Transform",
+        )
+
+    @ToolDef.from_fn
+    def warp():
+        def draw_settings(context, layout, _tool):
+            imapaint = context.tool_settings.image_paint
+            layout.prop(imapaint, "warp_interpolation", text="Interpolation")
+            layout.prop(imapaint, "warp_grid_size", text="Grid Size")
+
+        return dict(
+            idname="builtin.image_paint_select_warp",
+            label="Warp Selection",
+            cursor='PAINT_CROSS',
+            # No dedicated warp icon asset; reuse the transform icon (2D parity).
+            icon="ops.transform.transform",
+            widget=None,
+            keymap="3D View Tool: Sculpt, Image Select Warp",
+            draw_settings=draw_settings,
+        )
+
+
+_tools_image_paint_select_view3d = (
+    (
+        _defs_image_paint_select_view3d.box,
+        _defs_image_paint_select_view3d.circle,
+        _defs_image_paint_select_view3d.lasso,
+        _defs_image_paint_select_view3d.polyline,
+    ),
+    None,
+    (
+        _defs_image_paint_select_view3d.move,
+        _defs_image_paint_select_view3d.transform,
+        _defs_image_paint_select_view3d.warp,
+    ),
+)
 
 
 class _defs_image_paint_select:
@@ -5045,6 +5195,8 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
                 _defs_sculpt_paint_shape.curve,
             ),
             None,
+            *_tools_image_paint_select_view3d,
+            None,
             _defs_transform.translate,
             _defs_transform.rotate,
             _defs_transform.scale,
@@ -5271,6 +5423,8 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         _defs_transform.scale,
         _defs_transform.transform,
         None,
+        *_tools_image_paint_select_view3d,
+        None,
         _defs_sculpt.sculpt_cursor,
         None,
         *_tools_annotate,
@@ -5485,6 +5639,23 @@ class VIEW3D_OT_sculpt_paint_display_set(Operator):
         return {'FINISHED'}
 
 
+class VIEW3D_OT_sculpt_paint_select_tool_cycle(Operator):
+    """Cycle the Paint Selection tools (Box, Circle, Lasso, Polyline), Paint toolbar only"""
+    bl_idname = "view3d.sculpt_paint_select_tool_cycle"
+    bl_label = "Cycle Paint Selection Tool"
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'SCULPT':
+            return False
+        return VIEW3D_PT_tools_active._tool_display_from_context(context) == 'PAINT'
+
+    def execute(self, context):
+        import bpy
+        return bpy.ops.wm.tool_set_by_id(name="builtin.image_paint_select_box", cycle=True)
+
+
 class SEQUENCER_PT_tools_active(ToolSelectPanelHelper, Panel):
     bl_space_type = 'SEQUENCE_EDITOR'
     bl_region_type = 'TOOLS'
@@ -5569,6 +5740,7 @@ classes = (
     NODE_PT_tools_active,
     VIEW3D_PT_tools_active,
     VIEW3D_OT_sculpt_paint_display_set,
+    VIEW3D_OT_sculpt_paint_select_tool_cycle,
     SEQUENCER_PT_tools_active,
     SCULPT_PT_insert_asset_correction,
     SCULPT_PT_insert_asset_extra,

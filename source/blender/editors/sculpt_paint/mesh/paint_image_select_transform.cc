@@ -1583,6 +1583,16 @@ static void image_select_transform_commit_write_final(bContext *C,
 {
   ImageUser iuser = state->iuser;
 
+  bool is_normal_map = false;
+  for (const ImagePaintSelectionTarget &target :
+       image_paint_selection_targets_get(C, state->owner_sima))
+  {
+    if (target.image == ima) {
+      is_normal_map = target.channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+      break;
+    }
+  }
+
   /* Re-apply the cut that lift_source made originally: #image_select_fragment_commit_with_undo
    * just restored the source region to its pre-lift original for the "before" snapshot. */
   image_select_fragment_lift_source(C, ima, state->iuser, state->fragments);
@@ -1643,6 +1653,15 @@ static void image_select_transform_commit_write_final(bContext *C,
     }
     /* IMB_transform expects a backward matrix: dest_pixel -> fragment_local. */
     const float3x3 backward_matrix_src = math::invert(forward_matrix);
+
+    /* A tangent-space normal map is expressed in the UV frame, so its stored vectors turn with
+     * the rotation of the transform (the resample alone would leave them pointing the old way). */
+    float2x2 forward_linear;
+    forward_linear[0] = float2(forward_matrix[0].x, forward_matrix[0].y);
+    forward_linear[1] = float2(forward_matrix[1].x, forward_matrix[1].y);
+    const float2x2 normal_rotation = image_select_normal_rotation(forward_linear);
+    const bool rotate_normals = is_normal_map &&
+                                !image_select_normal_rotation_is_identity(normal_rotation);
 
     const float2 uv_origin_src = float2(float(src_col), float(src_row));
 
@@ -1789,6 +1808,10 @@ static void image_select_transform_commit_write_final(bContext *C,
                     IMB_FILTER_BILINEAR,
                     backward_region,
                     &src_crop);
+
+      if (rotate_normals) {
+        image_select_normal_buffer_rotate(*temp_pixels, normal_rotation);
+      }
 
       /* Transform the fragment selection mask into temp_mask using the same matrix and crop as the
        * pixel transform above.  The mask and pixel transforms must stay in sync: any dest pixel

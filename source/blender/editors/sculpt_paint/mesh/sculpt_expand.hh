@@ -21,6 +21,7 @@ namespace blender {
 struct Brush;
 struct Object;
 struct Scene;
+struct wmKeyConfig;
 namespace bke::pbvh {
 class Node;
 }
@@ -230,6 +231,10 @@ struct Cache {
    * has not been used yet, or in the single-object path. */
   std::unique_ptr<detail::GlobalGeodesicTopology> geodesic_topology_cache;
 };
+
+/** Modal key-map of the expand operators; called from #ED_keymap_paint on every key-map
+ * regeneration. Defined in sculpt_expand.cc. */
+void modal_keymap(wmKeyConfig *keyconf);
 
 }  // namespace ed::sculpt_paint::expand
 

@@ -1489,6 +1489,14 @@ enum eImagePaint_SelectionExpand : int8_t {
   IMAGE_PAINT_SELECT_EXPAND_MESH = 3,
 };
 
+/** #ImagePaintSettings::selection_space (3D Viewport Select Box / Circle). */
+enum eImagePaint_SelectionSpace : int8_t {
+  /** The gesture is a screen-space shape: texels are selected by where they project on screen. */
+  IMAGE_PAINT_SELECT_SPACE_VIEW = 0,
+  /** The gesture is laid on the tangent plane of the surface under the first click. */
+  IMAGE_PAINT_SELECT_SPACE_SCENE = 1,
+};
+
 /** #ImagePaintSettings::shape (and its nested fields). */
 
 /** #PaintShapeSettings::type */
@@ -1864,12 +1872,14 @@ struct ImagePaintSettings {
   short warp_grid_size = 4;
   float gradient_opacity = 1.0f;
   /** #eImagePaint_WarpInterpolation */
-  char warp_interpolation = IMAGE_PAINT_WARP_INTERP_LINEAR;
+  char warp_interpolation = IMAGE_PAINT_WARP_INTERP_SMOOTH;
   /** Paint the selection gradient across every UDIM tile instead of only the active one. */
   char gradient_multi_udim = 0;
+  /** #eImagePaint_SelectionSpace (zero = View, so old files need no versioning). */
+  char selection_space = IMAGE_PAINT_SELECT_SPACE_VIEW;
   /* Pad so the embedded #ColorBand starts on an 8-byte boundary and the struct size (which holds
    * pointers) stays a multiple of 8. */
-  char _pad_gradient2[2] = {};
+  char _pad_gradient2[1] = {};
   /**
    * Color ramp (stops + interpolation) for the selection gradient tool. Embedded by value like
    * #ColorMapping::coba, so it needs a runtime #BKE_colorband_init: see #scene_init_data,

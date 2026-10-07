@@ -155,6 +155,11 @@ set(SRC
   mesh/paint_image_select_gradient.cc
   mesh/paint_image_select_warp.cc
   mesh/paint_image_select_gizmo.cc
+  mesh/paint_image_select_view3d.cc
+  mesh/paint_image_select_view3d.hh
+  mesh/paint_image_select_move_view3d.cc
+  mesh/paint_image_select_transform_view3d.cc
+  mesh/paint_image_select_warp_view3d.cc
   mesh/paint_image_canvas_symmetry.cc
   mesh/paint_image_symmetry_line.cc
   mesh/paint_image_2d_curve_mask.cc

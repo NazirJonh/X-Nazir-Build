@@ -16,6 +16,7 @@
 #include "BKE_image_paint_selection.hh"
 
 #include "BLI_function_ref.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -139,6 +140,83 @@ ImBuf *image_select_make_display_ibuf_feather(const ImBuf *src,
  * Fragment masks live outside BKE tile maps, so this stays in the editor layer.
  */
 float image_select_sample_mask_bilinear(const ImBuf *mask, float fx, float fy);
+
+/**
+ * Bilinear sample of a fragment's color buffer at fragment-local pixel coordinates \a f (pixel
+ * centers), shared by the 2D and 3D write-back paths. Float sources are returned as-is, byte
+ * sources scaled to 0..1; \a r_color always receives 4 components, repeating the last source
+ * channel when the buffer has fewer than 4 (an alpha derived from a repeated channel is
+ * meaningless — callers compute alpha from the channel count themselves).
+ *
+ * \param channels: component count of the fragment's float buffer (ignored for byte buffers,
+ * which are always 4). Pass the destination's channel count so the strides match.
+ * \return False when the fragment carries no readable color buffer.
+ */
+bool image_select_fragment_sample_bilinear(const SelectionTileFragment &frag,
+                                           const float2 &f,
+                                           const int channels,
+                                           float4 &r_color);
+
+/* -------------------------------------------------------------------- */
+/** \name Tangent-space normal maps
+ *
+ * The XY of a tangent-space normal is expressed in the UV frame, so content that is rotated or
+ * mirrored in UV space has to turn its stored vectors with it; otherwise the bumps of a rotated
+ * fragment still light as if it was not rotated. Only the orthogonal factor of the transform is
+ * applied: a pure scale keeps the stored values (the appearance of a resized normal map is the
+ * resampled one, not a steeper / flatter one).
+ * \{ */
+
+/**
+ * The rotation / reflection part (polar decomposition) of the forward 2x2 \a linear map, in the
+ * orientation of the encoded XY (X = U, Y = V, OpenGL convention). Identity for a degenerate map.
+ */
+float2x2 image_select_normal_rotation(const float2x2 &linear);
+
+/** Turn the XY of one encoded (`rgb * 2 - 1`) normal pixel by \a rotation; alpha is untouched. */
+void image_select_normal_color_rotate(float4 &color, const float2x2 &rotation);
+
+/**
+ * #image_select_normal_color_rotate over every pixel of a 4-channel \a ibuf (float or byte) whose
+ * alpha is not zero.
+ */
+void image_select_normal_buffer_rotate(ImBuf &ibuf, const float2x2 &rotation);
+
+/** True when \a rotation is (numerically) the identity, so callers can skip the pass. */
+bool image_select_normal_rotation_is_identity(const float2x2 &rotation);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Shared selection clipboard
+ *
+ * One clipboard shared by the Image Editor (2D) and the 3D Viewport selection tools, so a copy
+ * in one editor can be pasted in the other. Fragments are grouped by the image they were copied
+ * from (session UID); a paste resolves the groups against its own canvas images.
+ * \{ */
+
+/**
+ * One image's copied fragments. #image_uid is the session UID of the source image; a paste
+ * prefers the group whose image matches its target and falls back to the first group.
+ */
+struct ImageSelectClipboardGroup {
+  uint32_t image_uid = 0;
+  Vector<SelectionTileFragment> fragments;
+};
+
+struct ImageSelectClipboard {
+  Vector<ImageSelectClipboardGroup> groups;
+  /** Whether the clipboard holds a selection-mask copy (used by the 2D paste poll). */
+  bool has_mask = false;
+};
+
+/** The global clipboard (lazily created; freed on app exit). Main-thread only. */
+ImageSelectClipboard *image_select_clipboard_get();
+
+/** Free every group's fragments and empty the clipboard. */
+void image_select_clipboard_clear();
+
+/** \} */
 
 /**
  * Alpha-blend a prepared fragment buffer into a destination canvas, placing the fragment's

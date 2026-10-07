@@ -540,6 +540,8 @@ set(GLSL_SRC
   shaders/gpu_shader_image_overlays_stereo_merge_frag.glsl
   shaders/gpu_shader_image_shuffle_color_frag.glsl
   shaders/gpu_shader_image_color_frag.glsl
+  shaders/gpu_shader_image_select_mask.bsl.hh
+  shaders/gpu_shader_image_select_pbr.bsl.hh
   shaders/gpu_shader_3D_image_vert.glsl
   shaders/gpu_shader_3D_vert.glsl
   shaders/gpu_shader_3D_normal_vert.glsl

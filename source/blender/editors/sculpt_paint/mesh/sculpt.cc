@@ -115,6 +115,8 @@
 #include "../paint_clone_stroke.hh"
 #include "../paint_curve_patch_session.hh"
 #include "../paint_intern.hh"
+#include "paint_image_select_intern.hh"
+#include "paint_image_select_view3d.hh"
 #include "paint_material_source.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_boundary.hh"
@@ -10687,6 +10689,22 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
 
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   Brush &brush = *BKE_paint_brush(&sd.paint);
+
+  /* Selection mask: refresh the face-selection-derived 2D masks of the canvas image at stroke
+   * start, exactly like the 2D painter does, so a 3D stroke respects the same face selection
+   * the selection tools rasterized. Cheap when unchanged (hash-keyed, see
+   * #image_paint_selection_mask_from_face_selection). */
+  if (SCULPT_use_image_paint_brush(
+          scene.toolsettings->paint_mode, ob, &brush, sd.paint.visible_material_channels))
+  {
+    /* Same resolver as the selection tools: Material canvases paint into several maps, each of
+     * which needs its derived face mask. */
+    for (const ImagePaintSelectionTarget &target :
+         ed::sculpt_paint::image_paint_selection_view3d_targets_get(C, ob))
+    {
+      image_paint_selection_mask_from_face_selection(C, &scene, target.image);
+    }
+  }
 
   /* Ctrl+LMB samples a face set color without starting a sculpt stroke.
    * A regular stroke never reaches sampling because #PaintStroke::add_step aborts when

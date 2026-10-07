@@ -1132,6 +1132,11 @@ void PAINT_OT_image_select_warp(wmOperatorType *ot);
 void PAINT_OT_image_select_warp_confirm(wmOperatorType *ot);
 void PAINT_OT_image_select_warp_cancel(wmOperatorType *ot);
 void PAINT_OT_image_select_warp_undo_step(wmOperatorType *ot);
+
+/* Selection masks in the 3D Viewport (Sculpt texture painting): the operators live in
+ * mesh/paint_image_select_view3d.hh (declared in `blender::ed::sculpt_paint` next to the rest of
+ * that module's API); registered from #ED_operatortypes_paint. */
+
 /** True while a selection transform gizmo is active in the current Image Editor. */
 bool image_select_transform_is_floating(bContext *C);
 /** True while a move-selection fragment is floating in the current Image Editor. */

@@ -28,6 +28,7 @@
 #include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
@@ -40,6 +41,7 @@
 #include "BKE_unit.hh"
 
 #include "GPU_immediate.hh"
+#include "GPU_immediate_util.hh"
 #include "GPU_matrix.hh"
 #include "GPU_state.hh"
 
@@ -62,6 +64,7 @@
 #include "../paint_gradient_curve.hh"
 
 #include "paint_image_select_gradient.hh"
+#include "paint_image_select_intern.hh"
 
 #include "mesh_brush_common.hh"
 #include "sculpt_automask.hh"
@@ -1037,6 +1040,12 @@ static float gradient_radial_radius(const ARegion *region,
 /** Minimum cursor travel in pixels before a new surface sample is accepted. */
 static constexpr float GRADIENT_CURVE_MIN_DIST_PX = 2.5f;
 
+/** Wheel step of the gradient's halfway color. */
+static constexpr float GRADIENT_MIDPOINT_STEP = 0.05f;
+/** Clamp range of the halfway color, keeping both gradient stops visible. */
+static constexpr float GRADIENT_MIDPOINT_MIN = 0.05f;
+static constexpr float GRADIENT_MIDPOINT_MAX = 0.95f;
+
 /**
  * Live state of a Curve gesture: the raw accepted samples and the curve built from them. The
  * modal keeps this in sync with the operator's RNA collection (same point count), so the
@@ -1805,6 +1814,12 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
             /* Rows never overlap in the image, so they can be blended concurrently; the tile's
              * dirty region is not thread-safe, so it is accumulated afterwards. */
             Array<bool> rows_changed(pixel_rows.size(), false);
+            /* Resolved once per tile, outside the parallel loop: the sampler is lock-free, while
+             * the per-pixel BKE blend-sample call would serialize the rows on a mutex. The mask is
+             * applied here, not folded into the shared `t`, because it depends on this image. */
+            const ImagePaintSelectionTileSampler selection_sampler =
+                BKE_image_paint_selection_tile_sampler_get(image_data.image, tile.tile_number);
+            const bool use_selection_mask = !selection_sampler.is_unrestricted();
             threading::parallel_for(pixel_rows.index_range(), 256, [&](const IndexRange rows) {
               Vector<float4> byte_storage;
               for (const int r : rows) {
@@ -1830,15 +1845,33 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
                                           byte_storage,
                                           premul_storage);
 
+                bool row_touched = false;
                 for (const int px : range.index_range()) {
                   const float t = row_t[px];
                   if (std::isnan(t)) {
                     continue;
                   }
+                  float weight = 1.0f;
+                  if (use_selection_mask) {
+                    weight = selection_sampler.sample(
+                        pixel_row.start_image_coordinate.x + px,
+                        pixel_row.start_image_coordinate.y);
+                    if (weight <= 0.0f) {
+                      continue;
+                    }
+                  }
                   float4 &pixel = scene_linear[px];
-                  pixel = paints_colors ?
-                              gradient_blend_color(coloring, pixel, t) :
-                              gradient_blend_value(coloring, pixel, channel_value, t);
+                  const float4 blended = paints_colors ?
+                                             gradient_blend_color(coloring, pixel, t) :
+                                             gradient_blend_value(
+                                                 coloring, pixel, channel_value, t);
+                  /* Linear mix by weight (not a threshold) so a feathered selection edge stays
+                   * smooth. */
+                  pixel = weight >= 1.0f ? blended : math::interpolate(pixel, blended, weight);
+                  row_touched = true;
+                }
+                if (!row_touched) {
+                  continue;
                 }
 
                 if (!float_buffer.is_empty()) {
@@ -2147,6 +2180,57 @@ static void sculpt_color_gradient_status_clear(bContext *C)
   }
 }
 
+/**
+ * Prepare the selection mask of every image canvas the gradient will paint. Returns false (after
+ * reporting) when a canvas is borrowed by a floating selection session: its lifted fragments leave
+ * holes that the gradient would fill. Otherwise refreshes the face-selection-derived masks the same
+ * way the brush does at stroke start (#sculpt_brush_stroke_invoke), so the sampler never reads a
+ * stale mask. Runs before any undo step is opened so a refusal leaves nothing behind.
+ */
+static bool sculpt_color_gradient_canvases_prepare(bContext *C,
+                                                   wmOperator *op,
+                                                   const Span<Object *> objects)
+{
+  Scene &scene = *CTX_data_scene(C);
+  const Sculpt *sd = CTX_data_tool_settings(C)->sculpt;
+  if (sd == nullptr || scene.toolsettings == nullptr) {
+    return true;
+  }
+  PaintModeSettings &paint_mode_settings = scene.toolsettings->paint_mode;
+  const Brush *brush = BKE_paint_brush_for_read(&sd->paint);
+
+  Vector<Image *> images;
+  for (Object *ob : objects) {
+    if (ob == nullptr || ob->type != OB_MESH ||
+        !SCULPT_use_image_paint_brush(
+            paint_mode_settings, *ob, brush, sd->paint.visible_material_channels))
+    {
+      continue;
+    }
+    for (paint::image::ImagePaintTarget &target : paint::image::init_image_paint_targets(
+             *ob, paint_mode_settings, brush, sd->paint.visible_material_channels))
+    {
+      Image *image = target.data->image;
+      if (image == nullptr) {
+        continue;
+      }
+      if (image->runtime != nullptr && image->runtime->paint_selection_borrowed_by != nullptr) {
+        BKE_report(op->reports,
+                   RPT_WARNING,
+                   "Image is being edited by a floating selection, finish it before using the "
+                   "gradient");
+        return false;
+      }
+      images.append_non_duplicates(image);
+    }
+  }
+
+  for (Image *image : images) {
+    image_paint_selection_mask_from_face_selection(C, &scene, image);
+  }
+  return true;
+}
+
 static int sculpt_color_gradient_init(bContext *C, wmOperator *op)
 {
   const Scene &scene = *CTX_data_scene(C);
@@ -2174,6 +2258,10 @@ static int sculpt_color_gradient_init(bContext *C, wmOperator *op)
   for (Object *object : objects) {
     bke::object::pbvh_ensure(*depsgraph, *object);
     BKE_sculpt_update_object_for_edit(depsgraph, object, true);
+  }
+
+  if (!sculpt_color_gradient_canvases_prepare(C, op, objects)) {
+    return OPERATOR_CANCELLED;
   }
 
   if (sculpt_color_gradient_uses_image_undo(C, objects)) {
@@ -2518,9 +2606,11 @@ static wmOperatorStatus sculpt_color_gradient_curve_modal(bContext *C,
 
   if (ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE)) {
     /* Shifting the halfway color along the curve, like the straight-line gestures. */
-    const float step = (event->type == WHEELUPMOUSE) ? 0.05f : -0.05f;
-    const float midpoint = math::clamp(
-        RNA_float_get(op->ptr, "midpoint") + step, 0.05f, 0.95f);
+    const float step = (event->type == WHEELUPMOUSE) ? GRADIENT_MIDPOINT_STEP :
+                                                       -GRADIENT_MIDPOINT_STEP;
+    const float midpoint = math::clamp(RNA_float_get(op->ptr, "midpoint") + step,
+                                       GRADIENT_MIDPOINT_MIN,
+                                       GRADIENT_MIDPOINT_MAX);
     RNA_float_set(op->ptr, "midpoint", midpoint);
     sculpt_color_gradient_curve_preview(C, op, data, true);
     sculpt_color_gradient_curve_status_update(C, op);
@@ -2647,6 +2737,354 @@ static bool sculpt_color_gradient_radial_center_set(bContext *C,
   return true;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Color Gradient interactive editing
+ *
+ * With the `interactive` property enabled, a Linear or Radial gradient does not end when the drag
+ * does: the operator stays modal and the gradient stays live. The start (Radial: center) and end
+ * (Radial: radius) handles, and the midpoint marker, stay draggable; Enter applies, Esc (or RMB)
+ * rolls the whole step back. This reuses the drag gesture's machinery — the geometry is derived
+ * from the same RNA coordinates the gesture writes — so one undo step covers the whole session.
+ * \{ */
+
+/** Which handle the mouse drag moves (see #ColorGradientInteractiveData::dragging). */
+enum GradientInteractiveHandle {
+  GRADIENT_HANDLE_NONE = 0,
+  GRADIENT_HANDLE_START = 1,
+  GRADIENT_HANDLE_END = 2,
+  GRADIENT_HANDLE_MID = 3,
+};
+
+/**
+ * Sentinel whose address tags #ColorGradientInteractiveData inside #wmOperator::customdata: the
+ * drag phase stores a #wmGesture there and the Curve phase a #ColorGradientCurveData, so the
+ * pointer alone cannot tell the phases apart. The compare below only rules the cast in or out,
+ * it never dereferences through a foreign type.
+ */
+static constexpr int GRADIENT_INTERACTIVE_DATA_TAG = 0;
+
+struct ColorGradientInteractiveData {
+  /** First member, see #GRADIENT_INTERACTIVE_DATA_TAG. */
+  const int *tag = &GRADIENT_INTERACTIVE_DATA_TAG;
+  /** #GradientInteractiveHandle currently under the mouse drag. */
+  int dragging = GRADIENT_HANDLE_NONE;
+  /** Region type the draw callback is registered with; static, stays valid if the area closes. */
+  ARegionType *region_type = nullptr;
+  void *draw_handle = nullptr;
+  /** Last accepted handle positions (region pixels), mirrored from the RNA by the modal so the
+   * draw callback never has to touch the operator. */
+  float2 start_px = float2(0.0f);
+  float2 end_px = float2(0.0f);
+  float midpoint = 0.5f;
+};
+
+static ColorGradientInteractiveData *interactive_data_get(wmOperator *op)
+{
+  if (op->customdata == nullptr) {
+    return nullptr;
+  }
+  auto *data = static_cast<ColorGradientInteractiveData *>(op->customdata);
+  if (data->tag != &GRADIENT_INTERACTIVE_DATA_TAG) {
+    /* The drag gesture's #wmGesture or the Curve phase's data, not this struct. */
+    return nullptr;
+  }
+  return data;
+}
+
+/** The gradient line's screen-space start (Radial: projected center) and end, region pixels. */
+static void interactive_handles_screen(const bContext *C,
+                                       wmOperator *op,
+                                       float2 &r_start,
+                                       float2 &r_end)
+{
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  r_end = float2(float(RNA_int_get(op->ptr, "xend")), float(RNA_int_get(op->ptr, "yend")));
+  if (eSculptGradientType(sd.gradient_type) == SCULPT_GRADIENT_RADIAL) {
+    const ARegion *region = CTX_wm_region(C);
+    float center_co[3];
+    RNA_float_get_array(op->ptr, "center", center_co);
+    float projected[3];
+    if (region != nullptr && region->regiondata != nullptr &&
+        ED_view3d_project_float_global(
+            region, center_co, projected, V3D_PROJ_TEST_CLIP_DEFAULT) == V3D_PROJ_RET_OK)
+    {
+      r_start = float2(projected[0], projected[1]);
+      return;
+    }
+    /* Fall back to the drag start if the center is off-screen. */
+    r_start = float2(float(RNA_int_get(op->ptr, "xstart")), float(RNA_int_get(op->ptr, "ystart")));
+    return;
+  }
+  r_start = float2(float(RNA_int_get(op->ptr, "xstart")), float(RNA_int_get(op->ptr, "ystart")));
+}
+
+/** Screen position of the midpoint marker: along the handle line, at the halfway color point. */
+static float2 interactive_mid_point(const ColorGradientInteractiveData &data)
+{
+  return math::interpolate(data.start_px, data.end_px, data.midpoint);
+}
+
+/** Screen-space hit test radius of the handles. */
+static constexpr float GRADIENT_INTERACTIVE_HANDLE_RADIUS = 10.0f;
+
+static int interactive_hit_test(const ColorGradientInteractiveData &data, const float2 &mval)
+{
+  const float2 mid = interactive_mid_point(data);
+  if (math::distance(mid, mval) <= GRADIENT_INTERACTIVE_HANDLE_RADIUS) {
+    return GRADIENT_HANDLE_MID;
+  }
+  if (math::distance(data.start_px, mval) <= GRADIENT_INTERACTIVE_HANDLE_RADIUS) {
+    return GRADIENT_HANDLE_START;
+  }
+  if (math::distance(data.end_px, mval) <= GRADIENT_INTERACTIVE_HANDLE_RADIUS) {
+    return GRADIENT_HANDLE_END;
+  }
+  return GRADIENT_HANDLE_NONE;
+}
+
+/** Segment count of the interactive gradient's handle discs. */
+static constexpr int GRADIENT_INTERACTIVE_HANDLE_SEGMENTS = 16;
+
+static void sculpt_color_gradient_interactive_draw(const bContext * /*C*/,
+                                                   ARegion * /*region*/,
+                                                   void *arg)
+{
+  const ColorGradientInteractiveData *data = static_cast<ColorGradientInteractiveData *>(arg);
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_line_smooth(true);
+  /* The handles float over the 3D scene; a depth test would be meaningless in POST_PIXEL. */
+  const GPUDepthTest depth_prev = GPU_depth_test_get();
+  GPU_depth_test(GPU_DEPTH_NONE);
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+  /* This fork has no 2D uniform-color builtin; the 3D one with z = 0 in POST_PIXEL is the
+   * same pattern the curve gradient's overlay uses. */
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  /* Dark under-stroke then light core, matching the curve gradient's overlay. */
+  const float2 mid = interactive_mid_point(*data);
+  for (const int pass : IndexRange(2)) {
+    GPU_line_width((pass == 0) ? 3.0f : 1.5f);
+    immUniformColor4f(0.0f, 0.0f, 0.0f, 0.55f);
+    if (pass == 1) {
+      immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
+    }
+    immBegin(GPU_PRIM_LINE_STRIP, 3);
+    immVertex3f(pos, data->start_px.x, data->start_px.y, 0.0f);
+    immVertex3f(pos, mid.x, mid.y, 0.0f);
+    immVertex3f(pos, data->end_px.x, data->end_px.y, 0.0f);
+    immEnd();
+  }
+
+  /* Handles: filled discs with a contrasting outline; the active one is slightly larger. */
+  const float radius = GRADIENT_INTERACTIVE_HANDLE_RADIUS;
+  immUniformColor4f(0.9f, 0.9f, 0.9f, 0.9f);
+  imm_draw_circle_fill_3d(
+      pos, data->start_px.x, data->start_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
+  imm_draw_circle_fill_3d(
+      pos, data->end_px.x, data->end_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
+  imm_draw_circle_fill_3d(
+      pos, mid.x, mid.y, radius * 0.45f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
+  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.8f);
+  GPU_line_width(1.0f);
+  for (const float2 &center : {data->start_px, data->end_px, mid}) {
+    imm_draw_circle_wire_3d(
+        pos, center.x, center.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
+  }
+
+  immUnbindProgram();
+  GPU_depth_test(depth_prev);
+  GPU_blend(GPU_BLEND_NONE);
+  GPU_line_smooth(false);
+}
+
+/** Sync the draw overlay's mirrored state and tag the region. */
+static void interactive_overlay_refresh(bContext *C,
+                                        wmOperator *op,
+                                        ColorGradientInteractiveData &data)
+{
+  interactive_handles_screen(C, op, data.start_px, data.end_px);
+  data.midpoint = RNA_float_get(op->ptr, "midpoint");
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+}
+
+static void sculpt_color_gradient_interactive_status(bContext *C)
+{
+  if (ScrArea *area = CTX_wm_area(C)) {
+    ED_area_status_text(area, IFACE_("Drag handles: move gradient  Wheel: midpoint  Enter: "
+                                    "apply  Esc: cancel"));
+  }
+}
+
+/** Tear down the interactive session: confirm applies (closes the undo step), cancel restores. */
+static void sculpt_color_gradient_interactive_end(bContext *C,
+                                                  wmOperator *op,
+                                                  const bool confirmed)
+{
+  ColorGradientInteractiveData *data = static_cast<ColorGradientInteractiveData *>(op->customdata);
+  if (data == nullptr) {
+    return;
+  }
+  BLI_assert(data->tag == &GRADIENT_INTERACTIVE_DATA_TAG);
+  if (data->region_type != nullptr && data->draw_handle != nullptr) {
+    ED_region_draw_cb_exit(data->region_type, data->draw_handle);
+  }
+  MEM_delete(data);
+  op->customdata = nullptr;
+  WM_cursor_modal_restore(CTX_wm_window(C));
+
+  sculpt_color_gradient_status_clear(C);
+  if (confirmed) {
+    Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+    ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    sculpt_color_gradient_finish(C, sculpt_color_gradient_uses_image_undo(C,
+        sculpt_mode_objects(vc)));
+  }
+  else {
+    sculpt_color_gradient_abort(C);
+  }
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+}
+
+/** Switch from the finished drag gesture to the persistent editing phase. */
+static wmOperatorStatus sculpt_color_gradient_interactive_enter(bContext *C, wmOperator *op)
+{
+  ARegion *region = CTX_wm_region(C);
+  ColorGradientInteractiveData *data = MEM_new<ColorGradientInteractiveData>(__func__);
+  data->region_type = region->runtime->type;
+  if (data->region_type != nullptr) {
+    data->draw_handle = ED_region_draw_cb_activate(data->region_type,
+                                                   sculpt_color_gradient_interactive_draw,
+                                                   data,
+                                                   REGION_DRAW_POST_PIXEL);
+  }
+  op->customdata = data;
+  interactive_overlay_refresh(C, op, *data);
+  WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_CROSS);
+  sculpt_color_gradient_interactive_status(C);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+/** Persistent editing phase after the drag gesture finished (see #sculpt_color_gradient_modal). */
+static wmOperatorStatus sculpt_color_gradient_interactive_modal(bContext *C,
+                                                                wmOperator *op,
+                                                                const wmEvent *event)
+{
+  /* The caller routed through #interactive_data_get, so the cast is type-safe. */
+  ColorGradientInteractiveData &data = *static_cast<ColorGradientInteractiveData *>(
+      op->customdata);
+  BLI_assert(data.tag == &GRADIENT_INTERACTIVE_DATA_TAG);
+  ARegion *region = CTX_wm_region(C);
+  const float2 mval = region != nullptr ?
+                          float2(float(event->xy[0] - region->winrct.xmin),
+                                 float(event->xy[1] - region->winrct.ymin)) :
+                          float2(0.0f);
+
+  if (event->type == EVT_MODAL_MAP) {
+    switch (event->val) {
+      case GESTURE_MODAL_BEGIN: {
+        /* LMB press: grab a handle; on the Radial type, clicking empty space re-centers the
+         * gradient on the surface point under the cursor. */
+        data.dragging = interactive_hit_test(data, mval);
+        if (data.dragging == GRADIENT_HANDLE_NONE &&
+            eSculptGradientType(CTX_data_tool_settings(C)->sculpt->gradient_type) ==
+                SCULPT_GRADIENT_RADIAL)
+        {
+          if (sculpt_color_gradient_radial_center_set(C, op, event)) {
+            sculpt_color_gradient_exec(C, op);
+            interactive_overlay_refresh(C, op, data);
+          }
+        }
+        ED_region_tag_redraw(region);
+        return OPERATOR_RUNNING_MODAL;
+      }
+      case GESTURE_MODAL_SELECT: {
+        /* LMB release: drop the handle. */
+        data.dragging = GRADIENT_HANDLE_NONE;
+        ED_region_tag_redraw(region);
+        return OPERATOR_RUNNING_MODAL;
+      }
+      case GESTURE_MODAL_CANCEL: {
+        sculpt_color_gradient_interactive_end(C, op, false);
+        return OPERATOR_CANCELLED;
+      }
+      default:
+        return OPERATOR_RUNNING_MODAL;
+    }
+  }
+
+  switch (event->type) {
+    case MOUSEMOVE: {
+      if (data.dragging == GRADIENT_HANDLE_NONE) {
+        return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
+      }
+      switch (data.dragging) {
+        case GRADIENT_HANDLE_START:
+          RNA_int_set(op->ptr, "xstart", int(mval.x));
+          RNA_int_set(op->ptr, "ystart", int(mval.y));
+          break;
+        case GRADIENT_HANDLE_END:
+          RNA_int_set(op->ptr, "xend", int(mval.x));
+          RNA_int_set(op->ptr, "yend", int(mval.y));
+          break;
+        case GRADIENT_HANDLE_MID: {
+          const float2 start = data.start_px;
+          const float2 axis = data.end_px - start;
+          const float len_sq = math::length_squared(axis);
+          if (len_sq >= 1.0f) {
+            const float t = math::clamp(math::dot(mval - start, axis) / len_sq,
+                                        GRADIENT_MIDPOINT_MIN,
+                                        GRADIENT_MIDPOINT_MAX);
+            RNA_float_set(op->ptr, "midpoint", t);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+      sculpt_color_gradient_exec(C, op);
+      interactive_overlay_refresh(C, op, data);
+      return OPERATOR_RUNNING_MODAL;
+    }
+    case WHEELUPMOUSE:
+    case WHEELDOWNMOUSE: {
+      const float step = (event->type == WHEELUPMOUSE) ? GRADIENT_MIDPOINT_STEP :
+                                                         -GRADIENT_MIDPOINT_STEP;
+      const float midpoint = math::clamp(RNA_float_get(op->ptr, "midpoint") + step,
+                                         GRADIENT_MIDPOINT_MIN,
+                                         GRADIENT_MIDPOINT_MAX);
+      RNA_float_set(op->ptr, "midpoint", midpoint);
+      sculpt_color_gradient_exec(C, op);
+      interactive_overlay_refresh(C, op, data);
+      return OPERATOR_RUNNING_MODAL;
+    }
+    case EVT_RETKEY:
+    case EVT_PADENTER: {
+      if (event->val == KM_PRESS) {
+        sculpt_color_gradient_interactive_end(C, op, true);
+        return OPERATOR_FINISHED;
+      }
+      return OPERATOR_RUNNING_MODAL;
+    }
+    case INBETWEEN_MOUSEMOVE: {
+      /* Coalesced intermediate moves: no pass-through, the modal handler must keep them. */
+      return OPERATOR_RUNNING_MODAL;
+    }
+    default:
+      /* Navigation (orbit, pan, zoom) and other unhandled events pass through, so the session
+       * survives camera moves. */
+      return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
+  }
+}
+
+/** \} */
+
 static wmOperatorStatus sculpt_color_gradient_invoke(bContext *C,
                                                      wmOperator *op,
                                                      const wmEvent *event)
@@ -2688,14 +3126,20 @@ static wmOperatorStatus sculpt_color_gradient_modal(bContext *C,
     return sculpt_color_gradient_curve_modal(C, op, event);
   }
 
+  if (interactive_data_get(op) != nullptr) {
+    return sculpt_color_gradient_interactive_modal(C, op, event);
+  }
+
   if (ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE)) {
     const wmGesture *gesture = static_cast<const wmGesture *>(op->customdata);
     if (gesture != nullptr && gesture->is_active) {
       /* Shifting the halfway color along the drag gives a long, soft falloff without having to
        * drag far past the start. */
-      const float step = (event->type == WHEELUPMOUSE) ? 0.05f : -0.05f;
-      const float midpoint = math::clamp(
-          RNA_float_get(op->ptr, "midpoint") + step, 0.05f, 0.95f);
+      const float step = (event->type == WHEELUPMOUSE) ? GRADIENT_MIDPOINT_STEP :
+                                                         -GRADIENT_MIDPOINT_STEP;
+      const float midpoint = math::clamp(RNA_float_get(op->ptr, "midpoint") + step,
+                                         GRADIENT_MIDPOINT_MIN,
+                                         GRADIENT_MIDPOINT_MAX);
       RNA_float_set(op->ptr, "midpoint", midpoint);
       sculpt_color_gradient_exec(C, op);
       sculpt_color_gradient_status_update(C, op);
@@ -2706,6 +3150,12 @@ static wmOperatorStatus sculpt_color_gradient_modal(bContext *C,
   const wmOperatorStatus ret = WM_gesture_straightline_modal(C, op, event);
 
   if (ret & OPERATOR_FINISHED) {
+    if (RNA_boolean_get(op->ptr, "interactive")) {
+      /* Interactive editing: the gradient stays live with draggable handles instead of
+       * committing on release (Enter applies, Esc rolls the step back). */
+      sculpt_color_gradient_status_clear(C);
+      return sculpt_color_gradient_interactive_enter(C, op);
+    }
     /* The gesture already ran the final exec for both canvas types. */
     sculpt_color_gradient_status_clear(C);
     Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
@@ -2729,6 +3179,12 @@ static void sculpt_color_gradient_cancel(bContext *C, wmOperator *op)
     /* External teardown of a Curve gesture: #sculpt_color_gradient_curve_session_end rolls the
      * whole undo step back and frees the draw handler and sample data. */
     sculpt_color_gradient_curve_session_end(C, op, false);
+    return;
+  }
+  if (interactive_data_get(op) != nullptr) {
+    /* External teardown of the interactive editing phase (window close, file load): roll the
+     * whole undo step back and free the draw handler. */
+    sculpt_color_gradient_interactive_end(C, op, false);
     return;
   }
   sculpt_color_gradient_status_clear(C);
@@ -2817,8 +3273,8 @@ void SCULPT_OT_color_gradient(wmOperatorType *ot)
                        "Midpoint",
                        "Position along the gradient where the halfway color lands (changed with "
                        "the mouse wheel while dragging)",
-                       0.05f,
-                       0.95f);
+                       GRADIENT_MIDPOINT_MIN,
+                       GRADIENT_MIDPOINT_MAX);
 
   /* World-space samples of the Curve gradient's drag; stored the moment each point is accepted so
    * the live preview and the redo panel share one source of truth (kept over redo, unlike the
@@ -2831,6 +3287,15 @@ void SCULPT_OT_color_gradient(wmOperatorType *ot)
                            "World-space points of the drawn gradient curve, in stroke order");
   prop = RNA_def_boolean(ot->srna, "is_curve_gesture", false, "Curve Gesture", "");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  /* Interactive editing (Linear and Radial): keep the gradient live with draggable handles after
+   * the drag ends, confirm with Enter, cancel with Esc. */
+  prop = RNA_def_boolean(ot->srna,
+                         "interactive",
+                         false,
+                         "Interactive",
+                         "After releasing the mouse, keep editing the gradient with its handles: "
+                         "confirm with Enter, cancel with Esc");
 
   WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
 }

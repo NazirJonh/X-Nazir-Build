@@ -10,9 +10,14 @@
 #include <cmath>
 #include <cstring>
 
+#include "MEM_guardedalloc.h"
+
+#include "BLI_math_matrix_types.hh"
 #include "BLI_rect.h"
+#include "BLI_task.hh"
 #include "BLI_vector.hh"
 
+#include "BKE_blender.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
@@ -142,6 +147,120 @@ ImBuf *image_select_make_display_ibuf_feather(const ImBuf *src,
 float image_select_sample_mask_bilinear(const ImBuf *mask, float fx, float fy)
 {
   return BKE_image_paint_selection_sample_mask_imbuf_bilinear(mask, fx, fy);
+}
+
+bool image_select_fragment_sample_bilinear(const SelectionTileFragment &frag,
+                                           const float2 &f,
+                                           const int channels,
+                                           float4 &r_color)
+{
+  if (frag.pixels.fragment_ibuf == nullptr) {
+    return false;
+  }
+  const int fw = frag.geom.size_px.x;
+  const int fh = frag.geom.size_px.y;
+  if (fw <= 0 || fh <= 0 || channels <= 0) {
+    return false;
+  }
+  const float blx = std::max(0.0f, std::min(float(fw) - 1.0001f, f.x - 0.5f));
+  const float bly = std::max(0.0f, std::min(float(fh) - 1.0001f, f.y - 0.5f));
+  const int bx0 = int(blx);
+  const int bx1 = std::min(fw - 1, bx0 + 1);
+  const int by0 = int(bly);
+  const int by1 = std::min(fh - 1, by0 + 1);
+  const float wx1 = blx - float(bx0);
+  const float wx0 = 1.0f - wx1;
+  const float wy1 = bly - float(by0);
+  const float wy0 = 1.0f - wy1;
+
+  if (frag.pixels.fragment_ibuf->float_data() != nullptr) {
+    const float *src = frag.pixels.fragment_ibuf->float_data();
+    for (const int c : IndexRange(4)) {
+      const int cc = std::min(c, channels - 1);
+      r_color[c] = src[(by0 * fw + bx0) * channels + cc] * wx0 * wy0 +
+                   src[(by0 * fw + bx1) * channels + cc] * wx1 * wy0 +
+                   src[(by1 * fw + bx0) * channels + cc] * wx0 * wy1 +
+                   src[(by1 * fw + bx1) * channels + cc] * wx1 * wy1;
+    }
+    return true;
+  }
+  if (frag.pixels.fragment_ibuf->byte_data() != nullptr) {
+    const uint8_t *src = frag.pixels.fragment_ibuf->byte_data();
+    for (const int c : IndexRange(4)) {
+      r_color[c] = (float(src[(by0 * fw + bx0) * 4 + c]) * wx0 * wy0 +
+                    float(src[(by0 * fw + bx1) * 4 + c]) * wx1 * wy0 +
+                    float(src[(by1 * fw + bx0) * 4 + c]) * wx0 * wy1 +
+                    float(src[(by1 * fw + bx1) * 4 + c]) * wx1 * wy1) /
+                   255.0f;
+    }
+    return true;
+  }
+  return false;
+}
+
+float2x2 image_select_normal_rotation(const float2x2 &linear)
+{
+  const float det = linear[0].x * linear[1].y - linear[0].y * linear[1].x;
+  /* A reflection mirrors the second column so what is left is a pure rotation; the mirror is put
+   * back on the result. */
+  const float flip = det < 0.0f ? -1.0f : 1.0f;
+  const float cos_sum = linear[0].x + linear[1].y * flip;
+  const float sin_diff = linear[0].y - linear[1].x * flip;
+  const float length = std::hypot(cos_sum, sin_diff);
+  if (length < 1e-8f) {
+    return float2x2::identity();
+  }
+  const float c = cos_sum / length;
+  const float s = sin_diff / length;
+  return float2x2({c, s}, {-s * flip, c * flip});
+}
+
+bool image_select_normal_rotation_is_identity(const float2x2 &rotation)
+{
+  constexpr float eps = 1e-5f;
+  return std::abs(rotation[0].x - 1.0f) < eps && std::abs(rotation[0].y) < eps &&
+         std::abs(rotation[1].x) < eps && std::abs(rotation[1].y - 1.0f) < eps;
+}
+
+void image_select_normal_color_rotate(float4 &color, const float2x2 &rotation)
+{
+  const float2 xy = rotation * float2(color[0] * 2.0f - 1.0f, color[1] * 2.0f - 1.0f);
+  color[0] = std::clamp(xy.x * 0.5f + 0.5f, 0.0f, 1.0f);
+  color[1] = std::clamp(xy.y * 0.5f + 0.5f, 0.0f, 1.0f);
+}
+
+void image_select_normal_buffer_rotate(ImBuf &ibuf, const float2x2 &rotation)
+{
+  const int64_t pixel_num = int64_t(ibuf.x) * int64_t(ibuf.y);
+  if (float *data = ibuf.float_data_for_write()) {
+    const int channels = ibuf.channels >= 4 ? ibuf.channels : 4;
+    threading::parallel_for(IndexRange(pixel_num), 8192, [&](const IndexRange range) {
+      for (const int64_t i : range) {
+        float *px = data + i * channels;
+        if (px[3] <= 0.0f) {
+          continue;
+        }
+        float4 color(px[0], px[1], px[2], px[3]);
+        image_select_normal_color_rotate(color, rotation);
+        px[0] = color[0];
+        px[1] = color[1];
+      }
+    });
+  }
+  else if (uint8_t *data = ibuf.byte_data_for_write()) {
+    threading::parallel_for(IndexRange(pixel_num), 8192, [&](const IndexRange range) {
+      for (const int64_t i : range) {
+        uint8_t *px = data + i * 4;
+        if (px[3] == 0) {
+          continue;
+        }
+        float4 color(float(px[0]) / 255.0f, float(px[1]) / 255.0f, 0.0f, 1.0f);
+        image_select_normal_color_rotate(color, rotation);
+        px[0] = uint8_t(color[0] * 255.0f + 0.5f);
+        px[1] = uint8_t(color[1] * 255.0f + 0.5f);
+      }
+    });
+  }
 }
 
 void image_select_blend_buffer_into_canvas_at(ImBuf *dst_canvas,
@@ -576,5 +695,39 @@ void image_select_fragment_commit_with_undo(bContext * /*C*/,
    * operator can have run in between. */
   ED_image_undo_push_end();
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Shared selection clipboard
+ * \{ */
+
+static ImageSelectClipboard *g_clipboard = nullptr;
+
+static void image_select_clipboard_atexit(void * /*user_data*/)
+{
+  image_select_clipboard_clear();
+}
+
+ImageSelectClipboard *image_select_clipboard_get()
+{
+  if (g_clipboard == nullptr) {
+    g_clipboard = MEM_new<ImageSelectClipboard>(__func__);
+    BKE_blender_atexit_register(image_select_clipboard_atexit, nullptr);
+  }
+  return g_clipboard;
+}
+
+void image_select_clipboard_clear()
+{
+  if (g_clipboard == nullptr) {
+    return;
+  }
+  for (ImageSelectClipboardGroup &group : g_clipboard->groups) {
+    selection_tile_fragments_free(group.fragments);
+  }
+  g_clipboard->groups.clear();
+  g_clipboard->has_mask = false;
+}
+
+/** \} */
 
 } /* namespace blender */

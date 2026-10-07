@@ -4312,6 +4312,28 @@ static void rna_def_image_paint(BlenderRNA *brna)
       prop, "Selection Expand", "How a paint selection gesture is expanded onto the UV layout");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  static const EnumPropertyItem selection_space_items[] = {
+      {IMAGE_PAINT_SELECT_SPACE_VIEW,
+       "VIEW",
+       0,
+       "View",
+       "Draw the selection shape in screen space"},
+      {IMAGE_PAINT_SELECT_SPACE_SCENE,
+       "SCENE",
+       0,
+       "Scene",
+       "Lay the selection shape on the surface under the first click, to position it on the "
+       "surface"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "selection_space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "selection_space");
+  RNA_def_property_enum_items(prop, selection_space_items);
+  RNA_def_property_ui_text(
+      prop, "Selection Space", "Space the 3D Viewport Select Box and Circle shapes are drawn in");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   prop = RNA_def_property(srna, "warp_grid_size", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "warp_grid_size");
   RNA_def_property_range(prop, 2, 10);

@@ -100,8 +100,10 @@
 
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
+#include "mesh/paint_image_select_view3d.hh"
 #include "mesh/paint_mask.hh"
 #include "mesh/paint_material_attribute.hh"
+#include "mesh/sculpt_expand.hh"
 #include "mesh/sculpt_intern.hh"
 
 namespace blender {
@@ -2619,13 +2621,51 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_select_warp_cancel);
   WM_operatortype_append(PAINT_OT_image_select_warp_undo_step);
 
+  /* Image selection in the 3D Viewport (Sculpt texture painting). */
+  WM_operatortype_append(PAINT_OT_image_select_view3d_all);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_none);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_invert);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_box);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_lasso);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_polyline);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_circle);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_move);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_transform);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_warp);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_floating_confirm);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_floating_cancel);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_floating_undo_step);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_preview_channel);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_copy);
+  WM_operatortype_append(PAINT_OT_image_select_view3d_paste);
+
   image_paint_clipboard_ensure_atexit_handler();
+}
+
+/** Keymap poll for the 3D Viewport floating-selection bindings: active only while a session is
+ * live in a Viewport window, so Enter / Escape / Ctrl+Z keep their normal meaning otherwise. */
+static bool image_select_view3d_floating_keymap_poll(bContext *C)
+{
+  return ed::sculpt_paint::image_select_view3d_session_active() != nullptr &&
+         CTX_wm_region_view3d(C) != nullptr;
 }
 
 void ED_keymap_paint(wmKeyConfig *keyconf)
 {
   using namespace blender::ed::sculpt_paint;
   wmKeyMap *keymap;
+
+  /* Floating selection tools in the 3D Viewport: confirm / cancel / step-back while a fragment
+   * floats. The keymap itself is polled down to a live session; its items live in
+   * `blender_default.py` (items added only here are cleared when the Python keyconfig loads,
+   * which left the keymap empty). */
+  {
+    wmKeyMap *float_keymap = WM_keymap_ensure(keyconf,
+                                              "Image Paint Selection Floating (3D Viewport)",
+                                              SPACE_EMPTY,
+                                              RGN_TYPE_WINDOW);
+    float_keymap->poll = image_select_view3d_floating_keymap_poll;
+  }
 
   keymap = WM_keymap_ensure(keyconf, "Paint Curve", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = paint_curve_poll;

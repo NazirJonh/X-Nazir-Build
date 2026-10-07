@@ -312,6 +312,12 @@ static void view3d_free(SpaceLink *sl)
   /* Per-layout grid sessions (scroll, grip height) of this editor; the filter state itself is
    * shared by every host and stays, see #image_grid_state_remove. */
   ed::image_grid::image_grid_state_remove(ed::image_grid::ImageGridOwner::from(*vd));
+
+  /* A floating image-selection session owned by this Viewport cannot outlive it. */
+  ED_paint_image_select_view3d_space_free(vd);
+  /* The mask outline overlay cache (GPU batch) is global; dropping it here is safe, it rebuilds
+   * on the next redraw of whichever Viewport still shows the selection. */
+  ED_paint_image_select_view3d_overlay_free();
 }
 
 /* spacetype; init callback */
@@ -408,6 +414,14 @@ static void view3d_main_region_init(wmWindowManager *wm, ARegion *region)
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Image Paint", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
+
+  /* Before 'Sculpt' so Enter / Esc / Ctrl+Z reach a floating image-selection session first. The
+   * keymap is polled down to a live session, so it is inert otherwise. */
+  keymap = WM_keymap_ensure(wm->runtime->defaultconf,
+                            "Image Paint Selection Floating (3D Viewport)",
+                            SPACE_EMPTY,
+                            RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Sculpt", SPACE_EMPTY, RGN_TYPE_WINDOW);
@@ -1820,6 +1834,9 @@ void ED_spacetype_view3d()
   art->message_subscribe = view3d_main_region_message_subscribe;
   art->cursor = view3d_main_region_cursor;
   art->lock = REGION_DRAW_LOCK_ALL;
+  /* Image-selection overlay (marching ants of the paint-canvas selection mask, projected onto
+   * the surface). Registered once at spacetype creation. */
+  ED_paint_image_select_view3d_draw_cb_register(art);
   BLI_addhead(&st->regiontypes, art);
 
   /* regions: list-view/buttons */

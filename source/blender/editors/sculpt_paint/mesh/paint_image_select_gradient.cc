@@ -2017,6 +2017,9 @@ struct GradientDragData {
 static constexpr float GRADIENT_HANDLE_HIT_RADIUS_PX = 15.0f;
 /** Minimum cursor travel (region pixels) before the next curve sample is accepted. */
 static constexpr float GRADIENT_CURVE_COLLECT_DIST_PX = 4.0f;
+/** Clamp range of the gradient's halfway point, keeping both gradient stops visible. */
+static constexpr float GRADIENT_MIDPOINT_MIN = 0.05f;
+static constexpr float GRADIENT_MIDPOINT_MAX = 0.95f;
 
 /**
  * Resolve a Curve-mode press over the floating session: grab the midpoint handle, select and drag
@@ -2080,7 +2083,7 @@ static float image_select_gradient_project_midpoint(const float2 &uv,
     return 0.5f;
   }
   const float t = ((uv.x - start_uv.x) * dx + (uv.y - start_uv.y) * dy) / dist_sq;
-  return clamp_f(t, 0.05f, 0.95f);
+  return clamp_f(t, GRADIENT_MIDPOINT_MIN, GRADIENT_MIDPOINT_MAX);
 }
 
 static GradientDragMode image_select_gradient_curve_press_resolve(const ARegion *region,
@@ -2508,7 +2511,9 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
             if (is_curve && state->curve != nullptr) {
               const float2 mid_px = image_select_gradient_curve_px_from_uv(state, uv);
               const gradient_curve::CurveProjection proj = state->curve->project(mid_px);
-              state->midpoint = clamp_f(proj.s / state->curve->length(), 0.05f, 0.95f);
+              state->midpoint = clamp_f(proj.s / state->curve->length(),
+                                        GRADIENT_MIDPOINT_MIN,
+                                        GRADIENT_MIDPOINT_MAX);
             }
             else {
               state->midpoint = image_select_gradient_project_midpoint(

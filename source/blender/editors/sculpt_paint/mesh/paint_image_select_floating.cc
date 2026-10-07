@@ -296,6 +296,11 @@ wmKeyMap *image_select_floating_modal_keymap(wmKeyConfig *keyconf)
   /* Gradient only uses CONFIRM / CANCEL; it ignores UNDO_STEP. */
   WM_modalkeymap_assign(keymap, "PAINT_OT_image_select_gradient");
 
+  /* The 3D Viewport floating tools share the same modal vocabulary. */
+  WM_modalkeymap_assign(keymap, "PAINT_OT_image_select_view3d_move");
+  WM_modalkeymap_assign(keymap, "PAINT_OT_image_select_view3d_transform");
+  WM_modalkeymap_assign(keymap, "PAINT_OT_image_select_view3d_warp");
+
   return keymap;
 }
 

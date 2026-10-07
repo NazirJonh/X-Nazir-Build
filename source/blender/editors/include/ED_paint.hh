@@ -673,4 +673,14 @@ bool ED_paint_shape_session_shows_image(const Object &ob, const Image &image);
  * parametric shape without an analytic SDF). */
 bool ED_paint_shape_transform_is_available(const Object &ob);
 
+/* `paint_image_select_view3d.cc` — 3D Viewport overlay for image selection mask */
+
+/** Free 3D image-selection state owned by \a v3d (called from space_view3d). */
+void ED_paint_image_select_view3d_space_free(View3D *v3d);
+/** Register the 3D image-selection overlay draw callback on \a art (called once at spacetype
+ * registration). */
+void ED_paint_image_select_view3d_draw_cb_register(ARegionType *art);
+/** Free the global overlay cache (mask outline GPU batch), e.g. when a 3D Viewport closes. */
+void ED_paint_image_select_view3d_overlay_free();
+
 }  // namespace blender

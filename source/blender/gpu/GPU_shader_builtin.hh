@@ -192,8 +192,17 @@ enum GPUBuiltinShader {
    * \param pos: in vec3
    */
   GPU_SHADER_3D_IMAGE_COLOR_SCENE_LINEAR_TO_REC709_SRGB,
+
+  /** Draw the boundary of the image-paint selection mask as a screen-space dashed line,
+   * sampling the mask through the mesh UVs (3D Viewport, sculpt mode). */
+  GPU_SHADER_IMAGE_SELECT_MASK,
+
+  /** Shade a floating image-paint selection patch as a PBR material (3D Viewport, sculpt mode):
+   * samples the Base Color / Roughness / Metallic / Normal fragments of one selection and blends
+   * a diffuse + Blinn-Phong response over the interpolated surface normal. */
+  GPU_SHADER_IMAGE_SELECT_PBR,
 };
-#define GPU_SHADER_BUILTIN_LEN (GPU_SHADER_3D_IMAGE_COLOR_SCENE_LINEAR_TO_REC709_SRGB + 1)
+#define GPU_SHADER_BUILTIN_LEN (GPU_SHADER_IMAGE_SELECT_PBR + 1)
 
 /** Support multiple configurations. */
 enum GPUShaderConfig {

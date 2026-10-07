@@ -2164,6 +2164,10 @@ class VIEW3D_MT_editor_menus(Menu):
             elif mesh.use_paint_mask_vertex and mode_string in {'PAINT_WEIGHT', 'PAINT_VERTEX'}:
                 layout.menu("VIEW3D_MT_select_paint_mask_vertex")
         elif mode_string == 'SCULPT':
+            # Selection-mask tools for texture painting on image / material canvases.
+            paint_mode = tool_settings.paint_mode
+            if paint_mode.canvas_source in {'IMAGE', 'MATERIAL'}:
+                layout.menu("VIEW3D_MT_select_image_paint")
             # Face selection masking for sculpt painting (color attribute / image canvases).
             if obj is not None and obj.type == 'MESH' and obj.data.use_paint_mask:
                 layout.menu("VIEW3D_MT_select_paint_mask")
@@ -3287,6 +3291,29 @@ class VIEW3D_MT_paint_vertex_grease_pencil(Menu):
         layout.operator("grease_pencil.vertex_color_brightness_contrast", text="Brightness/Contrast")
         layout.separator()
         layout.operator("paint.sample_color").merged = False
+
+
+class VIEW3D_MT_select_image_paint(Menu):
+    """Selection-mask operations for Sculpt Mode texture painting (image / material canvases).
+
+    The operators rasterize through the mesh: a gesture drawn on the surface selects the canvas
+    pixels it projects onto, and painting is constrained by the resulting mask in both the 3D
+    Viewport and the Image Editor. Mirrors the Image Editor's Select menu (paint mode).
+    """
+
+    bl_label = "Paint Selection"
+
+    def draw(self, _context):
+        layout = self.layout
+
+        layout.operator("paint.image_select_view3d_all", text="All")
+        layout.operator("paint.image_select_view3d_none", text="None")
+        layout.operator("paint.image_select_view3d_invert", text="Invert")
+
+        layout.separator()
+
+        layout.operator("paint.image_select_view3d_copy", text="Copy Selection")
+        layout.operator("paint.image_select_view3d_paste", text="Paste Selection")
 
 
 class VIEW3D_MT_select_paint_mask(Menu):
@@ -10936,6 +10963,7 @@ classes = (
     VIEW3D_MT_select_edit_armature,
     VIEW3D_MT_select_edit_grease_pencil,
     VIEW3D_MT_select_paint_mask,
+    VIEW3D_MT_select_image_paint,
     VIEW3D_MT_select_paint_mask_vertex,
     VIEW3D_MT_select_edit_pointcloud,
     VIEW3D_MT_edit_curves_select_more_less,

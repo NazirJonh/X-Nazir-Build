@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "BLI_span.hh"
+
 #include "BKE_image.hh"
 
 namespace blender {
@@ -237,6 +239,68 @@ float BKE_image_paint_selection_blend_sample_bilinear(const Image *image,
                                                       int tile_number,
                                                       float fx,
                                                       float fy);
+
+/**
+ * Lock-free per-tile view of the selection weights, resolved once before a parallel pixel loop.
+ * The pointers stay valid as long as nothing edits or invalidates the image's selection masks
+ * (true for the duration of a paint dab / gradient apply, which run on the main thread).
+ *
+ * Reproduces the exact branch structure of #BKE_image_paint_selection_blend_sample, including the
+ * asymmetry that a tile without a user mask is blocked under the hard policy but unrestricted
+ * under the feathered one (see #paint_selection_user_weight).
+ */
+struct ImagePaintSelectionTileSampler {
+  /** User-authored mask pointers, or null when this tile has none. */
+  const ImBuf *user_binary_mask = nullptr;
+  const ImBuf *user_blend_mask = nullptr;
+  /** Derived face-selection mask pointers, or null when this tile has none. */
+  const ImBuf *face_binary_mask = nullptr;
+  const ImBuf *face_blend_mask = nullptr;
+  /** Image-wide "at least one tile holds a user mask" flag. */
+  bool has_user_selection = false;
+  /** Whether a derived face-selection mask currently constrains sampling. */
+  bool derived_active = false;
+  /** Image edge policy: feathered weights vs. a hard binary threshold. */
+  bool use_feather = false;
+  /**
+   * Image and mask revision this view was resolved from (see
+   * #BKE_image_paint_selection_mask_revision_get). #sample and #sample_bilinear assert that the
+   * masks were not invalidated in between: the pointers above stay valid only as long as nothing
+   * edits them, and a stale view would silently sample the wrong weights.
+   */
+  const Image *debug_image = nullptr;
+  uint64_t debug_mask_revision = 0;
+
+  /** Per-pixel weight: identical result to #BKE_image_paint_selection_blend_sample. */
+  float sample(int x, int y) const;
+  /** Bilinear variant: identical result to #BKE_image_paint_selection_blend_sample_bilinear. */
+  float sample_bilinear(float fx, float fy) const;
+  /**
+   * Weights of the horizontal pixel span starting at (\a x_start, \a y), identical to #sample per
+   * pixel but with the mask-kind branches hoisted out of the loop. Returns false when every
+   * weight is 0, so the caller can skip the span.
+   */
+  bool sample_row(int x_start, int y, blender::MutableSpan<float> r_weights) const;
+  /** True when every pixel weight is 1, so sampling can be skipped entirely. */
+  bool is_unrestricted() const;
+
+private:
+  /**
+   * The user-authored weight of the shared #sample / #sample_bilinear body. The hard binary test
+   * always uses the pixel (\a x, \a y); the feathered path samples the blend mask, bilinearly at
+   * (\a fx, \a fy) when \a use_bilinear, nearest otherwise.
+   */
+  float user_weight(float fx, float fy, int x, int y, bool use_bilinear) const;
+  /** The derived face-selection weight of the same shared body, mirroring it branch for branch. */
+  float face_weight(float fx, float fy, int x, int y, bool use_bilinear) const;
+};
+
+/**
+ * Resolve the per-tile sampler. Builds the derived blend masks if needed, so it takes the mask
+ * mutex; call it once per tile from a single (sequential) thread before the parallel pixel loop.
+ */
+ImagePaintSelectionTileSampler BKE_image_paint_selection_tile_sampler_get(const Image *image,
+                                                                          int tile_number);
 
 /**
  * Bilinearly sample an arbitrary single-channel float mask #ImBuf directly, with no image/tile

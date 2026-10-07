@@ -32,6 +32,7 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "RE_bake.h"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_maps.hh"
@@ -53,7 +54,6 @@
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 
-#include "RE_bake.h"
 
 namespace blender {
 

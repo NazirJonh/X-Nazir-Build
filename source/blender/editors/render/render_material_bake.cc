@@ -852,6 +852,9 @@ static bool bake_requests_render(Main &bmain,
    * exists for this temporary Main. The preview path evaluates only this scene's depsgraph, which
    * is what the shader preview render relies on for its own separate Main as well. */
   scene->r.scemode |= R_BUTS_PREVIEW;
+  /* Only this scene: the release-context convenience (see #R_BAKE_CONTEXT_RELEASE) must stay
+   * limited to the bake, not leak into the material previews that share #R_BUTS_PREVIEW. */
+  scene->r.scemode |= R_BAKE_CONTEXT_RELEASE;
 
   Mesh *mesh = bake_quad_mesh(&bmain);
   Object *object = BKE_object_add_for_data(

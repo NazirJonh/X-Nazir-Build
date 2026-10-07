@@ -5,13 +5,12 @@
 /** \file
  * \ingroup editors
  *
- * Access the Stack Layers display mode from outside its module, for RNA and for the automated test
- * suite.
+ * Access the Stack Layers display mode from outside its module, for RNA.
  *
  * Kept apart from #ED_outliner.hh so the module's main public header stays about the editor API:
- * this is the narrow door the Outliner's own RNA properties and the tests walk through, nothing
- * more. Everything here is automation surface: it exists so a script can ask and act where a
- * mouse click would sit, and none of it is a stable scripting API.
+ * this is the narrow door the Outliner's own RNA properties walk through, nothing more. Everything
+ * here is the surface the space's RNA properties need: the focus name, the sub-selection, the
+ * source's add kinds, and the tool header sync.
  */
 
 #pragma once
@@ -22,7 +21,6 @@
 
 struct bContext;
 struct EnumPropertyItem;
-struct ID;
 struct ScrArea;
 struct SpaceOutliner;
 
@@ -87,93 +85,5 @@ bool outliner_stack_focus_sub_index_apply(bContext &C, SpaceOutliner &space_outl
 const EnumPropertyItem *outliner_stack_focus_sub_index_itemf(bContext *C,
                                                              SpaceOutliner &space_outliner,
                                                              bool *r_free);
-
-/**
- * Whether the stack row at \a ordinal is currently selected in the tree, or false when it is not
- * in the tree at all.
- *
- * For the automated test suite: nothing in the display mode itself needs a row's selection by
- * ordinal, since selection is tree-store state the tree already carries on its own.
- */
-bool outliner_stack_row_is_selected(const SpaceOutliner &space_outliner, int ordinal);
-/**
- * Whether the stack row at \a ordinal is open (not collapsed) in the tree, or false when it is not
- * in the tree at all.
- *
- * For the automated test suite; see #outliner_stack_row_is_selected.
- */
-bool outliner_stack_row_is_open(const SpaceOutliner &space_outliner, int ordinal);
-/**
- * Select or deselect the stack row at \a ordinal, the way clicking it would: the other rows'
- * selection is cleared, and nothing the row's data cares about happens (no activation). With \a
- * extend the click is the ctrl-clicked kind -- the row joins the selection instead of replacing
- * it, which is what a multi-row operation needs its rows picked by.
- *
- * For the automated test suite; see #outliner_stack_row_is_selected.
- */
-void outliner_stack_row_select(bContext &C,
-                               SpaceOutliner &space_outliner,
-                               int ordinal,
-                               bool select,
-                               bool extend);
-/**
- * Collapse or open the stack row at \a ordinal, the way its disclosure toggle would.
- *
- * For the automated test suite; see #outliner_stack_row_is_selected.
- */
-void outliner_stack_row_closed_set(SpaceOutliner &space_outliner, int ordinal, bool closed);
-/**
- * The session UID of the data-block whose preview the stack row at \a ordinal shows, or 0 when
- * the row has no preview.
- *
- * For the automated test suite; see #outliner_stack_row_is_selected.
- */
-uint32_t outliner_stack_row_preview_uid(const SpaceOutliner &space_outliner, int ordinal);
-
-/**
- * Move the row at \a source_ordinal in \a source_space's stack next to the row at
- * \a target_ordinal in \a space_outliner's, exactly as dropping the first onto the second would.
- *
- * For the automated test suite: a real drop needs a #wmDrag and a mouse event over a second,
- * genuinely drawn Outliner region, neither of which a script can produce on demand. This goes
- * through the same #outliner_stack_identity_resolve guard #OUTLINER_OT_stack_layer_drop does, so
- * it fails the same way a drop between two different stacks does.
- *
- * \return false when \a source_space and \a space_outliner do not show the same stack -- a
- * different owner or a different source -- or either row is gone.
- */
-bool outliner_stack_layer_debug_drop(bContext &C,
-                                     const SpaceOutliner &source_space,
-                                     int source_ordinal,
-                                     SpaceOutliner &space_outliner,
-                                     int target_ordinal);
-
-/**
- * Drop a data-block on \a space_outliner's stack -- on the row at \a target_ordinal, or on the
- * stack itself for -1 -- exactly as dragging it there would.
- *
- * For the automated test suite, mirroring #outliner_stack_layer_debug_drop: a real drop needs a
- * #wmDrag and a mouse event over a genuinely drawn Outliner region, neither of which a script can
- * produce on demand. The source's drop handler judges and executes the payload the same way the
- * stack drop operators hand it one.
- *
- * \return false when this Outliner shows no stack, its source has no drop handler, or the handler
- * refuses the payload.
- */
-bool outliner_stack_layer_debug_drop_id(bContext &C,
-                                        SpaceOutliner &space_outliner,
-                                        const ID &dropped,
-                                        int target_ordinal);
-
-/**
- * The session UID of the data-block the drag started on the stack sub-row at \a ordinal and \a
- * role would carry, or 0 when there is no such row in the tree or it has nothing to drag.
- *
- * For the automated test suite, mirroring #outliner_stack_layer_debug_drop_id: a real drag needs
- * a mouse event over a genuinely drawn Outliner region, which a script cannot produce on demand.
- * This runs the same carrier logic the drag operator does -- the sub-row's data-block out of
- * #TreeElement.directdata -- and builds the same #wmDrag to report what it carries.
- */
-uint32_t outliner_stack_item_debug_drag_id(SpaceOutliner &space_outliner, int ordinal, int role);
 
 }  // namespace blender::ed::outliner

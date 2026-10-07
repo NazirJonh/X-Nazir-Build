@@ -775,7 +775,12 @@ enum eRender_SceMode : int {
   R_SCEMODE_UNUSED_10 = 1 << 10, /* cleared */
   R_SCEMODE_UNUSED_11 = 1 << 11, /* cleared */
   R_NO_IMAGE_LOAD = 1 << 12,
-  R_SCEMODE_UNUSED_13 = 1 << 13, /* cleared */
+  /**
+   * Runtime-only: set by the paint-layer bake on its temporary scene, so EEVEE knows it may
+   * release the draw lock while waiting for shader compilation (see #eevee::Instance::render_sample).
+   * Never set on a saved scene; the DNA bit was unused.
+   */
+  R_BAKE_CONTEXT_RELEASE = 1 << 13,
   R_NO_FRAME_UPDATE = 1 << 14,
   R_SCEMODE_UNUSED_15 = 1 << 15, /* cleared */
   R_SCEMODE_UNUSED_16 = 1 << 16, /* cleared */
@@ -1611,13 +1616,17 @@ struct PaintModeSettings {
   /**
    * The channel the Layer Material tab's per-channel widgets address. RNA exposes only bakeable
    * channels and normalizes legacy non-bakeable values on read without changing this stored value.
+   *
+   * One of the three channel cursors (see BKE_paint_layers_target.hh, "The three channel cursors"):
+   * the Layer Material tab's cursor over the active row's own channels.
    */
   int active_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 
   /**
    * The channel whose per (row, channel) blend/opacity the Stack Layers header shows and edits.
    * Distinct from #active_layer_channel: that one is the Layer Material tab's per-channel widgets,
-   * this one is a cursor over the Outliner's columns.
+   * this one is a cursor over the Outliner's columns. The brush's own "wants to write" channels
+   * are the third cursor and live on #Brush, not here.
    */
   int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 

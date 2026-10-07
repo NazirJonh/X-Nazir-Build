@@ -150,6 +150,29 @@ MaterialPaintLayer *BKE_paint_layers_mask_base(MaterialPaintLayer &layer);
 const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &layer);
 
 /**
+ * The folder children of \a layer, bottom to top: its #MaterialPaintLayer::children list.
+ * Phase 2.2: Outliner row building and hashing read the tree through this (and #effects /
+ * #mask_items above) instead of touching `.children` / `.effects` / `.mask_stack` directly.
+ */
+Vector<MaterialPaintLayer *> BKE_paint_layers_children(MaterialPaintLayer &layer);
+Vector<const MaterialPaintLayer *> BKE_paint_layers_children(const MaterialPaintLayer &layer);
+
+/** Whether \a layer holds any folder children (an emptied folder still reports false here). */
+bool BKE_paint_layers_has_children(const MaterialPaintLayer &layer);
+
+/**
+ * The raw sub-lists for walkers that preserve storage order without allocating a snapshot
+ * (row building, hashing): parallels #BKE_paint_layers_owner_list, which also hands out a list.
+ * Callers that need random access use #BKE_paint_layers_children / #effects / #mask_items above.
+ */
+const ListBaseT<MaterialPaintLayer> &BKE_paint_layers_children_list(
+    const MaterialPaintLayer &layer);
+ListBaseT<MaterialPaintLayer> &BKE_paint_layers_children_list(MaterialPaintLayer &layer);
+const ListBaseT<MaterialPaintLayer> &BKE_paint_layers_effects_list(
+    const MaterialPaintLayer &layer);
+const ListBaseT<MaterialPaintLayer> &BKE_paint_layers_mask_list(const MaterialPaintLayer &layer);
+
+/**
  * Call \a fn for each of \a layer's three sub-lists in the fixed order the file writer, the
  * readers and the ID walk rely on: #MaterialPaintLayer::children, then #effects, then
  * #mask_stack. This is the one place that traversal order lives, so the serialization order
@@ -192,6 +215,13 @@ ListBaseT<MaterialPaintLayer> *BKE_paint_layers_owner_list(Material &ma,
  * top level (or is not part of \a ma's description).
  */
 MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether \a marker names \a root itself or any row nested under it (children, effects,
+ * mask stack, recursively). Phase 2.2: the one subtree test; ED callers use this instead of
+ * their own recursion.
+ */
+bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUUID &marker);
 
 /**
  * A flat walk of \a ma's description, bottom to top, with folders emitted and then their children.

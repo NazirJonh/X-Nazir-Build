@@ -352,8 +352,6 @@ enum wmEventType : int16_t {
   TIMERREPORT = 0x0116,   /* Timer event, reports (278). */
   TIMERREGION = 0x0117,   /* Timer event, region slide in/out (279). */
   TIMERNOTIFIER = 0x0118, /* Timer event, notifier sender (280). */
-  TIMERPAINTLAYERSBAKE = 0x0119, /* Timer event, paint-layers bake debounce (281). */
-  TIMERPAINTLAYERSCOLD = 0x011A, /* Timer event, paint-layers cold-tier drop (282). */
 /* Timer max (287). */
 #define _TIMER_MAX 0x011F
 

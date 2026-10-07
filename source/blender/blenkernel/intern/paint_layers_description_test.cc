@@ -2225,6 +2225,30 @@ TEST_F(PaintLayersDescription, rna_opacity_is_value_only_and_blend_is_structural
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 
+TEST_F(PaintLayersDescription, rna_nested_correction_channel_opacity_reaches_dna)
+{
+  /* The reported slider bug (9.2): a content correction nested in its parent's effects must
+   * resolve through the RNA setter (#rna_paint_layer_sub_owner), not silently skip the write.
+   * BKE value coverage for the same field lives in the generator/graph tests; here only the
+   * RNA write itself is asserted. */
+  Material *ma = BKE_material_add(bmain, "RnaNestedCorrMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
+  ASSERT_NE(corr, nullptr);
+
+  PointerRNA ptr = RNA_pointer_create_discrete(
+      &ma->id,
+      RNA_struct_find("MaterialPaintLayerChannelSettings"),
+      &corr->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, "opacity");
+  ASSERT_NE(prop, nullptr);
+  RNA_property_float_set(&ptr, prop, 25.0f);
+  EXPECT_FLOAT_EQ(corr->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR].opacity, 0.25f);
+}
+
 TEST_F(PaintLayersDescription, rna_paint_layers_new_find_remove_round_trip)
 {
   Material *ma = BKE_material_add(bmain, "RnaRoundTripMat");

@@ -78,16 +78,6 @@ struct WindowManagerRuntime {
   bUUID id_browser_filter_layer_id = {};
 
   /**
-   * The material the Stack Layers Add-Material browser last picked.
-   *
-   * Session-only and never written to the file: it is a UI hand-off, not state. The RNA update
-   * (#WindowManager.stack_layer_material_pick) turns the pick into an undo-able
-   * #OUTLINER_OT_stack_layer_add call and clears it again, so a value is never observed outside
-   * the click that set it.
-   */
-  Material *stack_layer_material_pick = nullptr;
-
-  /**
    * Indicates the main loop (#WM_main()) to stop processing the event queue and move to the next
    * step. The Remaining events will then be processed during the next iteration of the loop.
    *

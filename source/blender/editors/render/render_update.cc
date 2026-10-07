@@ -132,6 +132,10 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
   Main *bmain = update_ctx->bmain;
   static bool recursive_check = false;
 
+  /* First thing on every scene update, so nothing the paint layers can schedule -- a bake, a graph
+   * rebuild -- runs before the sampler budget is sized from the GPU (a no-op after the first). */
+  ed::material_bake::ED_paint_layers_sampler_budget_ensure();
+
   /* don't do this render engine update if we're updating the scene from
    * other threads doing e.g. rendering or baking jobs */
   if (!BLI_thread_is_main()) {
@@ -312,7 +316,7 @@ static void material_changed(Main *bmain, Material *ma)
    * may wait on a timer that will never fire. Everywhere else this is deferred 0.3s so a burst of
    * edits inside that window coalesces into one bake pass instead of restarting a `wmJob` on each. */
   if (wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first)) {
-    ed::material_bake::paint_layers_bake_debounce_arm(*wm, *ma);
+    ed::material_bake::paint_layers_bake_debounce_arm(*ma);
     /* Hiding a row is a value edit that reaches here without a scene update, so this is the one
      * place that sees it: arm the cold-tier clock now, or a row hidden and then left alone would
      * never be looked at again. */

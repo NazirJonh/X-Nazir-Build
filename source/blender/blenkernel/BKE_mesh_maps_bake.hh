@@ -232,15 +232,7 @@ void BKE_mesh_maps_bake_write_with_margin(int8_t type,
  *
  * \return how many objects contributed coverage.
  */
-int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
-                                        Scene &scene,
-                                        ViewLayer &view_layer,
-                                        const Object &ob,
-                                        const Material &ma,
-                                        int resolution,
-                                        Span<uint8_t> own_coverage,
-                                        MutableSpan<uint8_t> r_coverage,
-                                        MutableSpan<char> r_overlap_name);
+
 
 /** \} */
 
@@ -249,6 +241,27 @@ int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
  * matches. The image is a float, `Non-Color`, \a resolution x \a resolution blank; the slot owns it
  * through #BKE_mesh_maps_slot_image_set. Returns null for an invalid type or resolution.
  */
+/**
+ * Walk every other mesh object that shares  ma's atlas and union its texel coverage into
+ *  r_coverage, so the bake's margin never eats a foreign island. The first object whose
+ * coverage overlaps  own_coverage is named in  r_overlap_name. Only objects the current
+ * depsgraph evaluates (or, failing that, their unevaluated data) take part, and only those with
+ * the material and the UV layer #BKE_paint_layers_uv_map_resolve resolves for the mesh.
+ *
+ * eturn the number of foreign objects whose coverage was unioned in. Uses
+ * `RE_bake_pixels_populate`, so it is the one render-module dependency of this header's core;
+ * see the refactor plan's 5.4.
+ */
+int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
+                                        Scene &scene,
+                                        ViewLayer &view_layer,
+                                        const Object &ob,
+                                        const Material &ma,
+                                        const int resolution,
+                                        Span<uint8_t> own_coverage,
+                                        MutableSpan<uint8_t> r_coverage,
+                                        MutableSpan<char> r_overlap_name);
+
 Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain, Material &ma, int8_t type, int resolution);
 
 /**

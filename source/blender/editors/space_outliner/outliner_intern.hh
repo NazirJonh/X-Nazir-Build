@@ -16,6 +16,7 @@
 #include "BLI_set.hh"
 #include "BLI_vector.hh"
 
+#include "BLI_listbase.h"
 #include "DNA_listBase.h"
 #include "DNA_vec_types.h"
 
@@ -53,7 +54,14 @@ struct bPoseChannel;
 struct View2D;
 struct wmKeyConfig;
 struct wmOperatorType;
+struct wmDrag;
+struct wmDropBox;
+struct wmEvent;
 struct WorkSpace;
+
+namespace ui {
+struct Block;
+}  // namespace ui
 
 namespace bke::outliner::treehash {
 class TreeHash;
@@ -791,6 +799,77 @@ bool outliner_stack_row_fill_swatch_anchor_rect(const SpaceOutliner &space_outli
 /** An Image Editor already open in this screen, or null. */
 ScrArea *outliner_image_area_find(const bContext &C);
 
+/* -------------------------------------------------------------------- */
+/** \name Stack Layers draw pass (outliner_stack_draw.cc)
+ *
+ * The stack's own drawing lives apart from the tree drawing; these are the entry points the tree
+ * drawing itself reaches into, the row metrics shared with the rename field and the hit-tests,
+ * and the row-selection predicates the highlight pass reads.
+ * \{ */
+
+/** How far outside the preview its frame sits, in pixels before the interface scale. */
+constexpr float OUTLINER_STACK_PREVIEW_FRAME_MARGIN = 2.0f;
+/** Text shrink of a compact row's column label and value/mode buttons, so they read in one unit. */
+constexpr float OUTLINER_STACK_COLUMN_TEXT_SCALE = 0.84f;
+/** Width of the value/mode popup, in UI units. */
+constexpr float OUTLINER_STACK_COLUMN_POPUP_WIDTH = 7.0f;
+/** Vertical breathing room above and below a column button, in pixels before interface scale. */
+constexpr float OUTLINER_STACK_COLUMN_BUTTON_PAD_Y = 1.0f;
+/** Height of each of the two stacked value/mode buttons in a Large row, in UI units. */
+constexpr float OUTLINER_STACK_COLUMN_STACKED_BUTTON_HEIGHT = 0.86f;
+
+/** Width a Stack Layers row's preview slots occupy, from the leading icon to the last frame. */
+float outliner_stack_preview_row_width(bool leading_icon, int num_previews);
+/** Where the one-unit-tall content of a row whose bottom is \a row_bottom sits. */
+int stack_row_content_offset(int row_bottom, int row_height);
+/** The content line of \a te, from the layout the draw pass wrote. */
+int stack_row_content_y(const SpaceOutliner &space_outliner, const TreeElement &te);
+/** The x a child of a Stack Layers row is drawn at. */
+int stack_child_start_x(const SpaceOutliner &space_outliner, const TreeElement &te, int startx);
+/** Whether the row's visibility toggle is drawn inline in the row, rather than in a column. */
+bool stack_row_has_inline_toggle(const StackRow *row);
+
+void outliner_draw_stack_row_icons(ui::Block *block,
+                                   ARegion *region,
+                                   SpaceOutliner *space_outliner,
+                                   const bContext &C,
+                                   const TreeViewContext &tvc);
+void outliner_draw_stack_preview_tooltips(ui::Block *block,
+                                          ARegion *region,
+                                          SpaceOutliner *space_outliner,
+                                          const TreeViewContext &tvc);
+void outliner_draw_stack_columns(bContext *C,
+                                 ui::Block *block,
+                                 ARegion *region,
+                                 SpaceOutliner *space_outliner,
+                                 const TreeViewContext &tvc);
+void outliner_draw_stack_row_bands(const ARegion *region,
+                                   const SpaceOutliner *space_outliner,
+                                   const int startx);
+void stack_preview_icons_ensure(const bContext &C, SpaceOutliner &space_outliner);
+
+/** The empty-texture placeholder: a faint frame with a texture icon at preview size. */
+void stack_preview_empty_draw(const rctf &preview_rect, const float alpha_fac);
+/** One preview slot filled with \a color, framed like #stack_preview_empty_draw does it. */
+void stack_preview_color_draw(const rctf &preview_rect,
+                              const float color[4],
+                              const float alpha_fac);
+
+/** Whether a Stack Layers row should read as selected (its own row or one of its sub-rows). */
+bool stack_layer_row_selected(const TreeElement &te);
+/** Whether a Stack Layers row should read as active (its own row, or a sub-row of it). */
+bool stack_layer_row_active(const TreeElement &te);
+/** Whether any of the tree's stack rows is the active element right now. */
+bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner);
+
+/** Shared with the tree drawing: whether \a te draws faded out (its data is linked, hidden...). */
+bool element_should_draw_faded(const TreeViewContext &tvc,
+                               const SpaceOutliner *space_outliner,
+                               const TreeElement *te,
+                               const TreeStoreElem *tselem);
+
+/** \} */
+
 /**
  * The identity of the row \a identity names, or -1 when it can no longer be found: the owner or
  * source changed, or the row itself is gone.
@@ -812,6 +891,85 @@ void stack_selected_ordinals_get(SpaceOutliner &space_outliner, blender::Vector<
  */
 void stack_ordinals_drop_covered_descendants(const SpaceOutliner &space_outliner,
                                              blender::Vector<int> &r_ordinals);
+/* The operator bodies live in outliner_stack_layers_ops.cc; these are the exec, invoke, poll
+ * and itemf hooks the registrations there hand in. */
+bool stack_add_poll(bContext *C);
+const EnumPropertyItem *stack_add_type_itemf(bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/, bool *r_free);
+wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_back_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+wmOperatorStatus stack_focus_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_group_add_exec(bContext *C, wmOperator *op);
+int stack_operator_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op);
+wmOperatorStatus stack_pin_toggle_exec(bContext *C, wmOperator * /*op*/);
+wmOperatorStatus stack_row_activate_exec(bContext *C, wmOperator *op);
+bool stack_row_activate_poll(bContext *C);
+wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/);
+bool stack_row_add_poll(bContext *C);
+void stack_row_add_ui(bContext *C, wmOperator *op);
+bool stack_row_clipboard_poll(bContext *C);
+wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op);
+bool stack_row_mask_poll(bContext *C);
+wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_merge_down_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op);
+bool stack_row_remove_poll(bContext *C);
+wmOperatorStatus stack_row_rename_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_rename_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/);
+bool stack_row_reorder_poll(bContext *C);
+wmOperatorStatus stack_row_ungroup_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
+bool stack_row_visibility_toggle_poll(bContext *C);
+wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op);
+const EnumPropertyItem *stack_sub_index_itemf(bContext *C, PointerRNA * /*ptr*/, PropertyRNA * /*prop*/, bool *r_free);
+wmOperatorStatus stack_sub_index_set_exec(bContext *C, wmOperator *op);
+bool stack_sub_index_set_poll(bContext *C);
+wmOperatorStatus stack_target_clear_exec(bContext *C, wmOperator * /*op*/);
+
+/* The stack drop passes live in outliner_stack_dragdrop.cc; these are the hooks the shared
+ * drop boxes hand control to, and the generic drop helpers they read back. */
+bool datastack_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
+std::string datastack_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);
+void stack_layer_drop_data_init(SpaceOutliner &space_outliner, wmDrag *drag, const TreeStoreElem &tselem);
+bool stack_layer_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
+std::string stack_layer_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);
+bool stack_id_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
+std::string stack_id_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);
+TreeElement *outliner_drop_insert_find(bContext *C, const int xy[2], TreeElementInsertType *r_insert_type);
+TreeElement *outliner_data_from_tree_element_and_parents(bool (*check_type)(TreeElement *te),
+                                                         TreeElement *te);
+bool is_object_element(TreeElement *te);
+bool is_pchan_element(TreeElement *te);
+
+/** The index to insert at for a drop that reorders \a drag_te against \a drop_te. */
+template<typename T> inline int outliner_get_insert_index(TreeElement *drag_te,
+                                                          TreeElement *drop_te,
+                                                          TreeElementInsertType insert_type,
+                                                          ListBaseT<T> *listbase)
+{
+  /* Find the element to insert after. Null is the start of the list. */
+  if (drag_te->index < drop_te->index) {
+    if (insert_type == TE_INSERT_BEFORE) {
+      drop_te = drop_te->prev;
+    }
+  }
+  else {
+    if (insert_type == TE_INSERT_AFTER) {
+      drop_te = drop_te->next;
+    }
+  }
+
+  if (drop_te == nullptr) {
+    return 0;
+  }
+
+  return BLI_findindex(listbase, drop_te->directdata);
+}
+
 /** The stack's owning data-block for the current focus, or null. */
 ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,
                              SpaceOutliner &space_outliner);

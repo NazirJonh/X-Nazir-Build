@@ -570,6 +570,47 @@ const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &l
   return nullptr;
 }
 
+Vector<MaterialPaintLayer *> BKE_paint_layers_children(MaterialPaintLayer &layer)
+{
+  Vector<MaterialPaintLayer *> items;
+  paint_layer_list_collect(layer.children, items);
+  return items;
+}
+
+Vector<const MaterialPaintLayer *> BKE_paint_layers_children(const MaterialPaintLayer &layer)
+{
+  Vector<const MaterialPaintLayer *> items;
+  paint_layer_list_collect(layer.children, items);
+  return items;
+}
+
+bool BKE_paint_layers_has_children(const MaterialPaintLayer &layer)
+{
+  return !BLI_listbase_is_empty(&layer.children);
+}
+
+const ListBaseT<MaterialPaintLayer> &BKE_paint_layers_children_list(
+    const MaterialPaintLayer &layer)
+{
+  return layer.children;
+}
+
+ListBaseT<MaterialPaintLayer> &BKE_paint_layers_children_list(MaterialPaintLayer &layer)
+{
+  return layer.children;
+}
+
+const ListBaseT<MaterialPaintLayer> &BKE_paint_layers_effects_list(
+    const MaterialPaintLayer &layer)
+{
+  return layer.effects;
+}
+
+const ListBaseT<MaterialPaintLayer> &BKE_paint_layers_mask_list(const MaterialPaintLayer &layer)
+{
+  return layer.mask_stack;
+}
+
 bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, float r_fill[4])
 {
   BKE_paint_layers_base_color_get(layer, r_fill);

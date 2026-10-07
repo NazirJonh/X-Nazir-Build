@@ -58,7 +58,13 @@ bool BKE_paint_material_sync_texture3d_conflicts(const Scene *scene, PaintMode p
  * touch the tool system: callers with a #bContext are responsible for the receiving side's tool
  * bindings.
  */
-void BKE_paint_material_brush_sync(Scene *scene, Paint *source);
+/**
+ * Apply  source's brush and PBR Paint setup onto the paired editor's. eturn whether anything
+ * was applied (sync on, canvas Material, brush usable); a caller that refreshes the UI waits for
+ * that, since the notifiers this module used to send live on the editor side of the layer
+ * boundary now.
+ */
+bool BKE_paint_material_brush_sync(Scene *scene, Paint *source);
 
 /**
  * Manually copy the brush, palette, cavity curve, visible material channels and unified settings
@@ -76,7 +82,7 @@ bool BKE_paint_material_brush_sync_directional(Scene *scene, Paint *source, Pain
  *
  * \return whether a copy was made and assigned.
  */
-bool BKE_paint_material_brush_sync_disable(Main *bmain, Scene *scene);
+Brush *BKE_paint_material_brush_sync_disable(Main *bmain, Scene *scene);
 
 /**
  * Align Image Paint with the Sculpt brush after a blend file or startup is loaded.
@@ -92,7 +98,11 @@ void BKE_paint_material_brush_sync_after_load(Main *bmain);
  * mode. Kept separate from #BKE_paint_material_brush_sync because these change far more often than
  * the active brush and are driven from a different callback.
  */
-void BKE_paint_material_unified_settings_sync(Scene *scene, Paint *source);
+/**
+ * Copy  source's unified paint settings onto the paired editor's. eturn whether the pair
+ * exists and the copy happened; a caller that refreshes the UI waits for that.
+ */
+bool BKE_paint_material_unified_settings_sync(Scene *scene, Paint *source);
 
 /**
  * Call after the active brush of \a source changed through the tool system.

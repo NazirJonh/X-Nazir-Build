@@ -16,10 +16,10 @@
  * This file also holds the 0.3s debounce for the *light* bakes (Material-row images, Combined
  * preview inputs): #material_changed (`render_update.cc`) no longer runs
  * `material_bake_images_rebake_stale`/`material_bake_layered_rows_ensure` synchronously on every
- * edit; it arms #paint_layers_bake_debounce_arm instead, and #paint_layers_bake_debounce_timer --
- * dispatched straight from the window-manager's own timer loop, like `TIMERAUTOSAVE` -- runs them
- * once, 0.3s after the *last* edit of a burst (a trailing-edge debounce: #paint_layers_bake_debounce_arm
- * restarts the timer on every call, so a continuous drag never lets it reach a tick).
+ * edit; it arms #paint_layers_bake_debounce_arm instead, and its #BLI_timer tick -- run from the
+ * shared main-loop hook the same way `bpy.app.timers` works -- runs them once, 0.3s after the
+ * *last* edit of a burst (a trailing-edge debounce: #paint_layers_bake_debounce_arm restarts the
+ * timer on every call, so a continuous drag never lets it reach a tick).
  *
  * #MA_PAINT_LAYERS_BAKE_SCHEDULED stays set for as long as *anything* the tick started (or is about
  * to start: a heavy bake #paint_layers_bake_jobs_ensure has not queued yet) is still running --
@@ -131,16 +131,6 @@ void paint_layers_bake_debounce_arm(wmWindowManager &wm, Material &ma);
 bool paint_layers_bake_debounce_settles_immediately(bool jobs_in_flight, bool heavy_pending);
 
 /**
- * The debounce timer's own tick, dispatched from the window-manager's timer loop exactly like
- * `TIMERAUTOSAVE`: run the due bakes of every material armed since the timer was last started, and
- * disarm -- the timer is one-shot in effect, removed here and re-added by the next
- * #paint_layers_bake_debounce_arm. A material whose bakes started nothing (see
- * #paint_layers_bake_debounce_settles_immediately) has its #MA_PAINT_LAYERS_BAKE_SCHEDULED mark
- * cleared right here; everything else keeps it until #paint_layers_bake_scheduled_settle clears it.
- */
-void paint_layers_bake_debounce_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt);
-
-/**
  * Look for hidden rows that have aged past #PAINT_LAYERS_COLD_TIER_SECONDS and make them leave the
  * graph: each due material is marked for regeneration, its stored root hash invalidated and a
  * depsgraph update requested. Materials still inside the window are remembered and the shared cold
@@ -149,13 +139,6 @@ void paint_layers_bake_debounce_timer(Main &bmain, wmWindowManager &wm, wmTimer 
  * #ED_render_scene_update on every scene update and from the cold timer's own tick.
  */
 void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm);
-
-/**
- * The cold-tier timer's tick, dispatched from the window-manager's timer loop like
- * #paint_layers_bake_debounce_timer: remove the one-shot timer and rescan, which drops every row
- * that has now aged past the tier and re-arms for the rest.
- */
-void paint_layers_cold_tier_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt);
 
 /**
  * Whether an already-#MA_PAINT_LAYERS_BAKE_SCHEDULED material should have that mark cleared now,
@@ -193,6 +176,16 @@ void paint_layers_bake_scheduled_settle(Main &bmain,
  * the same session_uids, so a pending entry stays meaningful across a Ctrl+Z).
  */
 void paint_layers_bake_debounce_reset(wmWindowManager &wm);
+
+/**
+ * Size the paint-layer sampler budget from the GPU once, on the ED side of the layer boundary:
+ * EEVEE keeps some slots for its own textures (#PAINT_LAYERS_EEVEE_RESERVED_SAMPLERS), the rest
+ * bound how many samplers a layered material may use before the fallback pins live rows onto
+ * their baked maps. #GPU_max_textures is only valid after GPU init, which is why this runs from
+ * the first #ED_render_scene_update rather than startup; until then the budget stays zero, which
+ * merely disables the fallback check.
+ */
+void ED_paint_layers_sampler_budget_ensure();
 
 /**
  * The stale-until-action rule, re-exported for editors: #BKE_paint_layers_bake_gate_decide holds

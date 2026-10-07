@@ -14,7 +14,7 @@ from bl_operators.material_paint_layers import (
     mesh_map_summary_status,
 )
 from bl_ui.space_properties import PropertiesAnimationMixin
-from bl_ui.properties_paint_common import (
+from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
     draw_material_correction_channels,
     draw_material_layer_channels,

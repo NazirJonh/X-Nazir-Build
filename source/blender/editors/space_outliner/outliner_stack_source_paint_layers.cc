@@ -410,7 +410,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
                                                  "Correction";
       row.name_buffer = const_cast<char *>(correction.name);
       row.can_hold_children = folder;
-      row.has_children = folder && !BLI_listbase_is_empty(&correction.children);
+      row.has_children = folder && BKE_paint_layers_has_children(correction);
       /* Every correction is a dense setting under its layer, not a stack member of its own: it
        * keeps the usual row height and shows what it is through a small icon instead of a preview.
        * A mask item reads as a mask and carries the state icon a masked Layer row does; a content
@@ -458,7 +458,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
       if (folder) {
         /* Depth/parent bookkeeping mirrors a folder Layer's own recursion below: the correction's
          * row is at `parent_depth + 1`, so its children sit one further in. */
-        append_list(correction.children, parent_depth + 2, row_ordinal);
+        append_list(BKE_paint_layers_children_list(correction), parent_depth + 2, row_ordinal);
         r_rows.append(std::move(row));
       }
     }
@@ -481,7 +481,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
           row.stable_id = layer.marker;
           const bool folder = BKE_paint_layers_is_folder(layer);
           row.can_hold_children = folder;
-          row.has_children = folder && !BLI_listbase_is_empty(&layer.children);
+          row.has_children = folder && BKE_paint_layers_has_children(layer);
           row.enabled = (layer.flag & MA_PAINT_LAYER_ENABLED) != 0;
           /* The row's mask slot stands for the base mask, so its presence and its on/off state
            * come from that item, not from whichever correction happens to be enabled. */
@@ -604,7 +604,7 @@ void paint_stack_rows_from_description_impl(const Material &material,
           append_corrections(layer, row_ordinal, depth, MA_PAINT_LAYER_ROLE_EFFECT);
           append_corrections(layer, row_ordinal, depth, MA_PAINT_LAYER_ROLE_MASK_ITEM);
           if (folder) {
-            append_list(layer.children, depth + 1, row_ordinal);
+            append_list(BKE_paint_layers_children_list(layer), depth + 1, row_ordinal);
             /* The tree is built walking the rows from the last one down, and a child is only hung
              * off a folder already made; so a folder's row follows its contents in the vector.
              * The ordinals keep the walk order above -- rows are looked up by ordinal, never by
@@ -988,13 +988,13 @@ class PaintLayersStackSource final : public StackSource,
              * an edit to a row inside it must invalidate the cached rows exactly as an edit inside a
              * folder Layer's own children already does via #walk below. */
             if (BKE_paint_layers_is_folder(correction)) {
-              walk(correction.children);
+              walk(BKE_paint_layers_children_list(correction));
             }
           }
         };
-        hash_corrections(layer.effects);
-        hash_corrections(layer.mask_stack);
-        walk(layer.children);
+        hash_corrections(BKE_paint_layers_effects_list(layer));
+        hash_corrections(BKE_paint_layers_mask_list(layer));
+        walk(BKE_paint_layers_children_list(layer));
       }
     };
     walk(material.paint_layers);

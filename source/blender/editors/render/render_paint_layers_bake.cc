@@ -23,6 +23,8 @@
 #include "BKE_callbacks.hh"
 #include "BKE_global.hh"
 #include "BKE_main.hh"
+
+#include "BLI_timer.h"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
@@ -77,12 +79,10 @@ Set<uint32_t> &paint_layers_bake_debounce_pending()
   return pending;
 }
 
-/** Null when no debounce timer is currently armed; owned by the window manager once set. */
-wmTimer *&paint_layers_bake_debounce_timer_handle()
-{
-  static wmTimer *handle = nullptr;
-  return handle;
-}
+/** UUID of the bake-debounce timer registered with #BLI_timer, shared with no other user of it. */
+constexpr uintptr_t paint_layers_bake_debounce_timer_uuid = 1;
+/** UUID of the cold-tier drop timer registered with #BLI_timer. */
+constexpr uintptr_t paint_layers_cold_timer_uuid = 2;
 
 constexpr double paint_layers_bake_debounce_seconds = 0.3;
 
@@ -402,37 +402,43 @@ void paint_layers_bake_debounce_resolve(Main &bmain,
   }
 }
 
-bool paint_layers_bake_debounce_should_replace_timer(const wmTimer *existing)
+bool paint_layers_bake_debounce_should_replace_timer()
 {
-  /* A named, testable predicate rather than an inlined null check, so the trailing-edge intent is
-   * visible on its own: arming while a timer already runs must restart its countdown from now, not
-   * let the earlier one fire on schedule -- otherwise a continuous drag (a slider held for two
-   * seconds) would still start a bake every 0.3s instead of once after the drag ends. */
-  return existing != nullptr;
+  /* A named, testable predicate rather than an inlined registration check, so the trailing-edge
+   * intent is visible on its own: arming while a timer already runs must restart its countdown
+   * from now, not let the earlier one fire on schedule -- otherwise a continuous drag (a slider
+   * held for two seconds) would still start a bake every 0.3s instead of once after the drag
+   * ends. */
+  return BLI_timer_is_registered(paint_layers_bake_debounce_timer_uuid);
 }
 
-void paint_layers_bake_debounce_arm(wmWindowManager &wm, Material &ma)
+double paint_layers_bake_debounce_tick(uintptr_t /*uuid*/, void * /*user_data*/);
+
+void paint_layers_bake_debounce_arm(Material &ma)
 {
   BKE_paint_layers_bake_scheduled_set(ma, true);
   paint_layers_bake_debounce_pending().add(ma.id.session_uid);
-  if (paint_layers_bake_debounce_should_replace_timer(paint_layers_bake_debounce_timer_handle())) {
+  if (paint_layers_bake_debounce_should_replace_timer()) {
     /* Removing and re-adding, rather than leaving the running timer alone, is what makes this a
      * *trailing*-edge debounce: each edit pushes the fire time 0.3s further out, so only a genuine
-     * pause of that length ever lets the timer reach its tick. #WM_event_timer_remove only tags the
-     * old timer for removal -- it will not fire in the meantime (the dispatch loop skips a tagged
-     * timer), so there is no risk of it running between this call and the new one below. */
-    WM_event_timer_remove(&wm, nullptr, paint_layers_bake_debounce_timer_handle());
+     * pause of that length ever lets the timer reach its tick. #BLI_timer_unregister removes the
+     * armed timer for good, so there is no risk of it running between this call and the
+     * re-register below. */
+    BLI_timer_unregister(paint_layers_bake_debounce_timer_uuid);
   }
-  /* `win = nullptr`: this timer belongs to no window, exactly like `wm->autosavetimer` -- it is
-   * dispatched straight from the window-manager's own timer loop (see `TIMERPAINTLAYERSBAKE` in
-   * `wm_window.cc`), never queued as a `wmEvent` to any area's handlers. */
+  /* No window and no #wmEvent: this timer belongs to no editor. #BLI_timer runs it from the
+   * shared main-loop hook (#BLI_timer_execute), the same mechanism `bpy.app.timers` uses. */
   /* A correction visibility toggle keeps the longer window open (see
    * #PAINT_LAYERS_BAKE_EDIT_QUIET_SECONDS); every re-arm in it, including the one the graph
    * rebuild's own shading tag causes, restarts the countdown with the rest of that window. */
   const double seconds = BKE_paint_layers_bake_debounce_seconds(
       ma, paint_layers_bake_debounce_seconds);
-  paint_layers_bake_debounce_timer_handle() = WM_event_timer_add(
-      &wm, nullptr, TIMERPAINTLAYERSBAKE, seconds);
+  BLI_timer_register(paint_layers_bake_debounce_timer_uuid,
+                     paint_layers_bake_debounce_tick,
+                     nullptr,
+                     nullptr,
+                     seconds,
+                     false);
 }
 
 bool paint_layers_bake_debounce_settles_immediately(const bool jobs_in_flight,
@@ -447,8 +453,12 @@ bool paint_layers_bake_debounce_settles_immediately(const bool jobs_in_flight,
   return !jobs_in_flight && !heavy_pending;
 }
 
-void paint_layers_bake_debounce_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt)
+double paint_layers_bake_debounce_tick(uintptr_t /*uuid*/, void * /*user_data*/)
 {
+  /* #BLI_timer callbacks carry no context; the main database and its window manager are the ones
+   * the main loop is running with, which is what the old #wmTimer dispatch passed in. */
+  Main &bmain = *G_MAIN;
+  wmWindowManager &wm = *static_cast<wmWindowManager *>(bmain.wm.first);
   Set<uint32_t> &pending = paint_layers_bake_debounce_pending();
   Vector<uint32_t> pending_uids;
   pending_uids.reserve(pending.size());
@@ -474,12 +484,11 @@ void paint_layers_bake_debounce_timer(Main &bmain, wmWindowManager &wm, wmTimer 
      * started -- or #paint_layers_bake_jobs_ensure's very next call is about to start -- actually
      * frees, success or cancel alike. */
   }
-  /* One-shot in effect: the timer removes itself on its first tick and is re-added by the next
-   * #paint_layers_bake_debounce_arm, exactly like `material_paint_layers.py`'s own mesh-map
+  /* One-shot in effect: the timer removes itself on its first tick and is re-registered by the
+   * next #paint_layers_bake_debounce_arm, exactly like `material_paint_layers.py`'s own mesh-map
    * debounce re-registers its `bpy.app.timers` callback only when a new edit needs it. */
   pending.clear();
-  WM_event_timer_remove(&wm, nullptr, &wt);
-  paint_layers_bake_debounce_timer_handle() = nullptr;
+  return -1.0;
 }
 
 namespace {
@@ -495,13 +504,6 @@ Set<uint32_t> &paint_layers_cold_pending()
   return pending;
 }
 
-/** Null when no cold-tier timer is currently armed; owned by the window manager once set. */
-wmTimer *&paint_layers_cold_timer_handle()
-{
-  static wmTimer *handle = nullptr;
-  return handle;
-}
-
 /** The absolute time the armed cold timer targets; only re-armed when it moves perceptibly. */
 double &paint_layers_cold_deadline()
 {
@@ -511,6 +513,20 @@ double &paint_layers_cold_deadline()
 
 }  // namespace
 
+void ED_paint_layers_sampler_budget_ensure()
+{
+  static bool done = false;
+  if (done) {
+    return;
+  }
+  done = true;
+  const int max_textures = GPU_max_textures();
+  const int budget = (max_textures > PAINT_LAYERS_EEVEE_RESERVED_SAMPLERS) ?
+                         max_textures - PAINT_LAYERS_EEVEE_RESERVED_SAMPLERS :
+                         0;
+  BKE_paint_layers_sampler_budget_set(budget, max_textures);
+}
+
 void paint_layers_bake_debounce_reset(wmWindowManager &wm)
 {
   /* The debounce timer handle and pending set are process-static ED state, keyed on a #wmWindowManager
@@ -519,17 +535,10 @@ void paint_layers_bake_debounce_reset(wmWindowManager &wm)
    * #paint_layers_bake_debounce_timer_handle dangling for the next file's first edit to dereference.
    * Mirrors `wm_autosave_timer_end`, the same cleanup for `wm->autosavetimer`. Called from
    * #ED_editors_exit, in the branch that runs for a real file replace, never for memfile undo. */
-  if (wmTimer *timer = paint_layers_bake_debounce_timer_handle()) {
-    WM_event_timer_remove(&wm, nullptr, timer);
-    paint_layers_bake_debounce_timer_handle() = nullptr;
-  }
+  BLI_timer_unregister(paint_layers_bake_debounce_timer_uuid);
   paint_layers_bake_debounce_pending().clear();
-  /* The cold timer is keyed on the same `wm`, so it must be disarmed here too or its handle would
-   * dangle into the next file. */
-  if (wmTimer *timer = paint_layers_cold_timer_handle()) {
-    WM_event_timer_remove(&wm, nullptr, timer);
-    paint_layers_cold_timer_handle() = nullptr;
-  }
+  /* The cold timer must be disarmed here too, so it cannot fire against the next file. */
+  BLI_timer_unregister(paint_layers_cold_timer_uuid);
   paint_layers_cold_pending().clear();
 }
 
@@ -571,34 +580,34 @@ void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
     }
   }
   const double deadline = now + next;
-  const bool armed = paint_layers_cold_timer_handle() != nullptr;
+  const bool armed = BLI_timer_is_registered(paint_layers_cold_timer_uuid);
   const double deadband = deadline - paint_layers_cold_deadline();
   const bool moved = deadband > 0.5 || deadband < -0.5;
   if (next >= 0.0 && (!armed || moved)) {
     /* Only re-arm when the deadline actually moved: a scan on every scene update must not keep
      * resetting the timer. A hair past the deadline so the poll's `>=` age test cannot miss. */
     if (armed) {
-      WM_event_timer_remove(&wm, nullptr, paint_layers_cold_timer_handle());
+      BLI_timer_unregister(paint_layers_cold_timer_uuid);
     }
-    paint_layers_cold_timer_handle() = WM_event_timer_add(
-        &wm, nullptr, TIMERPAINTLAYERSCOLD, next + 0.05);
+    BLI_timer_register(paint_layers_cold_timer_uuid,
+                       paint_layers_cold_tier_tick,
+                       nullptr,
+                       nullptr,
+                       next + 0.05,
+                       false);
     paint_layers_cold_deadline() = deadline;
   }
   else if (next < 0.0 && armed) {
-    WM_event_timer_remove(&wm, nullptr, paint_layers_cold_timer_handle());
-    paint_layers_cold_timer_handle() = nullptr;
+    BLI_timer_unregister(paint_layers_cold_timer_uuid);
     paint_layers_cold_deadline() = 0.0;
   }
 }
 
-void paint_layers_cold_tier_timer(Main &bmain, wmWindowManager &wm, wmTimer &wt)
+static double paint_layers_cold_tier_tick(uintptr_t /*uuid*/, void * /*user_data*/)
 {
-  if (paint_layers_cold_timer_handle() == &wt) {
-    paint_layers_cold_timer_handle() = nullptr;
-  }
-  WM_event_timer_remove(&wm, nullptr, &wt);
   /* Rescan, which drops whatever is now due and re-arms for the rest. */
-  paint_layers_cold_tier_scan(bmain, wm);
+  paint_layers_cold_tier_scan(*G_MAIN, *static_cast<wmWindowManager *>(G_MAIN->wm.first));
+  return -1.0;
 }
 
 namespace {

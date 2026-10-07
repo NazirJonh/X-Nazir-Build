@@ -12,7 +12,8 @@
  * step with the description when the row being painted is removed or switched off.
  *
  * The old graph-truth edit verbs (channel toggle/value/unlink, rebake, resize) were removed in
- * phase 6; the description's own verbs live in `BKE_paint_layers.hh` and the Outliner source.
+ * phase 6; the description's own verbs live in `BKE_paint_layers.hh` alone, and the Outliner
+ * source only translates its row vocabulary onto them.
  */
 
 #include "BKE_paint_layers.hh"

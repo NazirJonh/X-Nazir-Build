@@ -845,7 +845,9 @@ if(WITH_GTESTS)
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
     intern/paint_layers_description_test.cc
+    intern/paint_layers_refactor_test.cc
     intern/paint_layers_generate_test.cc
+    intern/paint_layers_test_util.cc
     intern/paint_layers_graph_eval_test.cc
     intern/paint_layers_target_test.cc
     intern/paint_material_combined_cache_test.cc

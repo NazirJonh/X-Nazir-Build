@@ -11,8 +11,10 @@
  *
  * This is the interactive half of the pair that turns a material into a single buffer; the other
  * is the bake in `ED_material_bake.hh`. Which one applies is not a user choice but a property of
- * the graph, decided by #BKE_paint_material_source_resolve and by whether
- * #BKE_paint_material_composite_stack_from_material can express the channel as a layer stack:
+ * the material: #BKE_paint_material_source_resolve decides where a channel's content comes from,
+ * and the layer stack described by `Material::paint_layers` -- built into the composite canvas by
+ * `paint_layers_composite.cc` and evaluated per-region here -- is the only shape this module
+ * composites:
  *
  * - A plain stack of image layers composites here, on the CPU, in milliseconds, and can be
  *   refreshed for a single rectangle. That is what makes a stroke show its own result on the
@@ -571,7 +573,7 @@ bool BKE_paint_material_is_normal_combine_group(const bNode &node);
  * Values are #eMaterialPaintChannel plus #PAINT_LAYER_MAP_MASK. A fixed list rather than one
  * derived from the material: a pass is something the material *can* have, and the user picks it
  * before the maps behind it necessarily exist. Whether a given pass resolves to anything is
- * answered by #BKE_paint_material_composite_stack_from_material.
+ * answered by the stack builder in `paint_layers_composite.cc` when it flattens the description.
  */
 Span<int> BKE_paint_material_composite_passes();
 

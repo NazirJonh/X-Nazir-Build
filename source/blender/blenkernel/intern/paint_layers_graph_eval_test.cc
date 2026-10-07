@@ -22,9 +22,6 @@
 
 #include "testing/testing.h"
 
-#include "RNA_access.hh"
-#include "RNA_prototypes.hh"
-
 #include "BKE_colorband.hh"
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
@@ -9253,26 +9250,23 @@ TEST_F(PaintLayersGraphEvalTest, pass_through_folder_mode_switch_matches_the_cpu
 /** \name Correction opacity on a Material row
  *
  * A content correction mixes its map into the row's colour with factor `alpha(map) * opacity`.
- * The opacity lives on the correction's per (row, channel) settings, written by the Outliner's RNA
- * slider; these tests drive that exact call and check the generated result against the formula, so a
- * slider that silently falls back to `alpha` alone cannot pass.
+ * The opacity lives on the correction's per (row, channel) settings, written through the BKE
+ * setter (9.2); these tests drive that write and check the generated result against the formula,
+ * so a path that silently falls back to `alpha` alone cannot pass. The RNA slider reaching the
+ * same field is covered by the RNA suite (paint_layers_description_test.cc).
  * \{ */
 
 namespace {
 
-/** The Outliner's per (row, channel) opacity slider: an RNA setter that must resolve the row. */
-void rna_set_channel_opacity(Material &ma,
+/** The per (row, channel) opacity write through the BKE setter (9.2): the BKE write plus the
+ * values sync the RNA slider's update runs, so the graph below reads the new factor. */
+void bke_set_channel_opacity(Material &ma,
                              MaterialPaintLayer &layer,
                              const int channel,
-                             const float percent)
+                             const float factor)
 {
-  PointerRNA ptr = RNA_pointer_create_discrete(
-      &ma.id,
-      RNA_struct_find("MaterialPaintLayerChannelSettings"),
-      &layer.channel_settings[channel]);
-  PropertyRNA *prop = RNA_struct_find_property(&ptr, "opacity");
-  ASSERT_NE(prop, nullptr);
-  RNA_property_float_set(&ptr, prop, percent);
+  EXPECT_TRUE(BKE_paint_layers_channel_opacity_set(ma, layer, channel, factor));
+  BKE_paint_layers_values_sync(ma);
 }
 
 /** A source whose Principled is entirely constant, so a Material row on it can read Hybrid/Baked. */
@@ -10536,7 +10530,7 @@ TEST_F(PaintLayersGraphEvalTest, material_source_group_correction_opacity_matche
   expect_correction_mix(
       sample, source_rgb, 1.0f, eval_channel_result(interpreter, bc), "op=1");
 
-  rna_set_channel_opacity(*ma, *correction, bc, 35.0f);
+  bke_set_channel_opacity(*ma, *correction, bc, 0.35f);
   expect_correction_mix(
       sample, source_rgb, 0.35f, eval_channel_result(interpreter, bc), "op=0.35");
 
@@ -10585,7 +10579,7 @@ TEST_F(PaintLayersGraphEvalTest, material_hybrid_correction_opacity_matches_the_
   const RGBA sample = interpreter.sample_image(corr_map, "Color");
 
   expect_correction_mix(sample, row_color, 1.0f, eval_channel_result(interpreter, bc), "op=1");
-  rna_set_channel_opacity(*ma, *correction, bc, 50.0f);
+  bke_set_channel_opacity(*ma, *correction, bc, 0.5f);
   expect_correction_mix(sample, row_color, 0.5f, eval_channel_result(interpreter, bc), "op=0.5");
 
   /* The CPU reproduces the Hybrid result, so both sides read the same opacity. */
@@ -10642,7 +10636,7 @@ TEST_F(PaintLayersGraphEvalTest, material_baked_correction_opacity_matches_the_f
   const RGBA sample = interpreter.sample_image(corr_map, "Color");
 
   expect_correction_mix(sample, row_color, 1.0f, eval_channel_result(interpreter, bc), "op=1");
-  rna_set_channel_opacity(*ma, *correction, bc, 25.0f);
+  bke_set_channel_opacity(*ma, *correction, bc, 0.25f);
   expect_correction_mix(sample, row_color, 0.25f, eval_channel_result(interpreter, bc), "op=0.25");
 
   BKE_id_free(bmain, ma);
@@ -10948,7 +10942,7 @@ TEST_F(PaintLayersGraphEvalTest, paint_row_correction_opacity_matches_the_formul
   const float source_rgb[3] = {row_sample.r, row_sample.g, row_sample.b};
 
   expect_correction_mix(sample, source_rgb, 1.0f, eval_channel_result(interpreter, bc), "op=1");
-  rna_set_channel_opacity(*ma, *correction, bc, 40.0f);
+  bke_set_channel_opacity(*ma, *correction, bc, 0.4f);
   expect_correction_mix(sample, source_rgb, 0.4f, eval_channel_result(interpreter, bc), "op=0.4");
 
   BKE_id_free(bmain, ma);
@@ -10990,7 +10984,7 @@ TEST_F(PaintLayersGraphEvalTest, material_correction_fill_opacity_matches_the_fo
   const RGBA sample = {fill[0], fill[1], fill[2], 1.0f};
   const float source_rgb[3] = {0.2f, 0.5f, 0.9f};
 
-  rna_set_channel_opacity(*ma, *correction, bc, 40.0f);
+  bke_set_channel_opacity(*ma, *correction, bc, 0.4f);
   expect_correction_mix(sample, source_rgb, 0.4f, eval_channel_result(interpreter, bc), "fill op");
 
   BKE_id_free(bmain, ma);
@@ -12152,11 +12146,12 @@ TEST_F(PaintLayersFullStackTest, moving_the_active_row_over_a_baked_row_never_pa
 }
 
 /**
- * Moving a row's opacity through the RNA slider across 1.0 (1 -> 0.7 -> 1 -> 0.3) is a value edit:
+ * Moving a row's opacity through the BKE setter across 1.0 (1 -> 0.7 -> 1 -> 0.3) is a value edit:
  * no row group and not the root is rebuilt, and the graph follows the formula. Covers a Hybrid row
- * (B), SourceGroup rows (A, C, live while active), a Paint row and a Fill row.
+ * (B), SourceGroup rows (A, C, live while active), a Paint row and a Fill row. The RNA slider
+ * forwards to the same setter (rna_material.cc); its owner resolution is covered by the RNA suite.
  */
-TEST_F(PaintLayersFullStackTest, opacity_across_one_through_rna_rebuilds_nothing)
+TEST_F(PaintLayersFullStackTest, opacity_across_one_through_bke_rebuilds_nothing)
 {
   const Stack s = build("OpacityRna", {});
   ASSERT_NE(s.ma, nullptr);
@@ -12182,9 +12177,7 @@ TEST_F(PaintLayersFullStackTest, opacity_across_one_through_rna_rebuilds_nothing
      * default one and the earlier targets' last value (0.3) cannot leak in. */
     FsShape shape;
     {
-      PointerRNA ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, target.row);
-      PropertyRNA *prop = RNA_struct_find_property(&ptr, "opacity");
-      RNA_property_float_set(&ptr, prop, shape.*(target.member) * 100.0f);
+      ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, target.row, shape.*(target.member)));
       ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << target.label;
     }
     for (const float opacity : {1.0f, 0.7f, 1.0f, 0.3f}) {
@@ -12193,10 +12186,7 @@ TEST_F(PaintLayersFullStackTest, opacity_across_one_through_rna_rebuilds_nothing
       const Vector<bNode *> root_nodes = root_node_ptrs(*root);
       const Map<const bNodeTree *, Vector<bNode *>> before = row_group_snapshot(*bmain);
 
-      PointerRNA ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, target.row);
-      PropertyRNA *prop = RNA_struct_find_property(&ptr, "opacity");
-      ASSERT_NE(prop, nullptr);
-      RNA_property_float_set(&ptr, prop, opacity * 100.0f);
+      ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, target.row, opacity));
       shape.*(target.member) = opacity;
 
       ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma)) << tag;

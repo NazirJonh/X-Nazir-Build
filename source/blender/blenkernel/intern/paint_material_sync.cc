@@ -26,7 +26,6 @@
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 
-#include "WM_api.hh"
 
 namespace blender {
 
@@ -105,19 +104,21 @@ static void paint_material_unified_settings_sync_to(Paint *source, Paint *dst_pa
   BKE_brush_color_sync_legacy(&dst_ups);
 }
 
-void BKE_paint_material_unified_settings_sync(Scene *scene, Paint *source)
+bool BKE_paint_material_unified_settings_sync(Scene *scene, Paint *source)
 {
   Paint *dst_paint = BKE_paint_material_sync_target_get(scene, source);
-  if (dst_paint != nullptr) {
-    paint_material_unified_settings_sync_to(source, dst_paint);
+  if (dst_paint == nullptr) {
+    return false;
   }
+  paint_material_unified_settings_sync_to(source, dst_paint);
+  return true;
 }
 
-static void paint_material_brush_sync_apply(Scene *scene, Paint *source, Paint *dst_paint)
+static bool paint_material_brush_sync_apply(Scene *scene, Paint *source, Paint *dst_paint)
 {
   Brush *src_brush = BKE_paint_brush(source);
   if (src_brush == nullptr || src_brush->material_paint == nullptr) {
-    return;
+    return false;
   }
 
   /* Most brushes are restricted (#Brush.ob_mode) to the paint mode they were authored for, so
@@ -140,7 +141,7 @@ static void paint_material_brush_sync_apply(Scene *scene, Paint *source, Paint *
   if (!BKE_paint_brush_set_synced(*scene, *dst_paint, src_brush)) {
     /* The brush stays unusable in the receiving mode, so the two editors would keep different
      * brushes. Mirroring the remaining settings on top of that would only obscure the mismatch. */
-    return;
+    return false;
   }
 
   if (dst_paint->palette != source->palette) {
@@ -154,17 +155,18 @@ static void paint_material_brush_sync_apply(Scene *scene, Paint *source, Paint *
 
   paint_material_unified_settings_sync_to(source, dst_paint);
 
-  WM_main_add_notifier(NC_BRUSH | NA_SELECTED, src_brush);
-  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  /* The notifiers that refresh the two editors' brush UIs (#NC_BRUSH, #ND_TOOLSETTINGS) belong to
+   * the callers: the layer boundary holds for refreshes the same way it holds for editing. */
+  return true;
 }
 
-void BKE_paint_material_brush_sync(Scene *scene, Paint *source)
+bool BKE_paint_material_brush_sync(Scene *scene, Paint *source)
 {
   Paint *dst_paint = BKE_paint_material_sync_target_get(scene, source);
   if (dst_paint == nullptr) {
-    return;
+    return false;
   }
-  paint_material_brush_sync_apply(scene, source, dst_paint);
+  return paint_material_brush_sync_apply(scene, source, dst_paint);
 }
 
 bool BKE_paint_material_brush_sync_directional(Scene *scene, Paint *source, Paint *destination)
@@ -189,12 +191,12 @@ bool BKE_paint_material_brush_sync_directional(Scene *scene, Paint *source, Pain
   return true;
 }
 
-bool BKE_paint_material_brush_sync_disable(Main *bmain, Scene *scene)
+Brush *BKE_paint_material_brush_sync_disable(Main *bmain, Scene *scene)
 {
   if (bmain == nullptr || scene == nullptr || scene->toolsettings == nullptr ||
       scene->toolsettings->sculpt == nullptr)
   {
-    return false;
+    return nullptr;
   }
 
   ToolSettings *ts = scene->toolsettings;
@@ -205,21 +207,21 @@ bool BKE_paint_material_brush_sync_disable(Main *bmain, Scene *scene)
   if (sculpt_brush == nullptr || sculpt_brush != image_brush) {
     /* Already independent, so there is nothing to split apart. This also makes repeated disables
      * idempotent: only the transition out of a shared brush ever creates a copy. */
-    return false;
+    return nullptr;
   }
 
   Brush *image_brush_copy = id_cast<Brush *>(BKE_id_copy(bmain, &image_brush->id));
   if (image_brush_copy == nullptr) {
-    return false;
+    return nullptr;
   }
   /* #Paint.brush is not user-counted, so the copy keeps the user #BKE_id_copy gave it; dropping it
    * here would make the new brush a zero-user ID that is purged on the next save. */
   if (!BKE_paint_brush_set_synced(*scene, *image_paint, image_brush_copy)) {
-    return false;
+    return nullptr;
   }
 
-  WM_main_add_notifier(NC_BRUSH | NA_SELECTED, image_brush_copy);
-  return true;
+  /* The copy is the new Image Paint brush; the caller announces it. */
+  return image_brush_copy;
 }
 
 void BKE_paint_material_brush_sync_after_load(Main *bmain)

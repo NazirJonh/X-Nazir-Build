@@ -554,9 +554,11 @@ void Instance::render_sample()
     render_sync();
     /* Preview jobs share the draw lock with window drawing, so holding the context while waiting
      * for shader compilation (up to seconds) freezes the UI. Compile workers own their contexts,
-     * so waiting needs neither the lock nor the context. Limited to preview renders to keep F12
-     * behavior unchanged. See the disabled release pattern in #Instance::render_frame. */
-    const bool release_context = render != nullptr && (scene->r.scemode & R_BUTS_PREVIEW) &&
+     * so waiting needs neither the lock nor the context. Gated on #R_BAKE_CONTEXT_RELEASE: only
+     * the paint-layer bake asks for it, so ordinary preview renders (icons, asset thumbnails) and
+     * F12 keep the upstream behavior. See the disabled release pattern in
+     * #Instance::render_frame. */
+    const bool release_context = render != nullptr && (scene->r.scemode & R_BAKE_CONTEXT_RELEASE) &&
                                  !GPU_use_main_context_workaround();
     while (materials.queued_shaders_count > 0 || materials.queued_textures_count > 0) {
       if (release_context) {

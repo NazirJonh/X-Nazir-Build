@@ -20,6 +20,22 @@
  * Paint as the design's C-3 describes. Creating the map is an ID-creation plus a description edit,
  * so it belongs in the stroke's invoke on the main thread, wrapped in one undo group together with
  * the stroke itself; this API never opens undo and never runs from a sample.
+ *
+ * \section channel-cursors The three channel cursors
+ *
+ * Three independent cursors answer "which channel" in this domain, each with its own role; none of
+ * them reads or derives from another:
+ *
+ * - **The active layer** (`Material::active_layer_marker`, resolved by
+ *   #BKE_paint_layers_active_layer_get): decides what the Layer Material tab shows -- the row's
+ *   channels and the verbs on them.
+ * - **The Outliner's column cursor** (`ToolSettings.paint_mode.stack_layer_channel`): which
+ *   channel's per-(row, channel) blend and opacity the Stack Layers header shows and edits across
+ *   all rows at once. A view setting of the stack view, not a painting state.
+ * - **The brush** (the PBR Paint panel's per-channel visibility): which channels the brush
+ *   *wants* to write (`BKE_paint_material_channel_writes_to_target`). The intersection with what
+ *   the active layer *can* accept (`BKE_paint_layers_target_get` on the stroke's channel) decides
+ *   where a stroke lands; the target API is that intersection's arbiter.
  */
 
 #include <cstdint>

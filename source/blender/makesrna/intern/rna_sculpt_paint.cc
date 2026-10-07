@@ -904,7 +904,11 @@ static void rna_PaintModeSettings_canvas_source_update(bContext *C, PointerRNA *
   if (scene != nullptr && scene->toolsettings != nullptr && scene->toolsettings->sculpt != nullptr)
   {
     if (scene->toolsettings->paint_mode.material_paint_flag & PAINT_MATERIAL_BRUSH_SYNC) {
-      BKE_paint_material_brush_sync(scene, &scene->toolsettings->sculpt->paint);
+      Paint *sculpt_paint = &scene->toolsettings->sculpt->paint;
+      if (BKE_paint_material_brush_sync(scene, sculpt_paint)) {
+        WM_main_add_notifier(NC_BRUSH | NA_SELECTED, BKE_paint_brush(sculpt_paint));
+        WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+      }
     }
   }
 }
@@ -921,12 +925,16 @@ static void rna_PaintModeSettings_brush_sync_update(bContext *C, PointerRNA * /*
   ToolSettings *ts = scene->toolsettings;
   const bool use_brush_sync = (ts->paint_mode.material_paint_flag & PAINT_MATERIAL_BRUSH_SYNC) != 0;
   if (!use_brush_sync) {
-    BKE_paint_material_brush_sync_disable(CTX_data_main(C), scene);
+    if (Brush *synced_brush = BKE_paint_material_brush_sync_disable(CTX_data_main(C), scene)) {
+      WM_main_add_notifier(NC_BRUSH | NA_SELECTED, synced_brush);
+    }
   }
   else if (ts->sculpt != nullptr) {
     /* Sculpt Mode is the source: PBR Paint is set up there, and the Image Editor is the follower
      * in that workflow. */
-    BKE_paint_material_brush_sync(scene, &ts->sculpt->paint);
+    if (BKE_paint_material_brush_sync(scene, &ts->sculpt->paint)) {
+      WM_main_add_notifier(NC_BRUSH | NA_SELECTED, BKE_paint_brush(&ts->sculpt->paint));
+    }
   }
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
@@ -1132,7 +1140,10 @@ static void rna_UnifiedPaintSettings_update(bContext *C, PointerRNA *ptr)
     Paint *paints[2] = {ts->sculpt != nullptr ? &ts->sculpt->paint : nullptr, &ts->imapaint.paint};
     for (Paint *paint : paints) {
       if (paint != nullptr && &paint->unified_paint_settings == ptr->data) {
-        BKE_paint_material_unified_settings_sync(scene, paint);
+        if (BKE_paint_material_unified_settings_sync(scene, paint)) {
+          WM_main_add_notifier(NC_BRUSH | NA_SELECTED, BKE_paint_brush(paint));
+          WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+        }
         break;
       }
     }

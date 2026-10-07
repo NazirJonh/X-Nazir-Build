@@ -6,8 +6,6 @@
 
 #include "MEM_guardedalloc.h"
 
-#include "RNA_access.hh"
-
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idprop.hh"
@@ -7703,38 +7701,30 @@ TEST_F(PaintLayersGenerateTest, pass_through_folder_around_a_material_row_keeps_
 }
 
 /* -------------------------------------------------------------------- */
-/** \name Correction opacity through the RNA slider
+/** \name Correction opacity through the BKE setter
  * \{ */
 
 namespace {
 
 /**
- * Set a per (row, channel) opacity exactly the way the Outliner's value slider does: through the
- * #MaterialPaintLayerChannelSettings RNA property, whose setter has to resolve the owning row first.
- * A content correction's slider must therefore reach the row, which lives in its parent's effects.
+ * Set a per (row, channel) opacity through the BKE setter (9.2: BKE tests drive BKE, not RNA).
+ * The write is followed by the same values sync the RNA slider's update runs, so the generated
+ * group inputs below read the new factor. The slider reaching this field through a nested
+ * correction is covered by the RNA suite (paint_layers_description_test.cc).
  */
-void rna_set_channel_opacity(Material &ma,
+void bke_set_channel_opacity(Material &ma,
                              MaterialPaintLayer &layer,
                              const int channel,
-                             const float percent)
+                             const float factor)
 {
-  PointerRNA ptr = RNA_pointer_create_discrete(
-      &ma.id,
-      RNA_struct_find("MaterialPaintLayerChannelSettings"),
-      &layer.channel_settings[channel]);
-  PropertyRNA *prop = RNA_struct_find_property(&ptr, "opacity");
-  ASSERT_NE(prop, nullptr);
-  RNA_property_float_set(&ptr, prop, percent);
+  ASSERT_TRUE(BKE_paint_layers_channel_opacity_set(ma, layer, channel, factor));
+  BKE_paint_layers_values_sync(ma);
 }
 
-/** Set a row's own opacity the way the Outliner does for a mask item; the pointer is the row. */
-void rna_set_row_opacity(Material &ma, MaterialPaintLayer &layer, const float percent)
+/** Set a row's own opacity the way the Outliner does for a mask item, through BKE (9.2). */
+void bke_set_row_opacity(Material &ma, MaterialPaintLayer &layer, const float factor)
 {
-  PointerRNA ptr = RNA_pointer_create_discrete(
-      &ma.id, RNA_struct_find("MaterialPaintLayer"), &layer);
-  PropertyRNA *prop = RNA_struct_find_property(&ptr, "opacity");
-  ASSERT_NE(prop, nullptr);
-  RNA_property_float_set(&ptr, prop, percent);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(ma, &layer, factor));
 }
 
 }  // namespace
@@ -7745,7 +7735,7 @@ void rna_set_row_opacity(Material &ma, MaterialPaintLayer &layer, const float pe
  * reported bug: the slider was a no-op for a Paint correction, while a mask item (whose slider uses
  * the row pointer) worked. The check is the generated group input the row's factor reads.
  */
-TEST_F(PaintLayersGenerateTest, content_correction_opacity_rna_reaches_its_graph_input)
+TEST_F(PaintLayersGenerateTest, content_correction_opacity_bke_reaches_its_graph_input)
 {
   bNodeTree *shared = nullptr;
   bNodeTree *on_path = nullptr;
@@ -7785,8 +7775,8 @@ TEST_F(PaintLayersGenerateTest, content_correction_opacity_rna_reaches_its_graph
   EXPECT_FLOAT_EQ(socket_value(corr_socket), 1.0f);
   EXPECT_FLOAT_EQ(socket_value(mask_socket), 1.0f);
 
-  /* The content correction's per-channel slider, exactly as the RNA setter runs it. */
-  rna_set_channel_opacity(*ma, *corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 25.0f);
+  /* The content correction's per-channel value, exactly as the BKE setter writes it. */
+  bke_set_channel_opacity(*ma, *corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0.25f);
   EXPECT_FLOAT_EQ(socket_value(corr_socket), 0.25f);
   /* A value edit: neither the root nor the row's group is rebuilt. */
   EXPECT_EQ(ma->paint_layers_tree, root);
@@ -7800,14 +7790,14 @@ TEST_F(PaintLayersGenerateTest, content_correction_opacity_rna_reaches_its_graph
   BKE_paint_layers_values_sync(*ma);
   EXPECT_FLOAT_EQ(socket_value(corr_socket), 0.25f);
 
-  /* The mask item's row slider keeps working through the row pointer. */
-  rna_set_row_opacity(*ma, *mask_item, 40.0f);
+  /* The mask item's row value keeps working through the BKE setter. */
+  bke_set_row_opacity(*ma, *mask_item, 0.4f);
   BKE_paint_layers_values_sync(*ma);
   EXPECT_FLOAT_EQ(socket_value(mask_socket), 0.4f);
 }
 
 /** The same slider on a plain Paint row's content correction, so the fix does not regress it. */
-TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_rna_reaches_its_graph_input)
+TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_bke_reaches_its_graph_input)
 {
   MaterialPaintLayer *paint = add_paint_layer("Paint", add_image("Paint"));
   MaterialPaintLayer *corr = BKE_paint_layers_correction_add(
@@ -7828,7 +7818,7 @@ TEST_F(PaintLayersGenerateTest, paint_row_correction_opacity_rna_reaches_its_gra
   ASSERT_NE(socket, nullptr);
   ASSERT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 1.0f);
 
-  rna_set_channel_opacity(*ma, *corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 30.0f);
+  bke_set_channel_opacity(*ma, *corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0.3f);
   socket = root_instance_input("Paint C Base Color Opacity");
   ASSERT_NE(socket, nullptr);
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(socket->default_value)->value, 0.3f);
@@ -7865,8 +7855,8 @@ TEST_F(PaintLayersGenerateTest, light_row_bake_ensure_leaves_no_bake_structure)
 }
 
 /**
- * Test #2, defect A: a light row's opacity is a value edit, routed the way the Outliner's slider
- * runs it (#rna_set_row_opacity), not the raw C API. #paint_layers_tag_value_edited (untouched by
+  * Test #2, defect A: a light row's opacity is a value edit, written through the BKE setter
+  * (#bke_set_row_opacity, 9.2), not the raw C API. #paint_layers_tag_value_edited (untouched by
  * this task) only tags #MA_PAINT_LAYERS_REGEN when #paint_layer_or_ancestor_has_bake sees a non-null
  * #MaterialPaintLayer::bake on the edited row or an ancestor. A rejected "allocate up front for
  * every non-folder row" route would leave this light row's bake non-null (unrendered, invalid) and
@@ -7890,8 +7880,8 @@ TEST_F(PaintLayersGenerateTest, light_row_opacity_edit_does_not_regen_or_rebuild
       << "a naive up-front allocation for every non-folder row would leave a bake structure here";
   EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0);
 
-  /* The RNA path: MaterialPaintLayer.opacity, exactly the Outliner's slider. */
-  rna_set_row_opacity(*ma, *bottom, 42.0f);
+  /* The BKE path: MaterialPaintLayer.opacity, what the Outliner's slider forwards to. */
+  bke_set_row_opacity(*ma, *bottom, 0.42f);
 
   EXPECT_EQ(bottom->bake, nullptr);
   EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
@@ -8043,7 +8033,7 @@ TEST_F(PaintLayersGenerateTest, baked_row_that_becomes_light_drops_its_bake)
   /* The row no longer carries a bake, so #paint_layer_or_ancestor_has_bake sees none and a value
    * edit is no longer topology. */
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
-  rna_set_row_opacity(*ma, *paint, 42.0f);
+  bke_set_row_opacity(*ma, *paint, 0.42f);
   EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
       << "a dropped bake must not keep making value edits topology";
 }
@@ -8271,7 +8261,7 @@ TEST_F(PaintLayersGenerateTest, light_isolating_folder_stays_bakeless_and_does_n
   EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
 
   ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
-  rna_set_row_opacity(*ma, *child, 42.0f);
+  bke_set_row_opacity(*ma, *child, 0.42f);
   EXPECT_EQ(folder->bake, nullptr);
   EXPECT_FALSE((ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0)
       << "a value edit under a permanently-bakeless folder must not tag a topology rebuild";
@@ -8279,8 +8269,8 @@ TEST_F(PaintLayersGenerateTest, light_isolating_folder_stays_bakeless_and_does_n
 
 /**
  * F2-D2 (step 1), guard. The reference for a row is #visibility_does_not_invalidate_the_rows_own_bake
- * (a baked row's own hash moves on a value edit) plus #light_row_opacity_edit_does_not_regen_or_rebuild
- * (`rna_set_row_opacity` is the Outliner path; #paint_layer_or_ancestor_has_bake decides
+  * (a baked row's own hash moves on a value edit) plus #light_row_opacity_edit_does_not_regen_or_rebuild
+  * (`bke_set_row_opacity` is the BKE side of the Outliner path; #paint_layer_or_ancestor_has_bake decides
  * #MA_PAINT_LAYERS_REGEN). Here the same sequence runs for the child of a heavy, auto-baked,
  * isolating folder: the edit invalidates the folder's bake, tags stale/regen, and the drain restores
  * it.
@@ -8311,7 +8301,7 @@ TEST_F(PaintLayersGenerateTest, auto_baked_folder_child_value_edit_invalidates_a
   BKE_paint_layers_bake_hash(*folder, before);
 
   ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BAKE_STALE);
-  rna_set_row_opacity(*ma, *child, 42.0f);
+  bke_set_row_opacity(*ma, *child, 0.42f);
 
   /* The child's opacity is part of the folder's hash, so the same flags a baked row gets are set. */
   uint32_t after[2];
@@ -8367,7 +8357,7 @@ TEST_F(PaintLayersGenerateTest, editing_a_sibling_outside_the_folder_leaves_the_
   BKE_paint_layers_bake_hash(*folder, before);
 
   ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BAKE_STALE);
-  rna_set_row_opacity(*ma, *outside, 33.0f);
+  bke_set_row_opacity(*ma, *outside, 0.33f);
 
   uint32_t after[2];
   BKE_paint_layers_bake_hash(*folder, after);

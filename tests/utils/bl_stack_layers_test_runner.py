@@ -38,7 +38,10 @@ def _arguments():
     report = DEFAULT_REPORT_NAME
     if "--report" in extra:
         report = extra[extra.index("--report") + 1]
-    return report
+    # The suite to run: the Stack Layers Outliner module by default, or any module named on the
+    # `--` line (a bare name from tests/python, e.g. `bl_paint_layers_addressing`).
+    modules = [arg for arg in extra if not arg.startswith("--")]
+    return report, (modules or ["bl_outliner_stack_layers"])
 
 
 def _poll_and_run():
@@ -47,14 +50,14 @@ def _poll_and_run():
     if win is None or win.screen is None:
         return 0.5  # window not up yet; poll again
 
-    report_path = _arguments()
+    report_path, module_names = _arguments()
     with open(report_path, "w", encoding="utf-8") as stream:
         suite_dir = os.path.normpath(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python"))
         sys.path.insert(0, suite_dir)
-        import bl_outliner_stack_layers as mod
-
-        suite = unittest.defaultTestLoader.loadTestsFromModule(mod)
+        suite = unittest.TestSuite()
+        for module_name in module_names:
+            suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(__import__(module_name)))
         runner = unittest.TextTestRunner(verbosity=2, stream=stream)
         result = runner.run(suite)
         stream.write("\nSTACK_LAYERS_TEST_RESULT: %s\n" %

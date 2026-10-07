@@ -20,11 +20,14 @@ set(SRC
   outliner_context.cc
   outliner_dragdrop.cc
   outliner_draw.cc
+  outliner_stack_draw.cc
   outliner_edit.cc
   outliner_ops.cc
   outliner_query.cc
   outliner_select.cc
   outliner_stack_layers.cc
+  outliner_stack_layers_ops.cc
+  outliner_stack_dragdrop.cc
   outliner_stack_source.cc
   outliner_stack_source_paint_layers.cc
   outliner_stack_source_shape_keys.cc

@@ -618,7 +618,10 @@ static wmOperatorStatus material_paint_brush_ensure_exec(bContext *C, wmOperator
 
   /* Sync after the channel settings exist, so the paired editor adopts a brush that is already set
    * up. No-op when sync is off or the canvas is not Material. */
-  BKE_paint_material_brush_sync(CTX_data_scene(C), paint);
+  if (BKE_paint_material_brush_sync(CTX_data_scene(C), paint)) {
+    WM_main_add_notifier(NC_BRUSH | NA_SELECTED, BKE_paint_brush(paint));
+    WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  }
 
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
   return OPERATOR_FINISHED;
@@ -701,7 +704,10 @@ static void material_paint_source_changed(bContext *C, Paint *paint, Brush *brus
 
   /* Same reasoning as #material_paint_brush_ensure_exec: the paired editor must not be left on a
    * different source mode. No-op when sync is off or the canvas is not Material. */
-  BKE_paint_material_brush_sync(scene, paint);
+  if (BKE_paint_material_brush_sync(scene, paint)) {
+    WM_main_add_notifier(NC_BRUSH | NA_SELECTED, BKE_paint_brush(paint));
+    WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+  }
 
   BKE_brush_tag_unsaved_changes(brush);
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);

@@ -1669,6 +1669,24 @@ static void rna_BrushMaterialPaint_alpha_mode_update(Main *bmain, Scene *scene, 
   rna_BrushMaterialPaint_update(bmain, scene, ptr);
 }
 
+/** The stroke-side answer the PBR Paint panel's #material_paint_writable_channels mirrors
+ * (properties_paint_common.py), exposed per channel: whether this brush's configuration writes
+ * \a channel to a Material image canvas for a stroke with \a paint_mode and the visible
+ * channels of \a paint. */
+static bool rna_BrushMaterialPaint_writes_to_target(BrushMaterialPaint *brush_paint,
+                                                    Paint *paint,
+                                                    PaintModeSettings *paint_mode,
+                                                    int channel)
+{
+  if (paint == nullptr || paint_mode == nullptr) {
+    return false;
+  }
+  return BKE_paint_material_channel_writes_to_target(*brush_paint,
+                                                     *paint_mode,
+                                                     paint->visible_material_channels,
+                                                     eMaterialPaintChannel(channel));
+}
+
 static void rna_BrushMaterialPaint_channels_begin(CollectionPropertyIterator *iter,
                                                   PointerRNA *ptr)
 {
@@ -4020,6 +4038,26 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "Sample Alpha to mask other active channels' writes during this stroke when the Alpha "
       "channel is enabled");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_alpha_mode_update");
+
+  /* A bool per channel rather than a bitmask, so which channels are asked about (the UI order,
+   * without Custom and Height) stays the Python side's own vocabulary. */
+  func = RNA_def_function(srna, "writes_to_target", "rna_BrushMaterialPaint_writes_to_target");
+  RNA_def_function_ui_description(
+      func, "Whether this brush writes the channel to a Material image canvas this stroke");
+  parm = RNA_def_pointer(
+      func, "paint", "Paint", "", "The paint-mode settings whose visible channels apply");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "paint_mode", "PaintModeSettings", "", "The paint mode settings a stroke would use");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                      "Channel",
+                      "The channel to ask about");
+  parm = RNA_def_boolean(func, "result", false, "", "");
+  RNA_def_function_return(func, parm);
 }
 
 static void rna_def_brush(BlenderRNA *brna)

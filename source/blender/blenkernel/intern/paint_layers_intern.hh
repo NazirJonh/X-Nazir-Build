@@ -472,9 +472,8 @@ const PaintLayerKindInfo &BKE_paint_layers_kind_info(int source);
  */
 bool BKE_paint_layers_fill_to_paint(Material &ma, MaterialPaintLayer &layer, float r_fill[4]);
 
-/** Whether \a marker names \a layer or anything nested under it (children, effects,
- * mask stack). */
-bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &layer, const bUUID &marker);
+/* #BKE_paint_layers_subtree_contains is declared in the public header (phase 2.2), visible here
+ * through "BKE_paint_layers.hh" above. */
 
 /**
  * The factor \a layer blends by before any per-pixel coverage: its own opacity, zero when it is

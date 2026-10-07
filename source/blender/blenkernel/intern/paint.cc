@@ -92,7 +92,6 @@
 
 #include "paint_layers_intern.hh"
 
-#include "WM_api.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"

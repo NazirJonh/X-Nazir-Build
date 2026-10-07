@@ -485,11 +485,15 @@ class InsertSession:
         # Linked curve copies keep the live curve (its modifiers and node groups), so nothing is
         # baked for them; every other placement needs a mesh to join or duplicate.
         self.live_curves = settings.insert_type == 'CURVE' and settings.placement == 'INSTANCE'
-        if settings.insert_type == 'CURVE' and not self.live_curves:
+        # Joining into the sculpt mesh uses the evaluated result (modifiers applied). It is baked
+        # into a scene carrier like a curve, so the join no longer depends on the asset itself
+        # being evaluated by the depsgraph (hidden, library or not yet instantiated sources).
+        bake_for_join = settings.placement == 'JOIN'
+        if (settings.insert_type == 'CURVE' and not self.live_curves) or bake_for_join:
             self.items = self._bake_items(context, self.items)
             if not self.items:
                 self.errors.append(
-                    "The curve evaluates to no mesh (give it a profile/bevel or geometry nodes)")
+                    "The source evaluates to no mesh (a curve needs a profile/bevel or geometry nodes)")
                 return False
         self.radius, self.anchor = items_extent(
             context.evaluated_depsgraph_get(), self.items,
@@ -1072,8 +1076,9 @@ def drop_batch(settings, placements, cursor_placement, *, keep_source, parent_to
             linked=settings.placement == 'INSTANCE',
             cursor_placement=cursor_placement,
         )
-    except RuntimeError:
-        return False
+    except RuntimeError as ex:
+        # The operator's own report (e.g. why a source was rejected) travels in the exception.
+        return str(ex) or False
     return result == {'FINISHED'}
 
 
@@ -1139,10 +1144,12 @@ def insert(context, session, settings, *, undo_message):
         # same undo reason.
         session.remove_temp_sources(keep=[source for source, _matrix in placements])
 
-    if not drop_batch(
-            settings, placements, cursor_placement,
-            keep_source=not discard_sources, parent_to_active=True):
+    dropped = drop_batch(
+        settings, placements, cursor_placement,
+        keep_source=not discard_sources, parent_to_active=True)
+    if dropped is not True:
         # Nothing was inserted: leave nothing behind and let the caller report it.
         session.remove_temp_sources()
-        return InsertResult('CANCELLED', 'ERROR', "Insert failed: the source could not be placed")
+        reason = dropped if isinstance(dropped, str) else "the source could not be placed"
+        return InsertResult('CANCELLED', 'ERROR', "Insert failed: {:s}".format(reason))
     return InsertResult('FINISHED', None, None)

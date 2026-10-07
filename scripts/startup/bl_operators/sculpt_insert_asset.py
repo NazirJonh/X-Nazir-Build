@@ -803,7 +803,7 @@ class SculptInsertModalBase(Operator):
         result = sculpt_insert.insert(
             context, session, self.get_settings(context), undo_message=self.bl_label)
         if result.message is not None:
-            self.report(result.message_type, result.message)
+            self.report({result.message_type or 'ERROR'}, result.message)
         self._finish(context)
         return {result.status}
 

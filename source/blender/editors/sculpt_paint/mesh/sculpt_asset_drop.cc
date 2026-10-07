@@ -1022,6 +1022,12 @@ static wmOperatorStatus sculpt_mesh_asset_drop_exec(bContext *C, wmOperator *op)
 
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
   Base *source_base = BKE_view_layer_base_find(view_layer, asset_ob);
+  if (source_base == nullptr) {
+    /* Not instantiated in this scene yet (see #asset_drop_batch_place_separate). */
+    BKE_collection_object_add(bmain, scene->master_collection, asset_ob);
+    BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+    source_base = BKE_view_layer_base_find(view_layer, asset_ob);
+  }
   const bool linked = RNA_boolean_get(op->ptr, "linked");
   const eDupli_ID_Flags dupflag = linked ? eDupli_ID_Flags{} : eDupli_ID_Flags(U.dupflag);
 
@@ -1456,6 +1462,13 @@ static void asset_drop_batch_place_separate(Main &bmain,
 
   for (const AssetDropPlacement &placement : placements) {
     Base *source_base = BKE_view_layer_base_find(&view_layer, placement.object);
+    if (source_base == nullptr) {
+      /* A freshly imported asset (or one living in a collection outside this scene) has no base
+       * yet; instantiate it in the scene so it can be duplicated. */
+      BKE_collection_object_add(&bmain, scene.master_collection, placement.object);
+      BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
+      source_base = BKE_view_layer_base_find(&view_layer, placement.object);
+    }
     if (source_base == nullptr) {
       if (r_created.is_empty()) {
         BKE_report(op.reports,

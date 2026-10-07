@@ -116,9 +116,9 @@
 
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
-#include "paint_image_select_gradient.hh"
-#include "paint_image_select_gesture.hh"
-#include "paint_image_select_intern.hh"
+#include "../selection/paint_image_select_gradient.hh"
+#include "../selection/paint_image_select_gesture.hh"
+#include "../selection/paint_image_select_intern.hh"
 #include "paint_image_uv_geom.hh"
 #include "paint_image_uv_symmetry.hh"
 #include "sculpt_intern.hh"

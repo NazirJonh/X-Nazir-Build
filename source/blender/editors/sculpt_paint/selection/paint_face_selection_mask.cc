@@ -22,8 +22,8 @@
 #include "PRF_profile.hh"
 
 #include "paint_face_selection_mask.hh"
-#include "sculpt_filter.hh"
-#include "sculpt_intern.hh"
+#include "../mesh/sculpt_filter.hh"
+#include "../mesh/sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
 

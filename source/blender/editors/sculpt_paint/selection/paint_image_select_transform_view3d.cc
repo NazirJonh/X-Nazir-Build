@@ -71,7 +71,7 @@
 #include "paint_image_select_intern.hh"
 #include "paint_image_select_move_intern.hh"
 #include "paint_image_select_view3d.hh"
-#include "sculpt_intern.hh"
+#include "../mesh/sculpt_intern.hh"
 
 #include "BKE_mesh.hh"
 #include "BKE_screen.hh"

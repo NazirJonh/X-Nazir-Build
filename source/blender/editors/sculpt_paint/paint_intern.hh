@@ -1134,7 +1134,7 @@ void PAINT_OT_image_select_warp_cancel(wmOperatorType *ot);
 void PAINT_OT_image_select_warp_undo_step(wmOperatorType *ot);
 
 /* Selection masks in the 3D Viewport (Sculpt texture painting): the operators live in
- * mesh/paint_image_select_view3d.hh (declared in `blender::ed::sculpt_paint` next to the rest of
+ * selection/paint_image_select_view3d.hh (declared in `blender::ed::sculpt_paint` next to the rest of
  * that module's API); registered from #ED_operatortypes_paint. */
 
 /** True while a selection transform gizmo is active in the current Image Editor. */
@@ -1162,7 +1162,7 @@ bool image_select_canvas_paint_blocked(bContext *C);
 void image_paint_clipboard_ensure_atexit_handler();
 /**
  * Modal keymap shared by the floating-selection operators (move / transform / warp).
- * Defined in mesh/paint_image_select_floating.cc; registered from #ED_keymap_paint.
+ * Defined in selection/paint_image_select_floating.cc; registered from #ED_keymap_paint.
  */
 wmKeyMap *image_select_floating_modal_keymap(wmKeyConfig *keyconf);
 

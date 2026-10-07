@@ -15,7 +15,7 @@
 
 #include "ED_view3d.hh"
 
-#include "paint_face_selection_mask.hh"
+#include "../selection/paint_face_selection_mask.hh"
 
 namespace blender {
 

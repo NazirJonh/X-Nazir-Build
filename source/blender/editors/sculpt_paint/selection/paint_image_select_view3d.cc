@@ -109,12 +109,12 @@
 
 #include "../shapes/paint_shape_space.hh"
 #include "../paint_intern.hh"
-#include "mesh_brush_common.hh"
+#include "../mesh/mesh_brush_common.hh"
 #include "paint_face_selection_mask.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_select_view3d.hh"
-#include "paint_image_uv_geom.hh"
-#include "sculpt_intern.hh"
+#include "../mesh/paint_image_uv_geom.hh"
+#include "../mesh/sculpt_intern.hh"
 
 #include "GEO_reverse_uv_sampler.hh"
 

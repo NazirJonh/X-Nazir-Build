@@ -51,7 +51,7 @@
 #include "paint_curve_patch_edit_intern.hh"
 #include "paint_image_curve_patch.hh"
 #include "paint_image_curve_patch_raster.hh"
-#include "mesh/paint_image_select_intern.hh"
+#include "selection/paint_image_select_intern.hh"
 
 namespace blender {
 

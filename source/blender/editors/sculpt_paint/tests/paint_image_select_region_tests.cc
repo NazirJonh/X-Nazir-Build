@@ -5,9 +5,9 @@
 #include <cmath>
 #include <limits>
 
-#include "paint_image_select_region.hh"
+#include "../selection/paint_image_select_region.hh"
 
-#include "paint_image_select_source.hh"
+#include "../selection/paint_image_select_source.hh"
 
 #include "BLI_array.hh"
 #include "BLI_math_vector_types.hh"

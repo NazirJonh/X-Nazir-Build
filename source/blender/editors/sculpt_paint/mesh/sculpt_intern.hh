@@ -33,7 +33,7 @@
 #include "BLI_vector.hh"
 #include "BLI_virtual_array.hh"
 
-#include "paint_face_selection_mask.hh"
+#include "../selection/paint_face_selection_mask.hh"
 
 #include "IMB_colormanagement.hh"
 

@@ -39,7 +39,7 @@
 
 #include "../shapes/paint_shape_target.hh"
 #include "../shapes/paint_vector_editor.hh"
-#include "paint_image_select_floating.hh"
+#include "../selection/paint_image_select_floating.hh"
 
 namespace blender {
 

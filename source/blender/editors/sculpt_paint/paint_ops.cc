@@ -100,7 +100,7 @@
 
 #include "curves/sculpt_intern.hh"
 #include "mesh/paint_hide.hh"
-#include "mesh/paint_image_select_view3d.hh"
+#include "selection/paint_image_select_view3d.hh"
 #include "mesh/paint_mask.hh"
 #include "mesh/paint_material_attribute.hh"
 #include "mesh/sculpt_expand.hh"

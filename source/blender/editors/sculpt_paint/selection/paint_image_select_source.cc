@@ -48,7 +48,7 @@
 #include "bmesh.hh"
 
 #include "paint_image_select_intern.hh"
-#include "paint_image_uv_geom.hh"
+#include "../mesh/paint_image_uv_geom.hh"
 
 namespace blender::ed::sculpt_paint::image_select {
 

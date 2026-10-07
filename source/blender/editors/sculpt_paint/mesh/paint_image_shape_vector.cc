@@ -78,7 +78,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "paint_image_select_intern.hh"
+#include "../selection/paint_image_select_intern.hh"
 #include "paint_shape_vector_3d.hh"
 #include "../shapes/paint_shape_target.hh"
 #include "../shapes/paint_shape_edit.hh"

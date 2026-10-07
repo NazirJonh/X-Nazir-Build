@@ -36,7 +36,7 @@
 #include "paint_image_select_move_intern.hh"
 #include "paint_image_select_transform_intern.hh"
 #include "paint_image_select_warp_intern.hh"
-#include "paint_image_shape_composite.hh"
+#include "../mesh/paint_image_shape_composite.hh"
 
 namespace blender {
 

@@ -77,7 +77,7 @@
 #include "../shapes/paint_shape_create.hh"
 #include "../shapes/paint_shape_edit.hh"
 #include "../shapes/paint_shape_op_props.hh"
-#include "paint_image_select_intern.hh"
+#include "../selection/paint_image_select_intern.hh"
 #include "paint_image_shape_composite.hh"
 #include "../shapes/paint_shape_render.hh"
 

@@ -72,7 +72,7 @@
 #include "../shapes/paint_shape_space.hh"
 #include "../shapes/paint_shape_target.hh"
 #include "mesh_brush_common.hh"
-#include "paint_face_selection_mask.hh"
+#include "../selection/paint_face_selection_mask.hh"
 #include "paint_image_shape_composite.hh"
 #include "paint_material_blend.hh"
 #include "paint_material_source.hh"

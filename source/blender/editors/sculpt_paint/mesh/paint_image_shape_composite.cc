@@ -63,7 +63,7 @@
 #include "../shapes/paint_shape_render.hh"
 #include "paint_material_blend.hh"
 /* #image_select_undo_session_step_get only. */
-#include "paint_image_select_fragment.hh"
+#include "../selection/paint_image_select_fragment.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 

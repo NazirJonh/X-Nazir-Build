@@ -57,8 +57,8 @@
 #include "WM_types.hh"
 
 #include "../paint_intern.hh"
-#include "paint_face_selection_mask.hh"
-#include "paint_image_select_intern.hh"
+#include "../selection/paint_face_selection_mask.hh"
+#include "../selection/paint_image_select_intern.hh"
 
 namespace blender {
 

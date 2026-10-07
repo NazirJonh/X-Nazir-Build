@@ -109,7 +109,7 @@
 #include "paint_image_select_move_intern.hh"
 /* #ED_image_paint_select_transform_state_free only. */
 #include "paint_image_select_transform_intern.hh"
-#include "paint_image_uv_geom.hh"
+#include "../mesh/paint_image_uv_geom.hh"
 
 namespace blender {
 

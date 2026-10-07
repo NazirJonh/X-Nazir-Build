@@ -5118,6 +5118,98 @@ TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
 }
 
 /**
+ * 10.4: the anti-drift harness is mandatory. Every blend mode needs a graph-vs-CPU parity case:
+ * the table in #PaintLayersGraphEvalTest.every_blend_mode_matches_the_cpu plus the Normal-only
+ * modes covered by #PaintLayersGraphEvalTest.normal_replace_override_matches_the_cpu (combine is
+ * the Normal default every normal parity test already runs). A new mode must extend one of the
+ * two instead of landing without coverage -- this test fails with its number until it does.
+ */
+TEST_F(PaintLayersGraphEvalTest, every_blend_mode_has_a_parity_case)
+{
+  static_assert(MA_PAINT_LAYER_BLEND_NORMAL_REPLACE == 20,
+                "A new blend mode was added: extend the parity table below and its tests");
+  const eMaterialPaintLayerBlend tabled[] = {
+      MA_PAINT_LAYER_BLEND_MIX,          MA_PAINT_LAYER_BLEND_MULTIPLY,
+      MA_PAINT_LAYER_BLEND_OVERLAY,      MA_PAINT_LAYER_BLEND_ADD,
+      MA_PAINT_LAYER_BLEND_SUBTRACT,     MA_PAINT_LAYER_BLEND_DIVIDE,
+      MA_PAINT_LAYER_BLEND_DARKEN,       MA_PAINT_LAYER_BLEND_LIGHTEN,
+      MA_PAINT_LAYER_BLEND_SCREEN,       MA_PAINT_LAYER_BLEND_BURN,
+      MA_PAINT_LAYER_BLEND_DODGE,        MA_PAINT_LAYER_BLEND_DIFFERENCE,
+      MA_PAINT_LAYER_BLEND_EXCLUSION,    MA_PAINT_LAYER_BLEND_SOFT_LIGHT,
+      MA_PAINT_LAYER_BLEND_LINEAR_LIGHT, MA_PAINT_LAYER_BLEND_HUE,
+      MA_PAINT_LAYER_BLEND_SATURATION,   MA_PAINT_LAYER_BLEND_COLOR,
+      MA_PAINT_LAYER_BLEND_VALUE,
+  };
+  /* The Normal channel's own modes never reach the generic table: combine is its forced default,
+   * replace its only override, and both are Normal-harness cases. */
+  const eMaterialPaintLayerBlend normal_only[] = {
+      MA_PAINT_LAYER_BLEND_NORMAL_COMBINE,
+      MA_PAINT_LAYER_BLEND_NORMAL_REPLACE,
+  };
+  for (int v = int(MA_PAINT_LAYER_BLEND_MIX); v <= int(MA_PAINT_LAYER_BLEND_NORMAL_REPLACE); v++) {
+    const auto covered = [&](const eMaterialPaintLayerBlend *modes, const int n) {
+      for (int i = 0; i < n; i++) {
+        if (int(modes[i]) == v) {
+          return true;
+        }
+      }
+      return false;
+    };
+    EXPECT_TRUE(covered(tabled, ARRAY_SIZE(tabled)) || covered(normal_only, ARRAY_SIZE(normal_only)))
+        << "Blend mode " << v << " has no graph-vs-CPU parity case";
+  }
+}
+
+/**
+ * The Normal channel's only blend override: the top map replaces the combined normal instead of
+ * combining with it. Graph and CPU must agree with each other and -- at full opacity -- with the
+ * top map itself.
+ */
+TEST_F(PaintLayersGraphEvalTest, normal_replace_override_matches_the_cpu)
+{
+  const int size = 4;
+  const float tolerance = 1e-4f;
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+
+  ma = BKE_material_add(bmain, "NormalReplace");
+  Image *bottom_map = add_solid_image("NormalReplaceBottom", size, 128, 128, 255, 255);
+  make_image_data(bottom_map);
+  add_layer("Bottom", MA_PAINT_LAYER_SOURCE_IMAGE, bottom_map, channel);
+
+  Image *detail_map = add_solid_image("NormalReplaceDetail", size, 200, 100, 220, 255);
+  make_image_data(detail_map);
+  MaterialPaintLayer *top = add_layer("Top", MA_PAINT_LAYER_SOURCE_IMAGE, detail_map, channel);
+  ASSERT_NE(top, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *top, channel, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  GraphInterpreter interpreter;
+  interpreter.instance = find_instance();
+  interpreter.tree = ma->paint_layers_tree;
+  interpreter.y = 0;
+  ASSERT_NE(interpreter.instance, nullptr);
+  const RGBA detail_enc = interpreter.sample_image(detail_map, "Color");
+  const float expected[3] = {
+      detail_enc.r * 2.0f - 1.0f, detail_enc.g * 2.0f - 1.0f, detail_enc.b * 2.0f - 1.0f};
+
+  for (int x = 0; x < size; x++) {
+    interpreter.x = x;
+    const RGBA graph = interpreter.eval_result(result_name(channel));
+    const RGBA cpu = cpu_pixel_at(channel, x, 0);
+    EXPECT_NEAR(graph.r, cpu.r, tolerance) << "graph vs cpu x=" << x;
+    EXPECT_NEAR(graph.g, cpu.g, tolerance) << "graph vs cpu x=" << x;
+    EXPECT_NEAR(graph.b, cpu.b, tolerance) << "graph vs cpu x=" << x;
+    EXPECT_NEAR(graph.r, expected[0], tolerance) << "replace x=" << x;
+    EXPECT_NEAR(graph.g, expected[1], tolerance) << "replace x=" << x;
+    EXPECT_NEAR(graph.b, expected[2], tolerance) << "replace x=" << x;
+  }
+
+  BKE_id_free(bmain, ma);
+  ma = nullptr;
+}
+
+/**
  * A folder is an isolated group (design §5): its children composite over transparency, the folder
  * lays the result over what is below with its own blend, opacity and mask. The generated chain and
  * the CPU must agree on all of it, and the model is checked here on the cases that would break a

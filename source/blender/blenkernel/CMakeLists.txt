@@ -847,6 +847,11 @@ if(WITH_GTESTS)
     intern/paint_layers_description_test.cc
     intern/paint_layers_refactor_test.cc
     intern/paint_layers_generate_test.cc
+    intern/paint_layers_generate_mapping_test.cc
+    intern/paint_layers_generate_source_group_test.cc
+    intern/paint_layers_generate_gates_test.cc
+    intern/paint_layers_generate_warm_test.cc
+    intern/paint_layers_generate_extended_test.cc
     intern/paint_layers_test_util.cc
     intern/paint_layers_graph_eval_test.cc
     intern/paint_layers_target_test.cc

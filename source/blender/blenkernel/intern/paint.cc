@@ -1252,6 +1252,12 @@ static void paint_brush_default_essentials_name_get(const PaintMode paint_mode,
              * activates the remembered binding or any brush with Brush Type = Clone. */
             name = "Clone";
             break;
+          case SCULPT_BRUSH_TYPE_CLONE_MESH:
+            /* Same situation as #SCULPT_BRUSH_TYPE_CLONE above: no essentials asset yet, so
+             * the tool activates the remembered binding or any brush with
+             * Brush Type = Clone Stamp Mesh. */
+            name = "Clone Stamp Mesh";
+            break;
           case SCULPT_BRUSH_TYPE_SIMPLIFY:
             name = "Density";
             break;

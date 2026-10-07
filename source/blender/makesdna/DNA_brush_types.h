@@ -384,6 +384,22 @@ struct BrushCurvePatchSettings {
   float cap_end_length = 1.0f;
 };
 
+/** Settings of the Clone Stamp Mesh sculpt brush (#SCULPT_BRUSH_TYPE_CLONE_MESH). Embedded by
+ * value for the same reasons as #BrushCurvePatchSettings: no optional lifetime, no extra
+ * alloc or blend-file read. */
+struct BrushCloneStampMeshSettings {
+  /** How the sampled source form is applied to the target surface. See
+   * #eCloneStampMeshApplyMode. */
+  char apply_mode = CLONE_STAMP_MESH_APPLY_IMPRINT;
+  /** What happens to a vertex whose source probe found no surface. See
+   * #eCloneStampMeshMissingSource. */
+  char missing_source = CLONE_STAMP_MESH_MISSING_IGNORE;
+  char _pad[2] = {};
+  /** Scales the tangential extent of the patch read from the source relative to the brush
+   * radius (1.0 samples a source patch of the brush's own world size). RNA-clamped. */
+  float sample_scale = 1.0f;
+};
+
 /**
  * \note Any change to members that is user visible and that may make the brush differ from the one
  * saved in the asset library should be followed by a #BKE_brush_tag_unsaved_changes() call.
@@ -732,6 +748,10 @@ struct Brush {
    * the settings either belong to every brush or to none -- and by-value costs no alloc, free or
    * blend-file read of its own. */
   BrushCurvePatchSettings curve_patch;
+
+  /** Clone Stamp Mesh brush settings (#SCULPT_BRUSH_TYPE_CLONE_MESH). Embedded by value like
+   * #curve_patch; see #BrushCloneStampMeshSettings. */
+  BrushCloneStampMeshSettings clone_stamp_mesh;
 
   /** Roll stroke method (#BRUSH_STROKE_ROLL). Scale the rolled texture with the pressure-driven
    * brush radius so the pattern keeps its aspect ratio under pressure. */

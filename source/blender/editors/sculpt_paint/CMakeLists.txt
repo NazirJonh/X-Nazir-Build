@@ -24,6 +24,7 @@ set(SRC
   paint_clone.cc
   paint_clone_2d.cc
   paint_clone_cursor.cc
+  paint_clone_mesh_source.cc
   paint_clone_source.cc
   paint_clone_stroke.cc
   paint_cursor.cc
@@ -222,6 +223,7 @@ set(SRC
   paint_clone.hh
   paint_clone_2d.hh
   paint_clone_cursor.hh
+  paint_clone_mesh_source.hh
   paint_clone_source.hh
   paint_clone_stroke.hh
   paint_cursor.hh
@@ -311,6 +313,7 @@ paint_intern.hh
   mesh/brushes/clay.cc
   mesh/brushes/clay_strips.cc
   mesh/brushes/clay_thumb.cc
+  mesh/brushes/clone_stamp.cc
   mesh/brushes/crease.cc
   mesh/brushes/draw.cc
   mesh/brushes/draw_face_sets.cc

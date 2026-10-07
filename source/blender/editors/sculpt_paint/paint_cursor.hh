@@ -153,6 +153,12 @@ void mesh_cursor_active_draw(PaintCursorContext &pcontext);
  * of which would drop it. No-op outside Sculpt mode.
  */
 void mesh_cursor_clone_source_draw(PaintCursorContext &pcontext);
+/**
+ * Draw the Clone Stamp Mesh source marker: the brush footprint laid out in the frozen stamp
+ * frame on the source surface, slid along with the brush in Relative mode. No-op outside
+ * Sculpt mode or without a source for the active object.
+ */
+void mesh_cursor_clone_mesh_source_draw(PaintCursorContext &pcontext);
 void mesh_cursor_inactive_draw(PaintCursorContext &pcontext);
 
 void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext);

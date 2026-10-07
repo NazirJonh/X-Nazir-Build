@@ -1725,9 +1725,10 @@ static void paint_cursor_draw_3D_view_brush_cursor(PaintCursorContext &pcontext)
 
   mesh_cursor_update_and_init(pcontext);
 
-  /* Before the branch, so the clone source marker is drawn whichever cursor path follows -- it
-   * matters most DURING a stroke, which is exactly when the inactive path does not run. */
+  /* Before the branch, so the clone source markers are drawn whichever cursor path follows --
+   * it matters most DURING a stroke, which is exactly when the inactive path does not run. */
   mesh_cursor_clone_source_draw(pcontext);
+  mesh_cursor_clone_mesh_source_draw(pcontext);
 
   if (pcontext.is_stroke_active) {
     mesh_cursor_active_draw(pcontext);

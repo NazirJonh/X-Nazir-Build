@@ -9,6 +9,7 @@
 #include "editors/sculpt_paint/paint_cursor.hh"
 #include "editors/sculpt_paint/paint_clone.hh"
 #include "editors/sculpt_paint/paint_clone_cursor.hh"
+#include "editors/sculpt_paint/paint_clone_mesh_source.hh"
 #include "editors/sculpt_paint/paint_clone_source.hh"
 
 #include "DNA_mesh_types.h"
@@ -356,7 +357,8 @@ static void screen_space_point_draw(const uint gpuattr,
                                     const ARegion *region,
                                     const float true_location[3],
                                     const float obmat[4][4],
-                                    const int size)
+                                    const int size,
+                                    const float ring_radius = 0.0f)
 {
   float translation_vertex_cursor[3], location[3];
   copy_v3_v3(location, true_location);
@@ -366,6 +368,11 @@ static void screen_space_point_draw(const uint gpuattr,
   if (translation_vertex_cursor[2] <= 1.0f) {
     imm_draw_circle_fill_3d(
         gpuattr, translation_vertex_cursor[0], translation_vertex_cursor[1], size, 10);
+    if (ring_radius > 0.0f) {
+      /* Footprint of the brush on a symmetry pass, in screen pixels. */
+      imm_draw_circle_wire_3d(
+          gpuattr, translation_vertex_cursor[0], translation_vertex_cursor[1], ring_radius, 80);
+    }
   }
 }
 
@@ -427,8 +434,13 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
                                      const Object &symm_reference_ob,
                                      const float radius,
                                      const ePaintSymmetrySpace symmetry_space,
-                                     const float4x4 &cursor_to_world)
+                                     const float4x4 &cursor_to_world,
+                                     const float ring_radius = 0.0f)
 {
+  /* With a ring radius the main (un-mirrored) point is skipped: the brush's own cursor already
+   * marks it, and only the symmetry passes get the write-zone highlight. */
+  const bool ring_only = ring_radius > 0.0f;
+
   /* #PAINT_SYMM_SPACE_GLOBAL_WORLD / #PAINT_SYMM_SPACE_GLOBAL_CURSOR mirror the multi-object
    * stroke around world axes rather than the object's own local origin (see
    * #symmetry_space_frame). Reuse the exact same mirrored-center computation the stroke itself
@@ -464,7 +476,11 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
                                                                         symmetry_space,
                                                                         cursor_to_world);
     for (const MirroredDaub &daub : symm_daubs) {
-      screen_space_point_draw(gpuattr, region, daub.center, float4x4::identity().ptr(), 3);
+      if (ring_only && &daub == &symm_daubs[0]) {
+        continue;
+      }
+      screen_space_point_draw(
+          gpuattr, region, daub.center, float4x4::identity().ptr(), 3, ring_radius);
       if (bke::paint::supports_symmetry_tiling(paint_mode)) {
         BLI_assert(sd && paint_mode == PaintMode::Sculpt);
         const float3 local_point = math::transform_point(ob.world_to_object(), daub.center);
@@ -484,7 +500,10 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
 
       /* Axis Symmetry. */
       location = symmetry_flip(true_location, ePaintSymmetryFlags(i));
-      screen_space_point_draw(gpuattr, region, location, ob.object_to_world().ptr(), 3);
+      if (!(ring_only && i == 0)) {
+        screen_space_point_draw(
+            gpuattr, region, location, ob.object_to_world().ptr(), 3, ring_radius);
+      }
 
       /* Tiling. */
       if (bke::paint::supports_symmetry_tiling(paint_mode)) {
@@ -505,7 +524,8 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
             BLI_assert(sd && paint_mode == PaintMode::Sculpt);
             tiling_preview_draw(gpuattr, region, location, *sd, ob, radius);
           }
-          screen_space_point_draw(gpuattr, region, location, ob.object_to_world().ptr(), 3);
+          screen_space_point_draw(
+              gpuattr, region, location, ob.object_to_world().ptr(), 3, ring_radius);
         }
       }
     }
@@ -697,6 +717,14 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
     }
   }
 
+  /* Clone Stamp Mesh highlights where each symmetry pass will write, instead of marking it with
+   * a dot only. */
+  const float clone_mesh_ring =
+      (pcontext.mode == PaintMode::Sculpt &&
+       brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE_MESH) ?
+          BKE_brush_radius_get(pcontext.paint, &brush) :
+          0.0f;
+
   /* Cursor location symmetry points. */
   if (math::distance(active_vertex_co, pcontext.location) < pcontext.radius) {
     immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha);
@@ -709,7 +737,8 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
                              *symm_reference_ob,
                              pcontext.radius,
                              ePaintSymmetrySpace(pcontext.paint->symmetry_space),
-                             cursor::symmetry_cursor_to_world(*pcontext.scene, *symm_reference_ob));
+                             cursor::symmetry_cursor_to_world(*pcontext.scene, *symm_reference_ob),
+                             clone_mesh_ring);
   }
 
   if (pcontext.mode != PaintMode::Sculpt) {
@@ -1087,6 +1116,133 @@ void mesh_cursor_clone_source_draw(PaintCursorContext &pcontext)
   immUnbindProgram();
   immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
+  GPU_matrix_pop();
+  GPU_matrix_pop_projection();
+  wmWindowViewport(pcontext.win);
+}
+
+void mesh_cursor_clone_mesh_source_draw(PaintCursorContext &pcontext)
+{
+  if (pcontext.mode != PaintMode::Sculpt || pcontext.brush == nullptr ||
+      pcontext.brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_CLONE_MESH)
+  {
+    return;
+  }
+  if (pcontext.paint == nullptr) {
+    return;
+  }
+  if (pcontext.region == nullptr || pcontext.vc.obact == nullptr || pcontext.vc.v3d == nullptr) {
+    return;
+  }
+  /* With symmetry on the brush is the source (see #do_clone_stamp_brush): there is no separate
+   * source marker, only the write zones of the symmetry passes. The reference is the active
+   * object in a multi-object stroke, as in #screen_space_overlays_draw. */
+  {
+    const Vector<Object *> mode_objects = sculpt_mode_objects(pcontext.vc);
+    const Object &symm_reference_ob = mode_objects.size() > 1 ? *mode_objects[0] :
+                                                                  *pcontext.vc.obact;
+    if (clone_mesh::clone_mesh_symmetry_mode_active(symm_reference_ob)) {
+      return;
+    }
+  }
+  const clone_mesh::CloneMeshSourcePoint *source = clone_mesh::clone_mesh_source_point_get(
+      pcontext.object);
+  if (source == nullptr || source->source_object == nullptr) {
+    return;
+  }
+  const Object &source_object = *source->source_object;
+
+  /* Where the brush is, for Relative to displace the marker by; same lookup the texture clone's
+   * marker does, since the hover data is not refreshed mid-stroke.
+   *
+   * The MAIN pass location, deliberately, not `location_symm`: the latter is the last
+   * symmetry pass's dab center and would make the marker jump between passes on every step,
+   * while the anchor that Relative measures from is the main pass's center too. */
+  const SculptSession *ss = pcontext.ss;
+  const float3 *cursor_co = nullptr;
+  if (pcontext.is_stroke_active && ss != nullptr && ss->cache != nullptr) {
+    cursor_co = &ss->cache->location;
+  }
+  else if (pcontext.is_cursor_over_mesh) {
+    cursor_co = &pcontext.location;
+  }
+
+  /* Red while the last dab against this stroke's runtime was refused: the stamp is not
+   * landing (source fell off, Relative dragged past the surface, ...). There is no reports
+   * channel from a brush dab, so this color is the warning -- see
+   * #clone_mesh::CloneMeshStrokeRuntime::last_dab_ok. At hover time the stroke cache (and the
+   * runtime with it) does not exist yet and the marker stays white. */
+  bool last_dab_ok = true;
+  if (ss != nullptr && ss->cache != nullptr && ss->cache->clone_mesh_runtime != nullptr &&
+      ss->cache->clone_mesh_runtime->is_valid)
+  {
+    last_dab_ok = ss->cache->clone_mesh_runtime->last_dab_ok;
+  }
+  float marker_color[4];
+  if (last_dab_ok) {
+    copy_v4_fl4(marker_color, 1.0f, 1.0f, 1.0f, 0.85f);
+  }
+  else {
+    copy_v4_fl4(marker_color, 1.0f, 0.25f, 0.25f, 0.9f);
+  }
+
+  /* Brush footprint in the source's local space: the CURRENT brush size, converted through the
+   * two objects' scales. An approximation for non-uniform scales, like the texture clone's
+   * object-space marker slide. */
+  const float pixel_radius = BKE_brush_radius_get(pcontext.paint, pcontext.brush);
+  const float3 radius_reference = cursor_co ? *cursor_co : pcontext.location;
+  const float radius_target = paint_calc_object_space_radius(
+      pcontext.vc, radius_reference, pixel_radius);
+  const float3 target_scale = math::to_scale(pcontext.vc.obact->object_to_world());
+  const float3 source_scale = math::to_scale(source_object.object_to_world());
+  const float target_scale_avg = math::average(target_scale);
+  const float source_scale_avg = math::average(source_scale);
+  if (!(radius_target > 0.0f) || target_scale_avg < 1e-12f || source_scale_avg < 1e-12f) {
+    return;
+  }
+  const float radius_source = radius_target * (target_scale_avg / source_scale_avg);
+
+  /* The marker lives in the frozen stamp frame on the source surface, so it stays glued to the
+   * source mesh under viewport rotation. In Relative mode it shows the spot the walk currently
+   * reads -- the walking patch itself, which follows the source surface -- or the frozen pick
+   * before the first Relative stroke. */
+  float3 marker_co = source->co_source_local;
+  if (pcontext.paint->clone_mode == CLONE_MODE_RELATIVE && source->walk_valid) {
+    marker_co = source->walk_co_source_local;
+  }
+
+  float4x4 marker_to_source = float4x4::identity();
+  marker_to_source.x_axis() = source->frame_axes[0];
+  marker_to_source.y_axis() = source->frame_axes[1];
+  marker_to_source.z_axis() = source->frame_axes[2];
+  marker_to_source.location() = marker_co;
+
+  /* Its own view stage: the marker lives on the SOURCE object and must survive whichever of
+   * the active / inactive / legacy cursor paths runs afterwards. */
+  wmViewport(&pcontext.region->winrct);
+  GPU_matrix_push_projection();
+  ED_view3d_draw_setup_view(pcontext.wm,
+                            pcontext.win,
+                            pcontext.depsgraph,
+                            pcontext.scene,
+                            pcontext.region,
+                            pcontext.vc.v3d,
+                            nullptr,
+                            nullptr,
+                            nullptr);
+  GPU_matrix_push();
+  GPU_matrix_mul(source_object.object_to_world().ptr());
+  GPU_matrix_push();
+  GPU_matrix_mul(marker_to_source.ptr());
+
+  immUnbindProgram();
+  clone::clone_dashed_program_bind();
+  immUniformColor4fv(marker_color);
+  imm_draw_circle_wire_3d(pcontext.pos, 0.0f, 0.0f, radius_source, 32);
+  immUnbindProgram();
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  GPU_matrix_pop();
   GPU_matrix_pop();
   GPU_matrix_pop_projection();
   wmWindowViewport(pcontext.win);

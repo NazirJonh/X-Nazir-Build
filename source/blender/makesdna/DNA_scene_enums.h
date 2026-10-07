@@ -108,6 +108,26 @@ enum eCloneMode : int8_t {
   CLONE_MODE_RELATIVE = 1,
 };
 
+/** #Brush.clone_stamp_mesh.apply_mode */
+enum eCloneStampMeshApplyMode : int8_t {
+  /** Converge the target surface onto the stamped source form: the dab displaces by
+   * (source height - current target height). Repeated dabbing settles the region into the
+   * source's shape instead of stacking onto it. */
+  CLONE_STAMP_MESH_APPLY_IMPRINT = 0,
+  /** Build the source form up on top of the target's current surface, like an alpha or
+   * VDM brush: the dab displaces by the source height alone. */
+  CLONE_STAMP_MESH_APPLY_ADDITIVE = 1,
+};
+
+/** #Brush.clone_stamp_mesh.missing_source */
+enum eCloneStampMeshMissingSource : int8_t {
+  /** Leave vertices whose source probe found no surface exactly where they are. */
+  CLONE_STAMP_MESH_MISSING_IGNORE = 0,
+  /** Treat the missing probe as source height zero, so an Imprint dab pulls the region down
+   * onto the stamp plane. Meaningless for Additive (it adds zero) and treated as Ignore. */
+  CLONE_STAMP_MESH_MISSING_FILL_PLANE = 1,
+};
+
 /** #SceneRenderLayer::passflag */
 enum eScenePassType : uint32_t {
   SCE_PASS_COMBINED = (1 << 0),

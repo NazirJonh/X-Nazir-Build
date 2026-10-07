@@ -52,6 +52,10 @@ struct PaintStroke;
 namespace clone {
 struct CloneStrokeRuntime;
 }
+namespace clone_mesh {
+struct CloneMeshStrokeRuntime;
+struct CloneMeshBrushSource;
+}
 namespace auto_mask {
 struct Cache;
 }
@@ -976,6 +980,37 @@ struct StrokeCache {
   clone::CloneStrokeRuntime *clone_runtime = nullptr;
 
   /**
+   * Clone Stamp Mesh: the source object's stroke-start positions snapshot and the private BVH
+   * built over it, built on the first dab of the stroke (see
+   * #clone_mesh::CloneMeshStrokeRuntime for why the dabs never read the live mesh). Same
+   * ownership as #clone_runtime: the cache is the stroke's lifetime, #~StrokeCache releases
+   * it, cancel included.
+   */
+  clone_mesh::CloneMeshStrokeRuntime *clone_mesh_runtime = nullptr;
+
+  /**
+   * Clone Stamp Mesh with symmetry on: the source is the surface under the brush itself, read on
+   * the main pass and stamped by the mirror/radial passes. Lives on the PRIMARY object's cache
+   * (the one under the cursor); every other object's mirror passes reach it through
+   * #multi_object_sample_reference. Holds a stroke-start snapshot of the primary's surface.
+   */
+  std::shared_ptr<clone_mesh::CloneMeshBrushSource> clone_mesh_brush_source;
+
+  /**
+   * Clone Stamp Mesh, Relative mode: per-vertex stroke state for overlap-free stamping (the
+   * Layer brush's pattern). #clone_mesh_factor keeps the LARGEST signed strength the vertex has
+   * received this stroke, so re-covering a vertex only pushes it towards full strength instead
+   * of re-applying the stamp on top of itself; #clone_mesh_target is the vertex's target offset
+   * from its stroke-start position, a strength-weighted running average over every dab that
+   * covered it (.xyz = sum of weight * target, .w = sum of weights; .w == 0 means untouched).
+   * Both are sized to the vertex count on the first Relative dab and stay empty otherwise.
+   * Absolute keeps its converging re-stamp semantics and BMesh (unstable per-vertex indices under
+   * dynamic topology) falls back to the accumulating application, so neither uses these.
+   */
+  Array<float> clone_mesh_factor;
+  Array<float4> clone_mesh_target;
+
+  /**
    * Pre-stroke color and coverage for the material channel maps, allocated on the first dab of a
    * stroke that paints with a mode other than Mix. See #paint::image::MaterialStrokeAccum.
    */
@@ -1530,6 +1565,18 @@ void cache_calc_brushdata_symm(ed::sculpt_paint::StrokeCache &cache,
                                ePaintSymmetryFlags symm,
                                char axis,
                                float angle);
+
+/**
+ * Mirror a direction for one symmetry pass: `symmetry_flip` for the pass's axes plus the
+ * radial rotation, routed through the reference object's frame in shared-origin multi-object
+ * mode -- the exact mirror #cache_calc_brushdata_symm applies to the cache's own vectors.
+ * Used by brushes that build their own per-pass data (Clone Stamp Mesh's destination frame).
+ */
+float3 symm_pass_mirror_direction(const ed::sculpt_paint::StrokeCache &cache, float3 dir);
+
+/** Point counterpart of #symm_pass_mirror_direction (translation included), in the object's
+ * local space. Used by Clone Stamp Mesh to mirror its source point for each symmetry pass. */
+float3 symm_pass_mirror_point(const ed::sculpt_paint::StrokeCache &cache, float3 co);
 
 /** Calculates the nodes that a brush will influence. */
 brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgraph,

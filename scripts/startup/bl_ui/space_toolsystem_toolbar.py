@@ -2328,6 +2328,29 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def clone_mesh():
+        def draw_settings(context, layout, _tool):
+            # Shown in the Active Tool panel only, the tool header stays empty.
+            if context.region.type == 'TOOL_HEADER':
+                return
+            paint = context.tool_settings.sculpt
+            brush = paint.brush
+            layout.prop(paint, "clone_mode", text="Mode")
+            if brush is not None:
+                layout.prop(brush.clone_stamp_mesh, "apply_mode", text="Apply")
+                layout.prop(brush.clone_stamp_mesh, "missing_source", text="Missing Source")
+            layout.operator("paint.clone_mesh_source_reset", text="Reset Source")
+
+        return dict(
+            idname="builtin_brush.clone_mesh",
+            label="Clone Stamp Mesh",
+            icon="brush.paint_texture.clone",
+            options={'USE_BRUSHES'},
+            brush_type='CLONE_MESH',
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
     def layer_eraser():
         return dict(
             idname="builtin_brush.layer_eraser",
@@ -5182,6 +5205,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.mask_by_color,
             _defs_sculpt.mask_by_topology_island,
             _defs_sculpt.clone,
+            _defs_sculpt.clone_mesh,
             _defs_sculpt.layer_eraser,
             _defs_sculpt.texture_fill,
             _defs_sculpt.color_gradient,

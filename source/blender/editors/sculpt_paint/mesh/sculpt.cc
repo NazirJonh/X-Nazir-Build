@@ -112,6 +112,7 @@
 #include "ED_view3d.hh"
 
 #include "../paint_clone.hh"
+#include "../paint_clone_mesh_source.hh"
 #include "../paint_clone_stroke.hh"
 #include "../paint_curve_patch_session.hh"
 #include "../paint_intern.hh"
@@ -1028,6 +1029,7 @@ static int sculpt_brush_needs_normal(const SculptSession &ss, const Brush &brush
            (bke::brush::normal_weight_get(brush, ss.cache->toggle_settings.invert) > 0.0f)) ||
           ELEM(brush.sculpt_brush_type,
                SCULPT_BRUSH_TYPE_BLOB,
+               SCULPT_BRUSH_TYPE_CLONE_MESH,
                SCULPT_BRUSH_TYPE_CREASE,
                SCULPT_BRUSH_TYPE_DRAW,
                SCULPT_BRUSH_TYPE_DRAW_SHARP,
@@ -2840,6 +2842,10 @@ static float brush_strength(const Sculpt &sd,
       return alpha * pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_SLIDE_RELAX:
       return alpha * pressure * overlap * feather * 2.0f;
+    case SCULPT_BRUSH_TYPE_CLONE_MESH:
+      /* The stamp's own form already carries the detail's amplitude; linear strength like
+       * Draw, not the squared pressure the color-clone uses. */
+      return alpha * flip * pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_PAINT:
     case SCULPT_BRUSH_TYPE_CLONE:
       final_pressure = pressure * pressure;
@@ -3999,7 +4005,7 @@ static float3 calc_sculpt_normal(const Depsgraph &depsgraph,
  * transforms are identity for the single-object / option-off / reference-object cases, keeping
  * those paths bit-exact.
  */
-static float3 symm_pass_mirror_point(const StrokeCache &cache, float3 co)
+float3 symm_pass_mirror_point(const StrokeCache &cache, float3 co)
 {
   if (cache.symm_shared_origin_active) {
     co = math::transform_point(cache.symm_ref_from_cur, co);
@@ -4011,8 +4017,10 @@ static float3 symm_pass_mirror_point(const StrokeCache &cache, float3 co)
   return math::transform_point(cache.symm_rot_mat, co);
 }
 
-/** Direction counterpart of #symm_pass_mirror_point (ignores translation). */
-static float3 symm_pass_mirror_direction(const StrokeCache &cache, float3 dir)
+/** Direction counterpart of #symm_pass_mirror_point (ignores translation). Exported because
+ * brushes that build their own per-pass data (Clone Stamp Mesh's destination frame) need the
+ * exact mirror the cache's own vectors get, shared-origin included. */
+float3 symm_pass_mirror_direction(const StrokeCache &cache, float3 dir)
 {
   if (cache.symm_shared_origin_active) {
     dir = math::transform_direction(cache.symm_ref_from_cur, dir);
@@ -5200,6 +5208,8 @@ static const char *sculpt_brush_type_name(const Brush &brush)
       return "Texture Fill Brush";
     case SCULPT_BRUSH_TYPE_CLONE:
       return "Clone Brush";
+    case SCULPT_BRUSH_TYPE_CLONE_MESH:
+      return "Clone Stamp Mesh Brush";
   }
 
   return "Sculpting";
@@ -5615,6 +5625,12 @@ void do_brush_action(const Depsgraph &depsgraph,
        * cache and released with it. */
       clone::sculpt_clone_dab_apply(
           depsgraph, sd, ob, brush, paint_mode_settings, ss.cache->clone_runtime);
+      break;
+    case SCULPT_BRUSH_TYPE_CLONE_MESH:
+      /* Clone Stamp Mesh: stamp the source object's surface form onto this mesh. Standard
+       * position undo (the default arm of push_undo_nodes); the source's stroke-start
+       * snapshot and its BVH are owned by the stroke cache and released with it. */
+      brushes::do_clone_stamp_brush(depsgraph, sd, ob, node_mask);
       break;
   }
 
@@ -6306,6 +6322,7 @@ StrokeCache::StrokeCache() = default;
 StrokeCache::~StrokeCache()
 {
   clone::clone_stroke_runtime_free(this->clone_runtime);
+  clone_mesh::clone_mesh_stroke_runtime_free(this->clone_mesh_runtime);
   if (this->dial) {
     BLI_dial_free(this->dial);
   }
@@ -10745,6 +10762,20 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
   }
 
+  /* Clone Stamp Mesh: same binding, same reasoning -- a clone stroke is meaningless until a
+   * source exists, and the picker needs the mouse over the 3D viewport. */
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE_MESH) {
+    WorkspaceStatus status(C);
+    status.item(IFACE_("Clone Mesh"), ICON_MOUSE_LMB);
+    status.item(IFACE_("Set Source"), ICON_EVENT_SHIFT, ICON_MOUSE_LMB);
+
+    if ((event->modifier & KM_SHIFT) != 0) {
+      WM_operator_name_call(
+          C, "PAINT_OT_clone_mesh_source_set", wm::OpCallContext::InvokeDefault, nullptr, event);
+      return OPERATOR_FINISHED;
+    }
+  }
+
   stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event->type);
   brush_stroke_init(C, op);
 
@@ -11691,6 +11722,10 @@ template void gather_data_grids<float3>(const SubdivCCG &,
                                         Span<float3>,
                                         Span<int>,
                                         MutableSpan<float3>);
+template void gather_data_grids<float4>(const SubdivCCG &,
+                                        Span<float4>,
+                                        Span<int>,
+                                        MutableSpan<float4>);
 template void gather_data_bmesh<int>(Span<int>, const Set<BMVert *, 0> &, MutableSpan<int>);
 template void gather_data_bmesh<float>(Span<float>, const Set<BMVert *, 0> &, MutableSpan<float>);
 template void gather_data_bmesh<float3>(Span<float3>,
@@ -11705,6 +11740,10 @@ template void scatter_data_grids<float3>(const SubdivCCG &,
                                          Span<float3>,
                                          Span<int>,
                                          MutableSpan<float3>);
+template void scatter_data_grids<float4>(const SubdivCCG &,
+                                         Span<float4>,
+                                         Span<int>,
+                                         MutableSpan<float4>);
 template void scatter_data_bmesh<float>(Span<float>, const Set<BMVert *, 0> &, MutableSpan<float>);
 template void scatter_data_bmesh<float3>(Span<float3>,
                                          const Set<BMVert *, 0> &,

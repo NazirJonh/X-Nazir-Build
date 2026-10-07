@@ -203,6 +203,15 @@ void do_scene_project_brush(const Depsgraph &depsgraph,
                             const Sculpt &sd,
                             Object &object,
                             const IndexMask &node_mask);
+/**
+ * Clone Stamp Mesh: stamp the source object's surface form onto this mesh, per symmetry
+ * pass. Source record and stroke-frozen sampling runtime live in paint_clone_mesh_source; no
+ * source (or an invalid one) makes the brush a no-op.
+ */
+void do_clone_stamp_brush(const Depsgraph &depsgraph,
+                          const Sculpt &sd,
+                          Object &object,
+                          const IndexMask &node_mask);
 /** Smooth positions with neighboring vertices. */
 void do_smooth_brush(const Depsgraph &depsgraph,
                      const Sculpt &sd,

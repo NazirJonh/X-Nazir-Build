@@ -289,6 +289,29 @@ const EnumPropertyItem rna_enum_shared_automasking_flag_items[] = {
      "Only affect vertices that are not occluded by other faces (slower performance)"},
     {0, nullptr, 0, nullptr, nullptr}};
 
+static const EnumPropertyItem rna_enum_brush_clone_stamp_mesh_apply_mode_items[] = {
+    {CLONE_STAMP_MESH_APPLY_IMPRINT,
+     "IMPRINT",
+     0,
+     "Imprint",
+     "Converge the surface onto the stamped source form"},
+    {CLONE_STAMP_MESH_APPLY_ADDITIVE,
+     "ADDITIVE",
+     0,
+     "Additive",
+     "Build the source form up on top of the current surface, like an alpha brush"},
+    {0, nullptr, 0, nullptr, nullptr}};
+
+static const EnumPropertyItem rna_enum_brush_clone_stamp_mesh_missing_source_items[] = {
+    {CLONE_STAMP_MESH_MISSING_IGNORE, "IGNORE", 0, "Ignore", "Leave unsampled vertices alone"},
+    {CLONE_STAMP_MESH_MISSING_FILL_PLANE,
+     "FILL_PLANE",
+     0,
+     "Fill Plane",
+     "Treat a missing sample as source height zero, pulling the region onto the stamp plane "
+     "in Imprint mode"},
+    {0, nullptr, 0, nullptr, nullptr}};
+
 const EnumPropertyItem rna_enum_brush_sculpt_brush_type_items[] = {
     {SCULPT_BRUSH_TYPE_DRAW, "DRAW", 0, "Draw", ""},
     {SCULPT_BRUSH_TYPE_DRAW_SHARP, "DRAW_SHARP", 0, "Draw Sharp", ""},
@@ -344,6 +367,12 @@ const EnumPropertyItem rna_enum_brush_sculpt_brush_type_items[] = {
      0,
      "Clone Stamp",
      "Copy every visible material channel from a source point on the mesh"},
+    {SCULPT_BRUSH_TYPE_CLONE_MESH,
+     "CLONE_MESH",
+     0,
+     "Clone Stamp Mesh",
+     "Stamp the surface form of a source object onto the mesh under the brush, with symmetry "
+     "and an absolute or brush-relative source"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1793,6 +1822,20 @@ static std::optional<std::string> rna_BrushCurvePatchSettings_path(const Pointer
 static void rna_BrushCurvePatchSettings_update(Main * /*bmain*/,
                                                Scene * /*scene*/,
                                                PointerRNA *ptr)
+{
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+static std::optional<std::string> rna_BrushCloneStampMeshSettings_path(const PointerRNA * /*ptr*/)
+{
+  return "clone_stamp_mesh";
+}
+
+static void rna_BrushCloneStampMeshSettings_update(Main * /*bmain*/,
+                                                   Scene * /*scene*/,
+                                                   PointerRNA *ptr)
 {
   Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
   BKE_brush_tag_unsaved_changes(br);
@@ -4406,6 +4449,46 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_alpha_mode_update");
 }
 
+static void rna_def_brush_clone_stamp_mesh_settings(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "BrushCloneStampMeshSettings", nullptr);
+  RNA_def_struct_sdna(srna, "BrushCloneStampMeshSettings");
+  RNA_def_struct_path_func(srna, "rna_BrushCloneStampMeshSettings_path");
+  RNA_def_struct_ui_text(srna, "Clone Stamp Mesh Settings", "Clone Stamp Mesh brush settings");
+
+  prop = RNA_def_property(srna, "apply_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "apply_mode");
+  RNA_def_property_enum_items(prop, rna_enum_brush_clone_stamp_mesh_apply_mode_items);
+  RNA_def_property_ui_text(prop,
+                           "Apply Mode",
+                           "How the sampled source form is applied to the surface: converge "
+                           "onto the stamp (Imprint) or build it up (Additive)");
+  RNA_def_property_update(prop, 0, "rna_BrushCloneStampMeshSettings_update");
+
+  prop = RNA_def_property(srna, "missing_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "missing_source");
+  RNA_def_property_enum_items(prop, rna_enum_brush_clone_stamp_mesh_missing_source_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Missing Source",
+      "What happens to a vertex whose probe found no source surface (a hole or an open edge "
+      "in the source): leave it alone, or flatten it onto the stamp plane in Imprint mode");
+  RNA_def_property_update(prop, 0, "rna_BrushCloneStampMeshSettings_update");
+
+  prop = RNA_def_property(srna, "sample_scale", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sample_scale");
+  RNA_def_property_range(prop, 0.001f, 100.0f);
+  RNA_def_property_ui_text(
+      prop,
+      "Sample Scale",
+      "Unused by the brush: the source patch is always sampled 1:1 with the brush footprint. "
+      "The property is kept so brushes saved with older files still load; it has no effect");
+  RNA_def_property_update(prop, 0, "rna_BrushCloneStampMeshSettings_update");
+}
+
 static void rna_def_brush(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -6318,6 +6401,12 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Curve Patch", "Curve Patch settings");
 
+  prop = RNA_def_property(srna, "clone_stamp_mesh", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "BrushCloneStampMeshSettings");
+  RNA_def_property_pointer_sdna(prop, nullptr, "clone_stamp_mesh");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Clone Stamp Mesh", "Clone Stamp Mesh brush settings");
+
   /* Roll stroke method. Kept flat rather than nested in a struct of its own: two booleans do not
    * describe a settings block. */
   prop = RNA_def_property(srna, "use_roll_pressure_scale", PROP_BOOLEAN, PROP_NONE);
@@ -6621,6 +6710,7 @@ void RNA_def_brush(BlenderRNA *brna)
   rna_def_gpencil_options(brna);
   rna_def_curves_sculpt_options(brna);
   rna_def_brush_material_paint(brna);
+  rna_def_brush_clone_stamp_mesh_settings(brna);
   rna_def_brush_curve_patch_texture_slot(brna);
   rna_def_brush_curve_patch_settings(brna);
   rna_def_brush_texture_slot(brna);

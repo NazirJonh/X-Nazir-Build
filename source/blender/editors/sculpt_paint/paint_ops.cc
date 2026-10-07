@@ -93,6 +93,7 @@
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_edit_intern.hh"
 #include "paint_clone.hh"
+#include "paint_clone_mesh_source.hh"
 #include "paint_clone_source.hh"
 #include "paint_image_curve_patch_edit.hh"
 #include "paint_intern.hh"
@@ -2485,6 +2486,11 @@ void ED_operatortypes_paint()
   blender::ed::sculpt_paint::clone::clone_source_points_callbacks_register();
   WM_operatortype_append(blender::ed::sculpt_paint::clone::PAINT_OT_clone_source_set);
   WM_operatortype_append(blender::ed::sculpt_paint::clone::PAINT_OT_clone_source_reset);
+  blender::ed::sculpt_paint::clone_mesh::clone_mesh_source_points_callbacks_register();
+  WM_operatortype_append(
+      blender::ed::sculpt_paint::clone_mesh::PAINT_OT_clone_mesh_source_set);
+  WM_operatortype_append(
+      blender::ed::sculpt_paint::clone_mesh::PAINT_OT_clone_mesh_source_reset);
   WM_operatortype_append(PAINT_OT_grab_clone);
   WM_operatortype_append(PAINT_OT_project_image);
   WM_operatortype_append(PAINT_OT_image_from_view);

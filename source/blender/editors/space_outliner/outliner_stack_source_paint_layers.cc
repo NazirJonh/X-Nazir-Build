@@ -1478,8 +1478,15 @@ class PaintLayersStackSource final : public StackSource,
     const MaterialPaintLayer *from = paste_source_row(*ctx.bmain, source);
     MaterialPaintLayer *target = paint_description_row_for_ordinal(
         const_cast<Material &>(layers_owner(owner)), target_ordinal);
-    return from != nullptr && target != nullptr &&
-           BKE_paint_layers_correction_can_paste(*from, *target);
+    if (from == nullptr || target == nullptr) {
+      return false;
+    }
+    /* Corrections paste onto the target row; Layer rows paste beside it (10.3). */
+    if (BKE_paint_layers_role(*from) == PaintLayerRole::Layer) {
+      return BKE_paint_layers_subtree_can_paste(
+          *from, const_cast<Material &>(layers_owner(owner)), target);
+    }
+    return BKE_paint_layers_correction_can_paste(*from, *target);
   }
 
   bool rows_paste_into(bContext &C,
@@ -1501,9 +1508,11 @@ class PaintLayersStackSource final : public StackSource,
     }
 
     /* Why two passes: a base mask must land first, or the items copied after it would find no base
-     * to sit over and be refused. */
+     * to sit over and be refused. Layer rows keep their source order by chaining the anchor:
+     * every pasted row lands above the previous copy. */
     int skipped = 0;
     bool any = false;
+    MaterialPaintLayer *layer_anchor = target;
     for (const bool base_pass : {true, false}) {
       for (const StackItemIdentity &identity : sources) {
         const MaterialPaintLayer *from = paste_source_row(*bmain, identity);
@@ -1517,7 +1526,17 @@ class PaintLayersStackSource final : public StackSource,
         if (is_base != base_pass) {
           continue;
         }
-        MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, material, *from, target);
+        MaterialPaintLayer *copy = nullptr;
+        if (BKE_paint_layers_role(*from) == PaintLayerRole::Layer) {
+          copy = BKE_paint_layers_subtree_paste(
+              *bmain, material, *from, layer_anchor, PaintLayerPlace::Above);
+          if (copy != nullptr) {
+            layer_anchor = copy;
+          }
+        }
+        else {
+          copy = BKE_paint_layers_correction_paste(*bmain, material, *from, target);
+        }
         if (copy == nullptr) {
           skipped++;
           continue;

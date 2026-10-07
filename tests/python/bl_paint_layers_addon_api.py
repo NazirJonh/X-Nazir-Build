@@ -100,6 +100,31 @@ class PaintLayersAddonApiTest(unittest.TestCase):
             self.assertTrue(row.marker)
             self.assertIs(ma.paint_layers.find(row.marker), row)
 
+    def test_paste_copies_subtree_with_fresh_markers(self):
+        # 10.3: a preset-style copy across materials, then a correction onto a row.
+        _ob, ma = make_layered("PasteDst")
+        _ob_src, src_ma = make_layered("PasteSrc")
+        folder = src_ma.paint_layers.new(source='STACK', name="Preset")
+        child = src_ma.paint_layers.new(source='IMAGE', name="PresetChild",
+                                        anchor=folder, place='INTO')
+        layer = ma.paint_layers.new(source='IMAGE', name="Bottom")
+
+        copy = ma.paint_layers.paste(source=folder, anchor=layer, place='ABOVE')
+        self.assertIsNotNone(copy)
+        self.assertNotEqual(copy.marker, folder.marker)
+        kids = list(copy.children)
+        self.assertEqual(len(kids), 1)
+        self.assertEqual(kids[0].name, "PresetChild")
+        self.assertNotEqual(kids[0].marker, child.marker)
+        # The active cursor is left alone by a paste.
+        self.assertIs(ma.paint_layers.active, layer)
+
+        # A correction source lands on the target row instead.
+        effect = folder.correction_add(role='EFFECT', source='IMAGE', name="E")
+        pasted_effect = ma.paint_layers.paste(source=effect, target=layer)
+        self.assertIsNotNone(pasted_effect)
+        self.assertIn(pasted_effect, list(layer.effects))
+
 
 if __name__ == "__main__":
     unittest.main()

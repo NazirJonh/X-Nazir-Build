@@ -1048,6 +1048,50 @@ static MaterialPaintLayer *rna_Material_paint_layers_merge_down(Material *ma,
   return folder;
 }
 
+/**
+ * Paste a copy of \a source (10.3): a Layer row -- with its whole subtree -- lands at \a anchor
+ * and \a place, a correction lands on the \a target row. The source may belong to another
+ * material, which is how a preset browser hands a stored row over; images are copied, never
+ * shared. The active cursor is left alone.
+ */
+static MaterialPaintLayer *rna_Material_paint_layers_paste(Material *ma,
+                                                           Main *bmain,
+                                                           ReportList *reports,
+                                                           PointerRNA *source_ptr,
+                                                           PointerRNA *anchor_ptr,
+                                                           int place,
+                                                           PointerRNA *target_ptr)
+{
+  MaterialPaintLayer *source = static_cast<MaterialPaintLayer *>(source_ptr->data);
+  if (source == nullptr) {
+    BKE_report(reports, RPT_ERROR, "No paint layer to paste");
+    return nullptr;
+  }
+  MaterialPaintLayer *copy = nullptr;
+  if (BKE_paint_layers_role(*source) == PaintLayerRole::Layer) {
+    MaterialPaintLayer *anchor = static_cast<MaterialPaintLayer *>(anchor_ptr->data);
+    if (anchor != nullptr && BKE_paint_layers_find(*ma, anchor->marker) != anchor) {
+      BKE_report(reports, RPT_ERROR, "Paste anchor must belong to this material");
+      return nullptr;
+    }
+    copy = BKE_paint_layers_subtree_paste(*bmain, *ma, *source, anchor, PaintLayerPlace(place));
+  }
+  else {
+    MaterialPaintLayer *target = static_cast<MaterialPaintLayer *>(target_ptr->data);
+    if (target == nullptr || BKE_paint_layers_find(*ma, target->marker) != target) {
+      BKE_report(reports, RPT_ERROR, "Pasting a correction needs a target row of this material");
+      return nullptr;
+    }
+    copy = BKE_paint_layers_correction_paste(*bmain, *ma, *source, target);
+  }
+  if (copy == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Cannot paste this paint layer here");
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  return copy;
+}
+
 static void rna_MaterialPaintLayer_name_set(PointerRNA *ptr, const char *value)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
@@ -3340,6 +3384,36 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
   RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
   parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "", "The new folder");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "paste", "rna_Material_paint_layers_paste");
+  RNA_def_function_ui_description(
+      func,
+      "Paste a copy of a paint layer: a Layer row with its subtree lands at the anchor, "
+      "a correction lands on the target row");
+  RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func,
+                         "source",
+                         "MaterialPaintLayer",
+                         "Paint Layer",
+                         "The row to copy, possibly of another material");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(
+      func, "anchor", "MaterialPaintLayer", "", "Anchor row, or none for the top of the stack");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_enum(func,
+                      "place",
+                      rna_enum_material_paint_layer_place_items,
+                      0,
+                      "Place",
+                      "Where to put a Layer row relative to the anchor");
+  parm = RNA_def_pointer(
+      func, "target", "MaterialPaintLayer", "", "Target row for a correction source");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "copy", "MaterialPaintLayer", "", "The pasted copy");
   RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "regenerate", "rna_Material_paint_layers_regenerate");

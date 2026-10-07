@@ -191,6 +191,63 @@ TEST_F(PaintLayersTestBase, mask_and_subtree_accessors_agree)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name 10.3: subtree paste in BKE
+ * \{ */
+
+TEST_F(PaintLayersTestBase, subtree_paste_places_a_deep_copy_at_the_anchor)
+{
+  /* A folder with a painted child pasted above a sibling: the copy carries the subtree with
+   * fresh markers and its own images, and lands where asked. */
+  MaterialPaintLayer *folder = add_folder("Folder");
+  Image *child_img = add_solid_image("ChildImg");
+  MaterialPaintLayer *child = add_paint_layer_into(folder, "Child", child_img);
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_solid_image("BottomImg"));
+
+  EXPECT_TRUE(BKE_paint_layers_subtree_can_paste(*folder, *ma, bottom));
+  MaterialPaintLayer *copy = BKE_paint_layers_subtree_paste(
+      *bmain, *ma, *folder, bottom, PaintLayerPlace::Above);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_NE(copy, folder);
+  EXPECT_FALSE(BLI_uuid_equal(copy->marker, folder->marker));
+
+  const Vector<MaterialPaintLayer *> kids = BKE_paint_layers_children(*copy);
+  ASSERT_EQ(kids.size(), 1);
+  EXPECT_STREQ(kids[0]->name, "Child");
+  EXPECT_FALSE(BLI_uuid_equal(kids[0]->marker, child->marker));
+  /* Maps are copied, never shared: painting the copy must not touch the source. */
+  ASSERT_EQ(kids[0]->channels_num, 1);
+  EXPECT_NE(kids[0]->channels[0].image, child_img);
+}
+
+TEST_F(PaintLayersTestBase, subtree_paste_refusals)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Layer", add_solid_image("LayerImg"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, layer, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_SOURCE_IMAGE, "C");
+  ASSERT_NE(correction, nullptr);
+
+  /* Corrections paste onto a row, not beside one: the subtree verb refuses them. */
+  EXPECT_FALSE(BKE_paint_layers_subtree_can_paste(*correction, *ma, layer));
+  EXPECT_EQ(BKE_paint_layers_subtree_paste(*bmain, *ma, *correction, layer, PaintLayerPlace::Above),
+            nullptr);
+
+  /* Into names a folder: a leaf cannot hold rows. */
+  EXPECT_EQ(BKE_paint_layers_subtree_paste(*bmain, *ma, *layer, layer, PaintLayerPlace::Into),
+            nullptr);
+
+  /* An anchor of another material is foreign, never a slot of this one. */
+  Material *other = BKE_material_add(bmain, "Other");
+  MaterialPaintLayer *foreign = BKE_paint_layers_add(
+      *other, MA_PAINT_LAYER_SOURCE_IMAGE, "Foreign", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(foreign, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_subtree_can_paste(*layer, *ma, foreign));
+  EXPECT_EQ(BKE_paint_layers_subtree_paste(*bmain, *ma, *layer, foreign, PaintLayerPlace::Above),
+            nullptr);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name 2.2.3: one depth-first order
  * \{ */
 

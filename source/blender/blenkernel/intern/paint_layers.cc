@@ -1966,6 +1966,64 @@ MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
   return copy;
 }
 
+bool BKE_paint_layers_subtree_can_paste(const MaterialPaintLayer &source,
+                                        Material &ma,
+                                        const MaterialPaintLayer *anchor)
+{
+  if (BKE_paint_layers_role(source) != PaintLayerRole::Layer) {
+    return false;
+  }
+  if (anchor == nullptr) {
+    return true;
+  }
+  return paint_layer_owner_list(&ma.paint_layers, anchor) != nullptr;
+}
+
+MaterialPaintLayer *BKE_paint_layers_subtree_paste(Main &bmain,
+                                                   Material &ma,
+                                                   const MaterialPaintLayer &source,
+                                                   MaterialPaintLayer *anchor,
+                                                   PaintLayerPlace place)
+{
+  if (!BKE_paint_layers_subtree_can_paste(source, ma, anchor)) {
+    return nullptr;
+  }
+  if (anchor != nullptr && BKE_paint_layers_is_folder(*anchor) && place == PaintLayerPlace::Above)
+  {
+    /* An add onto a folder means filling it: the same redirect the Add policy applies, so a
+     * preset dropped on a folder lands inside it from every caller. */
+    place = PaintLayerPlace::Into;
+  }
+  /* Why copy the images: a map is painted in place, so a pasted row sharing its source's image
+   * would turn every stroke on one into a stroke on the other. */
+  MaterialPaintLayer *copy = paint_layer_branch_duplicate(bmain, ma, source, true);
+  if (anchor == nullptr) {
+    BLI_addtail(&ma.paint_layers, copy);
+  }
+  else if (place == PaintLayerPlace::Into) {
+    if (!BKE_paint_layers_is_folder(*anchor)) {
+      BKE_material_paint_layer_free(copy);
+      return nullptr;
+    }
+    BLI_addtail(&anchor->children, copy);
+  }
+  else {
+    ListBase *owner = paint_layer_owner_list(&ma.paint_layers, anchor);
+    if (owner == nullptr) {
+      BKE_material_paint_layer_free(copy);
+      return nullptr;
+    }
+    if (place == PaintLayerPlace::Above) {
+      BLI_insertlinkafter(owner, anchor, copy);
+    }
+    else {
+      BLI_insertlinkbefore(owner, anchor, copy);
+    }
+  }
+  paint_layer_mark_owned(ma);
+  return copy;
+}
+
 MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *layer, float value)
 {
   if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {

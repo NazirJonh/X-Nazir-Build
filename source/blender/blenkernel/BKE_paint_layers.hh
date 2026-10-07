@@ -612,6 +612,33 @@ MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
                                                       MaterialPaintLayer *target);
 
 /**
+ * Whether #BKE_paint_layers_subtree_paste can place a copy of the Layer row \a source at \a anchor:
+ * \a source must be a stack row (corrections paste onto a row through
+ * #BKE_paint_layers_correction_paste instead), and \a anchor -- null for the top of the stack --
+ * must be a row of \a ma.
+ */
+bool BKE_paint_layers_subtree_can_paste(const MaterialPaintLayer &source,
+                                        Material &ma,
+                                        const MaterialPaintLayer *anchor);
+
+/**
+ * Paste a deep copy of the Layer row \a source -- which may belong to another material, as a
+ * preset browser hands one over -- into \a ma at \a anchor and \a place (phase 10.3). The copy
+ * carries the whole subtree: children, effects and mask items get fresh markers unique within
+ * \a ma and copies of the images their channels hold (never the shared image); a source material
+ * or node group stays shared with a user of its own. An `Above` at a folder lands `Into` it,
+ * the same redirect the Add policy applies. The active cursor is left alone.
+ *
+ * \return the copy, or null when #BKE_paint_layers_subtree_can_paste refuses or \a place names
+ * a non-folder for `Into`.
+ */
+MaterialPaintLayer *BKE_paint_layers_subtree_paste(Main &bmain,
+                                                   Material &ma,
+                                                   const MaterialPaintLayer &source,
+                                                   MaterialPaintLayer *anchor,
+                                                   PaintLayerPlace place);
+
+/**
  * Give \a layer a new base mask item of strength \a value, inserted first in its mask stack.
  *
  * The item is a constant `MULTIPLY` element, so the row's coverage starts at `F = value`. A

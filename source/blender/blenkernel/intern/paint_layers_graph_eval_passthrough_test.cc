@@ -1498,21 +1498,6 @@ TEST_F(PaintLayersGraphEvalTest, stack_mask_item_folder_auto_baked_matches_live)
  * `alpha(map) * opacity`, then the row laid over the bottom. The row covers fully here (its source
  * alpha is one), so the bottom is not reached and the result is the corrected colour.
  */
-void expect_correction_mix(const RGBA &sample,
-                           const float source_rgb[3],
-                           const float opacity,
-                           const RGBA &got,
-                           const char *tag)
-{
-  const float f = sample.a * opacity;
-  const float expected[3] = {source_rgb[0] + (sample.r - source_rgb[0]) * f,
-                             source_rgb[1] + (sample.g - source_rgb[1]) * f,
-                             source_rgb[2] + (sample.b - source_rgb[2]) * f};
-  EXPECT_NEAR(got.r, expected[0], 1e-4f) << tag;
-  EXPECT_NEAR(got.g, expected[1], 1e-4f) << tag;
-  EXPECT_NEAR(got.b, expected[2], 1e-4f) << tag;
-}
-
 }  // namespace
 
 }  // namespace blender::bke::tests

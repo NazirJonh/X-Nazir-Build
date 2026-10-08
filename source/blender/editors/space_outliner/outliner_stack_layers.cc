@@ -71,7 +71,6 @@ const ed::outliner::StackRow *outliner_stack_row_resolve(const SpaceOutliner &sp
                                                          const bUUID &row_id,
                                                          int ordinal_hint);
 
-namespace {
 
 /* The Stack Layers clipboard holds row identities rather than raw source data. A paste asks the
  * source to duplicate those rows, so every source keeps ownership of its data and copy
@@ -159,7 +158,7 @@ wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op)
   return OPERATOR_FINISHED;
 }
 
-static wmOperatorStatus stack_back_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+wmOperatorStatus stack_back_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   /* The modifier is read once, at invoke: an exec reached from a script or from Repeat Last has
    * no event to read, and an operator whose behavior is not in its properties is not
@@ -930,7 +929,7 @@ static const char *stack_add_source_collection_name(const short idcode)
  * A confirm dialog rather than a redo popup: every change in a redo popup re-runs the whole add,
  * and dragging a colour would create and throw away a set of full-size maps per mouse move.
  */
-static wmOperatorStatus stack_row_add_invoke(bContext *C,
+wmOperatorStatus stack_row_add_invoke(bContext *C,
                                              wmOperator *op,
                                              const wmEvent * /*event*/)
 {
@@ -952,7 +951,7 @@ static wmOperatorStatus stack_row_add_invoke(bContext *C,
  * source data-block for a kind made from one. The anchor, the kind and the marker are what the
  * button that placed the call already decided.
  */
-static void stack_row_add_ui(bContext *C, wmOperator *op)
+void stack_row_add_ui(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   StackAddKindInfo kind_info;
@@ -1465,7 +1464,6 @@ wmOperatorStatus stack_target_clear_exec(bContext *C, wmOperator * /*op*/)
                                                                      OPERATOR_CANCELLED;
 }
 
-}  // namespace
 
 const EnumPropertyItem *outliner_stack_focus_sub_index_itemf(bContext *C,
                                                               SpaceOutliner &space_outliner,

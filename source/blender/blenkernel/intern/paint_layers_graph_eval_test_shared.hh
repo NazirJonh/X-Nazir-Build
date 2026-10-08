@@ -15,6 +15,32 @@
 
 namespace blender::bke::tests {
 
+static const float kIsolatingPaintA[4] = {0.70f, 0.30f, 0.10f, 1.0f};
+
+/* Defined further down, next to the other source builders. */
+static Material *make_interface_wired_source(Main &bmain, const char *name);
+
+/** Configure a Color Ramp node into a two-stop linear ramp whose alpha runs \a a0 -> \a a1. */
+static void configure_color_ramp(bNode &node, const float a0, const float a1)
+{
+  ColorBand *band = static_cast<ColorBand *>(node.storage);
+  if (band == nullptr) {
+    return;
+  }
+  band->tot = 2;
+  band->ipotype = COLBAND_INTERP_LINEAR;
+  band->color_mode = COLBAND_BLEND_RGB;
+  band->data[0].pos = 0.0f;
+  band->data[0].r = 0.0f;
+  band->data[0].g = 0.0f;
+  band->data[0].b = 0.0f;
+  band->data[0].a = a0;
+  band->data[1].pos = 1.0f;
+  band->data[1].r = 1.0f;
+  band->data[1].g = 1.0f;
+  band->data[1].b = 1.0f;
+  band->data[1].a = a1;
+}
 
 /** A float data-space image of \a size x \a size from a row-major array of RGB triples, alpha one. */
 static Image *make_data_pattern_map(Main *bmain,
@@ -640,8 +666,6 @@ static void normal_result_reference(const RGBA &bottom_enc,
   r_out[2] = final_n[2] * 0.5f + 0.5f;
 }
 
- * \{ */
-
 /** A float image in data space, as the material bake writes a Value channel / coverage map. */
 static Image *make_bake_data_map(Main *bmain, const char *name, const int size, const float rgba[4])
 {
@@ -739,5 +763,244 @@ MaterialPaintLayer *add_content_correction(Material &ma,
   BKE_paint_layers_correction_source_set(ma, correction, MA_PAINT_LAYER_SOURCE_IMAGE);
   return correction;
 }
+
+
+static void expect_correction_mix(const RGBA &sample,
+                           const float source_rgb[3],
+                           const float opacity,
+                           const RGBA &got,
+                           const char *tag)
+{
+  const float f = sample.a * opacity;
+  const float expected[3] = {source_rgb[0] + (sample.r - source_rgb[0]) * f,
+                             source_rgb[1] + (sample.g - source_rgb[1]) * f,
+                             source_rgb[2] + (sample.b - source_rgb[2]) * f};
+  EXPECT_NEAR(got.r, expected[0], 1e-4f) << tag;
+  EXPECT_NEAR(got.g, expected[1], 1e-4f) << tag;
+  EXPECT_NEAR(got.b, expected[2], 1e-4f) << tag;
+}
+
+static Material *make_specular_source(Main &bmain, const char *name, const bool linked)
+{
+  Material *source = make_interface_wired_source(bmain, name);
+  bNodeTree *group = nullptr;
+  bNode *group_instance = nullptr;
+  for (bNode &node : source->nodetree->nodes) {
+    if (node.is_group() && node.id != nullptr) {
+      group = id_cast<bNodeTree *>(node.id);
+      group_instance = &node;
+    }
+  }
+  if (group == nullptr || group_instance == nullptr) {
+    return source;
+  }
+  bNode *group_input = nullptr;
+  bNode *principled = nullptr;
+  for (bNode &node : group->nodes) {
+    if (node.is_group_input()) {
+      group_input = &node;
+    }
+    else if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+      principled = &node;
+    }
+  }
+  if (group_input == nullptr || principled == nullptr) {
+    return source;
+  }
+  bNodeTreeInterfaceSocket *spec_in = group->tree_interface.add_socket(
+      "Specular", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  nodes::update_node_declaration_and_sockets(*group, *group_input);
+  nodes::update_node_declaration_and_sockets(*group, *group_instance);
+  BKE_ntree_update_tag_all(group);
+  BKE_ntree_update_after_single_tree_change(bmain, *group);
+  BKE_ntree_update_tag_all(source->nodetree);
+  BKE_ntree_update_after_single_tree_change(bmain, *source->nodetree);
+
+  bNodeSocket *specular = bke::node_find_socket(*principled, SOCK_IN, "Specular IOR Level"_ustr);
+  if (specular == nullptr) {
+    return source;
+  }
+  if (linked && spec_in != nullptr && spec_in->identifier != nullptr) {
+    bNodeSocket *instance_in = bke::node_find_socket(
+        *group_instance, SOCK_IN, UString::from_ptr_noinline(spec_in->identifier));
+    if (instance_in != nullptr && instance_in->default_value != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(instance_in->default_value)->value = 0.25f;
+    }
+    bNodeSocket *input_out = bke::node_find_socket(
+        *group_input, SOCK_OUT, UString::from_ptr_noinline(spec_in->identifier));
+    if (input_out != nullptr) {
+      bke::node_add_link(*group, *group_input, *input_out, *principled, *specular);
+    }
+  }
+  else {
+    static_cast<bNodeSocketValueFloat *>(specular->default_value)->value = 0.25f;
+  }
+  BKE_ntree_update_tag_all(group);
+  BKE_ntree_update_after_single_tree_change(bmain, *group);
+  return source;
+}
+
+static Vector<bNode *> root_node_ptrs(bNodeTree &tree)
+{
+  Vector<bNode *> nodes;
+  for (bNode &node : tree.nodes) {
+    nodes.append(&node);
+  }
+  return nodes;
+}
+
+static Material *make_wrapper_forced_source(Main &bmain, const char *name, bNode **r_principled)
+{
+  Material *source = BKE_material_add(&bmain, name);
+  bNodeTree &ntree = *source->nodetree;
+  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(ntree,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  bNode *noise = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_NOISE);
+  bke::node_add_link(ntree,
+                     *noise,
+                     *bke::node_find_socket(*noise, SOCK_OUT, "Color"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr));
+  *r_principled = principled;
+  return source;
+}
+
+static bNodeTree *wrapper_tree_find(Main &bmain, const char *source_name)
+{
+  char full[MAX_ID_NAME - 2];
+  SNPRINTF(full, ".PL Source %s", source_name);
+  for (bNodeTree &tree : bmain.nodetrees) {
+    if (STREQ(tree.id.name + 2, full)) {
+      return &tree;
+    }
+  }
+  return nullptr;
+}
+
+static Material *make_interface_wired_source(Main &bmain, const char *name)
+{
+  bNodeTree *group = bke::node_tree_add_tree(&bmain, "InterfaceWiredGroup", "ShaderNodeTree");
+  bNodeTreeInterface &iface = group->tree_interface;
+  bNodeTreeInterfaceSocket *in_color = iface.add_socket(
+      "Color", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeTreeInterfaceSocket *in_roughness = iface.add_socket(
+      "Roughness", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeTreeInterfaceSocket *in_metallic = iface.add_socket(
+      "Metallic", "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+  bNodeTreeInterfaceSocket *out_bsdf = iface.add_socket(
+      "BSDF", "", "NodeSocketShader", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  iface.tag_items_changed();
+  static_cast<bNodeSocketValueFloat *>(in_metallic->socket_data)->value = 0.7f;
+
+  bNode *group_input = bke::node_add_node(nullptr, *group, "NodeGroupInput"_ustr);
+  bNode *group_output = bke::node_add_node(nullptr, *group, "NodeGroupOutput"_ustr);
+  bNode *principled = bke::node_add_static_node(nullptr, *group, SH_NODE_BSDF_PRINCIPLED);
+  nodes::update_node_declaration_and_sockets(*group, *group_input);
+  nodes::update_node_declaration_and_sockets(*group, *group_output);
+  bke::node_add_link(*group,
+                     *group_input,
+                     *bke::node_find_socket(
+                         *group_input, SOCK_OUT, UString::from_ptr_noinline(in_color->identifier)),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr));
+  bke::node_add_link(
+      *group,
+      *group_input,
+      *bke::node_find_socket(
+          *group_input, SOCK_OUT, UString::from_ptr_noinline(in_roughness->identifier)),
+      *principled,
+      *bke::node_find_socket(*principled, SOCK_IN, "Roughness"_ustr));
+  bke::node_add_link(
+      *group,
+      *group_input,
+      *bke::node_find_socket(
+          *group_input, SOCK_OUT, UString::from_ptr_noinline(in_metallic->identifier)),
+      *principled,
+      *bke::node_find_socket(*principled, SOCK_IN, "Metallic"_ustr));
+  bke::node_add_link(*group,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *group_output,
+                     *bke::node_find_socket(
+                         *group_output, SOCK_IN, UString::from_ptr_noinline(out_bsdf->identifier)));
+  bNode *group_frame = bke::node_add_static_node(nullptr, *group, NODE_FRAME);
+  for (bNode &node : group->nodes) {
+    if (!node.is_frame()) {
+      node.parent = group_frame;
+    }
+  }
+  BKE_ntree_update_tag_all(group);
+  BKE_ntree_update_after_single_tree_change(bmain, *group);
+
+  Material *source = BKE_material_add(&bmain, name);
+  bNodeTree &tree = *source->nodetree;
+  bNode *instance = bke::node_add_node(nullptr, tree, group->typeinfo->group_idname);
+  instance->id = &group->id;
+  id_us_plus(&group->id);
+  nodes::update_node_declaration_and_sockets(tree, *instance);
+  /* A full update before the links: it gives the instance's input sockets their default values,
+   * which only then exist to be written (the source's Metallic rides the interface default). */
+  BKE_ntree_update_tag_all(source->nodetree);
+  BKE_ntree_update_after_single_tree_change(bmain, *source->nodetree);
+
+  bNode *rgb = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
+  bNodeSocket *rgb_out = bke::node_find_socket(*rgb, SOCK_OUT, "Color"_ustr);
+  const float rgb_color[4] = {0.2f, 0.5f, 0.9f, 1.0f};
+  copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(rgb_out->default_value)->value, rgb_color);
+  bNode *value = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+  bNodeSocket *value_out = bke::node_find_socket(*value, SOCK_OUT, "Value"_ustr);
+  static_cast<bNodeSocketValueFloat *>(value_out->default_value)->value = 0.3f;
+
+  bNode *reroute_color = bke::node_add_static_node(nullptr, tree, NODE_REROUTE);
+  bNode *reroute_roughness = bke::node_add_static_node(nullptr, tree, NODE_REROUTE);
+  bke::node_add_link(tree,
+                     *rgb,
+                     *rgb_out,
+                     *reroute_color,
+                     *bke::node_find_socket(*reroute_color, SOCK_IN, "Input"_ustr));
+  bke::node_add_link(
+      tree,
+      *reroute_color,
+      *bke::node_find_socket(*reroute_color, SOCK_OUT, "Output"_ustr),
+      *instance,
+      *bke::node_find_socket(*instance, SOCK_IN, UString::from_ptr_noinline(in_color->identifier)));
+  bke::node_add_link(tree,
+                     *value,
+                     *value_out,
+                     *reroute_roughness,
+                     *bke::node_find_socket(*reroute_roughness, SOCK_IN, "Input"_ustr));
+  bke::node_add_link(
+      tree,
+      *reroute_roughness,
+      *bke::node_find_socket(*reroute_roughness, SOCK_OUT, "Output"_ustr),
+      *instance,
+      *bke::node_find_socket(
+          *instance, SOCK_IN, UString::from_ptr_noinline(in_roughness->identifier)));
+
+  bNode *output = bke::node_add_static_node(nullptr, tree, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(
+      tree,
+      *instance,
+      *bke::node_find_socket(
+          *instance, SOCK_OUT, UString::from_ptr_noinline(out_bsdf->identifier)),
+      *output,
+      *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+
+  bNode *root_frame = bke::node_add_static_node(nullptr, tree, NODE_FRAME);
+  for (bNode &node : tree.nodes) {
+    if (!node.is_frame()) {
+      node.parent = root_frame;
+    }
+  }
+  BKE_ntree_update_tag_all(source->nodetree);
+  BKE_ntree_update_after_single_tree_change(bmain, *source->nodetree);
+  return source;
+}
+
 
 }  // namespace blender::bke::tests

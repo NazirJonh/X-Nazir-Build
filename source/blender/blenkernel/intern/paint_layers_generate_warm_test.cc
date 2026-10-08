@@ -556,62 +556,6 @@ TEST_F(PaintLayersGenerateTest, grouping_a_root_paint_row_keeps_its_code_shape)
  * exercise the fallback: hidden rows are dropped first, then live rows are pinned to their bakes.
  * \{ */
 
-namespace {
-
-/** An Image Texture node reading \a image with the given sampling, linked by the caller. */
-bNode *add_tex_image_node(bNodeTree &tree,
-                          Image &image,
-                          const int interpolation,
-                          const int projection)
-{
-  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
-  if (node == nullptr) {
-    return nullptr;
-  }
-  node->id = &image.id;
-  id_us_plus(&image.id);
-  NodeTexImage *storage = static_cast<NodeTexImage *>(node->storage);
-  storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
-  storage->interpolation = interpolation;
-  storage->projection = projection;
-  return node;
-}
-
-bNodeSocket *out_socket(bNode &node, const char *name)
-{
-  return bke::node_find_socket(node, SOCK_OUT, UString::from_ptr_noinline(name));
-}
-
-bNodeSocket *in_socket(bNode &node, const char *name)
-{
-  return bke::node_find_socket(node, SOCK_IN, UString::from_ptr_noinline(name));
-}
-
-/** Three distinct image samplers feeding a Principled's Base Color: a live-worthy source. */
-void source_set_three_image_base_color(Material &source,
-                                       Image &a,
-                                       Image &b,
-                                       Image &c)
-{
-  bNodeTree &tree = *source.nodetree;
-  bNode *principled = nullptr;
-  for (bNode &node : tree.nodes) {
-    if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
-      principled = &node;
-      break;
-    }
-  }
-  bNodeSocket *base = in_socket(*principled, "Base Color");
-  bNode *na = add_tex_image_node(tree, a, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
-  bNode *nb = add_tex_image_node(tree, b, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
-  bNode *nc = add_tex_image_node(tree, c, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
-  bke::node_add_link(tree, *na, *out_socket(*na, "Color"), *principled, *base);
-  bke::node_add_link(tree, *nb, *out_socket(*nb, "Color"), *na, *in_socket(*na, "Vector"));
-  bke::node_add_link(tree, *nc, *out_socket(*nc, "Color"), *nb, *in_socket(*nb, "Vector"));
-}
-
-}  // namespace
-
 TEST_F(PaintLayersGenerateTest, sampler_count_follows_the_eevee_rules)
 {
   Material *source = add_principled_source("CountSource", 0.3f);

@@ -549,6 +549,10 @@ int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
                                         const Material &ma,
                                         const int resolution,
                                         Span<uint8_t> own_coverage,
+                                        FunctionRef<void(Mesh &mesh,
+                                                         MutableSpan<BakePixel> pixels,
+                                                         int resolution,
+                                                         StringRef uv_name)> populate_pixels,
                                         MutableSpan<uint8_t> r_coverage,
                                         MutableSpan<char> r_overlap_name)
 {
@@ -567,22 +571,6 @@ int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
 
   Array<BakePixel> pixels(pixels_num);
   Array<uint8_t> object_coverage(pixels_num);
-  /* `RE_bake_pixels_populate` always indexes `material_to_image`, even with no materials; a single
-   * null entry that matches the null bake image keeps the texel pass purely about geometry. */
-  Image *material_to_image[1] = {nullptr};
-  BakeImage bake_image = {};
-  bake_image.image = nullptr;
-  bake_image.width = resolution;
-  bake_image.height = resolution;
-  bake_image.offset = 0;
-  BakeTargets targets = {};
-  targets.images = &bake_image;
-  targets.images_num = 1;
-  targets.material_to_image = material_to_image;
-  targets.materials_num = 1;
-  targets.pixels_num = int(pixels_num);
-  targets.channels_num = 4;
-
   /* High-poly sources are not "foreign" islands: they are geometry the low-poly samples, even when
    * they happen to use the same material and UV layer. */
   Set<const Object *> source_objects;
@@ -614,7 +602,7 @@ int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
     if (missing || uv_name == nullptr || uv_name[0] == '\0') {
       continue;
     }
-    RE_bake_pixels_populate(mesh, pixels.data(), pixels_num, &targets, StringRef(uv_name));
+    populate_pixels(*mesh, pixels, resolution, StringRef(uv_name));
     BKE_mesh_maps_bake_restrict_to_material(pixels.data(), pixels_num, *mesh, candidate, ma);
     BKE_mesh_maps_bake_coverage_from_pixels(pixels.data(), pixels_num, object_coverage);
     if (!r_overlap_name.is_empty() && r_overlap_name[0] == '\0' &&

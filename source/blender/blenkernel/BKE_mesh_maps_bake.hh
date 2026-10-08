@@ -27,7 +27,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "BLI_function_ref.hh"
 #include "BLI_span.hh"
+#include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
 #include "DNA_scene_enums.h"
@@ -222,46 +224,38 @@ void BKE_mesh_maps_bake_write_with_margin(int8_t type,
  * in a slot and carries the UV layer the material names (resolved through
  * #BKE_paint_layers_uv_map_resolve, so an object without it is skipped). The atlas belongs to the
  * material, and a material is shared across every scene of the file, so the scope is the whole file
- * rather than one view layer. No render happens: the texels come from #RE_bake_pixels_populate on
- * each object's evaluated mesh plus #BKE_mesh_maps_bake_restrict_to_material, on the viewport
+ * rather than one view layer. No render happens: the texels come from \a populate_pixels on each
+ * object's evaluated mesh plus #BKE_mesh_maps_bake_restrict_to_material, on the viewport
  * depsgraph. An object that the viewport depsgraph does not evaluate (one in another scene, say) is
  * taken from its own data mesh, without modifiers: a proximity estimate, not an exact one.
+ *
+ * \param populate_pixels: fills the `resolution x resolution` #BakePixel array of a mesh for the UV
+ * layer of the given name (the caller passes #RE_bake_pixels_populate), which keeps blenkernel free
+ * of the render module.
  *
  * When \a r_overlap_name is non-empty and some foreign coverage intersects \a own_coverage, it
  * receives the name (without the ID prefix) of the first such object; it is cleared otherwise.
  *
  * \return how many objects contributed coverage.
  */
-
-
-/** \} */
+int BKE_mesh_maps_bake_foreign_coverage(
+    Main &bmain,
+    Scene &scene,
+    ViewLayer &view_layer,
+    const Object &ob,
+    const Material &ma,
+    int resolution,
+    Span<uint8_t> own_coverage,
+    FunctionRef<void(Mesh &mesh, MutableSpan<BakePixel> pixels, int resolution, StringRef uv_name)>
+        populate_pixels,
+    MutableSpan<uint8_t> r_coverage,
+    MutableSpan<char> r_overlap_name);
 
 /**
  * The atlas of \a ma for \a type, created on first use and recreated when \a resolution no longer
  * matches. The image is a float, `Non-Color`, \a resolution x \a resolution blank; the slot owns it
  * through #BKE_mesh_maps_slot_image_set. Returns null for an invalid type or resolution.
  */
-/**
- * Walk every other mesh object that shares  ma's atlas and union its texel coverage into
- *  r_coverage, so the bake's margin never eats a foreign island. The first object whose
- * coverage overlaps  own_coverage is named in  r_overlap_name. Only objects the current
- * depsgraph evaluates (or, failing that, their unevaluated data) take part, and only those with
- * the material and the UV layer #BKE_paint_layers_uv_map_resolve resolves for the mesh.
- *
- * eturn the number of foreign objects whose coverage was unioned in. Uses
- * `RE_bake_pixels_populate`, so it is the one render-module dependency of this header's core;
- * see the refactor plan's 5.4.
- */
-int BKE_mesh_maps_bake_foreign_coverage(Main &bmain,
-                                        Scene &scene,
-                                        ViewLayer &view_layer,
-                                        const Object &ob,
-                                        const Material &ma,
-                                        const int resolution,
-                                        Span<uint8_t> own_coverage,
-                                        MutableSpan<uint8_t> r_coverage,
-                                        MutableSpan<char> r_overlap_name);
-
 Image *BKE_mesh_maps_bake_atlas_ensure(Main &bmain, Material &ma, int8_t type, int resolution);
 
 /**

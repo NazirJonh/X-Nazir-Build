@@ -70,6 +70,26 @@ void BKE_mesh_face_offsets_ensure_alloc(Mesh *mesh);
 
 namespace blender::bke::tests {
 
+/** The caller-side texel pass #BKE_mesh_maps_bake_foreign_coverage asks for (the editor's twin). */
+static void populate_geometry_pixels(Mesh &mesh,
+                                     MutableSpan<BakePixel> pixels,
+                                     const int resolution,
+                                     const StringRef uv_name)
+{
+  Image *material_to_image[1] = {nullptr};
+  BakeImage bake_image = {};
+  bake_image.width = resolution;
+  bake_image.height = resolution;
+  BakeTargets targets = {};
+  targets.images = &bake_image;
+  targets.images_num = 1;
+  targets.material_to_image = material_to_image;
+  targets.materials_num = 1;
+  targets.pixels_num = int(pixels.size());
+  targets.channels_num = 4;
+  RE_bake_pixels_populate(&mesh, pixels.data(), size_t(pixels.size()), &targets, uv_name);
+}
+
 class MeshMapBakeTest : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
@@ -1011,6 +1031,7 @@ TEST_F(MeshMapBakeTest, foreign_coverage_only_material_and_named_uv)
       *ma,
       resolution,
       own_coverage,
+      populate_geometry_pixels,
       foreign_coverage,
       MutableSpan<char>(overlap_name, sizeof(overlap_name)));
 
@@ -1322,6 +1343,7 @@ TEST_F(MeshMapBakeTest, source_objects_are_not_foreign_or_baked)
       *ma,
       resolution,
       own_coverage,
+      populate_geometry_pixels,
       foreign_coverage,
       MutableSpan<char>(overlap_name, sizeof(overlap_name)));
   EXPECT_EQ(foreign_num, 0);

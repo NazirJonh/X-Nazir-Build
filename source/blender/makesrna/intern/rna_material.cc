@@ -677,7 +677,9 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
    * UI-built one. An empty name means the unique default. */
   PaintLayerAddParams params;
   params.name = (name[0] != '\0') ? name : nullptr;
-  params.anchor = static_cast<MaterialPaintLayer *>(anchor_ptr->data);
+  /* An unset optional pointer reaches the callback as null, not as a null #PointerRNA. */
+  params.anchor = (anchor_ptr != nullptr) ? static_cast<MaterialPaintLayer *>(anchor_ptr->data) :
+                                            nullptr;
   if (params.anchor != nullptr &&
       BKE_paint_layers_find(*ma, params.anchor->marker) != params.anchor)
   {
@@ -945,7 +947,9 @@ static void rna_Material_paint_layers_move(Material *ma,
                                            int place)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
-  MaterialPaintLayer *anchor = static_cast<MaterialPaintLayer *>(anchor_ptr->data);
+  MaterialPaintLayer *anchor = (anchor_ptr != nullptr) ?
+                                   static_cast<MaterialPaintLayer *>(anchor_ptr->data) :
+                                   nullptr;
   if (!BKE_paint_layers_move(*ma, layer, anchor, PaintLayerPlace(place))) {
     BKE_reportf(reports,
                 RPT_ERROR,
@@ -1069,7 +1073,9 @@ static MaterialPaintLayer *rna_Material_paint_layers_paste(Material *ma,
   }
   MaterialPaintLayer *copy = nullptr;
   if (BKE_paint_layers_role(*source) == PaintLayerRole::Layer) {
-    MaterialPaintLayer *anchor = static_cast<MaterialPaintLayer *>(anchor_ptr->data);
+    MaterialPaintLayer *anchor = (anchor_ptr != nullptr) ?
+                                     static_cast<MaterialPaintLayer *>(anchor_ptr->data) :
+                                     nullptr;
     if (anchor != nullptr && BKE_paint_layers_find(*ma, anchor->marker) != anchor) {
       BKE_report(reports, RPT_ERROR, "Paste anchor must belong to this material");
       return nullptr;
@@ -1077,7 +1083,9 @@ static MaterialPaintLayer *rna_Material_paint_layers_paste(Material *ma,
     copy = BKE_paint_layers_subtree_paste(*bmain, *ma, *source, anchor, PaintLayerPlace(place));
   }
   else {
-    MaterialPaintLayer *target = static_cast<MaterialPaintLayer *>(target_ptr->data);
+    MaterialPaintLayer *target = (target_ptr != nullptr) ?
+                                     static_cast<MaterialPaintLayer *>(target_ptr->data) :
+                                     nullptr;
     if (target == nullptr || BKE_paint_layers_find(*ma, target->marker) != target) {
       BKE_report(reports, RPT_ERROR, "Pasting a correction needs a target row of this material");
       return nullptr;
@@ -2976,7 +2984,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                       "What the correction applies");
   RNA_def_string(func,
                  "name",
-                 "",
+                 nullptr,
                  MAX_NAME,
                  "Name",
                  "Name of the new correction, empty for the default");
@@ -3260,7 +3268,7 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   RNA_def_string(func,
                  "name",
-                 "",
+                 nullptr,
                  MAX_NAME,
                  "Name",
                  "Name of the new layer, empty for the unique default");

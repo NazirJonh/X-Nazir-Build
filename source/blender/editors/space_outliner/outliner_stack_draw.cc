@@ -1009,7 +1009,7 @@ bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner)
  * activity comes from what it directly contains, the same way a Collection is only "active"
  * through the object directly inside it, not through everything nested further down.
  */
-static bool stack_layer_direct_child_active(const TreeElement &te)
+bool stack_layer_direct_child_active(const TreeElement &te)
 {
   for (const TreeElement &child : te.subtree) {
     if (TREESTORE(&child)->type == TSE_STACK_LAYER && stack_layer_row_active(child)) {

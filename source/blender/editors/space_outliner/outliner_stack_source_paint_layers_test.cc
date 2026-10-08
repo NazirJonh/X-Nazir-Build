@@ -1227,23 +1227,25 @@ TEST_F(OutlinerStackPaintLayersSourceTest, marker_addressing_survives_a_renumber
   MaterialPaintLayer *bottom = paint_description_row_for_ordinal(*ma, bottom_ordinal);
   ASSERT_NE(bottom, nullptr);
 
-  const int top_ordinal = paint_layers_edit_add(*ma, PAINT_STACK_ADD_PAINT, -1, {});
-  ASSERT_GE(top_ordinal, 0);
-  MaterialPaintLayer *top = paint_description_row_for_ordinal(*ma, top_ordinal);
+  /* A row inserted ahead of `bottom` in the walk order renumbers it; an Add with no anchor appends
+   * at the other end, which would not, so the insert is placed explicitly. */
+  MaterialPaintLayer *top = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Inserted", bottom, PaintLayerPlace::Below);
   ASSERT_NE(top, nullptr);
-  /* The add landed above: every row below it shifted down by one. */
-  ASSERT_EQ(layers_ordinal_of(*ma, bottom), 1);
+  ASSERT_EQ(layers_ordinal_of(*ma, top), bottom_ordinal);
+  ASSERT_EQ(layers_ordinal_of(*ma, bottom), bottom_ordinal + 1);
 
   /* The remembered ordinal now names the other row; the marker still names ours. */
+  EXPECT_EQ(paint_description_row_for_ordinal(*ma, bottom_ordinal), top);
   MaterialPaintLayer *by_marker = BKE_paint_layers_find(*ma, bottom->marker);
   ASSERT_NE(by_marker, nullptr);
   EXPECT_EQ(by_marker, bottom);
 
   /* Removing through the marker's fresh ordinal removes the same row, and only it. */
-  const int fresh_ordinal = layers_ordinal_of(*ma, *by_marker);
+  const int fresh_ordinal = layers_ordinal_of(*ma, by_marker);
   ASSERT_TRUE(paint_layers_edit_remove(*ma, fresh_ordinal));
   EXPECT_EQ(BKE_paint_layers_find(*ma, bottom->marker), nullptr);
-  EXPECT_EQ(paint_description_row_for_ordinal(*ma, fresh_ordinal), top);
+  EXPECT_EQ(paint_description_row_for_ordinal(*ma, bottom_ordinal), top);
 }
 
 }  // namespace tests

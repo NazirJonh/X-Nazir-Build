@@ -11,7 +11,7 @@
  * depth-first order the Outliner's ordinals are built on (2.2.3).
  */
 
-#include "intern/paint_layers_test_util.hh"
+#include "intern/paint_layers_test_util.cc"
 
 #include "DNA_material_types.h"
 
@@ -19,6 +19,7 @@
 #include "BLI_string.h"
 #include "BLI_uuid.h"
 
+#include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 
@@ -67,7 +68,10 @@ TEST_F(PaintLayersTestBase, set_material_refuses_cycle)
 {
   Material *other = BKE_material_add(bmain, "Other");
   other->paint_layers_flag |= MA_PAINT_LAYERED;
-  MaterialPaintLayer *bridge = add_paint_layer("Bridge", add_solid_image("BridgeBase"));
+  /* Only a Material-source row takes a source material. */
+  MaterialPaintLayer *bridge = BKE_paint_layers_add(
+      *ma, MA_PAINT_LAYER_SOURCE_MATERIAL, "Bridge", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bridge, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, bridge, other));
   EXPECT_EQ(bridge->material, other);
   EXPECT_TRUE(BKE_paint_layers_material_depends_on(*ma, *other));
@@ -75,7 +79,7 @@ TEST_F(PaintLayersTestBase, set_material_refuses_cycle)
   /* In the other material, a row sourcing `ma` closes the A -> B -> A cycle and must be refused:
    * the same protection the Outliner's Add and the drop handler rely on. */
   MaterialPaintLayer *row = BKE_paint_layers_add(
-      *other, MA_PAINT_LAYER_SOURCE_IMAGE, "Back", nullptr, PaintLayerPlace::Above);
+      *other, MA_PAINT_LAYER_SOURCE_MATERIAL, "Back", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(row, nullptr);
   EXPECT_FALSE(BKE_paint_layers_set_material(*other, row, ma));
   EXPECT_EQ(row->material, nullptr);
@@ -111,10 +115,12 @@ TEST_F(PaintLayersTestBase, add_with_policy_paint_matches_low_level_add)
   MaterialPaintLayer *by_hand = BKE_paint_layers_add(
       *ma, MA_PAINT_LAYER_SOURCE_IMAGE, "Row", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(by_hand, nullptr);
+  /* The default-channel rule is the policy's own; a bare `BKE_paint_layers_add` row carries no
+   * channel record, so the by-hand row gets the same rule applied explicitly. */
+  BKE_paint_layers_default_channels_apply(*ma, *by_hand);
 
-  /* Same shape: a Layer-role image row with a Base Color record, whether the policy or the caller
-   * built it. The default-channel rule is the policy's own; the low-level edit here enables the
-   * record by hand because a bare `BKE_paint_layers_add` row carries none. */
+  /* Same shape: a Layer-role image row with the same channel records, whether the policy or the
+   * caller built it. */
   EXPECT_EQ(via_policy->source, MA_PAINT_LAYER_SOURCE_IMAGE);
   EXPECT_EQ(via_policy->role, by_hand->role);
   EXPECT_EQ(via_policy->channels_num, by_hand->channels_num);
@@ -257,12 +263,19 @@ TEST_F(PaintLayersTestBase, foreach_matches_flatten_on_nested_tree)
    * item and corrections, rows interleaved. #BKE_paint_layers_foreach is the definition of the
    * Outliner's ordinal order; #BKE_paint_layers_flatten is the row list the UI reads. */
   MaterialPaintLayer *folder = add_folder("Folder");
-  add_paint_layer_into(folder, "ChildA", add_solid_image("ChildA"));
+  MaterialPaintLayer *child_a = add_paint_layer_into(folder, "ChildA", add_solid_image("ChildA"));
   MaterialPaintLayer *layer = add_paint_layer("Layer", add_solid_image("LayerBase"));
   add_mask_item(*layer, "Mask", add_solid_image("MaskBase"));
   MaterialPaintLayer *child_b = add_paint_layer_into(folder, "ChildB", add_solid_image("ChildB"));
 
-  const Vector<MaterialPaintLayer *> via_foreach = flatten_via_foreach(*ma);
+  /* #BKE_paint_layers_foreach also visits corrections and mask items (the Outliner draws them as
+   * rows); #BKE_paint_layers_flatten lists Layer-role rows only, so compare those. */
+  Vector<MaterialPaintLayer *> via_foreach;
+  for (MaterialPaintLayer *row : flatten_via_foreach(*ma)) {
+    if (BKE_paint_layers_role(*row) == PaintLayerRole::Layer) {
+      via_foreach.append(row);
+    }
+  }
   Vector<const MaterialPaintLayer *> via_flatten;
   BKE_paint_layers_flatten(*ma, via_flatten);
 
@@ -272,13 +285,15 @@ TEST_F(PaintLayersTestBase, foreach_matches_flatten_on_nested_tree)
   }
   /* The nesting reads in document order: folder, its children in turn, then the layer. */
   EXPECT_EQ(via_foreach[0], folder);
-  EXPECT_EQ(via_foreach[1], child_b);
+  EXPECT_EQ(via_foreach[1], child_a);
+  EXPECT_EQ(via_foreach[2], child_b);
+  EXPECT_EQ(via_foreach[3], layer);
 }
 
-TEST_F(PaintLayersTestBase, foreach_visit_allows_pruning_but_not_order_change)
+TEST_F(PaintLayersTestBase, foreach_visit_false_stops_the_walk)
 {
-  /* A false return skips a subtree: the walk order of everything else is untouched, so a caller
-   * that prunes folders still sees the same rows in the same order as the Outliner does. */
+  /* A false return ends the whole walk, which is what the ordinal lookups build on: nothing after
+   * the row that answered false is visited, not even its siblings. */
   MaterialPaintLayer *folder = add_folder("Folder");
   MaterialPaintLayer *child = add_paint_layer_into(folder, "Hidden", add_solid_image("Hidden"));
   add_paint_layer("Top", add_solid_image("Top"));
@@ -286,10 +301,11 @@ TEST_F(PaintLayersTestBase, foreach_visit_allows_pruning_but_not_order_change)
   Vector<MaterialPaintLayer *> rows;
   BKE_paint_layers_foreach(*ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *) {
     rows.append(const_cast<MaterialPaintLayer *>(&layer));
-    /* Skip everything under the folder once it is seen. */
+    /* Stop at the folder. */
     return &layer != folder;
   });
-  EXPECT_EQ(rows.size(), 2);
+  EXPECT_EQ(rows.size(), 1);
+  EXPECT_EQ(rows[0], folder);
   EXPECT_FALSE(rows.contains(child));
 }
 

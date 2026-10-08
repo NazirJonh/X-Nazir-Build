@@ -32,6 +32,8 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "GPU_capabilities.hh"
+
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_node_types.h"
@@ -69,7 +71,7 @@ Set<uint32_t> &paint_layers_bake_active()
  * pointer, since the material may be deleted, or belong to a file that gets closed, while this is
  * waiting; #paint_layers_bake_debounce_resolve is what turns a surviving uid back into a
  * #Material. A single shared timer drains the whole set on its first tick (see
- * #paint_layers_bake_debounce_timer), matching the batching #material_paint_layers.py's own
+ * #paint_layers_bake_debounce_tick), matching the batching #material_paint_layers.py's own
  * mesh-map debounce does: the window opens on the *first* edit of a burst, not a rolling "quiet
  * period" reset by each new one.
  */
@@ -256,7 +258,7 @@ void paint_layers_bake_undo_post(Main *bmain,
   }
 
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first);
-  const bool debounce_armed = paint_layers_bake_debounce_timer_handle() != nullptr;
+  const bool debounce_armed = BLI_timer_is_registered(paint_layers_bake_debounce_timer_uuid);
   for (Material &ma : bmain->materials) {
     if (!BKE_paint_layers_bake_scheduled_get(ma)) {
       continue;
@@ -306,7 +308,7 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
     }
     /* A material inside its 0.3s debounce window is left alone: its heavy bake, if it turns out
      * to need one, is queued by the very next call of this function, once
-     * #paint_layers_bake_debounce_timer's tick has cleared it from the pending set. Everything
+     * #paint_layers_bake_debounce_tick has cleared it from the pending set. Everything
      * else -- a bake left stale by a file load, or by anything that never goes through
      * #material_changed -- is still caught here on every call, exactly as before; only a just-
      * edited material's *own* heavy job is deferred. */
@@ -350,6 +352,7 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
      * "bake now" callers already stamped it; this covers the backstop sweep after a file load, which
      * starts a heavy job that no arm preceded. */
     BKE_paint_layers_bake_scheduled_set(ma, true);
+    WM_jobs_start(&wm, wm_job);
   }
 }
 
@@ -457,6 +460,10 @@ double paint_layers_bake_debounce_tick(uintptr_t /*uuid*/, void * /*user_data*/)
 {
   /* #BLI_timer callbacks carry no context; the main database and its window manager are the ones
    * the main loop is running with, which is what the old #wmTimer dispatch passed in. */
+  if (G_MAIN == nullptr || G_MAIN->wm.first == nullptr) {
+    paint_layers_bake_debounce_pending().clear();
+    return -1.0;
+  }
   Main &bmain = *G_MAIN;
   wmWindowManager &wm = *static_cast<wmWindowManager *>(bmain.wm.first);
   Set<uint32_t> &pending = paint_layers_bake_debounce_pending();
@@ -527,20 +534,20 @@ void ED_paint_layers_sampler_budget_ensure()
   BKE_paint_layers_sampler_budget_set(budget, max_textures);
 }
 
-void paint_layers_bake_debounce_reset(wmWindowManager &wm)
+void paint_layers_bake_debounce_reset(wmWindowManager & /*wm*/)
 {
-  /* The debounce timer handle and pending set are process-static ED state, keyed on a #wmWindowManager
-   * that is about to stop existing (a new file, closing the file, quitting) -- #wm_close_and_free
-   * frees every registered `wmTimer`, including this one if it is still armed, which would leave
-   * #paint_layers_bake_debounce_timer_handle dangling for the next file's first edit to dereference.
-   * Mirrors `wm_autosave_timer_end`, the same cleanup for `wm->autosavetimer`. Called from
-   * #ED_editors_exit, in the branch that runs for a real file replace, never for memfile undo. */
+  /* The pending sets are process-static ED state tied to a file that is about to stop existing
+   * (a new file, closing the file, quitting); a #BLI_timer tick left armed would run against the
+   * next file's Main. Called from #ED_editors_exit, in the branch that runs for a real file
+   * replace, never for memfile undo. */
   BLI_timer_unregister(paint_layers_bake_debounce_timer_uuid);
   paint_layers_bake_debounce_pending().clear();
   /* The cold timer must be disarmed here too, so it cannot fire against the next file. */
   BLI_timer_unregister(paint_layers_cold_timer_uuid);
   paint_layers_cold_pending().clear();
 }
+
+static double paint_layers_cold_tier_tick(uintptr_t uuid, void *user_data);
 
 void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
 {
@@ -605,6 +612,13 @@ void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
 
 static double paint_layers_cold_tier_tick(uintptr_t /*uuid*/, void * /*user_data*/)
 {
+  /* This timer is spent: unregister it first, or the scan would see itself as still armed and keep
+   * it from arming a successor for an unmoved deadline. */
+  BLI_timer_unregister(paint_layers_cold_timer_uuid);
+  paint_layers_cold_deadline() = 0.0;
+  if (G_MAIN == nullptr || G_MAIN->wm.first == nullptr) {
+    return -1.0;
+  }
   /* Rescan, which drops whatever is now due and re-arms for the rest. */
   paint_layers_cold_tier_scan(*G_MAIN, *static_cast<wmWindowManager *>(G_MAIN->wm.first));
   return -1.0;
@@ -647,7 +661,7 @@ wmOperatorStatus paint_layers_bake_now_exec(bContext *C, wmOperator *op)
    * keeps reporting stale for as long as what this starts is still running, whether or not a
    * debounce timer happened to be armed for \a ma already. */
   BKE_paint_layers_bake_scheduled_set(*ma, true);
-  /* The exact two calls #paint_layers_bake_debounce_timer's own tick makes, run now instead of
+  /* The exact two calls #paint_layers_bake_debounce_tick makes, run now instead of
    * waiting out the remainder of the 0.3s window -- \a ma's pending debounce entry, if it has one,
    * is left alone rather than resolved here: the timer's own tick still fires later and simply
    * finds nothing left to do for it (#material_bake_images_rebake_stale and

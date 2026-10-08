@@ -1084,6 +1084,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       if (has_region && structure_changed) {
         has_region = false;
       }
+      const bool reuse_cache = bake->coverage != nullptr;
       int src_width = 0;
       int src_height = 0;
       bool have_source_dims = false;
@@ -1192,6 +1193,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
           !BKE_paint_layers_bake_is_valid(ma, *layer))
       {
         /* A hidden row stays stale without holding the signal: showing it marks it again. */
+        if (bake_row_is_hidden(ma, *layer)) {
+          continue;
+        }
         pending = true;
         break;
       }
@@ -1934,6 +1938,9 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
       if (report_progress) {
         report_progress(total_pairs > 0 ? float(done_pairs) / float(total_pairs) : 1.0f);
       }
+      if (!rendered) {
+        continue;
+      }
       PaintLayersBakeJob::ChannelResult result;
       result.channel = channel;
       result.is_color = info.is_color;
@@ -2602,7 +2609,7 @@ static uint64_t bake_hash_layer(uint64_t h,
     h = bake_hash_mix(h, uint8_t(layer.source));
     h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
     if (layer.material != nullptr) {
-        h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
+      h = bake_hash_mix(h, BKE_paint_layers_source_material_tree_hash(*layer.material));
     }
     h = bake_hash_mix(h, layer.bake != nullptr ? uint32_t(layer.bake->size) : 0);
     /* A parent's bake renders this row through its maps, and they can appear or be replaced after

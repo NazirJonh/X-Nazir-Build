@@ -88,6 +88,32 @@
 namespace blender::ed::object {
 namespace {
 
+/**
+ * The texel pass of #BKE_mesh_maps_bake_foreign_coverage: pure geometry, so the bake image is null.
+ * #RE_bake_pixels_populate always indexes `material_to_image`, even with no materials; a single
+ * null entry that matches the null bake image keeps the pass about geometry only.
+ */
+void mesh_map_bake_populate_geometry_pixels(Mesh &mesh,
+                                            MutableSpan<BakePixel> pixels,
+                                            const int resolution,
+                                            const StringRef uv_name)
+{
+  Image *material_to_image[1] = {nullptr};
+  BakeImage bake_image = {};
+  bake_image.image = nullptr;
+  bake_image.width = resolution;
+  bake_image.height = resolution;
+  bake_image.offset = 0;
+  BakeTargets targets = {};
+  targets.images = &bake_image;
+  targets.images_num = 1;
+  targets.material_to_image = material_to_image;
+  targets.materials_num = 1;
+  targets.pixels_num = int(pixels.size());
+  targets.channels_num = 4;
+  RE_bake_pixels_populate(&mesh, pixels.data(), size_t(pixels.size()), &targets, uv_name);
+}
+
 /** One (object, type) of a run: the private render world plus its bookkeeping. */
 struct MeshMapBakeWorld {
   /* The private render world. */
@@ -813,15 +839,17 @@ void mesh_map_bake_commit_current(MeshMapBakeJob &job, MeshMapBakePairState &pai
   }
   Array<uint8_t> foreign_coverage(world.pixels_num, 0);
   char overlap_name[MAX_ID_NAME] = "";
-  BKE_mesh_maps_bake_foreign_coverage(*job.bmain,
-                                      *job.scene,
-                                      *job.view_layer,
-                                      *ob,
-                                      *ma,
-                                      job.resolution,
-                                      own_coverage,
-                                      foreign_coverage,
-                                      MutableSpan<char>(overlap_name, sizeof(overlap_name)));
+  BKE_mesh_maps_bake_foreign_coverage(
+      *job.bmain,
+      *job.scene,
+      *job.view_layer,
+      *ob,
+      *ma,
+      job.resolution,
+      own_coverage,
+      mesh_map_bake_populate_geometry_pixels,
+      foreign_coverage,
+      MutableSpan<char>(overlap_name, sizeof(overlap_name)));
   if (overlap_name[0] != '\0' && job.reports != nullptr) {
     BKE_reportf(job.reports,
                 RPT_WARNING,

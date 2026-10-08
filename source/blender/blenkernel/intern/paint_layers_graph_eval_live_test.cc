@@ -1240,25 +1240,4 @@ TEST_F(PaintLayersGraphEvalTest, live_material_image_normal_map_alpha_is_ignored
  * it Baked, so every row on it must show its source through the SourceGroup wrapper. Returns the
  * material; \a r_principled receives the node the caller feeds Normal.
  */
-static Material *make_wrapper_forced_source(Main &bmain, const char *name, bNode **r_principled)
-{
-  Material *source = BKE_material_add(&bmain, name);
-  bNodeTree &ntree = *source->nodetree;
-  bNode *principled = bke::node_add_static_node(nullptr, ntree, SH_NODE_BSDF_PRINCIPLED);
-  bNode *output = bke::node_add_static_node(nullptr, ntree, SH_NODE_OUTPUT_MATERIAL);
-  bke::node_add_link(ntree,
-                     *principled,
-                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
-                     *output,
-                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
-  bNode *noise = bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_NOISE);
-  bke::node_add_link(ntree,
-                     *noise,
-                     *bke::node_find_socket(*noise, SOCK_OUT, "Color"_ustr),
-                     *principled,
-                     *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr));
-  *r_principled = principled;
-  return source;
-}
-
 }  // namespace blender::bke::tests

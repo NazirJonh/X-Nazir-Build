@@ -77,6 +77,9 @@ void paint_stack_rows_from_description(const Material &material,
 /** The description row (a layer or correction) a flat-walk ordinal names, or null. */
 MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, int ordinal);
 
+/** The ordinal #paint_stack_rows_from_description gives \a target, or -1. */
+int layers_ordinal_of(const Material &ma, const MaterialPaintLayer *target);
+
 /**
  * The context-free description edits behind #PaintLayersStackSource's verbs: they touch only
  * `Material::paint_layers` through the `BKE_paint_layers_*` API, so a unit test can drive them

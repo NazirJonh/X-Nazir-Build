@@ -90,12 +90,12 @@ struct StackDropData {
   TreeElementInsertType insert_type;
 };
 
-static void datastack_drop_data_init(wmDrag *drag,
-                                     Object *ob,
-                                     bPoseChannel *pchan,
-                                     TreeElement *te,
-                                     TreeStoreElem *tselem,
-                                     void *directdata)
+void datastack_drop_data_init(wmDrag *drag,
+                              Object *ob,
+                              bPoseChannel *pchan,
+                              TreeElement *te,
+                              TreeStoreElem *tselem,
+                              void *directdata)
 {
   StackDropData *drop_data = MEM_new_zeroed<StackDropData>("datastack drop data");
 

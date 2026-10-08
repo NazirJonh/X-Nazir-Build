@@ -20,6 +20,8 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "intern/paint_layers_runtime.hh"
+
 namespace blender::bke::test {
 
 void PaintLayersTestBase::SetUp()
@@ -52,8 +54,14 @@ MaterialPaintLayer *PaintLayersTestBase::add_paint_layer_into(MaterialPaintLayer
                                                               const char *name,
                                                               Image *image)
 {
+  /* The low-level add places beside its anchor; only the policy Add turns Above on a folder into
+   * Into, so a folder anchor names the folder to fill explicitly. */
   MaterialPaintLayer *layer = BKE_paint_layers_add(
-      *ma, MA_PAINT_LAYER_SOURCE_IMAGE, name, anchor, PaintLayerPlace::Above);
+      *ma,
+      MA_PAINT_LAYER_SOURCE_IMAGE,
+      name,
+      anchor,
+      (anchor != nullptr) ? PaintLayerPlace::Into : PaintLayerPlace::Above);
   EXPECT_NE(layer, nullptr);
   layer->channels = MEM_new_array<MaterialPaintLayerChannel>(1, __func__);
   layer->channels[0].channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
@@ -86,6 +94,9 @@ MaterialPaintLayer *PaintLayersTestBase::add_mask_item(MaterialPaintLayer &paren
   item->marker = BLI_uuid_generate_random();
   item->source = MA_PAINT_LAYER_SOURCE_IMAGE;
   item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  /* The first (and here only) item is the layer's mask base, which #BKE_paint_layers_mask_base
+   * looks for by this flag. */
+  item->flag |= MA_PAINT_LAYER_MASK_BASE;
   item->channels = MEM_new_array<MaterialPaintLayerChannel>(1, __func__);
   item->channels[0].channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   item->channels[0].state = MA_PAINT_LAYER_CHANNEL_ENABLED;

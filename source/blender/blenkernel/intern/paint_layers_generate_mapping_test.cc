@@ -727,11 +727,6 @@ TEST_F(PaintLayersGenerateTest, source_group_mapping_shared_group_copies_private
   EXPECT_EQ(shared->id.us, users_shared);
 }
 
-namespace {
-/* Defined further down with the other source builders. */
-void source_set_three_image_base_color(Material &source, Image &a, Image &b, Image &c);
-}  // namespace
-
 /** Stage 2: a forced bake keeps the row on its raw maps -- no Mapping anywhere, and the report
  * says the mapping was ignored. */
 TEST_F(PaintLayersGenerateTest, source_group_mapping_forced_bake_ignores_it_never_bake_keeps_it)

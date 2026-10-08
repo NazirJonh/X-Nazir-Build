@@ -859,6 +859,8 @@ void stack_preview_color_draw(const rctf &preview_rect,
 bool stack_layer_row_selected(const TreeElement &te);
 /** Whether a Stack Layers row should read as active (its own row, or a sub-row of it). */
 bool stack_layer_row_active(const TreeElement &te);
+/** Whether a folder directly holds the row that is open right now (one level down only). */
+bool stack_layer_direct_child_active(const TreeElement &te);
 /** Whether any of the tree's stack rows is the active element right now. */
 bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner);
 
@@ -934,6 +936,12 @@ wmOperatorStatus stack_target_clear_exec(bContext *C, wmOperator * /*op*/);
  * drop boxes hand control to, and the generic drop helpers they read back. */
 bool datastack_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
 std::string datastack_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);
+void datastack_drop_data_init(wmDrag *drag,
+                              Object *ob,
+                              bPoseChannel *pchan,
+                              TreeElement *te,
+                              TreeStoreElem *tselem,
+                              void *directdata);
 void stack_layer_drop_data_init(SpaceOutliner &space_outliner, wmDrag *drag, const TreeStoreElem &tselem);
 bool stack_layer_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
 std::string stack_layer_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);

@@ -1061,6 +1061,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
   /* The UV layer a group's Image Texture nodes read is topology: changing it must rebuild them. */
   topology_hash_string(hash, BKE_paint_layers_uv_map_name(ma));
+  return topology_hash_layer(hash, ma, layer, wired_channels, cache);
 }
 
 /**

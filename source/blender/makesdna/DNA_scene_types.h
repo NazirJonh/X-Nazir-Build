@@ -775,12 +775,13 @@ enum eRender_SceMode : int {
   R_SCEMODE_UNUSED_10 = 1 << 10, /* cleared */
   R_SCEMODE_UNUSED_11 = 1 << 11, /* cleared */
   R_NO_IMAGE_LOAD = 1 << 12,
+  R_SCEMODE_UNUSED_13 = 1 << 13, /* cleared */
   /**
    * Runtime-only: set by the paint-layer bake on its temporary scene, so EEVEE knows it may
    * release the draw lock while waiting for shader compilation (see #eevee::Instance::render_sample).
-   * Never set on a saved scene; the DNA bit was unused.
+   * Never set on a saved scene; it reuses the cleared bit 13, which versioning still masks out.
    */
-  R_BAKE_CONTEXT_RELEASE = 1 << 13,
+  R_BAKE_CONTEXT_RELEASE = R_SCEMODE_UNUSED_13,
   R_NO_FRAME_UPDATE = 1 << 14,
   R_SCEMODE_UNUSED_15 = 1 << 15, /* cleared */
   R_SCEMODE_UNUSED_16 = 1 << 16, /* cleared */

@@ -65,6 +65,7 @@
 
 namespace blender::ed::outliner {
 
+/**
  * The identity property every operator that addresses an existing row shares: the row's marker,
  * which survives the renumbering an edit puts the position through. Read through
  * #stack_operator_ordinal_get, so a caller names a row either way.

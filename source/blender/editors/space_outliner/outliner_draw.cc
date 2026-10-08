@@ -111,14 +111,6 @@ namespace blender {
 
 namespace ed::outliner {
 
-/**
-
-/**
-
-/**
-
-/**
-
 /* -------------------------------------------------------------------- */
 /** \name Tree Size Functions
  * \{ */
@@ -2205,29 +2197,6 @@ static void outliner_draw_text(const uiFontStyle *fstyle,
   BLF_disable(font_id, BLF_ASPECT);
 }
 
-/**
- * The value and mode columns of the Stack Layers mode.
- *
- * Which properties those are is the source's business, so this only knows that a row may name one
- * of each and how wide the source wants them. A row that names neither still reserves the space:
- * columns that shift from row to row are harder to read than columns with a gap in them.
- */
-/**
-
-/**
-
-/**
-
-/** Forward declaration; defined further down, next to the rest of the fading logic. */
-bool element_should_draw_faded(const TreeViewContext &tvc,
-                                      const SpaceOutliner *space_outliner,
-                                      const TreeElement *te,
-                                      const TreeStoreElem *tselem);
-
-/**
-
-/** Whether \a row's visibility toggle sits before its icon rather than in a column. */
-
 static void outliner_draw_rnabuts(ui::Block *block,
                                   ARegion *region,
                                   SpaceOutliner *space_outliner,
@@ -3488,10 +3457,10 @@ static void outliner_set_subtree_coords(TreeElement *te)
   });
 }
 
-static bool element_should_draw_faded(const TreeViewContext &tvc,
-                                      const SpaceOutliner *space_outliner,
-                                      const TreeElement *te,
-                                      const TreeStoreElem *tselem)
+bool element_should_draw_faded(const TreeViewContext &tvc,
+                               const SpaceOutliner *space_outliner,
+                               const TreeElement *te,
+                               const TreeStoreElem *tselem)
 {
   if (tselem->type == TSE_SOME_ID) {
     switch (te->idcode) {
@@ -3560,12 +3529,6 @@ static bool element_should_draw_faded(const TreeViewContext &tvc,
 
   return false;
 }
-
-/**
-
-/** Same reasoning as #stack_layer_row_selected, for the active flag. */
-
-/**
 
 static void outliner_draw_tree_element(ui::Block *block,
                                        const uiFontStyle *fstyle,

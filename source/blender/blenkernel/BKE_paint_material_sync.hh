@@ -59,7 +59,7 @@ bool BKE_paint_material_sync_texture3d_conflicts(const Scene *scene, PaintMode p
  * bindings.
  */
 /**
- * Apply  source's brush and PBR Paint setup onto the paired editor's. eturn whether anything
+ * Apply \a source's brush and PBR Paint setup onto the paired editor's. \return whether anything
  * was applied (sync on, canvas Material, brush usable); a caller that refreshes the UI waits for
  * that, since the notifiers this module used to send live on the editor side of the layer
  * boundary now.
@@ -97,10 +97,9 @@ void BKE_paint_material_brush_sync_after_load(Main *bmain);
  * Mirror \a source's #UnifiedPaintSettings (size, strength, color, jitter) onto the paired paint
  * mode. Kept separate from #BKE_paint_material_brush_sync because these change far more often than
  * the active brush and are driven from a different callback.
- */
-/**
- * Copy  source's unified paint settings onto the paired editor's. eturn whether the pair
- * exists and the copy happened; a caller that refreshes the UI waits for that.
+ *
+ * \return whether the pair exists and the copy happened; a caller that refreshes the UI waits for
+ * that.
  */
 bool BKE_paint_material_unified_settings_sync(Scene *scene, Paint *source);
 

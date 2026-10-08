@@ -373,7 +373,7 @@ bNode *group_instance_of(bNodeTree &group, const bNodeTree &wrapper)
   return nullptr;
 }
 
-/** The instance socket of the wrapper input  name (".PL Mapping Offset"/Scale/Rotation) names,
+/** The instance socket of the wrapper input \a name (".PL Mapping Offset"/Scale/Rotation) names,
  * found through the wrapper interface role: the identifier is the wrapper's own. */
 bNodeSocket *instance_mapping_socket(bNode &instance, const char *name)
 {
@@ -392,7 +392,7 @@ bNodeSocket *instance_mapping_socket(bNode &instance, const char *name)
   return bke::node_find_socket(instance, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
 }
 
-/** Whether the wrapper instance's mapping input  name is fed by the row group's Group Input. */
+/** Whether the wrapper instance's mapping input \a name is fed by the row group's Group Input. */
 bool instance_mapping_input_wired(bNodeTree &group, bNode &instance, const char *name)
 {
   bNodeSocket *dst = instance_mapping_socket(instance, name);
@@ -569,7 +569,7 @@ static uint64_t code_shape_signature(const bNodeTree &tree)
  * #code_shape_signature of \a tree combined with that of every group it instances, recursively and
  * without regard to the instance order or names: the shape of the code the shader inlines.
  */
-static uint64_t code_shape_deep(const bNodeTree &tree, const int depth)
+static uint64_t code_shape_deep(const bNodeTree &tree, const int depth = 0)
 {
   Vector<uint64_t> parts;
   parts.append(code_shape_signature(tree));
@@ -597,6 +597,59 @@ static void make_generate_image_mask_like(Image &image)
   make_generate_image_data(image);
   image.alpha_mode = IMA_ALPHA_STRAIGHT;
   image.flag |= IMA_GPU_LINEAR_PREMUL;
+}
+
+
+/** An Image Texture node reading \a image with the given sampling, linked by the caller. */
+static bNode *add_tex_image_node(bNodeTree &tree,
+                          Image &image,
+                          const int interpolation,
+                          const int projection)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  if (node == nullptr) {
+    return nullptr;
+  }
+  node->id = &image.id;
+  id_us_plus(&image.id);
+  NodeTexImage *storage = static_cast<NodeTexImage *>(node->storage);
+  storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+  storage->interpolation = interpolation;
+  storage->projection = projection;
+  return node;
+}
+
+static bNodeSocket *out_socket(bNode &node, const char *name)
+{
+  return bke::node_find_socket(node, SOCK_OUT, UString::from_ptr_noinline(name));
+}
+
+static bNodeSocket *in_socket(bNode &node, const char *name)
+{
+  return bke::node_find_socket(node, SOCK_IN, UString::from_ptr_noinline(name));
+}
+
+/** Three distinct image samplers feeding a Principled's Base Color: a live-worthy source. */
+static void source_set_three_image_base_color(Material &source,
+                                       Image &a,
+                                       Image &b,
+                                       Image &c)
+{
+  bNodeTree &tree = *source.nodetree;
+  bNode *principled = nullptr;
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
+      principled = &node;
+      break;
+    }
+  }
+  bNodeSocket *base = in_socket(*principled, "Base Color");
+  bNode *na = add_tex_image_node(tree, a, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
+  bNode *nb = add_tex_image_node(tree, b, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
+  bNode *nc = add_tex_image_node(tree, c, SHD_INTERP_LINEAR, SHD_PROJ_BOX);
+  bke::node_add_link(tree, *na, *out_socket(*na, "Color"), *principled, *base);
+  bke::node_add_link(tree, *nb, *out_socket(*nb, "Color"), *na, *in_socket(*na, "Vector"));
+  bke::node_add_link(tree, *nc, *out_socket(*nc, "Color"), *nb, *in_socket(*nb, "Vector"));
 }
 
 }  // namespace blender::bke::tests

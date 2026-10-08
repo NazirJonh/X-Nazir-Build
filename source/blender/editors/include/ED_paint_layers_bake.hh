@@ -35,7 +35,6 @@
 
 struct Main;
 struct wmOperatorType;
-struct wmTimer;
 struct wmWindow;
 struct wmWindowManager;
 
@@ -91,20 +90,20 @@ bool ED_paint_layers_stale_or_pending(const wmWindowManager &wm, const Material 
  * file that has since been closed) is silently dropped.
  *
  * Pure with respect to window-manager/job state -- a #Main and a list of numbers are everything it
- * needs -- so it is testable without a #wmWindowManager or a `wmTimer`; only what to *do* with a
- * resolved material (#paint_layers_bake_debounce_timer) has real side effects.
+ * needs -- so it is testable without a #wmWindowManager or a timer; only what to *do* with a
+ * resolved material (the debounce tick) has real side effects.
  */
 void paint_layers_bake_debounce_resolve(Main &bmain,
                                         Span<uint32_t> pending,
                                         Vector<Material *> &r_found);
 
 /**
- * Whether arming should first remove \a existing before creating a new timer -- true whenever one
- * is already running. Named and tested on its own (a raw pointer, no #wmWindowManager needed) so
- * the trailing-edge intent is checkable directly: arming while a timer runs must restart its
- * countdown, or a continuous drag would still tick, and bake, every 0.3s instead of once at the end.
+ * Whether arming should first remove the debounce #BLI_timer before registering a new one -- true
+ * whenever one is already running. Named and tested on its own so the trailing-edge intent is
+ * checkable directly: arming while a timer runs must restart its countdown, or a continuous drag
+ * would still tick, and bake, every 0.3s instead of once at the end.
  */
-bool paint_layers_bake_debounce_should_replace_timer(const wmTimer *existing);
+bool paint_layers_bake_debounce_should_replace_timer();
 
 /**
  * Record that \a ma was just edited and make sure the 0.3s debounce timer is armed (or, if one is
@@ -114,11 +113,11 @@ bool paint_layers_bake_debounce_should_replace_timer(const wmTimer *existing);
  * `material_bake_layered_rows_ensure` synchronously on every edit; \a ma is marked
  * #MA_PAINT_LAYERS_BAKE_SCHEDULED for as long as it is waiting.
  *
- * \a ma must belong to \a wm's file: a caller with no #wmWindowManager (background mode, a script)
- * has nothing to arm a timer on and must run the bakes immediately instead -- this function is
- * only ever reached once that has already been checked.
+ * A caller with no #wmWindowManager (background mode, a script) has no main loop to run the
+ * timer and must run the bakes immediately instead -- this function is only ever reached once
+ * that has already been checked.
  */
-void paint_layers_bake_debounce_arm(wmWindowManager &wm, Material &ma);
+void paint_layers_bake_debounce_arm(Material &ma);
 
 /**
  * Whether the tick may clear \a ma's #MA_PAINT_LAYERS_BAKE_SCHEDULED mark itself, right after
@@ -168,11 +167,10 @@ void paint_layers_bake_scheduled_settle(Main &bmain,
                                         int exclude_job_type);
 
 /**
- * Disarm the debounce timer and forget every material still waiting on it, without running their
- * bakes. Must be called before \a wm's own timers are freed (see `wm_close_and_free`) whenever the
- * file \a wm belongs to is about to stop existing -- a new file, closing, quitting -- or
- * #paint_layers_bake_debounce_timer_handle would dangle into whatever comes next. Mirrors
- * `wm_autosave_timer_end`; called from #ED_editors_exit, never for memfile undo (its materials keep
+ * Disarm the debounce and cold-tier timers and forget every material still waiting on them,
+ * without running their bakes. Must be called whenever the file \a wm belongs to is about to stop
+ * existing -- a new file, closing, quitting -- or a stale tick would run against whatever comes
+ * next. Called from #ED_editors_exit, never for memfile undo (its materials keep
  * the same session_uids, so a pending entry stays meaningful across a Ctrl+Z).
  */
 void paint_layers_bake_debounce_reset(wmWindowManager &wm);
@@ -204,7 +202,7 @@ inline PaintLayersBakeGateAction paint_layers_bake_gate_decide(const bool stale,
 
 /**
  * "Bake Paint Layers Now": collapse \a ma's 0.3s debounce (if one is armed for it) and run its due
- * bakes immediately -- the same calls #paint_layers_bake_debounce_timer's own tick makes
+ * bakes immediately -- the same calls the debounce tick makes
  * (`material_bake_images_rebake_stale`, `material_bake_layered_rows_ensure`,
  * #paint_layers_bake_jobs_ensure) -- without waiting the remainder of the debounce window first.
  *

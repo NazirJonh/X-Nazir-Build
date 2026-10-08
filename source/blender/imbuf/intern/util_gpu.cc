@@ -352,6 +352,15 @@ void IMB_update_gpu_texture_sub(gpu::Texture *tex,
 
   bool freebuf = false;
 
+  eGPUDataFormat data_format;
+  void *data = imb_gpu_get_data(ibuf,
+                                do_rescale,
+                                size,
+                                use_premult,
+                                use_grayscale,
+                                &freebuf,
+                                &data_format,
+                                store_linear_float);
 
   /* Update Texture. */
   GPU_texture_update_sub(tex, data_format, data, x, y, z, w, h, 1);
@@ -452,6 +461,10 @@ gpu::Texture *IMB_create_gpu_texture(const char *name,
     do_rescale = true;
   }
   BLI_assert(tex != nullptr);
+  eGPUDataFormat data_format;
+  void *data = imb_gpu_get_data(
+      ibuf, do_rescale, size, use_premult, true, &freebuf, &data_format, store_linear_float);
+  GPU_texture_update(tex, data_format, data);
 
   GPU_texture_swizzle_set(tex, imb_gpu_get_swizzle(ibuf));
   GPU_texture_anisotropic_filter(tex, true);

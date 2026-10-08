@@ -18,18 +18,6 @@ namespace blender::bke::tests {
 
 
 /** The `.PL Source <name>` wrapper group in \a bmain, or null. */
-static bNodeTree *wrapper_tree_find(Main &bmain, const char *source_name)
-{
-  char full[MAX_ID_NAME - 2];
-  SNPRINTF(full, ".PL Source %s", source_name);
-  for (bNodeTree &tree : bmain.nodetrees) {
-    if (STREQ(tree.id.name + 2, full)) {
-      return &tree;
-    }
-  }
-  return nullptr;
-}
-
 /**
  * B3 (a): a Material row in SourceGroup whose Normal comes from a computed source (not a Normal
  * Map) must show the same encoded [0,1] normal the bake would store: the wrapper encodes the

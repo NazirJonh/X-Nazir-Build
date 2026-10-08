@@ -456,11 +456,9 @@ TEST_F(MaterialBakeTest, debounce_arm_replaces_a_running_timer_for_trailing_edge
   /* A trailing-edge debounce must restart its countdown on every edit, not just the first, or a
    * continuous drag (a slider held for two seconds) would still tick -- and bake -- every 0.3s
    * instead of once after the drag ends. #paint_layers_bake_debounce_should_replace_timer is the
-   * named, pure form of that "restart, don't leave running" decision: true whenever a timer already
-   * exists, checked with nothing but a pointer, never dereferenced. */
-  EXPECT_FALSE(paint_layers_bake_debounce_should_replace_timer(nullptr));
-  wmTimer *const not_dereferenced = reinterpret_cast<wmTimer *>(std::uintptr_t(1));
-  EXPECT_TRUE(paint_layers_bake_debounce_should_replace_timer(not_dereferenced));
+   * named form of that "restart, don't leave running" decision: true whenever the debounce
+   * #BLI_timer is registered. With nothing armed there is nothing to replace. */
+  EXPECT_FALSE(paint_layers_bake_debounce_should_replace_timer());
 }
 
 TEST_F(MaterialBakeTest, debounce_settles_immediately_only_when_nothing_is_or_will_be_running)

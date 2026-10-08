@@ -161,8 +161,14 @@ TEST_F(PaintLayersGraphEvalTest, normal_replace_override_matches_the_cpu)
   interpreter.y = 0;
   ASSERT_NE(interpreter.instance, nullptr);
   const RGBA detail_enc = interpreter.sample_image(detail_map, "Color");
-  const float expected[3] = {
+  /* The channel result is normalized and re-encoded, so the top map comes back as the encoded unit
+   * vector of its own decoded normal. */
+  float detail_normal[3] = {
       detail_enc.r * 2.0f - 1.0f, detail_enc.g * 2.0f - 1.0f, detail_enc.b * 2.0f - 1.0f};
+  normalize_v3(detail_normal);
+  const float expected[3] = {detail_normal[0] * 0.5f + 0.5f,
+                             detail_normal[1] * 0.5f + 0.5f,
+                             detail_normal[2] * 0.5f + 0.5f};
 
   for (int x = 0; x < size; x++) {
     interpreter.x = x;

@@ -205,6 +205,10 @@ ChainResult PaintLayersChainBuilder::build_list(
       }
       row = build_row(layer, row_target, substituted, baked_color, premul, layer_group, channel);
     }
+    if (!row.valid) {
+      continue;
+    }
+    ChainLayer current = row.current;
     if (row.grouped) {
       /* The parent chains the group through its instance: Color and Coverage are the row's
        * straight result, while Below/Blend/Result are the instance's own sockets. */
@@ -1172,6 +1176,10 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
     else if (source_group_instance != nullptr) {
       /* The whole source graph goes through the wrapper's COLOR:<CHANNEL> output. No map, so
        * content coverage for this row comes from the wrapper's COVERAGE output below. */
+      if (source_group_socket == nullptr) {
+        /* The wrapper has no COLOR output for this channel: the row is dropped. */
+        return false;
+      }
       current.source_node = source_group_instance;
       current.source = source_group_socket;
     }

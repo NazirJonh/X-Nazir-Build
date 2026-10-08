@@ -16,6 +16,18 @@
 
 namespace blender::bke::tests {
 
+static const int kFsSize = 2;
+/** Mask map grey per texel (row-major 2x2): closed, partial, mostly open, open. Alpha is one. */
+static const uchar kFsMaskBytes[4] = {0, 102, 204, 255};
+/** A's Base Color correction map per texel: straight RGB bytes and a shared alpha of 0.6. */
+static const uchar kFsCorrBytes[4][4] = {
+    {230, 40, 40, 153}, {40, 230, 40, 153}, {40, 40, 230, 153}, {200, 200, 50, 153}};
+static const float kFsMaskOpacity = 0.6f;
+static const float kFsCorrOpacity = 0.5f;
+static const float kFsIsoOpacity = 0.5f;
+static const float kFsInnerPaintOpacity = 0.6f;
+static const float kFsTopOpacity = 0.7f;
+/** Below one, or C would cover everything A's mask and correction do. */
 static const float kFsCOpacity = 0.4f;
 static const float kFsFillColor[4] = {0.30f, 0.45f, 0.20f, 1.0f};
 static const float kFsFillRoughness = 0.75f;

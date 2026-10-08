@@ -141,6 +141,8 @@ int paint_stack_selected_channel(const StackReadContext &ctx)
                                                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 }
 
+}  // namespace
+
 /**
  * The ordinal #paint_stack_rows_from_description would give \a target, or -1. The order is the one
  * #BKE_paint_layers_foreach defines, which is what the row builder's #append_corrections appends
@@ -165,6 +167,8 @@ int layers_ordinal_of(const Material &ma, const MaterialPaintLayer *target)
                            });
   return found;
 }
+
+namespace {
 
 /** Set a layered material's target mode, resolving the active Paint the same way the operator
  * does. */

@@ -852,7 +852,6 @@ if(WITH_GTESTS)
     intern/paint_layers_generate_gates_test.cc
     intern/paint_layers_generate_warm_test.cc
     intern/paint_layers_generate_extended_test.cc
-    intern/paint_layers_test_util.cc
     intern/paint_layers_graph_eval_test.cc
     intern/paint_layers_graph_eval_multisource_test.cc
     intern/paint_layers_graph_eval_masks_test.cc

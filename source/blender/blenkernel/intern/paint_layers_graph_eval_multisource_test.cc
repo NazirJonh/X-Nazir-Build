@@ -255,7 +255,6 @@ TEST_F(PaintLayersGraphEvalTest, multi_source_baked_rows_match_the_reference_and
 }
 
 /** Two Paint children of the isolating folder: distinct uniform data maps (alpha stored as one). */
-static const float kIsolatingPaintA[4] = {0.70f, 0.30f, 0.10f, 1.0f};
 static const float kIsolatingPaintB[4] = {0.20f, 0.80f, 0.40f, 1.0f};
 
 /**
@@ -1550,15 +1549,6 @@ TEST_F(PaintLayersGraphEvalTest, untracked_material_child_inside_folder_adds_no_
 }
 
 /** The generated root's node pointers, for the "a second rebuild changed nothing" check. */
-static Vector<bNode *> root_node_ptrs(bNodeTree &tree)
-{
-  Vector<bNode *> nodes;
-  for (bNode &node : tree.nodes) {
-    nodes.append(&node);
-  }
-  return nodes;
-}
-
 /**
  * Stage 4: a Pass Through folder with a Material child must be byte-identical to moving the child
  * to the parent, hiding it must be a value edit (same result, same root nodes), and a second

@@ -27,13 +27,10 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
-#include "BLI_time.h"
 #include "BLI_utildefines.h"
 
-#include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 
 #include "ED_material_bake.hh"
@@ -152,14 +149,6 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
        * yet keeps painting its own value until one lands. */
       bake_ = ed::material_bake::material_source_bake_get(*brush_paint.source_material,
                                                           brush_paint.source_bake_size);
-#if PBR_PAINT_BAKE_DEBUG
-      printf("[PBR-BAKE] stroke: source_mode=MATERIAL mat='%s' bake_size=%d cached=%d layout=%d\n",
-             brush_paint.source_material->id.name + 2,
-             brush_paint.source_bake_size,
-             int(bake_ != nullptr),
-             int(brush_paint.source_layout));
-      fflush(stdout);
-#endif
     }
   }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
@@ -235,31 +224,6 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
                                           source.effective_mtex.brush_map_mode !=
                                               MTEX_MAP_MODE_3D;
           source.usable = baked_buffer_ok && map_mode_supported;
-#if PBR_PAINT_BAKE_DEBUG
-          printf("[PBR-BAKE] stroke: channel=%d kind=Baked ibuf=%p %dx%d ch=%d float=%p "
-                 "first=(%.4f, %.4f, %.4f) usable=%d direct=%d map_mode=%d size=(%.3f, %.3f)\n",
-                 int(info.channel),
-                 (void *)source.ibuf,
-                 source.ibuf != nullptr ? source.ibuf->x : 0,
-                 source.ibuf != nullptr ? source.ibuf->y : 0,
-                 source.ibuf != nullptr ? source.ibuf->channels : 0,
-                 source.ibuf != nullptr ? (void *)source.ibuf->float_data() : nullptr,
-                 (source.ibuf != nullptr && source.ibuf->float_data() != nullptr) ?
-                     source.ibuf->float_data()[0] :
-                     -1.0f,
-                 (source.ibuf != nullptr && source.ibuf->float_data() != nullptr) ?
-                     source.ibuf->float_data()[1] :
-                     -1.0f,
-                 (source.ibuf != nullptr && source.ibuf->float_data() != nullptr) ?
-                     source.ibuf->float_data()[2] :
-                     -1.0f,
-                 int(source.usable),
-                 int(source.image_direct_sample),
-                 int(source.effective_mtex.brush_map_mode),
-                 source.effective_mtex.size[0],
-                 source.effective_mtex.size[1]);
-          fflush(stdout);
-#endif
           source.flip_green_channel = info.channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
                                       channel.normal_space ==
                                           BRUSH_MATERIAL_PAINT_NORMAL_SPACE_DIRECTX;
@@ -290,10 +254,6 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
 
   pool_ = BKE_image_pool_new();
 
-#if PBR_PAINT_SOURCE_PROFILE
-  const double construct_start = BLI_time_now_seconds();
-  int probed_image_num = 0;
-#endif
 
   /* Usability is decided once here rather than per sample, so the UI warning and the engine can
    * never disagree in the middle of a stroke. For IMAGE sources, probe ImBuf acquisition via the
@@ -344,18 +304,7 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
       /* Acquire may update ImageUser; keep a local copy so the const Tex on the brush is not
        * mutated through a const path. */
       ImageUser iuser = tex->iuser;
-#if PBR_PAINT_SOURCE_PROFILE
-      const double acquire_start = BLI_time_now_seconds();
-#endif
       ImBuf *ibuf = BKE_image_pool_acquire_ibuf(tex->ima, &iuser, pool_);
-#if PBR_PAINT_SOURCE_PROFILE
-      /* A slow acquire here means this image was not yet in the pool (first probe for it this
-       * stroke, so a real decode happened); a fast one means another channel already pulled the
-       * same image in and the pool served it from cache. Compare the two to see whether the
-       * per-channel Tex duplication (each channel owns its own Tex/MTex even when pointing at
-       * the same Image) is causing redundant decodes across channels. */
-      const double acquire_seconds = BLI_time_now_seconds() - acquire_start;
-#endif
       source.usable = ibuf != nullptr;
       if (ibuf && ibuf->float_data() == nullptr) {
         source.do_linear_conversion = true;
@@ -373,17 +322,6 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
       else {
         BKE_image_pool_release_ibuf(tex->ima, ibuf, pool_);
       }
-#if PBR_PAINT_SOURCE_PROFILE
-      printf("[pbr_paint] source probe: channel=%d image=%s size=%dx%d acquire=%.3fms %s%s\n",
-             i,
-             tex->ima->id.name + 2,
-             ibuf != nullptr ? ibuf->x : 0,
-             ibuf != nullptr ? ibuf->y : 0,
-             acquire_seconds * 1000.0,
-             acquire_seconds > 0.001 ? "(likely decode)" : "(cache hit)",
-             direct_sample ? " direct_sample" : "");
-      probed_image_num++;
-#endif
     }
     else {
       source.usable = true;
@@ -391,33 +329,7 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
     active_ |= source.usable;
   }
 
-#if PBR_PAINT_BAKE_DEBUG
-  /* Why the whole sampler ends up active or not, which is what decides between painting the source
-   * and painting nothing at all. */
-  if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
-    printf("[PBR-BAKE] stroke: SUMMARY active=%d bake=%p bake_size=%d\n",
-           int(active_),
-           (const void *)bake_.get(),
-           brush_paint.source_bake_size);
-    for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-      const ChannelSource &s = sources_[i];
-      printf("[PBR-BAKE] stroke:   channel=%d resolved=%d kind=%d usable=%d ibuf=%p\n",
-             i,
-             int(material_resolve.channels[i]),
-             int(s.kind),
-             int(s.usable),
-             (void *)s.ibuf);
-    }
-    fflush(stdout);
-  }
-#endif
 
-#if PBR_PAINT_SOURCE_PROFILE
-  const double construct_seconds = BLI_time_now_seconds() - construct_start;
-  printf("[pbr_paint] ChannelSourceSet construct: %d image probe(s), %.3fms total\n",
-         probed_image_num,
-         construct_seconds * 1000.0);
-#endif
 }
 
 ChannelSourceSet::~ChannelSourceSet()
@@ -735,19 +647,6 @@ static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
                                               float4 &r_rgba)
 {
   if (sample_direct_layout(layout, ctx.symm_point, ctx.view_point_2d, r_value, r_rgba)) {
-#if PBR_PAINT_BAKE_DEBUG
-    if (source.kind == ChannelSourceKind::Baked) {
-      static std::atomic_bool logged = false;
-      if (!logged.exchange(true)) {
-        printf("[PBR-BAKE] sculpt: direct sample OK layout.kind=%d rgba=(%.4f, %.4f, %.4f)\n",
-               int(layout.kind),
-               r_rgba.x,
-               r_rgba.y,
-               r_rgba.z);
-        fflush(stdout);
-      }
-    }
-#endif
     return;
   }
   if (source.kind == ChannelSourceKind::Baked && source.baked_target_uv) {
@@ -765,19 +664,6 @@ static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
     /* #RE_texture_evaluate needs a #Tex, while Image and brush-mapped Baked sources have none.
      * Reaching here means the direct placement could not be built, so report nothing rather than
      * dereferencing the null texture. */
-#if PBR_PAINT_BAKE_DEBUG
-    static std::atomic_bool black_return_logged = false;
-    if (!black_return_logged.exchange(true)) {
-      printf("[PBR-BAKE] sample: returning BLACK -- direct layout disabled. kind=%d "
-             "layout.kind=%d direct=%d ibuf=%p map_mode=%d\n",
-             int(source.kind),
-             int(layout.kind),
-             int(source.image_direct_sample),
-             (void *)source.ibuf,
-             source.mtex != nullptr ? int(source.mtex->brush_map_mode) : -1);
-      fflush(stdout);
-    }
-#endif
     r_rgba = float4(0.0f);
     if (r_value != nullptr) {
       *r_value = 0.0f;

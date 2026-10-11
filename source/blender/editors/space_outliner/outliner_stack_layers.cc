@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <climits>
-#include <cstdio>
 #include <functional>
 
 #include "DNA_defs.h"
@@ -834,7 +833,6 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
   const int kind = RNA_enum_get(op->ptr, "type");
   StackAddKindInfo kind_info;
   if (!stack_add_kind_info_get(*C, kind, kind_info)) {
-    printf("PL-DIAG stack_layer_add: unknown kind %d\n", kind);
     return OPERATOR_CANCELLED;
   }
 
@@ -882,9 +880,6 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
     args.color = linear_color;
   }
   const int added = outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args);
-  if (added < 0) {
-    printf("PL-DIAG stack_layer_add: row_add refused kind=%d anchor=%d\n", kind, anchor_ordinal);
-  }
   return added >= 0 ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 

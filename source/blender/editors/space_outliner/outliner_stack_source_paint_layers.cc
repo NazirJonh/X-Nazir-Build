@@ -20,7 +20,6 @@
 
 #include <algorithm>
 #include <climits>
-#include <cstdio>
 #include <functional>
 #include <optional>
 #include <string>
@@ -1283,7 +1282,6 @@ class PaintLayersStackSource final : public StackSource,
               const StackAddArgs &args = {}) const override
   {
     if (!this->is_editable(owner)) {
-      printf("PL-DIAG paint row_add: owner not editable\n");
       return -1;
     }
     Material &material = layers_owner(owner);
@@ -1324,7 +1322,6 @@ class PaintLayersStackSource final : public StackSource,
     }
     const int created = paint_layers_edit_add(material, kind, ordinal, args);
     if (created < 0) {
-      printf("PL-DIAG paint row_add: policy refused kind=%d ordinal=%d\n", kind, ordinal);
       return -1;
     }
     /* A painted mask correction gets its opaque map now, neutral for its blend, rather than on

@@ -32,11 +32,6 @@
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 
-#include "BLI_time.h"
-
-#include <atomic>
-#include <cstdio>
-
 #include "mesh_brush_common.hh"
 #include "paint_debug.hh"
 #include "paint_material_blend.hh"
@@ -46,31 +41,6 @@
 #include "sculpt_paint_material.hh"
 
 namespace blender::ed::sculpt_paint::material {
-
-/* Per-dab printf profiling. Master switch is #PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
-#if PBR_PAINT_MATERIAL_PROFILE
-namespace {
-struct MaterialPaintProfile {
-  std::atomic<int64_t> vert_num{0};
-  std::atomic<int64_t> active_vert_num{0};
-  std::atomic<double> factors_seconds{0.0};
-  std::atomic<double> automask_seconds{0.0};
-  std::atomic<double> sample_and_blend_seconds{0.0};
-
-  void reset()
-  {
-    vert_num.store(0);
-    active_vert_num.store(0);
-    factors_seconds.store(0.0);
-    automask_seconds.store(0.0);
-    sample_and_blend_seconds.store(0.0);
-  }
-};
-}  // namespace
-
-static MaterialPaintProfile g_scalar_profile;
-static MaterialPaintProfile g_color_profile;
-#endif
 
 /* -------------------------------------------------------------------- */
 /** \name Local Data Structures
@@ -118,10 +88,6 @@ static void do_paint_scalar_task(Object &object,
 {
   const Span<int> verts = node.verts();
   BLI_assert(factors.size() == verts.size());
-#if PBR_PAINT_MATERIAL_PROFILE
-  const double sample_start = BLI_time_now_seconds();
-  int64_t active_num = 0;
-#endif
 
   /* The value from before this stroke touched this vertex, frozen for the whole stroke (see
    * #orig_material_scalar_data_lookup_mesh); every dab blends against this instead of the
@@ -161,15 +127,7 @@ static void do_paint_scalar_task(Object &object,
     const float2 composite_mix = mix * brush_alpha;
     const float blended = apply_scalar_blend(orig[i], composite_mix, blend_mode);
     attribute[verts[i]] = math::clamp(blended, value_range.x, value_range.y);
-#if PBR_PAINT_MATERIAL_PROFILE
-    active_num++;
-#endif
   }
-#if PBR_PAINT_MATERIAL_PROFILE
-  g_scalar_profile.sample_and_blend_seconds.fetch_add(BLI_time_now_seconds() - sample_start);
-  g_scalar_profile.vert_num.fetch_add(verts.size());
-  g_scalar_profile.active_vert_num.fetch_add(active_num);
-#endif
 }
 
 /** Base Color counterpart to #do_paint_scalar_task; the same node-local span convention applies,
@@ -192,10 +150,6 @@ static void do_paint_color_task(Object &object,
 {
   const Span<int> verts = node.verts();
   BLI_assert(factors.size() == verts.size());
-#if PBR_PAINT_MATERIAL_PROFILE
-  const double sample_start = BLI_time_now_seconds();
-  int64_t active_num = 0;
-#endif
 
   /* The color from before this stroke touched this vertex, frozen for the whole stroke; every
    * dab blends against this instead of the live (already-dab-modified) color attribute, so
@@ -225,9 +179,6 @@ static void do_paint_color_task(Object &object,
     if (factor <= 0.0f) {
       continue;
     }
-#if PBR_PAINT_MATERIAL_PROFILE
-    active_num++;
-#endif
 
     const float3 target = source_colors.is_empty() ? target_rgb : source_colors[i];
     /* Alpha does not mask its own write; only every other channel's write is scaled. */
@@ -259,11 +210,6 @@ static void do_paint_color_task(Object &object,
                           result,
                           color_attribute.span);
   }
-#if PBR_PAINT_MATERIAL_PROFILE
-  g_color_profile.sample_and_blend_seconds.fetch_add(BLI_time_now_seconds() - sample_start);
-  g_color_profile.vert_num.fetch_add(verts.size());
-  g_color_profile.active_vert_num.fetch_add(active_num);
-#endif
 }
 
 /** \} */
@@ -547,12 +493,6 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
     return;
   }
 
-#if PBR_PAINT_MATERIAL_PROFILE
-  const double step_start = BLI_time_now_seconds();
-  g_scalar_profile.reset();
-  g_color_profile.reset();
-#endif
-
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
 
@@ -593,9 +533,6 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
     dab.alpha.resize(alpha_masking_active ? offset : 0);
   }
 
-#if PBR_PAINT_MATERIAL_PROFILE
-  const double shared_factors_start = BLI_time_now_seconds();
-#endif
   /* Brush falloff, the texture-sample coordinates and the Alpha mask are all channel-independent,
    * so they are built once here and reused by every channel pass below instead of being redone
    * per channel. */
@@ -658,10 +595,6 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
         }
       },
       exec_mode::grain_size(1));
-#if PBR_PAINT_MATERIAL_PROFILE
-  const double shared_factors_ms = (BLI_time_now_seconds() - shared_factors_start) * 1000.0;
-  g_scalar_profile.factors_seconds.fetch_add(shared_factors_ms / 1000.0);
-#endif
 
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!BKE_paint_material_channel_writes_to_target(
@@ -721,27 +654,6 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
                          all_tls);
   }
 
-#if PBR_PAINT_MATERIAL_PROFILE
-  const double step_seconds = BLI_time_now_seconds() - step_start;
-  /* One line per brush dab step per symmetry pass: cheap enough to leave on for a whole stroke
-   * and shows the factors/automasking/sample+blend split, which the per-stroke sampler summary
-   * cannot. */
-  printf(
-      "[pbr_paint] do_paint_material_brush step: total=%.3fms | scalar verts=%lld/%lld "
-      "factors=%.3fms automask=%.3fms sample+blend=%.3fms | color verts=%lld/%lld "
-      "factors=%.3fms automask=%.3fms sample+blend=%.3fms\n",
-      step_seconds * 1000.0,
-      static_cast<long long>(g_scalar_profile.active_vert_num.load()),
-      static_cast<long long>(g_scalar_profile.vert_num.load()),
-      g_scalar_profile.factors_seconds.load() * 1000.0,
-      g_scalar_profile.automask_seconds.load() * 1000.0,
-      g_scalar_profile.sample_and_blend_seconds.load() * 1000.0,
-      static_cast<long long>(g_color_profile.active_vert_num.load()),
-      static_cast<long long>(g_color_profile.vert_num.load()),
-      g_color_profile.factors_seconds.load() * 1000.0,
-      g_color_profile.automask_seconds.load() * 1000.0,
-      g_color_profile.sample_and_blend_seconds.load() * 1000.0);
-#endif
 }
 
 /** \} */

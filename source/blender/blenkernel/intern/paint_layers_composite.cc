@@ -601,6 +601,13 @@ bool composite_image_layers_build(const Material &material,
       copy_v2_v2(out_correction.mapping_offset, correction.mapping.offset);
       copy_v2_v2(out_correction.mapping_scale, correction.mapping.scale);
       out_correction.mapping_rotation = correction.mapping.rotation;
+      out_correction.mapping_wrap = BKE_paint_layers_mapping_wrap_get(correction);
+      /* A clipping wrap reaches the correction as a coverage factor, whatever its source, for the
+       * reason given at the row's own flag below. A Stack correction composites children and has
+       * no map of its own, so its mapping never applies. */
+      out_correction.mapping_clips_coverage = out_correction.mapping_enabled &&
+                                              out_correction.mapping_wrap !=
+                                                  MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
       /* Only a content map holds normals; a mask is reduced to a grey and never remapped as one. */
       out_correction.tangent_normal = is_content && channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
                                       out_correction.mapping_enabled;
@@ -706,6 +713,12 @@ bool composite_image_layers_build(const Material &material,
     copy_v2_v2(out.mapping_offset, layer->mapping.offset);
     copy_v2_v2(out.mapping_scale, layer->mapping.scale);
     out.mapping_rotation = layer->mapping.rotation;
+    out.mapping_wrap = BKE_paint_layers_mapping_wrap_get(*layer);
+    /* A clipping wrap reaches the row as a coverage factor, whatever its source: a map's own alpha
+     * is ignored on channels that track no content alpha and by a Material row, so a clipped texel
+     * would otherwise blend its black into the rows below, like the generated graph's factor. */
+    out.mapping_clips_coverage = out.mapping_enabled &&
+                                 out.mapping_wrap != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
     out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.mapping_enabled;
     /* The row's effective opacity times the channel's own multiplier and the disabled case; the
      * same helper the generator's per (row, channel) input reads. The mask stack is its own list of
@@ -735,6 +748,7 @@ bool composite_image_layers_build(const Material &material,
       copy_v2_v2(out.coverage_mapping_offset, out.mapping_offset);
       copy_v2_v2(out.coverage_mapping_scale, out.mapping_scale);
       out.coverage_mapping_rotation = out.mapping_rotation;
+      out.coverage_mapping_wrap = out.mapping_wrap;
     }
     else if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer->bake != nullptr &&
              layer->bake->coverage != nullptr)

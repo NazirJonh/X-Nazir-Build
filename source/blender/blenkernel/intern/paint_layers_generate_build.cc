@@ -1191,33 +1191,19 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
   }
 }
 
-std::pair<bNode *, bNodeSocket *> PaintLayersTreeBuilder::mapping_vector_ensure(
-    bNodeTree &tree,
-    bNode *group_input,
-    const MaterialPaintLayer &row,
-    const float location_x,
-    const float location_y)
+bNode *PaintLayersTreeBuilder::mapping_node_build(bNodeTree &tree,
+                                                  bNode *group_input,
+                                                  const MaterialPaintLayer &row,
+                                                  const float location_x,
+                                                  const float location_y)
 {
-  /* The Mapping node exists only while the row remaps a repeatable map and its mode builds it
-   * here, in the row's own tree. A SourceGroup Material row's Mapping lives inside its wrapper,
-   * so this builds nothing there -- the wrapper's values are wired to the row group's inputs by
-   * #source_group_mapping_wire instead. */
-  if (!BKE_paint_layers_mapping_applies(ma_, row, cache_) ||
-      (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
-       BKE_paint_layers_material_mode(ma_, row, cache_) != PaintLayerMaterialMode::Hybrid))
-  {
-    return {nullptr, nullptr};
-  }
-  if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
-    return {*found, socket_out(**found, "Vector")};
-  }
   auto [uv_node, uv_out] = generated_uv_map_ensure(tree, BKE_paint_layers_uv_map_name(ma_));
   if (uv_node == nullptr || uv_out == nullptr) {
-    return {nullptr, nullptr};
+    return nullptr;
   }
   bNode *mapping = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
   if (mapping == nullptr) {
-    return {nullptr, nullptr};
+    return nullptr;
   }
   /* Point: `R * (uv * scale) + offset`, the same transform the CPU applies. */
   mapping->custom1 = NODE_MAPPING_TYPE_POINT;
@@ -1229,9 +1215,8 @@ std::pair<bNode *, bNodeSocket *> PaintLayersTreeBuilder::mapping_vector_ensure(
     STRNCPY_UTF8(mapping->label, label);
   }
   bNodeSocket *map_vector = socket_in(*mapping, "Vector");
-  bNodeSocket *map_out = socket_out(*mapping, "Vector");
-  if (map_vector == nullptr || map_out == nullptr) {
-    return {nullptr, nullptr};
+  if (map_vector == nullptr || socket_out(*mapping, "Vector") == nullptr) {
+    return nullptr;
   }
   bke::node_add_link(tree, *uv_node, *uv_out, *mapping, *map_vector);
   /* The values ride the row group's mapping inputs; an input missing here (a substituted row
@@ -1258,8 +1243,95 @@ std::pair<bNode *, bNodeSocket *> PaintLayersTreeBuilder::mapping_vector_ensure(
   link_value(mapping_offset_inputs_, "Location");
   link_value(mapping_rotation_inputs_, "Rotation");
   link_value(mapping_scale_inputs_, "Scale");
-  mapping_nodes_.add(&row, mapping);
+  return mapping;
+}
+
+std::pair<bNode *, bNodeSocket *> PaintLayersTreeBuilder::mapping_vector_ensure(
+    bNodeTree &tree,
+    bNode *group_input,
+    const MaterialPaintLayer &row,
+    const float location_x,
+    const float location_y)
+{
+  /* The Mapping node exists only while the row remaps a repeatable map and its mode builds it
+   * here, in the row's own tree. A SourceGroup Material row's Mapping lives inside its wrapper,
+   * so this builds nothing there -- the wrapper's values are wired to the row group's inputs by
+   * #source_group_mapping_wire instead. */
+  if (!BKE_paint_layers_mapping_applies(ma_, row, cache_) ||
+      (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+       BKE_paint_layers_material_mode(ma_, row, cache_) != PaintLayerMaterialMode::Hybrid))
+  {
+    return {nullptr, nullptr};
+  }
+  /* A row's clip mask may have built the node already; the maps then share it. */
+  bNode *mapping = nullptr;
+  if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
+    mapping = *found;
+  }
+  else {
+    mapping = mapping_node_build(tree, group_input, row, location_x, location_y);
+    if (mapping == nullptr) {
+      return {nullptr, nullptr};
+    }
+    mapping_nodes_.add(&row, mapping);
+  }
+  bNodeSocket *map_out = socket_out(*mapping, "Vector");
+  if (map_out == nullptr) {
+    return {nullptr, nullptr};
+  }
   return {mapping, map_out};
+}
+
+bNodeSocket *PaintLayersTreeBuilder::mapping_wrap_mask_ensure(bNodeTree &tree,
+                                                              bNode *group_input,
+                                                              const MaterialPaintLayer &row,
+                                                              const float location_x,
+                                                              const float location_y,
+                                                              bNode *&r_node)
+{
+  r_node = nullptr;
+  if (group_input == nullptr ||
+      BKE_paint_layers_mapping_wrap_get(row) == MA_PAINT_LAYER_MAPPING_WRAP_REPEAT ||
+      !BKE_paint_layers_mapping_applies(ma_, row, cache_))
+  {
+    return nullptr;
+  }
+  if (const std::pair<bNode *, bNodeSocket *> *cached = mapping_mask_outputs_.lookup_ptr(&row)) {
+    r_node = cached->first;
+    return cached->second;
+  }
+  /* The maps of a Fill row and a Hybrid Material row already read this row's Mapping, so the mask
+   * shares it. A SourceGroup row reads its values inside the wrapper, so the row builds a Mapping
+   * of its own, fed by the same inputs, whose only reader is the mask; it is not registered in
+   * #mapping_nodes_ because no map of the row reads it. */
+  const bool wrapper_row = row.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+                           BKE_paint_layers_material_mode(ma_, row, cache_) !=
+                               PaintLayerMaterialMode::Hybrid;
+  bNode *mapping = nullptr;
+  if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
+    mapping = *found;
+  }
+  else {
+    mapping = mapping_node_build(tree, group_input, row, location_x, location_y);
+    if (mapping != nullptr && !wrapper_row) {
+      mapping_nodes_.add(&row, mapping);
+    }
+  }
+  bNodeSocket *map_out = (mapping != nullptr) ? socket_out(*mapping, "Vector") : nullptr;
+  if (map_out == nullptr) {
+    return nullptr;
+  }
+  bNodeSocket *mask = mapping_wrap_mask_add(tree,
+                                            *mapping,
+                                            *map_out,
+                                            BKE_paint_layers_mapping_wrap_get(row),
+                                            location_x + 160.0f,
+                                            location_y,
+                                            r_node);
+  if (mask != nullptr && r_node != nullptr) {
+    mapping_mask_outputs_.add(&row, {r_node, mask});
+  }
+  return mask;
 }
 
 bNodeSocket *PaintLayersTreeBuilder::normal_remap_ensure(bNodeTree &tree,
@@ -1369,6 +1441,106 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
   bke::node_add_link(tree, *remap, *remap_out, *encode, *encode_in);
   r_node = encode;
   return encode_out;
+}
+
+/** A Math node of \a operation at the given place; null when it cannot be made. */
+static bNode *mapping_wrap_math_add(bNodeTree &tree,
+                                    const int operation,
+                                    const float location_x,
+                                    const float location_y)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  if (node == nullptr) {
+    return nullptr;
+  }
+  node->custom1 = operation;
+  node->location[0] = location_x;
+  node->location[1] = location_y;
+  return node;
+}
+
+static void mapping_wrap_socket_value_set(bNode &node, const char *name, const float value)
+{
+  bNodeSocket *socket = socket_in(node, name);
+  if (socket != nullptr && socket->default_value != nullptr) {
+    static_cast<bNodeSocketValueFloat *>(socket->default_value)->value = value;
+  }
+}
+
+bNodeSocket *mapping_wrap_mask_add(bNodeTree &tree,
+                                   bNode &vector_node,
+                                   bNodeSocket &vector_out,
+                                   const int16_t wrap,
+                                   const float location_x,
+                                   const float location_y,
+                                   bNode *&r_node)
+{
+  r_node = nullptr;
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(wrap, repeat_u, repeat_v);
+  if (repeat_u && repeat_v) {
+    return nullptr;
+  }
+  bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+  bNodeSocket *sep_vector = (separate != nullptr) ? socket_in(*separate, "Vector") : nullptr;
+  if (sep_vector == nullptr) {
+    return nullptr;
+  }
+  separate->location[0] = location_x;
+  separate->location[1] = location_y;
+  bke::node_add_link(tree, vector_node, vector_out, *separate, *sep_vector);
+  /* An axis is inside the unit square exactly when `floor(a) == 0`; Compare with an epsilon of
+   * one half reads that without a pair of range tests. */
+  bNode *last = nullptr;
+  bNodeSocket *last_out = nullptr;
+  const bool clipped[2] = {!repeat_u, !repeat_v};
+  const char *axis_names[2] = {"X", "Y"};
+  for (const int axis : IndexRange(2)) {
+    if (!clipped[axis]) {
+      continue;
+    }
+    bNodeSocket *from = socket_out(*separate, axis_names[axis]);
+    bNode *floor_node = mapping_wrap_math_add(
+        tree, NODE_MATH_FLOOR, location_x + 120.0f, location_y - 90.0f * float(axis));
+    bNode *compare = mapping_wrap_math_add(
+        tree, NODE_MATH_COMPARE, location_x + 240.0f, location_y - 90.0f * float(axis));
+    if (from == nullptr || floor_node == nullptr || compare == nullptr) {
+      return nullptr;
+    }
+    bNodeSocket *floor_in = socket_in(*floor_node, "Value");
+    bNodeSocket *floor_out = socket_out(*floor_node, "Value");
+    bNodeSocket *compare_in = socket_in(*compare, "Value");
+    bNodeSocket *compare_out = socket_out(*compare, "Value");
+    if (floor_in == nullptr || floor_out == nullptr || compare_in == nullptr ||
+        compare_out == nullptr)
+    {
+      return nullptr;
+    }
+    mapping_wrap_socket_value_set(*compare, "Value_001", 0.0f);
+    mapping_wrap_socket_value_set(*compare, "Value_002", 0.5f);
+    bke::node_add_link(tree, *separate, *from, *floor_node, *floor_in);
+    bke::node_add_link(tree, *floor_node, *floor_out, *compare, *compare_in);
+    if (last == nullptr) {
+      last = compare;
+      last_out = compare_out;
+      continue;
+    }
+    bNode *both = mapping_wrap_math_add(
+        tree, NODE_MATH_MULTIPLY, location_x + 360.0f, location_y - 45.0f);
+    bNodeSocket *both_a = (both != nullptr) ? socket_in(*both, "Value") : nullptr;
+    bNodeSocket *both_b = (both != nullptr) ? socket_in(*both, "Value_001") : nullptr;
+    bNodeSocket *both_out = (both != nullptr) ? socket_out(*both, "Value") : nullptr;
+    if (both_a == nullptr || both_b == nullptr || both_out == nullptr) {
+      return nullptr;
+    }
+    bke::node_add_link(tree, *last, *last_out, *both, *both_a);
+    bke::node_add_link(tree, *compare, *compare_out, *both, *both_b);
+    last = both;
+    last_out = both_out;
+  }
+  r_node = last;
+  return last_out;
 }
 
 LayerGroup *PaintLayersTreeBuilder::layer_group_ensure(const MaterialPaintLayer &layer,

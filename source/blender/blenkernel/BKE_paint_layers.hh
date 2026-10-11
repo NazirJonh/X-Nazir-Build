@@ -1321,6 +1321,26 @@ bool BKE_paint_layers_mapping_set_rotation(Material &ma,
                                             MaterialPaintLayer *layer,
                                             float rotation);
 
+/**
+ * Which axes of a mapped map repeat for \a wrap (#eMaterialPaintLayerMappingWrap). An axis that
+ * does not repeat reads transparent outside [0, 1]. The one answer the CPU resample, the CPU
+ * coverage clip and the graph's clip factor share, so they cannot disagree on what a wrap mode
+ * means.
+ */
+void BKE_paint_layers_mapping_wrap_axes(int16_t wrap, bool &r_repeat_u, bool &r_repeat_v);
+
+/**
+ * The wrap mode of \a layer with an out-of-range stored value read as Repeat. Mapping applies the
+ * wrap in the graph and on the CPU only while the row's mapping applies.
+ */
+int16_t BKE_paint_layers_mapping_wrap_get(const MaterialPaintLayer &layer);
+
+/**
+ * Set the mapping wrap of \a layer. Structural: Repeat builds nothing extra, any other mode adds
+ * the row's clip factor, so the tree is regenerated.
+ */
+bool BKE_paint_layers_mapping_set_wrap(Material &ma, MaterialPaintLayer *layer, int16_t wrap);
+
 /** \} */
 
 /**

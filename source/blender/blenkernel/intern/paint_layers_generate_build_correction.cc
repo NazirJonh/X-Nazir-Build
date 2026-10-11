@@ -435,6 +435,15 @@ if (!substituted) {
         std::tie(correction_material_coverage_node, correction_material_coverage_socket) =
             build_grey_of_map(tree, location_x, location_y, *correction.bake->coverage, -240.0f);
       }
+      /* A clipping UV wrap leaves through the coverage: outside the square the correction
+       * contributes nothing instead of the black of a clipped content map. */
+      coverage_clip_multiply(tree,
+                             group_input,
+                             correction,
+                             location_x - 180.0f,
+                             location_y - 480.0f,
+                             correction_material_coverage_node,
+                             correction_material_coverage_socket);
     }
     else if (correction.source == MA_PAINT_LAYER_SOURCE_NODE_GROUP) {
       /* A Node Group correction is Baked-only, exactly like a Layer row of that source: no
@@ -543,7 +552,8 @@ if (!substituted) {
                      tree, group_input, correction, location_x - 180.0f, location_y - 160.0f);
                  mapping.first != nullptr && mapping.second != nullptr)
         {
-          /* A mapped Fill reads its map through its own Mapping node; tiling needs Repeat. */
+          /* A mapped Fill reads its map through its own Mapping node; tiling needs Repeat. A UV
+           * wrap that clips an axis leaves through the coverage factor, not the extension. */
           if (NodeTexImage *storage = static_cast<NodeTexImage *>(
                   correction_source->storage))
           {
@@ -771,6 +781,18 @@ if (!substituted) {
                                                                correction_alpha;
       bNode *coverage_map_node = material_correction ? correction_material_coverage_node :
                                                         correction_source;
+      if (!material_correction && !fill) {
+        /* A UV wrap that clips an axis: the map's own alpha is no guard on its own -- it is ignored
+         * on channels that track no content alpha -- so the clip multiplies into the factor and the
+         * clipped texels lay nothing over the rows below. A Material correction took it above. */
+        coverage_clip_multiply(tree,
+                               group_input,
+                               correction,
+                               location_x - 180.0f,
+                               location_y - 480.0f,
+                               coverage_map_node,
+                               coverage_map_socket);
+      }
       if (fill || coverage_map_socket == nullptr || coverage_map_node == nullptr) {
         /* A flat correction's factor is its opacity; it covers fully. */
         correction_coverage_socket = correction_opacity;
@@ -999,7 +1021,64 @@ void PaintLayersChainBuilder::live_map_configure(bNode &map,
   }
 }
 
+void PaintLayersChainBuilder::coverage_clip_multiply(bNodeTree &tree,
+                                                     bNode *group_input,
+                                                     const MaterialPaintLayer &row,
+                                                     const float location_x,
+                                                     const float location_y,
+                                                     bNode *&r_node,
+                                                     bNodeSocket *&r_socket)
+{
+  /* A UV wrap that clips an axis has to leave through the coverage factor: a map's own alpha is no
+   * guard (a Material row's transparency is its source's Alpha). A null mask (Repeat, or nothing
+   * mapped) changes nothing. */
+  bNode *clip_node = nullptr;
+  bNodeSocket *clip = outer_.mapping_wrap_mask_ensure(
+      tree, group_input, row, location_x, location_y, clip_node);
+  if (clip == nullptr || clip_node == nullptr) {
+    return;
+  }
+  if (r_socket == nullptr || r_node == nullptr) {
+    r_node = clip_node;
+    r_socket = clip;
+    return;
+  }
+  bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  bNodeSocket *p_a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
+  bNodeSocket *p_b = (product != nullptr) ? socket_in(*product, "Value_001") : nullptr;
+  bNodeSocket *p_out = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
+  if (p_a == nullptr || p_b == nullptr || p_out == nullptr) {
+    return;
+  }
+  product->custom1 = NODE_MATH_MULTIPLY;
+  product->location[0] = location_x + 480.0f;
+  product->location[1] = location_y;
+  bke::node_add_link(tree, *r_node, *r_socket, *product, *p_a);
+  bke::node_add_link(tree, *clip_node, *clip, *product, *p_b);
+  r_node = product;
+  r_socket = p_out;
+}
+
 std::pair<bNode *, bNodeSocket *> PaintLayersChainBuilder::resolve_correction_coverage(
+    bNodeTree &tree,
+    bNode *group_input,
+    const float location_x,
+    const float location_y,
+    const MaterialPaintLayer &row)
+{
+  std::pair<bNode *, bNodeSocket *> coverage = resolve_correction_coverage_source(
+      tree, group_input, location_x, location_y, row);
+  coverage_clip_multiply(tree,
+                         group_input,
+                         row,
+                         location_x - 180.0f,
+                         location_y - 480.0f,
+                         coverage.first,
+                         coverage.second);
+  return coverage;
+}
+
+std::pair<bNode *, bNodeSocket *> PaintLayersChainBuilder::resolve_correction_coverage_source(
     bNodeTree &tree,
     bNode *group_input,
     const float location_x,
@@ -2245,6 +2324,15 @@ void PaintLayersChainBuilder::build_mask_item(
           else {
             multiply_node = correction_map;
             multiply_socket = correction_alpha;
+            /* A UV wrap that clips an axis zeroes the item's factor outside the square, so the
+             * clipped texels do not push the mask's grey into the rows' factor. */
+            coverage_clip_multiply(tree,
+                                   group_input,
+                                   correction,
+                                   location_x - 400.0f,
+                                   location_y - 480.0f,
+                                   multiply_node,
+                                   multiply_socket);
           }
         }
         if (!build_mask_element_chain(tree,

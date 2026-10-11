@@ -186,7 +186,15 @@ uint64_t topology_hash_correction(uint64_t hash,
   hash = topology_hash_mix(hash, fill ? 1 : 0);
   /* Whether the row carries a Mapping node: the applied-mapping predicate, which folds a
    * Material row's mode in. The values ride group inputs and never move this hash. */
-  hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, correction, cache) ? 1 : 0);
+  const bool correction_mapped = BKE_paint_layers_mapping_applies(ma, correction, cache);
+  hash = topology_hash_mix(hash, correction_mapped ? 1 : 0);
+  /* The UV wrap adds nodes and changes the maps' extension; Repeat mixes nothing, so a file that
+   * never used it keeps its stored hash. */
+  if (correction_mapped &&
+      BKE_paint_layers_mapping_wrap_get(correction) != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT)
+  {
+    hash = topology_hash_mix(hash, 0x100 + uint64_t(BKE_paint_layers_mapping_wrap_get(correction)));
+  }
   const bool mask_material_or_group = mask_item &&
                                       ELEM(correction.source,
                                            MA_PAINT_LAYER_SOURCE_MATERIAL,
@@ -380,7 +388,15 @@ uint64_t topology_hash_layer(uint64_t hash,
   /* Whether the row carries a Mapping node: the applied-mapping predicate, which folds a
    * Material row's mode in (Hybrid's live textures or the wrapper). The values ride group inputs
    * and never move this hash. */
-  hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, layer, cache) ? 1 : 0);
+  const bool layer_mapped = BKE_paint_layers_mapping_applies(ma, layer, cache);
+  hash = topology_hash_mix(hash, layer_mapped ? 1 : 0);
+  /* The UV wrap adds nodes and changes the maps' extension; Repeat mixes nothing, so a file that
+   * never used it keeps its stored hash. */
+  if (layer_mapped &&
+      BKE_paint_layers_mapping_wrap_get(layer) != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT)
+  {
+    hash = topology_hash_mix(hash, 0x100 + uint64_t(BKE_paint_layers_mapping_wrap_get(layer)));
+  }
   /* Visibility is a value: disabling leaves the row in the graph with factor zero, so the flag is
    * not part of topology. A rebuild for another reason may drop the row (see the removed-rows set),
    * and enabling it back force-invalidates the stored root hash and rebuilds it in. */

@@ -376,6 +376,19 @@ bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
                                     float location_y,
                                     bNode *&r_node)
 ;
+/**
+ * A 0/1 float that is 1 where \a vector_out lies inside the unit square on every axis that does not
+ * repeat. Null when every axis repeats, so Repeat adds nothing. \a r_node is
+ * the node that owns the returned output.
+ */
+bNodeSocket *mapping_wrap_mask_add(bNodeTree &tree,
+                                   bNode &vector_node,
+                                   bNodeSocket &vector_out,
+                                   int16_t wrap,
+                                   float location_x,
+                                   float location_y,
+                                   bNode *&r_node)
+;
 void input_link_restore(Material &ma,
                         bNodeSocket &input,
                         bNode &from_node,

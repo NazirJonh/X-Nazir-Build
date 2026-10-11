@@ -95,6 +95,13 @@ struct PaintMaterialCompositeCorrection {
   float mapping_offset[2] = {};
   float mapping_scale[2] = {1.0f, 1.0f};
   float mapping_rotation = 0.0f;
+  /** #eMaterialPaintLayerMappingWrap: what the remap does outside the unit UV square. */
+  int16_t mapping_wrap = 0;
+  /**
+   * A correction whose UV wrap clips an axis: its coverage is zeroed outside the unit square after
+   * the mapping, like #PaintMaterialCompositeImageLayer.mapping_clips_coverage.
+   */
+  bool mapping_clips_coverage = false;
   /**
    * The mapped map holds tangent-space normals (Normal channel): the resample also rotates and
    * flips the vectors, see #composite_resample_mapped.
@@ -200,6 +207,14 @@ struct PaintMaterialCompositeImageLayer {
   float mapping_offset[2] = {};
   float mapping_scale[2] = {1.0f, 1.0f};
   float mapping_rotation = 0.0f;
+  /** #eMaterialPaintLayerMappingWrap: what the remap does outside the unit UV square. */
+  int16_t mapping_wrap = 0;
+  /**
+   * A row whose UV wrap clips an axis: its coverage is zeroed outside the unit square after the
+   * mapping, the way the graph's clip factor does, so a clipped texel never blends into the rows
+   * below. Only set while the mapping applies; see #composite_clip_coverage_fold.
+   */
+  bool mapping_clips_coverage = false;
   /**
    * The mapped map holds tangent-space normals (Normal channel): the resample also rotates and
    * flips the vectors, see #composite_resample_mapped.
@@ -269,6 +284,7 @@ struct PaintMaterialCompositeImageLayer {
   float coverage_mapping_offset[2] = {};
   float coverage_mapping_scale[2] = {1.0f, 1.0f};
   float coverage_mapping_rotation = 0.0f;
+  int16_t coverage_mapping_wrap = 0;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   /** How much of #mask_image applies; 0 ignores the mask entirely. */
@@ -390,6 +406,7 @@ struct PaintMaterialCompositeLayer {
   float coverage_mapping_offset[2] = {};
   float coverage_mapping_scale[2] = {1.0f, 1.0f};
   float coverage_mapping_rotation = 0.0f;
+  int16_t coverage_mapping_wrap = 0;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
   float mask_influence = 1.0f;

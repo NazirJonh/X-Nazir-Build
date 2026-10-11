@@ -634,6 +634,21 @@ enum eMaterialPaintLayerMappingFlag : int16_t {
 ENUM_OPERATORS(eMaterialPaintLayerMappingFlag)
 
 /**
+ * #MaterialPaintLayerMapping::wrap: what the row's maps do outside the unit UV square after the
+ * mapping. Zero is Repeat, so files written before the option read back as before.
+ */
+enum eMaterialPaintLayerMappingWrap : int16_t {
+  /** Repeat on both axes. */
+  MA_PAINT_LAYER_MAPPING_WRAP_REPEAT = 0,
+  /** Repeat along U; transparent outside [0, 1] along V. */
+  MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X = 1,
+  /** Repeat along V; transparent outside [0, 1] along U. */
+  MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y = 2,
+  /** One copy; transparent outside [0, 1] on both axes. */
+  MA_PAINT_LAYER_MAPPING_WRAP_CLIP = 3,
+};
+
+/**
  * UV mapping of one paint layer row, stored by value.
  *
  * Zeroes mean "disabled": old files read back as disabled, and a zero scale
@@ -652,6 +667,11 @@ struct MaterialPaintLayerMapping {
   int16_t space = MA_PAINT_LAYER_MAPPING_SPACE_UV;
   /** #eMaterialPaintLayerMappingFlag. */
   int16_t flag = 0;
+  /** #eMaterialPaintLayerMappingWrap. */
+  int16_t wrap = MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
+  /* Pads the struct to 32 bytes: it is embedded in #MaterialPaintLayer, whose size must stay a
+   * multiple of 8 for its pointers. */
+  char _pad[6] = {};
 };
 
 /**

@@ -1392,6 +1392,7 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
                                         const float offset[2],
                                         const float scale[2],
                                         const float rotation,
+                                        const int16_t wrap,
                                         const bool tangent_normal)
 {
   if (src == nullptr || ref_width <= 0 || ref_height <= 0 || src->x <= 0 || src->y <= 0) {
@@ -1422,6 +1423,9 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
   const float scale_y = BKE_paint_layers_mapping_scale_normalize(scale[1]);
   const float cos_rot = cosf(rotation);
   const float sin_rot = sinf(rotation);
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(wrap, repeat_u, repeat_v);
   /* One straight-linear tap at wrapped texel (tx, ty), re-premultiplied for the filter below: byte
    * buffers are straight-stored, float buffers premultiplied-stored, the convention the tile
    * decode assumes. */
@@ -1471,9 +1475,21 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
       const float sy = v * scale_y;
       float uu = sx * cos_rot - sy * sin_rot + offset[0];
       float vv = sx * sin_rot + sy * cos_rot + offset[1];
-      /* Repeat edges, like the graph's REPEAT textures. */
-      uu -= floorf(uu);
-      vv -= floorf(vv);
+      /* An axis that repeats wraps; one that does not reads transparent outside [0, 1]. The row's
+       * coverage carries the same clip (#composite_clip_coverage_fold), so this only keeps the
+       * clipped texels from holding colour. */
+      if (repeat_u) {
+        uu -= floorf(uu);
+      }
+      if (repeat_v) {
+        vv -= floorf(vv);
+      }
+      float *p = out + (int64_t(y) * ref_width + x) * 4;
+      /* Only an axis that does not repeat is range-tested: a wrapped one can round to exactly 1. */
+      if ((!repeat_u && (uu < 0.0f || uu >= 1.0f)) || (!repeat_v && (vv < 0.0f || vv >= 1.0f))) {
+        p[0] = p[1] = p[2] = p[3] = 0.0f;
+        continue;
+      }
       const float su = uu * float(src->x) - 0.5f;
       const float sv = vv * float(src->y) - 0.5f;
       const int x0 = int(floorf(su));
@@ -1485,7 +1501,6 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
       tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0, src->y), t10);
       tap_straight(wrap_texel(x0, src->x), wrap_texel(y0 + 1, src->y), t01);
       tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0 + 1, src->y), t11);
-      float *p = out + (int64_t(y) * ref_width + x) * 4;
       for (const int k : IndexRange(4)) {
         p[k] = (1.0f - a) * (1.0f - b) * t00[k] + a * (1.0f - b) * t10[k] +
                (1.0f - a) * b * t01[k] + a * b * t11[k];
@@ -1525,6 +1540,7 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
                                    const float mapping_offset[2],
                                    const float mapping_scale[2],
                                    const float mapping_rotation,
+                                   const int16_t mapping_wrap,
                                    const int ref_width,
                                    const int ref_height,
                                    Vector<CompositeImageLock> &r_locks,
@@ -1539,6 +1555,7 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
                                                 mapping_offset,
                                                 mapping_scale,
                                                 mapping_rotation,
+                                                mapping_wrap,
                                                 tangent_normal))
   {
     /* The source buffer stays locked; the owned resample is what the evaluator reads. */
@@ -1546,6 +1563,100 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
     r_ibuf = mapped;
     r_colorspace_name = composite_buffer_colorspace_name(r_ibuf);
   }
+}
+
+/**
+ * Fold a clipping UV wrap into a row's (or correction's) coverage. A map's own alpha is no guard:
+ * a Material source's transparency is its Alpha, and channels that track no content alpha ignore
+ * the map's. So the part outside the unit square -- after the same scale/rotate/offset the
+ * resample applies -- has to leave the coverage instead. The result is one owned buffer holding
+ * `coverage * inside` in every channel, read as alpha; it replaces the coverage constant or map.
+ * \a alpha_source is the map whose own alpha covered when there is no coverage of its own (a Fill
+ * or Paint correction's map), so the inside keeps that alpha. The generated graph multiplies the
+ * same 0/1 factor into the coverage.
+ */
+static void composite_clip_coverage_fold(ImBuf *&r_coverage_ibuf,
+                                         const char *&r_coverage_colorspace_name,
+                                         bool &r_has_coverage_constant,
+                                         const float coverage_constant,
+                                         bool &r_coverage_from_alpha,
+                                         const ImBuf *alpha_source,
+                                         const int16_t wrap,
+                                         const float offset[2],
+                                         const float scale[2],
+                                         const float rotation,
+                                         const int ref_width,
+                                         const int ref_height,
+                                         Vector<CompositeImageLock> &r_locks)
+{
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(wrap, repeat_u, repeat_v);
+  if (ref_width <= 0 || ref_height <= 0 || (repeat_u && repeat_v)) {
+    return;
+  }
+  const bool has_map = r_coverage_ibuf != nullptr;
+  if (has_map && !composite_ibuf_is_rgba(r_coverage_ibuf, ref_width, ref_height)) {
+    /* A coverage of another size is rejected later with the rest; do not guess its texels. */
+    return;
+  }
+  ImBuf *clip = IMB_allocImBuf(uint(ref_width), uint(ref_height), ImBufFlags::FloatData);
+  if (clip == nullptr || clip->float_data() == nullptr) {
+    if (clip != nullptr) {
+      IMB_freeImBuf(clip);
+    }
+    return;
+  }
+  clip->channels = 4;
+  float *out = clip->float_data_for_write();
+  const float scale_x = BKE_paint_layers_mapping_scale_normalize(scale[0]);
+  const float scale_y = BKE_paint_layers_mapping_scale_normalize(scale[1]);
+  const float cos_rot = cosf(rotation);
+  const float sin_rot = sinf(rotation);
+  for (int y = 0; y < ref_height; y++) {
+    const float v = (float(y) + 0.5f) / float(ref_height);
+    for (int x = 0; x < ref_width; x++) {
+      const float u = (float(x) + 0.5f) / float(ref_width);
+      const float sx = u * scale_x;
+      const float sy = v * scale_y;
+      float uu = sx * cos_rot - sy * sin_rot + offset[0];
+      float vv = sx * sin_rot + sy * cos_rot + offset[1];
+      if (repeat_u) {
+        uu -= floorf(uu);
+      }
+      if (repeat_v) {
+        vv -= floorf(vv);
+      }
+      const bool inside = (repeat_u || (uu >= 0.0f && uu < 1.0f)) &&
+                          (repeat_v || (vv >= 0.0f && vv < 1.0f));
+      float value = 0.0f;
+      if (inside) {
+        if (r_has_coverage_constant) {
+          value = coverage_constant;
+        }
+        else if (has_map) {
+          value = mask_factor_at(r_coverage_ibuf, r_coverage_from_alpha, x, y, 1.0f);
+        }
+        else if (alpha_source != nullptr) {
+          /* No coverage of its own: the map's alpha is what covered before, and still does inside
+           * the square. */
+          value = composite_color_alpha_at(alpha_source, x, y);
+        }
+        else {
+          value = 1.0f;
+        }
+      }
+      float *p = out + (int64_t(y) * ref_width + x) * 4;
+      p[0] = p[1] = p[2] = p[3] = value;
+    }
+  }
+  IMB_colormanagement_assign_float_colorspace(
+      clip, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  composite_image_own(clip, r_locks);
+  r_coverage_ibuf = clip;
+  r_coverage_colorspace_name = composite_buffer_colorspace_name(clip);
+  r_has_coverage_constant = false;
+  r_coverage_from_alpha = true;
 }
 
 /** Acquire one image-layer's buffers into \a r_layer, recursing into a folder's children. */
@@ -1577,6 +1688,7 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
   copy_v2_v2(r_layer.coverage_mapping_offset, image_layer.coverage_mapping_offset);
   copy_v2_v2(r_layer.coverage_mapping_scale, image_layer.coverage_mapping_scale);
   r_layer.coverage_mapping_rotation = image_layer.coverage_mapping_rotation;
+  r_layer.coverage_mapping_wrap = image_layer.coverage_mapping_wrap;
 
   if (image_layer.color_image != nullptr) {
     r_layer.color_ibuf = composite_image_acquire(
@@ -1602,6 +1714,7 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
                              image_layer.mapping_offset,
                              image_layer.mapping_scale,
                              image_layer.mapping_rotation,
+                             image_layer.mapping_wrap,
                              ref_width,
                              ref_height,
                              r_locks,
@@ -1634,9 +1747,25 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
                            r_layer.coverage_mapping_offset,
                            r_layer.coverage_mapping_scale,
                            r_layer.coverage_mapping_rotation,
+                           r_layer.coverage_mapping_wrap,
                            ref_width,
                            ref_height,
                            r_locks);
+  }
+  if (image_layer.mapping_clips_coverage) {
+    composite_clip_coverage_fold(r_layer.coverage_ibuf,
+                                 r_layer.coverage_colorspace_name,
+                                 r_layer.has_coverage_constant,
+                                 r_layer.coverage_constant,
+                                 r_layer.coverage_from_alpha,
+                                 nullptr,
+                                 image_layer.mapping_wrap,
+                                 image_layer.mapping_offset,
+                                 image_layer.mapping_scale,
+                                 image_layer.mapping_rotation,
+                                 ref_width,
+                                 ref_height,
+                                 r_locks);
   }
   for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
     PaintMaterialCompositeCorrectionBuffer buffer;
@@ -1662,6 +1791,7 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
                              correction.mapping_offset,
                              correction.mapping_scale,
                              correction.mapping_rotation,
+                             correction.mapping_wrap,
                              ref_width,
                              ref_height,
                              r_locks,
@@ -1692,9 +1822,25 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
                              correction.mapping_offset,
                              correction.mapping_scale,
                              correction.mapping_rotation,
+                             correction.mapping_wrap,
                              ref_width,
                              ref_height,
                              r_locks);
+    }
+    if (correction.mapping_clips_coverage) {
+      composite_clip_coverage_fold(buffer.coverage_ibuf,
+                                   buffer.coverage_colorspace_name,
+                                   buffer.has_coverage_constant,
+                                   buffer.coverage_constant,
+                                   buffer.coverage_from_alpha,
+                                   correction.material_source ? nullptr : buffer.ibuf,
+                                   correction.mapping_wrap,
+                                   correction.mapping_offset,
+                                   correction.mapping_scale,
+                                   correction.mapping_rotation,
+                                   ref_width,
+                                   ref_height,
+                                   r_locks);
     }
     if (correction.is_folder) {
       /* A Stack correction has no map of its own; its children are acquired the same way a Layer
@@ -1736,6 +1882,7 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
                              correction.mapping_offset,
                              correction.mapping_scale,
                              correction.mapping_rotation,
+                             correction.mapping_wrap,
                              ref_width,
                              ref_height,
                              r_locks);
@@ -1766,9 +1913,25 @@ static bool composite_layer_build(const PaintMaterialCompositeImageLayer &image_
                              correction.mapping_offset,
                              correction.mapping_scale,
                              correction.mapping_rotation,
+                             correction.mapping_wrap,
                              ref_width,
                              ref_height,
                              r_locks);
+    }
+    if (correction.mapping_clips_coverage) {
+      composite_clip_coverage_fold(buffer.coverage_ibuf,
+                                   buffer.coverage_colorspace_name,
+                                   buffer.has_coverage_constant,
+                                   buffer.coverage_constant,
+                                   buffer.coverage_from_alpha,
+                                   correction.material_source ? nullptr : buffer.ibuf,
+                                   correction.mapping_wrap,
+                                   correction.mapping_offset,
+                                   correction.mapping_scale,
+                                   correction.mapping_rotation,
+                                   ref_width,
+                                   ref_height,
+                                   r_locks);
     }
     if (correction.is_folder) {
       buffer.is_folder = true;
@@ -2146,6 +2309,7 @@ static uint64_t composite_correction_hash(uint64_t hash,
   hash = get_default_hash(hash,
                           BKE_paint_layers_mapping_scale_normalize(correction.mapping_scale[1]),
                           correction.mapping_rotation,
+                          correction.mapping_wrap,
                           correction.tangent_normal);
   /* A flat Fill-effect colour has no image behind it, and the flags below change how the same map
    * is read, so none of them can be left out or a slider/toggle would serve a stale composite. */
@@ -2210,6 +2374,7 @@ static uint64_t composite_layers_hash(uint64_t hash,
     hash = get_default_hash(hash,
                             BKE_paint_layers_mapping_scale_normalize(layer.mapping_scale[1]),
                             layer.mapping_rotation,
+                            layer.mapping_wrap,
                             layer.tangent_normal);
     /* The coverage's own mapping (a mapped Hybrid row's live alpha): without it a mapping slider
      * would change the composited pixels while the cache still served the old ones. */

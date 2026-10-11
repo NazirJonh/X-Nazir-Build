@@ -1536,6 +1536,20 @@ void PaintLayersChainBuilder::resolve_row_factor(const MaterialPaintLayer *layer
     std::tie(layer_factor_node, layer_factor_socket) = build_grey_of_map(
         tree, location_x, location_y, *layer->bake->coverage, -320.0f);
   }
+
+  /* A UV wrap that clips an axis: the row's maps' own alpha is no guard (a Material row's
+   * transparency is its source's Alpha, and channels that track no content alpha ignore the map's),
+   * so the clip multiplies into the factor. A substituted row shows a bake, which the mapping never
+   * moves. */
+  if (!substituted) {
+    coverage_clip_multiply(tree,
+                           group_input,
+                           *layer,
+                           location_x - 180.0f,
+                           location_y - 480.0f,
+                           layer_factor_node,
+                           layer_factor_socket);
+  }
 }
 
 void PaintLayersChainBuilder::build_row_factor_chain(const MaterialPaintLayer *layer,

@@ -229,6 +229,26 @@ class PaintLayersTreeBuilder {
                                                           const MaterialPaintLayer &row,
                                                           float location_x,
                                                           float location_y);
+  /** Build one Point Mapping node of \a row, fed by its UV source and its group's mapping inputs. */
+  bNode *mapping_node_build(bNodeTree &tree,
+                            bNode *group_input,
+                            const MaterialPaintLayer &row,
+                            float location_x,
+                            float location_y);
+  /**
+   * The coverage factor of a row whose UV wrap clips an axis: 1 where the row's mapped UV lies
+   * inside the unit square on every non-repeating axis, 0 outside. Null for a row that does not
+   * clip. The clip has to enter as a factor: a map's own alpha is ignored on channels that track no
+   * content alpha and by a Material row (its transparency is its source's Alpha), so clipped texels
+   * would otherwise blend a black into the rows below. One set of nodes per row, shared by every
+   * channel.
+   */
+  bNodeSocket *mapping_wrap_mask_ensure(bNodeTree &tree,
+                                        bNode *group_input,
+                                        const MaterialPaintLayer &row,
+                                        float location_x,
+                                        float location_y,
+                                        bNode *&r_node);
   /**
    * Re-orient a tangent-space Normal map read through the row's Mapping: returns the socket to
    * use in place of \a color. The Mapping only moves the read point, so the encoded vectors must
@@ -271,6 +291,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
   /** The Mapping node built for a row, so every channel and map of it shares the one node. */
   Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
+  /** A row's UV wrap clip factor, built once and read by every channel of the row. */
+  Map<const MaterialPaintLayer *, std::pair<bNode *, bNodeSocket *>> mapping_mask_outputs_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;
   bNode *group_input_ = nullptr;
   bNode *group_output_ = nullptr;
@@ -437,12 +459,33 @@ class PaintLayersChainBuilder {
                                 bNode *&folder_coverage_node,
                                 bNodeSocket *&folder_coverage);
 
-  /** The Material/Node Group correction's own coverage, on the Alpha channel. */
+  /**
+   * The Material/Node Group correction's own coverage, on the Alpha channel, times the row's UV
+   * wrap clip (null when the source has none and nothing clips).
+   */
   std::pair<bNode *, bNodeSocket *> resolve_correction_coverage(bNodeTree &tree,
                                                                 bNode *group_input,
                                                                 float location_x,
                                                                 float location_y,
                                                                 const MaterialPaintLayer &row);
+  /** The coverage alone, before the UV wrap clip; see #resolve_correction_coverage. */
+  std::pair<bNode *, bNodeSocket *> resolve_correction_coverage_source(
+      bNodeTree &tree,
+      bNode *group_input,
+      float location_x,
+      float location_y,
+      const MaterialPaintLayer &row);
+  /**
+   * Multiply the UV wrap clip of the Material-source \a row into the coverage socket (or make it
+   * the coverage when there is none). Nothing happens for a row that does not clip.
+   */
+  void coverage_clip_multiply(bNodeTree &tree,
+                              bNode *group_input,
+                              const MaterialPaintLayer &row,
+                              float location_x,
+                              float location_y,
+                              bNode *&r_node,
+                              bNodeSocket *&r_socket);
 
   /**
    * Configure a Hybrid Material row's live Image Texture the way a Layer row does: the source

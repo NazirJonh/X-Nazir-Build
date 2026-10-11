@@ -271,6 +271,7 @@ MaterialPaintLayer *paint_layer_alloc(Material &ma,
   layer->mapping.scale[1] = 1.0f;
   layer->mapping.rotation = 0.0f;
   layer->mapping.space = MA_PAINT_LAYER_MAPPING_SPACE_UV;
+  layer->mapping.wrap = MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
   /* Uniform scale is the common case, so a new row starts with the axes locked together. */
   layer->mapping.flag = MA_PAINT_LAYER_MAPPING_SCALE_LOCK;
   STRNCPY(layer->name, name != nullptr ? name : "");
@@ -2388,9 +2389,12 @@ bool paint_layer_effects_lay_content(const Material &ma,
     {
       return true;
     }
-    /* A constant normal makes no sense, so a Fill lays nothing in the Normal channel. */
+    /* A constant normal makes no sense, so a Fill lays nothing in the Normal channel -- unless it
+     * reads an assigned normal map there, which the correction build and the CPU composite lay
+     * like a Paint correction's (#BKE_paint_layers_fill_reads_map is their shared gate). */
     if (effect->source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
-        channel != PAINT_MATERIAL_CHANNEL_NORMAL)
+        (channel != PAINT_MATERIAL_CHANNEL_NORMAL ||
+         BKE_paint_layers_fill_reads_map(ma, *effect, channel)))
     {
       return true;
     }
@@ -3194,6 +3198,38 @@ bool BKE_paint_layers_mapping_set_rotation(Material &ma, MaterialPaintLayer *lay
   layer->mapping.rotation = rotation;
   paint_layers_tag_mapping_value(ma);
   BKE_paint_layers_values_sync(ma);
+  return true;
+}
+
+void BKE_paint_layers_mapping_wrap_axes(const int16_t wrap, bool &r_repeat_u, bool &r_repeat_v)
+{
+  r_repeat_u = ELEM(wrap, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X);
+  r_repeat_v = ELEM(wrap, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
+}
+
+int16_t BKE_paint_layers_mapping_wrap_get(const MaterialPaintLayer &layer)
+{
+  /* An out-of-range stored value reads as Repeat, the behavior before the option existed. */
+  return (layer.mapping.wrap >= MA_PAINT_LAYER_MAPPING_WRAP_REPEAT &&
+          layer.mapping.wrap <= MA_PAINT_LAYER_MAPPING_WRAP_CLIP) ?
+             layer.mapping.wrap :
+             int16_t(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT);
+}
+
+bool BKE_paint_layers_mapping_set_wrap(Material &ma, MaterialPaintLayer *layer, const int16_t wrap)
+{
+  if (layer == nullptr || paint_layer_owner_list(&ma.paint_layers, layer) == nullptr) {
+    return false;
+  }
+  if (wrap < MA_PAINT_LAYER_MAPPING_WRAP_REPEAT || wrap > MA_PAINT_LAYER_MAPPING_WRAP_CLIP) {
+    return false;
+  }
+  if (layer->mapping.wrap == wrap) {
+    return true;
+  }
+  layer->mapping.wrap = wrap;
+  /* The wrap adds or removes the clip factor's nodes, which is topology. */
+  BKE_paint_layers_tag_edited(ma);
   return true;
 }
 

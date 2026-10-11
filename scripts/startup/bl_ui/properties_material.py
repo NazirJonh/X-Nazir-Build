@@ -680,6 +680,7 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         row.prop(layer, "mapping_scale", text="Scale")
         row.prop(layer, "mapping_scale_lock", text="", icon_only=True)
         col.prop(layer, "mapping_rotation", text="Rotation")
+        col.prop(layer, "mapping_wrap", text="UV Wrap")
 
         if layer.mapping_enabled and not layer.mapping_applies:
             # The mode cannot carry the mapping right now: the row shows its baked maps (a forced

@@ -24,6 +24,11 @@ struct EnumPropertyItem;
 struct ScrArea;
 struct SpaceOutliner;
 
+/* DNA types live in `blender`; declared there so the header does not depend on include order. */
+namespace blender {
+struct Material;
+}
+
 /**
  * One kind of row the displayed stack's source can add, as its #StackEditor declares it.
  *
@@ -70,6 +75,15 @@ const char *outliner_stack_focus_name_get(const SpaceOutliner &space_outliner);
  */
 void outliner_stack_add_kinds_get(const SpaceOutliner &space_outliner,
                                   blender::Vector<OutlinerStackAddKind> &r_kinds);
+
+/**
+ * The Add-Material browser's hand-off slot: the material the popover last picked, null otherwise.
+ *
+ * The browser writes its pick into an RNA pointer property; this is the storage behind the
+ * Outliner's one, kept on the space's runtime so the window manager knows nothing of it.
+ */
+Material *outliner_stack_material_pick_get(const SpaceOutliner &space_outliner);
+void outliner_stack_material_pick_set(SpaceOutliner &space_outliner, Material *material);
 
 /** Index of the focused stack's source-defined sub-selection, such as a material slot. */
 int outliner_stack_focus_sub_index_get(const SpaceOutliner &space_outliner);

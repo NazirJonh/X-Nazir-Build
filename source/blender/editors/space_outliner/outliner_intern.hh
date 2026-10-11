@@ -157,6 +157,12 @@ struct SpaceOutliner_Runtime {
    */
   std::string stack_focus_name;
   /**
+   * The material the Add-Material browser popover last picked, as a hand-off to
+   * #SpaceOutliner.stack_layer_material_pick. Only ever set for the duration of the click that
+   * assigned it: the RNA update turns it into an Add call and clears it again.
+   */
+  Material *stack_layer_material_pick = nullptr;
+  /**
    * What the user did with each row, by #StackRow::stable_id: survives any renumbering.
    *
    * Clicks and collapses live in the tree store between builds. Read into this map whenever the

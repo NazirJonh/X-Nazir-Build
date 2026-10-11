@@ -834,6 +834,7 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
   const int kind = RNA_enum_get(op->ptr, "type");
   StackAddKindInfo kind_info;
   if (!stack_add_kind_info_get(*C, kind, kind_info)) {
+    printf("PL-DIAG stack_layer_add: unknown kind %d\n", kind);
     return OPERATOR_CANCELLED;
   }
 
@@ -880,9 +881,11 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
   if (kind_info.takes_color) {
     args.color = linear_color;
   }
-  return outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args) >= 0 ?
-             OPERATOR_FINISHED :
-             OPERATOR_CANCELLED;
+  const int added = outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args);
+  if (added < 0) {
+    printf("PL-DIAG stack_layer_add: row_add refused kind=%d anchor=%d\n", kind, anchor_ordinal);
+  }
+  return added >= 0 ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
 }
 
 /** The RNA-Main collection the Add searches a source kind's data-blocks in. Null for a type with
@@ -1539,6 +1542,19 @@ const char *outliner_stack_focus_name_get(const SpaceOutliner &space_outliner)
   return (space_outliner.runtime != nullptr) ?
              space_outliner.runtime->stack_focus_name.c_str() :
              "";
+}
+
+Material *outliner_stack_material_pick_get(const SpaceOutliner &space_outliner)
+{
+  return (space_outliner.runtime != nullptr) ? space_outliner.runtime->stack_layer_material_pick :
+                                               nullptr;
+}
+
+void outliner_stack_material_pick_set(SpaceOutliner &space_outliner, Material *material)
+{
+  if (space_outliner.runtime != nullptr) {
+    space_outliner.runtime->stack_layer_material_pick = material;
+  }
 }
 
 int outliner_stack_focus_sub_index_get(const SpaceOutliner &space_outliner)

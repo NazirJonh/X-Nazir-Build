@@ -893,6 +893,51 @@ static void rna_SpaceOutliner_display_mode_update(bContext * /*C*/, PointerRNA *
   ED_area_tag_refresh(area);
 }
 
+/* The material the Add-Material browser popover last picked. Assigning a non-null material is what
+ * adds the layer: the update turns the pick into an undo-able #OUTLINER_OT_stack_layer_add call and
+ * clears the slot again, so a value is never observed outside the click that set it. */
+static PointerRNA rna_SpaceOutliner_stack_layer_material_pick_get(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  Material *material = ed::outliner::outliner_stack_material_pick_get(*space_outliner);
+  return (material != nullptr) ? RNA_id_pointer_create(&material->id) : PointerRNA_NULL;
+}
+
+static void rna_SpaceOutliner_stack_layer_material_pick_set(PointerRNA *ptr,
+                                                            const PointerRNA value,
+                                                            ReportList * /*reports*/)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  ed::outliner::outliner_stack_material_pick_set(*space_outliner,
+                                                 static_cast<Material *>(value.data));
+}
+
+static void rna_SpaceOutliner_stack_layer_material_pick_update(bContext *C, PointerRNA *ptr)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  Material *material = ed::outliner::outliner_stack_material_pick_get(*space_outliner);
+  if (material == nullptr) {
+    return;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("OUTLINER_OT_stack_layer_add", false);
+  if (ot != nullptr) {
+    PointerRNA op_ptr = WM_operator_properties_create_ptr(ot);
+    /* The kind is set by identifier rather than by its place in the list, so the hand-off survives
+     * the source declaring its kinds in another order. */
+    RNA_enum_set_identifier(C, &op_ptr, "type", "MATERIAL");
+    /* By name, so the call the info log records -- and a repeat of it -- finds the same
+     * material. */
+    RNA_string_set(&op_ptr, "source", material->id.name + 2);
+    RNA_int_set(&op_ptr, "ordinal", -1);
+    WM_operator_name_call_ptr(C, ot, wm::OpCallContext::ExecDefault, &op_ptr, nullptr);
+    WM_operator_properties_free(&op_ptr);
+  }
+
+  /* The hand-off is spent whether or not the operator accepted it. */
+  ed::outliner::outliner_stack_material_pick_set(*space_outliner, nullptr);
+}
+
 static void rna_SpaceOutliner_stack_focus_name_get(PointerRNA *ptr, char *value)
 {
   const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
@@ -5495,6 +5540,23 @@ static void rna_def_space_outliner(BlenderRNA *brna)
                            "Name of the data-block the displayed stack belongs to, as the source "
                            "last resolved it; empty before the first stack is shown");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_ID);
+
+  /* Session-only hand-off from the Add-Material browser popover: assigning a material here is what
+   * adds it as a layer. Not persisted. */
+  prop = RNA_def_property(srna, "stack_layer_material_pick", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_SpaceOutliner_stack_layer_material_pick_get",
+                                 "rna_SpaceOutliner_stack_layer_material_pick_set",
+                                 nullptr,
+                                 nullptr);
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Stack Layer Material Pick",
+                           "Material the Add-Material browser last picked; assigning one adds it as "
+                           "a layer and clears the property again");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_SpaceOutliner_stack_layer_material_pick_update");
 
   prop = RNA_def_property(srna, "stack_focus_sub_index", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);

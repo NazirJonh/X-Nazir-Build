@@ -17,6 +17,9 @@ import bpy
 _ = bpy
 
 from bl_ui.properties_paint_common import (
+    _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X,
+    _MATERIAL_PAINT_CHANNEL_UI_ORDER,
+    _MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT,
     MaterialPaintChannelView,
     PAINT_MT_material_layer_channel_socket,
     _draw_channel_panel,

@@ -17,9 +17,11 @@
 
 #include "BKE_curve_patch.hh"
 
-struct ColorSpace;
-
 namespace blender {
+
+namespace ocio {
+class ColorSpace;
+}  // namespace ocio
 
 struct bContext;
 struct Brush;
@@ -98,7 +100,7 @@ float4 image_curve_patch_blend_src_float(const float3 &brush_color_linear, float
  */
 void image_curve_patch_blend_src_byte(const float3 &brush_color_linear,
                                       float alpha,
-                                      const ColorSpace *byte_colorspace,
+                                      const ocio::ColorSpace *byte_colorspace,
                                       uchar r_src[4]);
 
 /* \} */

@@ -4,6 +4,8 @@
 
 #include "testing/testing.h"
 
+#include "BKE_gtest_base.hh"
+
 #include "BLI_array.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
@@ -14,6 +16,9 @@
 #include "BKE_mesh.hh"
 
 namespace blender::bke::tests {
+
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_surface : public bke::BlenderGTestBase {};
 
 /**
  * Six vertices, one triangle on the first three. The last three sit far away so an in-place
@@ -51,7 +56,7 @@ static Mesh *make_origin_triangle_with_far_spare_verts()
  * an in-place rewrite of `.corner_vert` (same counts, new connectivity) shrinkwrap follows the
  * live triangle and misses the snapshotted origin face.
  */
-TEST(paint_curve_patch_surface, shrinkwrap_uses_snapshotted_topology_not_live_mesh)
+TEST_F(paint_curve_patch_surface, shrinkwrap_uses_snapshotted_topology_not_live_mesh)
 {
   Mesh *mesh = make_origin_triangle_with_far_spare_verts();
 
@@ -80,7 +85,7 @@ TEST(paint_curve_patch_surface, shrinkwrap_uses_snapshotted_topology_not_live_me
   BKE_id_free(nullptr, mesh);
 }
 
-TEST(paint_curve_patch_surface, fill_invalid_normals_all_zero_uses_fallback)
+TEST_F(paint_curve_patch_surface, fill_invalid_normals_all_zero_uses_fallback)
 {
   Array<float3> normals = {float3(0.0f), float3(0.0f), float3(0.0f)};
   const float3 fallback(0.0f, 1.0f, 0.0f);
@@ -90,7 +95,7 @@ TEST(paint_curve_patch_surface, fill_invalid_normals_all_zero_uses_fallback)
   }
 }
 
-TEST(paint_curve_patch_surface, fill_invalid_normals_copies_first_and_last_valid)
+TEST_F(paint_curve_patch_surface, fill_invalid_normals_copies_first_and_last_valid)
 {
   Array<float3> normals = {float3(0.0f), float3(0.0f), float3(0.0f, 0.0f, 1.0f), float3(0.0f)};
   curve_patch_surface_fill_invalid_normals(normals, float3(1.0f, 0.0f, 0.0f));
@@ -100,7 +105,7 @@ TEST(paint_curve_patch_surface, fill_invalid_normals_copies_first_and_last_valid
   EXPECT_NEAR(normals[3].z, 1.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_surface, fill_invalid_normals_interpolates_a_gap)
+TEST_F(paint_curve_patch_surface, fill_invalid_normals_interpolates_a_gap)
 {
   Array<float3> normals = {float3(1.0f, 0.0f, 0.0f), float3(0.0f), float3(0.0f, 1.0f, 0.0f)};
   curve_patch_surface_fill_invalid_normals(normals, float3(0.0f, 0.0f, 1.0f));
@@ -108,7 +113,7 @@ TEST(paint_curve_patch_surface, fill_invalid_normals_interpolates_a_gap)
   EXPECT_NEAR(normals[1].y, 0.5f * float(M_SQRT2), 1e-4f);
 }
 
-TEST(paint_curve_patch_surface, fill_invalid_normals_opposed_neighbours_keep_previous)
+TEST_F(paint_curve_patch_surface, fill_invalid_normals_opposed_neighbours_keep_previous)
 {
   /* Midpoint of (0,0,1) and (0,0,-1) is zero; the fill must stay finite. */
   Array<float3> normals = {float3(0.0f, 0.0f, 1.0f), float3(0.0f), float3(0.0f, 0.0f, -1.0f)};

@@ -165,6 +165,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedSkipsDisconnectedFaces)
       bm, test_vert(bm, 0, 0), test_vert(bm, 1, 0), test_vert(bm, 1, 1), test_vert(bm, 0, 1));
   test_quad(
       bm, test_vert(bm, 3, 0), test_vert(bm, 4, 0), test_vert(bm, 4, 1), test_vert(bm, 3, 1));
+  BM_mesh_elem_index_ensure(bm, BM_FACE);
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, true);
@@ -181,6 +182,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedFollowsSharedVertex)
   BMFace *fa = test_quad(
       bm, test_vert(bm, 0, 0), shared, test_vert(bm, 1, 1), test_vert(bm, 0, 1));
   test_quad(bm, shared, test_vert(bm, 2, 0), test_vert(bm, 2, 1), test_vert(bm, 1, 1));
+  BM_mesh_elem_index_ensure(bm, BM_FACE);
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, false);
@@ -199,6 +201,7 @@ TEST_F(ImagePaintUVGeomMeshTest, MeshConnectedSkipsHiddenNeighbor)
   BMFace *fb = test_quad(
       bm, shared, test_vert(bm, 2, 0), test_vert(bm, 2, 1), test_vert(bm, 1, 1));
   BM_elem_flag_enable(fb, BM_ELEM_HIDDEN);
+  BM_mesh_elem_index_ensure(bm, BM_FACE);
   BM_mesh_elem_table_ensure(bm, BM_FACE);
   const int seed[] = {BM_elem_index_get(fa)};
   Array<bool> tags(bm->totface, false);
@@ -350,9 +353,8 @@ TEST_F(ImagePaintUVGeomMeshTest, ClaimBufferCornerNotStrictlyOwned)
 
 TEST_F(ImagePaintUVGeomMeshTest, ClaimBufferSharedEdgeIsNonStrict)
 {
-  /* Two quads sharing the UV edge u = 0.5 on a 2x1 texture whose texel centers land
-   * at u = 0.25 and u = 0.75 — never on the seam. Widen to 4 texels so a center
-   * lands exactly on the shared edge at u = 0.5. */
+  /* Two quads sharing the UV edge u = 0.5 on a 3x2 texture: the middle column's texel centers
+   * land exactly on the seam (u = 0.5), at v = 0.25 inside both quads' v range. */
   BMesh *bm = test_bmesh_with_uv();
   const BMUVOffsets offsets = BM_uv_map_offsets_get(bm);
   BMFace *left = test_quad_uv(bm, offsets, 0.0f, 0.0f, 0.5f);
@@ -361,13 +363,17 @@ TEST_F(ImagePaintUVGeomMeshTest, ClaimBufferSharedEdgeIsNonStrict)
   BM_mesh_elem_table_ensure(bm, BM_FACE);
 
   const int fill[] = {BM_elem_index_get(left)};
-  Array<uint8_t> claim(4 * 1);
-  image_paint_uv_claim_buffer_build(bm, offsets, Span<int>(fill, 1), float2(0.0f, 0.0f), 4, 1, claim);
+  Array<uint8_t> claim(3 * 2);
+  image_paint_uv_claim_buffer_build(bm, offsets, Span<int>(fill, 1), float2(0.0f, 0.0f), 3, 2, claim);
 
-  /* Texel 0 center u = 0.125: strictly inside the left quad. */
+  /* Texel 0 center (1/6, 0.25): strictly inside the left quad only. */
   EXPECT_TRUE(claim[0] & UV_CLAIM_FILL_STRICT);
   EXPECT_FALSE(claim[0] & UV_CLAIM_FOREIGN_INCLUSIVE);
-  /* Texel 2 center u = 0.625: inside the right quad only. */
+  /* Texel 1 center (0.5, 0.25): on the shared seam, so both charts reach it but neither owns it. */
+  EXPECT_TRUE(claim[1] & UV_CLAIM_FILL_INCLUSIVE);
+  EXPECT_TRUE(claim[1] & UV_CLAIM_FOREIGN_INCLUSIVE);
+  EXPECT_FALSE(claim[1] & UV_CLAIM_FILL_STRICT);
+  /* Texel 2 center (5/6, 0.25): inside the right quad only. */
   EXPECT_FALSE(claim[2] & UV_CLAIM_FILL_INCLUSIVE);
   EXPECT_TRUE(claim[2] & UV_CLAIM_FOREIGN_INCLUSIVE);
 

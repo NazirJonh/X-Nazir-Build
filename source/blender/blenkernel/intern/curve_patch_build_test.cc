@@ -4,6 +4,8 @@
 
 #include "testing/testing.h"
 
+#include "BKE_gtest_base.hh"
+
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 
@@ -11,6 +13,9 @@
 #include "BKE_curves.hh"
 
 namespace blender::bke::tests {
+
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_build : public bke::BlenderGTestBase {};
 
 /* A poly control curve with `count` points spaced one unit apart along +X, every radius 1.0.
  * Poly rather than bezier so the test pins the build, not the bezier evaluator. */
@@ -43,7 +48,7 @@ static CurvePatchParams make_params()
   return params;
 }
 
-TEST(paint_curve_patch_build, straight_curve_builds_a_ribbon)
+TEST_F(paint_curve_patch_build, straight_curve_builds_a_ribbon)
 {
   const CurvesGeometry curve = make_poly_control_curve(3);
   CurvePatchGeometry geometry;
@@ -55,7 +60,7 @@ TEST(paint_curve_patch_build, straight_curve_builds_a_ribbon)
   EXPECT_GT(geometry.ribbon_radius, 0.0f);
 }
 
-TEST(paint_curve_patch_build, single_point_curve_yields_an_empty_spline)
+TEST_F(paint_curve_patch_build, single_point_curve_yields_an_empty_spline)
 {
   const CurvesGeometry curve = make_poly_control_curve(1);
   CurvePatchGeometry geometry;
@@ -65,7 +70,7 @@ TEST(paint_curve_patch_build, single_point_curve_yields_an_empty_spline)
   EXPECT_TRUE(geometry.spline.is_empty());
 }
 
-TEST(paint_curve_patch_build, coincident_points_yield_a_zero_length_spline)
+TEST_F(paint_curve_patch_build, coincident_points_yield_a_zero_length_spline)
 {
   CurvesGeometry curve = make_poly_control_curve(4);
   curve.positions_for_write().fill(float3(0.0f));
@@ -82,7 +87,7 @@ TEST(paint_curve_patch_build, coincident_points_yield_a_zero_length_spline)
   EXPECT_FALSE(geometry.ribbon.ready);
 }
 
-TEST(paint_curve_patch_build, cyclic_curve_is_carried_into_the_spline)
+TEST_F(paint_curve_patch_build, cyclic_curve_is_carried_into_the_spline)
 {
   const CurvesGeometry open = make_poly_control_curve(4, /*cyclic*/ false);
   const CurvesGeometry closed = make_poly_control_curve(4, /*cyclic*/ true);
@@ -98,7 +103,7 @@ TEST(paint_curve_patch_build, cyclic_curve_is_carried_into_the_spline)
   EXPECT_GT(closed_geometry.spline.total_length(), open_geometry.spline.total_length());
 }
 
-TEST(paint_curve_patch_build, an_unready_surface_leaves_the_curve_in_its_own_plane)
+TEST_F(paint_curve_patch_build, an_unready_surface_leaves_the_curve_in_its_own_plane)
 {
   const CurvesGeometry curve = make_poly_control_curve(3);
   CurvePatchGeometry geometry;
@@ -113,7 +118,7 @@ TEST(paint_curve_patch_build, an_unready_surface_leaves_the_curve_in_its_own_pla
   }
 }
 
-TEST(paint_curve_patch_build, a_weight_table_spreads_stamps_over_several_slots)
+TEST_F(paint_curve_patch_build, a_weight_table_spreads_stamps_over_several_slots)
 {
   const CurvesGeometry curve = make_poly_control_curve(8);
   CurvePatchParams params = make_params();
@@ -136,7 +141,7 @@ TEST(paint_curve_patch_build, a_weight_table_spreads_stamps_over_several_slots)
   EXPECT_TRUE(saw_slot_1);
 }
 
-TEST(paint_curve_patch_build, empty_normals_span_forces_ribbon_not_frames)
+TEST_F(paint_curve_patch_build, empty_normals_span_forces_ribbon_not_frames)
 {
   /* The underlying mechanism #CurvePatchBuildMode::PlanarSingleWindow is implemented in terms of:
    * handing the LOW-LEVEL `curve_patch_geometry_build()` an empty `evaluated_normals` span must
@@ -162,7 +167,7 @@ TEST(paint_curve_patch_build, empty_normals_span_forces_ribbon_not_frames)
   EXPECT_TRUE(geometry.frames.frames.is_empty());
 }
 
-TEST(paint_curve_patch_build, build_mode_selects_normals_and_strip_path)
+TEST_F(paint_curve_patch_build, build_mode_selects_normals_and_strip_path)
 {
   /* The two modes of the wrapper, pinned side by side on the same input.
    *

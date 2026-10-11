@@ -1510,6 +1510,8 @@ TEST_F(PaintLayersCompositeTest, mapping_formula_matches_the_shader_node)
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  /* A fresh row locks its scale axes together; these cases set them apart. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, correction, false));
 
   /* Scale two reads each quadrant exactly: bottom-left red, bottom-right green, top-left blue,
    * top-right white. The doubled pattern also tiles: x = 2 reads like x = 0 (Repeat). */
@@ -1876,6 +1878,8 @@ TEST_F(PaintLayersCompositeTest, material_row_mapping_remaps_the_coverage)
   /* The remap samples bilinearly with Repeat, so the cases below land on texel centers. Scale two
    * along x only: each row is uniform in x, so the factor reads exactly as unmapped. */
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  /* A fresh row locks its scale axes together; these cases set them apart. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, row, false));
   const float scale2[2] = {2.0f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale2));
   coverage = row_coverage();
@@ -2153,6 +2157,8 @@ TEST_F(PaintLayersCompositeTest, mapped_normal_map_rotates_and_mirrors_its_vecto
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       *ma, fill, channel, add_solid_image("Detail", 4, 204, 128, 230, 255, true)));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  /* A fresh row locks its scale axes together; these cases set them apart. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
 
   const float detail[3] = {204.0f / 255.0f * 2.0f - 1.0f,
                            128.0f / 255.0f * 2.0f - 1.0f,

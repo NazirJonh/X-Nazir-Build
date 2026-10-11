@@ -19,10 +19,11 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_vector.hh"
 
-struct BMesh;
-struct Object;
 
 namespace blender {
+
+struct BMesh;
+struct Object;
 
 /**
  * Mirror \a hit_position across every enabled axis combination and append the face

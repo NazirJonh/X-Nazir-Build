@@ -725,6 +725,8 @@ TEST_F(PaintLayersGraphEvalTest, mapped_fill_normal_follows_rotation_and_mirror_
   MaterialPaintLayer *fill = add_layer("MappedFill", MA_PAINT_LAYER_SOURCE_CONSTANT, detail_map, channel);
   ASSERT_NE(fill, nullptr);
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  /* A fresh row locks its scale axes together; these cases set them apart. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, rotation));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -820,6 +822,8 @@ TEST_F(PaintLayersGraphEvalTest, source_group_normal_map_color_follows_the_row_m
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(BKE_paint_layers_set_material(*ma, row, source));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  /* A fresh row locks its scale axes together; these cases set them apart. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, row, false));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, row, rotation));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
   BKE_paint_layers_active_set(*ma, row->marker);

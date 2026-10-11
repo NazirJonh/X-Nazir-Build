@@ -37,7 +37,6 @@
 #include "BKE_lib_query.hh"
 #include "BKE_lib_remap.hh"
 #include "BKE_main.hh"
-#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -955,10 +954,6 @@ static bool image_combined_preview_clip_calc(const Material &ma,
 
 static void image_main_region_draw(const bContext *C, ARegion *region)
 {
-  /* The Combined preview's end-to-end budget is defined on the whole callback, since a frame that
-   * shades nothing is exactly what the "no-op frame" target measures. */
-  PAINT_CHANNEL_PERF_COMBINED_FRAME();
-
   /* draw entirely, view changes should be handled here */
   SpaceImage *sima = CTX_wm_space_image(C);
   Object *obedit = CTX_data_edit_object(C);

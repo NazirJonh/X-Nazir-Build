@@ -68,7 +68,6 @@
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
-#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_report.hh"
@@ -123,7 +122,6 @@
 
 namespace blender {
 
-namespace paint_material_channel_perf = bke::paint_material_channel_perf;
 
 static CLG_LogRef LOG = {"sculpt"};
 
@@ -3115,23 +3113,11 @@ static bool sculpt_pbvh_update_pixels(const Depsgraph &depsgraph,
   const bool need_rebuild = pbvh.pixels_ == nullptr || pbvh.pixels_->flags.dirty ||
                             pbvh.pixels_->layout_key != layout_key;
 
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  PAINT_CHANNEL_PERF_SCOPE(SculptPbvhUpdatePixels);
-  if (!need_rebuild) {
-    paint_material_channel_perf::set_pbvh_update_rebuilt(false);
-    return true;
-  }
-  const bool rebuilt = bke::pbvh::build_pixels(
-      depsgraph, ob, *image_data.image, *image_data.image_user, uv_map_name);
-  paint_material_channel_perf::set_pbvh_update_rebuilt(rebuilt);
-  return rebuilt;
-#else
   if (!need_rebuild) {
     return true;
   }
   return bke::pbvh::build_pixels(
       depsgraph, ob, *image_data.image, *image_data.image_user, uv_map_name);
-#endif
 }
 
 /** \} */
@@ -3680,24 +3666,6 @@ void do_brush_action(const Depsgraph &depsgraph,
   IndexMaskMemory memory;
   IndexMask texnode_mask;
 
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  const bool perf_trace = ELEM(brush.sculpt_brush_type,
-                               SCULPT_BRUSH_TYPE_PAINT,
-                               SCULPT_BRUSH_TYPE_ERASE) &&
-                          SCULPT_use_image_paint_brush(paint_mode_settings,
-                                                       ob,
-                                                       &brush,
-                                                       sd.paint.visible_material_channels);
-  double perf_dab_start = 0.0;
-  if (perf_trace) {
-    const int symmetry_passes = ss.cache ? (ss.cache->radial_symmetry_pass + 1) *
-                                               (ss.cache->mirror_symmetry_pass + 1) :
-                                           1;
-    paint_material_channel_perf::dab_begin(symmetry_passes);
-    perf_dab_start = paint_material_channel_perf::now_seconds();
-  }
-#endif
-
   const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
                                                                                  !ss.cache->accum;
   const bool use_pixels = sculpt_needs_pbvh_pixels(brush, ob);
@@ -3707,26 +3675,9 @@ void do_brush_action(const Depsgraph &depsgraph,
       return;
     }
 
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-    {
-      PAINT_CHANNEL_PERF_SCOPE(PbvGatherTexpaint);
-      texnode_mask = pbvh_gather_texpaint(ob, brush, use_original, 1.0f, memory);
-      paint_material_channel_perf::set_gather_node_count(texnode_mask.size());
-    }
-#else
     texnode_mask = pbvh_gather_texpaint(ob, brush, use_original, 1.0f, memory);
-#endif
 
     if (texnode_mask.is_empty()) {
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-      if (perf_trace) {
-        paint_material_channel_perf::add_section_us(
-            paint_material_channel_perf::Section::DoBrushActionTotal,
-            paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
-                                                       perf_dab_start));
-        paint_material_channel_perf::dab_end_log();
-      }
-#endif
       return;
     }
   }
@@ -3737,15 +3688,6 @@ void do_brush_action(const Depsgraph &depsgraph,
 
   /* Only act if some verts are inside the brush area. */
   if (node_mask.is_empty()) {
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-    if (perf_trace) {
-      paint_material_channel_perf::add_section_us(
-          paint_material_channel_perf::Section::DoBrushActionTotal,
-          paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
-                                                     perf_dab_start));
-      paint_material_channel_perf::dab_end_log();
-    }
-#endif
     return;
   }
 
@@ -4041,16 +3983,6 @@ void do_brush_action(const Depsgraph &depsgraph,
   paint_runtime.average_stroke_counter++;
   /* Update last stroke position. */
   paint_runtime.last_stroke_valid = true;
-
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  if (perf_trace) {
-    paint_material_channel_perf::add_section_us(
-        paint_material_channel_perf::Section::DoBrushActionTotal,
-        paint_material_channel_perf::seconds_to_us(paint_material_channel_perf::now_seconds() -
-                                                   perf_dab_start));
-    paint_material_channel_perf::dab_end_log();
-  }
-#endif
 }
 
 void cache_calc_brushdata_symm(StrokeCache &cache,
@@ -6494,36 +6426,6 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
         brush,
         this->sculpt_->paint.visible_material_channels);
 
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-    {
-      const Vector<paint::image::ImagePaintTarget> &targets = cache->image_paint_targets;
-      const int target_count = targets.size();
-      Vector<const char *> names;
-      Vector<int> res_x;
-      Vector<int> res_y;
-      names.reserve(target_count);
-      res_x.reserve(target_count);
-      res_y.reserve(target_count);
-      for (const paint::image::ImagePaintTarget &target : targets) {
-        names.append(target.channel_name ? target.channel_name : "?");
-        int width = 0;
-        int height = 0;
-        if (target.data && target.data->image && target.data->image_user) {
-          ImageUser tile_user = *target.data->image_user;
-          ImBuf *tile_buffer = BKE_image_acquire_ibuf(target.data->image, &tile_user, nullptr);
-          if (tile_buffer) {
-            width = tile_buffer->x;
-            height = tile_buffer->y;
-            BKE_image_release_ibuf(target.data->image, tile_buffer, nullptr);
-          }
-        }
-        res_x.append(width);
-        res_y.append(height);
-      }
-      paint_material_channel_perf::stroke_begin_targets_log(
-          target_count, names.data(), res_x.data(), res_y.data());
-    }
-#endif
   }
 
   if (BKE_brush_color_jitter_get_settings(this->paint, brush)) {

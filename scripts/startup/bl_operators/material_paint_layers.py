@@ -61,6 +61,11 @@ class _PaintLayerOperator(Operator):
         return mat is not None and mat.is_layered
 
 
+# Dynamic enum items must stay referenced from Python: Blender keeps raw pointers to the strings of
+# the last returned list, so a list rebuilt on every call leaves the UI reading freed memory.
+_ENUM_ITEMS_CACHE = {}
+
+
 def _rna_enum_items_cached(struct, prop, keep=None):
     """The (identifier, name, "") items of an RNA enum, built once and kept alive."""
     key = (struct, prop, tuple(keep) if keep is not None else None)

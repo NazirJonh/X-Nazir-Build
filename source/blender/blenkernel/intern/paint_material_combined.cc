@@ -27,7 +27,6 @@
 #include "BLI_vector.hh"
 
 #include "BKE_image_partial_update.hh"
-#include "BKE_paint_material_channel_perf_debug.hh"
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
@@ -841,9 +840,6 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
     combined_cache_enforce_budget(key);
     return entry.ibuf.get();
   }
-
-  PAINT_CHANNEL_PERF_COMBINED_SET_REBUILD(
-      rebuild_all, BLI_rcti_size_x(&entry.dirty_region), BLI_rcti_size_y(&entry.dirty_region));
 
   rcti to_shade;
   BLI_rcti_init(&to_shade, 0, 0, 0, 0);

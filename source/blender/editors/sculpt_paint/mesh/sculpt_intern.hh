@@ -8,10 +8,20 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+
+/* ERASE-PERF: temporary. */
+#ifndef ERASE_PERF_LOG
+#  define ERASE_PERF_LOG 1 /* ERASE-PERF: temporary. */
+#endif
+#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
+#  include <atomic>
+#  include "BLI_time.h"
+#endif /* ERASE-PERF: temporary. */
 
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
@@ -272,11 +282,47 @@ class MaterialStrokeAccum {
    * \note Only the allocation is serialized. Callers then write disjoint texels of the returned
    * block in parallel, which is safe for all three arrays above.
    */
+#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
+  /* ERASE-PERF: temporary. Counters read/reset by the per-dab log in sculpt_paint_image.cc. */
+  std::atomic<int64_t> perf_block_ensure_us{0};
+  std::atomic<int> perf_blocks_total{0};
+  std::atomic<int> perf_blocks_new_dab{0};
+  ~MaterialStrokeAccum();
+#endif /* ERASE-PERF: temporary. */
+
   Block &block_ensure(const ImBuf *buffer, const int block_x, const int block_y)
   {
+#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
+    const double perf_t0 = BLI_time_now_seconds();
+#endif /* ERASE-PERF: temporary. */
     const Key key{buffer, block_x, block_y};
-    std::lock_guard lock(mutex_);
-    return *blocks_.lookup_or_add_cb(key, []() { return std::make_unique<Block>(); });
+    /* High bits of the multiplicative hash, so neighboring blocks of one image land in different
+     * shards. */
+    Shard &shard = shards_[(key.hash() >> 40) & (shard_num - 1)];
+    {
+      std::lock_guard lock(shard.mutex);
+      if (const std::unique_ptr<Block> *found = shard.blocks.lookup_ptr(key)) {
+#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
+        perf_block_ensure_us.fetch_add(int64_t((BLI_time_now_seconds() - perf_t0) * 1.0e6));
+#endif /* ERASE-PERF: temporary. */
+        return **found;
+      }
+    }
+    /* Allocate (zero-fills ~132 KB) outside the lock. If another thread inserted the same key
+     * meanwhile, `add` fails and that block wins while ours is dropped. */
+    std::unique_ptr<Block> fresh = std::make_unique<Block>();
+    std::lock_guard lock(shard.mutex);
+    const bool added = shard.blocks.add(key, std::move(fresh));
+    Block &result = *shard.blocks.lookup(key);
+#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
+    if (added) {
+      perf_blocks_total.fetch_add(1);
+      perf_blocks_new_dab.fetch_add(1);
+    }
+    perf_block_ensure_us.fetch_add(int64_t((BLI_time_now_seconds() - perf_t0) * 1.0e6));
+#endif /* ERASE-PERF: temporary. */
+    UNUSED_VARS(added);
+    return result;
   }
 
  private:
@@ -301,8 +347,12 @@ class MaterialStrokeAccum {
     }
   };
 
-  Map<Key, std::unique_ptr<Block>> blocks_;
-  std::mutex mutex_;
+  static constexpr int shard_num = 64;
+  struct Shard {
+    std::mutex mutex;
+    Map<Key, std::unique_ptr<Block>> blocks;
+  };
+  std::array<Shard, shard_num> shards_;
 };
 
 /** Builds paint targets for Mode=`Image` (one canvas) or Mode=`Material` (Principled maps). */

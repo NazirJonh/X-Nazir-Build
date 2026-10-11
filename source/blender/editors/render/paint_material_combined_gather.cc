@@ -19,7 +19,6 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
-#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -302,7 +301,6 @@ ImBuf *combined_preview_ensure(Main & /*bmain*/,
                                rcti *r_changed_region,
                                CombinedEvalStats *r_stats)
 {
-  PAINT_CHANNEL_PERF_COMBINED_SCOPE(Gather);
   if (r_revision != nullptr) {
     *r_revision = 0;
   }
@@ -459,11 +457,8 @@ ImBuf *combined_preview_ensure(Main & /*bmain*/,
       const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);
       rcti channel_changed;
       ImBuf *composite = nullptr;
-      {
-        PAINT_CHANNEL_PERF_COMBINED_SCOPE(CompositeRefresh);
-        composite = BKE_paint_material_composite_cache_ensure(
-            ma, channel, layers, stack_hash, nullptr, nullptr, &channel_changed);
-      }
+      composite = BKE_paint_material_composite_cache_ensure(
+          ma, channel, layers, stack_hash, nullptr, nullptr, &channel_changed);
       if (composite != nullptr && composite->x == width && composite->y == height) {
         /* Referenced, not merely pointed at: the next channel's `cache_ensure` may evict this very
          * entry to stay inside the composite cache's budget. */
@@ -567,8 +562,7 @@ ImBuf *combined_preview_ensure(Main & /*bmain*/,
     scale_rect(cache_request.clip);
   }
 
-  /* Collected unconditionally, because the perf harness reports the evaluator separately from
-   * everything else and the caller usually has no interest in the numbers. */
+  /* Collected unconditionally, since the caller usually has no interest in the numbers. */
   /* Reported in the returned buffer's own texels, which is what the cache already works in. Not
    * scaled back up to the canvas: the buffer covers the whole canvas whatever its resolution, so a
    * consumer turning the rectangle into UV divides by the dimensions of the buffer it is reading
@@ -576,11 +570,6 @@ ImBuf *combined_preview_ensure(Main & /*bmain*/,
   CombinedEvalStats stats;
   ImBuf *result = BKE_paint_material_combined_cache_ensure(
       ma, inputs, lighting, cache_request, r_revision, r_changed_region, &stats);
-  /* The output resolution, not the canvas: it is what the numbers have to be read against. */
-  PAINT_CHANNEL_PERF_COMBINED_SET_EVAL(
-      stats.elapsed_seconds, stats.pixels_processed, output_width, output_height);
-  PAINT_CHANNEL_PERF_COMBINED_SET_CLIP(BLI_rcti_size_x(&cache_request.clip),
-                                       BLI_rcti_size_y(&cache_request.clip));
   if (r_stats != nullptr) {
     *r_stats = stats;
   }

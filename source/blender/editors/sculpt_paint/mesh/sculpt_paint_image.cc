@@ -126,7 +126,18 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
         target.is_material_channel = true;
         target.is_mask_target = material_target.is_mask_target;
         target.is_correction_target = material_target.is_correction_target;
-        target.channel = material_target.channel;
+        if (material_target.is_mask_target && material_target.image != nullptr) {
+          /* The generated fill records the mask's empty state; an opaque one (Black/White Mask) is
+           * what erase must restore. */
+          if (const ImageTile *tile = BKE_image_get_tile(material_target.image, 0)) {
+            if (tile->gen_color[3] >= 1.0f) {
+              const float grey = (tile->gen_color[0] + tile->gen_color[1] + tile->gen_color[2]) /
+                                 3.0f;
+              target.mask_erase_fill = float4(grey, grey, grey, 1.0f);
+            }
+          }
+        }
+        target.channel =material_target.channel;
         target.channel_name = material_target.is_mask_target ?
                                   IFACE_("Mask") :
                                   BKE_paint_material_channel_info(material_target.channel).ui_name;
@@ -852,7 +863,7 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
                              const PackedPixelRow &pixel_row,
                              const IndexRange range)
 {
-  if (!state.processors.is_noop ||
+  if (!state.processors.is_noop || state.accum != nullptr ||
       !ELEM(state.blend_mode, IMB_BLEND_MIX, IMB_BLEND_NORMAL_MIX))
   {
     return false;
@@ -970,10 +981,13 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
                                const float4 &brush_color_default)
 {
   if (target.is_mask_target) {
+    if (cache.material_erase && target.mask_erase_fill) {
+      return *target.mask_erase_fill;
+    }
     /* A mask map is opaque grey: the stroke paints the brush grey itself, primary or secondary
      * on invert, the way Texture Paint picks the color. A fixed white would change nothing on a
      * white Multiply map. */
-    const float3 rgb = cache.toggle_settings.invert ?
+    const float3 rgb = cache.material_invert ?
                            BKE_brush_secondary_color_get(&sd.paint, &brush) :
                            BKE_brush_color_get(&sd.paint, &brush);
     const float grey = (rgb.x + rgb.y + rgb.z) / 3.0f;
@@ -984,12 +998,12 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
                                                        sd.paint,
                                                        brush,
                                                        target.channel,
-                                                       cache.toggle_settings.invert),
+                                                       cache.material_invert),
                   1.0f);
   }
   if (target.is_normal_channel) {
     float3 tangent(0.0f, 0.0f, 1.0f);
-    if (!cache.toggle_settings.invert && target.color_override) {
+    if (!cache.material_invert && target.color_override) {
       tangent = float3((*target.color_override)[0] * 2.0f - 1.0f,
                        (*target.color_override)[1] * 2.0f - 1.0f,
                        (*target.color_override)[2] * 2.0f - 1.0f);
@@ -999,7 +1013,7 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
     return float4(packed[0], packed[1], packed[2], 1.0f);
   }
   if (target.color_override) {
-    if (cache.toggle_settings.invert) {
+    if (cache.material_invert) {
       const float value = BKE_paint_material_channel_default_value(target.channel);
       return float4(value, value, value, 1.0f);
     }
@@ -1016,6 +1030,30 @@ static Bounds<int2> merge_bounds(const Bounds<int2> &a, const Bounds<int2> &b)
 static Bounds<int2> negative_bounds()
 {
   return {int2(std::numeric_limits<int>::max()), int2(std::numeric_limits<int>::lowest())};
+}
+
+/**
+ * Blend mode for one target. Erase clears coverage on every target (channels, Normal, Alpha and
+ * masks alike), so none of them needs a per-channel fallback; the accumulator and
+ * #material::composite_coverage already treat #IMB_BLEND_ERASE_ALPHA in pre-multiplied space.
+ */
+static IMB_BlendMode resolve_target_blend_mode(const ImagePaintTarget &target,
+                                               const Brush &brush,
+                                               const ed::sculpt_paint::StrokeCache &cache)
+{
+  if (!target.is_material_channel) {
+    return IMB_BlendMode(brush.blend);
+  }
+  BLI_assert(brush.material_paint != nullptr);
+  if (cache.material_erase) {
+    if (target.is_mask_target && target.mask_erase_fill) {
+      /* Clearing alpha would show the mask stack's base (reveal) over a Black Mask. */
+      return IMB_BLEND_MIX;
+    }
+    return IMB_BLEND_ERASE_ALPHA;
+  }
+  return IMB_BlendMode(BKE_paint_material_channel_blend_mode(
+      *brush.material_paint, target.channel, cache.material_invert));
 }
 
 /** Per-face material filter for Mode=Material image painting (active slot only). */
@@ -1938,14 +1976,15 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   const MaterialPaintFilter material_filter = MaterialPaintFilter::from_object(
       ob, material_canvas_mode);
 
-  const float4 brush_color_default = float4(cache.toggle_settings.invert ?
+  const float4 brush_color_default = float4(cache.material_invert ?
                                                 BKE_brush_secondary_color_get(&sd.paint, brush) :
                                                 BKE_brush_color_get(&sd.paint, brush),
                                             1.0f);
 
   /* Erasing pulls the channel back to its neutral value and must not read a source texture. */
   const ed::sculpt_paint::material::ChannelSourceSampler *sampler =
-      cache.toggle_settings.invert ? nullptr : cache.material_source_sampler.get();
+      (cache.material_invert || cache.material_erase) ? nullptr :
+                                                         cache.material_source_sampler.get();
   const ed::sculpt_paint::material::ChannelSourceSampler *active_sampler = (sampler != nullptr &&
                                                                             sampler->is_active()) ?
                                                                                sampler :
@@ -1954,7 +1993,8 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
 
-  const bool alpha_masking_active = !cache.toggle_settings.invert && active_sampler != nullptr &&
+  const bool alpha_masking_active = !cache.material_invert && !cache.material_erase &&
+                                    active_sampler != nullptr &&
                                     brush->material_paint != nullptr &&
                                      BKE_paint_material_channel_masks_stroke(
                                          *brush->material_paint,
@@ -2014,19 +2054,17 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     const float4 *brush_color_ptr;
     const bool material_blend = target.is_material_channel;
     BLI_assert(!material_blend || brush->material_paint != nullptr);
-    const IMB_BlendMode blend_mode = material_blend ?
-                                         IMB_BlendMode(BKE_paint_material_channel_blend_mode(
-                                             *brush->material_paint,
-                                             target.channel,
-                                             cache.toggle_settings.invert)) :
-                                         IMB_BlendMode(brush->blend);
+    const IMB_BlendMode blend_mode = resolve_target_blend_mode(target, *brush, cache);
 
     /* Mix converges when applied dab after dab, so it stays on the cheaper live-image path and
      * costs no accumulator memory. Every other mode compounds and needs one. The accumulator
      * itself is shared by every channel of the stroke - its blocks are keyed by tile buffer. */
     auto accum_for = [&](const bool is_material,
                          const IMB_BlendMode mode) -> MaterialStrokeAccum * {
-      if (!is_material || ELEM(mode, IMB_BLEND_MIX, IMB_BLEND_NORMAL_MIX)) {
+      /* Erase on a mask mixes toward the fill; it needs the accumulator too so Strength caps the
+       * result instead of every dab compounding toward full. */
+      if (!is_material || (ELEM(mode, IMB_BLEND_MIX, IMB_BLEND_NORMAL_MIX) && !cache.material_erase))
+      {
         return nullptr;
       }
       if (!cache.material_raster_accum) {
@@ -2038,11 +2076,13 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     if (target.is_mask_target) {
       /* Same grey as #paint_brush_color: the per-dab primary/secondary pick lives here for the
        * leading target, while grouped candidates resolve through that helper. */
-      const float3 mask_rgb = cache.toggle_settings.invert ?
+      const float3 mask_rgb = cache.material_invert ?
                                   BKE_brush_secondary_color_get(&sd.paint, brush) :
                                   BKE_brush_color_get(&sd.paint, brush);
       const float mask_grey = (mask_rgb.x + mask_rgb.y + mask_rgb.z) / 3.0f;
-      brush_color_storage = float4(mask_grey, mask_grey, mask_grey, 1.0f);
+      brush_color_storage = (cache.material_erase && target.mask_erase_fill) ?
+                                *target.mask_erase_fill :
+                                float4(mask_grey, mask_grey, mask_grey, 1.0f);
       brush_color_ptr = &brush_color_storage;
     }
     else if (target.is_color_channel) {
@@ -2051,13 +2091,13 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                               sd.paint,
                                                               *brush,
                                                               target.channel,
-                                                              cache.toggle_settings.invert);
+                                                              cache.material_invert);
       brush_color_storage = float4(rgb, 1.0f);
       brush_color_ptr = &brush_color_storage;
     }
     else if (target.is_normal_channel) {
       float3 tangent(0.0f, 0.0f, 1.0f);
-      if (!cache.toggle_settings.invert && target.color_override) {
+      if (!cache.material_invert && target.color_override) {
         /* color_override stores packed 0..1; unpack to tangent then re-pack after invert branch.
          */
         tangent[0] = (*target.color_override)[0] * 2.0f - 1.0f;
@@ -2070,7 +2110,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       brush_color_ptr = &brush_color_storage;
     }
     else if (target.color_override) {
-      if (cache.toggle_settings.invert) {
+      if (cache.material_invert) {
         const float v = BKE_paint_material_channel_default_value(target.channel);
         brush_color_storage = float4(v, v, v, 1.0f);
         brush_color_ptr = &brush_color_storage;
@@ -2164,11 +2204,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
         }
         /* Channel grouping only ever collects material channels (a plain image canvas is the
          * single target), but resolve the mode the same way as above so the two cannot drift. */
-        const IMB_BlendMode candidate_blend =
-            candidate.is_material_channel ?
-                IMB_BlendMode(BKE_paint_material_channel_blend_mode(
-                    *brush->material_paint, candidate.channel, cache.toggle_settings.invert)) :
-                IMB_BlendMode(brush->blend);
+        const IMB_BlendMode candidate_blend = resolve_target_blend_mode(candidate, *brush, cache);
         dests.append({candidate.data.get(),
                       candidate.channel,
                       paint_brush_color(candidate, sd, *brush, cache, brush_color_default),

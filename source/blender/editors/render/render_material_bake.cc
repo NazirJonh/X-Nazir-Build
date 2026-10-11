@@ -93,8 +93,6 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-/**
-
 namespace blender::ed::material_bake {
 
 /* -------------------------------------------------------------------- */

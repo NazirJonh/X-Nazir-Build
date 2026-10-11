@@ -453,6 +453,17 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
           toolsystem_main_brush_binding_update_from_active(paint);
         }
       }
+
+      /* The Erase tool has no essentials asset to fall back on: when nothing usable is
+       * remembered, adopt (or create) the local Erase brush so Paint <-> Erase always works. */
+      if (paint_mode == PaintMode::Sculpt && tref_rt->brush_type == SCULPT_BRUSH_TYPE_ERASE &&
+          (paint->brush == nullptr || paint->brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_ERASE))
+      {
+        Brush *erase_brush = BKE_brush_material_erase_ensure(*bmain, *scene, *paint);
+        if (BKE_paint_brush_set_synced(*scene, *paint, erase_brush)) {
+          toolsystem_brush_type_binding_update(paint, paint_mode, tref_rt->brush_type);
+        }
+      }
     }
 
     if (Paint *synced_paint = BKE_paint_material_sync_on_tool_restore(scene, paint_mode)) {

@@ -395,8 +395,9 @@ static void paint_color_channel(
   }
 
   SculptSession &ss = *ob.runtime->sculpt_session;
+  const bool to_default = ss.cache->material_erase || ss.cache->material_invert;
   const float3 target_rgb = BKE_paint_material_channel_color_get(
-      brush_paint, sd.paint, brush, channel, ss.cache->toggle_settings.invert);
+      brush_paint, sd.paint, brush, channel, to_default);
 
   Array<float4> &mix_colors = ss.cache->material_mix_base_color;
   if (mix_colors.is_empty()) {
@@ -495,7 +496,9 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
 
-  const bool invert = ss.cache->toggle_settings.invert;
+  /* Vertex attributes carry no alpha, so an erase blends toward the channel defaults, the same as
+   * Ctrl on a regular paint brush. Ctrl on the Erase brush sets neither and paints normally. */
+  const bool invert = ss.cache->material_erase || ss.cache->material_invert;
 
   /* Erasing pulls the channel back to its neutral value and must not read a source texture. */
   const ChannelSourceSampler *sampler = invert ? nullptr :

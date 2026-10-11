@@ -474,6 +474,7 @@ enum eBrushSculptType : char {
   SCULPT_BRUSH_TYPE_BLUR = 34,
   SCULPT_BRUSH_TYPE_SCENE_PROJECT = 35,
   SCULPT_BRUSH_TYPE_TEXTURE_FILL = 36,
+  SCULPT_BRUSH_TYPE_ERASE = 37,
 };
 
 /* Brush.curves_sculpt_brush_type. */

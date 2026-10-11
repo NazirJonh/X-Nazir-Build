@@ -205,6 +205,19 @@ enum eBrushMaterialPaintSourceLayout : int8_t {
   BRUSH_MATERIAL_PAINT_SOURCE_LAYOUT_TARGET_UV = 1,
 };
 
+/**
+ * Stroke parameter preset applied by an Erase brush (#BrushMaterialPaint.erase_mode), mirroring
+ * the stock texture paint Erase brushes. The mode is a one-shot preset (falloff, antialiasing,
+ * pressure size), not a runtime branch: user tweaks made afterwards are kept.
+ */
+enum ePaintMaterialEraseMode : int8_t {
+  BRUSH_MATERIAL_PAINT_ERASE_HARD = 0,
+  /* 1 was "Hard Pressure" (removed): pressure is the brush's own pressure toggles. Keep unused so
+   * Soft and Pixel Art keep their stored values. */
+  BRUSH_MATERIAL_PAINT_ERASE_SOFT = 1,
+  BRUSH_MATERIAL_PAINT_ERASE_PIXEL_ART = 2,
+};
+
 struct BrushMaterialPaintChannel {
   DNA_DEFINE_CXX_METHODS(BrushMaterialPaintChannel)
 
@@ -246,7 +259,8 @@ struct BrushMaterialPaint {
   char use_alpha_map = 0;
   /** When the Alpha channel is enabled, sample Alpha to mask other channels' writes this stroke. */
   char use_alpha_stroke_mask = 1;
-  char _pad = 0;
+  /** #ePaintMaterialEraseMode. */
+  char erase_mode = 0;
   /**
    * Mapping (map_mode, size, angle) shared by every channel's source texture, so multi-channel
    * patterns (e.g. a Base Color texture with a matching Normal/Roughness texture) stay aligned

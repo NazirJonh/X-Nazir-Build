@@ -1499,6 +1499,16 @@ class _defs_sculpt:
             brush_type='PAINT',
         )
 
+    @ToolDef.from_fn
+    def erase():
+        return dict(
+            idname="builtin_brush.erase",
+            label="Erase",
+            icon="brush.gpencil_draw.erase",
+            options={'USE_BRUSHES'},
+            brush_type='ERASE',
+        )
+
     @staticmethod
     def poll_texture_fill(context):
         if context is None:
@@ -4164,6 +4174,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         'SCULPT': [
             _sculpt_tool,
             _defs_sculpt.paint,
+            _defs_sculpt.erase,
             _defs_sculpt.mask,
             _defs_sculpt.draw_face_sets,
             lambda context: (

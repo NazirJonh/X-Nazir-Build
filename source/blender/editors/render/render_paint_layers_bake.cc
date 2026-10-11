@@ -549,7 +549,7 @@ void paint_layers_bake_debounce_reset(wmWindowManager & /*wm*/)
 
 static double paint_layers_cold_tier_tick(uintptr_t uuid, void *user_data);
 
-void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager &wm)
+void paint_layers_cold_tier_scan(Main &bmain, wmWindowManager & /*wm*/)
 {
   const double now = BLI_time_now_seconds();
   Set<uint32_t> &pending = paint_layers_cold_pending();

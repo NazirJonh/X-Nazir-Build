@@ -341,7 +341,7 @@ void IMB_update_gpu_texture_sub(gpu::Texture *tex,
                                 int z,
                                 int w,
                                 int h,
-                                bool use_high_bitdepth,
+                                bool /*use_high_bitdepth*/,
                                 bool use_grayscale,
                                 bool use_premult,
                                 const bool store_linear_float)

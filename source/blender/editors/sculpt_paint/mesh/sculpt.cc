@@ -1367,6 +1367,7 @@ static void restore_from_undo_step(const Depsgraph &depsgraph, const Sculpt &sd,
       break;
     case SCULPT_BRUSH_TYPE_BLUR:
     case SCULPT_BRUSH_TYPE_PAINT:
+    case SCULPT_BRUSH_TYPE_ERASE:
     case SCULPT_BRUSH_TYPE_SMEAR:
       /* Poly Paint pushes #Type::Material (scalar and/or color channels) where a plain color
        * stroke pushes #Type::Color, so restore whichever the in-progress step actually holds. */
@@ -2437,6 +2438,12 @@ static float brush_strength(const Sculpt &sd,
       return alpha * pressure * overlap * feather;
     case SCULPT_BRUSH_TYPE_SLIDE_RELAX:
       return alpha * pressure * overlap * feather * 2.0f;
+    case SCULPT_BRUSH_TYPE_ERASE:
+      /* Erase composites through the stroke accumulator, which already caps the result at the
+       * Strength. The spacing attenuation (`1 / sum of overlapping dabs`) would only make each dab
+       * so faint that a stroke never reaches the full effect. */
+      final_pressure = pressure * pressure;
+      return final_pressure * feather;
     case SCULPT_BRUSH_TYPE_PAINT:
       final_pressure = pressure * pressure;
       return final_pressure * overlap * feather;
@@ -3079,7 +3086,7 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
 
 static bool sculpt_needs_pbvh_pixels(const Brush &brush, const Object &ob)
 {
-  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
+  if (ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_ERASE)) {
     return !ob.runtime->sculpt_session->cache->image_paint_targets.is_empty();
   }
 
@@ -3533,9 +3540,9 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
     undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Mask);
   }
   else if (brush_type_is_paint(brush.sculpt_brush_type)) {
-    /* Only the PAINT brush routes to Material attrs or image canvases; Smear/Blur are
-     * no-ops on those canvases (see #do_brush_action) and need no undo push there. */
-    if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+    /* Only the PAINT and ERASE brushes route to Material attrs or image canvases; Smear/Blur
+     * are no-ops on those canvases (see #do_brush_action) and need no undo push there. */
+    if (ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_ERASE) &&
         paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT &&
         bke::object::pbvh_get(ob)->type() == bke::pbvh::Type::Mesh)
     {
@@ -3565,12 +3572,15 @@ static void push_undo_nodes(const Depsgraph &depsgraph,
         }
       }
     }
-    else if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE) {
+    else if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE &&
+             brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_ERASE)
+    {
       undo::push_nodes(depsgraph, ob, node_mask, undo::Type::Color);
     }
-    /* Else: Material/Image canvas with PAINT brush (image undo is handled by
-     * #stroke_undo_begin; empty targets push nothing), or Smear/Blur on a non-Color-Attribute
-     * canvas (no-op, nothing mutated). Nothing to undo either way. */
+    /* Else: Material/Image canvas with PAINT/ERASE brush (image undo is handled by
+     * #stroke_undo_begin; empty targets push nothing), Smear/Blur on a non-Color-Attribute
+     * canvas (no-op, nothing mutated), or ERASE on a Color-Attribute canvas (no-op). Nothing
+     * to undo either way. */
   }
   else {
     need_coords = true;
@@ -3636,6 +3646,8 @@ static const char *sculpt_brush_type_name(const Brush &brush)
       return "Draw Face Sets";
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_ERASER:
       return "Multires Displacement Eraser";
+    case SCULPT_BRUSH_TYPE_ERASE:
+      return "Erase Brush";
     case SCULPT_BRUSH_TYPE_DISPLACEMENT_SMEAR:
       return "Multires Displacement Smear";
     case SCULPT_BRUSH_TYPE_PAINT:
@@ -3669,7 +3681,9 @@ void do_brush_action(const Depsgraph &depsgraph,
   IndexMask texnode_mask;
 
 #if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  const bool perf_trace = brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+  const bool perf_trace = ELEM(brush.sculpt_brush_type,
+                               SCULPT_BRUSH_TYPE_PAINT,
+                               SCULPT_BRUSH_TYPE_ERASE) &&
                           SCULPT_use_image_paint_brush(paint_mode_settings,
                                                        ob,
                                                        &brush,
@@ -3937,6 +3951,23 @@ void do_brush_action(const Depsgraph &depsgraph,
       else {
         color::do_paint_brush(depsgraph, paint_mode_settings, sd, ob, node_mask, texnode_mask);
       }
+      break;
+    case SCULPT_BRUSH_TYPE_ERASE:
+      if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL_PAINT) {
+        material::do_paint_material_brush(depsgraph, sd, ob, node_mask, paint_mode_settings);
+      }
+      else if (paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL ||
+               paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_IMAGE)
+      {
+        /* Image / Material maps: empty target list is a real no-op (no color-attr fallback). */
+        if (SCULPT_use_image_paint_brush(
+                paint_mode_settings, ob, &brush, sd.paint.visible_material_channels))
+        {
+          color::do_paint_brush(depsgraph, paint_mode_settings, sd, ob, node_mask, texnode_mask);
+        }
+      }
+      /* Color Attribute canvas: erasing plain vertex colors is out of scope, so erase is a
+       * no-op there -- mirroring how Smear/Blur are no-ops on material canvases. */
       break;
     case SCULPT_BRUSH_TYPE_SMEAR:
       /* Smear only operates on the active Color Attribute; no-op on Material canvases to
@@ -4615,6 +4646,7 @@ static void brush_delta_update(const Depsgraph &depsgraph,
   /* TEXTURE_FILL intentionally excluded — one-shot fill, no per-step delta. */
   if (!ELEM(brush_type,
             SCULPT_BRUSH_TYPE_PAINT,
+            SCULPT_BRUSH_TYPE_ERASE,
             SCULPT_BRUSH_TYPE_GRAB,
             SCULPT_BRUSH_TYPE_ELASTIC_DEFORM,
             SCULPT_BRUSH_TYPE_CLOTH,
@@ -5639,7 +5671,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   brush_init_tex(sd, ss);
 
   PaintModeSettings &paint_mode_init = tool_settings->paint_mode;
+  /* The Erase brush does not paint Color Attributes, so it must not create a color layer. */
   const bool needs_color_attributes = brush_type_is_paint(brush->sculpt_brush_type) &&
+                                      brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_ERASE &&
                                       paint_mode_init.canvas_source ==
                                           PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE;
 
@@ -5728,7 +5762,7 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   /* Material canvas: create missing Image Texture maps for enabled channels so a stroke can
    * write. Invalidate the resolve cache so this stroke does not write into a stale Image after
    * undo or a Shader Editor edit. */
-  if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+  if (ELEM(brush->sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_ERASE) &&
       paint_mode_init.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && ob.type == OB_MESH)
   {
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
@@ -6263,7 +6297,11 @@ bool sculpt_brush_uses_image_canvas(const Brush &brush,
                                     const Paint &paint,
                                     Object &ob)
 {
-  if (!ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_TEXTURE_FILL)) {
+  if (!ELEM(brush.sculpt_brush_type,
+            SCULPT_BRUSH_TYPE_PAINT,
+            SCULPT_BRUSH_TYPE_ERASE,
+            SCULPT_BRUSH_TYPE_TEXTURE_FILL))
+  {
     return false;
   }
   return SCULPT_use_image_paint_brush(settings, ob, &brush, paint.visible_material_channels);
@@ -6369,6 +6407,12 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
   cache->mouse_event = cache->initial_mouse;
   copy_v2_v2(paint_runtime->tex_mouse, cache->initial_mouse);
 
+  {
+    const bool is_erase_brush = brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE;
+    cache->material_erase = is_erase_brush && !cache->toggle_settings.invert;
+    cache->material_invert = !is_erase_brush && cache->toggle_settings.invert;
+  }
+
   cache->initial_direction_flipped = brush_flip(*brush, *cache) < 0.0f;
 
   /* Truly temporary data that isn't stored in properties. */
@@ -6438,7 +6482,7 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
   /* Original coordinates require the sculpt undo system, which isn't used
    * for image brushes. It's also not necessary, just disable it. */
-  if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+  if (brush && ELEM(brush->sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_ERASE) &&
        SCULPT_use_image_paint_brush(
            *paint_mode_settings_, ob, brush, this->sculpt_->paint.visible_material_channels))
   {
@@ -6889,7 +6933,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   else if (sculpt_brush_uses_image_canvas(*brush, *paint_mode_settings_, sd.paint, ob)) {
     flush_update_done(this->vc, *wm_, ob, UpdateType::Image);
   }
-  else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
+  else if (ELEM(brush->sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_ERASE)) {
     flush_update_done(this->vc, *wm_, ob, UpdateType::Color);
   }
   else {
@@ -6960,6 +7004,16 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   if (brush_type_is_paint(brush.sculpt_brush_type) &&
       !color_supported_check(scene, ob, op->reports))
   {
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    return OPERATOR_CANCELLED;
+  }
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE &&
+      CTX_data_tool_settings(C)->paint_mode.canvas_source == PAINT_CANVAS_SOURCE_COLOR_ATTRIBUTE)
+  {
+    /* #do_brush_action has no Color Attribute branch for the Erase brush; say so instead of
+     * running a stroke that changes nothing. */
+    BKE_report(op->reports, RPT_WARNING, "The Erase brush does not support Color Attributes");
     stroke->cancel(C);
     MEM_delete(stroke);
     return OPERATOR_CANCELLED;

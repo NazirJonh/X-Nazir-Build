@@ -1279,6 +1279,43 @@ void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+static wmOperatorStatus material_erase_brush_add_exec(bContext *C, wmOperator *op)
+{
+  Main &bmain = *CTX_data_main(C);
+  Scene &scene = *CTX_data_scene(C);
+  /* The poll guarantees Sculpt Mode, so the Sculpt paint settings exist. */
+  Paint *paint = &CTX_data_tool_settings(C)->sculpt->paint;
+
+  /* Reuse the local Erase brush when one exists: re-running the operator after another tool took
+   * over must return to the same brush instead of piling up duplicates. A linked Erase brush is
+   * not reused - it would keep its library defaults and cannot be freely configured. */
+  bool created = false;
+  Brush *brush = BKE_brush_material_erase_ensure(bmain, scene, *paint, &created);
+  if (!created) {
+    BKE_reportf(op->reports, RPT_INFO, "Reusing Erase brush \"%s\"", brush->id.name + 2);
+  }
+
+  if (!BKE_paint_brush_set_synced(scene, *paint, brush)) {
+    BKE_report(op->reports, RPT_ERROR, "Could not activate the Erase brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_erase_brush_add(wmOperatorType *ot)
+{
+  ot->name = "Add Erase Brush";
+  ot->idname = "PAINT_OT_material_erase_brush_add";
+  ot->description =
+      "Create or activate an Erase brush for Sculpt Mode PBR Paint: true erase removes "
+      "coverage from the active channels, and Ctrl paints instead";
+  ot->exec = material_erase_brush_add_exec;
+  ot->poll = ed::sculpt_paint::sculpt_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperator *op)
 {
   Object *ob = CTX_data_active_object(C);
@@ -1744,6 +1781,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_from_view);
   WM_operatortype_append(PAINT_OT_brush_colors_flip);
   WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
+  WM_operatortype_append(PAINT_OT_material_erase_brush_add);
   WM_operatortype_append(PAINT_OT_material_paint_source_mode_set);
   WM_operatortype_append(PAINT_OT_material_paint_source_material_set);
   WM_operatortype_append(PAINT_OT_material_paint_images_ensure);

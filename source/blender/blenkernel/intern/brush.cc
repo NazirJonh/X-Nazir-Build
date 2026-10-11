@@ -899,6 +899,115 @@ void BKE_brush_material_paint_ensure(Brush *brush)
   brush->material_paint = BKE_brush_material_paint_create_default();
 }
 
+/** Replaces the distance falloff points with the stock Erase Hard profile: full strength until
+ *  ~75% of the radius, then a short ramp down to zero at the edge. Point values come from the
+ *  essentials asset dump; re-check against the asset if it is ever regenerated. */
+static void brush_material_erase_hard_curve_set(Brush *brush)
+{
+  /* Creates #Brush.curve_distance_falloff when missing, and gives the mapping a sane base to
+   * replace the points of. The function never writes #Brush.curve_distance_falloff_preset and
+   * has no CUSTOM choice, so both are set below. */
+  BKE_brush_curve_preset(brush, CURVE_PRESET_LINE);
+
+  constexpr int hard_point_num = 4;
+  static constexpr float hard_points[hard_point_num][2] = {
+      {0.753f, 1.0f}, {0.812f, 0.946f}, {0.965f, 0.058f}, {1.0f, 0.0f}};
+
+  CurveMapping *cumap = brush->curve_distance_falloff;
+  CurveMap *cuma = &cumap->cm[0];
+  MEM_delete(cuma->curve);
+  cuma->totpoint = hard_point_num;
+  cuma->curve = MEM_new_array<CurveMapPoint>(hard_point_num, "erase falloff points");
+  for (int i = 0; i < hard_point_num; i++) {
+    cuma->curve[i].x = hard_points[i][0];
+    cuma->curve[i].y = hard_points[i][1];
+    cuma->curve[i].flag = cuma->default_handle_type;
+  }
+  brush->curve_distance_falloff_preset = BRUSH_CURVE_CUSTOM;
+
+  BKE_curvemapping_changed(cumap, false);
+}
+
+void BKE_brush_material_erase_mode_apply(Brush *brush, const ePaintMaterialEraseMode mode)
+{
+  /* The presets set only falloff and antialiasing (#Brush.sampling_flag &
+   * #BRUSH_PAINT_ANTIALIASING); pressure toggles stay under the user's control. */
+  switch (mode) {
+    case BRUSH_MATERIAL_PAINT_ERASE_HARD:
+      brush_material_erase_hard_curve_set(brush);
+      brush->sampling_flag |= BRUSH_PAINT_ANTIALIASING;
+      break;
+    case BRUSH_MATERIAL_PAINT_ERASE_SOFT:
+      /* Analytic smooth falloff, no curve points needed. */
+      brush->curve_distance_falloff_preset = BRUSH_CURVE_SMOOTH;
+      brush->sampling_flag |= BRUSH_PAINT_ANTIALIASING;
+      break;
+    case BRUSH_MATERIAL_PAINT_ERASE_PIXEL_ART:
+      brush->curve_distance_falloff_preset = BRUSH_CURVE_CONSTANT;
+      brush->sampling_flag &= ~BRUSH_PAINT_ANTIALIASING;
+      break;
+  }
+}
+
+Brush *BKE_brush_material_erase_create_default(Main *bmain, Paint *paint)
+{
+  Brush *brush = BKE_brush_add(bmain, "Erase", OB_MODE_SCULPT);
+  brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_ERASE;
+
+  /* The default material-paint channel selection (Base Color, Metallic, Roughness, Normal) is
+   * the starting point for "Channels to Erase". */
+  BKE_brush_material_paint_ensure(brush);
+  brush->material_paint->erase_mode = BRUSH_MATERIAL_PAINT_ERASE_HARD;
+
+  /* Brush-wide erase blend, so the brush works as a stock eraser on non-material (Mode=Image)
+   * canvases without extra engine code. */
+  brush->blend = IMB_BLEND_ERASE_ALPHA;
+
+  /* Stock Erase stroke numbers. */
+  BKE_brush_size_set(paint, brush, 70);
+  brush->spacing = 10;
+  brush->jitter = 0.0f;
+  brush->alpha = 1.0f;
+  brush->flow = 1.0f;
+
+  /* Same placement as the Paint brush sources: the texture lies on the surface in the brush's
+   * Area Plane instead of following the screen. */
+  brush->mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+
+  BKE_brush_material_erase_mode_apply(brush, BRUSH_MATERIAL_PAINT_ERASE_HARD);
+
+  return brush;
+}
+
+Brush *BKE_brush_material_erase_ensure(Main &bmain, Scene &scene, Paint &paint, bool *r_created)
+{
+  /* Reuse the local Erase brush when one exists: re-activating after another tool took over must
+   * return to the same brush instead of piling up duplicates. A linked Erase brush is not reused -
+   * it would keep its library defaults and cannot be freely configured. */
+  Brush *found = nullptr;
+  for (Brush &iter : bmain.brushes) {
+    if (ID_IS_LINKED(&iter) || !(iter.ob_mode & OB_MODE_SCULPT) ||
+        iter.sculpt_brush_type != SCULPT_BRUSH_TYPE_ERASE)
+    {
+      continue;
+    }
+    if (found == nullptr || STREQ(iter.id.name + 2, "Erase")) {
+      found = &iter;
+    }
+  }
+  if (r_created) {
+    *r_created = (found == nullptr);
+  }
+  if (found) {
+    return found;
+  }
+  Brush *brush = BKE_brush_material_erase_create_default(&bmain, &paint);
+  /* Activation applies the scene-side preset over #Brush.material_paint; snapshot first so the
+   * default channel selection is not overwritten by a missing or stale preset. */
+  BKE_paint_material_brush_preset_snapshot(scene, *brush);
+  return brush;
+}
+
 /** Adjusts the counted reference on \a mtex's #MTex.tex by \a delta (+1 or -1). No-op if
  *  #MTex.tex is null. */
 static void material_paint_mtex_tex_user_adjust(MTex &mtex, const int delta)
@@ -2270,7 +2379,10 @@ bool BKE_brush_has_cube_tip(const Brush *brush, PaintMode paint_mode)
         return true;
       }
 
-      if (ELEM(brush->sculpt_brush_type, SCULPT_BRUSH_TYPE_CLAY_STRIPS, SCULPT_BRUSH_TYPE_PAINT) &&
+      if (ELEM(brush->sculpt_brush_type,
+               SCULPT_BRUSH_TYPE_CLAY_STRIPS,
+               SCULPT_BRUSH_TYPE_PAINT,
+               SCULPT_BRUSH_TYPE_ERASE) &&
           (brush->tip_roundness < 1.0f || brush->tip_scale_x != 1.0f))
       {
         return true;
@@ -2307,6 +2419,7 @@ static bool is_paint_tool(const Brush &brush)
 {
   return ELEM(brush.sculpt_brush_type,
               SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_ERASE,
               SCULPT_BRUSH_TYPE_SMEAR,
               SCULPT_BRUSH_TYPE_BLUR);
 }

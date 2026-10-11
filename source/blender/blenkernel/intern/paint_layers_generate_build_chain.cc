@@ -1331,7 +1331,7 @@ bool PaintLayersChainBuilder::build_substituted_source(const MaterialPaintLayer 
                                                        const float location_y,
                                                        Image *baked_color,
                                                        ChainLayer &r_current,
-                                                       const int channel,
+                                                       const int /*channel*/,
                                                        const bool use_baked_content,
                                                         bNode **r_content_node)
 {

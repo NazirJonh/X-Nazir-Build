@@ -729,8 +729,9 @@ class StrokePanel(BrushPanel):
         # which requires "Edit After Stroke". Without that qualifier the option renders dead
         # for every plain Roll stroke.
         # Color brushes are excluded: face sets are derived from displacement magnitude and have no
-        # color meaning, and a color patch commits no face-set step.
-        show_face_set = mode == 'SCULPT' and brush.sculpt_brush_type != 'PAINT' and (
+        # color meaning, and a color patch commits no face-set step. The Erase brush is excluded
+        # for the same reason - it writes no displacement at all.
+        show_face_set = mode == 'SCULPT' and brush.sculpt_brush_type not in {'PAINT', 'ERASE'} and (
             brush.stroke_method == 'CURVE_PATCH' or
             (brush.stroke_method == 'ROLL' and brush.use_roll_edit_after)
         )
@@ -1389,6 +1390,12 @@ def brush_settings(layout, context, brush, popover=False):
             layout.prop(brush, "project_ray_direction_type")
             layout.prop(brush, "minimum_distance")
             layout.prop(brush, "use_bidirectional")
+
+        elif sculpt_brush_type == 'ERASE':
+            row = layout.row(align=True)
+            row.prop(brush, "flow")
+            row.prop(brush, "invert_flow_pressure", text="")
+            row.prop(brush, "use_flow_pressure", text="")
 
         elif sculpt_brush_type == 'PAINT':
             row = layout.row(align=True)
@@ -2348,8 +2355,16 @@ def draw_material_paint_channels(
         )
         if paint_mode is not None and not show_custom:
             row.prop(paint_mode, "new_channel_image_size", text="")
+        # Re-running the operator re-activates the existing Erase brush instead of duplicating it,
+        # so this doubles as the switch-back path from a regular paint brush.
+        layout.operator(
+            "paint.material_erase_brush_add",
+            text="Add Erase Brush",
+            icon='ADD',
+        )
         return
 
+    is_erase_brush = brush.sculpt_brush_type == 'ERASE'
     channels = {channel.channel: channel for channel in material_paint.channels}
 
     # Drawn as operator buttons rather than a plain enum: switching to Material has to make a
@@ -2387,6 +2402,28 @@ def draw_material_paint_channels(
         )
         sub.prop(material_paint, "source_layout")
         sub.prop(material_paint, "source_bake_size")
+    if not is_erase_brush:
+        # Reachable while a regular paint brush is active: the primary path to the Erase brush.
+        layout.operator(
+            "paint.material_erase_brush_add",
+            text="Add Erase Brush",
+            icon='ADD',
+        )
+    else:
+        # Picking a mode applies its stock stroke parameters (falloff, antialiasing, pressure
+        # size) as a one-shot preset; tweaks made afterwards are kept.
+        layout.prop(material_paint, "erase_mode")
+        # The Texture panel is hidden for PBR canvases, so the brush texture (the erase strength
+        # mask) gets its own drop/assign zone here.
+        tex_header, tex_panel = layout.panel("erase_brush_texture", default_closed=False)
+        tex_header.label(text="Texture")
+        if tex_panel:
+            tex_col = draw_brush_texture_image_grid(
+                tex_panel, brush.texture_slot, context.tool_settings.texture_grid_display_view3d,
+            )
+            draw_brush_texture_properties(
+                tex_col, brush, context.sculpt_object, default_closed=True,
+            )
     layout.separator()
 
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
@@ -2446,7 +2483,12 @@ def draw_material_paint_channels(
         layout.separator()
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
-    _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
+    if is_erase_brush:
+        erase_col = layout.column(align=True)
+        erase_col.label(text="Channels to Erase")
+        _draw_material_paint_channel_toggles(erase_col, channels, toggle_ids, toggle_labels)
+    else:
+        _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
 
     # Image maps: resolution only matters while at least one enabled channel still needs a map.
     # A layered material grows the active row's maps on the first stroke, and the Principled-graph
@@ -2466,6 +2508,12 @@ def draw_material_paint_channels(
                 icon='IMAGE_DATA',
             )
             row.prop(paint_mode, "new_channel_image_size", text="")
+
+    if is_erase_brush:
+        # The per-channel value/blend editors are hidden while erasing: an erase stroke removes
+        # coverage, it does not paint channel values. Ctrl switches the Erase brush back to
+        # painting; configure the values with a Paint brush.
+        return
 
     if any(channels[channel_id].use for channel_id in toggle_ids):
         layout.separator()

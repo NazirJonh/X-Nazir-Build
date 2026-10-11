@@ -48,7 +48,7 @@ class OUTLINER_HT_tool_header(Header):
             # Which channel's blend and opacity the rows below show and edit. Width is capped so
             # the dropdown does not stretch to the widest possible item and crowd the Add buttons.
             sub = layout.row()
-            sub.ui_units_x = 6.0
+            sub.ui_units_x = 4.0
             sub.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
 
         layout.separator_spacer()

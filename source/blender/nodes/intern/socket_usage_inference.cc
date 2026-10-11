@@ -373,6 +373,11 @@ class SocketUsageInferencerImpl {
         socket.context, node->identifier, &node->owner_tree());
     Vector<const bNodeSocket *> dependent_sockets;
     for (const bNode *group_input_node : group->group_input_nodes()) {
+      if (socket->index() >= group_input_node->output_sockets().size()) {
+        /* The group node can have more inputs than the group's interface while it is being
+         * rebuilt (the group node is updated later than the group), so there is no match. */
+        continue;
+      }
       const bNodeSocket &group_input_socket = group_input_node->output_socket(socket->index());
       if (group_input_socket.is_directly_linked()) {
         /* Skip unlinked group inputs to avoid further unnecessary processing of them further down

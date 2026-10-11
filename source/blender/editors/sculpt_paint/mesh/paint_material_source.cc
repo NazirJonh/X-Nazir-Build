@@ -37,8 +37,6 @@
 #include "ED_view3d.hh"
 
 #include "../paint_intern.hh"
-/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
-#include "paint_debug.hh"
 #include "paint_material_source.hh"
 #include "sculpt_intern.hh"
 

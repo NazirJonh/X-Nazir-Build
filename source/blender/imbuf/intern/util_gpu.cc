@@ -6,7 +6,6 @@
  * \ingroup imbuf
  */
 
-#include "BLI_time.h"
 #include "BLI_utildefines.h"
 
 #include "MEM_guardedalloc.h"

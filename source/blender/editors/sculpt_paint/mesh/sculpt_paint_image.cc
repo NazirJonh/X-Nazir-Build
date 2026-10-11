@@ -13,8 +13,6 @@
  * dropped along with the composite tagging API this file no longer calls. */
 #include "DNA_scene_types.h"
 
-#include <atomic>
-#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -74,56 +72,7 @@ namespace ed::sculpt_paint::paint::image {
 using namespace blender::bke::pbvh::pixels;
 using namespace blender::bke::image;
 
-/* WORKAROUND: temporary printf profiling to check whether the Base Color channel's cost (much
- * higher than Roughness/Normal for the same pixel count, per the bke.paint_channel_perf report)
- * is the byte<->scene-linear colorspace conversion in #read_image_pixels/#write_image_pixels, as
- * opposed to #blend_colors itself. Remove once the perf work is done.
- * Toggle all logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
-#include "paint_debug.hh"
 
-#if PBR_PAINT_IMAGE_PROFILE
-namespace {
-struct ChannelWriteProfile {
-  std::atomic<int64_t> pixel_num{0};
-  std::atomic<int> tile_num{0};
-  std::atomic<int> valid_row_num{0};
-  std::atomic<int> changed_row_num{0};
-  std::atomic<int> skipped_row_num{0};
-  std::atomic<int64_t> sample_context_num{0};
-  std::atomic<double> sample_seconds{0.0};
-  std::atomic<double> read_seconds{0.0};
-  std::atomic<double> blend_seconds{0.0};
-  std::atomic<double> write_seconds{0.0};
-  std::atomic<int> noop_processor{-1}; /* -1 unknown, 0 has conversion, 1 is_noop. */
-  std::atomic<int> sampler_active{0};
-  std::atomic<int> normal_channel{0};
-  std::atomic<int> linear_conversion{0};
-};
-
-struct PairPaintProfile {
-  std::atomic<int> node_num{0};
-  std::atomic<int> paired_node_num{0};
-  std::atomic<int> fallback_node_num{0};
-  std::atomic<int> tile_num{0};
-  std::atomic<int> row_num{0};
-  std::atomic<int64_t> pixel_num{0};
-  std::atomic<int> failure_empty_or_tile_cache{0};
-  std::atomic<int> failure_row_cache{0};
-  std::atomic<int> failure_context_cache{0};
-  std::atomic<int> failure_alpha_cache{0};
-  std::atomic<int> failure_geometry{0};
-  std::atomic<int> failure_buffer{0};
-  std::atomic<int> failure_processors{0};
-  std::atomic<int> failure_write_buffer{0};
-  std::atomic<int> failure_write_geometry{0};
-  std::atomic<int> layout_key_mismatch{0};
-};
-}  // namespace
-
-/* Indexed by eMaterialPaintChannel; PAINT_MATERIAL_CHANNEL_NUM channels max. */
-static ChannelWriteProfile g_channel_write_profile[PAINT_MATERIAL_CHANNEL_NUM];
-static PairPaintProfile g_pair_paint_profile;
-#endif
 
 ImageData::~ImageData()
 {
@@ -979,8 +928,7 @@ static void apply_prepared_paint_range(PaintChannelRangeState &state,
 {
   /* This runs once per pixel range, i.e. hundreds of thousands of times per dab. Four
    * #BLI_time_now_seconds calls (a #QueryPerformanceCounter each on Windows) are not free at that
-   * rate, so the clock is only read when a caller actually asked for the breakdown - which only
-   * the #PBR_PAINT_IMAGE_PROFILE paths do. */
+   * rate, so the clock is only read when a caller actually asked for the breakdown. */
   const bool timed = r_read_seconds != nullptr || r_blend_seconds != nullptr ||
                      r_write_seconds != nullptr;
   const auto now = [timed]() { return timed ? BLI_time_now_seconds() : 0.0; };
@@ -1325,24 +1273,6 @@ static void apply_paint_channel(ImageData &image_data,
 {
   PRF_scope(ProfileCategory::Editor);
 
-#if PBR_PAINT_IMAGE_PROFILE
-  ChannelWriteProfile &channel_wprof = g_channel_write_profile[channel];
-  channel_wprof.pixel_num.store(0);
-  channel_wprof.tile_num.store(0);
-  channel_wprof.valid_row_num.store(0);
-  channel_wprof.changed_row_num.store(0);
-  channel_wprof.skipped_row_num.store(0);
-  channel_wprof.sample_context_num.store(0);
-  channel_wprof.sample_seconds.store(0.0);
-  channel_wprof.read_seconds.store(0.0);
-  channel_wprof.blend_seconds.store(0.0);
-  channel_wprof.write_seconds.store(0.0);
-  channel_wprof.sampler_active.store(sampler != nullptr);
-  channel_wprof.normal_channel.store(is_normal_channel);
-  channel_wprof.linear_conversion.store(
-      sampler != nullptr && sampler->needs_linear_conversion(channel));
-  const double apply_start = BLI_time_now_seconds();
-#endif
 
 #ifdef DEBUG_PIXEL_NODES
   float4 debug_color;
@@ -1364,10 +1294,6 @@ static void apply_paint_channel(ImageData &image_data,
     if (image_buffer == nullptr) {
       continue;
     }
-#if PBR_PAINT_IMAGE_PROFILE
-    channel_wprof.tile_num.fetch_add(1);
-    channel_wprof.sample_context_num.fetch_add(int64_t(tile_cache.row_contexts.size()));
-#endif
 
     MutableSpan<float4> float_buffer;
     MutableSpan<uchar4> byte_buffer;
@@ -1392,18 +1318,9 @@ static void apply_paint_channel(ImageData &image_data,
 
       tile_cache.valid_rows.foreach_index(
         [&](const int row_i) {
-#if PBR_PAINT_IMAGE_PROFILE
-          channel_wprof.valid_row_num.fetch_add(1);
-#endif
           if (!tile_cache.row_changed[row_i]) {
-#if PBR_PAINT_IMAGE_PROFILE
-            channel_wprof.skipped_row_num.fetch_add(1);
-#endif
             return;
           }
-#if PBR_PAINT_IMAGE_PROFILE
-          channel_wprof.changed_row_num.fetch_add(1);
-#endif
           const PackedPixelRow pixel_row = tile_data.pixel_rows[row_i];
           const int row_size = pixel_row.num_pixels;
           Span<float> row_factors = tile_cache.row_factors[row_i];
@@ -1463,9 +1380,6 @@ static void apply_paint_channel(ImageData &image_data,
             paint_material_channel_perf::add_pixels_painted(range.size());
 
             PaintLocalData &tls = all_tls.local();
-#if PBR_PAINT_IMAGE_PROFILE
-            const double sample_phase_start = BLI_time_now_seconds();
-#endif
             if (sampler != nullptr) {
               /* A source texture replaces the channel's fixed value; the cached brush factor
                * still carries falloff, so the stroke shape is unchanged. */
@@ -1520,14 +1434,6 @@ static void apply_paint_channel(ImageData &image_data,
               prepare_paint_range(tls, factors, brush_color, blend_mode);
             }
 
-#if PBR_PAINT_IMAGE_PROFILE
-            ChannelWriteProfile &wprof = g_channel_write_profile[channel];
-            wprof.sample_seconds.fetch_add(BLI_time_now_seconds() - sample_phase_start);
-            wprof.noop_processor.store(processors->is_noop ? 1 : 0);
-            double read_seconds = 0.0;
-            double blend_seconds = 0.0;
-            double write_seconds = 0.0;
-#endif
             PaintChannelRangeState range_state{tls,
                                                float_buffer,
                                                byte_buffer,
@@ -1545,22 +1451,9 @@ static void apply_paint_channel(ImageData &image_data,
             apply_prepared_paint_range(range_state,
                                        pixel_row,
                                        range,
-#if PBR_PAINT_IMAGE_PROFILE
-                                       &read_seconds,
-                                       &blend_seconds,
-                                       &write_seconds
-#else
                                        nullptr,
                                        nullptr,
-                                       nullptr
-#endif
-            );
-#if PBR_PAINT_IMAGE_PROFILE
-            wprof.read_seconds.fetch_add(read_seconds);
-            wprof.blend_seconds.fetch_add(blend_seconds);
-            wprof.write_seconds.fetch_add(write_seconds);
-            wprof.pixel_num.fetch_add(range.size());
-#endif
+                                       nullptr);
           });
         },
         exec_mode::grain_size(2));
@@ -1577,41 +1470,6 @@ static void apply_paint_channel(ImageData &image_data,
 
   pixel_node.flags.dirty |= pixels_updated;
 
-#if PBR_PAINT_IMAGE_PROFILE
-  const int64_t pixels = channel_wprof.pixel_num.load();
-  if (pixels > 0) {
-    const double sample_ms = channel_wprof.sample_seconds.load() * 1000.0;
-    const double read_ms = channel_wprof.read_seconds.load() * 1000.0;
-    const double blend_ms = channel_wprof.blend_seconds.load() * 1000.0;
-    const double write_ms = channel_wprof.write_seconds.load() * 1000.0;
-    printf(
-        "[pbr_paint] apply_paint_channel channel=%d tiles=%d rows=%d changed=%d "
-        "skipped=%d contexts=%lld pixels=%lld sampler=%d normal=%d linear_conversion=%d "
-        "noop_colorspace=%d | "
-        "sample=%.3fms read=%.3fms blend=%.3fms write=%.3fms total=%.3fms | "
-        "per_1k_px sample=%.4fms read=%.4fms blend=%.4fms write=%.4fms\n",
-        int(channel),
-        int(channel_wprof.tile_num.load()),
-        int(channel_wprof.valid_row_num.load()),
-        int(channel_wprof.changed_row_num.load()),
-        int(channel_wprof.skipped_row_num.load()),
-        static_cast<long long>(channel_wprof.sample_context_num.load()),
-        static_cast<long long>(pixels),
-        channel_wprof.sampler_active.load(),
-        channel_wprof.normal_channel.load(),
-        channel_wprof.linear_conversion.load(),
-        int(channel_wprof.noop_processor.load()),
-        double(sample_ms),
-        double(read_ms),
-        double(blend_ms),
-        double(write_ms),
-        double((BLI_time_now_seconds() - apply_start) * 1000.0),
-        double(sample_ms / (double(pixels) / 1000.0)),
-        double(read_ms / (double(pixels) / 1000.0)),
-        double(blend_ms / (double(pixels) / 1000.0)),
-        double(write_ms / (double(pixels) / 1000.0)));
-  }
-#endif
 }
 
 /** Apply N compatible non-Normal channels in one shared row/range traversal. */
@@ -1680,9 +1538,6 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
   if (dest_num < 2 || pixel_node.tiles.is_empty() ||
       tile_caches.size() != pixel_node.tiles.size())
   {
-#if PBR_PAINT_IMAGE_PROFILE
-    g_pair_paint_profile.failure_empty_or_tile_cache.fetch_add(1);
-#endif
     return false;
   }
 
@@ -1697,23 +1552,14 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
     if (tile_cache.row_factors.size() != cache_row_num ||
         tile_cache.row_changed.size() != cache_row_num)
     {
-#if PBR_PAINT_IMAGE_PROFILE
-      g_pair_paint_profile.failure_row_cache.fetch_add(1);
-#endif
       return false;
     }
     if (sampler != nullptr && tile_cache.row_contexts.size() != cache_row_num) {
-#if PBR_PAINT_IMAGE_PROFILE
-      g_pair_paint_profile.failure_context_cache.fetch_add(1);
-#endif
       return false;
     }
     if (alpha_masking_active && sampler != nullptr &&
         tile_cache.row_alpha_factors.size() != cache_row_num)
     {
-#if PBR_PAINT_IMAGE_PROFILE
-      g_pair_paint_profile.failure_alpha_cache.fetch_add(1);
-#endif
       return false;
     }
     for (const int dest_i : dests.index_range()) {
@@ -1721,15 +1567,9 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
       const TileColorspaceProcessor *tile_processors =
           dests[dest_i].image_data->processors.lookup_ptr(tile.tile_number);
       if (buffer == nullptr) {
-#if PBR_PAINT_IMAGE_PROFILE
-        g_pair_paint_profile.failure_buffer.fetch_add(1);
-#endif
         return false;
       }
       if (tile_processors == nullptr) {
-#if PBR_PAINT_IMAGE_PROFILE
-        g_pair_paint_profile.failure_processors.fetch_add(1);
-#endif
         return false;
       }
       const int slot = tile_i * dest_num + dest_i;
@@ -1742,9 +1582,6 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
     for (int dest_i = 1; dest_i < dest_num; dest_i++) {
       ImBuf *other = buffers[tile_i * dest_num + dest_i];
       if (other == first_buffer || other->x != first_buffer->x || other->y != first_buffer->y) {
-#if PBR_PAINT_IMAGE_PROFILE
-        g_pair_paint_profile.failure_geometry.fetch_add(1);
-#endif
         return false;
       }
     }
@@ -1778,10 +1615,6 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
             return;
           }
           const PackedPixelRow pixel_row = tile.pixel_rows[row_i];
-#if PBR_PAINT_IMAGE_PROFILE
-          g_pair_paint_profile.row_num.fetch_add(1);
-          g_pair_paint_profile.pixel_num.fetch_add(pixel_row.num_pixels);
-#endif
           /* No #material::channel_uses_alpha_mask test here: Alpha is excluded from grouping by
            * #is_pairable_channel, so every channel in this group is masked by it. */
           Span<float> factors = tile_cache.row_factors[row_i];
@@ -1846,9 +1679,6 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
         exec_mode::grain_size(2));
 
     if (tile_updated.load(std::memory_order_relaxed)) {
-#if PBR_PAINT_IMAGE_PROFILE
-      g_pair_paint_profile.tile_num.fetch_add(1);
-#endif
       for (const int dest_i : dests.index_range()) {
         tile.mark_dirty(tile_cache.dirty_bounds);
         BKE_image_mark_dirty(dests[dest_i].image_data->image,
@@ -2330,12 +2160,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           }
         }
         if (!layout_matches || shared_image) {
-#if PBR_PAINT_IMAGE_PROFILE
-          printf("[pbr_paint] group skip channel=%d layout_matches=%d shared_image=%d\n",
-                 int(candidate.channel),
-                 int(layout_matches),
-                 int(shared_image));
-#endif
           continue;
         }
         /* Channel grouping only ever collects material channels (a plain image canvas is the
@@ -2358,26 +2182,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     }
     const bool group_write = dests.size() >= 2;
 
-#if PBR_PAINT_IMAGE_PROFILE
-    if (group_write) {
-      g_pair_paint_profile.node_num.store(0);
-      g_pair_paint_profile.paired_node_num.store(0);
-      g_pair_paint_profile.fallback_node_num.store(0);
-      g_pair_paint_profile.tile_num.store(0);
-      g_pair_paint_profile.row_num.store(0);
-      g_pair_paint_profile.pixel_num.store(0);
-      g_pair_paint_profile.failure_empty_or_tile_cache.store(0);
-      g_pair_paint_profile.failure_row_cache.store(0);
-      g_pair_paint_profile.failure_context_cache.store(0);
-      g_pair_paint_profile.failure_alpha_cache.store(0);
-      g_pair_paint_profile.failure_geometry.store(0);
-      g_pair_paint_profile.failure_buffer.store(0);
-      g_pair_paint_profile.failure_processors.store(0);
-      g_pair_paint_profile.failure_write_buffer.store(0);
-      g_pair_paint_profile.failure_write_geometry.store(0);
-      g_pair_paint_profile.layout_key_mismatch.store(0);
-    }
-#endif
 
     /* Destinations are prepared here, before the threaded paint pass. #fetch_image_buffers
      * inserts into #ImageData::buffers and #ImageData::processors, so doing it from inside the
@@ -2421,9 +2225,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           },
           exec_mode::grain_size(1));
     }
-#if PBR_PAINT_IMAGE_PROFILE
-    const double group_pixels_start = group_write ? BLI_time_now_seconds() : 0.0;
-#endif
     {
       PAINT_CHANNEL_PERF_SCOPE(PaintPixels);
       node_mask.foreach_index(
@@ -2450,20 +2251,12 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
               return;
             }
 
-#if PBR_PAINT_IMAGE_PROFILE
-            g_pair_paint_profile.node_num.fetch_add(1);
-#endif
             const bool grouped = apply_paint_channel_group(dests,
                                                            *brush,
                                                            pixel_nodes[i],
                                                            node_factor_caches[pos],
                                                            active_sampler,
                                                            alpha_masking_active);
-#if PBR_PAINT_IMAGE_PROFILE
-            (grouped ? g_pair_paint_profile.paired_node_num :
-                       g_pair_paint_profile.fallback_node_num)
-                .fetch_add(1);
-#endif
             if (!grouped) {
               for (const PaintChannelWriteDest &dest : dests) {
                 apply_paint_channel(*dest.image_data,
@@ -2490,30 +2283,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           exec_mode::grain_size(1));
     }
 
-#if PBR_PAINT_IMAGE_PROFILE
-    if (group_write) {
-      printf("[pbr_paint] apply_paint_channel_group dests=%d first=%d nodes=%d grouped_nodes=%d "
-             "fallback_nodes=%d tiles=%d rows=%d pixels=%lld elapsed=%.3fms "
-             "fail_empty_or_tile_cache=%d fail_row_cache=%d fail_context_cache=%d "
-             "fail_alpha_cache=%d fail_geometry=%d fail_buffer=%d fail_processors=%d\n",
-             int(dests.size()),
-             int(target.channel),
-             g_pair_paint_profile.node_num.load(),
-             g_pair_paint_profile.paired_node_num.load(),
-             g_pair_paint_profile.fallback_node_num.load(),
-             g_pair_paint_profile.tile_num.load(),
-             g_pair_paint_profile.row_num.load(),
-             static_cast<long long>(g_pair_paint_profile.pixel_num.load()),
-             (BLI_time_now_seconds() - group_pixels_start) * 1000.0,
-             g_pair_paint_profile.failure_empty_or_tile_cache.load(),
-             g_pair_paint_profile.failure_row_cache.load(),
-             g_pair_paint_profile.failure_context_cache.load(),
-             g_pair_paint_profile.failure_alpha_cache.load(),
-             g_pair_paint_profile.failure_geometry.load(),
-             g_pair_paint_profile.failure_buffer.load(),
-             g_pair_paint_profile.failure_processors.load());
-    }
-#endif
 
     {
       PAINT_CHANNEL_PERF_SCOPE(SeamFix);

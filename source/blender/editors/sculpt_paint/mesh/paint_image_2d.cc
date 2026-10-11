@@ -8,10 +8,8 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -55,8 +53,6 @@
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
-/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
-#include "paint_debug.hh"
 
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
@@ -612,24 +608,6 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
     {
       /* Image and brush-mapped Baked sources have no #Tex for the texture engine to evaluate;
        * see the same guard in #sample_channel_source_with_layout. */
-#if PBR_PAINT_BAKE_DEBUG
-      {
-        static std::atomic_bool logged = false;
-        if (!logged.exchange(true)) {
-          printf("[PBR-BAKE] 2d-view: returning BLACK channel=%d kind=%d layout.kind=%d "
-                 "direct=%d ibuf=%p map_mode=%d texco=(%.4f, %.4f)\n",
-                 int(channel),
-                 int(source.kind),
-                 int(layout.kind),
-                 int(source.image_direct_sample),
-                 (void *)source.ibuf,
-                 source.mtex != nullptr ? int(source.mtex->brush_map_mode) : -1,
-                 texco.x,
-                 texco.y);
-          fflush(stdout);
-        }
-      }
-#endif
       r_rgba = float4(0.0f);
       return 0.0f;
     }
@@ -1074,130 +1052,8 @@ static void brush_painter_mask_imbuf_partial_update(BrushPainter *painter,
 }
 
 /* create imbuf with brush color */
-#if PBR_PAINT_2D_DAB_PROFILE
-/**
- * Dab-fill totals for the current stroke, reported and reset by #paint_2d_stroke_done.
- *
- * Plain statics rather than atomics: dabs are issued from the main thread and the parallel work
- * inside a dab is joined before these are touched, so there is no concurrent update.
- */
-static double g_dab_fill_seconds = 0.0;
-static int64_t g_dab_fill_pixels = 0;
-static int g_dab_fill_calls = 0;
-#endif
 
-#if PBR_PAINT_2D_STROKE_PROFILE
-/**
- * Cross-section of one stroke, reported and reset by #paint_2d_stroke_done.
- *
- * Same main-thread rule as the dab-fill counters: parallel work inside a phase is joined before
- * these are touched.
- */
-static double g_stroke_wall_seconds = 0.0;
-static int g_stroke_wall_calls = 0;
-static double g_stroke_single_seconds = 0.0;
-static int g_stroke_single_calls = 0;
-static double g_stroke_op_seconds = 0.0;
-static int g_stroke_op_calls = 0;
-static int64_t g_stroke_op_pixels = 0;
-static double g_stroke_dab_fill_seconds = 0.0;
-static int g_stroke_dab_fill_calls = 0;
-static int64_t g_stroke_dab_fill_pixels = 0;
-static double g_stroke_area_seconds = 0.0;
-static int g_stroke_area_calls = 0;
-static int64_t g_stroke_area_pixels = 0;
-static double g_stroke_redraw_seconds = 0.0;
-static int g_stroke_redraw_calls = 0;
-static int g_stroke_painters = 0;
-static int g_stroke_view_path_calls = 0;
-static int g_stroke_area_path_calls = 0;
-static int g_stroke_imbuf_new = 0;
-static int g_stroke_imbuf_update = 0;
-static int g_stroke_imbuf_partial = 0;
-static double g_stroke_curve_mask_seconds = 0.0;
-static int g_stroke_curve_mask_calls = 0;
-static double g_stroke_source_update_seconds = 0.0;
-static int g_stroke_source_update_calls = 0;
-static bool g_stroke_meta_logged = false;
 
-/** Scoped timer accumulating into a seconds/calls pair. */
-struct StrokePhaseTimer {
-  double *accum;
-  int *calls;
-  double start = BLI_time_now_seconds();
-
-  StrokePhaseTimer(double *accum_, int *calls_) : accum(accum_), calls(calls_) {}
-  ~StrokePhaseTimer()
-  {
-    *this->accum += BLI_time_now_seconds() - this->start;
-    (*this->calls)++;
-  }
-};
-
-static const char *paint_2d_direct_sample_kind_name(
-    const ed::sculpt_paint::material::DirectSampleKind kind)
-{
-  using Kind = ed::sculpt_paint::material::DirectSampleKind;
-  switch (kind) {
-    case Kind::Disabled:
-      return "Disabled";
-    case Kind::Area:
-      return "Area";
-    case Kind::View:
-      return "View";
-    case Kind::Tiled:
-      return "Tiled";
-    case Kind::Random:
-      return "Random";
-    case Kind::Stencil:
-      return "Stencil";
-  }
-  return "?";
-}
-
-static const char *paint_2d_map_mode_name(const short map_mode)
-{
-  switch (map_mode) {
-    case MTEX_MAP_MODE_VIEW:
-      return "view";
-    case MTEX_MAP_MODE_TILED:
-      return "tiled";
-    case MTEX_MAP_MODE_3D:
-      return "3d";
-    case MTEX_MAP_MODE_AREA:
-      return "area";
-    case MTEX_MAP_MODE_STENCIL:
-      return "stencil";
-    case MTEX_MAP_MODE_RANDOM:
-      return "random";
-  }
-  return "?";
-}
-#endif
-
-#if PBR_PAINT_2D_DAB_PROFILE || PBR_PAINT_2D_STROKE_PROFILE
-/** Scoped timer accumulating dab-fill into whichever profile counters are compiled in. */
-struct DabFillTimer {
-  double start = BLI_time_now_seconds();
-  int64_t pixels = 0;
-
-  explicit DabFillTimer(const int64_t pixel_num) : pixels(pixel_num) {}
-  ~DabFillTimer()
-  {
-    const double elapsed = BLI_time_now_seconds() - this->start;
-#if PBR_PAINT_2D_DAB_PROFILE
-    g_dab_fill_seconds += elapsed;
-    g_dab_fill_pixels += this->pixels;
-    g_dab_fill_calls++;
-#endif
-#if PBR_PAINT_2D_STROKE_PROFILE
-    g_stroke_dab_fill_seconds += elapsed;
-    g_stroke_dab_fill_pixels += this->pixels;
-    g_stroke_dab_fill_calls++;
-#endif
-  }
-};
-#endif
 
 static void brush_painter_imbuf_fill(BrushPainter *painter,
                                      ImagePaintTile *tile,
@@ -1244,9 +1100,6 @@ static void brush_painter_imbuf_fill(BrushPainter *painter,
   /* fill image buffer */
   uchar *byte_data = ibuf->byte_data_for_write();
   float *float_data = ibuf->float_data_for_write();
-#if PBR_PAINT_2D_DAB_PROFILE || PBR_PAINT_2D_STROKE_PROFILE
-  const DabFillTimer fill_timer(int64_t(size) * int64_t(size));
-#endif
   if (paint_2d_view_dab_material_batch_enabled(painter)) {
     paint_2d_view_dab_fill_material_batch(painter,
                                           tile,
@@ -1384,9 +1237,6 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
    * under `use_texture_old`, so guard the access to avoid dereferencing null. */
   const uchar *oldtexibuf_byte_data = use_texture_old ? oldtexibuf->byte_data() : nullptr;
   const float *oldtexibuf_float_data = use_texture_old ? oldtexibuf->float_data() : nullptr;
-#if PBR_PAINT_2D_DAB_PROFILE || PBR_PAINT_2D_STROKE_PROFILE
-  const DabFillTimer fill_timer(int64_t(std::max(0, w - origx)) * int64_t(std::max(0, h - origy)));
-#endif
   const int fill_w = std::max(0, w - origx);
   const int fill_h = std::max(0, h - origy);
   if (!use_texture_old && paint_2d_view_dab_material_batch_enabled(painter)) {
@@ -1763,20 +1613,12 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
                                   paint_2d_matching_curve_mask(shared_state, tile, diameter) !=
                                       nullptr;
   if (copy_shared_source) {
-#if PBR_PAINT_2D_STROKE_PROFILE
-    const StrokePhaseTimer source_timer(&g_stroke_source_update_seconds,
-                                        &g_stroke_source_update_calls);
-#endif
     paint_2d_painter_copy_shared_source(painter, shared_state->painter);
   }
   else if (painter->channel_sources != nullptr && painter->use_material_channel_color &&
            (use_2d_channel_source ||
             paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)))
   {
-#if PBR_PAINT_2D_STROKE_PROFILE
-    const StrokePhaseTimer source_timer(&g_stroke_source_update_seconds,
-                                        &g_stroke_source_update_calls);
-#endif
     const short source_map_mode = paint_2d_source_map_mode_for_2d(
         paint_2d_shared_source_map_mode(painter));
     if (source_map_mode == MTEX_MAP_MODE_TILED) {
@@ -1891,10 +1733,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   /* Re-initialize the curve mask. Mask is always recreated due to the change of position.
    * Extra material painters share the primary's rasterized mask when the dab diameter matches. */
   const bool has_selection_mask = BKE_image_paint_selection_mask_has_any(s->image);
-#if PBR_PAINT_2D_STROKE_PROFILE
-  {
-    const StrokePhaseTimer curve_timer(&g_stroke_curve_mask_seconds, &g_stroke_curve_mask_calls);
-#endif
     const CurveMaskCache *shared_mask = paint_2d_matching_curve_mask(shared_state, tile, diameter);
     const bool shared_mask_has_selection = shared_state != nullptr &&
                                            BKE_image_paint_selection_mask_has_any(shared_state->image);
@@ -1904,9 +1742,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
     else {
       paint_curve_mask_cache_update(&cache->curve_mask_cache, brush, diameter, size, pos);
     }
-#if PBR_PAINT_2D_STROKE_PROFILE
-  }
-#endif
 
   /* Apply selection mask to the curve mask in-place after it has been recreated. The curve mask
    * must not be shared after this step: every material target may use a different image selection. */
@@ -1953,9 +1788,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       }
       /* do partial update of texture; material sources are resampled on the reused overlap */
       brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
-#if PBR_PAINT_2D_STROKE_PROFILE
-      g_stroke_imbuf_partial++;
-#endif
     }
     else if (cache->ibuf != nullptr && cache->ibuf->x == diameter && cache->ibuf->y == diameter) {
       /* View Plane PBR sources change with the cursor, so pixels must be resampled every dab.
@@ -1963,9 +1795,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
        * a new one (the previous path required #texibuf, which #brush_painter_imbuf_new never
        * creates, so every dab leaked the old buffer and paid a full alloc). */
       brush_painter_imbuf_fill(painter, tile, cache->ibuf, pressure, distance);
-#if PBR_PAINT_2D_STROKE_PROFILE
-      g_stroke_imbuf_update++;
-#endif
     }
     else {
       if (cache->ibuf) {
@@ -1974,9 +1803,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
       }
       /* create brush from scratch */
       cache->ibuf = brush_painter_imbuf_new(painter, tile, diameter, pressure, distance);
-#if PBR_PAINT_2D_STROKE_PROFILE
-      g_stroke_imbuf_new++;
-#endif
     }
 
     cache->lastdiameter = diameter;
@@ -1990,9 +1816,6 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
 
     if ((dx != 0) || (dy != 0)) {
       brush_painter_imbuf_partial_update(painter, tile, pos, diameter);
-#if PBR_PAINT_2D_STROKE_PROFILE
-      g_stroke_imbuf_partial++;
-#endif
     }
   }
 }
@@ -2473,9 +2296,6 @@ static int paint_2d_op(void *state,
                        const float lastpos[2],
                        const float pos[2])
 {
-#if PBR_PAINT_2D_STROKE_PROFILE
-  const StrokePhaseTimer op_timer(&g_stroke_op_seconds, &g_stroke_op_calls);
-#endif
   ImagePaintState *s = (static_cast<ImagePaintState *>(state));
   const ImagePaintSettings &image_paint_settings = s->scene->toolsettings->imapaint;
   ImBuf *clonebuf = nullptr, *frombuf;
@@ -2525,12 +2345,6 @@ static int paint_2d_op(void *state,
     tot = 1;
   }
 
-#if PBR_PAINT_2D_STROKE_PROFILE
-  for (int region_i = 0; region_i < tot; region_i++) {
-    g_stroke_op_pixels += int64_t(std::max(0, region[region_i].width)) *
-                          int64_t(std::max(0, region[region_i].height));
-  }
-#endif
 
   /* blend into canvas */
   for (a = 0; a < tot; a++) {
@@ -2669,19 +2483,6 @@ static bool paint_2d_use_area_plane_mesh(const BrushPainter *painter)
 
 static bool paint_2d_use_area_plane(const BrushPainter *painter)
 {
-#if PBR_PAINT_BAKE_DEBUG
-  {
-    static std::atomic_bool logged = false;
-    if (!logged.exchange(true)) {
-      printf("[PBR-BAKE] 2d-path: use_material_channel_color=%d area_plane_mesh=%d "
-             "shared_map_mode=%d\n",
-             int(painter->use_material_channel_color),
-             int(paint_2d_use_area_plane_mesh(painter)),
-             int(paint_2d_shared_source_map_mode(painter)));
-      fflush(stdout);
-    }
-  }
-#endif
   if (!painter->use_material_channel_color || !paint_2d_use_area_plane_mesh(painter)) {
     return false;
   }
@@ -2740,26 +2541,6 @@ static void paint_2d_sample_area_mtex(
     const float tex_y = point.y * source.mtex->size[1] + source.mtex->ofs[1];
     const bool ok = painter->channel_sources->sample_image_direct(
         source, tex_x, tex_y, r_value, r_rgba);
-#if PBR_PAINT_BAKE_DEBUG
-    {
-      static std::atomic_bool logged = false;
-      if (!logged.exchange(true)) {
-        printf("[PBR-BAKE] 2d-area: baked sample ok=%d pos=(%.3f, %.3f, %.3f) tex=(%.4f, %.4f) "
-               "rgba=(%.4f, %.4f, %.4f, %.4f)\n",
-               int(ok),
-               position.x,
-               position.y,
-               position.z,
-               tex_x,
-               tex_y,
-               r_rgba.x,
-               r_rgba.y,
-               r_rgba.z,
-               r_rgba.w);
-        fflush(stdout);
-      }
-    }
-#endif
     if (!ok) {
       r_rgba = float4(0.0f);
       if (r_value != nullptr) {
@@ -3643,9 +3424,6 @@ static bool paint_2d_area_plane_prepare_from_hit(ImagePaintState *s,
 
   r_geom.hit = hit;
   r_geom.flipped = flipped;
-#if PBR_PAINT_2D_PROFILE
-  const double t0 = BLI_time_now_seconds();
-#endif
   if (s->tiles[0].size[0] <= 0) {
     return false;
   }
@@ -3660,17 +3438,11 @@ static bool paint_2d_area_plane_prepare_from_hit(ImagePaintState *s,
       r_geom.hit.position, r_geom.hit.normal, r_geom.radius_object, 0.0f);
   r_geom.dab_tri = mesh.triangle(r_geom.hit.tri_index);
 
-#if PBR_PAINT_2D_PROFILE
-  const double t1 = BLI_time_now_seconds();
-#endif
   r_geom.accepted = mesh.triangles_in_sphere(r_geom.object_to_brush);
   if (r_geom.accepted.is_empty()) {
     return false;
   }
 
-#if PBR_PAINT_2D_PROFILE
-  const double t2 = BLI_time_now_seconds();
-#endif
   r_geom.unfold_mats = ed::sculpt_paint::area_plane_unfold_matrices(
       mesh.triangles(), r_geom.hit.tri_index, r_geom.accepted);
   r_geom.dab_normal = ed::sculpt_paint::area_plane_triangle_face_normal(r_geom.dab_tri);
@@ -3678,16 +3450,6 @@ static bool paint_2d_area_plane_prepare_from_hit(ImagePaintState *s,
     r_geom.dab_normal = r_geom.hit.normal;
   }
   r_geom.valid = true;
-#if PBR_PAINT_2D_PROFILE
-  printf("[pbr_paint_2d] area_plane prepare hit=%.3fms sphere=%.3fms unfold=%.3fms "
-         "accepted=%d tris=%d radius_obj=%.6g\n",
-         (t1 - t0) * 1000.0,
-         (t2 - t1) * 1000.0,
-         (BLI_time_now_seconds() - t2) * 1000.0,
-         int(r_geom.accepted.size()),
-         int(mesh.triangles().size()),
-         double(r_geom.radius_object));
-#endif
   return true;
 }
 
@@ -3708,10 +3470,6 @@ static bool paint_2d_area_plane_prepare(ImagePaintState *s,
 
 static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom)
 {
-#if PBR_PAINT_2D_STROKE_PROFILE
-  const StrokePhaseTimer area_timer(&g_stroke_area_seconds, &g_stroke_area_calls);
-  int64_t area_pixels = 0;
-#endif
   BrushPainter *painter = s->painter;
   const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
   /* Read from the View2D rather than #SpaceImage: it is the value the display actually rotates by,
@@ -3741,14 +3499,6 @@ static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom
   ImagePool *pool = painter->channel_sources != nullptr ? painter->channel_sources->pool() :
                                                           nullptr;
 
-#if PBR_PAINT_2D_PROFILE
-  const double t0 = BLI_time_now_seconds();
-  double coverage_seconds = 0.0;
-  int64_t raster_tri_num = 0;
-  int64_t pixel_num = 0;
-  int64_t built_tris = 0;
-  int64_t reused_tris = 0;
-#endif
 
   for (int i = 0; i < s->num_tiles; i++) {
     if (!paint_2d_ensure_tile_canvas(s, i)) {
@@ -3786,9 +3536,6 @@ static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom
     for (int tri_i = 0; tri_i < geom.accepted.size(); tri_i++) {
       const AreaPlaneTriCoverage *tri_cov = &tile_cov->tris[tri_i];
       if (shared_cov == nullptr) {
-#if PBR_PAINT_2D_PROFILE
-        const double t_cov = BLI_time_now_seconds();
-#endif
         paint_2d_area_plane_build_tri_coverage(tile,
                                                painter,
                                                mesh.triangle(geom.accepted[tri_i]),
@@ -3802,24 +3549,8 @@ static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom
                                                pool,
                                                local_cov.tris[tri_i]);
         tri_cov = &local_cov.tris[tri_i];
-#if PBR_PAINT_2D_PROFILE
-        coverage_seconds += BLI_time_now_seconds() - t_cov;
-        built_tris++;
-#endif
       }
-#if PBR_PAINT_2D_PROFILE
-      else {
-        reused_tris++;
-      }
-#endif
       if (paint_2d_area_plane_fill_and_blend(s, tile, *tri_cov, channel_local_mat, pool, geom)) {
-#if PBR_PAINT_2D_PROFILE
-        raster_tri_num++;
-        pixel_num += int64_t(tri_cov->pixels.size());
-#endif
-#if PBR_PAINT_2D_STROKE_PROFILE
-        area_pixels += int64_t(tri_cov->pixels.size());
-#endif
       }
     }
 
@@ -3827,21 +3558,6 @@ static void paint_2d_area_plane_apply(ImagePaintState *s, AreaPlaneDabGeom &geom
       geom.coverage_tiles.append(std::move(local_cov));
     }
   }
-#if PBR_PAINT_2D_PROFILE
-  printf("[pbr_paint_2d] area_plane raster channel=%d written_tris=%lld pixels=%lld "
-         "built_tris=%lld reused_tris=%lld coverage=%.3fms fill=%.3fms elapsed=%.3fms\n",
-         int(painter->material_channel),
-         static_cast<long long>(raster_tri_num),
-         static_cast<long long>(pixel_num),
-         static_cast<long long>(built_tris),
-         static_cast<long long>(reused_tris),
-         coverage_seconds * 1000.0,
-         ((BLI_time_now_seconds() - t0) - coverage_seconds) * 1000.0,
-         (BLI_time_now_seconds() - t0) * 1000.0);
-#endif
-#if PBR_PAINT_2D_STROKE_PROFILE
-  g_stroke_area_pixels += area_pixels;
-#endif
 }
 
 /**
@@ -3914,9 +3630,6 @@ static void paint_2d_stroke_single(ImagePaintState *s,
                                    const ImagePaintState *shared_state,
                                    const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
-#if PBR_PAINT_2D_STROKE_PROFILE
-  const StrokePhaseTimer single_timer(&g_stroke_single_seconds, &g_stroke_single_calls);
-#endif
   float new_uv[2], old_uv[2];
   BrushPainter *painter = s->painter;
 
@@ -3933,9 +3646,6 @@ static void paint_2d_stroke_single(ImagePaintState *s,
   ui::view2d_region_to_view(s->v2d, prev_mval[0], prev_mval[1], &old_uv[0], &old_uv[1]);
 
   if (!eraser && paint_2d_use_area_plane(painter)) {
-#if PBR_PAINT_2D_STROKE_PROFILE
-    g_stroke_area_path_calls++;
-#endif
     const ed::sculpt_paint::AreaPlaneMesh &mesh = *painter->area_plane_mesh;
     const char symm = char(s->symmetry & PAINT_SYMM_AXIS_ALL);
     const float2 uv_new(new_uv[0], new_uv[1]);
@@ -3967,9 +3677,6 @@ static void paint_2d_stroke_single(ImagePaintState *s,
     return;
   }
 
-#if PBR_PAINT_2D_STROKE_PROFILE
-  g_stroke_view_path_calls++;
-#endif
 
   float start_uv[2];
   ui::view2d_region_to_view(s->v2d, 0.0f, 0.0f, &start_uv[0], &start_uv[1]);
@@ -4120,52 +3827,6 @@ static void paint_2d_stroke_single(ImagePaintState *s,
   painter->firsttouch = false;
 }
 
-#if PBR_PAINT_2D_STROKE_PROFILE
-/**
- * One-shot dump of #DirectSampleLayout.kind for every usable PBR source on this stroke.
- *
- * Uses the mapping that the upcoming path will actually sample: Area Plane keeps AREA, View Plane
- * remaps AREA/3D to VIEW. Cheap enough to run once at the first dab; the kind itself does not
- * depend on cursor position.
- */
-static void paint_2d_stroke_profile_log_layouts(const BrushPainter *painter)
-{
-  if (painter == nullptr || painter->channel_sources == nullptr) {
-    printf("[PBR-STROKE] layout: no channel_sources\n");
-    return;
-  }
-  const short raw_map = paint_2d_shared_source_map_mode(painter);
-  const eMTex_BrushMapMode layout_map = eMTex_BrushMapMode(
-      paint_2d_use_area_plane(painter) ? raw_map : paint_2d_source_map_mode_for_2d(raw_map));
-  int logged = 0;
-  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
-    const eMaterialPaintChannel channel = eMaterialPaintChannel(i);
-    if (!paint_2d_channel_source_usable_2d(painter, channel)) {
-      continue;
-    }
-    MTex mtex_2d = dna::shallow_copy(*painter->channel_sources->source(channel).mtex);
-    mtex_2d.brush_map_mode = layout_map;
-    const ed::sculpt_paint::material::DirectSampleLayout layout =
-        ed::sculpt_paint::material::make_direct_sample_layout(
-            painter->channel_sources->source(channel),
-            mtex_2d,
-            painter->paint != nullptr ? painter->paint->runtime : nullptr,
-            *painter->brush,
-            nullptr);
-    printf("[PBR-STROKE] layout channel=%s kind=%s map=%s raw_map=%s ibuf=%dx%d\n",
-           BKE_paint_material_channel_info(channel).ui_name,
-           paint_2d_direct_sample_kind_name(layout.kind),
-           paint_2d_map_mode_name(layout_map),
-           paint_2d_map_mode_name(raw_map),
-           layout.ibuf_x,
-           layout.ibuf_y);
-    logged++;
-  }
-  if (logged == 0) {
-    printf("[PBR-STROKE] layout: channel_sources active but no usable image sources\n");
-  }
-}
-#endif
 
 void paint_2d_stroke(void *ps,
                      const float prev_mval[2],
@@ -4176,22 +3837,7 @@ void paint_2d_stroke(void *ps,
                      float base_size,
                      const ed::sculpt_paint::ImagePaintRollDab *roll_dab)
 {
-#if PBR_PAINT_2D_STROKE_PROFILE
-  const StrokePhaseTimer wall_timer(&g_stroke_wall_seconds, &g_stroke_wall_calls);
-#endif
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
-#if PBR_PAINT_2D_STROKE_PROFILE
-  if (!g_stroke_meta_logged) {
-    g_stroke_meta_logged = true;
-    g_stroke_painters = 1 + s->material_extra_states_num;
-    printf("[PBR-STROKE] begin painters=%d area_plane=%d canvas=%dx%d\n",
-           g_stroke_painters,
-           int(!eraser && paint_2d_use_area_plane(s->painter)),
-           (s->tiles != nullptr && s->num_tiles > 0) ? s->tiles[0].size[0] : 0,
-           (s->tiles != nullptr && s->num_tiles > 0) ? s->tiles[0].size[1] : 0);
-    paint_2d_stroke_profile_log_layouts(s->painter);
-  }
-#endif
   /* Mirrored centers are mesh-only, so every material channel shares them; the geometry beside
    * them is sized by each state's own image and is not shared. */
   Array<SymmetryDab> dabs(AREA_PLANE_SYMMETRY_SLOTS);
@@ -4604,9 +4250,6 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
 
 static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool final)
 {
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-  const double perf_start = BLI_time_now_seconds();
-#endif
   bool had_redraw = false;
   int redraw_tiles = 0;
   for (int i = 0; i < s->num_tiles; i++) {
@@ -4666,23 +4309,10 @@ static void paint_2d_redraw_single(const bContext *C, ImagePaintState *s, bool f
     }
   }
 
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-  printf("[PBR-PERF] redraw_single image=%s final=%d tiles=%d elapsed=%.3f ms\n",
-         s->image ? s->image->id.name + 2 : "<null>",
-         int(final),
-         redraw_tiles,
-         (BLI_time_now_seconds() - perf_start) * 1000.0);
-#endif
 }
 
 void paint_2d_redraw(const bContext *C, void *ps, bool final)
 {
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-  const double perf_start = BLI_time_now_seconds();
-#endif
-#if PBR_PAINT_2D_STROKE_PROFILE
-  const StrokePhaseTimer redraw_timer(&g_stroke_redraw_seconds, &g_stroke_redraw_calls);
-#endif
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
 
   paint_2d_redraw_single(C, s, final);
@@ -4693,12 +4323,6 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
    * has consumed it; clearing it in paint_2d_redraw_single() makes extra channels miss their GPU
    * update after the primary channel is processed. */
   ED_imapaint_clear_partial_redraw();
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-  printf("[PBR-PERF] redraw total final=%d states=%d elapsed=%.3f ms\n",
-         int(final),
-         1 + s->material_extra_states_num,
-         (BLI_time_now_seconds() - perf_start) * 1000.0);
-#endif
 }
 
 void paint_2d_stroke_done(void *ps)
@@ -4714,111 +4338,7 @@ void paint_2d_stroke_done(void *ps)
 
   paint_2d_stroke_done_single(s, true);
 
-#if PBR_PAINT_2D_DAB_PROFILE
-  if (g_dab_fill_calls > 0) {
-    printf("[PBR-DAB] fill total=%.3f ms calls=%d pixels=%lld (%.1f Mpx/s, %.4f ms/call)\n",
-           g_dab_fill_seconds * 1000.0,
-           g_dab_fill_calls,
-           (long long)g_dab_fill_pixels,
-           g_dab_fill_seconds > 0.0 ?
-               double(g_dab_fill_pixels) / g_dab_fill_seconds / 1000000.0 :
-               0.0,
-           g_dab_fill_seconds * 1000.0 / double(g_dab_fill_calls));
-  }
-  g_dab_fill_seconds = 0.0;
-  g_dab_fill_pixels = 0;
-  g_dab_fill_calls = 0;
-#endif
 
-#if PBR_PAINT_2D_STROKE_PROFILE
-  if (g_stroke_wall_calls > 0 || g_stroke_redraw_calls > 0) {
-    const double leftover = g_stroke_single_seconds - g_stroke_dab_fill_seconds -
-                            g_stroke_op_seconds - g_stroke_area_seconds -
-                            g_stroke_curve_mask_seconds - g_stroke_source_update_seconds;
-    const char *path = "none";
-    if (g_stroke_view_path_calls > 0 && g_stroke_area_path_calls > 0) {
-      path = "mixed";
-    }
-    else if (g_stroke_area_path_calls > 0) {
-      path = "area";
-    }
-    else if (g_stroke_view_path_calls > 0) {
-      path = "view";
-    }
-    const double dab_mpx = g_stroke_dab_fill_seconds > 0.0 ?
-                               double(g_stroke_dab_fill_pixels) / g_stroke_dab_fill_seconds /
-                                   1000000.0 :
-                               0.0;
-    const double area_mpx = g_stroke_area_seconds > 0.0 ?
-                                double(g_stroke_area_pixels) / g_stroke_area_seconds / 1000000.0 :
-                                0.0;
-    printf("[PBR-STROKE] painters=%d path=%s view_calls=%d area_calls=%d "
-           "imbuf_new=%d imbuf_update=%d imbuf_partial=%d\n",
-           g_stroke_painters,
-           path,
-           g_stroke_view_path_calls,
-           g_stroke_area_path_calls,
-           g_stroke_imbuf_new,
-           g_stroke_imbuf_update,
-           g_stroke_imbuf_partial);
-    printf("[PBR-STROKE] wall=%.3f ms calls=%d (%.3f ms/call)  single=%.3f ms leftover=%.3f ms\n",
-           g_stroke_wall_seconds * 1000.0,
-           g_stroke_wall_calls,
-           g_stroke_wall_calls > 0 ? g_stroke_wall_seconds * 1000.0 / double(g_stroke_wall_calls) :
-                                     0.0,
-           g_stroke_single_seconds * 1000.0,
-           leftover * 1000.0);
-    printf("[PBR-STROKE] curve_mask=%.3f ms calls=%d  source_update=%.3f ms calls=%d\n",
-           g_stroke_curve_mask_seconds * 1000.0,
-           g_stroke_curve_mask_calls,
-           g_stroke_source_update_seconds * 1000.0,
-           g_stroke_source_update_calls);
-    printf("[PBR-STROKE] dab_fill=%.3f ms calls=%d px=%lld (%.1f Mpx/s)\n",
-           g_stroke_dab_fill_seconds * 1000.0,
-           g_stroke_dab_fill_calls,
-           static_cast<long long>(g_stroke_dab_fill_pixels),
-           dab_mpx);
-    printf("[PBR-STROKE] blend_op=%.3f ms calls=%d px=%lld\n",
-           g_stroke_op_seconds * 1000.0,
-           g_stroke_op_calls,
-           static_cast<long long>(g_stroke_op_pixels));
-    printf("[PBR-STROKE] area_raster=%.3f ms calls=%d px=%lld (%.1f Mpx/s)\n",
-           g_stroke_area_seconds * 1000.0,
-           g_stroke_area_calls,
-           static_cast<long long>(g_stroke_area_pixels),
-           area_mpx);
-    printf("[PBR-STROKE] redraw=%.3f ms calls=%d  total=%.3f ms\n",
-           g_stroke_redraw_seconds * 1000.0,
-           g_stroke_redraw_calls,
-           (g_stroke_wall_seconds + g_stroke_redraw_seconds) * 1000.0);
-  }
-  g_stroke_wall_seconds = 0.0;
-  g_stroke_wall_calls = 0;
-  g_stroke_single_seconds = 0.0;
-  g_stroke_single_calls = 0;
-  g_stroke_op_seconds = 0.0;
-  g_stroke_op_calls = 0;
-  g_stroke_op_pixels = 0;
-  g_stroke_dab_fill_seconds = 0.0;
-  g_stroke_dab_fill_calls = 0;
-  g_stroke_dab_fill_pixels = 0;
-  g_stroke_area_seconds = 0.0;
-  g_stroke_area_calls = 0;
-  g_stroke_area_pixels = 0;
-  g_stroke_redraw_seconds = 0.0;
-  g_stroke_redraw_calls = 0;
-  g_stroke_painters = 0;
-  g_stroke_view_path_calls = 0;
-  g_stroke_area_path_calls = 0;
-  g_stroke_imbuf_new = 0;
-  g_stroke_imbuf_update = 0;
-  g_stroke_imbuf_partial = 0;
-  g_stroke_curve_mask_seconds = 0.0;
-  g_stroke_curve_mask_calls = 0;
-  g_stroke_source_update_seconds = 0.0;
-  g_stroke_source_update_calls = 0;
-  g_stroke_meta_logged = false;
-#endif
 }
 
 static void paint_2d_fill_add_pixel_byte(const Scene * /*scene*/,

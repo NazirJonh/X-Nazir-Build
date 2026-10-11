@@ -33,7 +33,6 @@
 #include "IMB_imbuf.hh"
 
 #include "mesh_brush_common.hh"
-#include "paint_debug.hh"
 #include "paint_material_blend.hh"
 #include "paint_material_source.hh"
 #include "sculpt_color.hh"

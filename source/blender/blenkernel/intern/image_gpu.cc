@@ -6,14 +6,6 @@
  * \ingroup bke
  */
 
-/* ERASE-PERF: temporary. */
-#ifndef ERASE_PERF_LOG
-#  define ERASE_PERF_LOG 1 /* ERASE-PERF: temporary. */
-#endif
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-#  include <cstdio>
-#endif /* ERASE-PERF: temporary. */
-
 #include "MEM_guardedalloc.h"
 
 #include "BLI_boxpack_2d.h"
@@ -318,13 +310,6 @@ static gpu::Texture *image_gpu_texture_error_create(eGPUTextureTarget textarget)
 static void image_gpu_texture_partial_update_changes_available(
     Image *image, PartialUpdateChecker<ImageTileData>::CollectResult &changes)
 {
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  const double perf_t0 = BLI_time_now_seconds();
-  int perf_rects = 0;
-  int64_t perf_area = 0;
-  rcti perf_union;
-  BLI_rcti_init(&perf_union, 0, 0, 0, 0);
-#endif /* ERASE-PERF: temporary. */
   while (changes.get_next_change() == ePartialUpdateIterResult::ChangeAvailable) {
     /* Calculate the clipping region with the tile buffer.
      * TODO(jbakker): should become part of ImageTileData to deduplicate with image engine. */
@@ -338,17 +323,6 @@ static void image_gpu_texture_partial_update_changes_available(
       continue;
     }
 
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-    perf_rects++;
-    perf_area += int64_t(BLI_rcti_size_x(&clipped_update_region)) *
-                 int64_t(BLI_rcti_size_y(&clipped_update_region));
-    if (perf_rects == 1) {
-      perf_union = clipped_update_region;
-    }
-    else {
-      BLI_rcti_union(&perf_union, &clipped_update_region);
-    }
-#endif /* ERASE-PERF: temporary. */
     image_update_gputexture_ex(image,
                                changes.tile_data.tile,
                                changes.tile_data.tile_buffer,
@@ -357,18 +331,6 @@ static void image_gpu_texture_partial_update_changes_available(
                                BLI_rcti_size_x(&clipped_update_region),
                                BLI_rcti_size_y(&clipped_update_region));
   }
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  if (perf_rects > 0) {
-    printf("ERASE-PERF gpu_flush image=%s rects=%d uploaded_px=%lld union=%dx%d flush_ms=%.3f\n",
-           image->id.name + 2,
-           perf_rects,
-           (long long)perf_area,
-           BLI_rcti_size_x(&perf_union),
-           BLI_rcti_size_y(&perf_union),
-           (BLI_time_now_seconds() - perf_t0) * 1000.0);
-    fflush(stdout);
-  }
-#endif /* ERASE-PERF: temporary. */
 }
 
 static void image_gpu_texture_try_partial_update(Image *image, ImageUser *iuser)

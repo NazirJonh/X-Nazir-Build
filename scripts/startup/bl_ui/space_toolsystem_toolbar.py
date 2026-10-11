@@ -2121,6 +2121,17 @@ class _defs_texture_paint:
         )
 
     @ToolDef.from_fn
+    def erase():
+        # No brush_type: image brush types have no Erase entry. The tool is recognized by its
+        # idname in wm_toolsystem.cc and activates the shared material Erase brush.
+        return dict(
+            idname="builtin_brush.erase",
+            label="Erase",
+            icon="brush.gpencil_draw.erase",
+            options={'USE_BRUSHES'},
+        )
+
+    @ToolDef.from_fn
     def blur():
         return dict(
             idname="builtin_brush.soften",
@@ -3807,6 +3818,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ],
         'PAINT': [
             _brush_tool,
+            _defs_texture_paint.erase,
             _defs_texture_paint.blur,
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,
@@ -4254,6 +4266,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         ],
         'PAINT_TEXTURE': [
             _brush_tool,
+            _defs_texture_paint.erase,
             _defs_texture_paint.blur,
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,

@@ -2355,13 +2355,6 @@ def draw_material_paint_channels(
         )
         if paint_mode is not None and not show_custom:
             row.prop(paint_mode, "new_channel_image_size", text="")
-        # Re-running the operator re-activates the existing Erase brush instead of duplicating it,
-        # so this doubles as the switch-back path from a regular paint brush.
-        layout.operator(
-            "paint.material_erase_brush_add",
-            text="Add Erase Brush",
-            icon='ADD',
-        )
         return
 
     is_erase_brush = brush.sculpt_brush_type == 'ERASE'
@@ -2402,14 +2395,7 @@ def draw_material_paint_channels(
         )
         sub.prop(material_paint, "source_layout")
         sub.prop(material_paint, "source_bake_size")
-    if not is_erase_brush:
-        # Reachable while a regular paint brush is active: the primary path to the Erase brush.
-        layout.operator(
-            "paint.material_erase_brush_add",
-            text="Add Erase Brush",
-            icon='ADD',
-        )
-    else:
+    if is_erase_brush:
         # Picking a mode applies its stock stroke parameters (falloff, antialiasing, pressure
         # size) as a one-shot preset; tweaks made afterwards are kept.
         layout.prop(material_paint, "erase_mode")

@@ -1133,8 +1133,8 @@ static bool paint_cursor_context_init(bContext *C,
       /* Source Mode: Material has no #Tex to sample, so its pixels come from the bake instead.
        * Everything downstream -- placement, map mode, the hide rules below -- stays shared. */
       bool has_preview = false;
-      const bool is_erase_brush = pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE &&
-                                  pcontext.mode == PaintMode::Sculpt;
+      /* Sculpt and the Image Editor share the Erase brush; both sample its own texture. */
+      const bool is_erase_brush = pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE;
       if (!is_erase_brush &&
           pcontext.brush->material_paint->source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL)
       {

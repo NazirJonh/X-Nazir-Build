@@ -4356,6 +4356,23 @@ bool BKE_paint_material_face_matches_active_slot(const Object &ob, const int fac
   return face_material_index == math::max(ob.actcol - 1, 0);
 }
 
+bool BKE_paint_mask_erase_fill_get(Image *image, float r_fill[4])
+{
+  if (image == nullptr) {
+    return false;
+  }
+  const ImageTile *tile = BKE_image_get_tile(image, 0);
+  if (tile == nullptr || tile->gen_color[3] < 1.0f) {
+    return false;
+  }
+  const float grey = (tile->gen_color[0] + tile->gen_color[1] + tile->gen_color[2]) / 3.0f;
+  r_fill[0] = grey;
+  r_fill[1] = grey;
+  r_fill[2] = grey;
+  r_fill[3] = 1.0f;
+  return true;
+}
+
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
     Object &ob,
     PaintModeSettings &mode_settings,

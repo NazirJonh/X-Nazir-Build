@@ -104,6 +104,9 @@ void BKE_brush_material_paint_ensure(Brush *brush);
  */
 void BKE_brush_material_erase_mode_apply(Brush *brush, ePaintMaterialEraseMode mode);
 
+/** True for the shared material Erase brush (Sculpt and Texture/Image paint). */
+bool BKE_brush_is_material_erase(const Brush &brush);
+
 /**
  * Adds a new local Erase brush for Sculpt Mode PBR Paint: a #Brush with
  * #SCULPT_BRUSH_TYPE_ERASE, stock Erase stroke defaults and a default channel selection.

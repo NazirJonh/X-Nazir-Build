@@ -14,15 +14,6 @@
 #include <optional>
 #include <string>
 
-/* ERASE-PERF: temporary. */
-#ifndef ERASE_PERF_LOG
-#  define ERASE_PERF_LOG 1 /* ERASE-PERF: temporary. */
-#endif
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-#  include <atomic>
-#  include "BLI_time.h"
-#endif /* ERASE-PERF: temporary. */
-
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
 #include "BKE_image_wrappers.hh"
@@ -50,6 +41,7 @@
 #include "ED_view3d.hh"
 
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
+#include "editors/sculpt_paint/paint_material_stroke_accum.hh"
 
 namespace blender {
 
@@ -235,124 +227,6 @@ struct ImagePaintTarget {
   bool is_correction_target = false;
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
   const char *channel_name = nullptr;
-};
-
-/**
- * Per-stroke pre-stroke color and coverage accumulator for material channel maps.
- *
- * The raster engine normally blends each dab straight into the live image. That converges for Mix
- * - re-mixing toward the same target changes nothing - but every other mode compounds: a slow drag
- * is dozens of dabs, so Add saturates to white and Multiply crushes to black, and wherever the
- * stroke overlaps itself the application count jumps, leaving hard edges along the overlap.
- *
- * So for the non-Mix modes the engine switches to the model the vertex engine already uses (see
- * #StrokeCache::material_mix_base_color): accumulate the stroke's coverage separately, and blend
- * that once against a pre-stroke value frozen at the texel's first touch. This is what lets
- * paint_material_blend.hh's promise - that a channel value means the same thing in both engines -
- * hold for modes other than Mix.
- *
- * Storage is lazy per #block_size square of texels, so it costs memory only where the stroke
- * actually lands, and only for a stroke that needs it.
- */
-class MaterialStrokeAccum {
- public:
-  /** Side of one lazily allocated texel block, matching the image undo tile grid. */
-  static constexpr int block_size = 64;
-  static constexpr int block_texel_num = block_size * block_size;
-
-  struct Block {
-    /** Scene-linear color from before the stroke, captured per texel by #orig_valid. */
-    Array<float4> orig = Array<float4>(block_texel_num);
-    /** Stroke coverage so far, pre-multiplied exactly like #StrokeCache::material_mix_base_color. */
-    Array<float4> mix = Array<float4>(block_texel_num, float4(0.0f));
-    /**
-     * Whether the matching #orig entry has been captured yet. A texel is always read before it is
-     * written, so the image still holds its pre-stroke value at that first touch.
-     *
-     * Deliberately a byte per texel rather than a bit set: neighboring texels of one block are
-     * filled by different threads, and distinct bytes can be written concurrently where bits
-     * sharing a word cannot.
-     */
-    Array<bool> orig_valid = Array<bool>(block_texel_num, false);
-  };
-
-  /**
-   * The block covering (\a block_x, \a block_y) of \a buffer, allocating it on first use.
-   *
-   * \note Only the allocation is serialized. Callers then write disjoint texels of the returned
-   * block in parallel, which is safe for all three arrays above.
-   */
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  /* ERASE-PERF: temporary. Counters read/reset by the per-dab log in sculpt_paint_image.cc. */
-  std::atomic<int64_t> perf_block_ensure_us{0};
-  std::atomic<int> perf_blocks_total{0};
-  std::atomic<int> perf_blocks_new_dab{0};
-  ~MaterialStrokeAccum();
-#endif /* ERASE-PERF: temporary. */
-
-  Block &block_ensure(const ImBuf *buffer, const int block_x, const int block_y)
-  {
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-    const double perf_t0 = BLI_time_now_seconds();
-#endif /* ERASE-PERF: temporary. */
-    const Key key{buffer, block_x, block_y};
-    /* High bits of the multiplicative hash, so neighboring blocks of one image land in different
-     * shards. */
-    Shard &shard = shards_[(key.hash() >> 40) & (shard_num - 1)];
-    {
-      std::lock_guard lock(shard.mutex);
-      if (const std::unique_ptr<Block> *found = shard.blocks.lookup_ptr(key)) {
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-        perf_block_ensure_us.fetch_add(int64_t((BLI_time_now_seconds() - perf_t0) * 1.0e6));
-#endif /* ERASE-PERF: temporary. */
-        return **found;
-      }
-    }
-    /* Allocate (zero-fills ~132 KB) outside the lock. If another thread inserted the same key
-     * meanwhile, `add` fails and that block wins while ours is dropped. */
-    std::unique_ptr<Block> fresh = std::make_unique<Block>();
-    std::lock_guard lock(shard.mutex);
-    const bool added = shard.blocks.add(key, std::move(fresh));
-    Block &result = *shard.blocks.lookup(key);
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-    if (added) {
-      perf_blocks_total.fetch_add(1);
-      perf_blocks_new_dab.fetch_add(1);
-    }
-    perf_block_ensure_us.fetch_add(int64_t((BLI_time_now_seconds() - perf_t0) * 1.0e6));
-#endif /* ERASE-PERF: temporary. */
-    UNUSED_VARS(added);
-    return result;
-  }
-
- private:
-  struct Key {
-    const ImBuf *buffer;
-    int block_x;
-    int block_y;
-
-    bool operator==(const Key &other) const
-    {
-      return buffer == other.buffer && block_x == other.block_x && block_y == other.block_y;
-    }
-
-    uint64_t hash() const
-    {
-      /* Knuth's multiplicative constant, folded in one field at a time. */
-      constexpr uint64_t mul = 0x9E3779B97F4A7C15ull;
-      uint64_t value = uint64_t(uintptr_t(buffer));
-      value = value * mul + uint64_t(uint32_t(block_x));
-      value = value * mul + uint64_t(uint32_t(block_y));
-      return value;
-    }
-  };
-
-  static constexpr int shard_num = 64;
-  struct Shard {
-    std::mutex mutex;
-    Map<Key, std::unique_ptr<Block>> blocks;
-  };
-  std::array<Shard, shard_num> shards_;
 };
 
 /** Builds paint targets for Mode=`Image` (one canvas) or Mode=`Material` (Principled maps). */

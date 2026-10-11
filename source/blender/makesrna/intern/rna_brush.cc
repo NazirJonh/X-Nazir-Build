@@ -4103,6 +4103,7 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
                       PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                       "Channel",
                       "The channel to ask about");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   parm = RNA_def_boolean(func, "result", false, "", "");
   RNA_def_function_return(func, parm);
 }

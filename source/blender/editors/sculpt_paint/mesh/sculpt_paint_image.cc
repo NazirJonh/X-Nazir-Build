@@ -5,9 +5,6 @@
 /* Paint a color made from hash of node pointer. */
 // #define DEBUG_PIXEL_NODES
 
-/* ERASE-PERF: temporary. Single switch for all erase-stroke timing diagnostics. */
-#define ERASE_PERF_LOG 1 /* ERASE-PERF: temporary. */
-
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_mesh_types.h"
@@ -16,13 +13,9 @@
  * dropped along with the composite tagging API this file no longer calls. */
 #include "DNA_scene_types.h"
 
+#include <atomic>
 #include <cstring>
 #include <utility>
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-#  include <atomic>
-#  include <cstdio>
-#  include "BLI_time.h"
-#endif /* ERASE-PERF: temporary. */
 
 #include "ED_paint.hh"
 #include "ED_view3d.hh"
@@ -76,52 +69,6 @@ namespace ed::sculpt_paint::paint::image {
 using namespace blender::bke::pbvh::pixels;
 using namespace blender::bke::image;
 
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-/* ERASE-PERF: temporary. Per-dab counters, summed across worker threads with atomics. */
-struct ErasePerf {
-  std::atomic<int64_t> accum_us{0};
-  std::atomic<int64_t> blend_us{0};
-  std::atomic<int64_t> texels{0};
-  std::atomic<int64_t> mark_dirty_us{0};
-  std::atomic<int64_t> gpu_mark_us{0};
-  std::atomic<int64_t> gpu_rect_area{0};
-  std::atomic<int> gpu_rect_num{0};
-  /* Stroke bookkeeping, touched from the main thread only. */
-  const void *stroke_id = nullptr;
-  bool stroke_active = false;
-  int dab_num = 0;
-  double total_s = 0.0;
-  double max_s = 0.0;
-  int last_blocks = 0;
-};
-static ErasePerf g_erase_perf;
-
-static void erase_perf_summary(const char *why)
-{
-  ErasePerf &p = g_erase_perf;
-  if (p.stroke_active) {
-    printf("ERASE-PERF stroke_end(%s) dabs=%d total_ms=%.3f max_dab_ms=%.3f final_blocks=%d\n",
-           why,
-           p.dab_num,
-           p.total_s * 1000.0,
-           p.max_s * 1000.0,
-           p.last_blocks);
-    fflush(stdout);
-  }
-  p.stroke_active = false;
-  p.dab_num = 0;
-  p.total_s = 0.0;
-  p.max_s = 0.0;
-  p.last_blocks = 0;
-}
-
-/* Declared in sculpt_intern.hh: the stroke owns the accumulator, so its death ends the stroke. */
-MaterialStrokeAccum::~MaterialStrokeAccum()
-{
-  g_erase_perf.last_blocks = perf_blocks_total.load();
-  erase_perf_summary("accum_freed");
-}
-#endif /* ERASE-PERF: temporary. */
 
 
 
@@ -180,12 +127,9 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
         if (material_target.is_mask_target && material_target.image != nullptr) {
           /* The generated fill records the mask's empty state; an opaque one (Black/White Mask) is
            * what erase must restore. */
-          if (const ImageTile *tile = BKE_image_get_tile(material_target.image, 0)) {
-            if (tile->gen_color[3] >= 1.0f) {
-              const float grey = (tile->gen_color[0] + tile->gen_color[1] + tile->gen_color[2]) /
-                                 3.0f;
-              target.mask_erase_fill = float4(grey, grey, grey, 1.0f);
-            }
+          float fill[4];
+          if (BKE_paint_mask_erase_fill_get(material_target.image, fill)) {
+            target.mask_erase_fill = float4(fill);
           }
         }
         target.channel =material_target.channel;
@@ -721,6 +665,11 @@ struct PaintChannelRangeState {
    * storage (straight for a colour correction) rather than to this.
    */
   const bool correction_target;
+  /**
+   * The constant paint color of this target's dabs. Read only by a scalar-mode accumulator (erase)
+   * to rebuild the coverage color of a Mix composite; may be null otherwise.
+   */
+  const float4 *erase_color = nullptr;
 };
 
 /** Prepare paint colors when no source texture is sampled for the channel. */
@@ -792,9 +741,6 @@ static void accumulate_material_range(PaintChannelRangeState &state,
                                       const PackedPixelRow &pixel_row,
                                       const IndexRange range)
 {
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  const double perf_t0 = BLI_time_now_seconds();
-#endif /* ERASE-PERF: temporary. */
   constexpr int block_size = MaterialStrokeAccum::block_size;
   const MutableSpan<float4> paint_pixels = state.tls.paint_pixels;
   const Span<float4> scene_linear_pixels = state.tls.scene_linear_pixels;
@@ -816,8 +762,45 @@ static void accumulate_material_range(PaintChannelRangeState &state,
     MaterialStrokeAccum::Block &block = state.accum->block_ensure(
         state.accum_buffer, block_x, block_y);
 
+    const int texel_start = row_in_block * block_size + column_in_block;
+    if (block.mix_alpha) {
+      /* Scalar mode: erase paints one constant color per target, so the coverage color is that
+       * color times the alpha. Only the alpha is stored; ERASE_ALPHA reads nothing else and a
+       * mask-fill Mix gets its color rebuilt from the fill. */
+      const bool need_color = state.blend_mode != IMB_BLEND_ERASE_ALPHA && state.erase_color;
+      const float4 fill = need_color ? *state.erase_color : float4(0.0f);
+      const float fill_alpha_inv = fill.w > 0.0f ? 1.0f / fill.w : 0.0f;
+      for (const int offset_i : IndexRange(run)) {
+        const int texel = texel_start + offset_i;
+        const int pixel_i = i + offset_i;
+        if (!block.orig_valid[texel]) {
+          block.orig[texel] = scene_linear_pixels[pixel_i];
+          block.orig_valid[texel] = true;
+        }
+        /* Same alpha recurrence as #blend_color_mix_float. */
+        float &alpha = block.mix_alpha[texel];
+        const float paint_alpha = paint_pixels[pixel_i].w;
+        if (paint_alpha != 0.0f) {
+          alpha = (1.0f - paint_alpha) * alpha + paint_alpha;
+        }
+        float4 composite_mix(0.0f);
+        if (need_color) {
+          const float scale = alpha * fill_alpha_inv;
+          composite_mix = float4(fill.x * scale, fill.y * scale, fill.z * scale, alpha);
+        }
+        else {
+          composite_mix.w = alpha;
+        }
+        composite_mix = composite_mix * state.brush.alpha;
+        paint_pixels[pixel_i] = material::composite_coverage(
+            block.orig[texel], composite_mix, state.blend_mode);
+      }
+      i += run;
+      continue;
+    }
+
     for (const int offset_i : IndexRange(run)) {
-      const int texel = row_in_block * block_size + column_in_block + offset_i;
+      const int texel = texel_start + offset_i;
       const int pixel_i = i + offset_i;
 
       /* The image still holds the pre-stroke value the first time a texel is touched, because
@@ -837,9 +820,6 @@ static void accumulate_material_range(PaintChannelRangeState &state,
     }
     i += run;
   }
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  g_erase_perf.accum_us.fetch_add(int64_t((BLI_time_now_seconds() - perf_t0) * 1.0e6));
-#endif /* ERASE-PERF: temporary. */
 }
 
 /**
@@ -873,16 +853,10 @@ static void blend_paint_range(PaintChannelRangeState &state,
                               const PackedPixelRow &pixel_row,
                               const IndexRange range)
 {
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  g_erase_perf.texels.fetch_add(int64_t(state.tls.paint_pixels.size()));
-#endif /* ERASE-PERF: temporary. */
   if (state.accum != nullptr) {
     accumulate_material_range(state, pixel_row, range);
     return;
   }
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  const double perf_t0 = BLI_time_now_seconds();
-#endif /* ERASE-PERF: temporary. */
   blend_colors(state.tls.paint_pixels,
                state.tls.scene_linear_pixels,
                state.brush,
@@ -892,9 +866,6 @@ static void blend_paint_range(PaintChannelRangeState &state,
                use_single_over(state),
                normal_mix_uses_over(state),
                state.byte_buffer.size() != 0 && !state.premul_storage);
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  g_erase_perf.blend_us.fetch_add(int64_t((BLI_time_now_seconds() - perf_t0) * 1.0e6));
-#endif /* ERASE-PERF: temporary. */
 }
 
 /** Write one blended paint range to a channel image. */
@@ -1519,7 +1490,8 @@ static void apply_paint_channel(ImageData &image_data,
                                                image_data.image != nullptr &&
                                                    image_data.image->alpha_mode ==
                                                        IMA_ALPHA_PREMUL,
-                                               is_correction_target};
+                                               is_correction_target,
+                                               &brush_color};
             apply_prepared_paint_range(range_state, pixel_row, range);
           });
         },
@@ -1735,7 +1707,8 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
                                            buffer,
                                            dest_image != nullptr &&
                                                dest_image->alpha_mode == IMA_ALPHA_PREMUL,
-                                           dest.is_correction_target};
+                                           dest.is_correction_target,
+                                           &dest.brush_color};
               apply_prepared_paint_range(state, pixel_row, range);
             }
           });
@@ -1922,11 +1895,6 @@ static void mark_gpu_texture_regions_dirty(ImageData &image_data,
       continue;
     }
     const rcti &region = saved_tile_dirty[tile_i].second;
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-    g_erase_perf.gpu_rect_area.fetch_add(int64_t(BLI_rcti_size_x(&region)) *
-                                         int64_t(BLI_rcti_size_y(&region)));
-    g_erase_perf.gpu_rect_num.fetch_add(1);
-#endif /* ERASE-PERF: temporary. */
     BKE_image_update_gputexture_delayed(image_data.image,
                                         image_tile,
                                         image_buffer,
@@ -2000,79 +1968,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     return;
   }
 
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-  /* ERASE-PERF: temporary. Resets the per-dab counters here and prints one line from the
-   * destructor, which runs on every exit path of this function without altering any of them. */
-  int perf_targets = 0;
-  int perf_dests = 0;
-  struct ErasePerfDabScope {
-    ed::sculpt_paint::StrokeCache &cache;
-    const Brush *brush;
-    const int &targets;
-    const int &dests;
-    double t0;
-    ErasePerfDabScope(ed::sculpt_paint::StrokeCache &cache_,
-                      const Brush *brush_,
-                      const int &targets_,
-                      const int &dests_)
-        : cache(cache_), brush(brush_), targets(targets_), dests(dests_)
-    {
-      ErasePerf &p = g_erase_perf;
-      if (p.stroke_id != &cache) {
-        erase_perf_summary("new_stroke");
-        p.stroke_id = &cache;
-      }
-      p.stroke_active = true;
-      p.accum_us = 0;
-      p.blend_us = 0;
-      p.texels = 0;
-      p.mark_dirty_us = 0;
-      p.gpu_mark_us = 0;
-      p.gpu_rect_area = 0;
-      p.gpu_rect_num = 0;
-      if (cache.material_raster_accum) {
-        cache.material_raster_accum->perf_block_ensure_us = 0;
-        cache.material_raster_accum->perf_blocks_new_dab = 0;
-      }
-      t0 = BLI_time_now_seconds();
-    }
-    ~ErasePerfDabScope()
-    {
-      ErasePerf &p = g_erase_perf;
-      const double dt = BLI_time_now_seconds() - t0;
-      const MaterialStrokeAccum *accum = cache.material_raster_accum.get();
-      const int blocks = accum ? accum->perf_blocks_total.load() : 0;
-      p.last_blocks = blocks;
-      p.total_s += dt;
-      p.max_s = std::max(p.max_s, dt);
-      const int dab_i = p.dab_num++;
-      printf(
-          "ERASE-PERF dab=%d kind=%s brush_type=%d dab_ms=%.3f accum_ms_sum=%.3f "
-          "blend_ms_sum=%.3f blocks=%d blocks_new=%d accum_bytes=%lld ensure_ms_sum=%.3f "
-          "mark_dirty_ms=%.3f gpu_mark_ms=%.3f gpu_rects=%d gpu_rect_px=%lld targets=%d "
-          "dests=%d texels=%lld\n",
-          dab_i,
-          cache.material_erase ? "ERASE" : "PAINT",
-          brush ? int(brush->sculpt_brush_type) : -1,
-          dt * 1000.0,
-          double(p.accum_us.load()) / 1000.0,
-          double(p.blend_us.load()) / 1000.0,
-          blocks,
-          accum ? accum->perf_blocks_new_dab.load() : 0,
-          long long(blocks) * long long(MaterialStrokeAccum::block_texel_num) *
-              long long(2 * sizeof(float4) + sizeof(bool)),
-          accum ? double(accum->perf_block_ensure_us.load()) / 1000.0 : 0.0,
-          double(p.mark_dirty_us.load()) / 1000.0,
-          double(p.gpu_mark_us.load()) / 1000.0,
-          p.gpu_rect_num.load(),
-          (long long)p.gpu_rect_area.load(),
-          targets,
-          dests,
-          (long long)p.texels.load());
-      fflush(stdout);
-    }
-  } perf_dab_scope(cache, brush, perf_targets, perf_dests);
-#endif /* ERASE-PERF: temporary. */
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
@@ -2160,7 +2055,8 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
         return nullptr;
       }
       if (!cache.material_raster_accum) {
-        cache.material_raster_accum = std::make_unique<MaterialStrokeAccum>();
+        cache.material_raster_accum = std::make_unique<MaterialStrokeAccum>(
+            cache.material_erase);
       }
       return cache.material_raster_accum.get();
     };
@@ -2303,10 +2199,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       }
     }
     const bool group_write = dests.size() >= 2;
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-    perf_targets += 1;
-    perf_dests += int(dests.size());
-#endif /* ERASE-PERF: temporary. */
 
 
     /* Destinations are prepared here, before the threaded paint pass. #fetch_image_buffers
@@ -2451,21 +2343,10 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
            * its pre-stroke pixels. Marking the regions here instead means the texture is refreshed
            * incrementally the next time it is used - as opposed to discarding it wholesale at the
            * end of the stroke, which would throw away every partial update this stroke made. */
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-          const double perf_t0 = BLI_time_now_seconds();
-#endif /* ERASE-PERF: temporary. */
           mark_gpu_texture_regions_dirty(dest_data, pixel_node, saved_tile_dirty);
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-          const double perf_t1 = BLI_time_now_seconds();
-#endif /* ERASE-PERF: temporary. */
 
           bke::pbvh::pixels::mark_image_dirty(
               nodes[i], pixel_node, *dest_data.image, dest_data.buffers);
-#if ERASE_PERF_LOG /* ERASE-PERF: temporary. */
-          g_erase_perf.gpu_mark_us.fetch_add(int64_t((perf_t1 - perf_t0) * 1.0e6));
-          g_erase_perf.mark_dirty_us.fetch_add(
-              int64_t((BLI_time_now_seconds() - perf_t1) * 1.0e6));
-#endif /* ERASE-PERF: temporary. */
         }
       });
     }

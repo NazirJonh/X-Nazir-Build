@@ -949,9 +949,20 @@ void BKE_brush_material_erase_mode_apply(Brush *brush, const ePaintMaterialErase
   }
 }
 
+bool BKE_brush_is_material_erase(const Brush &brush)
+{
+  return brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE;
+}
+
 Brush *BKE_brush_material_erase_create_default(Main *bmain, Paint *paint)
 {
+  /* One Erase brush serves Sculpt and Texture/Image paint; the image brush type stays at its
+   * Draw default and the erase behavior is keyed on #Brush.sculpt_brush_type. */
+  /* Created as a Sculpt brush first: #BKE_brush_add only allocates the sculpt-only settings
+   * (#Brush.mesh_automasking_settings) for an exact #OB_MODE_SCULPT, and Sculpt code dereferences
+   * them unconditionally. */
   Brush *brush = BKE_brush_add(bmain, "Erase", OB_MODE_SCULPT);
+  brush->ob_mode |= OB_MODE_TEXTURE_PAINT;
   brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_ERASE;
 
   /* The default material-paint channel selection (Base Color, Metallic, Roughness, Normal) is
@@ -986,8 +997,8 @@ Brush *BKE_brush_material_erase_ensure(Main &bmain, Scene &scene, Paint &paint, 
    * it would keep its library defaults and cannot be freely configured. */
   Brush *found = nullptr;
   for (Brush &iter : bmain.brushes) {
-    if (ID_IS_LINKED(&iter) || !(iter.ob_mode & OB_MODE_SCULPT) ||
-        iter.sculpt_brush_type != SCULPT_BRUSH_TYPE_ERASE)
+    if (ID_IS_LINKED(&iter) || !(iter.ob_mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) ||
+        !BKE_brush_is_material_erase(iter))
     {
       continue;
     }
@@ -999,6 +1010,10 @@ Brush *BKE_brush_material_erase_ensure(Main &bmain, Scene &scene, Paint &paint, 
     *r_created = (found == nullptr);
   }
   if (found) {
+    /* Brushes made before the shared Erase brush only carry the Sculpt mode. */
+    found->ob_mode |= OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT;
+    /* Erase brushes created with both modes at once missed the sculpt-only settings. */
+    BKE_brush_init_mesh_automasking_settings(found);
     return found;
   }
   Brush *brush = BKE_brush_material_erase_create_default(&bmain, &paint);

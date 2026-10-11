@@ -179,6 +179,7 @@ set(SRC
   paint_curve_patch_sampler.hh
   paint_curve_patch_session.hh
 paint_intern.hh
+  paint_material_stroke_accum.hh
   paint_image_curve_patch.hh
   paint_image_curve_patch_anchor.hh
   paint_image_stroke_hook.hh

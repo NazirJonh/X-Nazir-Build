@@ -125,6 +125,26 @@ Brush *BKE_brush_material_erase_ensure(Main &bmain,
                                        Paint &paint,
                                        bool *r_created = nullptr);
 
+/** True for the default Mask brush created by #BKE_brush_material_mask_ensure. */
+bool BKE_brush_is_material_mask_default(const Brush &brush);
+
+/**
+ * Adds a new local Mask brush: a #Brush with a hard edge, stock stroke defaults and
+ * #BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH set. Usable in Sculpt and Texture Paint. Activation is
+ * the caller's job (typically #BKE_paint_material_mask_brush_set).
+ */
+Brush *BKE_brush_material_mask_create_default(Main *bmain, Paint *paint);
+
+/**
+ * Returns the default Mask brush, preferring the one named "Mask", creating it (with the preset
+ * snapshot taken) when none exists. \a r_created tells the caller which happened. Linked brushes
+ * are never reused. Activation is the caller's job.
+ */
+Brush *BKE_brush_material_mask_ensure(Main &bmain,
+                                      Scene &scene,
+                                      Paint &paint,
+                                      bool *r_created = nullptr);
+
 /**
  * Deep-copies channels/base_color/flags/shared_source_mapping from \a src. The caller owns the
  * result and must eventually pass it to #BKE_brush_material_paint_free.

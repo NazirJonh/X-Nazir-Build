@@ -993,13 +993,11 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
     if (cache.material_erase && target.mask_erase_fill) {
       return *target.mask_erase_fill;
     }
-    /* A mask map is opaque grey: the stroke paints the brush grey itself, primary or secondary
-     * on invert, the way Texture Paint picks the color. A fixed white would change nothing on a
-     * white Multiply map. */
-    const float3 rgb = cache.material_invert ?
-                           BKE_brush_secondary_color_get(&sd.paint, &brush) :
-                           BKE_brush_color_get(&sd.paint, &brush);
-    const float grey = (rgb.x + rgb.y + rgb.z) / 3.0f;
+    /* A mask map is opaque grey: the stroke paints the value the brush's mask source selects.
+     * A fixed white would change nothing on a white Multiply map. */
+    BLI_assert(brush.material_paint != nullptr);
+    const float grey = BKE_paint_material_mask_value_get(
+        *brush.material_paint, sd.paint, brush, cache.material_invert);
     return float4(grey, grey, grey, 1.0f);
   }
   if (target.is_color_channel) {
@@ -1310,6 +1308,7 @@ static void apply_paint_channel(ImageData &image_data,
                                 const eMaterialPaintChannel channel,
                                 const bool is_color_channel,
                                 const bool is_normal_channel,
+                                const bool mask_luminance,
                                 const bool alpha_masking_active,
                                 const float3 &view_right,
                                 const float3 & /*view_up*/,
@@ -1455,6 +1454,13 @@ static void apply_paint_channel(ImageData &image_data,
                   tls.sampled_colors.resize(range.size());
                   for (const int i : range.index_range()) {
                     tls.sampled_colors[i] = float3(tls.sampled_scalars[i]);
+                  }
+                }
+                if (mask_luminance) {
+                  /* A Mask map is grey: a Base Color source is reduced to its luminance after the
+                   * decode above, so the colorspace is already scene-linear here. */
+                  for (float3 &color : tls.sampled_colors) {
+                    color = float3(math::clamp(BKE_paint_material_mask_luminance(color), 0.0f, 1.0f));
                   }
                 }
               }
@@ -1994,8 +2000,11 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
 
-  const bool alpha_masking_active = !cache.material_invert && !cache.material_erase &&
-                                    active_sampler != nullptr &&
+  /* Alpha is the Mask value's source in Mask mode, never a mask over it: its sampler entry is
+   * read per target below. */
+  const bool mask_mode = paint_mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK;
+  const bool alpha_masking_active = !mask_mode && !cache.material_invert &&
+                                    !cache.material_erase && active_sampler != nullptr &&
                                     brush->material_paint != nullptr &&
                                      BKE_paint_material_channel_masks_stroke(
                                          *brush->material_paint,
@@ -2062,12 +2071,11 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     };
     MaterialStrokeAccum *stroke_accum = accum_for(material_blend, blend_mode);
     if (target.is_mask_target) {
-      /* Same grey as #paint_brush_color: the per-dab primary/secondary pick lives here for the
-       * leading target, while grouped candidates resolve through that helper. */
-      const float3 mask_rgb = cache.material_invert ?
-                                  BKE_brush_secondary_color_get(&sd.paint, brush) :
-                                  BKE_brush_color_get(&sd.paint, brush);
-      const float mask_grey = (mask_rgb.x + mask_rgb.y + mask_rgb.z) / 3.0f;
+      /* Same value as #paint_brush_color: the per-dab pick lives here for the leading target,
+       * while grouped candidates resolve through that helper. */
+      BLI_assert(brush->material_paint != nullptr);
+      const float mask_grey = BKE_paint_material_mask_value_get(
+          *brush->material_paint, sd.paint, *brush, cache.material_invert);
       brush_color_storage = (cache.material_erase && target.mask_erase_fill) ?
                                 *target.mask_erase_fill :
                                 float4(mask_grey, mask_grey, mask_grey, 1.0f);
@@ -2135,7 +2143,10 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     /* Normal needs the tangent-basis path and Alpha acts as a stroke mask rather than as ordinary
      * channel payload; neither can share the plain multi-destination pass. */
     const auto is_pairable_channel = [](const ImagePaintTarget &candidate) {
-      return !candidate.is_normal_channel && candidate.channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+      /* #ImagePaintTarget::channel is meaningless for a mask, and its source channel is resolved
+       * per target below, so a mask never shares a pass. */
+      return !candidate.is_mask_target && !candidate.is_normal_channel &&
+             candidate.channel != PAINT_MATERIAL_CHANNEL_ALPHA;
     };
     /* Same sampler representation (#ChannelSourceSampler::color vs ::scalar) and the same value
      * range. `is_color_channel` alone only covers the first half: a future scalar channel with a
@@ -2200,6 +2211,28 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     }
     const bool group_write = dests.size() >= 2;
 
+    /* A mask target has no channel of its own: when the brush's mask source has a usable texture
+     * the sampler is asked for that one channel instead, and a Base Color sample is reduced to its
+     * luminance. Otherwise the stroke stays on the flat #brush_color. */
+    const ed::sculpt_paint::material::ChannelSourceSampler *target_sampler = active_sampler;
+    eMaterialPaintChannel sample_channel = target.channel;
+    bool sample_is_color = target.is_color_channel;
+    bool mask_luminance = false;
+    if (target.is_mask_target) {
+      std::optional<eMaterialPaintChannel> mask_channel;
+      if (active_sampler != nullptr && brush->material_paint != nullptr) {
+        mask_channel = ed::sculpt_paint::material::mask_source_channel_get(
+            *brush->material_paint);
+      }
+      if (mask_channel && active_sampler->has_usable_source(*mask_channel)) {
+        sample_channel = *mask_channel;
+        sample_is_color = *mask_channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+        mask_luminance = sample_is_color;
+      }
+      else {
+        target_sampler = nullptr;
+      }
+    }
 
     /* Destinations are prepared here, before the threaded paint pass. #fetch_image_buffers
      * inserts into #ImageData::buffers and #ImageData::processors, so doing it from inside the
@@ -2253,10 +2286,11 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                   stroke_accum,
                                   pixel_nodes[i],
                                   node_factor_caches[pos],
-                                  active_sampler,
-                                  target.channel,
-                                  target.is_color_channel,
+                                  target_sampler,
+                                  sample_channel,
+                                  sample_is_color,
                                   target.is_normal_channel,
+                                  mask_luminance,
                                   alpha_masking_active,
                                   cache.view_right,
                                   cache.view_up,
@@ -2285,6 +2319,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                     active_sampler,
                                     dest.channel,
                                     dest.is_color_channel,
+                                    false,
                                     false,
                                     alpha_masking_active,
                                     cache.view_right,

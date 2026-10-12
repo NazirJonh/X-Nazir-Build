@@ -1685,6 +1685,12 @@ static void rna_BrushMaterialPaint_alpha_mode_update(Main *bmain, Scene *scene, 
   rna_BrushMaterialPaint_update(bmain, scene, ptr);
 }
 
+static bool rna_BrushMaterialPaint_is_mask_default_get(PointerRNA *ptr)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<const BrushMaterialPaint *>(ptr->data);
+  return (brush_paint->mask_flag & BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH) != 0;
+}
+
 /** The stroke-side answer the PBR Paint panel's #material_paint_writable_channels mirrors
  * (properties_paint_common.py), exposed per channel: whether this brush's configuration writes
  * \a channel to a Material image canvas for a stroke with \a paint_mode and the visible
@@ -4085,6 +4091,38 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "Stroke parameter preset (falloff, antialiasing, pressure size) applied when the mode is "
       "picked; user tweaks made afterwards are kept");
   RNA_def_property_update(prop, 0, "rna_Brush_material_paint_erase_mode_update");
+
+  static const EnumPropertyItem prop_mask_source_items[] = {
+      {BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA,
+       "ALPHA",
+       0,
+       "Alpha",
+       "Use the brush's Alpha channel; falls back to Coverage while Alpha is off"},
+      {BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR,
+       "BASE_COLOR",
+       0,
+       "Base Color",
+       "Use the luminance of the brush's Base Color"},
+      {BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE,
+       "COVERAGE",
+       0,
+       "Coverage",
+       "Use the grey level of the brush's primary color, or secondary when inverted"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "mask_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mask_source");
+  RNA_def_property_enum_items(prop, prop_mask_source_items);
+  RNA_def_property_ui_text(
+      prop, "Mask Source", "Channel that sets the mask value while painting in Mask mode");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "is_mask_default", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_BrushMaterialPaint_is_mask_default_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Default Mask Brush", "Whether this is the default brush used for the Mask");
 
   /* A bool per channel rather than a bitmask, so which channels are asked about (the UI order,
    * without Custom and Height) stays the Python side's own vocabulary. */

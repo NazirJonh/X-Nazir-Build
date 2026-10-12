@@ -39,6 +39,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include <optional>
@@ -204,6 +205,10 @@ void mask_edit_end_if_target_removed(bContext &C, Material &ma, const bUUID &rem
   /* The mask brush goes back to the content brush; the mode is the target, not any binding. */
   BKE_paint_material_layer_target_mode_set(
       *bmain, *scene, *paint, mode_settings, PAINT_LAYER_TARGET_CONTENT);
+  if (paint->brush != nullptr) {
+    /* The restored content brush may belong to another tool, so that tool becomes active too. */
+    WM_toolsystem_activate_brush_and_tool(&C, paint, paint->brush);
+  }
 }
 
 }  // namespace blender::ed::sculpt_paint::material_layer

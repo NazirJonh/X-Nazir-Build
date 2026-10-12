@@ -250,6 +250,13 @@ class BrushAssetShelf:
         )
 
 
+def draw_material_mask_brush_reset(layout, context):
+    """Offer a way back to the default Mask brush, only while the Mask is the paint target."""
+    if context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+        return
+    layout.operator("paint.material_mask_brush_reset", text="", icon='FILE_REFRESH')
+
+
 def brush_asset_shelf_filter_draw(panel, context):
     if context.asset_shelf.bl_idname != BrushAssetShelf.get_shelf_name_from_context(context):
         return
@@ -2410,6 +2417,9 @@ def draw_material_paint_channels(
             draw_brush_texture_properties(
                 tex_col, brush, context.sculpt_object, default_closed=True,
             )
+    # The Mask reads this value from the brush, so the choice only matters while painting a mask.
+    if paint_mode is not None and paint_mode.layer_target_mode == 'MASK':
+        layout.prop(material_paint, "mask_source")
     layout.separator()
 
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.

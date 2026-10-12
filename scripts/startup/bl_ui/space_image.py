@@ -17,6 +17,7 @@ from bl_ui.properties_paint_common import (
     brush_basic_texpaint_settings,
     brush_settings,
     brush_settings_advanced,
+    draw_material_mask_brush_reset,
     draw_color_settings,
     draw_material_paint_channels,
     draw_material_paint_visibility_chevron,
@@ -885,6 +886,7 @@ class _draw_tool_settings_context_mode:
         brush = paint.brush
 
         BrushAssetShelf.draw_popup_selector(layout, context, brush)
+        draw_material_mask_brush_reset(layout, context)
 
         if brush is None:
             return

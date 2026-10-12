@@ -120,14 +120,40 @@ static bool channel_source_image_direct_ok(const Tex *tex, const MTex *mtex, con
   return true;
 }
 
+std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterialPaint &brush_paint)
+{
+  switch (eBrushMaterialPaintMaskSource(brush_paint.mask_source)) {
+    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA:
+      if (brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use != 0) {
+        return PAINT_MATERIAL_CHANNEL_ALPHA;
+      }
+      return std::nullopt;
+    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR:
+      return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+    case BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE:
+      break;
+  }
+  return std::nullopt;
+}
+
 ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
                                    const PaintModeSettings &settings,
-                                   const int visible_material_channels)
+                                   const int visible_material_channels,
+                                   const bool resolve_mask_source)
 {
-  if (settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
-    /* No channel is resolved at all: #is_active() stays false, and nothing below reads
-     * brush_paint.channels[] or opens a source image. See the design spec's invariant M6. */
-    return;
+  const bool mask_mode = settings.layer_target_mode == PAINT_LAYER_TARGET_MASK;
+  std::optional<eMaterialPaintChannel> mask_channel;
+  if (mask_mode) {
+    /* A Mask stroke is a flat scalar unless the caller asked for the one source channel the brush
+     * selects: #is_active() stays false and no other brush_paint.channels[] entry is read or has
+     * an image opened. This keeps invariant M6 intact for every channel but that one. */
+    if (!resolve_mask_source) {
+      return;
+    }
+    mask_channel = mask_source_channel_get(brush_paint);
+    if (!mask_channel) {
+      return;
+    }
   }
   bool any_source = false;
   const MaterialSourceResolve material_resolve =
@@ -138,8 +164,11 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
       brush_paint.source_material != nullptr)
   {
     bool any_baked = false;
-    for (const ChannelResolution resolution : material_resolve.channels) {
-      any_baked |= resolution == ChannelResolution::Baked;
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if (mask_channel && channel != *mask_channel) {
+        continue;
+      }
+      any_baked |= material_resolve.channels[channel] == ChannelResolution::Baked;
     }
     if (any_baked) {
       /* Whatever is cached right now; the bake itself runs in a job (see
@@ -150,11 +179,21 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
     }
   }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    const bool channel_enabled = BKE_paint_material_channel_is_enabled(
-        brush_paint, settings, visible_material_channels, info.channel);
-    const bool alpha_masks = info.channel == PAINT_MATERIAL_CHANNEL_ALPHA &&
-                              BKE_paint_material_channel_masks_stroke(
-                                  brush_paint, settings, visible_material_channels);
+    if (mask_channel && info.channel != *mask_channel) {
+      continue;
+    }
+    /* The mask channel is picked by #mask_source_channel_get, not by what the brush paints into
+     * the material, so the visibility gate of ordinary strokes must not veto it. Alpha as a stroke
+     * mask is meaningless for a Mask target. */
+    const bool channel_enabled = mask_mode ? true :
+                                             BKE_paint_material_channel_is_enabled(
+                                                 brush_paint,
+                                                 settings,
+                                                 visible_material_channels,
+                                                 info.channel);
+    const bool alpha_masks = !mask_mode && info.channel == PAINT_MATERIAL_CHANNEL_ALPHA &&
+                             BKE_paint_material_channel_masks_stroke(
+                                 brush_paint, settings, visible_material_channels);
     if (!channel_enabled && !alpha_masks) {
       continue;
     }
@@ -794,12 +833,13 @@ ChannelSourceSampler::ChannelSourceSampler(const SculptSession &ss,
                                             const Brush &brush,
                                             const BrushMaterialPaint &brush_paint,
                                             const PaintModeSettings &settings,
-                                            const int visible_material_channels)
+                                            const int visible_material_channels,
+                                            const bool resolve_mask_source)
     : ss_(ss),
       brush_(brush),
       settings_(settings),
       brush_paint_(brush_paint),
-      sources_(brush_paint, settings, visible_material_channels)
+      sources_(brush_paint, settings, visible_material_channels, resolve_mask_source)
 {
 }
 

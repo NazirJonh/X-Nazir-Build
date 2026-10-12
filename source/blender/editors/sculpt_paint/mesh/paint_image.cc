@@ -832,6 +832,10 @@ bool ED_paint_material_mask_edit_end_if_active(bContext &C)
     return false;
   }
   BKE_paint_material_mask_edit_end_ex(*bmain, *scene, *paint, mode_settings);
+  if (paint->brush != nullptr) {
+    /* The restored content brush may belong to another tool, so that tool becomes active too. */
+    WM_toolsystem_activate_brush_and_tool(&C, paint, paint->brush);
+  }
   WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
   WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, nullptr);
   return true;

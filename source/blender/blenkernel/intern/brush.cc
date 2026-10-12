@@ -140,6 +140,11 @@ static void brush_copy_data(Main * /*bmain*/,
   if (brush_src->material_paint != nullptr) {
     brush_dst->material_paint = MEM_new<BrushMaterialPaint>(
         __func__, dna::shallow_copy(*(brush_src->material_paint)));
+    /* A duplicate is a brush of the user's own, not "the" default Mask brush: if it kept the flag,
+     * #BKE_brush_material_mask_ensure could pick the copy over the original and Reset would stop
+     * being deterministic. Only this ID copy clears it; the preset snapshot/apply path goes
+     * through #BKE_brush_material_paint_copy_into and must keep the flag of its own brush. */
+    brush_dst->material_paint->mask_flag &= char(~BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH);
   }
   if (brush_src->mesh_automasking_settings != nullptr) {
     brush_dst->mesh_automasking_settings = MEM_new<MeshAutomaskingSettings>(
@@ -362,7 +367,19 @@ static void brush_blend_write(BlendWriter *writer, ID *id, const void *id_addres
     BKE_curvemapping_blend_write(writer, brush->curves_sculpt_settings->curve_parameter_falloff);
   }
   if (brush->material_paint) {
-    writer->write_struct(brush->material_paint);
+    if (BKE_brush_is_material_mask_default(*brush) ||
+        brush->material_paint->mask_source == BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA)
+    {
+      writer->write_struct(brush->material_paint);
+    }
+    else {
+      /* Only the default Mask brush may persist a Mask source. On any other brush (an asset used
+       * as the Mask brush) the choice lives in the scene's #PaintMaterialBrushPreset, so saving the
+       * brush or exporting it as an asset never turns it into a Mask brush by accident. */
+      BrushMaterialPaint material_paint_copy = dna::shallow_copy(*brush->material_paint);
+      material_paint_copy.mask_source = BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA;
+      writer->write_struct_at_address(brush->material_paint, &material_paint_copy);
+    }
   }
   if (brush->mesh_automasking_settings) {
     writer->write_struct(brush->mesh_automasking_settings);
@@ -1019,6 +1036,71 @@ Brush *BKE_brush_material_erase_ensure(Main &bmain, Scene &scene, Paint &paint, 
   Brush *brush = BKE_brush_material_erase_create_default(&bmain, &paint);
   /* Activation applies the scene-side preset over #Brush.material_paint; snapshot first so the
    * default channel selection is not overwritten by a missing or stale preset. */
+  BKE_paint_material_brush_preset_snapshot(scene, *brush);
+  return brush;
+}
+
+bool BKE_brush_is_material_mask_default(const Brush &brush)
+{
+  return brush.material_paint != nullptr &&
+         (brush.material_paint->mask_flag & BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH) != 0;
+}
+
+Brush *BKE_brush_material_mask_create_default(Main *bmain, Paint *paint)
+{
+  /* Created as a Sculpt brush first for the same reason as the Erase brush: the sculpt-only
+   * settings are only allocated for an exact #OB_MODE_SCULPT. */
+  Brush *brush = BKE_brush_add(bmain, "Mask", OB_MODE_SCULPT);
+  brush->ob_mode |= OB_MODE_TEXTURE_PAINT;
+  /* Sculpt Mode only paints into the material maps with a Paint brush; the default Draw type would
+   * displace the mesh instead of painting the mask. */
+  brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_PAINT;
+
+  BKE_brush_material_paint_ensure(brush);
+  brush->material_paint->mask_flag |= BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH;
+
+  /* A hard edge keeps the painted mask crisp. The preset also turns antialiasing on, which the
+   * edge needs to stay smooth at its sub-pixel boundary. */
+  BKE_brush_material_erase_mode_apply(brush, BRUSH_MATERIAL_PAINT_ERASE_HARD);
+
+  BKE_brush_size_set(paint, brush, 70);
+  brush->spacing = 10;
+  brush->jitter = 0.0f;
+  brush->alpha = 1.0f;
+  brush->flow = 1.0f;
+  brush->mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+
+  return brush;
+}
+
+Brush *BKE_brush_material_mask_ensure(Main &bmain, Scene &scene, Paint &paint, bool *r_created)
+{
+  /* Reuse the default Mask brush when one exists, so entering Mask again does not pile up
+   * duplicates. The brush the user picked for Mask is tracked by #PaintModeSettings, not here. A
+   * linked brush is not reused, for the same reason as in #BKE_brush_material_erase_ensure. */
+  Brush *found = nullptr;
+  for (Brush &iter : bmain.brushes) {
+    if (ID_IS_LINKED(&iter) || !(iter.ob_mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) ||
+        !BKE_brush_is_material_mask_default(iter))
+    {
+      continue;
+    }
+    if (found == nullptr || STREQ(iter.id.name + 2, "Mask")) {
+      found = &iter;
+    }
+  }
+  if (r_created) {
+    *r_created = (found == nullptr);
+  }
+  if (found) {
+    /* Brushes made before the shared Mask brush only carry the Sculpt mode. */
+    found->ob_mode |= OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT;
+    BKE_brush_init_mesh_automasking_settings(found);
+    return found;
+  }
+  Brush *brush = BKE_brush_material_mask_create_default(&bmain, &paint);
+  /* Same snapshot as the Erase brush: activation must not overwrite the default settings with a
+   * missing or stale preset. */
   BKE_paint_material_brush_preset_snapshot(scene, *brush);
   return brush;
 }

@@ -5742,9 +5742,15 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
       }
 
       /* Same stroke-scoped sampler as Material Paint: raster image targets also sample per-channel
-       * sources through StrokeCache::material_source_sampler. */
+       * sources through StrokeCache::material_source_sampler. A Mask stroke additionally resolves
+       * its one mask-source channel, which only the raster path knows how to sample. */
       ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
-          ss, *brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+          ss,
+          *brush,
+          brush_paint,
+          paint_mode_init,
+          sd.paint.visible_material_channels,
+          /*resolve_mask_source=*/true);
     }
     ED_space_image_paint_auto_select_material_canvas(CTX_data_main(C), &ob);
   }

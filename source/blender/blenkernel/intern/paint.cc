@@ -85,6 +85,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -3811,6 +3812,39 @@ float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_pain
   return float3(brush_paint.channels[channel].value);
 }
 
+float BKE_paint_material_mask_luminance(const float3 &linear_rgb)
+{
+  /* Rec.709 weights: the mask is judged by perceived brightness of the linear color. */
+  return 0.2126f * linear_rgb.x + 0.7152f * linear_rgb.y + 0.0722f * linear_rgb.z;
+}
+
+float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
+                                        const Paint &paint,
+                                        const Brush &brush,
+                                        const bool invert)
+{
+  const eBrushMaterialPaintMaskSource source = eBrushMaterialPaintMaskSource(
+      brush_paint.mask_source);
+  if (source == BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR) {
+    return BKE_paint_material_mask_luminance(
+        BKE_paint_material_base_color_get(brush_paint, paint, brush, invert));
+  }
+  /* Only the Alpha channel is read here; the other channels stay out of the Mask stroke. An
+   * Alpha that is off falls back to coverage so a Mask brush never paints nothing. */
+  if (source == BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA &&
+      brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use != 0)
+  {
+    if (invert) {
+      return BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_ALPHA);
+    }
+    return brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].value[0];
+  }
+  /* Coverage: grey level of the brush's primary (or secondary on invert) color. */
+  const float3 rgb = invert ? BKE_brush_secondary_color_get(&paint, &brush) :
+                              BKE_brush_color_get(&paint, &brush);
+  return (rgb.x + rgb.y + rgb.z) / 3.0f;
+}
+
 /**
  * Finds Principled BSDF connected to Material Output Surface, else the first
  * Principled in the tree. Returns nullptr when none exist.
@@ -3957,21 +3991,11 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
   if (want_mask) {
     mode_settings.mask_saved_brush = paint.brush;
     if (mode_settings.mask_active_brush == nullptr) {
-      /* First mask edit ever: pick the texture-paint default ("Paint Hard", see
-       * #paint_brush_default_essentials_name_get) through the paint's own mode. Falls back to a
-       * plain local brush when the essentials library is unavailable (unit tests, minimal
-       * installs) -- mask strokes never read #BrushMaterialPaint.channels[] (invariant M6), so
-       * any brush paints a mask once #BKE_brush_material_paint_ensure ran on it. */
-      const PaintMode paint_mode = paint.runtime != nullptr ? paint.runtime->paint_mode :
-                                                              PaintMode::Texture3D;
-      mode_settings.mask_active_brush = BKE_paint_brush_from_essentials(
-          &bmain, paint_mode, "Paint Hard");
-      if (mode_settings.mask_active_brush == nullptr) {
-        const eObjectMode ob_mode = paint.runtime != nullptr && paint.runtime->ob_mode != 0 ?
-            eObjectMode(paint.runtime->ob_mode) :
-            OB_MODE_TEXTURE_PAINT;
-        mode_settings.mask_active_brush = BKE_brush_add(&bmain, "Mask", ob_mode);
-      }
+      /* First mask edit ever: use the local default Mask brush rather than an essentials asset,
+       * so the mask works without the library. Mask strokes read no #BrushMaterialPaint.channels[]
+       * entry except the one #BrushMaterialPaint.mask_source selects (invariant M6, relaxed for
+       * that channel only), so the default only needs its own material paint settings. */
+      mode_settings.mask_active_brush = BKE_brush_material_mask_ensure(bmain, scene, paint);
     }
     if (mode_settings.mask_active_brush != nullptr) {
       BKE_brush_material_paint_ensure(mode_settings.mask_active_brush);
@@ -4004,6 +4028,33 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
       ma.paint_layers_flag |= MA_PAINT_LAYERS_SLOTS_STALE;
     }
   }
+}
+
+bool BKE_paint_material_mask_brush_set(Scene &scene, Paint &paint, Brush *brush)
+{
+  PaintModeSettings &mode_settings = scene.toolsettings->paint_mode;
+  if (mode_settings.layer_target_mode != PAINT_LAYER_TARGET_MASK || brush == nullptr) {
+    return false;
+  }
+  /* Only the paint modes that can paint a mask are handled here; other modes keep their own
+   * brush bookkeeping. */
+  if (paint.runtime == nullptr ||
+      !ELEM(paint.runtime->paint_mode, PaintMode::Sculpt, PaintMode::Texture2D))
+  {
+    return false;
+  }
+  /* Applies the brush's stored preset through the synced path, so the Mask brush gets the same
+   * stroke settings as any other brush the user activates. */
+  if (!BKE_paint_brush_set_synced(scene, paint, brush)) {
+    return false;
+  }
+  /* Recorded only after activation succeeded, so a refused brush never becomes the remembered
+   * Mask brush. */
+  mode_settings.mask_active_brush = brush;
+  /* The Sculpt/Image Paint pair shares its brush while synced; the tool system skips that sync in
+   * Mask, so without it Image 2D would keep painting the mask with a stale brush. */
+  BKE_paint_material_brush_sync(&scene, &paint);
+  return true;
 }
 
 void BKE_paint_material_mask_edit_begin_ex(Main &bmain,

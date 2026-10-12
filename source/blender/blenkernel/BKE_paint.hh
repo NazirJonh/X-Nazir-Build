@@ -1114,6 +1114,26 @@ float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_pain
                                             bool invert);
 
 /**
+ * Scalar value written by a Mask stroke, chosen by #BrushMaterialPaint::mask_source.
+ * Alpha reads the Alpha channel value (or its default on invert) and falls back to coverage
+ * when that channel is off. Base Color is the Rec.709 luminance of
+ * #BKE_paint_material_base_color_get. Coverage is the grey level of the primary (or secondary on
+ * invert) brush color. This is the only place that decides the Mask value, so Sculpt and
+ * Image 2D cannot disagree.
+ */
+float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
+                                        const Paint &paint,
+                                        const Brush &brush,
+                                        bool invert);
+
+/**
+ * Rec.709 luminance of a scene-linear color, as used for the Base Color mask source. Shared with
+ * the engines that sample a Base Color source texture per pixel, so the constant and the sampled
+ * value cannot drift apart.
+ */
+float BKE_paint_material_mask_luminance(const float3 &linear_rgb);
+
+/**
  * Clears per-material Principled-socket image resolution cache entries.
  * Call after node-tree or material slot changes that can alter resolved targets.
  */
@@ -1179,6 +1199,17 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
                                               Paint &paint,
                                               PaintModeSettings &mode_settings,
                                               ePaintLayerTargetMode mode);
+
+/**
+ * Activate \a brush as the brush used while the paint target is #PAINT_LAYER_TARGET_MASK, and
+ * remember it as #PaintModeSettings.mask_active_brush for the next time Mask is entered.
+ *
+ * Use this for user-driven brush changes made in Mask mode. The low-level #BKE_paint_brush_set
+ * stays the path for internal switches, which must not change the remembered Mask brush. Returns
+ * false, changing nothing, when Mask is not the target, \a brush is null, the paint mode cannot
+ * paint a mask, or the brush cannot be used by \a paint.
+ */
+bool BKE_paint_material_mask_brush_set(Scene &scene, Paint &paint, Brush *brush);
 
 /**
  * Image the Image Editor should show for the Material canvas when nothing is selected.

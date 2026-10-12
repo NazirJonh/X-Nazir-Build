@@ -23,6 +23,7 @@ from bl_ui.properties_paint_common import (
     BrushAssetShelf,
     brush_color_eyedropper_draw,
     draw_material_paint_channels,
+    draw_material_mask_brush_reset,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -365,6 +366,7 @@ class _draw_tool_settings_context_mode:
         brush = paint.brush
 
         BrushAssetShelf.draw_popup_selector(layout, context, brush)
+        draw_material_mask_brush_reset(layout, context)
 
         if brush is None:
             return False

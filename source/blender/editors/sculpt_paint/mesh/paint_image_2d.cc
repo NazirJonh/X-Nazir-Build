@@ -876,7 +876,8 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
     const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
         painter->channel_sources->source(channel);
     const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
-    const bool batch_decode = !is_normal && source.do_linear_conversion &&
+    /* Scalar channels carry a value, not a color: decoding it as sRGB would bend it. */
+    const bool batch_decode = is_color && !is_normal && source.do_linear_conversion &&
                               (paint_runtime == nullptr || !paint_runtime->do_linear_conversion);
     const bool skip_colorspace = batch_decode &&
                                  paint_2d_area_source_matches_canvas_encoding(source, cache);
@@ -969,13 +970,14 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
   if (paint_2d_channel_source_usable_2d(painter, painter->material_channel)) {
     const float coverage = rgba[3];
     float4 sampled;
-    const float intensity = paint_2d_sample_channel_source(
-        painter, painter->material_channel, x, y, thread, sampled);
     const bool is_normal = painter->material_channel == PAINT_MATERIAL_CHANNEL_NORMAL;
     const bool is_color = ELEM(painter->material_channel,
                                PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                PAINT_MATERIAL_CHANNEL_EMISSION,
                                PAINT_MATERIAL_CHANNEL_NORMAL);
+    /* Scalar channels read only `intensity`, so the color decode would be wasted. */
+    const float intensity = paint_2d_sample_channel_source(
+        painter, painter->material_channel, x, y, thread, sampled, is_color);
     if (is_color) {
       /* Randomize Color on the sampled texels - Base Color only, applied while the sample is
        * still scene-linear (the same space the channel-value path jitters in). */
@@ -1014,7 +1016,7 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
   if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
     float4 sampled;
     alpha_factor = paint_2d_sample_channel_source(
-        painter, PAINT_MATERIAL_CHANNEL_ALPHA, x, y, thread, sampled);
+        painter, PAINT_MATERIAL_CHANNEL_ALPHA, x, y, thread, sampled, false);
   }
   alpha_factor = math::clamp(alpha_factor, 0.0f, 1.0f);
   rgba[3] *= alpha_factor;
@@ -3034,20 +3036,21 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
       painter, source, local_mat, position, uv, thread, pool, &value, sampled);
 
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
-  if (decode_linear && !is_normal && source.do_linear_conversion &&
-      (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
-  {
-    IMB_colormanagement_colorspace_to_scene_linear_v3(sampled, source.colorspace);
-  }
-  if (apply_flip && source.flip_green_channel) {
-    sampled[1] = 1.0f - sampled[1];
-  }
-
+  /* Scalar channels read `value` below, so the color conversion and flip are skipped for them. */
   const bool is_color = ELEM(channel,
                              PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                              PAINT_MATERIAL_CHANNEL_EMISSION,
                              PAINT_MATERIAL_CHANNEL_NORMAL);
+  const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
+  if (is_color && decode_linear && !is_normal && source.do_linear_conversion &&
+      (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
+  {
+    IMB_colormanagement_colorspace_to_scene_linear_v3(sampled, source.colorspace);
+  }
+  if (is_color && apply_flip && source.flip_green_channel) {
+    sampled[1] = 1.0f - sampled[1];
+  }
+
   if (is_color) {
     r_rgb = float3(sampled[0], sampled[1], sampled[2]);
   }

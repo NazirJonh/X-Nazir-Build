@@ -2369,6 +2369,25 @@ def _draw_mask_alpha_pair(layout, channel):
     row.template_material_paint_value_slider(channel, "value_secondary", index=0)
 
 
+def draw_mask_alpha_swatches(layout, context, brush):
+    """Header stand-in for the color swatches while the Mask takes its value from the Alpha pair.
+
+    Each button opens a grayscale popup instead of a color picker. Returns ``False`` when the
+    regular color swatches apply.
+    """
+    channel = _mask_alpha_channel(context, brush)
+    if channel is None:
+        return False
+    row = layout.row(align=True)
+    row.ui_units_x = 4
+    row.template_material_paint_value_swatch(
+        channel, "value", index=0, panel="PAINT_PT_material_mask_value_primary")
+    row.template_material_paint_value_swatch(
+        channel, "value_secondary", panel="PAINT_PT_material_mask_value_secondary")
+    row.separator()
+    return True
+
+
 def draw_material_paint_channels(
         context, layout, brush, paint, paint_mode, *, show_custom):
     """Draw Material / Material Paint channel enable + value rows.
@@ -2463,10 +2482,8 @@ def draw_material_paint_channels(
                 tex_col, brush, context.sculpt_object, default_closed=True,
             )
     # The Mask reads this value from the brush, so the choice only matters while painting a mask.
-    if paint_mode is not None and paint_mode.layer_target_mode == 'MASK':
-        mask_alpha = _mask_alpha_channel(context, brush)
-        if mask_alpha is not None:
-            _draw_mask_alpha_pair(layout, mask_alpha)
+    is_mask_target = paint_mode is not None and paint_mode.layer_target_mode == 'MASK'
+    if is_mask_target:
         layout.prop(material_paint, "mask_source")
     layout.separator()
 
@@ -2475,6 +2492,13 @@ def draw_material_paint_channels(
     # `show_custom` is only passed True for the PAINT_CANVAS_SOURCE_MATERIAL_PAINT (vertex color)
     # canvas, so it also selects the vertex-storable channel subset here.
     channel_ids = _MATERIAL_PAINT_CHANNEL_UI_ORDER
+    if is_mask_target:
+        # A Mask stroke reads one channel at most (see #BrushMaterialPaint.mask_source), the
+        # others would only suggest that their values reach the mask.
+        channel_ids = {
+            'ALPHA': ['ALPHA'],
+            'BASE_COLOR': ['BASE_COLOR'],
+        }.get(material_paint.mask_source, [])
     if show_custom:
         channel_ids = [
             channel_id for channel_id in channel_ids if channel_id in _MATERIAL_PAINT_VERTEX_CHANNELS
@@ -2578,7 +2602,15 @@ def draw_material_paint_channels(
     for channel_id in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'AO', 'ALPHA',
                        'NORMAL', 'EMISSION', 'SPECULAR'):
         channel = channels[channel_id]
-        if not (channel.use and channel_id in visible):
+        if is_mask_target:
+            # Only the channel the Mask reads; the default Mask brush owns the Alpha pair without
+            # enabling the channel (see #BKE_paint_material_mask_alpha_active).
+            if channel_id not in channel_ids:
+                continue
+            if not (channel.use or (channel_id == 'ALPHA' and
+                                    _mask_alpha_channel(context, brush) is not None)):
+                continue
+        elif not (channel.use and channel_id in visible):
             continue
         # Normal, Emission and Height are texture-map-only channels: a vertex canvas has no
         # per-vertex storage for them, so skip them for Material Paint. Their `use`/visibility bits
@@ -3238,13 +3270,14 @@ def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
     draw_image_paint_fill_expand(layout, brush)
 
     if capabilities.has_color:
-        material_paint = brush.material_paint
-        row = layout.row(align=True)
-        row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
-        row.ui_units_x = 4
-        UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
-        UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
-        row.separator()
+        if not draw_mask_alpha_swatches(layout, context, brush):
+            material_paint = brush.material_paint
+            row = layout.row(align=True)
+            row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
+            row.ui_units_x = 4
+            UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
+            UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
+            row.separator()
         layout.prop(brush, "blend", text="" if compact else iface_("Blend"), translate=False)
 
     UnifiedPaintPanel.prop_unified(
@@ -3562,8 +3595,34 @@ class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
         )
 
 
+class _MaterialMaskValuePopover:
+    # Not a registered type itself: subclassing a registered Panel would unregister its `draw`.
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        brush = UnifiedPaintPanel.paint_settings(context).brush
+        channel = _mask_alpha_channel(context, brush)
+        if channel is None:
+            return
+        self.layout.template_material_paint_value_slider(channel, self._prop_name, index=0)
+
+
+class PAINT_PT_material_mask_value_primary(_MaterialMaskValuePopover, bpy.types.Panel):
+    bl_label = "Mask Value"
+    _prop_name = "value"
+
+
+class PAINT_PT_material_mask_value_secondary(_MaterialMaskValuePopover, bpy.types.Panel):
+    bl_label = "Mask Secondary Value"
+    _prop_name = "value_secondary"
+
+
 classes = (
     PAINT_GT_mp_source,
+    PAINT_PT_material_mask_value_primary,
+    PAINT_PT_material_mask_value_secondary,
     PAINT_MT_material_paint_channel_socket,
     PAINT_MT_material_layer_channel_socket,
     PAINT_MT_material_paint_brush_sync,

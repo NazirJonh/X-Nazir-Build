@@ -3235,6 +3235,17 @@ void template_material_paint_value_slider(Layout *layout,
                                           StringRefNull propname,
                                           int index);
 /**
+ * Swatch showing the gradient color of float property  propname at  index, opening the
+ * popover panel  panel_type on click (where the value is edited, e.g. with
+ * #template_material_paint_value_slider).
+ */
+void template_material_paint_value_swatch(Layout *layout,
+                                          bContext *C,
+                                          PointerRNA *ptr,
+                                          StringRefNull propname,
+                                          int index,
+                                          StringRefNull panel_type);
+/**
  * \param icon_scale: Scale of the icon, 1x == button height.
  */
 void template_icon(Layout *layout, int icon_value, float icon_scale);

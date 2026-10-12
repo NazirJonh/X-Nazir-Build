@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -455,7 +456,9 @@ static bool paint_2d_mask_luminance(const BrushPainter *painter)
  */
 static bool paint_2d_material_channel_replaces_rgb(const BrushPainter *painter)
 {
-  return painter->use_material_channel_color &&
+  /* A Mask source texture scales the dab's coverage instead (see #BrushPainter.material_mask_source),
+   * so the brush color stays the written value. */
+  return painter->use_material_channel_color && !painter->material_mask_source &&
          paint_2d_channel_source_usable_2d(painter, painter->material_channel);
 }
 
@@ -739,6 +742,10 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
 
   const eMaterialPaintChannel channel = painter->material_channel;
   const bool channel_usable = paint_2d_channel_source_usable_2d(painter, channel);
+  /* A Mask source texture is the dab's coverage and leaves the written value to the brush, so
+   * earlier strokes survive where the texture is black. */
+  const bool mask_coverage = channel_usable && painter->material_mask_source;
+  const bool color_override = channel_usable && !mask_coverage;
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   /* A luminance mask is sampled decoded and written as grey, so it takes the scalar route. */
   const bool mask_luminance = paint_2d_mask_luminance(painter);
@@ -776,7 +783,11 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
                 0.0f,
                 1.0f);
           }
-          if (is_color) {
+          if (mask_coverage) {
+            coverage *= math::clamp(intensity, 0.0f, 1.0f);
+            colors[i] = float3(brush_rgb[0], brush_rgb[1], brush_rgb[2]);
+          }
+          else if (is_color) {
             colors[i] = float3(sampled[0], sampled[1], sampled[2]);
           }
           else {
@@ -806,7 +817,7 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
     }
   });
 
-  if (channel_usable) {
+  if (color_override) {
     const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
         painter->channel_sources->source(channel);
     const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
@@ -904,6 +915,12 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
           BKE_paint_material_mask_luminance(float3(sampled[0], sampled[1], sampled[2])),
           0.0f,
           1.0f);
+    }
+    if (painter->material_mask_source) {
+      /* Coverage, not value: the brush color already in  rgba is what gets written. */
+      rgba[3] = coverage * math::clamp(intensity, 0.0f, 1.0f);
+      /* Alpha masking is off for a Mask stroke, so nothing else scales the coverage. */
+      return;
     }
     const bool is_normal = painter->material_channel == PAINT_MATERIAL_CHANNEL_NORMAL;
     const bool is_color = !mask_luminance && ELEM(painter->material_channel,
@@ -3339,6 +3356,40 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
         const int idx = int(pixel.ly) * stride + int(pixel.lx);
         paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
         triangle_mask[idx] = strength;
+      }
+    });
+  }
+  else if (painter->material_mask_source) {
+    /* The source texture is the coverage of a Mask dab; the written value stays the brush's. */
+    float3 rgb(painter->material_channel_color[0],
+               painter->material_channel_color[1],
+               painter->material_channel_color[2]);
+    paint_2d_area_encode_canvas_rgb(cache, false, rgb);
+    threading::parallel_for(cov.pixels.index_range(), 1024, [&](const IndexRange range) {
+      const int thread = BLI_task_parallel_thread_id(nullptr);
+      for (const int64_t i : range) {
+        const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
+        const ushort strength = pixel_strength(pixel);
+        if (strength == 0) {
+          continue;
+        }
+        float3 sampled;
+        paint_2d_area_sample_channel_color(painter,
+                                           cache,
+                                           channel,
+                                           channel_local_mat,
+                                           pixel.sample_position,
+                                           pixel.uv,
+                                           thread,
+                                           pool,
+                                           paint_mode,
+                                           true,
+                                           false,
+                                           true,
+                                           sampled);
+        const int idx = int(pixel.ly) * stride + int(pixel.lx);
+        paint_2d_area_plane_write_rgb(float_data, byte_data, idx, rgb);
+        triangle_mask[idx] = ushort(float(strength) * math::clamp(sampled.x, 0.0f, 1.0f));
       }
     });
   }

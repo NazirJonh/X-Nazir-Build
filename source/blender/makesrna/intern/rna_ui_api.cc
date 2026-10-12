@@ -2951,6 +2951,19 @@ void RNA_api_ui_layout(StructRNA *srna)
   RNA_def_int(
       func, "index", 0, 0, INT_MAX, "Index", "Array index for the float property", 0, INT_MAX);
 
+  func = RNA_def_function(
+      srna, "template_material_paint_value_swatch", "template_material_paint_value_swatch");
+  RNA_def_function_ui_description(
+      func,
+      "Swatch showing a material paint scalar value in its gradient color, opening a popover "
+      "panel to edit it");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  api_ui_item_rna_common(func);
+  RNA_def_int(
+      func, "index", 0, 0, INT_MAX, "Index", "Array index for the float property", 0, INT_MAX);
+  parm = RNA_def_string(func, "panel", nullptr, 0, "", "Identifier of the popover panel");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
   func = RNA_def_function(srna, "template_icon", "template_icon");
   RNA_def_function_ui_description(func, "Display a large icon");
   parm = RNA_def_int(func, "icon_value", 0, 0, INT_MAX, "Icon to display", "", 0, INT_MAX);

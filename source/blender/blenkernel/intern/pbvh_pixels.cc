@@ -23,7 +23,6 @@
 #include "BKE_image_wrappers.hh"
 #include "BKE_paint.hh"
 
-#include "BKE_paint_material_channel_perf_debug.hh"
 
 #include "PRF_profile.hh"
 
@@ -489,10 +488,6 @@ static bool update_pixels(const Depsgraph &depsgraph,
     return false;
   }
 
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  blender::bke::paint_material_channel_perf::set_build_pixels_leaf_nodes_updated(
-      nodes_to_update.size());
-#endif
 
   const Mesh &mesh = *id_cast<const Mesh *>(object.data);
   if (uv_map_name.is_empty()) {
@@ -526,29 +521,18 @@ static bool update_pixels(const Depsgraph &depsgraph,
     BKE_image_release_ibuf(&image, tile_buffer, nullptr);
   }
 
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  {
-    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsUvIslands);
-#endif
     uv_masks.add(mesh_data, islands);
     uv_masks.dilate(image.seam_margin);
 
     islands.extract_borders();
     islands.extend_borders(mesh_data, uv_masks);
     update_geom_primitives(pbvh, mesh_data);
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  }
-#endif
 
   UVPrimitiveLookup uv_primitive_lookup(mesh_data.corner_tris.size(), islands);
 
   MutableSpan<MeshNode> nodes = pbvh.nodes<MeshNode>();
   MutableSpan<PixelNode> pixel_nodes = pbvh.pixels_->nodes;
 
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  {
-    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsEncode);
-#endif
     nodes_to_update.foreach_index(
         [&](const int i) {
           do_encode_pixels(mesh_data,
@@ -560,22 +544,12 @@ static bool update_pixels(const Depsgraph &depsgraph,
                            pixel_nodes[i]);
         },
         exec_mode::grain_size(1));
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  }
-#endif
   if (USE_WATERTIGHT_CHECK) {
     apply_watertight_check(pbvh, image, image_user);
   }
 
   /* Add solution for non-manifold parts of the model. */
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  {
-    PAINT_CHANNEL_PERF_SCOPE(BuildPixelsCopyUpdate);
-#endif
     copy_update(pbvh, image, image_user, mesh_data);
-#if PAINT_MATERIAL_CHANNEL_PERF_DEBUG
-  }
-#endif
 
   /* Rebuild the undo regions. */
   nodes_to_update.foreach_index([&](const int i) { pixel_nodes[i].rebuild_undo_regions(); });

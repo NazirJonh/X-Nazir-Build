@@ -12,15 +12,7 @@
 #include <cstdio>
 #include <cstring>
 
-#ifndef IMAGE_SELECT_DEBUG
-#  define IMAGE_SELECT_DEBUG 0
-#endif
-#if IMAGE_SELECT_DEBUG
-#  define IMG_SEL_DBG_PAINT(fmt, ...) \
-    printf("[image_select] %s:%d: " fmt "\n", __func__, __LINE__, ##__VA_ARGS__)
-#else
 #  define IMG_SEL_DBG_PAINT(fmt, ...) ((void)0)
-#endif
 
 #include "MEM_guardedalloc.h"
 
@@ -57,9 +49,6 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
-
-/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
-#include "paint_debug.hh"
 
 #include "NOD_texture.h"
 
@@ -162,15 +151,7 @@ void ED_imapaint_dirty_region(
 void imapaint_image_update(
     SpaceImage *sima, Image *image, ImBuf *ibuf, ImageUser *iuser, short texpaint)
 {
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-  const double perf_start = BLI_time_now_seconds();
-#endif
   if (BLI_rcti_is_empty(&imapaintpartial.dirty_region)) {
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-    printf("[PBR-PERF] image_update image=%s skipped_empty elapsed=%.3f ms\n",
-           image ? image->id.name + 2 : "<null>",
-           (BLI_time_now_seconds() - perf_start) * 1000.0);
-#endif
     return;
   }
 
@@ -196,13 +177,6 @@ void imapaint_image_update(
     /* Testing with partial update in uv editor too. */
     BKE_image_update_gputexture(
         image, iuser, imapaintpartial.dirty_region.xmin, imapaintpartial.dirty_region.ymin, w, h);
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-    printf("[PBR-PERF] image_update image=%s gpu_update=%dx%d elapsed=%.3f ms\n",
-           image ? image->id.name + 2 : "<null>",
-           w,
-           h,
-           (BLI_time_now_seconds() - perf_start) * 1000.0);
-#endif
   }
   else {
     /* No GPU upload on this path, but the *record* of what changed must be written all the same.
@@ -213,13 +187,6 @@ void imapaint_image_update(
     if (tile != nullptr && ibuf != nullptr) {
       BKE_image_partial_update_mark_region(image, tile, ibuf, &imapaintpartial.dirty_region);
     }
-#if PBR_PAINT_IMAGE_UPDATE_PROFILE
-    printf("[PBR-PERF] image_update image=%s no_gpu_path texpaint=%d locked=%d elapsed=%.3f ms\n",
-           image ? image->id.name + 2 : "<null>",
-           int(texpaint),
-           sima ? int(sima->lock) : 0,
-           (BLI_time_now_seconds() - perf_start) * 1000.0);
-#endif
   }
 }
 

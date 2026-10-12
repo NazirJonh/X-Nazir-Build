@@ -17,7 +17,6 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
-#include "BKE_paint_material_channel_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -40,26 +39,6 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_material_bake.hh"
-
-/**
- * Diagnostic tracing of the gather, one line per channel, so a single run shows which source every
- * channel resolved to and why. Set to 1 for a debugging session, then back to 0.
- *
- * A switch of its own rather than #PBR_PAINT_BAKE_DEBUG, for the same reason
- * #PBR_MATERIAL_BAKE_DEBUG has one: `editors/sculpt_paint/mesh/paint_debug.hh` belongs to another
- * module and this file cannot reach it.
- */
-#define PBR_COMBINED_GATHER_DEBUG 0
-#if PBR_COMBINED_GATHER_DEBUG
-#  include <cstdio>
-#  define PBR_COMBINED_LOG(...) \
-    do { \
-      printf("[PBR-COMBINED] " __VA_ARGS__); \
-      fflush(stdout); \
-    } while (0)
-#else
-#  define PBR_COMBINED_LOG(...) ((void)0)
-#endif
 
 namespace blender::ed::material_combined {
 
@@ -320,7 +299,6 @@ ImBuf *combined_preview_ensure(Main &bmain,
                                rcti *r_changed_region,
                                CombinedEvalStats *r_stats)
 {
-  PAINT_CHANNEL_PERF_COMBINED_SCOPE(Gather);
   if (r_revision != nullptr) {
     *r_revision = 0;
   }
@@ -386,30 +364,8 @@ ImBuf *combined_preview_ensure(Main &bmain,
       }
     }
   }
-#if PBR_COMBINED_GATHER_DEBUG
-  PBR_COMBINED_LOG("gather: mat='%s' canvas=%dx%d emission_strength=%.3f\n",
-                   ma.id.name + 2,
-                   width,
-                   height,
-                   combined_emission_strength(ma));
-  for (const int channel_index : IndexRange(int64_t(combined_shading_channels.size()))) {
-    const eMaterialPaintChannel channel = combined_shading_channels[channel_index];
-    /* Reported from the single derivation above rather than re-walked, so enabling this switch
-     * does not itself change what it is measuring. */
-    PBR_COMBINED_LOG("  ch=%d resolve=%d reason=%d stack=%d layers=%d image=%s\n",
-                     int(channel),
-                     int(resolve.channels[int(channel)]),
-                     int(resolve.reasons[int(channel)]),
-                     int(has_stack[channel_index]),
-                     int(stacks[channel_index].size()),
-                     resolve.images[int(channel)].image != nullptr ?
-                         resolve.images[int(channel)].image->id.name + 2 :
-                         "-");
-  }
-#endif
 
   if (width <= 0 || height <= 0) {
-    PBR_COMBINED_LOG("gather: no canvas size resolved, falling back to the plain image\n");
     return nullptr;
   }
 
@@ -499,7 +455,6 @@ ImBuf *combined_preview_ensure(Main &bmain,
       rcti channel_changed;
       ImBuf *composite = nullptr;
       {
-        PAINT_CHANNEL_PERF_COMBINED_SCOPE(CompositeRefresh);
         composite = BKE_paint_material_composite_cache_ensure(
             ma, channel, layers, stack_hash, nullptr, nullptr, &channel_changed);
       }
@@ -580,17 +535,6 @@ ImBuf *combined_preview_ensure(Main &bmain,
     inputs_hash = get_default_hash(
         inputs_hash, int(channel), int(source), source_detail, input.constant, int(input.is_srgb));
 
-    PBR_COMBINED_LOG("  ch=%d source=%d ibuf=%p %dx%d srgb=%d const=(%.3f %.3f %.3f %.3f)\n",
-                     int(channel),
-                     int(source),
-                     (const void *)input.ibuf,
-                     input.ibuf != nullptr ? input.ibuf->x : 0,
-                     input.ibuf != nullptr ? input.ibuf->y : 0,
-                     int(input.is_srgb),
-                     input.constant.x,
-                     input.constant.y,
-                     input.constant.z,
-                     input.constant.w);
   }
 
   /* Both rectangles arrive in canvas texels and the cache works in output pixels. Rounded
@@ -627,10 +571,6 @@ ImBuf *combined_preview_ensure(Main &bmain,
   ImBuf *result = BKE_paint_material_combined_cache_ensure(
       ma, inputs, lighting, cache_request, r_revision, r_changed_region, &stats);
   /* The output resolution, not the canvas: it is what the numbers have to be read against. */
-  PAINT_CHANNEL_PERF_COMBINED_SET_EVAL(
-      stats.elapsed_seconds, stats.pixels_processed, output_width, output_height);
-  PAINT_CHANNEL_PERF_COMBINED_SET_CLIP(BLI_rcti_size_x(&cache_request.clip),
-                                       BLI_rcti_size_y(&cache_request.clip));
   if (r_stats != nullptr) {
     *r_stats = stats;
   }

@@ -77,26 +77,6 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-/**
- * Diagnostic tracing of the bake, one line per stage boundary, so a single run shows which stage
- * failed. Set to 1 for a debugging session, then back to 0.
- *
- * The consuming side has a switch of its own, #PBR_PAINT_BAKE_DEBUG in
- * `editors/sculpt_paint/mesh/paint_debug.hh`: that is a different module and this file cannot
- * reach its header, so the two halves are enabled independently.
- */
-#define PBR_MATERIAL_BAKE_DEBUG 0
-#if PBR_MATERIAL_BAKE_DEBUG
-#  include <cstdio>
-#  define PBR_BAKE_LOG(...) \
-    do { \
-      printf("[PBR-BAKE] " __VA_ARGS__); \
-      fflush(stdout); \
-    } while (0)
-#else
-#  define PBR_BAKE_LOG(...) ((void)0)
-#endif
-
 namespace blender::ed::material_bake {
 
 /* -------------------------------------------------------------------- */
@@ -294,7 +274,6 @@ std::shared_ptr<const MaterialSourceBake> material_source_bake_get(const Materia
    * pixels for a moment beat a stroke that does nothing. */
   for (auto item : g_bake_cache.items()) {
     if (item.key.material_session_uid == key.material_session_uid) {
-      PBR_BAKE_LOG("get: res=%d not cached yet, serving res=%d\n", resolution, item.key.resolution);
       item.value.last_used_serial = ++g_bake_use_serial;
       return item.value.bake;
     }
@@ -446,9 +425,6 @@ static bool route_socket_to_root(Main &bmain,
      * linked up regardless, producing links that cross trees; #node_add_link only asserts on
      * that, so a release build would go on to bake from a silently malformed graph. */
     if (!group_tree->all_nodes().contains(current_node)) {
-      PBR_BAKE_LOG("route: '%s' path level %d does not contain the current node\n",
-                   route_name.c_str(),
-                   group_index);
       return false;
     }
     bNode *group_output = group_tree->group_output_node();
@@ -488,8 +464,6 @@ static bool route_socket_to_root(Main &bmain,
 
   root_tree.ensure_topology_cache();
   if (!root_tree.all_nodes().contains(current_node)) {
-    PBR_BAKE_LOG("route: '%s' did not reach the root tree; path is shorter than the nesting\n",
-                 route_name.c_str());
     return false;
   }
   bke::node_add_link(root_tree, *current_node, *current_socket, dest_node, dest_socket);
@@ -632,7 +606,6 @@ static bool bake_requests_attach(Main &bmain,
                                        bke::node_find_socket(*encode, SOCK_OUT, "Vector"_ustr) :
                                        nullptr;
       if (encode_input == nullptr || encode_output == nullptr) {
-        PBR_BAKE_LOG("prepare: AOV='%s' vector encode node failed\n", request.name);
         return false;
       }
       bke::node_add_link(tree, *encode, *encode_output, *aov, *aov_input);
@@ -648,13 +621,8 @@ static bool bake_requests_attach(Main &bmain,
                               *route_dest_socket,
                               request.name))
     {
-      PBR_BAKE_LOG("prepare: AOV='%s' routing to root tree failed\n", request.name);
       return false;
     }
-    PBR_BAKE_LOG("prepare: AOV='%s' is_color=%d encode_vector=%d routed ok\n",
-                 request.name,
-                 int(request.is_color),
-                 int(request.encode_vector));
   }
   return true;
 }
@@ -728,22 +696,9 @@ static bool bake_requests_render(Main &bmain,
                                   static_cast<RenderLayer *>(render_result->layers.first) :
                                   nullptr;
   if (render_layer == nullptr) {
-    PBR_BAKE_LOG("render: no render layer (result=%p)\n", (void *)render_result);
     success = false;
   }
   else {
-#if PBR_MATERIAL_BAKE_DEBUG
-    PBR_BAKE_LOG("render: layer='%s' passes present:\n", render_layer->name);
-    for (const RenderPass &pass : render_layer->passes) {
-      PBR_BAKE_LOG("  pass='%s' view='%s' channels=%d ibuf=%p %dx%d\n",
-                   pass.name,
-                   pass.view,
-                   pass.channels,
-                   (void *)pass.ibuf,
-                   pass.ibuf != nullptr ? pass.ibuf->x : 0,
-                   pass.ibuf != nullptr ? pass.ibuf->y : 0);
-    }
-#endif
     for (const int request_index : requests.index_range()) {
       const BakeSocketRequest &request = requests[request_index];
       const RenderPass *pass = RE_pass_find_by_name(render_layer, request.name, "");
@@ -751,16 +706,6 @@ static bool bake_requests_render(Main &bmain,
           !ELEM(pass->channels, 1, 4) || pass->ibuf->x != resolution ||
           pass->ibuf->y != resolution)
       {
-        PBR_BAKE_LOG(
-            "render: AOV='%s' unusable (pass=%p ibuf=%p float=%p channels=%d size=%dx%d want=%d)\n",
-            request.name,
-            (void *)pass,
-            pass != nullptr ? (void *)pass->ibuf : nullptr,
-            (pass != nullptr && pass->ibuf != nullptr) ? (void *)pass->ibuf->float_data() : nullptr,
-            pass != nullptr ? pass->channels : -1,
-            (pass != nullptr && pass->ibuf != nullptr) ? pass->ibuf->x : 0,
-            (pass != nullptr && pass->ibuf != nullptr) ? pass->ibuf->y : 0,
-            resolution);
         success = false;
         break;
       }
@@ -903,7 +848,6 @@ static bool bake_channel_requests_build(const Material &bake_material,
   const bNode *principled = BKE_paint_material_principled_find(
       bake_material, reason, &principled_group_path);
   if (principled == nullptr) {
-    PBR_BAKE_LOG("prepare: no Principled, reason=%d\n", int(reason));
     return false;
   }
 
@@ -913,7 +857,6 @@ static bool bake_channel_requests_build(const Material &bake_material,
     }
     const MaterialPaintChannelInfo &info = BKE_paint_material_channels()[channel];
     if (info.socket_name == nullptr) {
-      PBR_BAKE_LOG("prepare: channel=%d has no socket_name\n", channel);
       return false;
     }
     BakeSocketRequest request;
@@ -921,9 +864,6 @@ static bool bake_channel_requests_build(const Material &bake_material,
     request.source = channel_bake_source_socket(
         *principled, info, request.encode_vector, channel_group_path);
     if (request.source == nullptr) {
-      PBR_BAKE_LOG("prepare: channel=%d socket='%s' has no resolvable source\n",
-                   channel,
-                   info.socket_name);
       return false;
     }
     /* Root tree -> Principled's tree -> the source's tree. Both stretches are needed: routing only
@@ -933,12 +873,6 @@ static bool bake_channel_requests_build(const Material &bake_material,
     /* Normal is packed RGB, so it travels as a color AOV even though it is not a color. */
     request.is_color = info.is_color || info.channel == PAINT_MATERIAL_CHANNEL_NORMAL;
     SNPRINTF(request.name, "__PBR_PAINT_BAKE_%d", channel);
-    PBR_BAKE_LOG("prepare: channel=%d socket='%s' source node='%s' sock='%s' tree='%s'\n",
-                 channel,
-                 info.socket_name,
-                 request.source->owner_node().name,
-                 request.source->name,
-                 request.source->owner_tree().id.name + 2);
 
     r_requests.append(request);
     r_request_channels.append(channel);
@@ -1021,19 +955,6 @@ static void material_bake_startjob(void *customdata, wmJobWorkerStatus *worker_s
   for (const ChannelResolution channel_resolution : resolve.channels) {
     any_baked |= channel_resolution == ChannelResolution::Baked;
   }
-#if PBR_MATERIAL_BAKE_DEBUG
-  PBR_BAKE_LOG("job: start res=%d any_baked=%d uid=%u hash=%llu\n",
-               job.resolution,
-               int(any_baked),
-               job.key.material_session_uid,
-               (unsigned long long)job.key.node_tree_state_hash);
-  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    PBR_BAKE_LOG("job: resolve channel=%d resolution=%d reason=%d\n",
-                 i,
-                 int(resolve.channels[i]),
-                 int(resolve.reasons[i]));
-  }
-#endif
 
   std::array<ImBuf *, PAINT_MATERIAL_CHANNEL_NUM> images{};
   if (any_baked) {
@@ -1047,7 +968,6 @@ static void material_bake_startjob(void *customdata, wmJobWorkerStatus *worker_s
      * stop when a newer bake supersedes this one, which happens while the user is still dragging
      * Bake Size or picking a material, and the superseded render is then pure waste. */
     if (baked && worker_status != nullptr && worker_status->stop) {
-      PBR_BAKE_LOG("job: superseded before render, dropping\n");
       BKE_main_free(bake_main);
       return;
     }
@@ -1062,7 +982,6 @@ static void material_bake_startjob(void *customdata, wmJobWorkerStatus *worker_s
         images[request_channels[request_index]] = request_images[request_index];
       }
     }
-    PBR_BAKE_LOG("job: baked=%d channels=%d\n", int(baked), int(requests.size()));
     if (!baked) {
       /* Constant channels stay usable: a failure to render the graph says nothing about inputs
        * that were never linked in the first place. */
@@ -1147,11 +1066,6 @@ static void material_source_bake_ensure_impl(wmWindowManager &wm,
       return;
     }
   }
-  PBR_BAKE_LOG("ensure: starting job for '%s' uid=%u hash=%llu res=%d\n",
-               ma.id.name + 2,
-               key.material_session_uid,
-               (unsigned long long)key.node_tree_state_hash,
-               resolution);
 
   wmJob *wm_job = WM_jobs_get(&wm,
                               win,

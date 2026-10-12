@@ -93,12 +93,6 @@
 #include "paint_curve_intern.hh"
 #include "paint_intern.hh"
 
-/* Toggle all PBR debug logging via PBR_PAINT_DEBUG_LOG in paint_debug.hh. */
-#include "mesh/paint_debug.hh"
-#if PBR_PAINT_CURSOR_DEBUG
-#  include <cstdio>
-#endif
-
 namespace blender {
 
 /* TODOs:
@@ -172,31 +166,6 @@ static bool paint_draw_tex_overlay_3d(
     bool primary,
     const MTex *mtex_override,
     const ed::material_bake::MaterialSourcePreview *material_source);
-
-/* Diagnostic tracing of the Source Mode: Material overlay gates. Off unless
- * #PBR_PAINT_CURSOR_DEBUG is enabled in `mesh/paint_debug.hh`. */
-#if PBR_PAINT_CURSOR_DEBUG
-/** Prints only when \a state differs from the previous call at this \a slot. */
-static bool pbr_cursor_state_changed(const int slot, const uint64_t state)
-{
-  static uint64_t previous[8] = {};
-  BLI_assert(slot < 8);
-  if (previous[slot] == state) {
-    return false;
-  }
-  previous[slot] = state;
-  return true;
-}
-#  define PBR_CURSOR_LOG(slot, state, ...) \
-    do { \
-      if (pbr_cursor_state_changed(slot, uint64_t(state))) { \
-        printf("[PBR-CURSOR] " __VA_ARGS__); \
-        fflush(stdout); \
-      } \
-    } while (0)
-#else
-#  define PBR_CURSOR_LOG(slot, state, ...) ((void)0)
-#endif
 
 static bool paint_overlay_alpha_mask_mtex(const Paint *paint,
                                           const Brush *br,
@@ -970,18 +939,6 @@ static bool paint_draw_tex_overlay(Paint *paint,
                                        MTEX_MAP_MODE_VIEW,
                                        MTEX_MAP_MODE_TILED));
   if (mtex_override != nullptr) {
-    PBR_CURSOR_LOG(3,
-                   uint64_t(has_pixels) | uint64_t(map_mode_drawable) << 1 |
-                       uint64_t(valid) << 2 |
-                       uint64_t(uint16_t(mtex->brush_map_mode)) << 8 | uint64_t(mode) << 24,
-                   "draw: mode=%d map_mode=%d valid=%d has_pixels=%d drawable=%d "
-                   "material_source=%p\n",
-                   int(mode),
-                   int(mtex->brush_map_mode),
-                   int(valid),
-                   int(has_pixels),
-                   int(map_mode_drawable),
-                   (const void *)material_source);
   }
   if (!has_pixels || !map_mode_drawable) {
     return false;
@@ -1334,15 +1291,6 @@ static bool paint_cursor_context_init(bContext *C,
       ((pcontext.mode == PaintMode::Sculpt &&
         pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) ||
        pcontext.mode == PaintMode::Texture2D);
-  PBR_CURSOR_LOG(4,
-                 uint64_t(try_material_preview) | uint64_t(pcontext.mode) << 8 |
-                     uint64_t(pcontext.brush->sculpt_brush_type) << 16 |
-                     uint64_t(pcontext.brush->material_paint != nullptr) << 32,
-                 "gate: mode=%d material_paint=%p sculpt_brush_type=%d try_preview=%d\n",
-                 int(pcontext.mode),
-                 (const void *)pcontext.brush->material_paint,
-                 int(pcontext.brush->sculpt_brush_type),
-                 int(try_material_preview));
   if (try_material_preview) {
     const PaintModeSettings &paint_mode_settings = CTX_data_tool_settings(C)->paint_mode;
     /* Preview the channel sources only on the canvases whose strokes actually paint them: the
@@ -1353,15 +1301,6 @@ static bool paint_cursor_context_init(bContext *C,
                                ELEM(paint_mode_settings.canvas_source,
                                     PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
                                     PAINT_CANVAS_SOURCE_MATERIAL);
-    PBR_CURSOR_LOG(5,
-                   uint64_t(canvas_ok) | uint64_t(paint_mode_settings.canvas_source) << 8 |
-                       uint64_t(pcontext.mode) << 16 |
-                       uint64_t(pcontext.paint->visible_material_channels) << 24,
-                   "canvas: mode=%d canvas_source=%d canvas_ok=%d visible_channels=0x%x\n",
-                   int(pcontext.mode),
-                   int(paint_mode_settings.canvas_source),
-                   int(canvas_ok),
-                   uint32_t(pcontext.paint->visible_material_channels));
     if (canvas_ok) {
       const int visible_channels = pcontext.paint != nullptr ?
                                        pcontext.paint->visible_material_channels :
@@ -1404,23 +1343,6 @@ static bool paint_cursor_context_init(bContext *C,
           pcontext.mode != PaintMode::Texture2D &&
           pcontext.material_preview_mtex_storage.brush_map_mode == MTEX_MAP_MODE_VIEW &&
           !pcontext.paint->runtime->draw_anchored;
-      PBR_CURSOR_LOG(2,
-                     uint64_t(has_preview) | uint64_t(hide_idle_view_in_sculpt) << 1 |
-                         uint64_t(hide_for_active_tiled_stroke) << 2 |
-                         uint64_t(uint16_t(
-                             pcontext.material_preview_mtex_storage.brush_map_mode))
-                             << 8 |
-                         uint64_t(pcontext.mode) << 24 |
-                         uint64_t(pcontext.material_preview_source.usable) << 32,
-                     "init: mode=%d source_mode=%d has_preview=%d map_mode=%d "
-                     "hide_idle_view=%d hide_tiled=%d source_usable=%d\n",
-                     int(pcontext.mode),
-                     int(pcontext.brush->material_paint->source_mode),
-                     int(has_preview),
-                     int(pcontext.material_preview_mtex_storage.brush_map_mode),
-                     int(hide_idle_view_in_sculpt),
-                     int(hide_for_active_tiled_stroke),
-                     int(pcontext.material_preview_source.usable));
       if (has_preview && !hide_idle_view_in_sculpt && !hide_for_active_tiled_stroke) {
         pcontext.material_preview_mtex = &pcontext.material_preview_mtex_storage;
       }

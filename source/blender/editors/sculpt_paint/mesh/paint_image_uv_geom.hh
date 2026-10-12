@@ -217,9 +217,32 @@ inline void foreach_uv_polygon_pixel(const Span<float2> px_verts,
                     0,
                     reinterpret_cast<uint(*)[3]>(tris.data()));
 
+  /* A center on a triangulation diagonal is interior to the face: only the polygon's own edges
+   * make a center non-strict. */
+  const auto face_fn = [&](const int x, const int y, const bool tri_strict) {
+    if (tri_strict) {
+      return fn(x, y, true);
+    }
+    const float fx = float(x) + 0.5f;
+    const float fy = float(y) + 0.5f;
+    bool on_edge = false;
+    for (const int i : IndexRange(verts_num)) {
+      const float2 &a = px_verts[i];
+      const float2 &b = px_verts[(i + 1) % verts_num];
+      const float cross = (fx - a.x) * (b.y - a.y) - (fy - a.y) * (b.x - a.x);
+      if (cross == 0.0f && fx >= std::min(a.x, b.x) && fx <= std::max(a.x, b.x) &&
+          fy >= std::min(a.y, b.y) && fy <= std::max(a.y, b.y))
+      {
+        on_edge = true;
+        break;
+      }
+    }
+    return fn(x, y, !on_edge);
+  };
+
   for (const uint3 &tri : tris) {
     if (!foreach_triangle_pixel(
-            px_verts[tri[0]], px_verts[tri[1]], px_verts[tri[2]], width, height, fn))
+            px_verts[tri[0]], px_verts[tri[1]], px_verts[tri[2]], width, height, face_fn))
     {
       return;
     }

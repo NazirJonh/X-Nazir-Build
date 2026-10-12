@@ -8,6 +8,8 @@
 
 #include "paint_image_uv_geom.hh"
 
+#include <algorithm>
+
 #include "BLI_array.hh"
 #include "BLI_assert.h"
 #include "BLI_math_color.h"
@@ -46,31 +48,51 @@ bool image_paint_uv_poly_contains_point(Span<float2> uv_poly,
     const float w0 = edge_fn(p1, p2, uv.x, uv.y);
     const float w1 = edge_fn(p2, p0, uv.x, uv.y);
     const float w2 = edge_fn(p0, p1, uv.x, uv.y);
-    if (include_boundary) {
-      const bool has_neg = (w0 < 0.0f) || (w1 < 0.0f) || (w2 < 0.0f);
-      const bool has_pos = (w0 > 0.0f) || (w1 > 0.0f) || (w2 > 0.0f);
-      return has_neg != has_pos;
-    }
-    /* Strict interior: exclude the edge so a shared UV fold can still be filled. */
-    return (w0 > 0.0f && w1 > 0.0f && w2 > 0.0f) || (w0 < 0.0f && w1 < 0.0f && w2 < 0.0f);
+    /* Always boundary-inclusive: the strict test below needs the polygon's edges, not the
+     * triangulation's, so a point on a triangulation diagonal must still count as inside. */
+    const bool has_neg = (w0 < 0.0f) || (w1 < 0.0f) || (w2 < 0.0f);
+    const bool has_pos = (w0 > 0.0f) || (w1 > 0.0f) || (w2 > 0.0f);
+    return has_neg != has_pos;
   };
 
-  if (verts_num == 3) {
-    return point_in_tri(uv_poly[0], uv_poly[1], uv_poly[2]);
-  }
-
-  Vector<uint3, 8> tris(verts_num - 2);
-  BLI_polyfill_calc(reinterpret_cast<const float (*)[2]>(uv_poly.data()),
-                    uint(verts_num),
-                    0,
-                    reinterpret_cast<uint(*)[3]>(tris.data()));
-
-  for (const uint3 &tri : tris) {
-    if (point_in_tri(uv_poly[tri[0]], uv_poly[tri[1]], uv_poly[tri[2]])) {
-      return true;
+  /* Whether \a uv lies exactly on one of the polygon's own edges (or vertices). */
+  const auto on_polygon_edge = [&]() {
+    for (const int i : IndexRange(verts_num)) {
+      const float2 &a = uv_poly[i];
+      const float2 &b = uv_poly[(i + 1) % verts_num];
+      const float cross = (uv.x - a.x) * (b.y - a.y) - (uv.y - a.y) * (b.x - a.x);
+      if (cross != 0.0f) {
+        continue;
+      }
+      if (uv.x >= std::min(a.x, b.x) && uv.x <= std::max(a.x, b.x) &&
+          uv.y >= std::min(a.y, b.y) && uv.y <= std::max(a.y, b.y))
+      {
+        return true;
+      }
     }
-  }
-  return false;
+    return false;
+  };
+
+  /* Boundary-inclusive containment over the triangulation. */
+  const auto contains = [&]() {
+    if (verts_num == 3) {
+      return point_in_tri(uv_poly[0], uv_poly[1], uv_poly[2]);
+    }
+    Vector<uint3, 8> tris(verts_num - 2);
+    BLI_polyfill_calc(reinterpret_cast<const float (*)[2]>(uv_poly.data()),
+                      uint(verts_num),
+                      0,
+                      reinterpret_cast<uint(*)[3]>(tris.data()));
+    for (const uint3 &tri : tris) {
+      if (point_in_tri(uv_poly[tri[0]], uv_poly[tri[1]], uv_poly[tri[2]])) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /* Strict interior excludes the polygon edge so a shared UV fold can still be filled. */
+  return contains() && (include_boundary || !on_polygon_edge());
 }
 
 bool image_paint_face_contains_uv(const BMFace *efa, const BMUVOffsets &offsets, const float2 &uv)

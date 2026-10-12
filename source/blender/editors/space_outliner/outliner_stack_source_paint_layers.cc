@@ -19,7 +19,6 @@
  */
 
 #include <algorithm>
-#include <cstdio>
 #include <climits>
 #include <functional>
 #include <optional>

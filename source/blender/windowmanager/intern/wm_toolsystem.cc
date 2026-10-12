@@ -480,7 +480,8 @@ static void toolsystem_mask_brush_activate_for_tool(Main *bmain,
       (paint_mode == PaintMode::Sculpt && tref_rt->brush_type == SCULPT_BRUSH_TYPE_ERASE))
   {
     Brush *erase_brush = BKE_brush_material_erase_ensure(*bmain, *scene, *paint);
-    BKE_paint_material_mask_brush_set(*scene, *paint, erase_brush);
+    /* Not remembered: a tool substitutes a brush, the user did not choose it for the Mask. */
+    BKE_paint_material_mask_brush_set(*scene, *paint, erase_brush, false);
     return;
   }
 
@@ -492,7 +493,8 @@ static void toolsystem_mask_brush_activate_for_tool(Main *bmain,
   if (!fits_tool) {
     mask_brush = BKE_brush_material_mask_ensure(*bmain, *scene, *paint);
   }
-  BKE_paint_material_mask_brush_set(*scene, *paint, mask_brush);
+  /* The remembered brush is left as it is, so returning to a tool it fits restores it. */
+  BKE_paint_material_mask_brush_set(*scene, *paint, mask_brush, false);
 }
 
 static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
@@ -519,6 +521,9 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
       if (ELEM(paint_mode, PaintMode::Sculpt, PaintMode::Texture2D)) {
         toolsystem_mask_brush_activate_for_tool(bmain, scene, paint, tref, paint_mode);
       }
+      /* Other modes (Texture Paint 3D) do not paint a mask. They are skipped rather than falling
+       * through, because Texture 3D shares #ToolSettings::imapaint with Image 2D and the content
+       * restore below would replace the Mask brush there. */
       continue;
     }
 

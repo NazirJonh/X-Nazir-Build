@@ -5,8 +5,6 @@
 /* Paint a color made from hash of node pointer. */
 // #define DEBUG_PIXEL_NODES
 
-#include <cstdio>
-
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_mesh_types.h"
@@ -1329,7 +1327,6 @@ static void apply_paint_channel(ImageData &image_data,
                                 const eMaterialPaintChannel channel,
                                 const bool is_color_channel,
                                 const bool is_normal_channel,
-                                const bool mask_luminance,
                                 const bool alpha_masking_active,
                                 const float3 &view_right,
                                 const float3 & /*view_up*/,
@@ -1475,13 +1472,6 @@ static void apply_paint_channel(ImageData &image_data,
                   tls.sampled_colors.resize(range.size());
                   for (const int i : range.index_range()) {
                     tls.sampled_colors[i] = float3(tls.sampled_scalars[i]);
-                  }
-                }
-                if (mask_luminance) {
-                  /* A Mask map is grey: a Base Color source is reduced to its luminance after the
-                   * decode above, so the colorspace is already scene-linear here. */
-                  for (float3 &color : tls.sampled_colors) {
-                    color = float3(math::clamp(BKE_paint_material_mask_luminance(color), 0.0f, 1.0f));
                   }
                 }
               }
@@ -2238,9 +2228,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
      * Sampling it as the value would make every dab overwrite what earlier strokes painted. */
     const ed::sculpt_paint::material::ChannelSourceSampler *target_sampler = active_sampler;
     std::optional<eMaterialPaintChannel> mask_coverage_channel;
-    eMaterialPaintChannel sample_channel = target.channel;
-    bool sample_is_color = target.is_color_channel;
-    bool mask_luminance = false;
     if (target.is_mask_target) {
       std::optional<eMaterialPaintChannel> mask_channel;
       if (active_sampler != nullptr && brush->material_paint != nullptr) {
@@ -2309,10 +2296,9 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                   pixel_nodes[i],
                                   node_factor_caches[pos],
                                   target_sampler,
-                                  sample_channel,
-                                  sample_is_color,
+                                  target.channel,
+                                  target.is_color_channel,
                                   target.is_normal_channel,
-                                  mask_luminance,
                                   alpha_masking_active,
                                   cache.view_right,
                                   cache.view_up,
@@ -2341,7 +2327,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                     active_sampler,
                                     dest.channel,
                                     dest.is_color_channel,
-                                    false,
                                     false,
                                     alpha_masking_active,
                                     cache.view_right,

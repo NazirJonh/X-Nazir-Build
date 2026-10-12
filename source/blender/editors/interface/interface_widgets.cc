@@ -6015,9 +6015,7 @@ static int widget_roundbox_set(Button *but, rcti *rect)
  */
 static WidgetType *popover_widget_type(Button *but, rcti *rect)
 {
-  /* A popover bound to a float property stands in for a value swatch, see
-   * #template_material_paint_value_swatch. */
-  if (but->rnaprop && RNA_property_type(but->rnaprop) == PROP_FLOAT) {
+  if (but->flag2 & BUT2_VALUE_SWATCH) {
     return widget_type(WidgetStyle::ValueSwatch);
   }
   /* Besides the explicit #BUT_NO_MENU_TRIA opt-out, just check size:

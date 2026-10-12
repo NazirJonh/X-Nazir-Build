@@ -4040,7 +4040,10 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
   }
 }
 
-bool BKE_paint_material_mask_brush_set(Scene &scene, Paint &paint, Brush *brush)
+bool BKE_paint_material_mask_brush_set(Scene &scene,
+                                       Paint &paint,
+                                       Brush *brush,
+                                       const bool remember)
 {
   PaintModeSettings &mode_settings = scene.toolsettings->paint_mode;
   if (mode_settings.layer_target_mode != PAINT_LAYER_TARGET_MASK || brush == nullptr) {
@@ -4060,7 +4063,9 @@ bool BKE_paint_material_mask_brush_set(Scene &scene, Paint &paint, Brush *brush)
   }
   /* Recorded only after activation succeeded, so a refused brush never becomes the remembered
    * Mask brush. */
-  mode_settings.mask_active_brush = brush;
+  if (remember) {
+    mode_settings.mask_active_brush = brush;
+  }
   /* The Sculpt/Image Paint pair shares its brush while synced; the tool system skips that sync in
    * Mask, so without it Image 2D would keep painting the mask with a stale brush. */
   BKE_paint_material_brush_sync(&scene, &paint);

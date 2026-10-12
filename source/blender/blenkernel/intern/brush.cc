@@ -1087,6 +1087,9 @@ Brush *BKE_brush_material_mask_create_default(Main *bmain, Paint *paint)
     brush->flow = 1.0f;
     brush->mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
   }
+  /* A new brush carries the allocation user plus the fake user it gets by default. Nothing holds
+   * the first one, and left in place it would keep the brush from ever being purged. */
+  id_us_min(&brush->id);
 
   /* One brush serves Sculpt and Texture/Image paint, like the Erase brush. */
   brush->ob_mode |= OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT;

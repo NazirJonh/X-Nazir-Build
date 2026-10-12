@@ -206,7 +206,11 @@ enum eBrushMaterialPaintMaskSource : int8_t {
   BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA = 0,
   /** Rec.709 luminance of the brush's Base Color, in linear space. */
   BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR = 1,
-  /** Grey level of the brush's primary (or secondary when inverted) color. */
+  /**
+   * Grey level of the brush's primary (or secondary when inverted) color: the plain mean of its
+   * RGB, the way a color stroke has always been written into a mask. Not the luminance used for
+   * #BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR, which weighs the channels by perceived brightness.
+   */
   BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE = 2,
 };
 

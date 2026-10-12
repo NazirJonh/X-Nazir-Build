@@ -1216,8 +1216,15 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
  * stays the path for internal switches, which must not change the remembered Mask brush. Returns
  * false, changing nothing, when Mask is not the target, \a brush is null, the paint mode cannot
  * paint a mask, or the brush cannot be used by \a paint.
+ *
+ * \param remember: Record \a brush as the remembered Mask brush. Tool switches pass false when they
+ * substitute a brush that fits the tool, so the user's own choice survives a detour through a tool
+ * it does not fit.
  */
-bool BKE_paint_material_mask_brush_set(Scene &scene, Paint &paint, Brush *brush);
+bool BKE_paint_material_mask_brush_set(Scene &scene,
+                                       Paint &paint,
+                                       Brush *brush,
+                                       bool remember = true);
 
 /**
  * Image the Image Editor should show for the Material canvas when nothing is selected.

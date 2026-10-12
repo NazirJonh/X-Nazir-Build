@@ -7,7 +7,6 @@
  */
 
 #include <algorithm>
-#include <cstdio>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -4367,11 +4366,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       if (mask_fill_erase) {
         value = (mask_fill[0] + mask_fill[1] + mask_fill[2]) / 3.0f;
       }
-      else if (target.is_mask_target &&
-               brush_paint.mask_source != BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE)
-      {
-        /* Coverage keeps the full value below: this path has always written a flat white mask
-         * and only the non-coverage sources need the helper's value. */
+      else if (target.is_mask_target) {
+        /* Every source goes through the helper, Coverage included, so this engine writes the same
+         * grey as the Sculpt one and a Mask target never falls into the per-channel branches. */
         value = BKE_paint_material_mask_value_get(brush_paint, *paint, *brush, invert);
       }
       else if (target.is_color_channel) {

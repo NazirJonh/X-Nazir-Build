@@ -98,6 +98,7 @@ void template_material_paint_value_swatch(Layout *layout,
   /* Non-array properties use index 0, never -1: #button_value_get asserts on it. */
   but->rnaindex = RNA_property_array_check(prop) ? index : 0;
   but->drawflag |= BUT_NO_MENU_TRIA;
+  but->flag2 |= BUT2_VALUE_SWATCH;
   /* An empty popover is sized like an icon; match the regular color swatch width instead. */
   but->rect.xmax = but->rect.xmin + UI_UNIT_X * 2;
 }

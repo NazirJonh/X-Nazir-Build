@@ -427,6 +427,11 @@ enum {
    * buttons currently.
    */
   BUT2_FORCE_SEMI_MODAL_ACTIVE = 1 << 1,
+  /**
+   * A popover button drawn as the gradient color of the float property it carries, see
+   * #template_material_paint_value_swatch.
+   */
+  BUT2_VALUE_SWATCH = 1 << 2,
 };
 
 /** #Button.dragflag */

@@ -46,6 +46,7 @@
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
@@ -1768,8 +1769,22 @@ void ED_operatormacros_paint()
   RNA_boolean_set(otmacro->ptr, "mirror", false);
 }
 
+/** Derived paint-layer data after a memfile decode, see #ED_undosys_memfile_decode_hooks_add. */
+static void paint_layers_undo_post_decode(Main &bmain)
+{
+  BKE_paint_layers_undo_validate(bmain);
+  BKE_paint_layers_bake_subscriptions_validate(bmain);
+}
+
 void ED_operatortypes_paint()
 {
+  /* The generated paint-layer trees and bake slots are rewritten after an operator's undo push, so
+   * the undo tags do not describe them; the module takes part in the decode itself. */
+  UndoMemfileDecodeHooks undo_hooks;
+  undo_hooks.pre_decode = BKE_paint_layers_undo_prepare;
+  undo_hooks.post_decode = paint_layers_undo_post_decode;
+  ED_undosys_memfile_decode_hooks_add(undo_hooks);
+
   /* palette */
   using namespace blender::ed::sculpt_paint;
   WM_operatortype_append(PALETTE_OT_new);

@@ -354,16 +354,29 @@ bool BKE_paint_layers_row_removed_clear(Material &ma, const bUUID &marker);
 void BKE_paint_layers_root_hash_invalidate(Material &ma);
 
 /**
- * Detach the derived data of every layered material that changed since the last memfile undo push,
- * ahead of a memfile undo or redo decode.
+ * Detach the derived data of every layered material, ahead of a memfile undo or redo decode.
  *
  * The generated trees and the bake slots are rewritten after an operator's undo push (regeneration
  * on redraw, a finished bake job). The undo system keeps a data-block whose stored chunks equal the
  * state it is leaving, so such a data-block would survive the decode still pointing at maps and
- * groups the target state does not have, and those are freed under it. The pointers are derived
+ * groups the target state does not have, and those are freed under it. The decode walks those
+ * pointers itself (user-count recompute) before any later hook runs, and the undo tags do not say
+ * which data-blocks are affected, so every layered material is handled. The pointers are derived
  * data: dropping them and zeroing the hashes makes the regeneration after the undo put them back.
  */
 void BKE_paint_layers_undo_prepare(Main &bmain);
+
+/**
+ * Null the ID pointers of every layered material's bake slots and generated trees that name a
+ * data-block no longer in \a bmain, and make the material regenerate.
+ *
+ * Call right after a memfile undo or redo decode. #BKE_paint_layers_undo_prepare only covers the
+ * data-blocks the undo tags say changed after the last push; a tree the decode kept as it was can
+ * still name a map or group the target state does not have, and regeneration then decrements the
+ * users of freed memory. This one looks at the result of the decode instead of at the tags, and
+ * leaves every pointer that is still valid alone.
+ */
+void BKE_paint_layers_undo_validate(Main &bmain);
 
 /**
  * Drop the bake change subscriptions on images that no longer exist in  bmain.

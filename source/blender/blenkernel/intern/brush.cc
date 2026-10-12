@@ -979,6 +979,9 @@ Brush *BKE_brush_material_erase_create_default(Main *bmain, Paint *paint)
    * (#Brush.mesh_automasking_settings) for an exact #OB_MODE_SCULPT, and Sculpt code dereferences
    * them unconditionally. */
   Brush *brush = BKE_brush_add(bmain, "Erase", OB_MODE_SCULPT);
+  /* Drops the allocation user #BKE_brush_add leaves next to the default fake user, as
+   * `bpy.data.brushes.new` does; nothing holds it, and it would keep the brush from being purged. */
+  id_us_min(&brush->id);
   brush->ob_mode |= OB_MODE_TEXTURE_PAINT;
   brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_ERASE;
 

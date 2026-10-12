@@ -4025,6 +4025,8 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
           eObjectMode(paint.runtime->ob_mode) :
           OB_MODE_TEXTURE_PAINT;
       if (Brush *fallback = BKE_brush_add(&bmain, "Mask", ob_mode)) {
+        /* Same as `bpy.data.brushes.new`: only the fake user is meant to stay on a new brush. */
+        id_us_min(&fallback->id);
         BKE_brush_material_paint_ensure(fallback);
         BKE_paint_brush_set_synced(scene, paint, fallback);
       }

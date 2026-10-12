@@ -951,20 +951,18 @@ void BKE_paint_layers_undo_prepare(Main &bmain)
     if (!paint_layers_is_layered(ma)) {
       continue;
     }
-    /* Tags accumulate between two undo pushes and are cleared by each push, so a non-zero value
-     * on the material or one of its trees means derived data was rewritten after the last step. */
-    bool dirty = ma.id.recalc_after_undo_push != 0;
+    if (BLI_uuid_is_nil(ma.paint_layers_owner_uid)) {
+      continue;
+    }
+    /* Not gated on the undo tags: the decode itself walks every ID pointer of the data-blocks it
+     * keeps (the user-count recompute) before any hook can run after it, and the tags do not say
+     * which maps and groups the target state lacks. The generated data is derived, so it is always
+     * dropped and rebuilt by the next regeneration. */
     Vector<bNodeTree *> owned;
     for (bNodeTree &tree : bmain.nodetrees) {
-      if (BLI_uuid_equal(tree_owner_uid_get(tree), ma.paint_layers_owner_uid) &&
-          !BLI_uuid_is_nil(ma.paint_layers_owner_uid))
-      {
+      if (BLI_uuid_equal(tree_owner_uid_get(tree), ma.paint_layers_owner_uid)) {
         owned.append(&tree);
-        dirty |= tree.id.recalc_after_undo_push != 0;
       }
-    }
-    if (!dirty) {
-      continue;
     }
 
     Vector<const MaterialPaintLayer *> layers;
@@ -982,10 +980,31 @@ void BKE_paint_layers_undo_prepare(Main &bmain)
       layer.bake->hash[1] = 0;
     }
 
+    /* The material's own tree holds the instances of the generated groups. */
+    if (ma.nodetree != nullptr) {
+      for (bNode &node : ma.nodetree->nodes) {
+        if (node.id != nullptr && owned.contains(reinterpret_cast<bNodeTree *>(node.id))) {
+          node.id = nullptr;
+        }
+      }
+    }
+
     for (bNodeTree *tree : owned) {
+      /* Pointers are valid here: the previous decode's #BKE_paint_layers_undo_validate cleared the
+       * dangling ones, so reading the type is safe. Only maps and groups are generated data. */
       for (bNode &node : tree->nodes) {
         if (node.id != nullptr && ELEM(GS(node.id->name), ID_IM, ID_NT)) {
           node.id = nullptr;
+        }
+        for (bNodeSocket &sock : node.inputs) {
+          if (sock.type == SOCK_IMAGE) {
+            sock.default_value_typed<bNodeSocketValueImage>()->value = nullptr;
+          }
+        }
+        for (bNodeSocket &sock : node.outputs) {
+          if (sock.type == SOCK_IMAGE) {
+            sock.default_value_typed<bNodeSocketValueImage>()->value = nullptr;
+          }
         }
       }
       tree_topology_hash_set(*tree, 0);
@@ -995,6 +1014,119 @@ void BKE_paint_layers_undo_prepare(Main &bmain)
     }
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_SLOTS_STALE;
     DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  }
+}
+
+/** Null an ID pointer that is not in \a live. \return True when it was dangling. */
+template<typename T> static bool undo_dangling_id_clear(T *&id, const Set<const ID *> &live)
+{
+  if (id == nullptr || live.contains(reinterpret_cast<const ID *>(id))) {
+    return false;
+  }
+  id = nullptr;
+  return true;
+}
+
+/** Null the ID pointers of \a tree that the decode freed. \return True when any was dangling. */
+static bool undo_tree_dangling_clear(bNodeTree &tree, const Set<const ID *> &live)
+{
+  bool cleared = false;
+  const auto clear_socket = [&](bNodeSocket &sock) {
+    switch (sock.type) {
+      case SOCK_OBJECT:
+        cleared |= undo_dangling_id_clear(
+            sock.default_value_typed<bNodeSocketValueObject>()->value, live);
+        break;
+      case SOCK_IMAGE:
+        cleared |= undo_dangling_id_clear(
+            sock.default_value_typed<bNodeSocketValueImage>()->value, live);
+        break;
+      case SOCK_COLLECTION:
+        cleared |= undo_dangling_id_clear(
+            sock.default_value_typed<bNodeSocketValueCollection>()->value, live);
+        break;
+      case SOCK_TEXTURE:
+        cleared |= undo_dangling_id_clear(
+            sock.default_value_typed<bNodeSocketValueTexture>()->value, live);
+        break;
+      case SOCK_MATERIAL:
+        cleared |= undo_dangling_id_clear(
+            sock.default_value_typed<bNodeSocketValueMaterial>()->value, live);
+        break;
+      default:
+        break;
+    }
+  };
+  for (bNode &node : tree.nodes) {
+    cleared |= undo_dangling_id_clear(node.id, live);
+    for (bNodeSocket &sock : node.inputs) {
+      clear_socket(sock);
+    }
+    for (bNodeSocket &sock : node.outputs) {
+      clear_socket(sock);
+    }
+  }
+  return cleared;
+}
+
+void BKE_paint_layers_undo_validate(Main &bmain)
+{
+  /* Compared by address only, a freed data-block is never dereferenced. A pointer that is in the
+   * set is left alone, so this cannot damage a tree the decode re-read or kept intact. */
+  Set<const ID *> live;
+  ID *id_iter;
+  FOREACH_MAIN_ID_BEGIN (&bmain, id_iter) {
+    live.add(id_iter);
+  }
+  FOREACH_MAIN_ID_END;
+
+  for (Material &ma : bmain.materials) {
+    if (!paint_layers_is_layered(ma) || BLI_uuid_is_nil(ma.paint_layers_owner_uid)) {
+      continue;
+    }
+    bool stale = false;
+
+    Vector<const MaterialPaintLayer *> layers;
+    BKE_paint_layers_flatten_all(ma, layers);
+    for (const MaterialPaintLayer *layer_const : layers) {
+      MaterialPaintLayer &layer = *const_cast<MaterialPaintLayer *>(layer_const);
+      if (layer.bake == nullptr) {
+        continue;
+      }
+      bool bake_stale = undo_dangling_id_clear(layer.bake->coverage, live);
+      for (Image *&image : layer.bake->images) {
+        bake_stale |= undo_dangling_id_clear(image, live);
+      }
+      if (bake_stale) {
+        /* A partly cleared bake is not a valid cache: re-bake the row. */
+        layer.bake->hash[0] = 0;
+        layer.bake->hash[1] = 0;
+        stale = true;
+      }
+    }
+
+    /* The generated trees a material owns, which a decode may have kept as they were while the
+     * maps and groups they name were freed. The material's own tree holds the group instances. */
+    Vector<bNodeTree *> trees;
+    for (bNodeTree &tree : bmain.nodetrees) {
+      if (BLI_uuid_equal(tree_owner_uid_get(tree), ma.paint_layers_owner_uid)) {
+        trees.append(&tree);
+      }
+    }
+    if (ma.nodetree != nullptr) {
+      trees.append(ma.nodetree);
+    }
+    for (bNodeTree *tree : trees) {
+      if (undo_tree_dangling_clear(*tree, live)) {
+        /* Rebuilt by the next regeneration; the evaluated copy is refreshed at its end. */
+        tree_topology_hash_set(*tree, 0);
+        tree_root_hash_set(*tree, 0);
+        stale = true;
+      }
+    }
+    if (stale) {
+      ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_SLOTS_STALE;
+    }
   }
 }
 

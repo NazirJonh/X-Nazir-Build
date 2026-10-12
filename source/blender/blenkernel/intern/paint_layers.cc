@@ -12,6 +12,7 @@
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include <algorithm>
@@ -474,6 +475,12 @@ bool BKE_paint_layers_folder_is_pass_through(const Material &ma,
    * are read directly because emptiness is the question, not which items are enabled: a disabled
    * mask item still has to flip the mode so toggling its visibility later stays a value edit. */
   if (folder.mask_stack.first != nullptr || folder.effects.first != nullptr) {
+    return false;
+  }
+  /* An object mask multiplies the folder's own row factor; an inlined folder has no row, so the
+   * mask would silently hide nothing. The flag is sticky, so toggling visibility stays a value
+   * edit. */
+  if ((folder.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0) {
     return false;
   }
   /* The isolated folder computes `over(below, P/a, a)`; sequential over of the children is the
@@ -3116,6 +3123,12 @@ bool BKE_paint_layers_mapping_blocks_bake(const Material &ma,
     }
   }
   return false;
+}
+
+bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_mapping_blocks_bake(ma, layer) ||
+         BKE_paint_layers_object_mask_blocks_bake(layer);
 }
 
 /**

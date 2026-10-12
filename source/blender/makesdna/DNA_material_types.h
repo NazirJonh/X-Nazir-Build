@@ -539,6 +539,21 @@ enum eMaterialPaintLayerFlag : int16_t {
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
+/** #MaterialPaintLayer::object_mask_type */
+enum eMaterialPaintLayerObjectMaskType : int8_t {
+  MA_PAINT_LAYER_OBJECT_MASK_MESH = 0,
+  MA_PAINT_LAYER_OBJECT_MASK_UV_TILES = 1,
+};
+
+/** #MaterialPaintLayer::object_mask_flag */
+enum eMaterialPaintLayerObjectMaskFlag : int8_t {
+  /**
+   * The row has an object mask: set by the first hidden object or tile, and what makes the
+   * generator build the Attribute nodes.
+   */
+  MA_PAINT_LAYER_OBJECT_MASK_ACTIVE = 1 << 0,
+};
+
 /**
  * One channel of a #MaterialPaintLayer. A layer owns a `channels` array with one entry per wired
  * channel; #channel names which #eMaterialPaintChannel the record stands for.
@@ -722,7 +737,15 @@ struct MaterialPaintLayer {
    * reduced to luminance.
    */
   int8_t mask_channel = 7; /* PAINT_MATERIAL_CHANNEL_ALPHA */
-  char _pad[3] = {};
+  /**
+   * #eMaterialPaintLayerObjectMaskType: whether the row is limited per object (Mesh) or per UDIM
+   * tile of each object (UV Tiles). The per-object choices live on the objects
+   * (#Object::paint_layer_masks), so the material never references the objects using it.
+   */
+  int8_t object_mask_type = 0; /* MA_PAINT_LAYER_OBJECT_MASK_MESH */
+  /** #eMaterialPaintLayerObjectMaskFlag. */
+  int8_t object_mask_flag = 0;
+  char _pad[1] = {};
   /** Node group for a #MA_PAINT_LAYER_SOURCE_NODE_GROUP layer. */
   struct bNodeTree *custom_group = nullptr;
   /** Source material of a #MA_PAINT_LAYER_SOURCE_MATERIAL layer. Phase 3. */

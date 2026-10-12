@@ -278,6 +278,7 @@ set(SRC
     intern/paint_layers_generate_values.cc
     intern/paint_layers_generate_intern.hh
     intern/paint_layers_target.cc
+    intern/paint_layers_object_mask.cc
   intern/mesh_maps.cc
   intern/mesh_maps_bake.cc
   intern/paint_material_combined.cc
@@ -541,6 +542,7 @@ set(SRC
   BKE_paint_layers_composite.hh
   BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
+  BKE_paint_layers_object_mask.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
@@ -852,6 +854,7 @@ if(WITH_GTESTS)
     intern/paint_layers_generate_gates_test.cc
     intern/paint_layers_generate_warm_test.cc
     intern/paint_layers_generate_extended_test.cc
+    intern/paint_layers_object_mask_test.cc
     intern/paint_layers_graph_eval_test.cc
     intern/paint_layers_graph_eval_multisource_test.cc
     intern/paint_layers_graph_eval_masks_test.cc

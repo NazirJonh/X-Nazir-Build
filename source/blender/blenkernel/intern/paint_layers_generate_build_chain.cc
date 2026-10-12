@@ -61,6 +61,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -985,6 +986,120 @@ bool PaintLayersChainBuilder::build_folder_source(const MaterialPaintLayer *laye
   return true;
 }
 
+/** A node output with its node, so links need no #bNodeSocket::owner_node. */
+using NodeOut = std::pair<bNode *, bNodeSocket *>;
+
+/** Math node helper: `op(a, b)`, `b` linked when given, else the constant. */
+static NodeOut object_mask_math(bNodeTree &tree,
+                                const int op,
+                                const NodeOut a,
+                                const NodeOut *b,
+                                const float b_value,
+                                const float x,
+                                const float y,
+                                Vector<bNode *> &nodes)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  node->custom1 = op;
+  node->location[0] = x;
+  node->location[1] = y;
+  nodes.append(node);
+  bke::node_add_link(tree, *a.first, *a.second, *node, *socket_in(*node, "Value"));
+  bNodeSocket *in_b = socket_in(*node, "Value_001");
+  if (b != nullptr) {
+    bke::node_add_link(tree, *b->first, *b->second, *node, *in_b);
+  }
+  else {
+    static_cast<bNodeSocketValueFloat *>(in_b->default_value)->value = b_value;
+  }
+  return {node, socket_out(*node, "Value")};
+}
+
+/**
+ * The row's 0/1 visibility on the object being drawn. Mesh reads the object's flag; UV Tiles
+ * reads the tile bit of the fragment's UDIM. A missing record reads 0 ("nothing hidden"), which is
+ * why records store exclusions.
+ */
+static NodeOut object_mask_visible_build(bNodeTree &tree,
+                                         const Material &ma,
+                                         const MaterialPaintLayer &layer,
+                                         const float x,
+                                         const float y,
+                                         Vector<bNode *> &nodes)
+{
+  bNode *attr = bke::node_add_static_node(nullptr, tree, SH_NODE_ATTRIBUTE);
+  NodeShaderAttribute *data = static_cast<NodeShaderAttribute *>(attr->storage);
+  data->type = SHD_ATTRIBUTE_OBJECT;
+  STRNCPY(data->name, BKE_paint_layer_object_mask_attribute_path(ma, layer).c_str());
+  attr->location[0] = x - 400.0f;
+  attr->location[1] = y;
+  nodes.append(attr);
+  NodeOut excluded = {attr, socket_out(*attr, "Fac")};
+
+  if (layer.object_mask_type == MA_PAINT_LAYER_OBJECT_MASK_UV_TILES) {
+    /* UDIM standard: 10 columns per row; the mask covers FIRST..FIRST+NUM-1. */
+    constexpr float udim_columns = 10.0f;
+    constexpr float tile_last_exclusive =
+        float(bke::PAINT_LAYER_OBJECT_MASK_TILE_NUM) - 0.5f;
+    auto [uv_node, uv_out] = generated_uv_map_ensure(tree, BKE_paint_layers_uv_map_name(ma));
+    bNode *sep = bke::node_add_static_node(nullptr, tree, SH_NODE_SEPXYZ);
+    sep->location[0] = x - 400.0f;
+    sep->location[1] = y - 160.0f;
+    nodes.append(sep);
+    bke::node_add_link(tree, *uv_node, *uv_out, *sep, *socket_in(*sep, "Vector"));
+    const NodeOut col = object_mask_math(
+        tree, NODE_MATH_FLOOR, {sep, socket_out(*sep, "X")}, nullptr, 0.0f, x - 300, y - 160, nodes);
+    const NodeOut row = object_mask_math(
+        tree, NODE_MATH_FLOOR, {sep, socket_out(*sep, "Y")}, nullptr, 0.0f, x - 300, y - 220, nodes);
+    const NodeOut row10 = object_mask_math(
+        tree, NODE_MATH_MULTIPLY, row, nullptr, udim_columns, x - 240, y - 220, nodes);
+    const NodeOut index = object_mask_math(
+        tree, NODE_MATH_ADD, col, &row10, 0.0f, x - 180, y - 180, nodes);
+    /* 2^index; the bit is floor(bits / 2^index) mod 2, exact for 24 bits in a float. */
+    bNode *pow_node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+    pow_node->custom1 = NODE_MATH_POWER;
+    pow_node->location[0] = x - 120.0f;
+    pow_node->location[1] = y - 180.0f;
+    nodes.append(pow_node);
+    static_cast<bNodeSocketValueFloat *>(socket_in(*pow_node, "Value")->default_value)->value =
+        2.0f;
+    bke::node_add_link(
+        tree, *index.first, *index.second, *pow_node, *socket_in(*pow_node, "Value_001"));
+    const NodeOut pow_out = {pow_node, socket_out(*pow_node, "Value")};
+    const NodeOut shifted = object_mask_math(
+        tree, NODE_MATH_DIVIDE, excluded, &pow_out, 0.0f, x - 60, y - 120, nodes);
+    const NodeOut floored = object_mask_math(
+        tree, NODE_MATH_FLOOR, shifted, nullptr, 0.0f, x - 20, y - 120, nodes);
+    const NodeOut bit = object_mask_math(
+        tree, NODE_MATH_FLOORED_MODULO, floored, nullptr, 2.0f, x + 20, y - 120, nodes);
+    /* Tiles outside FIRST..FIRST+NUM-1 (column 0..9, index 0..NUM-1) are never hidden. */
+    const NodeOut col_ok = object_mask_math(
+        tree, NODE_MATH_LESS_THAN, col, nullptr, udim_columns, x - 120, y - 260, nodes);
+    const NodeOut col_ok0 = object_mask_math(
+        tree, NODE_MATH_GREATER_THAN, col, nullptr, -0.5f, x - 120, y - 300, nodes);
+    const NodeOut idx_ok = object_mask_math(
+        tree, NODE_MATH_LESS_THAN, index, nullptr, tile_last_exclusive, x - 120, y - 340, nodes);
+    const NodeOut idx_ok0 = object_mask_math(
+        tree, NODE_MATH_GREATER_THAN, index, nullptr, -0.5f, x - 120, y - 380, nodes);
+    const NodeOut ok_a = object_mask_math(
+        tree, NODE_MATH_MULTIPLY, col_ok, &col_ok0, 0.0f, x - 60, y - 280, nodes);
+    const NodeOut ok_b = object_mask_math(
+        tree, NODE_MATH_MULTIPLY, idx_ok, &idx_ok0, 0.0f, x - 60, y - 360, nodes);
+    const NodeOut ok = object_mask_math(
+        tree, NODE_MATH_MULTIPLY, ok_a, &ok_b, 0.0f, x, y - 320, nodes);
+    excluded = object_mask_math(tree, NODE_MATH_MULTIPLY, bit, &ok, 0.0f, x + 60, y - 200, nodes);
+  }
+  /* visible = 1 - excluded. */
+  bNode *sub = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  sub->custom1 = NODE_MATH_SUBTRACT;
+  sub->location[0] = x + 120.0f;
+  sub->location[1] = y - 120.0f;
+  nodes.append(sub);
+  static_cast<bNodeSocketValueFloat *>(socket_in(*sub, "Value")->default_value)->value = 1.0f;
+  bke::node_add_link(tree, *excluded.first, *excluded.second, *sub, *socket_in(*sub, "Value_001"));
+  return {sub, socket_out(*sub, "Value")};
+}
+
 bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
                                                bNodeTree &tree,
                                                bNode *group_input,
@@ -1312,6 +1427,32 @@ bool PaintLayersChainBuilder::build_row_source(const MaterialPaintLayer *layer,
         }
       }
     }
+  }
+  if ((layer->object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0 &&
+      (current.opacity == nullptr || current.opacity_node == nullptr))
+  {
+    /* No opacity input means an implicit factor of one: the visibility becomes the factor, or the
+     * mask would be silently dropped for such a row. */
+    const NodeOut visible = object_mask_visible_build(
+        tree, ma, *layer, location_x + 90.0f, location_y - 220.0f, source_nodes);
+    current.opacity_node = visible.first;
+    current.opacity = visible.second;
+  }
+  else if ((layer->object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0) {
+    const NodeOut visible = object_mask_visible_build(
+        tree, ma, *layer, location_x + 90.0f, location_y - 220.0f, source_nodes);
+    /* The object choice multiplies the row factor before the blend, the same place opacity acts:
+     * a hidden row is exactly a row at zero opacity. */
+    bNode *mul = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+    mul->custom1 = NODE_MATH_MULTIPLY;
+    mul->location[0] = location_x + 180.0f;
+    mul->location[1] = location_y - 160.0f;
+    source_nodes.append(mul);
+    bke::node_add_link(
+        tree, *current.opacity_node, *current.opacity, *mul, *socket_in(*mul, "Value"));
+    bke::node_add_link(tree, *visible.first, *visible.second, *mul, *socket_in(*mul, "Value_001"));
+    current.opacity_node = mul;
+    current.opacity = socket_out(*mul, "Value");
   }
   if (current.source == nullptr) {
     return false;

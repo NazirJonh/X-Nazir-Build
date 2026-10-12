@@ -910,8 +910,25 @@ class PaintLayersUiTest(unittest.TestCase):
         layout = _MockLayout()
         with bpy.context.temp_override(material=self.material):
             draw_material_mask_item(layout, mask)
-        # The source row is drawn (a Drop picker, a template_ID_browser call).
-        self.assertIn("template_id", layout.kinds(), layout.kinds())
+        # A mask correction is not the base mask, so it draws no Drop picker.
+        self.assertFalse(mask.is_mask_base)
+        self.assertNotIn("template_id", layout.kinds(), layout.kinds())
+
+    def test_base_mask_keeps_drop_image_widget(self):
+        # The base mask keeps its Drop image browser; a mask correction on the same layer does not.
+        from bl_ui.properties_paint_common import draw_material_mask_item
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        base = layer.mask_add(value=1.0)
+        correction = layer.correction_add(role='MASK_ITEM', source='CONSTANT', name="C")
+        self.assertTrue(base.is_mask_base)
+        self.assertFalse(correction.is_mask_base)
+        base_layout = _MockLayout()
+        draw_material_mask_item(base_layout, base)
+        self.assertIn("template_id", base_layout.kinds(), base_layout.kinds())
+        correction_layout = _MockLayout()
+        draw_material_mask_item(correction_layout, correction)
+        self.assertNotIn("template_id", correction_layout.kinds(), correction_layout.kinds())
 
     def test_effect_statuses_for_material_node_group_and_stack(self):
         # Item 4d: Material/Node Group effects show per-channel bake statuses; a Stack effect shows
@@ -939,9 +956,10 @@ class PaintLayersUiTest(unittest.TestCase):
         layout = _MockLayout()
         with bpy.context.temp_override(material=self.material):
             draw_material_mask_item(layout, mask)
-        # With no atlas allocated yet the widget draws a "No atlas" label, never a Drop picker.
+        # A mask correction is not the base mask, so it draws no atlas preview at all.
+        self.assertFalse(mask.is_mask_base)
         labels = [call[1][0] for call in layout.calls if call[0] == "label"]
-        self.assertIn("No atlas", labels)
+        self.assertNotIn("No atlas", labels)
         # Allocating an atlas makes the slot's read-only alias resolve to it.
         self.material.mesh_map_slots.ensure(type='AO')
         slot = next(s for s in self.material.mesh_map_slots if s.type == 'AO')

@@ -1110,6 +1110,7 @@ bool outliner_stack_can_reorder(const bContext &C, SpaceOutliner &space_outliner
 void outliner_stack_sources_undo_reset();
 
 void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot);
+void OUTLINER_OT_stack_row_action(wmOperatorType *ot);
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_pin_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);

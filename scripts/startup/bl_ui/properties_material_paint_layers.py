@@ -314,32 +314,37 @@ def draw_material_mask_item(layout, item):
     map, and shows no constant. A MESH_MAP mask reads the material's shared atlas (read-only), the
     same map a MESH_MAP row reads, so it shows a preview instead of a Drop image picker.
     """
+    # Drop targets and previews belong to the layer's base mask only, not to its mask corrections.
+    show_sources = not (item.role == 'MASK_ITEM' and not item.is_mask_base)
     if item.source == 'CONSTANT':
         # The map replaces the constant, so the value is hidden while one is assigned.
         if item.mask_image is None:
             _draw_material_constant_value(layout, item, item.mask_channel)
-        row = layout.row(align=True)
-        row.template_ID_browser(
-            item,
-            "mask_image",
-            open="image.open",
-            text="Drop image: Mask",
-            image_filter='PAINT_SOURCE',
-            use_unlink=True,
-            use_users=False,
-        )
+        if show_sources:
+            row = layout.row(align=True)
+            row.template_ID_browser(
+                item,
+                "mask_image",
+                open="image.open",
+                text="Drop image: Mask",
+                image_filter='PAINT_SOURCE',
+                use_unlink=True,
+                use_users=False,
+            )
     elif item.source == 'IMAGE':
         row = layout.row(align=True)
         row.prop(item, "mask_channel", text="")
-        record = _correction_base_color_record(item)
-        if record is None or record.image is None:
-            row.label(text="No map", icon='INFO')
-        else:
-            _draw_layer_channel_source(row, record, locked=True)
+        if show_sources:
+            record = _correction_base_color_record(item)
+            if record is None or record.image is None:
+                row.label(text="No map", icon='INFO')
+            else:
+                _draw_layer_channel_source(row, record, locked=True)
     elif item.source == 'MESH_MAP':
         row = layout.row(align=True)
         row.prop(item, "mesh_map_type", text="Map")
-        _draw_mesh_map_atlas_preview(row, item)
+        if show_sources:
+            _draw_mesh_map_atlas_preview(row, item)
     else:
         # A Material / Node Group / Stack mask carries more than one scalar, so it keeps the channel
         # picker the old Mask box offered.

@@ -295,6 +295,9 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
                                          const Material &ma_src,
                                          const int copy_flag);
 
+/** Re-assign generated tree and subgroup ownership to ma's new owner UID. */
+void BKE_paint_layers_owner_uid_changed(Main &bmain, Material &ma, const bUUID &old_uid);
+
 /**
  * The node group that exposes \a source's Principled channels as COLOR:<CHANNEL> outputs.
  *

@@ -124,6 +124,13 @@ struct PaintLayersTarget {
    * object-based resolver knows the mesh.
    */
   char uv_refusal[160] = {};
+  /** Set when the row is hidden on the object the target was resolved through (Mesh mode). */
+  char object_mask_refusal[96] = {};
+  /**
+   * UDIM tiles (bit `i` = tile `1001 + i`) the row is hidden on for that object (UV Tiles mode):
+   * a stroke skips them.
+   */
+  uint32_t excluded_tiles = 0;
 };
 
 /**

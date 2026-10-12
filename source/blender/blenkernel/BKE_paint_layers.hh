@@ -1275,6 +1275,12 @@ bool BKE_paint_layers_mapping_blocks_bake(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const PaintLayersRegenCache *cache = nullptr);
 
+/**
+ * Whether \a layer must stay live for bake reasons: its mapping (see
+ * #BKE_paint_layers_mapping_blocks_bake) and/or an object mask inside it.
+ */
+bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer &layer);
+
 /** Whether \a layer's mapping is enabled. */
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer);
 

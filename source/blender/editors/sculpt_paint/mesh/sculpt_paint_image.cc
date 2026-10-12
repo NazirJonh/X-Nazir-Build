@@ -54,6 +54,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
 
 #include "mesh_brush_common.hh"
@@ -113,12 +114,21 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
       const Vector<PaintMaterialImageTarget> material_targets =
           BKE_paint_material_image_targets_get(
               ob, paint_mode_settings, brush_paint, visible_material_channels);
+      /* The hidden tiles belong to the active row, so every channel map of the stroke shares them. */
+      uint32_t excluded_tiles = 0;
+      PaintLayersTarget layer_target;
+      if (BKE_paint_layers_target_get(
+              ob, -1, paint_mode_settings.active_layer_channel, paint_mode_settings, layer_target))
+      {
+        excluded_tiles = layer_target.excluded_tiles;
+      }
       for (const PaintMaterialImageTarget &material_target : material_targets) {
         ImagePaintTarget target;
         target.data = ImageData::from_image(material_target.image, material_target.iuser);
         if (!target.data) {
           continue;
         }
+        target.data->excluded_tiles = excluded_tiles;
         target.is_color_channel = material_target.is_color_channel;
         target.is_normal_channel = material_target.is_normal_channel;
         target.is_material_channel = true;
@@ -1352,6 +1362,13 @@ static void apply_paint_channel(ImageData &image_data,
     UDIMTilePixels &tile_data = pixel_node.tiles[tile_i];
     const RowFactorCache &tile_cache = tile_caches[tile_i];
 
+    /* A tile the row is hidden on for this object takes no paint (UV Tiles object mask). */
+    if (BKE_paint_layer_object_mask_tile_excluded(image_data.excluded_tiles,
+                                                   tile_data.tile_number))
+    {
+      continue;
+    }
+
     ImBuf *image_buffer = image_data.buffers.lookup_default(tile_data.tile_number, nullptr);
     if (image_buffer == nullptr) {
       continue;
@@ -1649,6 +1666,13 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
     UDIMTilePixels &tile = pixel_node.tiles[tile_i];
     const RowFactorCache &tile_cache = tile_caches[tile_i];
     std::atomic<bool> tile_updated{false};
+
+    /* All destinations of a group belong to one row, so they share the hidden tiles. */
+    if (BKE_paint_layer_object_mask_tile_excluded(dests[0].image_data->excluded_tiles,
+                                                   tile.tile_number))
+    {
+      continue;
+    }
 
     Array<MutableSpan<float4>> tile_float_buffers(dest_num);
     Array<MutableSpan<uchar4>> tile_byte_buffers(dest_num);

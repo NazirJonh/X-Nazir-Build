@@ -547,6 +547,11 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
   /* Leave sculpt mode. */
   ob.mode &= ~mode_flag;
 
+  /* Mask Mesh editing only makes sense while painting layers in Sculpt Mode. */
+  if (scene.toolsettings != nullptr) {
+    scene.toolsettings->paint_mode.layer_object_mask_edit = 0;
+  }
+
   BKE_sculptsession_free(&ob);
 
   paint_cursor_delete_textures();
@@ -566,6 +571,7 @@ void object_sculpt_mode_exit(bContext *C, Depsgraph &depsgraph)
   BKE_view_layer_synced_ensure(bmain, &scene, &view_layer);
   Object &ob = *BKE_view_layer_active_object_get(&view_layer);
   object_sculpt_mode_exit(bmain, depsgraph, scene, ob);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
 }
 
 static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)

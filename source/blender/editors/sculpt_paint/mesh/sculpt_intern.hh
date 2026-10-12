@@ -191,6 +191,8 @@ struct ImageData : NonCopyable {
 
   Map<bke::image::TileNumber, ImBuf *> buffers = {};
   Map<bke::image::TileNumber, TileColorspaceProcessor> processors = {};
+  /** UDIM tiles (bit `i` = tile `1001 + i`) a stroke must not write: the row is hidden there. */
+  uint32_t excluded_tiles = 0;
 
   ~ImageData();
 

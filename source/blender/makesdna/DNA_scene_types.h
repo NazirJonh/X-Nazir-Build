@@ -1650,7 +1650,13 @@ struct PaintModeSettings {
    * bookkeeping for restoring the brush. 0 is content, so no versioning is needed.
    */
   int8_t layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
-  char _pad_layer_target_mode[7] = {};
+  /**
+   * Whether the Properties editor shows the object mask of the active row. Runtime UI intent
+   * stored here so the Outliner toggle and the Python panel share one RNA property; cleared
+   * whenever #layer_target_mode is set (switching to Mask or Preview ends it).
+   */
+  int8_t layer_object_mask_edit = 0;
+  char _pad_layer_target_mode[6] = {};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

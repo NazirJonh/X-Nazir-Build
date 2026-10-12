@@ -517,6 +517,38 @@ bool stack_row_color_tag_poll(bContext *C)
   return row != nullptr && row->can_hold_children;
 }
 
+static wmOperatorStatus stack_row_action_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  const StackRow *row = (owner != nullptr) ? outliner_stack_row_find(*space_outliner, ordinal) :
+                                             nullptr;
+  const StackEditor *editor = stack_source_for_space(*space_outliner)->editor();
+  if (row == nullptr || editor == nullptr || !editor->row_action(*C, *owner, ordinal, *row)) {
+    return OPERATOR_CANCELLED;
+  }
+  ED_region_tag_redraw(CTX_wm_region(C));
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_stack_row_action(wmOperatorType *ot)
+{
+  ot->name = "Row Action";
+  ot->idname = "OUTLINER_OT_stack_row_action";
+  ot->description = "Run the row's own action";
+  ot->exec = stack_row_action_exec;
+  ot->poll = ED_operator_outliner_active;
+  /* No undo: the action is UI state, not data. */
+  ot->flag = OPTYPE_INTERNAL;
+  RNA_def_int(ot->srna, "ordinal", -1, -1, SHRT_MAX, "Ordinal", "", -1, SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
 static wmOperatorStatus stack_row_color_tag_set_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);

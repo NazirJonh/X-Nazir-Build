@@ -24,6 +24,7 @@
 
 #include "BKE_mesh_maps.hh"
 #include "BKE_mesh_maps_bake.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 
@@ -2700,6 +2701,43 @@ static int rna_ObjectMeshMapState_baked_time_get(PointerRNA *ptr)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Paint layer object mask RNA helpers
+ * \{ */
+
+static void rna_Object_paint_layer_masks_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  rna_iterator_listbase_begin(iter, ptr, &ob->paint_layer_masks, nullptr);
+}
+
+static bool rna_Object_paint_layer_masks_lookup_string(PointerRNA *ptr,
+                                                       const char *key,
+                                                       PointerRNA *r_ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  ObjectPaintLayerMask *record = BKE_paint_layer_object_mask_find_by_key(*ob, key);
+  if (record == nullptr) {
+    return false;
+  }
+  rna_pointer_create_with_ancestors(*ptr, RNA_ObjectPaintLayerMask, record, *r_ptr);
+  return true;
+}
+
+static void rna_ObjectPaintLayerMask_key_get(PointerRNA *ptr, char *value)
+{
+  const ObjectPaintLayerMask *record = static_cast<const ObjectPaintLayerMask *>(ptr->data);
+  const auto key = BKE_paint_layer_object_mask_key(record->owner_uid, record->marker);
+  memcpy(value, key.data(), key.size());
+}
+
+static int rna_ObjectPaintLayerMask_key_length(PointerRNA * /*ptr*/)
+{
+  return bke::PAINT_LAYER_OBJECT_MASK_KEY_LEN;
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else
@@ -3614,6 +3652,56 @@ static void rna_def_object_mesh_maps(BlenderRNA *brna, StructRNA *srna)
 
 /** \} */
 
+static void rna_def_object_paint_layer_masks(BlenderRNA *brna, StructRNA *srna)
+{
+  PropertyRNA *prop;
+
+  prop = RNA_def_property(srna, "paint_layer_masks", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ObjectPaintLayerMask");
+  /* Explicit lookup: the shader's Attribute node resolves a record by its key on every
+   * evaluation, and the default name lookup would format the key of each record again. */
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_Object_paint_layer_masks_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    "rna_Object_paint_layer_masks_lookup_string",
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Paint Layer Masks", "Layered-material rows hidden on this object");
+
+  srna = RNA_def_struct(brna, "ObjectPaintLayerMask", nullptr);
+  RNA_def_struct_sdna(srna, "ObjectPaintLayerMask");
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Mask", "What one layered-material row hides on this object");
+
+  prop = RNA_def_property(srna, "key", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(
+      prop, "rna_ObjectPaintLayerMask_key_get", "rna_ObjectPaintLayerMask_key_length", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Key", "Identity of the row: material owner uid and row marker");
+  RNA_def_struct_name_property(srna, prop);
+
+  prop = RNA_def_property(srna, "excluded_value", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "excluded_value");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Excluded", "1 when the row is hidden on this object (Mesh mode)");
+
+  prop = RNA_def_property(srna, "excluded_tiles_value", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "excluded_tiles_value");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Excluded Tiles Value", "Hidden UDIM tile bits as a float, for the shader");
+
+  prop = RNA_def_property(srna, "excluded_tiles", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "excluded_tiles");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Excluded Tiles", "Bit i hides UDIM tile 1001 + i (UV Tiles mode)");
+}
+
 static void rna_def_object(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3662,6 +3750,7 @@ static void rna_def_object(BlenderRNA *brna)
 
   /* mesh maps */
   rna_def_object_mesh_maps(brna, srna);
+  rna_def_object_paint_layer_masks(brna, srna);
 
   prop = RNA_def_property(srna, "data", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "ID");

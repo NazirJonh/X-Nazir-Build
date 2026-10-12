@@ -3992,6 +3992,9 @@ void BKE_paint_material_layer_target_mode_set(Main &bmain,
                                               PaintModeSettings &mode_settings,
                                               const ePaintLayerTargetMode mode)
 {
+  /* Choosing a paint target (Mask or content) ends object-mask editing on every path that sets it,
+   * even when the target is already the one asked for. */
+  mode_settings.layer_object_mask_edit = 0;
   const bool want_mask = (mode == PAINT_LAYER_TARGET_MASK);
   const bool was_mask = (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK);
   if (want_mask == was_mask) {

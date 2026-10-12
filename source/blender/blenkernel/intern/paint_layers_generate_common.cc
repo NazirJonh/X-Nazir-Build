@@ -61,6 +61,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -557,8 +558,7 @@ void interface_name_unique(const bNodeTreeInterface &interface,
 bool row_is_substituted(const Material &ma, const MaterialPaintLayer &layer)
 {
   return layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL &&
-         !BKE_paint_layers_mapping_blocks_bake(ma, layer) &&
-         BKE_paint_layers_bake_is_valid(ma, layer);
+         !BKE_paint_layers_bake_blocked(ma, layer) && BKE_paint_layers_bake_is_valid(ma, layer);
 }
 
 /**

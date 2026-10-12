@@ -46,6 +46,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -180,10 +181,21 @@ bool layers_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
     return false;
   }
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  /* Choosing Mask or Preview ends object-mask editing, even when the mode is already the one asked
+   * for. The flag itself is owned by BKE (#BKE_paint_material_layer_target_mode_set clears it);
+   * the editor only sends the notifier. */
+  const bool was_mask_editing = paint_mode.layer_object_mask_edit != 0;
   if (paint_mode.layer_target_mode == mode) {
+    BKE_paint_material_layer_target_mode_set(*bmain, *scene, *paint, paint_mode, mode);
+    if (was_mask_editing) {
+      WM_main_add_notifier(NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+    }
     return false;
   }
   BKE_paint_material_layer_target_mode_set(*bmain, *scene, *paint, paint_mode, mode);
+  if (was_mask_editing) {
+    WM_main_add_notifier(NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  }
   return true;
 }
 
@@ -504,6 +516,11 @@ void paint_stack_rows_from_description_impl(const Material &material,
                      layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT ? ICON_GP_DRAW_FILL :
                      has_mask                           ? paint_mask_state_icon(row.mask_enabled) :
                                                           ICON_IMAGE_RGB;
+          /* Only layers and folders limit where they show; effects and mask items do not. */
+          if (folder || BKE_paint_layers_role(layer) == PaintLayerRole::Layer) {
+            row.action_icon = ICON_SELECT_SET;
+            row.action_tooltip = TIP_("Choose the objects or UDIM tiles this layer shows on");
+          }
 
           if (!folder) {
             if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
@@ -922,6 +939,11 @@ class PaintLayersStackSource final : public StackSource,
     const Material &material = layers_owner(owner);
     uint64_t hash = uint64_t(material.paint_layers_flag);
     hash = hash * 1000003u ^ uint64_t(paint_stack_selected_channel(ctx));
+    /* The action button reads pressed from this flag, so the rows have to rebuild when it flips. */
+    if (ctx.scene != nullptr && ctx.scene->toolsettings != nullptr) {
+      hash = hash * 1000003u ^
+             uint64_t(ctx.scene->toolsettings->paint_mode.layer_object_mask_edit != 0);
+    }
     std::function<void(const ListBaseT<MaterialPaintLayer> &)> walk =
         [&](const ListBaseT<MaterialPaintLayer> &list) {
           for (const MaterialPaintLayer &layer : list) {
@@ -1006,6 +1028,15 @@ class PaintLayersStackSource final : public StackSource,
   {
     paint_stack_rows_from_description(
         layers_owner(owner), paint_stack_selected_channel(ctx), r_rows);
+    const Material &material = layers_owner(owner);
+    if (ctx.scene != nullptr && ctx.scene->toolsettings != nullptr &&
+        ctx.scene->toolsettings->paint_mode.layer_object_mask_edit != 0)
+    {
+      for (StackRow &row : r_rows) {
+        row.action_active = row.action_icon != ICON_NONE && !BLI_uuid_is_nil(row.stable_id) &&
+                            BLI_uuid_equal(material.active_layer_marker, row.stable_id);
+      }
+    }
     return !r_rows.is_empty();
   }
 
@@ -1019,7 +1050,44 @@ class PaintLayersStackSource final : public StackSource,
   {
     /* Wide enough for the compact row's "NN% Abr" label to fit without clipping (the label is
      * shown in the stacked column, whose width is the wider of the two). */
-    return {2.6f, 2.6f};
+    StackColumnLayout layout;
+    layout.value_width = 2.6f;
+    layout.mode_width = 2.6f;
+    layout.action_width = 1.0f;
+    return layout;
+  }
+
+  bool row_action(bContext &C,
+                  ID &owner,
+                  const int ordinal,
+                  const StackRow &row) const override
+  {
+    Scene *scene = CTX_data_scene(&C);
+    SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+    if (scene == nullptr || scene->toolsettings == nullptr || space_outliner == nullptr) {
+      return false;
+    }
+    PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+    if (row.action_active) {
+      paint_mode.layer_object_mask_edit = 0;
+    }
+    else {
+      /* Activating may switch the target mode, which clears the flag -- so set it after. The
+       * activation changes data (the active row), so it gets an undo step like the activate
+       * operator does. */
+      const Material &material = layers_owner(owner);
+      const bool active_changed = !BLI_uuid_equal(material.active_layer_marker, row.stable_id);
+      outliner_stack_row_activate(&C, *space_outliner, ordinal);
+      paint_mode.layer_object_mask_edit = 1;
+      /* Scan the UVs once now, so the Properties redraws only read the tile cache. */
+      BKE_paint_layer_object_mask_tiles_prefetch(*CTX_data_main(&C));
+      if (active_changed) {
+        ED_undo_push(&C, "Activate Paint Layer");
+      }
+    }
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+    return true;
   }
 
   bool row_activate(bContext &C,
@@ -1038,6 +1106,19 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     BKE_paint_layers_active_set(material, row.stable_id);
+    /* Mask editing only makes sense on a Layer row; leaving it for an effect/mask item ends it. */
+    if (Scene *scene = CTX_data_scene(&C)) {
+      if (scene->toolsettings != nullptr) {
+        MaterialPaintLayer *active = BKE_paint_layers_find(material, row.stable_id);
+        if (active != nullptr && active->role != MA_PAINT_LAYER_ROLE_LAYER) {
+          PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+          if (paint_mode.layer_object_mask_edit) {
+            paint_mode.layer_object_mask_edit = 0;
+            WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+          }
+        }
+      }
+    }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
     return true;
@@ -1105,7 +1186,12 @@ class PaintLayersStackSource final : public StackSource,
 
   std::optional<eObjectMode> focus_object_mode() const override
   {
-    return OB_MODE_TEXTURE_PAINT;
+    return OB_MODE_SCULPT;
+  }
+
+  const char *focus_tool_idname() const override
+  {
+    return "builtin_brush.paint";
   }
 
   bool notifier_invalidates(const wmNotifier &notifier) const override
@@ -1430,6 +1516,8 @@ class PaintLayersStackSource final : public StackSource,
     if (!paint_layers_edit_remove(material, ordinal)) {
       return false;
     }
+    /* Drop the object mask records of the removed row (and its descendants) right away. */
+    BKE_paint_layer_object_masks_cleanup_all(*CTX_data_main(&C));
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
   }

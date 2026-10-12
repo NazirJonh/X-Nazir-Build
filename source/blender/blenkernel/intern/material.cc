@@ -352,6 +352,15 @@ static void material_copy_data(Main *bmain,
   }
   /* Runtime state is derived and per-owner; a copy never shares it with the source. */
   material_dst->paint_layers_runtime = nullptr;
+  /* A real copy is a second owner: the uid keys the generated tree and every object's
+   * #ObjectPaintLayerMask, so sharing it would make two materials' rows indistinguishable. The
+   * evaluated copy keeps the uid -- the shader resolves object records through it. */
+  if ((flag & (LIB_ID_COPY_SET_COPIED_ON_WRITE | LIB_ID_CREATE_NO_MAIN)) == 0 &&
+      paint_layers_is_layered(*material_src))
+  {
+    material_dst->paint_layers_owner_uid = BLI_uuid_generate_random();
+  }
+
   /* The generated tree is owned 1:1 as well: the copy gets its own deep copy (or shares the
    * pointer under COW), see the generator. */
   BKE_paint_layers_generate_copy_data(bmain, *material_dst, *material_src, flag);

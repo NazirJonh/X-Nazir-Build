@@ -60,7 +60,9 @@
 #include "BKE_main.hh"
 #include "BKE_main_idmap.hh"
 #include "BKE_main_namemap.hh"
+#include "BKE_material.hh"
 #include "BKE_name_matching.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_preferences.h"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -1227,6 +1229,8 @@ static void setup_app_data(bContext *C,
    * side-effects, especially on next readfile call when considering IDs from the old Main
    * data-base, see e.g. #157387. */
   BLO_readfile_id_runtime_data_free_all(*bmain);
+
+  BKE_paint_layers_owner_uid_ensure_unique(*bmain);
 
   bmain->recovered = false;
 

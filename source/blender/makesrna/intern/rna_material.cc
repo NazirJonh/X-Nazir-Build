@@ -24,6 +24,8 @@
 #include "BLT_translation.hh"
 
 #include "BKE_customdata.hh"
+/* Outside #RNA_RUNTIME: the tile range constants are used by the RNA definitions too. */
+#include "BKE_paint_layers_object_mask.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -185,6 +187,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_mapping_wrap_items[]
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_grease_pencil.hh"
 #  include "BKE_lib_id.hh"
+#  include "BKE_library.hh"
 #  include "BKE_main.hh"
 #  include "BKE_material.hh"
 #  include "BKE_mesh.hh"
@@ -757,6 +760,7 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
 }
 
 static void rna_Material_paint_layers_remove(Material *ma,
+                                             Main *bmain,
                                              ReportList *reports,
                                              PointerRNA *layer_ptr)
 {
@@ -769,6 +773,9 @@ static void rna_Material_paint_layers_remove(Material *ma,
     return;
   }
   layer_ptr->invalidate();
+  /* The row is gone, so records naming its marker are orphans: drop them now instead of carrying
+   * them to the next save. */
+  BKE_paint_layer_object_masks_cleanup_all(*bmain);
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
@@ -1777,6 +1784,148 @@ static void rna_MaterialPaintLayer_mask_toggle(PointerRNA ptr, ReportList *repor
   BKE_report(reports, RPT_ERROR, "This paint layer has no mask to toggle");
 }
 
+/**
+ * The object's evaluated copy carries the records the shader reads, so SHADING alone would not
+ * refresh it. Once the row's Attribute nodes exist, hiding or showing an object only changes the
+ * value they read: the material and its tree are touched only when \a topology_changed (the row's
+ * mask flag flipped). A tree built with an older Attribute path is caught by the topology hash,
+ * which mixes the path format in.
+ */
+static void rna_MaterialPaintLayer_object_mask_tag(Material &ma,
+                                                   Object &ob,
+                                                   const bool topology_changed)
+{
+  DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL | ID_RECALC_SHADING);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, &ob);
+  /* The mask panel's checkboxes. */
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  if (topology_changed) {
+    BKE_paint_layers_tag_edited(ma);
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, &ma);
+  }
+}
+
+/* Read-only and never generates the owner uid: a getter must not change data, so a material that
+ * has no uid yet reports a key of zeros until the first `*_set`. */
+static void rna_MaterialPaintLayer_object_mask_key_get(PointerRNA *ptr, char *value)
+{
+  const Material *ma = id_cast<const Material *>(ptr->owner_id);
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  const auto key = BKE_paint_layer_object_mask_key(ma->paint_layers_owner_uid, layer->marker);
+  memcpy(value, key.data(), key.size());
+}
+
+static int rna_MaterialPaintLayer_object_mask_key_length(PointerRNA * /*ptr*/)
+{
+  return bke::PAINT_LAYER_OBJECT_MASK_KEY_LEN;
+}
+
+static bool rna_MaterialPaintLayer_object_mask_visible_get(PointerRNA ptr, Object *object)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (const Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    return BKE_paint_layer_object_mask_object_visible_get(*object, *ma, *layer);
+  }
+  return true;
+}
+
+static void rna_MaterialPaintLayer_object_mask_visible_set(PointerRNA ptr,
+                                                           Main *bmain,
+                                                           ReportList *reports,
+                                                           Object *object,
+                                                           const bool visible)
+{
+  MaterialPaintLayer *layer = nullptr;
+  Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer);
+  if (ma == nullptr || layer == nullptr || object == nullptr) {
+    return;
+  }
+  if (!ID_IS_EDITABLE(&object->id) || ID_IS_OVERRIDE_LIBRARY(&object->id)) {
+    BKE_report(reports, RPT_ERROR, "Object is not editable");
+    return;
+  }
+  if (!ID_IS_EDITABLE(&ma->id) || ID_IS_OVERRIDE_LIBRARY(&ma->id)) {
+    BKE_report(reports, RPT_ERROR, "Material is not editable");
+    return;
+  }
+  const int8_t old_mask_flag = layer->object_mask_flag;
+  if (BKE_paint_layer_object_mask_visible_set(*bmain, *object, *ma, *layer, visible)) {
+    rna_MaterialPaintLayer_object_mask_tag(
+        *ma, *object, layer->object_mask_flag != old_mask_flag);
+  }
+}
+
+static bool rna_MaterialPaintLayer_object_mask_tile_get(PointerRNA ptr, Object *object, int tile)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (const Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    return BKE_paint_layer_object_mask_tile_visible_get(*object, *ma, *layer, tile);
+  }
+  return true;
+}
+
+static void rna_MaterialPaintLayer_object_mask_tile_set(PointerRNA ptr,
+                                                        Main *bmain,
+                                                        ReportList *reports,
+                                                        Object *object,
+                                                        const int tile,
+                                                        const bool visible)
+{
+  MaterialPaintLayer *layer = nullptr;
+  Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer);
+  if (ma == nullptr || layer == nullptr || object == nullptr) {
+    return;
+  }
+  if (tile < bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST ||
+      tile >= bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST + bke::PAINT_LAYER_OBJECT_MASK_TILE_NUM)
+  {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Tile must be in %d..%d",
+                bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST,
+                bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST + bke::PAINT_LAYER_OBJECT_MASK_TILE_NUM -
+                    1);
+    return;
+  }
+  if (!ID_IS_EDITABLE(&object->id) || ID_IS_OVERRIDE_LIBRARY(&object->id)) {
+    BKE_report(reports, RPT_ERROR, "Object is not editable");
+    return;
+  }
+  if (!ID_IS_EDITABLE(&ma->id) || ID_IS_OVERRIDE_LIBRARY(&ma->id)) {
+    BKE_report(reports, RPT_ERROR, "Material is not editable");
+    return;
+  }
+  const int8_t old_mask_flag = layer->object_mask_flag;
+  if (BKE_paint_layer_object_mask_tile_set(*bmain, *object, *ma, *layer, tile, visible)) {
+    rna_MaterialPaintLayer_object_mask_tag(
+        *ma, *object, layer->object_mask_flag != old_mask_flag);
+  }
+}
+
+static void rna_MaterialPaintLayer_object_mask_tiles(PointerRNA ptr,
+                                                     Object *object,
+                                                     const bool refresh,
+                                                     int **r_tiles,
+                                                     int *r_tiles_num)
+{
+  *r_tiles = nullptr;
+  *r_tiles_num = 0;
+  MaterialPaintLayer *layer = nullptr;
+  if (const Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    const Vector<int> tiles = BKE_paint_layer_object_mask_object_tiles_cached(
+        *object, *ma, refresh);
+    if (refresh) {
+      WM_main_add_notifier(NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+    }
+    if (!tiles.is_empty()) {
+      *r_tiles_num = int(tiles.size());
+      *r_tiles = MEM_new_array_uninitialized<int>(tiles.size(), __func__);
+      memcpy(*r_tiles, tiles.data(), sizeof(int) * tiles.size());
+    }
+  }
+}
+
 static MaterialPaintLayerChannel *rna_MaterialPaintLayer_channel_add(PointerRNA ptr,
                                                                      ReportList *reports,
                                                                      int channel)
@@ -2680,6 +2829,12 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Role", "The row's structural place in its owner");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "is_mask_base", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_PAINT_LAYER_MASK_BASE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Base Mask", "The layer's own mask, as opposed to an extra mask correction");
+
   /* Meaningful for a mask item (role MASK_ITEM) with a Material, Node Group or Stack source only;
    * the generator ignores it for any other role/source combination. Normal is left out of the
    * item list (and refused by the setter): a mask is a single scalar, and Normal is a vector the
@@ -3050,6 +3205,103 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       func, "Turn the layer's mask on or off, keeping the mask image and its paint content");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
 
+  static const EnumPropertyItem object_mask_type_items[] = {
+      {MA_PAINT_LAYER_OBJECT_MASK_MESH, "MESH", 0, "Mesh", "Choose the objects the layer shows on"},
+      {MA_PAINT_LAYER_OBJECT_MASK_UV_TILES,
+       "UV_TILES",
+       0,
+       "UV Tiles",
+       "Choose the UDIM tiles of each object the layer shows on"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "object_mask_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "object_mask_type");
+  RNA_def_property_enum_items(prop, object_mask_type_items);
+  RNA_def_property_ui_text(prop, "Mask Type", "Limit the layer to some objects or UDIM tiles");
+  /* Topology: the generator adds or drops the Attribute nodes. */
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The per-object choices are stored on the objects, keyed by this string. */
+  prop = RNA_def_property(srna, "object_mask_key", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_object_mask_key_get",
+                                "rna_MaterialPaintLayer_object_mask_key_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Object Mask Key", "Key of this row's records in Object.paint_layer_masks");
+
+  func = RNA_def_function(
+      srna, "object_mask_visible_get", "rna_MaterialPaintLayer_object_mask_visible_get");
+  RNA_def_function_ui_description(func, "Whether the layer shows on the object (Mesh mode)");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
+  parm = RNA_def_pointer(func, "object", "Object", "", "The object to query");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "visible", true, "", "Whether the layer shows");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(
+      srna, "object_mask_visible_set", "rna_MaterialPaintLayer_object_mask_visible_set");
+  RNA_def_function_ui_description(func, "Show or hide the layer on the object (Mesh mode)");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_MAIN | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func, "object", "Object", "", "The object to change");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "visible", true, "", "Whether the layer shows");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(
+      srna, "object_mask_tile_get", "rna_MaterialPaintLayer_object_mask_tile_get");
+  RNA_def_function_ui_description(
+      func, "Whether the layer shows on a UDIM tile of the object (UV Tiles mode)");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
+  parm = RNA_def_pointer(func, "object", "Object", "", "The object to query");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  /* Wide range: an out-of-range tile reads as visible, so the UI can query unmaskable tiles. */
+  parm = RNA_def_int(func,
+                     "tile",
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST,
+                     0,
+                     INT_MAX,
+                     "Tile",
+                     "UDIM tile number",
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST,
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_LAST);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "visible", true, "", "Whether the layer shows on the tile");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(
+      srna, "object_mask_tile_set", "rna_MaterialPaintLayer_object_mask_tile_set");
+  RNA_def_function_ui_description(
+      func, "Show or hide the layer on a UDIM tile of the object (UV Tiles mode)");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_MAIN | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func, "object", "Object", "", "The object to change");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_int(func,
+                     "tile",
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST,
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST,
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_LAST,
+                     "Tile",
+                     "UDIM tile number",
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_FIRST,
+                     bke::PAINT_LAYER_OBJECT_MASK_TILE_LAST);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "visible", true, "", "Whether the layer shows on the tile");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+
+  func = RNA_def_function(srna, "object_mask_tiles", "rna_MaterialPaintLayer_object_mask_tiles");
+  RNA_def_function_ui_description(
+      func,
+      "The UDIM tiles the object's faces using this material occupy (cached until refreshed)");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
+  parm = RNA_def_pointer(func, "object", "Object", "", "The object to query");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  RNA_def_boolean(func, "refresh", false, "Refresh", "Rescan the UVs instead of using the cache");
+  parm = RNA_def_int_array(
+      func, "tiles", 1, nullptr, 1001, 2000, "Tiles", "Occupied UDIM tile numbers", 1001, 2000);
+  RNA_def_parameter_flags(parm, PROP_DYNAMIC, PARM_OUTPUT);
+
   func = RNA_def_function(srna, "channel_add", "rna_MaterialPaintLayer_channel_add");
   RNA_def_function_ui_description(func, "Add a channel record to the layer");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
@@ -3335,7 +3587,7 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
 
   func = RNA_def_function(srna, "remove", "rna_Material_paint_layers_remove");
   RNA_def_function_ui_description(func, "Remove a paint layer");
-  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_REPORTS);
   parm = RNA_def_pointer(
       func, "layer", "MaterialPaintLayer", "Paint Layer", "The paint layer to remove");
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);

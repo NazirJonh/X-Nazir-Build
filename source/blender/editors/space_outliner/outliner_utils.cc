@@ -405,6 +405,10 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
           num_columns += layout.mode_width;
         }
       }
+      /* The action column is not one of the two the flags hide. */
+      if (layout.action_width > 0) {
+        num_columns += layout.action_width;
+      }
       /* The per-row toggles live to the right of those columns, the way the restriction icons do
        * in the View Layer, rather than trailing the name -- unless the visibility toggle was
        * moved to the tree's own first column, in which case nothing is left to reserve room

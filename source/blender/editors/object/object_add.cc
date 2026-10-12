@@ -93,6 +93,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcloud.hh"
 #include "BKE_report.hh"
@@ -2729,6 +2730,7 @@ static void copy_object_set_idnew(bContext *C)
     BKE_libblock_relink_to_newid(bmain, &ob->id, ID_REMAP_SKIP_USER_CLEAR);
   }
   CTX_DATA_END;
+  BKE_paint_layer_object_masks_remap_from_newid(*bmain);
 
 #ifndef NDEBUG
   /* Call to `BKE_libblock_relink_to_newid` above is supposed to have cleared all those flags. */
@@ -5050,6 +5052,7 @@ Base *add_duplicate(
    * enforce remapping obdata (by default this is forbidden in edit mode). */
   const int remap_flag = BKE_object_is_in_editmode(ob) ? ID_REMAP_FORCE_OBDATA_IN_EDITMODE : 0;
   BKE_libblock_relink_to_newid(bmain, &ob->id, remap_flag);
+  BKE_paint_layer_object_masks_duplicate_remap(*ob, *base->object);
 
   /* Correct but the caller must do this. */
   // DAG_relations_tag_update(bmain);
@@ -5142,6 +5145,12 @@ static wmOperatorStatus duplicate_exec(bContext *C, wmOperator *op)
 
   /* Note that this will also clear newid pointers and tags. */
   copy_object_set_idnew(C);
+  /* Sub-process duplicates relink only here, so the mask records follow the material copies now. */
+  for (DuplicateObjectLink &link : object_base_links) {
+    if (link.object_new != nullptr && link.base_src != nullptr) {
+      BKE_paint_layer_object_masks_duplicate_remap(*link.object_new, *link.base_src->object);
+    }
+  }
 
   ED_outliner_select_sync_from_object_tag(C);
 

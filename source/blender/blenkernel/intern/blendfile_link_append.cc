@@ -57,6 +57,7 @@
 #include "BKE_material.hh"
 #include "BKE_mesh_legacy_convert.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_report.hh"
 #include "BKE_rigidbody.h"
 #include "BKE_scene.hh"
@@ -1625,6 +1626,8 @@ void BKE_blendfile_append(BlendfileLinkAppendContext *lapp_context, ReportList *
   BLO_read_do_version_after_setup(bmain, lapp_context, &bf_reports);
 
   BLO_readfile_id_runtime_data_free_all(*bmain);
+
+  BKE_paint_layers_owner_uid_ensure_unique(*bmain);
 }
 
 /** \} */

@@ -25,6 +25,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_object_mask.hh"
 
 #include "paint_layers_intern.hh"
 
@@ -285,6 +286,13 @@ bool BKE_paint_layers_target_get(Object &ob,
                    ma->paint_layers_uv_map);
     }
   }
+  if (r_target.layer != nullptr) {
+    /* Tile 0: the Mesh answer alone, folders included; tiles are answered per pixel. */
+    if (!BKE_paint_layer_object_mask_visible(ob, *ma, *r_target.layer, 0)) {
+      STRNCPY(r_target.object_mask_refusal, "The layer is masked out on this object");
+    }
+    r_target.excluded_tiles = BKE_paint_layer_object_mask_excluded_tiles(ob, *ma, *r_target.layer);
+  }
   return true;
 }
 
@@ -357,6 +365,9 @@ const char *BKE_paint_layers_target_refusal(const PaintLayersTarget &target)
 {
   if (target.uv_refusal[0] != '\0') {
     return target.uv_refusal;
+  }
+  if (target.object_mask_refusal[0] != '\0') {
+    return target.object_mask_refusal;
   }
   if (BKE_paint_layers_target_is_frozen(target)) {
     return "The layer is frozen (bake); unfreeze it to paint";

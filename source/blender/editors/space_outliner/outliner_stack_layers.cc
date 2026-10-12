@@ -56,6 +56,7 @@
 #include "UI_interface_layout.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "outliner_intern.hh"
@@ -2019,6 +2020,18 @@ bool outliner_stack_focus_set(bContext *C,
     BKE_view_layer_base_select_and_set_active(view_layer, base);
     if (!object::mode_set(C, *mode)) {
       BKE_report(CTX_wm_reports(C), RPT_WARNING, "Could not enter the stack's edit mode");
+    }
+    else if (const char *tool_idname = source.focus_tool_idname()) {
+      /* The context area is the Outliner, so #WM_toolsystem_ref_set_by_id would look up the
+       * wrong tool key. Build the 3D viewport's key for the mode just entered instead. */
+      bToolKey tkey{};
+      tkey.space_type = SPACE_VIEW3D;
+      tkey.mode = WM_toolsystem_mode_from_spacetype(*CTX_data_main(C),
+                                                    CTX_data_scene(C),
+                                                    CTX_data_view_layer(C),
+                                                    nullptr,
+                                                    SPACE_VIEW3D);
+      WM_toolsystem_ref_set_by_id_ex(C, CTX_wm_workspace(C), &tkey, tool_idname, false);
     }
   }
 

@@ -222,6 +222,11 @@ struct StackRow {
    * reads it. Drives the row's mask icon.
    */
   bool mask_enabled = true;
+  /** Icon of the row's action button, or #ICON_NONE when the row has no action. */
+  int action_icon = 0;
+  /** Draws the action button pressed: the source is in the action's mode for this row. */
+  bool action_active = false;
+  const char *action_tooltip = nullptr;
   /**
    * False when the source recognized something it cannot represent. Such a row is still listed --
    * a layer the user cannot see is worse than one it cannot edit -- but carries no controls.
@@ -597,6 +602,11 @@ struct StackColumnLayout {
   /** Zero (or negative) hides the column. Fractional values are allowed. */
   float mode_width = 0;
   /**
+   * One per-row action button after the mode column, such as editing what the row is limited to.
+   * Zero (or negative) hides the column.
+   */
+  float action_width = 0;
+  /**
    * Columns for the row's own toggles: the visibility toggle. A fixed count rather than one
    * derived per row, because the columns have to line up down the whole list.
    */
@@ -916,6 +926,15 @@ class StackEditor {
     return -1;
   }
 
+  /** The row's action button was pressed. Sources without an action need not implement this. */
+  virtual bool row_action(bContext & /*C*/,
+                          ID & /*owner*/,
+                          int /*ordinal*/,
+                          const StackRow & /*row*/) const
+  {
+    return false;
+  }
+
   /** Turn the row at \a ordinal on or off. */
   virtual bool row_set_enabled(bContext & /*C*/,
                                const StackFocus & /*focus*/,
@@ -1184,6 +1203,15 @@ class StackSource {
   virtual std::optional<eObjectMode> focus_object_mode() const
   {
     return std::nullopt;
+  }
+
+  /**
+   * The tool to activate in the 3D viewport after entering #focus_object_mode, or null to keep
+   * whatever tool the mode remembers.
+   */
+  virtual const char *focus_tool_idname() const
+  {
+    return nullptr;
   }
 
   /**

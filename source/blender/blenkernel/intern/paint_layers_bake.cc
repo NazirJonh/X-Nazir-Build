@@ -32,6 +32,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLI_hash.hh"
@@ -610,8 +611,10 @@ bool BKE_paint_layers_bake_substitute(const Material &ma,
   if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return false;
   }
-  /* A row with a mapping inside stays live, so its slider values reach the graph and the CPU. */
-  if (BKE_paint_layers_mapping_blocks_bake(ma, layer)) {
+  /* A row with a mapping inside stays live, so its slider values reach the graph and the CPU.
+   * A folder whose content is limited per object cannot be one material-wide picture: the object
+   * choice is applied in the shader, after every shared cache. */
+  if (BKE_paint_layers_bake_blocked(ma, layer)) {
     return false;
   }
   if (!BKE_paint_layers_bake_is_valid(ma, layer)) {
@@ -959,7 +962,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
         continue;
       }
       /* A row with a mapping inside stays live and is never baked (see #row_is_substituted). */
-      if (BKE_paint_layers_mapping_blocks_bake(ma, layer)) {
+      if (BKE_paint_layers_bake_blocked(ma, layer)) {
         continue;
       }
 
@@ -1215,7 +1218,7 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
     BKE_paint_layers_flatten_all(ma, layers);
     for (const MaterialPaintLayer *layer : layers) {
       if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
-          BKE_paint_layers_mapping_blocks_bake(ma, *layer))
+          BKE_paint_layers_bake_blocked(ma, *layer))
       {
         continue;
       }
@@ -1675,7 +1678,7 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
       continue;
     }
     if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
-        BKE_paint_layers_mapping_blocks_bake(ma, *layer))
+        BKE_paint_layers_bake_blocked(ma, *layer))
     {
       continue;
     }
@@ -1848,7 +1851,7 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
       continue;
     }
     if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
-        BKE_paint_layers_mapping_blocks_bake(ma, *layer))
+        BKE_paint_layers_bake_blocked(ma, *layer))
     {
       continue;
     }
@@ -2062,7 +2065,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
   BKE_paint_layers_flatten_all(*ma, layers);
   for (const MaterialPaintLayer *layer : layers) {
     if (BKE_paint_layers_kind_info(layer->source).needs_external_bake ||
-        BKE_paint_layers_mapping_blocks_bake(*ma, *layer))
+        BKE_paint_layers_bake_blocked(*ma, *layer))
     {
       continue;
     }

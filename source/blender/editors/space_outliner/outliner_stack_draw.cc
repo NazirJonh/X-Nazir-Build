@@ -764,7 +764,9 @@ void outliner_draw_stack_columns(bContext *C,
                           (space_outliner->stack_layers_flag & SO_SL_HIDE_OPACITY) == 0;
   const bool show_mode = layout.mode_width > 0 &&
                          (space_outliner->stack_layers_flag & SO_SL_HIDE_BLEND) == 0;
-  if (!show_value && !show_mode) {
+  /* Not hidden by the value/mode flags: the action is not either of those columns. */
+  const bool show_action = layout.action_width > 0;
+  if (!show_value && !show_mode && !show_action) {
     return;
   }
 
@@ -791,6 +793,7 @@ void outliner_draw_stack_columns(bContext *C,
   const float value_width = show_value ? layout.value_width * UI_UNIT_X : 0;
   const float mode_width = show_mode ? layout.mode_width * UI_UNIT_X : 0;
   const float stacked_width = max_ff(value_width, mode_width);
+  const float action_width = show_action ? layout.action_width * UI_UNIT_X : 0;
 
   tree_iterator::all_open(*space_outliner, [&](TreeElement *te) {
     const TreeStoreElem *tselem = TREESTORE(te);
@@ -837,6 +840,45 @@ void outliner_draw_stack_columns(bContext *C,
                                                     button_height - 2 * button_pad_y;
     const float compact_label_width = stacked_layout ? max_ff(value_width, mode_width) :
                                                        (value_width + mode_width);
+
+    /* After the value and mode columns, compact rows included: drawn before the compact branch
+     * returns. */
+    if (show_action && row->action_icon != ICON_NONE) {
+      const float action_x = column_x + (row->compact ? compact_label_width :
+                                         stacked      ? stacked_width :
+                                                        value_width + mode_width);
+      /* One unit square, centered on the row's full height whether or not the row stacks. */
+      const int action_height = int(UI_UNIT_Y);
+      const int action_y = te->ys +
+                           (outliner_tree_element_height(*space_outliner, *te) - action_height) /
+                               2;
+      /* A plain operator button: a toggle type without an RNA property never runs the operator.
+       * Embossed so the full two-unit width reads as one button, not a bare icon. */
+      const ui::EmbossType prev_emboss = block_emboss_get(block);
+      block_emboss_set(block, ui::EmbossType::Emboss);
+      /* Same button kind and call context as the row's visibility toggle, which is known to fire. */
+      ui::Button *button = uiDefIconButO(block,
+                                         ui::ButtonType::ButToggle,
+                                         "OUTLINER_OT_stack_row_action",
+                                         wm::OpCallContext::ExecDefault,
+                                         row->action_icon,
+                                         int(action_x),
+                                         action_y,
+                                         int(action_width),
+                                         action_height,
+                                         row->action_tooltip ? row->action_tooltip : "");
+      block_emboss_set(block, prev_emboss);
+      if (button != nullptr) {
+        RNA_int_set(ui::button_operator_ptr_ensure(button), "ordinal", tselem->nr);
+        /* Captured by value: the block is rebuilt every draw. */
+        button_func_pushed_state_set(
+            button,
+            [active = row->action_active](const ui::Button & /*button*/) { return active; });
+        if (!editable) {
+          button_disable(button, disabled_hint);
+        }
+      }
+    }
 
     if (row->compact && !stacked) {
       /* One label for the row's columns; its button opens #OUTLINER_OT_stack_column_popup, which

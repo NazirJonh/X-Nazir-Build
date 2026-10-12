@@ -27,6 +27,7 @@
 #include "ED_screen.hh"
 
 #include "UI_interface.hh"
+#include "UI_interface_icons.hh"
 #include "UI_view2d.hh"
 
 #include "outliner_intern.hh"
@@ -71,12 +72,32 @@ void outliner_viewcontext_init(const bContext *C, TreeViewContext *tvc)
 
 /** \} */
 
+int outliner_tree_element_height(const SpaceOutliner &space_outliner, const TreeElement &te)
+{
+  if (space_outliner.outlinevis != SO_STACK_LAYERS ||
+      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+  {
+    return UI_UNIT_Y;
+  }
+  /* Only the layers themselves grow: their content rows -- a mask correction, a channel sub-row --
+   * read better at the usual height, and a taller row for them would only add empty space. */
+  const TreeStoreElem *tselem = TREESTORE(&te);
+  if (tselem == nullptr || tselem->type != TSE_STACK_LAYER) {
+    return UI_UNIT_Y;
+  }
+  const StackRow *row = outliner_stack_row_find(space_outliner, tselem->nr);
+  if (row != nullptr && row->compact) {
+    return UI_UNIT_Y;
+  }
+  return 2 * UI_UNIT_Y;
+}
+
 TreeElement *outliner_find_item_at_y(const SpaceOutliner *space_outliner,
                                      const ListBaseT<TreeElement> *tree,
                                      float view_co_y)
 {
   for (TreeElement &te_iter : *tree) {
-    if (view_co_y < (te_iter.ys + UI_UNIT_Y)) {
+    if (view_co_y < (te_iter.ys + outliner_tree_element_height(*space_outliner, te_iter))) {
       if (view_co_y >= te_iter.ys) {
         /* co_y is inside this element */
         return &te_iter;
@@ -90,7 +111,9 @@ TreeElement *outliner_find_item_at_y(const SpaceOutliner *space_outliner,
       /* If the coordinate is lower than the next element, we can continue with that one and skip
        * recursion too. */
       const TreeElement *te_next = te_iter.next;
-      if (te_next && (view_co_y < (te_next->ys + UI_UNIT_Y))) {
+      if (te_next &&
+          (view_co_y < (te_next->ys + outliner_tree_element_height(*space_outliner, *te_next))))
+      {
         continue;
       }
 
@@ -352,6 +375,8 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
     case SO_ID_ORPHANS:
       num_columns = 3;
       break;
+    case SO_STACK_LAYERS:
+      return 0.0f;
     case SO_VIEW_LAYER:
       if (space_outliner->show_restrict_flags & SO_RESTRICT_ENABLE) {
         num_columns++;
@@ -411,9 +436,12 @@ bool outliner_is_element_visible(const TreeElement *te)
   return true;
 }
 
-bool outliner_is_element_in_view(const TreeElement *te, const View2D *v2d)
+bool outliner_is_element_in_view(const SpaceOutliner &space_outliner,
+                                const TreeElement *te,
+                                const View2D *v2d)
 {
-  return ((te->ys + UI_UNIT_Y) >= v2d->cur.ymin) && (te->ys <= v2d->cur.ymax);
+  return ((te->ys + outliner_tree_element_height(space_outliner, *te)) >= v2d->cur.ymin) &&
+         (te->ys <= v2d->cur.ymax);
 }
 
 bool outliner_item_is_co_over_name_icons(const TreeElement *te, float view_co_x)
@@ -478,6 +506,49 @@ void outliner_tag_redraw_avoid_rebuild_on_open_change(const SpaceOutliner *space
   else {
     ED_region_tag_redraw_no_rebuild(region);
   }
+}
+
+float outliner_stack_preview_size()
+{
+  return ICON_DEFAULT_HEIGHT * OUTLINER_STACK_PREVIEW_SCALE * UI_SCALE_FAC;
+}
+
+static rctf outliner_stack_preview_rect_impl(const float row_x,
+                                             const float content_y,
+                                             const int slot_index,
+                                             const bool has_leading_icon)
+{
+  const float preview_size = outliner_stack_preview_size();
+  /* Gap between multiple previews. */
+  const float preview_gap = UI_UNIT_X * 0.25f;
+  const float leading_icon_width = has_leading_icon ? UI_UNIT_X + 4.0f * UI_UNIT_X / 20.0f : 0.0f;
+
+  rctf rect;
+  rect.xmin = row_x + UI_UNIT_X + leading_icon_width +
+              (slot_index * (preview_size + preview_gap));
+  rect.xmax = rect.xmin + preview_size;
+  rect.ymin = content_y + (UI_UNIT_Y - preview_size) * 0.5f;
+  rect.ymax = rect.ymin + preview_size;
+  return rect;
+}
+
+rctf outliner_stack_row_preview_rect(const StackRow &row,
+                                     const float row_x,
+                                     const float content_y,
+                                     const int slot_index)
+{
+  /* The row's own icon is drawn ahead of the first slot when that slot says so; the geometry
+   * follows it, so every consumer shifts by the same amount without computing it again. */
+  const bool has_leading_icon = !row.preview_slots.is_empty() &&
+                                row.preview_slots[0].keeps_row_icon;
+  return outliner_stack_preview_rect_impl(row_x, content_y, slot_index, has_leading_icon);
+}
+
+rctf outliner_stack_slot_preview_rect(const float row_x,
+                                      const float content_y,
+                                      const int slot_index)
+{
+  return outliner_stack_preview_rect_impl(row_x, content_y, slot_index, false);
 }
 
 }  // namespace ed::outliner

@@ -113,6 +113,26 @@ static void blo_update_defaults_screen(bScreen *screen,
           }
         }
       }
+      if (sl.spacetype == SPACE_OUTLINER) {
+        /* The Stack Layers defaults #SpaceOutliner declares reach a space the code creates, but
+         * the startup file's Outliner was serialized before the field existed and carries a zero.
+         * Applied here rather than through versioning, so the factory startup keeps agreeing with
+         * a freshly split Outliner without touching what a user saved. */
+        SpaceOutliner *space_outliner = reinterpret_cast<SpaceOutliner *>(&sl);
+        space_outliner->stack_layers_flag |= SO_SL_BIG_ROWS | SO_SL_VISIBILITY_LEFT;
+
+        /* The tool header carries the Stack Layers controls and nothing else. The startup file
+         * was written before it existed, and a space type only initializes regions that are
+         * already there, so it is added here, hidden until the display mode asks for it. */
+        ListBaseT<ARegion> *regionbase = (&sl == area.spacedata.first) ? &area.regionbase :
+                                                                          &sl.regionbase;
+        if (ARegion *region = do_versions_add_region_if_not_found(
+                regionbase, RGN_TYPE_TOOL_HEADER, "tool header", RGN_TYPE_HEADER))
+        {
+          region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+          region->flag |= RGN_FLAG_HIDDEN;
+        }
+      }
     }
   }
 

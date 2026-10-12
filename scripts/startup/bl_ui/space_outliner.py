@@ -19,6 +19,34 @@ def has_selected_ids_in_context(context):
     return False
 
 
+class OUTLINER_HT_tool_header(Header):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'TOOL_HEADER'
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.display_mode == 'STACK_LAYERS'
+
+    def draw(self, context):
+        layout = self.layout
+        space = context.space_data
+
+        if space.stack_layers_view != 'STACK':
+            props = layout.operator("wm.context_set_enum", text="Outliner", icon='OUTLINER')
+            props.data_path = "space_data.display_mode"
+            props.value = 'VIEW_LAYER'
+
+            # Which source's stacks the object list is drawn from. It belongs on this row, next to
+            # the other Stack Layers controls, pushed to the far right edge.
+            layout.separator_spacer()
+            layout.prop(space, "stack_source", text="")
+            return
+
+        layout.operator("outliner.stack_layers_back", text="", icon='BACK')
+
+        layout.separator_spacer()
+
+
 class OUTLINER_HT_header(Header):
     bl_space_type = 'OUTLINER'
 
@@ -44,7 +72,9 @@ class OUTLINER_HT_header(Header):
         filter_text_supported = True
         # No text filtering for library override hierarchies. The tree is lazy built to avoid
         # performance issues in complex files.
-        if display_mode == 'LIBRARY_OVERRIDES' and space.lib_override_view_mode == 'HIERARCHIES':
+        if (display_mode == 'LIBRARY_OVERRIDES' and
+                space.lib_override_view_mode == 'HIERARCHIES') or (
+                display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK'):
             filter_text_supported = False
 
         if filter_text_supported:
@@ -141,6 +171,14 @@ class OUTLINER_MT_context_menu(Menu):
         space = context.space_data
 
         layout = self.layout
+
+        if space.display_mode == 'STACK_LAYERS':
+            # A stack row is not a data-block, so none of the common entries (assets, overrides,
+            # ID management) apply to it.
+            layout.menu("OUTLINER_MT_context_menu_view")
+            layout.separator()
+            layout.menu("INFO_MT_area")
+            return
 
         if space.display_mode == 'VIEW_LAYER':
             OUTLINER_MT_collection_new.draw_without_context_menu(context, layout)
@@ -584,6 +622,7 @@ class OUTLINER_PT_options_filter(Panel):
 
 
 classes = (
+    OUTLINER_HT_tool_header,
     OUTLINER_HT_header,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,

@@ -28,6 +28,7 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
 #include "ED_image.hh"
+#include "ED_outliner_stack_automation.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_spreadsheet.hh"
@@ -864,6 +865,33 @@ static ScrArea *rna_area_from_space(const PointerRNA *ptr)
   bScreen *screen = reinterpret_cast<bScreen *>(ptr->owner_id);
   SpaceLink *link = static_cast<SpaceLink *>(ptr->data);
   return BKE_screen_find_area_from_space(screen, link);
+}
+
+static void rna_SpaceOutliner_display_mode_update(bContext * /*C*/, PointerRNA *ptr)
+{
+  ScrArea *area = rna_area_from_space(ptr);
+  if (area != nullptr) {
+    /* The tool header only carries the Stack Layers controls, so it follows the display mode.
+     * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed. */
+    SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+    ed::outliner::outliner_tool_header_visibility_sync(area, *space_outliner);
+    ED_area_tag_redraw(area);
+  }
+  ED_area_tag_refresh(area);
+}
+
+static void rna_SpaceOutliner_stack_focus_name_get(PointerRNA *ptr, char *value)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  const char *name = ed::outliner::outliner_stack_focus_name_get(*space_outliner);
+  const int length = int(strlen(name));
+  memcpy(value, name, length + 1);
+}
+
+static int rna_SpaceOutliner_stack_focus_name_length(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return int(strlen(ed::outliner::outliner_stack_focus_name_get(*space_outliner)));
 }
 
 static void area_region_from_regiondata(bScreen *screen,
@@ -5184,6 +5212,30 @@ static void rna_def_space_outliner(BlenderRNA *brna)
        ICON_ORPHAN_DATA,
        "Unused Data",
        "Display data that is unused and/or will be lost when the file is reloaded"},
+      {SO_STACK_LAYERS,
+       "STACK_LAYERS",
+       ICON_IMAGE_RGB,
+       "Stack Layers",
+       "Display an ordered layer stack of the focused data"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem stack_layers_view_items[] = {
+      {SO_SL_VIEW_OBJECTS,
+       "OBJECTS",
+       ICON_OBJECT_DATA,
+       "Objects",
+       "Browse the objects that have a stack"},
+      {SO_SL_VIEW_STACK, "STACK", ICON_IMAGE_RGB, "Stack", "Display the focused stack"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem stack_source_items[] = {
+      {SO_STACK_SRC_SHAPE_KEYS,
+       "SHAPE_KEYS",
+       ICON_SHAPEKEY_DATA,
+       "Shape Keys",
+       "Shape keys of the active object"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -5219,7 +5271,34 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "outlinevis");
   RNA_def_property_enum_items(prop, display_mode_items);
   RNA_def_property_ui_text(prop, "Display Mode", "Type of information to display");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_display_mode_update");
+
+  prop = RNA_def_property(srna, "stack_layers_view", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_layers_view");
+  RNA_def_property_enum_items(prop, stack_layers_view_items);
+  RNA_def_property_ui_text(
+      prop, "Stack Layers View", "Whether to browse objects or to show one object's stack");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "stack_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_source");
+  RNA_def_property_enum_items(prop, stack_source_items);
+  RNA_def_property_ui_text(prop, "Stack Source", "Which kind of layer stack to display");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "stack_focus_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_SpaceOutliner_stack_focus_name_get",
+                                "rna_SpaceOutliner_stack_focus_name_length",
+                                nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Stack Focus Name",
+                           "Name of the data-block the displayed stack belongs to, as the source "
+                           "last resolved it; empty before the first stack is shown");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_ID);
 
   prop = RNA_def_property(srna, "lib_override_view_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, lib_override_view_mode);

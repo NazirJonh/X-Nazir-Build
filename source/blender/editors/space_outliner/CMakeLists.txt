@@ -27,6 +27,13 @@ set(SRC
   outliner_tree.cc
   outliner_utils.cc
   space_outliner.cc
+  stack_layer/outliner_stack_draw.cc
+  stack_layer/outliner_stack_layers.cc
+  stack_layer/outliner_stack_layers_ops.cc
+  stack_layer/outliner_stack_source.cc
+  stack_layer/outliner_stack_source_shape_keys.cc
+  stack_layer/tree_display_stack_layers.cc
+  stack_layer/tree_element_stack_layer.cc
   tree/common.cc
   tree/tree_display.cc
   tree/tree_display_data.cc
@@ -127,6 +134,8 @@ set(SRC
   tree/tree_element_view_collection.hh
   tree/tree_element_view_layer.hh
   tree/tree_iterator.hh
+  stack_layer/outliner_stack_source.hh
+  stack_layer/tree_element_stack_layer.hh
 )
 
 set(LIB

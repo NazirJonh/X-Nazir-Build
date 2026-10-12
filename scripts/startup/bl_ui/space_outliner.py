@@ -159,6 +159,12 @@ class OUTLINER_MT_context_menu_view(Menu):
 
         layout.separator()
 
+        layout.operator("view2d.zoom_in")
+        layout.operator("view2d.zoom_out")
+        layout.operator("view2d.reset", text="Reset Zoom")
+
+        layout.separator()
+
         layout.operator("outliner.expanded_toggle")
         layout.operator("outliner.show_hierarchy", text="Show Object Hierarchy")
         layout.operator("outliner.show_one_level", text="Show One Level")

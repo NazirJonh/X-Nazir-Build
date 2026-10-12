@@ -506,6 +506,27 @@ def km_outliner(params):
     )
 
     items.extend([
+        # View2D navigation. These bindings live in the Outliner keymap instead of the shared
+        # "View2D" keymap because the shared one zooms with the plain mouse wheel, while the
+        # Outliner must scroll with it. Panning and zooming follow the Industry Compatible
+        # conventions (pan with Alt+drag, zoom with Alt+RMB or Alt+wheel).
+        ("view2d.scroller_activate", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroller_activate", {"type": 'MIDDLEMOUSE', "value": 'PRESS'}, None),
+        ("view2d.pan", {"type": 'LEFTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.pan", {"type": 'MIDDLEMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.zoom", {"type": 'RIGHTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.pan", {"type": 'TRACKPADPAN', "value": 'ANY'}, None),
+        ("view2d.scroll_down", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_up", {"type": 'WHEELUPMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_right", {"type": 'WHEELDOWNMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("view2d.scroll_left", {"type": 'WHEELUPMOUSE', "value": 'PRESS', "shift": True}, None),
+        ("view2d.scroll_right", {"type": 'WHEELRIGHTMOUSE', "value": 'PRESS'}, None),
+        ("view2d.scroll_left", {"type": 'WHEELLEFTMOUSE', "value": 'PRESS'}, None),
+        ("view2d.zoom_in", {"type": 'WHEELINMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.zoom_out", {"type": 'WHEELOUTMOUSE', "value": 'PRESS', "alt": True}, None),
+        ("view2d.zoom", {"type": 'TRACKPADPAN', "value": 'ANY', "ctrl": True}, None),
+        ("view2d.zoom", {"type": 'TRACKPADZOOM', "value": 'ANY'}, None),
+        ("view2d.smoothview", {"type": 'TIMER1', "value": 'ANY', "any": True}, None),
         ("outliner.item_rename", {"type": 'LEFTMOUSE', "value": 'DOUBLE_CLICK'}, None),
         ("outliner.item_rename", {"type": 'RET', "value": 'PRESS'},
          {"properties": [("use_active", True)]}),

@@ -1875,10 +1875,7 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
       changed |= outliner_flag_set(*space_outliner, TSE_SELECTED, false);
     }
   }
-  /* Don't allow toggle on scene collection */
-  else if ((TREESTORE(te)->type != TSE_VIEW_COLLECTION_BASE) &&
-           outliner_item_is_co_within_close_toggle(te, view_mval[0]))
-  {
+  else if (outliner_item_is_co_within_close_toggle(te, view_mval[0])) {
     return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
   }
   else {

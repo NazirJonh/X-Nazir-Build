@@ -28,6 +28,7 @@
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
 
+#include "BLF_api.hh"
 #include "BLT_translation.hh"
 
 #include "BKE_action.hh"
@@ -71,6 +72,7 @@
 #include "WM_types.hh"
 
 #include "GPU_immediate.hh"
+#include "GPU_matrix.hh"
 #include "GPU_state.hh"
 
 #include "UI_interface.hh"
@@ -2121,6 +2123,99 @@ static void outliner_draw_separator(ARegion *region, const int x)
   immUnbindProgram();
 }
 
+/**
+ * View units per region pixel, i.e. the inverse of the current View2D zoom.
+ * Read from the active projection (as #ui::Block does) so it can be used by drawing code that
+ * has no access to the region.
+ */
+static float outliner_view_aspect()
+{
+  float winmat[4][4];
+  GPU_matrix_projection_get(winmat);
+  int viewport[4];
+  GPU_viewport_size_get_i(viewport);
+
+  const float width_scale = fabsf(float(viewport[2]) * winmat[0][0]);
+  return (width_scale > 0.0f) ? 2.0f / width_scale : 1.0f;
+}
+
+/**
+ * Move a view-space position onto the nearest region pixel. Glyphs and icons are rasterized at the
+ * final on-screen size, so an unaligned origin would resample them and make them blurry.
+ */
+static void outliner_view_pixel_snap(float *r_x, float *r_y)
+{
+  float winmat[4][4];
+  GPU_matrix_projection_get(winmat);
+  int viewport[4];
+  GPU_viewport_size_get_i(viewport);
+
+  if (winmat[0][0] == 0.0f || winmat[1][1] == 0.0f) {
+    return;
+  }
+
+  const float px = (*r_x * winmat[0][0] + winmat[3][0] + 1.0f) * 0.5f * float(viewport[2]);
+  const float py = (*r_y * winmat[1][1] + winmat[3][1] + 1.0f) * 0.5f * float(viewport[3]);
+  const float ndc_x = (roundf(px) / float(viewport[2])) * 2.0f - 1.0f;
+  const float ndc_y = (roundf(py) / float(viewport[3])) * 2.0f - 1.0f;
+  *r_x = (ndc_x - winmat[3][0]) / winmat[0][0];
+  *r_y = (ndc_y - winmat[3][1]) / winmat[1][1];
+}
+
+/**
+ * Draw an icon rasterized at its on-screen size instead of stretching a 1:1 raster with the view
+ * matrix. Same approach as #outliner_draw_element_text: request a compensating size and scale the
+ * result back with the model matrix.
+ */
+static void outliner_icon_draw(float x,
+                               float y,
+                               const int icon_id,
+                               const float alpha,
+                               const uchar mono_color[4] = nullptr,
+                               const bool mono_border = false,
+                               const ui::IconTextOverlay *text_overlay = UI_NO_ICON_OVERLAY_TEXT)
+{
+  const float aspect = outliner_view_aspect();
+  outliner_view_pixel_snap(&x, &y);
+
+  GPU_matrix_push();
+  GPU_matrix_translate_2f(x, y);
+  GPU_matrix_scale_2f(aspect, aspect);
+  ui::icon_draw_ex(0.0f,
+                   0.0f,
+                   icon_id,
+                   UI_INV_SCALE_FAC * aspect,
+                   alpha,
+                   0.0f,
+                   mono_color,
+                   mono_border,
+                   text_overlay);
+  GPU_matrix_pop();
+}
+
+static void outliner_draw_element_text(const uiFontStyle *fstyle,
+                                       const float aspect,
+                                       float x,
+                                       float y,
+                                       const char *text,
+                                       const uchar color[4])
+{
+  ui::fontstyle_set(fstyle);
+  outliner_view_pixel_snap(&x, &y);
+
+  /* Render zoomed text at a compensating font size and scale it back with the font aspect. This
+   * keeps the on-screen size tied to the View2D zoom while preserving glyph detail. The width
+   * must be measured with #fontstyle_string_width_with_block_aspect to match. */
+  const int font_id = fstyle->uifont_id;
+  BLF_enable(font_id, BLF_ASPECT);
+  BLF_aspect(font_id, aspect, aspect, 1.0f);
+  BLF_size(font_id, fstyle->points * UI_SCALE_FAC / aspect);
+  BLF_position(font_id, x, y, 0.0f);
+  BLF_color4ubv(font_id, color);
+  BLF_draw(font_id, text, BLF_DRAW_STR_DUMMY_MAX);
+  BLF_disable(font_id, BLF_ASPECT);
+}
+
 static void outliner_draw_rnabuts(ui::Block *block,
                                   ARegion *region,
                                   SpaceOutliner *space_outliner,
@@ -2984,15 +3079,13 @@ static bool tselem_draw_icon(ui::Block *block,
     if (is_collection) {
       Collection *collection = outliner_collection_from_tree_element(te);
       if (collection->color_tag != COLLECTION_COLOR_NONE) {
-        icon_draw_ex(x,
-                     y,
-                     ICON_COLLECTION_COLOR_01 + int(collection->color_tag),
-                     UI_INV_SCALE_FAC,
-                     alpha,
-                     0.0f,
-                     btheme->collection_color[collection->color_tag].color,
-                     btheme->tui.icon_border_intensity > 0.0f,
-                     &text_overlay);
+        outliner_icon_draw(x,
+                           y,
+                           ICON_COLLECTION_COLOR_01 + int(collection->color_tag),
+                           alpha,
+                           btheme->collection_color[collection->color_tag].color,
+                           btheme->tui.icon_border_intensity > 0.0f,
+                           &text_overlay);
         return true;
       }
     }
@@ -3003,18 +3096,16 @@ static bool tselem_draw_icon(ui::Block *block,
     /* Restrict column clip. it has been coded by simply overdrawing, doesn't work for buttons. */
     uchar color[4];
     if (ui::icon_get_theme_color(data.icon, color)) {
-      icon_draw_ex(x,
-                   y,
-                   data.icon,
-                   UI_INV_SCALE_FAC,
-                   alpha,
-                   0.0f,
-                   color,
-                   btheme->tui.icon_border_intensity > 0.0f,
-                   &text_overlay);
+      outliner_icon_draw(x,
+                         y,
+                         data.icon,
+                         alpha,
+                         color,
+                         btheme->tui.icon_border_intensity > 0.0f,
+                         &text_overlay);
     }
     else {
-      icon_draw_ex(x, y, data.icon, UI_INV_SCALE_FAC, alpha, 0.0f, nullptr, false, &text_overlay);
+      outliner_icon_draw(x, y, data.icon, alpha, nullptr, false, &text_overlay);
     }
   }
   else {
@@ -3376,6 +3467,7 @@ static void outliner_draw_tree_element(ui::Block *block,
 
   if (*starty + 2 * UI_UNIT_Y >= region->v2d.cur.ymin && *starty <= region->v2d.cur.ymax) {
     const float alpha_fac = element_should_draw_faded(tvc, te, tselem) ? 0.5f : 1.0f;
+    const float view_aspect = outliner_view_aspect();
     int xmax = region->v2d.cur.xmax;
 
     if ((tselem->flag & TSE_TEXTBUT) && (*te_edit == nullptr)) {
@@ -3454,7 +3546,7 @@ static void outliner_draw_tree_element(ui::Block *block,
     }
 
     if (tselem->type == TSE_VIEW_COLLECTION_BASE) {
-      /* Scene collection in view layer can't expand/collapse. */
+      /* The Scene Collection can't expand/collapse. */
     }
     else if (te->subtree.first || (te->flag & TE_PRETEND_HAS_CHILDREN)) {
       /* Open/close icon, only when sub-levels, except for scene. */
@@ -3462,11 +3554,11 @@ static void outliner_draw_tree_element(ui::Block *block,
 
       /* Icons a bit higher. */
       if (TSELEM_OPEN(tselem, space_outliner)) {
-        ui::icon_draw_alpha(
+        outliner_icon_draw(
             float(icon_x) + 2 * ufac, float(*starty) + 1 * ufac, ICON_DOWNARROW_HLT, alpha_fac);
       }
       else {
-        ui::icon_draw_alpha(
+        outliner_icon_draw(
             float(icon_x) + 2 * ufac, float(*starty) + 1 * ufac, ICON_RIGHTARROW, alpha_fac);
       }
     }
@@ -3496,7 +3588,7 @@ static void outliner_draw_tree_element(ui::Block *block,
     {
       const BIFIconID lib_icon = ui::icon_from_library(tselem->id);
       if (lib_icon != ICON_NONE) {
-        ui::icon_draw_alpha(
+        outliner_icon_draw(
             float(startx) + offsx + 2 * ufac, float(*starty) + 2 * ufac, lib_icon, alpha_fac);
         offsx += UI_UNIT_X + 4 * ufac;
       }
@@ -3504,13 +3596,13 @@ static void outliner_draw_tree_element(ui::Block *block,
       if (tselem->type == TSE_LAYER_COLLECTION) {
         const Collection *collection = id_cast<Collection *>(tselem->id);
         if (collection->importer) {
-          ui::icon_draw_alpha(
+          outliner_icon_draw(
               float(startx) + offsx + 2 * ufac, float(*starty) + 2 * ufac, ICON_IMPORT, alpha_fac);
           offsx += UI_UNIT_X + 4 * ufac;
         }
 
         if (!collection->exporters.is_empty()) {
-          ui::icon_draw_alpha(
+          outliner_icon_draw(
               float(startx) + offsx + 2 * ufac, float(*starty) + 2 * ufac, ICON_EXPORT, alpha_fac);
           offsx += UI_UNIT_X + 4 * ufac;
         }
@@ -3525,10 +3617,12 @@ static void outliner_draw_tree_element(ui::Block *block,
         text_color[3] = 255;
       }
       text_color[3] *= alpha_fac;
-      ui::fontstyle_draw_simple(fstyle, startx + offsx, *starty + 5 * ufac, te->name, text_color);
+      outliner_draw_element_text(
+          fstyle, view_aspect, startx + offsx, *starty + 5 * ufac, te->name, text_color);
     }
 
-    offsx += int(UI_UNIT_X + ui::fontstyle_string_width(fstyle, te->name));
+    offsx += int(UI_UNIT_X +
+                 ui::fontstyle_string_width_with_block_aspect(fstyle, te->name, view_aspect));
 
     /* Closed item, we draw the icons, not when it's a scene, or master-server list though. */
     if (!TSELEM_OPEN(tselem, space_outliner)) {
@@ -3913,7 +4007,8 @@ static void outliner_draw_tree(ui::Block *block,
 
     /* Set scissor so tree elements or lines can't overlap restriction icons. */
     if (right_column_width > 0.0f) {
-      int mask_x = BLI_rcti_size_x(&region->v2d.mask) - int(right_column_width) + 1;
+      const float columns_left = region->v2d.cur.xmax - right_column_width;
+      int mask_x = int(ui::view2d_view_to_region_x(&region->v2d, columns_left));
       CLAMP_MIN(mask_x, 0);
 
       GPU_scissor_get(scissor);

@@ -72,12 +72,7 @@ static void outliner_main_region_init(wmWindowManager *wm, ARegion *region)
   region->v2d.scroll |= V2D_SCROLL_HORIZONTAL_HIDE;
   region->v2d.scroll |= V2D_SCROLL_VERTICAL_HIDE;
 
-  region->v2d.align = (V2D_ALIGN_NO_NEG_X | V2D_ALIGN_NO_POS_Y);
-  region->v2d.keepzoom = (V2D_LOCKZOOM_X | V2D_LOCKZOOM_Y | V2D_LIMITZOOM | V2D_KEEPASPECT);
-  region->v2d.keeptot = V2D_KEEPTOT_STRICT;
-  region->v2d.minzoom = region->v2d.maxzoom = 1.0f;
-
-  view2d_region_reinit(&region->v2d, ui::V2D_COMMONVIEW_LIST, region->winx, region->winy);
+  view2d_region_reinit(&region->v2d, ui::V2D_COMMONVIEW_PANELS_UI, region->winx, region->winy);
 
   /* own keymap */
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Outliner", SPACE_OUTLINER, RGN_TYPE_WINDOW);
@@ -677,7 +672,9 @@ void ED_spacetype_outliner()
   /* regions: main window */
   art = MEM_new_zeroed<ARegionType>("spacetype outliner region");
   art->regionid = RGN_TYPE_WINDOW;
-  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D;
+  /* The shared View2D keymap zooms with the plain mouse wheel. The Outliner provides its own
+   * View2D bindings so the wheel keeps scrolling and zooming is done with Ctrl+MMB drag. */
+  art->keymapflag = ED_KEYMAP_UI;
 
   art->init = outliner_main_region_init;
   art->draw = outliner_main_region_draw;

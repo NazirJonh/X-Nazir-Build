@@ -438,6 +438,10 @@ bool outliner_item_is_co_over_name(const TreeElement *te, float view_co_x)
 
 bool outliner_item_is_co_within_close_toggle(const TreeElement *te, float view_co_x)
 {
+  /* The Scene Collection has no expand/collapse toggle, see #outliner_draw_tree_element. */
+  if (TREESTORE(te)->type == TSE_VIEW_COLLECTION_BASE) {
+    return false;
+  }
   return (view_co_x > te->xs) && (view_co_x < te->xs + UI_UNIT_X);
 }
 

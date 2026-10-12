@@ -4,6 +4,8 @@
 
 #include "testing/testing.h"
 
+#include "BKE_gtest_base.hh"
+
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 
@@ -15,6 +17,9 @@
 #include "BKE_pointcloud.hh"
 
 namespace blender::bke::tests {
+
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_to_geometry : public bke::BlenderGTestBase {};
 
 static CurvesGeometry make_poly_control_curve(const int count)
 {
@@ -39,13 +44,13 @@ static CurvePatchParams make_params()
   return params;
 }
 
-TEST(paint_curve_patch_to_geometry, empty_spline_yields_null_mesh)
+TEST_F(paint_curve_patch_to_geometry, empty_spline_yields_null_mesh)
 {
   CurvePatchGeometry geometry;
   EXPECT_EQ(curve_patch_geometry_to_mesh(geometry, make_params(), false, 0.0f, 0.0f), nullptr);
 }
 
-TEST(paint_curve_patch_to_geometry, ribbon_mesh_is_owned_nomain_with_uvs)
+TEST_F(paint_curve_patch_to_geometry, ribbon_mesh_is_owned_nomain_with_uvs)
 {
   CurvePatchGeometry geometry;
   curve_patch_build_from_control_curve(make_poly_control_curve(3),
@@ -67,7 +72,7 @@ TEST(paint_curve_patch_to_geometry, ribbon_mesh_is_owned_nomain_with_uvs)
   BKE_id_free(nullptr, mesh);
 }
 
-TEST(paint_curve_patch_to_geometry, ribbon_mode_yields_null_stamp_points)
+TEST_F(paint_curve_patch_to_geometry, ribbon_mode_yields_null_stamp_points)
 {
   CurvePatchGeometry geometry;
   curve_patch_build_from_control_curve(make_poly_control_curve(3),
@@ -79,7 +84,7 @@ TEST(paint_curve_patch_to_geometry, ribbon_mode_yields_null_stamp_points)
   EXPECT_EQ(curve_patch_geometry_to_stamp_points(geometry), nullptr);
 }
 
-TEST(paint_curve_patch_to_geometry, stamps_pointcloud_is_owned_nomain)
+TEST_F(paint_curve_patch_to_geometry, stamps_pointcloud_is_owned_nomain)
 {
   CurvePatchParams params = make_params();
   params.stamp_mode = CurvePatchStampMode::Stamps;

@@ -6,6 +6,8 @@
 
 #include "testing/testing.h"
 
+#include "BKE_gtest_base.hh"
+
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
 
@@ -14,6 +16,12 @@
 #include "BKE_curves.hh"
 
 namespace blender::bke::tests {
+
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_build : public bke::BlenderGTestBase {};
+
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_points : public bke::BlenderGTestBase {};
 
 /* A poly control curve with `count` points spaced one unit apart along +X, every radius 1.0.
  * Poly rather than bezier so the test pins the build, not the bezier evaluator. */
@@ -46,7 +54,7 @@ static CurvePatchParams make_params()
   return params;
 }
 
-TEST(paint_curve_patch_build, straight_curve_builds_a_ribbon)
+TEST_F(paint_curve_patch_build, straight_curve_builds_a_ribbon)
 {
   const CurvesGeometry curve = make_poly_control_curve(3);
   CurvePatchGeometry geometry;
@@ -58,7 +66,7 @@ TEST(paint_curve_patch_build, straight_curve_builds_a_ribbon)
   EXPECT_GT(geometry.ribbon_radius, 0.0f);
 }
 
-TEST(paint_curve_patch_build, single_point_curve_yields_an_empty_spline)
+TEST_F(paint_curve_patch_build, single_point_curve_yields_an_empty_spline)
 {
   const CurvesGeometry curve = make_poly_control_curve(1);
   CurvePatchGeometry geometry;
@@ -68,7 +76,7 @@ TEST(paint_curve_patch_build, single_point_curve_yields_an_empty_spline)
   EXPECT_TRUE(geometry.spline.is_empty());
 }
 
-TEST(paint_curve_patch_build, coincident_points_yield_a_zero_length_spline)
+TEST_F(paint_curve_patch_build, coincident_points_yield_a_zero_length_spline)
 {
   CurvesGeometry curve = make_poly_control_curve(4);
   curve.positions_for_write().fill(float3(0.0f));
@@ -85,7 +93,7 @@ TEST(paint_curve_patch_build, coincident_points_yield_a_zero_length_spline)
   EXPECT_FALSE(geometry.ribbon.ready);
 }
 
-TEST(paint_curve_patch_build, cyclic_curve_is_carried_into_the_spline)
+TEST_F(paint_curve_patch_build, cyclic_curve_is_carried_into_the_spline)
 {
   const CurvesGeometry open = make_poly_control_curve(4, /*cyclic*/ false);
   const CurvesGeometry closed = make_poly_control_curve(4, /*cyclic*/ true);
@@ -101,7 +109,7 @@ TEST(paint_curve_patch_build, cyclic_curve_is_carried_into_the_spline)
   EXPECT_GT(closed_geometry.spline.total_length(), open_geometry.spline.total_length());
 }
 
-TEST(paint_curve_patch_build, an_unready_surface_leaves_the_curve_in_its_own_plane)
+TEST_F(paint_curve_patch_build, an_unready_surface_leaves_the_curve_in_its_own_plane)
 {
   const CurvesGeometry curve = make_poly_control_curve(3);
   CurvePatchGeometry geometry;
@@ -116,7 +124,7 @@ TEST(paint_curve_patch_build, an_unready_surface_leaves_the_curve_in_its_own_pla
   }
 }
 
-TEST(paint_curve_patch_build, a_weight_table_spreads_stamps_over_several_slots)
+TEST_F(paint_curve_patch_build, a_weight_table_spreads_stamps_over_several_slots)
 {
   const CurvesGeometry curve = make_poly_control_curve(8);
   CurvePatchParams params = make_params();
@@ -151,7 +159,7 @@ static CurvePatchParams make_points_params()
   return params;
 }
 
-TEST(paint_curve_patch_points, one_stamp_per_control_point_open)
+TEST_F(paint_curve_patch_points, one_stamp_per_control_point_open)
 {
   const CurvesGeometry curve = make_poly_control_curve(5);
   CurvePatchGeometry geometry;
@@ -169,7 +177,7 @@ TEST(paint_curve_patch_points, one_stamp_per_control_point_open)
   }
 }
 
-TEST(paint_curve_patch_points, cyclic_curve_has_no_seam_duplicate)
+TEST_F(paint_curve_patch_points, cyclic_curve_has_no_seam_duplicate)
 {
   const CurvesGeometry curve = make_poly_control_curve(4, /*cyclic*/ true);
   CurvePatchGeometry geometry;
@@ -193,7 +201,7 @@ TEST(paint_curve_patch_points, cyclic_curve_has_no_seam_duplicate)
   EXPECT_EQ(real_stamps, 4);
 }
 
-TEST(paint_curve_patch_points, per_point_strength_texture_and_angle_are_consumed)
+TEST_F(paint_curve_patch_points, per_point_strength_texture_and_angle_are_consumed)
 {
   CurvesGeometry curve = make_poly_control_curve(3);
   /* Point 1: half strength, its own angle, and a slot assignment. */
@@ -235,7 +243,7 @@ TEST(paint_curve_patch_points, per_point_strength_texture_and_angle_are_consumed
   EXPECT_LE(geometry.stamps[2].tex_index, 1);
 }
 
-TEST(paint_curve_patch_points, zero_strength_point_is_skipped)
+TEST_F(paint_curve_patch_points, zero_strength_point_is_skipped)
 {
   CurvesGeometry curve = make_poly_control_curve(3);
   bke::MutableAttributeAccessor attrs = curve.attributes_for_write();
@@ -255,7 +263,7 @@ TEST(paint_curve_patch_points, zero_strength_point_is_skipped)
   }
 }
 
-TEST(paint_curve_patch_points, per_point_radius_sizes_the_stamp_and_the_strip)
+TEST_F(paint_curve_patch_points, per_point_radius_sizes_the_stamp_and_the_strip)
 {
   CurvesGeometry curve = make_poly_control_curve(3);
   curve.radius_for_write().fill(1.0f);
@@ -274,7 +282,7 @@ TEST(paint_curve_patch_points, per_point_radius_sizes_the_stamp_and_the_strip)
   EXPECT_NEAR(geometry.stamp_search_reach, expected_reach, 1e-5f);
 }
 
-TEST(paint_curve_patch_points, negative_strength_point_is_skipped)
+TEST_F(paint_curve_patch_points, negative_strength_point_is_skipped)
 {
   CurvesGeometry curve = make_poly_control_curve(3);
   bke::MutableAttributeAccessor attrs = curve.attributes_for_write();
@@ -296,7 +304,7 @@ TEST(paint_curve_patch_points, negative_strength_point_is_skipped)
   }
 }
 
-TEST(paint_curve_patch_points, missing_radius_attribute_uses_the_brush_radius)
+TEST_F(paint_curve_patch_points, missing_radius_attribute_uses_the_brush_radius)
 {
   CurvesGeometry curve = make_poly_control_curve(3);
   /* A paint-curve point with no `radius` attribute means "the brush radius" (1.0), not
@@ -313,7 +321,7 @@ TEST(paint_curve_patch_points, missing_radius_attribute_uses_the_brush_radius)
   }
 }
 
-TEST(paint_curve_patch_points, stamp_seed_override_drives_randomization)
+TEST_F(paint_curve_patch_points, stamp_seed_override_drives_randomization)
 {
   CurvePatchParams params = make_points_params();
   params.stamp_size_random = 0.5f;
@@ -369,7 +377,7 @@ TEST(paint_curve_patch_points, stamp_seed_override_drives_randomization)
   EXPECT_TRUE(any_different);
 }
 
-TEST(paint_curve_patch_points, fill_layout_is_untouched_by_the_points_fields)
+TEST_F(paint_curve_patch_points, fill_layout_is_untouched_by_the_points_fields)
 {
   const CurvesGeometry curve = make_poly_control_curve(6);
   CurvePatchParams params = make_params();
@@ -391,7 +399,7 @@ TEST(paint_curve_patch_points, fill_layout_is_untouched_by_the_points_fields)
 
 /** \} */
 
-TEST(paint_curve_patch_build, empty_normals_span_forces_ribbon_not_frames)
+TEST_F(paint_curve_patch_build, empty_normals_span_forces_ribbon_not_frames)
 {
   /* The underlying mechanism #CurvePatchBuildMode::PlanarSingleWindow is implemented in terms of:
    * handing the LOW-LEVEL `curve_patch_geometry_build()` an empty `evaluated_normals` span must
@@ -417,7 +425,7 @@ TEST(paint_curve_patch_build, empty_normals_span_forces_ribbon_not_frames)
   EXPECT_TRUE(geometry.frames.frames.is_empty());
 }
 
-TEST(paint_curve_patch_build, build_mode_selects_normals_and_strip_path)
+TEST_F(paint_curve_patch_build, build_mode_selects_normals_and_strip_path)
 {
   /* The two modes of the wrapper, pinned side by side on the same input.
    *

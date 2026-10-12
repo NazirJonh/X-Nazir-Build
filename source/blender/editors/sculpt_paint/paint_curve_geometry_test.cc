@@ -4,6 +4,8 @@
 
 #include "testing/testing.h"
 
+#include "BKE_gtest_base.hh"
+
 #include "BKE_curves.hh"
 
 #include "DNA_curves_types.h"
@@ -12,7 +14,10 @@
 
 namespace blender::ed::sculpt_paint::tests {
 
-TEST(paint_curve_geometry, init_bezier_single_curve)
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_geometry : public bke::BlenderGTestBase {};
+
+TEST_F(paint_curve_geometry, init_bezier_single_curve)
 {
   bke::CurvesGeometry geom;
   paintcurve_geometry_init_bezier(geom, 3);

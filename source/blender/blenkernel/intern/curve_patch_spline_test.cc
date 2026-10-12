@@ -4,6 +4,8 @@
 
 #include "testing/testing.h"
 
+#include "BKE_gtest_base.hh"
+
 #include <cmath>
 
 #include "BLI_index_range.hh"
@@ -16,7 +18,16 @@
 
 namespace blender::bke::tests {
 
-TEST(paint_curve_patch_spline, empty_when_fewer_than_two_points)
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_spline : public bke::BlenderGTestBase {};
+
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_spline_2d : public bke::BlenderGTestBase {};
+
+/** Fixture: registers the CPP types and attribute providers CurvesGeometry needs. */
+class paint_curve_patch_stamps : public bke::BlenderGTestBase {};
+
+TEST_F(paint_curve_patch_spline, empty_when_fewer_than_two_points)
 {
   CurvePatchSpline spline;
   const float3 one_point[1] = {float3(0.0f)};
@@ -25,7 +36,7 @@ TEST(paint_curve_patch_spline, empty_when_fewer_than_two_points)
   EXPECT_EQ(spline.total_length(), 0.0f);
 }
 
-TEST(paint_curve_patch_spline, straight_line_total_length_and_evaluate)
+TEST_F(paint_curve_patch_spline, straight_line_total_length_and_evaluate)
 {
   CurvePatchSpline spline;
   const float3 points[3] = {
@@ -44,7 +55,7 @@ TEST(paint_curve_patch_spline, straight_line_total_length_and_evaluate)
   EXPECT_NEAR(past_end.x, 2.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, tangent_points_along_positive_x)
+TEST_F(paint_curve_patch_spline, tangent_points_along_positive_x)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f)};
@@ -56,7 +67,7 @@ TEST(paint_curve_patch_spline, tangent_points_along_positive_x)
   EXPECT_NEAR(tan.z, 0.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, closest_point_reports_correct_arc_length_and_side)
+TEST_F(paint_curve_patch_spline, closest_point_reports_correct_arc_length_and_side)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
@@ -92,7 +103,7 @@ TEST(paint_curve_patch_spline, closest_point_reports_correct_arc_length_and_side
   EXPECT_NEAR(normal_dist3, 2.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, closest_point_extends_arc_length_past_curve_ends)
+TEST_F(paint_curve_patch_spline, closest_point_extends_arc_length_past_curve_ends)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
@@ -123,7 +134,7 @@ TEST(paint_curve_patch_spline, closest_point_extends_arc_length_past_curve_ends)
   EXPECT_NEAR(s3, 1.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, radius_at_interpolates_linearly)
+TEST_F(paint_curve_patch_spline, radius_at_interpolates_linearly)
 {
   CurvePatchSpline spline;
   const float3 points[3] = {
@@ -138,7 +149,7 @@ TEST(paint_curve_patch_spline, radius_at_interpolates_linearly)
   EXPECT_NEAR(spline.radius_at(2.0f), 4.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, radius_at_clamps_out_of_range_s)
+TEST_F(paint_curve_patch_spline, radius_at_clamps_out_of_range_s)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f)};
@@ -149,7 +160,7 @@ TEST(paint_curve_patch_spline, radius_at_clamps_out_of_range_s)
   EXPECT_NEAR(spline.radius_at(100.0f), 3.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, tile_span_default_is_hybrid_min)
+TEST_F(paint_curve_patch_spline, tile_span_default_is_hybrid_min)
 {
   /* Short curve (shorter than one diameter): span == total_length. */
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Default, 1, 1.0f, 2.0f),
@@ -159,7 +170,7 @@ TEST(paint_curve_patch_spline, tile_span_default_is_hybrid_min)
                   4.0f);
 }
 
-TEST(paint_curve_patch_spline, tile_span_repeat_divides_length)
+TEST_F(paint_curve_patch_spline, tile_span_repeat_divides_length)
 {
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 1, 10.0f, 2.0f),
                   10.0f);
@@ -167,7 +178,7 @@ TEST(paint_curve_patch_spline, tile_span_repeat_divides_length)
                   2.5f);
 }
 
-TEST(paint_curve_patch_spline, tile_span_repeat_clamps_below_one)
+TEST_F(paint_curve_patch_spline, tile_span_repeat_clamps_below_one)
 {
   /* A repeat count that somehow bypassed RNA's 1..64 range must not divide by zero. */
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Repeat, 0, 10.0f, 2.0f),
@@ -176,7 +187,7 @@ TEST(paint_curve_patch_spline, tile_span_repeat_clamps_below_one)
                   10.0f);
 }
 
-TEST(paint_curve_patch_spline, tile_span_stretch_is_total_length)
+TEST_F(paint_curve_patch_spline, tile_span_stretch_is_total_length)
 {
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode::Stretch, 1, 10.0f, 2.0f),
                   10.0f);
@@ -184,12 +195,12 @@ TEST(paint_curve_patch_spline, tile_span_stretch_is_total_length)
                   0.5f);
 }
 
-TEST(paint_curve_patch_spline, tile_span_unknown_mode_falls_back_to_default)
+TEST_F(paint_curve_patch_spline, tile_span_unknown_mode_falls_back_to_default)
 {
   EXPECT_FLOAT_EQ(curve_patch_texture_tile_span(CurvePatchLengthMode(99), 1, 10.0f, 2.0f), 4.0f);
 }
 
-TEST(paint_curve_patch_spline, cyclic_build_closes_the_loop)
+TEST_F(paint_curve_patch_spline, cyclic_build_closes_the_loop)
 {
   /* The four corners of a unit square, as a cyclic curve's evaluated points would arrive: the
    * first corner is NOT repeated at the end. */
@@ -213,7 +224,7 @@ TEST(paint_curve_patch_spline, cyclic_build_closes_the_loop)
   EXPECT_NEAR(closed_spline.total_length(), 4.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, cyclic_build_makes_join_tangent_continuous)
+TEST_F(paint_curve_patch_spline, cyclic_build_makes_join_tangent_continuous)
 {
   const float3 corners[4] = {float3(0.0f, 0.0f, 0.0f),
                              float3(1.0f, 0.0f, 0.0f),
@@ -231,7 +242,7 @@ TEST(paint_curve_patch_spline, cyclic_build_makes_join_tangent_continuous)
   EXPECT_NEAR(first.z, last.z, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, tile_span_cyclic_snaps_to_whole_tiles)
+TEST_F(paint_curve_patch_spline, tile_span_cyclic_snaps_to_whole_tiles)
 {
   /* Default mode on a length of 10 with radius 2 wants a 4.0 tile -- 2.5 tiles around the loop,
    * which would cut the last one mid-pattern. Snapped to 3 whole tiles. */
@@ -249,7 +260,7 @@ TEST(paint_curve_patch_spline, tile_span_cyclic_snaps_to_whole_tiles)
 
 /* A 10-unit straight line, radius 1, spacing 0.5 (i.e. 1.0 world units between stamps) and no
  * randomization: stamps land on an exact 1-unit grid. */
-TEST(paint_curve_patch_stamps, spacing_controls_count_and_positions)
+TEST_F(paint_curve_patch_stamps, spacing_controls_count_and_positions)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(10.0f, 0.0f, 0.0f)};
@@ -271,7 +282,7 @@ TEST(paint_curve_patch_stamps, spacing_controls_count_and_positions)
 
 /* The same seed must reproduce the same layout -- the relief is recomputed from scratch on every
  * interactive event, so any drift would make the patch flicker. */
-TEST(paint_curve_patch_stamps, same_seed_is_reproducible_different_seed_is_not)
+TEST_F(paint_curve_patch_stamps, same_seed_is_reproducible_different_seed_is_not)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(10.0f, 0.0f, 0.0f)};
@@ -298,7 +309,7 @@ TEST(paint_curve_patch_stamps, same_seed_is_reproducible_different_seed_is_not)
 
 /* Randomization only ever reduces: a stamp never exceeds the brush radius or full strength, and
  * never drops to zero or below. Jitter stays inside the requested amount. */
-TEST(paint_curve_patch_stamps, randomization_stays_in_range)
+TEST_F(paint_curve_patch_stamps, randomization_stays_in_range)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(20.0f, 0.0f, 0.0f)};
@@ -321,7 +332,7 @@ TEST(paint_curve_patch_stamps, randomization_stays_in_range)
 
 /* Stamps must come out sorted by arc length even after jitter displaces them, because the relief
  * binary-searches this list by `center_v`. */
-TEST(paint_curve_patch_stamps, sorted_by_arc_length_after_jitter)
+TEST_F(paint_curve_patch_stamps, sorted_by_arc_length_after_jitter)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(20.0f, 0.0f, 0.0f)};
@@ -336,7 +347,7 @@ TEST(paint_curve_patch_stamps, sorted_by_arc_length_after_jitter)
 
 /* A closed loop gets a whole number of stamps so the seam does not carry two overlapping stamps,
  * mirroring what `curve_patch_texture_tile_span()` does for cyclic tiling. */
-TEST(paint_curve_patch_stamps, cyclic_holds_a_whole_number_of_stamps)
+TEST_F(paint_curve_patch_stamps, cyclic_holds_a_whole_number_of_stamps)
 {
   CurvePatchSpline spline;
   /* Square loop, perimeter 12: `build_from_positions` appends the closing edge itself. */
@@ -359,7 +370,7 @@ TEST(paint_curve_patch_stamps, cyclic_holds_a_whole_number_of_stamps)
 /* The stamp sitting at a loop's join reaches into `v < 0`, which the ribbon LUT -- spanning
  * `[0, L]` exactly on a cyclic curve -- cannot represent. A ghost copy at `+L` supplies that half
  * from the far side of the join. */
-TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_start)
+TEST_F(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_start)
 {
   Vector<CurvePatchStamp> stamps;
   CurvePatchStamp stamp;
@@ -385,7 +396,7 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_start)
 
 /* The mirror case: a stamp just before the join needs its ghost at `-L`, since a vertex at a small
  * `s` searches a window that opens below zero. */
-TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_end)
+TEST_F(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_end)
 {
   Vector<CurvePatchStamp> stamps;
   CurvePatchStamp stamp;
@@ -409,7 +420,7 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_a_stamp_near_the_end)
 
 /* A stamp far from the join is already fully covered by the LUT and must not be duplicated --
  * a ghost there would be a second stamp in the middle of the loop. */
-TEST(paint_curve_patch_stamps, cyclic_wrap_leaves_interior_stamps_alone)
+TEST_F(paint_curve_patch_stamps, cyclic_wrap_leaves_interior_stamps_alone)
 {
   Vector<CurvePatchStamp> stamps;
   CurvePatchStamp stamp;
@@ -424,7 +435,7 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_leaves_interior_stamps_alone)
 
 /* The relief binary-searches the list by `center_v`, so the ghosts -- which land outside `[0, L]`
  * on both sides -- must leave it sorted. */
-TEST(paint_curve_patch_stamps, cyclic_wrap_keeps_the_list_sorted)
+TEST_F(paint_curve_patch_stamps, cyclic_wrap_keeps_the_list_sorted)
 {
   CurvePatchSpline spline;
   const float3 points[4] = {float3(0.0f, 0.0f, 0.0f),
@@ -446,13 +457,13 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_keeps_the_list_sorted)
   }
 }
 
-TEST(paint_curve_patch_spline, stamp_pick_texture_empty_table)
+TEST_F(paint_curve_patch_spline, stamp_pick_texture_empty_table)
 {
   EXPECT_EQ(curve_patch_stamp_pick_texture({}, 0.0f), -1);
   EXPECT_EQ(curve_patch_stamp_pick_texture({}, 0.5f), -1);
 }
 
-TEST(paint_curve_patch_spline, stamp_pick_texture_zero_total_falls_back)
+TEST_F(paint_curve_patch_spline, stamp_pick_texture_zero_total_falls_back)
 {
   /* Every slot disabled by a zero weight must degrade to the brush's own texture (-1), not to an
    * arbitrary slot -- otherwise zeroing every weight would silently keep stamping. */
@@ -461,7 +472,7 @@ TEST(paint_curve_patch_spline, stamp_pick_texture_zero_total_falls_back)
   EXPECT_EQ(curve_patch_stamp_pick_texture(Span(cdf, 3), 0.99f), -1);
 }
 
-TEST(paint_curve_patch_spline, stamp_pick_texture_respects_weights)
+TEST_F(paint_curve_patch_spline, stamp_pick_texture_respects_weights)
 {
   /* Weights 3:1 -- the cumulative table is {3, 4}. Sampled with a DETERMINISTIC sweep rather than
    * a generator so the assertion cannot flake. */
@@ -479,7 +490,7 @@ TEST(paint_curve_patch_spline, stamp_pick_texture_respects_weights)
   EXPECT_NEAR(float(first) / 1000.0f, 0.75f, 0.01f);
 }
 
-TEST(paint_curve_patch_spline, stamp_pick_texture_clamps_at_both_ends)
+TEST_F(paint_curve_patch_spline, stamp_pick_texture_clamps_at_both_ends)
 {
   const float cdf[2] = {1.0f, 2.0f};
   EXPECT_EQ(curve_patch_stamp_pick_texture(Span(cdf, 2), 0.0f), 0);
@@ -491,7 +502,7 @@ TEST(paint_curve_patch_spline, stamp_pick_texture_clamps_at_both_ends)
   EXPECT_EQ(curve_patch_stamp_pick_texture(Span(cdf, 2), -0.5f), 0);
 }
 
-TEST(paint_curve_patch_spline, stamp_pick_texture_single_entry_table_always_zero)
+TEST_F(paint_curve_patch_spline, stamp_pick_texture_single_entry_table_always_zero)
 {
   /* A one-slot list is the shape the real caller builds for a single enabled texture. It is also
    * the boundary case where the loop returns on its very first iteration. */
@@ -501,7 +512,7 @@ TEST(paint_curve_patch_spline, stamp_pick_texture_single_entry_table_always_zero
   }
 }
 
-TEST(paint_curve_patch_spline, stamp_pick_texture_never_picks_zero_weight_slot)
+TEST_F(paint_curve_patch_spline, stamp_pick_texture_never_picks_zero_weight_slot)
 {
   /* Slot 1 has zero width in the table (cumulative 1 -> 1), so no `random01` may land on it. */
   const float cdf[3] = {1.0f, 1.0f, 2.0f};
@@ -533,7 +544,7 @@ static float reference_ribbon_v(const float s,
   return v;
 }
 
-TEST(paint_curve_patch_spline, texture_zone_caps_disabled_matches_reference)
+TEST_F(paint_curve_patch_spline, texture_zone_caps_disabled_matches_reference)
 {
   const CurvePatchLengthMode modes[3] = {
       CurvePatchLengthMode::Default, CurvePatchLengthMode::Repeat, CurvePatchLengthMode::Stretch};
@@ -567,7 +578,7 @@ TEST(paint_curve_patch_spline, texture_zone_caps_disabled_matches_reference)
   }
 }
 
-TEST(paint_curve_patch_spline, texture_zone_boundaries)
+TEST_F(paint_curve_patch_spline, texture_zone_boundaries)
 {
   const float total_length = 10.0f;
   const float cap = 2.0f;
@@ -639,7 +650,7 @@ TEST(paint_curve_patch_spline, texture_zone_boundaries)
   EXPECT_NEAR(end_begin.v, -1.0f, 1e-2f);
 }
 
-TEST(paint_curve_patch_spline, texture_zone_middle_value_with_caps)
+TEST_F(paint_curve_patch_spline, texture_zone_middle_value_with_caps)
 {
   /* The three lines specific to this task -- `middle_offset = s - start_len`, `middle_length =
    * total - start - end`, `middle_cyclic = false` -- are only exercised by a Middle-zone sample
@@ -707,7 +718,7 @@ TEST(paint_curve_patch_spline, texture_zone_middle_value_with_caps)
   EXPECT_NEAR(cyclic_on.v, -2.5f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, texture_zone_caps_shrink_proportionally)
+TEST_F(paint_curve_patch_spline, texture_zone_caps_shrink_proportionally)
 {
   /* Caps asking for 6 + 3 on a curve of 3 must scale by 1/3 and keep their 2:1 ratio, collapsing
    * the middle rather than letting either cap overrun the curve. */
@@ -760,7 +771,7 @@ TEST(paint_curve_patch_spline, texture_zone_caps_shrink_proportionally)
   EXPECT_NEAR(inside_end.v, 0.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline, texture_zone_degenerate_middle_is_invalid)
+TEST_F(paint_curve_patch_spline, texture_zone_degenerate_middle_is_invalid)
 {
   /* Caps exactly filling the curve leave no middle; a position that would fall there must report
    * invalid instead of dividing by a zero-length span. */
@@ -777,7 +788,7 @@ TEST(paint_curve_patch_spline, texture_zone_degenerate_middle_is_invalid)
   EXPECT_FALSE(sample.valid);
 }
 
-TEST(paint_curve_patch_spline, texture_zone_zero_start_cap_is_unreachable)
+TEST_F(paint_curve_patch_spline, texture_zone_zero_start_cap_is_unreachable)
 {
   /* A zero Start Length is how an old file reads back, and how the UI disables the cap. No `s` may
    * land in that zone. */
@@ -795,7 +806,7 @@ TEST(paint_curve_patch_spline, texture_zone_zero_start_cap_is_unreachable)
   EXPECT_TRUE(sample.valid);
 }
 
-TEST(paint_curve_patch_stamps, stamps_build_without_cdf_uses_brush_texture)
+TEST_F(paint_curve_patch_stamps, stamps_build_without_cdf_uses_brush_texture)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f), float3(10.0f, 0.0f, 0.0f)};
@@ -820,7 +831,7 @@ TEST(paint_curve_patch_stamps, stamps_build_without_cdf_uses_brush_texture)
   }
 }
 
-TEST(paint_curve_patch_stamps, stamps_build_texture_index_is_deterministic)
+TEST_F(paint_curve_patch_stamps, stamps_build_texture_index_is_deterministic)
 {
   CurvePatchSpline spline;
   const float3 points[2] = {float3(0.0f), float3(20.0f, 0.0f, 0.0f)};
@@ -877,7 +888,7 @@ TEST(paint_curve_patch_stamps, stamps_build_texture_index_is_deterministic)
   EXPECT_TRUE(any_differs);
 }
 
-TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
+TEST_F(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
 {
   CurvePatchSpline spline;
   const float3 points[4] = {float3(0.0f, 0.0f, 0.0f),
@@ -946,7 +957,7 @@ TEST(paint_curve_patch_stamps, cyclic_wrap_ghosts_inherit_texture_index)
   }
 }
 
-TEST(paint_curve_patch_spline, normals_cyclic_closing_sample)
+TEST_F(paint_curve_patch_spline, normals_cyclic_closing_sample)
 {
   CurvePatchSpline spline;
   Vector<float3> points, normals;
@@ -963,7 +974,7 @@ TEST(paint_curve_patch_spline, normals_cyclic_closing_sample)
   EXPECT_V3_NEAR(spline.normals_3d.last(), float3(0.0f, 0.0f, 1.0f), 1e-6f);
 }
 
-TEST(paint_curve_patch_spline, smooth_normals_box_filter)
+TEST_F(paint_curve_patch_spline, smooth_normals_box_filter)
 {
   CurvePatchSpline spline;
   Vector<float3> points, normals;
@@ -986,7 +997,7 @@ TEST(paint_curve_patch_spline, smooth_normals_box_filter)
   EXPECT_V3_NEAR(spline.normals_smooth_3d.last(), float3(0.0f, 1.0f, 0.0f), 1e-4f);
 }
 
-TEST(paint_curve_patch_spline, normal_at_is_continuous_over_a_break)
+TEST_F(paint_curve_patch_spline, normal_at_is_continuous_over_a_break)
 {
   CurvePatchSpline spline;
   Vector<float3> points, normals;
@@ -1011,7 +1022,7 @@ TEST(paint_curve_patch_spline, normal_at_is_continuous_over_a_break)
   }
 }
 
-TEST(paint_curve_patch_spline, normal_at_falls_back_to_plane_normal)
+TEST_F(paint_curve_patch_spline, normal_at_falls_back_to_plane_normal)
 {
   CurvePatchSpline spline;
   const float3 points[3] = {
@@ -1029,7 +1040,7 @@ TEST(paint_curve_patch_spline, normal_at_falls_back_to_plane_normal)
 /** \name CurvePatchSpline2D (flat Image Editor adapter)
  * \{ */
 
-TEST(paint_curve_patch_spline_2d, open_path_arc_length_evaluate_and_tangent)
+TEST_F(paint_curve_patch_spline_2d, open_path_arc_length_evaluate_and_tangent)
 {
   CurvePatchSpline2D spline;
   const float2 points[3] = {float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(1.0f, 1.0f)};
@@ -1042,12 +1053,16 @@ TEST(paint_curve_patch_spline_2d, open_path_arc_length_evaluate_and_tangent)
   EXPECT_NEAR(mid.x, 1.0f, 1e-5f);
   EXPECT_NEAR(mid.y, 0.0f, 1e-5f);
 
+  /* Tangents are blended between the vertex tangents (central difference at the interior corner),
+   * so mid-way along the first leg it leans halfway toward the corner's 45 degree tangent. */
   const float2 tan = spline.tangent_at(0.5f);
-  EXPECT_NEAR(tan.x, 1.0f, 1e-5f);
-  EXPECT_NEAR(tan.y, 0.0f, 1e-5f);
+  const float2 expected_tan = math::normalize(float2(1.0f, 0.0f) +
+                                              math::normalize(float2(1.0f, 1.0f)));
+  EXPECT_NEAR(tan.x, expected_tan.x, 1e-5f);
+  EXPECT_NEAR(tan.y, expected_tan.y, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline_2d, cyclic_path_closes_the_loop)
+TEST_F(paint_curve_patch_spline_2d, cyclic_path_closes_the_loop)
 {
   CurvePatchSpline2D spline;
   const float2 corners[4] = {
@@ -1060,7 +1075,7 @@ TEST(paint_curve_patch_spline_2d, cyclic_path_closes_the_loop)
   EXPECT_EQ(spline.core.poly_3d.size(), 5);
 }
 
-TEST(paint_curve_patch_spline_2d, coincident_points_are_filtered)
+TEST_F(paint_curve_patch_spline_2d, coincident_points_are_filtered)
 {
   CurvePatchSpline2D spline;
   const float2 points[5] = {float2(0.0f, 0.0f),
@@ -1074,7 +1089,7 @@ TEST(paint_curve_patch_spline_2d, coincident_points_are_filtered)
   EXPECT_NEAR(spline.total_length(), 2.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline_2d, all_coincident_points_is_empty)
+TEST_F(paint_curve_patch_spline_2d, all_coincident_points_is_empty)
 {
   CurvePatchSpline2D spline;
   const float2 points[3] = {float2(0.0f, 0.0f), float2(0.0f, 0.0f), float2(0.0f, 0.0f)};
@@ -1083,7 +1098,7 @@ TEST(paint_curve_patch_spline_2d, all_coincident_points_is_empty)
   EXPECT_EQ(spline.total_length(), 0.0f);
 }
 
-TEST(paint_curve_patch_spline_2d, fewer_than_two_points_is_empty)
+TEST_F(paint_curve_patch_spline_2d, fewer_than_two_points_is_empty)
 {
   CurvePatchSpline2D spline;
   const float2 one_point[1] = {float2(0.5f, 0.5f)};
@@ -1091,7 +1106,7 @@ TEST(paint_curve_patch_spline_2d, fewer_than_two_points_is_empty)
   EXPECT_TRUE(spline.is_empty());
 }
 
-TEST(paint_curve_patch_spline_2d, arc_length_is_monotonic)
+TEST_F(paint_curve_patch_spline_2d, arc_length_is_monotonic)
 {
   /* A zigzag path with a sharp turn: every step advances the arc length, and the cumulative
    * lengths must stay strictly increasing -- the spacing logic derives dab positions from them. */
@@ -1108,7 +1123,7 @@ TEST(paint_curve_patch_spline_2d, arc_length_is_monotonic)
   EXPECT_NEAR(spline.total_length(), 3.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline_2d, sharp_corner_central_difference_tangent)
+TEST_F(paint_curve_patch_spline_2d, sharp_corner_central_difference_tangent)
 {
   /* L-shape; the tangent at the corner blends both incident segments (central difference). */
   CurvePatchSpline2D spline;
@@ -1120,7 +1135,7 @@ TEST(paint_curve_patch_spline_2d, sharp_corner_central_difference_tangent)
   EXPECT_NEAR(tan.y, float(M_SQRT1_2), 1e-5f);
 }
 
-TEST(paint_curve_patch_spline_2d, tangent_is_reproducible_across_rebuilds)
+TEST_F(paint_curve_patch_spline_2d, tangent_is_reproducible_across_rebuilds)
 {
   CurvePatchSpline2D a, b;
   const float2 points[3] = {float2(0.0f, 0.0f), float2(1.0f, 0.5f), float2(2.0f, 0.0f)};
@@ -1133,7 +1148,7 @@ TEST(paint_curve_patch_spline_2d, tangent_is_reproducible_across_rebuilds)
   }
 }
 
-TEST(paint_curve_patch_spline_2d, radius_at_interpolates_and_filters_in_lockstep)
+TEST_F(paint_curve_patch_spline_2d, radius_at_interpolates_and_filters_in_lockstep)
 {
   CurvePatchSpline2D spline;
   const float2 points[5] = {float2(0.0f, 0.0f),
@@ -1150,7 +1165,7 @@ TEST(paint_curve_patch_spline_2d, radius_at_interpolates_and_filters_in_lockstep
   EXPECT_NEAR(spline.radius_at(2.0f), 4.0f, 1e-5f);
 }
 
-TEST(paint_curve_patch_spline_2d, distance_sq_and_closest_point_dist)
+TEST_F(paint_curve_patch_spline_2d, distance_sq_and_closest_point_dist)
 {
   CurvePatchSpline2D spline;
   const float2 points[2] = {float2(0.0f, 0.0f), float2(2.0f, 0.0f)};
@@ -1170,10 +1185,11 @@ TEST(paint_curve_patch_spline_2d, distance_sq_and_closest_point_dist)
   /* Query past the far end: the closest point clamps onto the endpoint. */
   spline.closest_point_dist(float2(3.0f, 0.5f), s, tangent, dist);
   EXPECT_NEAR(s, 2.0f, 1e-5f);
-  EXPECT_NEAR(dist, 0.5f, 1e-5f);
+  /* Distance is to the endpoint (2, 0), not to the line: sqrt(1^2 + 0.5^2). */
+  EXPECT_NEAR(dist, std::sqrt(1.25f), 1e-5f);
 }
 
-TEST(paint_curve_patch_spline_2d, degenerate_spline_has_stable_tangent)
+TEST_F(paint_curve_patch_spline_2d, degenerate_spline_has_stable_tangent)
 {
   /* The first dab of a Roll stroke has no predecessor: the flat adapter must not crash and must
    * report a stable fallback tangent instead of an uninitialized read. */

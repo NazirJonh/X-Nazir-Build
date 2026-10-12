@@ -1143,7 +1143,33 @@ int CurvePatchRibbonLut::sample(const float3 &co, float2 r_uv[2]) const
   for (int attempt = 0; attempt < 4 && branch_num < 2; attempt++) {
     int anchor = -1;
     for (int k = 0; k < candidate_num; k++) {
-      if (!grouped[k] && (anchor < 0 || candidates[k].dist_sq < candidates[anchor].dist_sq)) {
+      if (grouped[k]) {
+        continue;
+      }
+      if (anchor < 0) {
+        anchor = k;
+        continue;
+      }
+      /* `dist_sq` is the bilinear-fit residual, which is ~0 for every stretch that covers the
+       * point, so it cannot rank them. The leg covering the point most centrally leads, matching
+       * the rasterizer's primary choice. Near-ties go to the smaller arc length, as in the
+       * rasterizer's #beats, so the anchor is deterministic; the fit residual only breaks an exact
+       * arc-length tie. */
+      const float cand_u = std::abs(candidates[k].uv.x);
+      const float anchor_u = std::abs(candidates[anchor].uv.x);
+      bool is_better;
+      if (cand_u < anchor_u - 1e-4f) {
+        is_better = true;
+      }
+      else if (std::abs(cand_u - anchor_u) <= 1e-4f) {
+        is_better = candidates[k].uv.y < candidates[anchor].uv.y ||
+                    (candidates[k].uv.y == candidates[anchor].uv.y &&
+                     candidates[k].dist_sq < candidates[anchor].dist_sq);
+      }
+      else {
+        is_better = false;
+      }
+      if (is_better) {
         anchor = k;
       }
     }

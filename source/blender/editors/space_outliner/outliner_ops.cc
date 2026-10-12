@@ -46,6 +46,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_constraint_operation);
   WM_operatortype_append(OUTLINER_OT_modifier_operation);
   WM_operatortype_append(OUTLINER_OT_delete);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_focus);
   WM_operatortype_append(OUTLINER_OT_stack_layers_back);
   WM_operatortype_append(OUTLINER_OT_stack_layer_activate);
 

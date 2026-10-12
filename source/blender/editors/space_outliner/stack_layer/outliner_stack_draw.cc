@@ -44,8 +44,8 @@
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
 #include "BKE_deform.hh"
-#include "BKE_gpencil_legacy.h"
 #include "BKE_global.hh"
+#include "BKE_gpencil_legacy.h"
 #include "BKE_grease_pencil.hh"
 #include "BKE_idtype.hh"
 #include "BKE_key.hh"
@@ -97,7 +97,6 @@
 #include "RNA_define.hh"
 
 #include "../outliner_intern.hh"
-#include "outliner_stack_source.hh"
 #include "../tree/tree_element.hh"
 #include "../tree/tree_element_grease_pencil_node.hh"
 #include "../tree/tree_element_id.hh"
@@ -105,6 +104,7 @@
 #include "../tree/tree_element_rna.hh"
 #include "../tree/tree_element_seq.hh"
 #include "../tree/tree_iterator.hh"
+#include "outliner_stack_source.hh"
 
 namespace blender {
 
@@ -148,8 +148,8 @@ void stack_preview_empty_draw(const rctf &preview_rect, const int icon, const fl
  * size, framed the way the empty-texture placeholder is.
  */
 void stack_preview_color_draw(const rctf &preview_rect,
-                                     const float color[4],
-                                     const float alpha_fac)
+                              const float color[4],
+                              const float alpha_fac)
 {
   /* The slot carries scene linear; the UI draws display colours. */
   float swatch[4];
@@ -196,7 +196,7 @@ float outliner_stack_preview_row_width(const bool leading_icon, const int num_pr
 /**
  * Where the one-unit-tall content of a row whose bottom is \a row_bottom sits.
  *
- * A Stack Layers row is two units tall with `SO_SL_BIG_ROWS` on, and its content -- name, icon,
+ * A Stack Layers row is two units tall with `SO_SL_SMALL_ROWS` off, and its content -- name, icon,
  * toggles, columns -- is centered in that: a name pinned to one edge of a tall row reads as
  * belonging to the row next to it.
  */
@@ -222,8 +222,8 @@ int stack_row_content_y(const SpaceOutliner &space_outliner, const TreeElement &
  * would add only left empty space beside its visibility toggle.
  */
 int stack_child_start_x(const SpaceOutliner &space_outliner,
-                               const TreeElement &child,
-                               const int parent_startx)
+                        const TreeElement &child,
+                        const int parent_startx)
 {
   const TreeStoreElem *tselem = TREESTORE(&child);
   if (tselem->type == TSE_STACK_LAYER) {
@@ -234,7 +234,7 @@ int stack_child_start_x(const SpaceOutliner &space_outliner,
        * there is nothing to line up with. */
       const StringRefNull aux_section = stack_aux_section_id(space_outliner);
       if (!aux_section.is_empty() && row->parent_section_id == aux_section &&
-          child.parent != nullptr && (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) != 0)
+          child.parent != nullptr && (space_outliner.stack_layers_flag & SO_SL_SMALL_ROWS) == 0)
       {
         const TreeStoreElem *parent_tselem = TREESTORE(child.parent);
         const StackRow *parent_row = (parent_tselem->type == TSE_STACK_LAYER) ?

@@ -19,34 +19,6 @@ def has_selected_ids_in_context(context):
     return False
 
 
-class OUTLINER_HT_tool_header(Header):
-    bl_space_type = 'OUTLINER'
-    bl_region_type = 'TOOL_HEADER'
-
-    @classmethod
-    def poll(cls, context):
-        return context.space_data.display_mode == 'STACK_LAYERS'
-
-    def draw(self, context):
-        layout = self.layout
-        space = context.space_data
-
-        if space.stack_layers_view != 'STACK':
-            props = layout.operator("wm.context_set_enum", text="Outliner", icon='OUTLINER')
-            props.data_path = "space_data.display_mode"
-            props.value = 'VIEW_LAYER'
-
-            # Which source's stacks the object list is drawn from. It belongs on this row, next to
-            # the other Stack Layers controls, pushed to the far right edge.
-            layout.separator_spacer()
-            layout.prop(space, "stack_source", text="")
-            return
-
-        layout.operator("outliner.stack_layers_back", text="", icon='BACK')
-
-        layout.separator_spacer()
-
-
 class OUTLINER_HT_header(Header):
     bl_space_type = 'OUTLINER'
 
@@ -66,6 +38,8 @@ class OUTLINER_HT_header(Header):
             OUTLINER_MT_editor_menus.draw_collapsible(context, layout)
         if display_mode == 'LIBRARY_OVERRIDES':
             layout.prop(space, "lib_override_view_mode", text="")
+        if display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK':
+            layout.operator("outliner.stack_layers_back", text="", icon='BACK')
 
         layout.separator_spacer()
 
@@ -80,8 +54,16 @@ class OUTLINER_HT_header(Header):
         if filter_text_supported:
             row = layout.row(align=True)
             row.prop(space, "filter_text", icon='VIEWZOOM', text="")
+        elif display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK':
+            layout.prop(
+                space, "use_stack_layer_pin", text="",
+                icon='PINNED' if space.use_stack_layer_pin else 'UNPINNED',
+            )
 
         layout.separator_spacer()
+
+        if display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'OBJECTS':
+            layout.prop(space, "stack_source", text="")
 
         if display_mode == 'SEQUENCE':
             row = layout.row(align=True)
@@ -622,7 +604,6 @@ class OUTLINER_PT_options_filter(Panel):
 
 
 classes = (
-    OUTLINER_HT_tool_header,
     OUTLINER_HT_header,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,

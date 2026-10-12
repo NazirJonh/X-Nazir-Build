@@ -257,25 +257,26 @@ enum eSpaceOutliner_StackLayersView : short {
  * #SpaceOutliner.stack_layers_flag
  *
  * Independent of #SpaceOutliner.flag and #SpaceOutliner.filter: the stack shows a different kind
- * of thing and wants a different set of switches. The bits are phrased as "hide" so that a
- * zero-filled old file reads as the sensible default (everything shown) while "everything off"
+ * of thing and wants a different set of switches. The bits are phrased as "away from the default"
+ * so that a zero-filled old file reads as the sensible default while "everything off"
  * stays a reachable state.
  */
 enum eSpaceOutliner_StackLayersFlag : short {
   SO_SL_HIDE_OPACITY = (1 << 0),
   SO_SL_HIDE_BLEND = (1 << 1),
   SO_SL_HIDE_ITEMS = (1 << 2),
-  SO_SL_BIG_ROWS = (1 << 3),
+  /** Compact one-unit rows instead of the tall rows with a thumbnail. */
+  SO_SL_SMALL_ROWS = (1 << 3),
   SO_SL_SORT_BY_NAME = (1 << 4),
   /** Keep the focused stack when the active object changes. */
   SO_SL_PINNED = (1 << 5),
   /**
-   * Draw the visibility toggle before the row's name instead of in the icon columns.
+   * Draw the visibility toggle in the icon columns instead of before the row's name.
    *
    * Which side it reads better on depends on the stack: a layer manager usually puts it first,
    * while the columns keep the toggles of every row aligned however deeply they are nested.
    */
-  SO_SL_VISIBILITY_LEFT = (1 << 6),
+  SO_SL_VISIBILITY_RIGHT = (1 << 6),
   /** Group a row's sub-rows into alternating pairs instead of alternating every sub-row. */
   SO_SL_PAIR_SUB_ROWS = (1 << 7),
   /**

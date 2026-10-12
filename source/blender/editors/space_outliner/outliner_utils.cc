@@ -75,7 +75,7 @@ void outliner_viewcontext_init(const bContext *C, TreeViewContext *tvc)
 int outliner_tree_element_height(const SpaceOutliner &space_outliner, const TreeElement &te)
 {
   if (space_outliner.outlinevis != SO_STACK_LAYERS ||
-      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+      (space_outliner.stack_layers_flag & SO_SL_SMALL_ROWS) != 0)
   {
     return UI_UNIT_Y;
   }

@@ -81,7 +81,7 @@ static bool outliner_stack_preview_section_from_cursor(const SpaceOutliner &spac
 {
   const TreeStoreElem *tselem = TREESTORE(&te);
   if (tselem->type != TSE_STACK_LAYER ||
-      (space_outliner.stack_layers_flag & SO_SL_BIG_ROWS) == 0)
+      (space_outliner.stack_layers_flag & SO_SL_SMALL_ROWS) != 0)
   {
     return false;
   }

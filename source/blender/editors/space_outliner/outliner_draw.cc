@@ -3638,7 +3638,7 @@ static void outliner_draw_tree_element(ui::Block *block,
 
     /* Data-type icon. A stack layer row with a preview available shows that instead, filling
      * more of its two-unit-tall row than a unit icon would. */
-    const bool stack_big_rows = (space_outliner->stack_layers_flag & SO_SL_BIG_ROWS) != 0;
+    const bool stack_big_rows = (space_outliner->stack_layers_flag & SO_SL_SMALL_ROWS) == 0;
     /* A row the source marked compact keeps the unit icon and the usual height even with Large
      * rows on, and shows no preview slots. */
     const StackRow *stack_row = (tselem->type == TSE_STACK_LAYER) ?
@@ -3845,6 +3845,7 @@ static void outliner_draw_tree_element(ui::Block *block,
     const bool skip_merged_child_icons = (tselem->type == TSE_STACK_LAYER);
 
     /* Closed item, we draw the icons, not when it's a scene, or master-server list though. */
+    int data_icons_end = startx + offsx;
     if (!TSELEM_OPEN(tselem, space_outliner) && !skip_merged_child_icons) {
       if (te->subtree.first) {
         if ((tselem->type == TSE_SOME_ID) && (te->idcode == ID_SCE)) {
@@ -3872,7 +3873,39 @@ static void outliner_draw_tree_element(ui::Block *block,
                                 &merged);
 
           GPU_blend(GPU_BLEND_NONE);
+          data_icons_end = tempx;
         }
+      }
+    }
+
+    /* Focus Stack follows the row's inline data icons: the ones merged into a collapsed object's
+     * row, or just the name when the children are rows of their own. */
+    if (space_outliner->outlinevis == SO_VIEW_LAYER && tselem->type == TSE_SOME_ID &&
+        te->idcode == ID_OB)
+    {
+      Object *object = id_cast<Object *>(tselem->id);
+      const StackSource &source = *stack_source_for_space(*space_outliner);
+      const StackReadContext ctx = {tvc.bmain, tvc.scene, tvc.view_layer};
+      /* Buttons are not clipped by overdrawing the way plain icons are (#tselem_draw_icon), so
+       * keep this one clear of the restriction columns. The rect is the full cell: the widget
+       * centers the icon inside it (#widget_draw_icon), unlike a plain icon draw which insets the
+       * glyph by hand. */
+      if (object != nullptr && source.object_has_stack(ctx, *object) && data_icons_end < xmax) {
+        ui::Button *but = uiDefIconButO(block,
+                                        ui::ButtonType::But,
+                                        "OUTLINER_OT_stack_layer_focus",
+                                        wm::OpCallContext::ExecDefault,
+                                        source.focus_button_icon(),
+                                        data_icons_end,
+                                        *starty,
+                                        UI_UNIT_X,
+                                        UI_UNIT_Y,
+                                        TIP_("Show this object's layer stack"));
+        PointerRNA *props = ui::button_operator_ptr_ensure(but);
+        RNA_string_set(props, "object", object->id.name + 2);
+        RNA_string_set(props, "library", ID_IS_LINKED(object) ? object->id.lib->id.name + 2 : "");
+        RNA_int_set(props, "sub_index", -1);
+        RNA_boolean_set(props, "enter_edit_mode", true);
       }
     }
   }

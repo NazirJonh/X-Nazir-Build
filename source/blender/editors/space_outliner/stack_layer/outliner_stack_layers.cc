@@ -16,8 +16,8 @@
 #include <climits>
 #include <functional>
 
-#include "DNA_defs.h"
 #include "DNA_ID.h"
+#include "DNA_defs.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -41,15 +41,15 @@
 #include "BLT_translation.hh"
 
 #include "ED_object.hh"
-#include "ED_outliner_stack_automation.hh"
+#include "ED_outliner_stack.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
 #include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
-#include "RNA_enum_types.hh"
 #include "RNA_define.hh"
+#include "RNA_enum_types.hh"
 
 #include "UI_interface_c.hh"
 #include "UI_interface_icons.hh"
@@ -85,26 +85,44 @@ bool stack_row_activate_poll(bContext *C)
   return owner != nullptr && stack_source_for_space(*space_outliner)->is_editable(*owner);
 }
 
+wmOperatorStatus stack_focus_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  Main *bmain = CTX_data_main(C);
+  char object_name[MAX_ID_NAME - 2];
+  char library_name[MAX_ID_NAME - 2];
+  RNA_string_get(op->ptr, "object", object_name);
+  RNA_string_get(op->ptr, "library", library_name);
+  /* The name alone is ambiguous between linked data of different libraries; an empty library
+   * names a local object. */
+  Object *object = id_cast<Object *>(
+      BKE_libblock_find_name_and_library(bmain, ID_OB, object_name, library_name));
+  if (object == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Object not found");
+    return OPERATOR_CANCELLED;
+  }
+  const int sub_index = RNA_int_get(op->ptr, "sub_index");
+  const bool enter_edit_mode = RNA_boolean_get(op->ptr, "enter_edit_mode");
+  return outliner_stack_focus_set(C, *space_outliner, *object, sub_index, enter_edit_mode) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
 wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (RNA_boolean_get(op->ptr, "keep_view")) {
-    /* Staying in the Stack Layers mode only steps back to the objects list. */
-    space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
+  if (space_outliner == nullptr) {
+    return OPERATOR_CANCELLED;
   }
-  else {
-    /* A plain invocation leaves the Stack Layers mode for the regular View Layer browsing. */
+  /* Without `keep_view` the mode is left for the regular View Layer browsing; with it the mode
+   * stays and only steps back to the objects list. */
+  if (!RNA_boolean_get(op->ptr, "keep_view")) {
     space_outliner->outlinevis = SO_VIEW_LAYER;
-    space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
-    /* Leaving the mode through an operator skips #rna_SpaceOutliner_display_mode_update, so the
-     * tool header that carries only the Stack Layers controls is synced here through the same
-     * helper the RNA update calls. */
-    ScrArea *area = CTX_wm_area(C);
-    if (area != nullptr) {
-      outliner_tool_header_visibility_sync(area, *space_outliner);
-      ED_area_tag_redraw(area);
-    }
   }
+  space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return OPERATOR_FINISHED;
 }
@@ -238,9 +256,8 @@ Object *outliner_stack_focus_object_resolve(const StackReadContext &ctx,
 
 const char *outliner_stack_focus_name_get(const SpaceOutliner &space_outliner)
 {
-  return (space_outliner.runtime != nullptr) ?
-             space_outliner.runtime->stack_focus_name.c_str() :
-             "";
+  return (space_outliner.runtime != nullptr) ? space_outliner.runtime->stack_focus_name.c_str() :
+                                               "";
 }
 
 void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner)
@@ -475,8 +492,8 @@ ID *outliner_stack_owner_get(const StackReadContext &ctx, SpaceOutliner &space_o
   if (outliner_stack_focus_object_resolve(ctx, space_outliner) == nullptr) {
     return nullptr;
   }
-  return stack_source_for_space(space_outliner)->owner_get(
-      ctx, space_outliner.runtime->stack_focus);
+  return stack_source_for_space(space_outliner)
+      ->owner_get(ctx, space_outliner.runtime->stack_focus);
 }
 
 /**
@@ -560,19 +577,7 @@ bool outliner_stack_focus_set(bContext *C,
   outliner_stack_rows_invalidate(space_outliner);
   space_outliner.outlinevis = SO_STACK_LAYERS;
   space_outliner.stack_layers_view = SO_SL_VIEW_STACK;
-  ScrArea *area = CTX_wm_area(C);
-  if (area != nullptr) {
-    for (ARegion &region : area->regionbase) {
-      if (region.regiontype != RGN_TYPE_TOOL_HEADER) {
-        continue;
-      }
-      const bool hidden = region.flag & RGN_FLAG_HIDDEN_BY_USER;
-      if (bool(region.flag & RGN_FLAG_HIDDEN) != hidden) {
-        SET_FLAG_FROM_TEST(region.flag, hidden, RGN_FLAG_HIDDEN);
-        ED_area_tag_region_size_update(area, &region);
-      }
-      ED_region_tag_redraw(&region);
-    }
+  if (ScrArea *area = CTX_wm_area(C)) {
     ED_area_tag_redraw(area);
   }
 
@@ -599,11 +604,8 @@ bool outliner_stack_focus_set(bContext *C,
        * wrong tool key. Build the 3D viewport's key for the mode just entered instead. */
       bToolKey tkey{};
       tkey.space_type = SPACE_VIEW3D;
-      tkey.mode = WM_toolsystem_mode_from_spacetype(*CTX_data_main(C),
-                                                    CTX_data_scene(C),
-                                                    CTX_data_view_layer(C),
-                                                    nullptr,
-                                                    SPACE_VIEW3D);
+      tkey.mode = WM_toolsystem_mode_from_spacetype(
+          *CTX_data_main(C), CTX_data_scene(C), CTX_data_view_layer(C), nullptr, SPACE_VIEW3D);
       WM_toolsystem_ref_set_by_id_ex(C, CTX_wm_workspace(C), &tkey, tool_idname, false);
     }
   }
@@ -628,9 +630,8 @@ bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, con
   if (row == nullptr) {
     return false;
   }
-  const bool result = stack_source_for_space(space_outliner)
-                          ->row_activate(*C, space_outliner.runtime->stack_focus, *owner, ordinal, *row);
-  return result;
+  return stack_source_for_space(space_outliner)
+      ->row_activate(*C, space_outliner.runtime->stack_focus, *owner, ordinal, *row);
 }
 
 bool outliner_stack_row_preview_activate(bContext *C,
@@ -651,9 +652,7 @@ bool outliner_stack_row_preview_activate(bContext *C,
   if (row == nullptr) {
     return false;
   }
-  const bool result = stack_source_for_space(space_outliner)
-                          ->preview_activate(*C, *owner, *row, section_id);
-  return result;
+  return stack_source_for_space(space_outliner)->preview_activate(*C, *owner, *row, section_id);
 }
 
 bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner, const int nr)
@@ -686,8 +685,7 @@ bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner,
   return false;
 }
 
-int outliner_stack_active_ordinal_get(const StackReadContext &ctx,
-                                      SpaceOutliner &space_outliner)
+int outliner_stack_active_ordinal_get(const StackReadContext &ctx, SpaceOutliner &space_outliner)
 {
   ID *owner = outliner_stack_owner_get(ctx, space_outliner);
   if (owner == nullptr) {

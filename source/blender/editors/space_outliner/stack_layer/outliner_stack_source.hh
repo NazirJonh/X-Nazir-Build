@@ -646,11 +646,11 @@ class StackGroupingEditor {
    * share, while what this one fills it with is the caller's choice, not part of the verb.
    */
   virtual bool row_aux_set(bContext & /*C*/,
-                            const StackFocus & /*focus*/,
-                            ID & /*owner*/,
-                            int /*ordinal*/,
-                            bool /*add*/,
-                            const float /*initial_color*/[4]) const
+                           const StackFocus & /*focus*/,
+                           ID & /*owner*/,
+                           int /*ordinal*/,
+                           bool /*add*/,
+                           const float /*initial_color*/[4]) const
   {
     return false;
   }
@@ -661,9 +661,9 @@ class StackGroupingEditor {
    * sources that have no mask notion.
    */
   virtual bool row_aux_toggle(bContext & /*C*/,
-                               const StackFocus & /*focus*/,
-                               ID & /*owner*/,
-                               int /*ordinal*/) const
+                              const StackFocus & /*focus*/,
+                              ID & /*owner*/,
+                              int /*ordinal*/) const
   {
     return false;
   }
@@ -814,11 +814,11 @@ class StackColorEditor {
    * re-fill.
    */
   virtual bool row_color_set(bContext & /*C*/,
-                                  const StackFocus & /*focus*/,
-                                  ID & /*owner*/,
-                                  int /*ordinal*/,
-                                  const float /*color*/[4],
-                                  StackColorSession * /*session*/) const
+                             const StackFocus & /*focus*/,
+                             ID & /*owner*/,
+                             int /*ordinal*/,
+                             const float /*color*/[4],
+                             StackColorSession * /*session*/) const
   {
     return false;
   }
@@ -835,11 +835,11 @@ class StackColorEditor {
    * preview.
    */
   virtual bool row_color_preview(bContext & /*C*/,
-                                      const StackFocus & /*focus*/,
-                                      ID & /*owner*/,
-                                      int /*ordinal*/,
-                                      const float /*color*/[4],
-                                      StackColorSession * /*session*/) const
+                                 const StackFocus & /*focus*/,
+                                 ID & /*owner*/,
+                                 int /*ordinal*/,
+                                 const float /*color*/[4],
+                                 StackColorSession * /*session*/) const
   {
     return false;
   }
@@ -1131,6 +1131,12 @@ class StackSource {
   virtual int empty_preview_icon() const;
 
   /**
+   * The icon of the button that opens an object's stack from the View Layer rows. Sources whose
+   * stack has a recognizable tool or data icon override it.
+   */
+  virtual int focus_button_icon() const;
+
+  /**
    * The side effects of choosing a sub-selection, in the data themselves.
    *
    * Changing the material slot has to move #Object::actcol along with it, or the brush stays on
@@ -1170,11 +1176,8 @@ class StackSource {
   virtual StackColumnLayout column_layout() const = 0;
 
   /** Make the row the thing the rest of Blender acts on. */
-  virtual bool row_activate(bContext &C,
-                            const StackFocus &focus,
-                            ID &owner,
-                            int ordinal,
-                            const StackRow &row) const = 0;
+  virtual bool row_activate(
+      bContext &C, const StackFocus &focus, ID &owner, int ordinal, const StackRow &row) const = 0;
   virtual bool row_is_active(const StackReadContext &ctx,
                              const StackFocus &focus,
                              const ID &owner,

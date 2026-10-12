@@ -27,8 +27,8 @@ namespace {
 
 Span<const StackSource *> stack_sources_ensure()
 {
-  /* Owned for the lifetime of the process: sources are stateless descriptions, and freeing them at
-   * exit would only add an order-of-destruction problem to save nothing. */
+  /* Static storage: the sources are stateless descriptions, and nothing outlives them that could
+   * still ask for one during static destruction at exit. */
   static Vector<std::unique_ptr<StackSource>> owned = []() {
     Vector<std::unique_ptr<StackSource>> sources;
     sources.append(stack_source_shape_keys_create());
@@ -49,6 +49,11 @@ Span<const StackSource *> stack_sources_ensure()
 Span<const StackSource *> stack_sources_get()
 {
   return stack_sources_ensure();
+}
+
+int StackSource::focus_button_icon() const
+{
+  return ICON_RENDERLAYERS;
 }
 
 int StackSource::empty_preview_icon() const

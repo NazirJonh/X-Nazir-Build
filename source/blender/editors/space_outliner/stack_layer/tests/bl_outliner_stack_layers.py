@@ -50,6 +50,17 @@ class StackLayersOutlinerTest(unittest.TestCase):
         object.shape_key_add(name="Key 2")
         return object
 
+    def focus_and_draw_stack(self, object):
+        self.space.display_mode = 'STACK_LAYERS'
+        with self.outliner_override():
+            result = bpy.ops.outliner.stack_layer_focus(
+                object=object.name,
+                sub_index=-1,
+                enter_edit_mode=False,
+            )
+        self.assertEqual(result, {'FINISHED'})
+        self.redraw_window()
+
     def test_display_mode_roundtrip(self):
         self.space.display_mode = 'STACK_LAYERS'
         self.assertEqual(self.space.display_mode, 'STACK_LAYERS')
@@ -90,8 +101,31 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.assertEqual(object.active_shape_key_index, 2)
         self.assertEqual(object.active_shape_key.name, "Key 2")
 
+    def test_stack_layer_focus_opens_the_stack_of_an_object(self):
+        object = self.add_object_with_shape_keys()
+        self.assertEqual(self.space.stack_layers_view, 'OBJECTS')
+        self.focus_and_draw_stack(object)
+        self.assertEqual(self.space.stack_layers_view, 'STACK')
+        self.assertEqual(self.space.stack_focus_name, "Key")
+
+    def test_stack_layer_focus_refuses_an_unknown_object(self):
+        self.space.display_mode = 'STACK_LAYERS'
+        with self.outliner_override():
+            with self.assertRaises(RuntimeError):
+                bpy.ops.outliner.stack_layer_focus(object="NoSuchObject", enter_edit_mode=False)
+
+    def test_pin_property_flips_the_flag(self):
+        object = self.add_object_with_shape_keys()
+        self.focus_and_draw_stack(object)
+        self.assertFalse(self.space.use_stack_layer_pin)
+        self.space.use_stack_layer_pin = True
+        self.assertTrue(self.space.use_stack_layer_pin)
+        self.space.use_stack_layer_pin = False
+        self.assertFalse(self.space.use_stack_layer_pin)
+
     def test_stack_operators_are_registered(self):
         for name in (
+            "stack_layer_focus",
             "stack_layers_back",
             "stack_layer_activate",
         ):

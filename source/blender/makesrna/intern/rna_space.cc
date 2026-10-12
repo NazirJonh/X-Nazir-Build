@@ -28,7 +28,7 @@ static constexpr bool RNA_SPACE_DEBUG_ENABLED = false;
 #include "ED_asset.hh"
 #include "ED_buttons.hh"
 #include "ED_image.hh"
-#include "ED_outliner_stack_automation.hh"
+#include "ED_outliner_stack.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_spreadsheet.hh"
@@ -865,19 +865,6 @@ static ScrArea *rna_area_from_space(const PointerRNA *ptr)
   bScreen *screen = reinterpret_cast<bScreen *>(ptr->owner_id);
   SpaceLink *link = static_cast<SpaceLink *>(ptr->data);
   return BKE_screen_find_area_from_space(screen, link);
-}
-
-static void rna_SpaceOutliner_display_mode_update(bContext * /*C*/, PointerRNA *ptr)
-{
-  ScrArea *area = rna_area_from_space(ptr);
-  if (area != nullptr) {
-    /* The tool header only carries the Stack Layers controls, so it follows the display mode.
-     * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed. */
-    SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
-    ed::outliner::outliner_tool_header_visibility_sync(area, *space_outliner);
-    ED_area_tag_redraw(area);
-  }
-  ED_area_tag_refresh(area);
 }
 
 static void rna_SpaceOutliner_stack_focus_name_get(PointerRNA *ptr, char *value)
@@ -5271,9 +5258,7 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "outlinevis");
   RNA_def_property_enum_items(prop, display_mode_items);
   RNA_def_property_ui_text(prop, "Display Mode", "Type of information to display");
-  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
-  RNA_def_property_update(
-      prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_display_mode_update");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
   prop = RNA_def_property(srna, "stack_layers_view", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stack_layers_view");
@@ -5286,6 +5271,12 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "stack_source");
   RNA_def_property_enum_items(prop, stack_source_items);
   RNA_def_property_ui_text(prop, "Stack Source", "Which kind of layer stack to display");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_pin", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PINNED);
+  RNA_def_property_ui_text(
+      prop, "Pin Stack", "Keep the focused stack when the active object changes");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 
   prop = RNA_def_property(srna, "stack_focus_name", PROP_STRING, PROP_NONE);

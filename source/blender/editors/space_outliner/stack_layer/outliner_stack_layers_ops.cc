@@ -12,12 +12,8 @@
  * below never mention a material, an image or a node.
  */
 
-#include <algorithm>
 #include <climits>
-#include <cstdio>
-#include <functional>
 
-#include "DNA_defs.h"
 #include "DNA_ID.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -25,42 +21,18 @@
 #include "DNA_space_types.h"
 #include "DNA_windowmanager_types.h"
 
-#include "BKE_context.hh"
-#include "BKE_layer.hh"
-#include "BKE_lib_id.hh"
-#include "BKE_main.hh"
-#include "BKE_report.hh"
-
-#include "BLI_listbase_wrapper.hh"
-#include "BLI_map.hh"
-#include "BLI_math_color.h"
-#include "BLI_mempool.h"
 #include "BLI_string.h"
-#include "BLI_string_utf8.h"
-#include "BLI_uuid.h"
 
-#include "BLT_translation.hh"
-
-#include "ED_object.hh"
-#include "ED_outliner_stack_automation.hh"
 #include "ED_screen.hh"
-#include "ED_undo.hh"
-
-#include "MEM_guardedalloc.h"
 
 #include "RNA_access.hh"
-#include "RNA_enum_types.hh"
 #include "RNA_define.hh"
-
-#include "UI_interface_c.hh"
-#include "UI_interface_icons.hh"
-#include "UI_interface_layout.hh"
+#include "RNA_enum_types.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
 
 #include "../outliner_intern.hh"
-#include "../tree/tree_iterator.hh"
 #include "outliner_stack_source.hh"
 
 namespace blender::ed::outliner {
@@ -79,6 +51,38 @@ static void rna_def_stack_row_marker(wmOperatorType *ot)
                  "Marker",
                  "The row's identity marker, as this mode issued it; takes precedence over the "
                  "position, which is only the row's at the time of the call");
+}
+
+void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot)
+{
+  ot->name = "Focus Stack";
+  ot->idname = "OUTLINER_OT_stack_layer_focus";
+  ot->description = "Show the layer stack of an object in the Outliner";
+  ot->exec = stack_focus_exec;
+  ot->poll = ED_operator_outliner_active;
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_string(ot->srna, "object", nullptr, MAX_ID_NAME - 2, "Object", "Object to focus");
+  RNA_def_string(ot->srna,
+                 "library",
+                 nullptr,
+                 MAX_ID_NAME - 2,
+                 "Library",
+                 "Name of the library the object is linked from; empty for a local object");
+  RNA_def_int(ot->srna,
+              "sub_index",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Index",
+              "Stack index within the object, such as a material slot; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  RNA_def_boolean(ot->srna,
+                  "enter_edit_mode",
+                  true,
+                  "Enter Edit Mode",
+                  "Enter the edit mode the source works in");
 }
 
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot)

@@ -759,6 +759,7 @@ bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner);
 void stack_selected_ordinals_get(SpaceOutliner &space_outliner, blender::Vector<int> &r_ordinals);
 wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_back_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+wmOperatorStatus stack_focus_exec(bContext *C, wmOperator *op);
 int stack_operator_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op);
 wmOperatorStatus stack_row_activate_exec(bContext *C, wmOperator *op);
 bool stack_row_activate_poll(bContext *C);
@@ -787,7 +788,7 @@ bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner,
 /**
  * Height of one row in pixels.
  *
- * #UI_UNIT_Y everywhere except a Stack Layers row with `SO_SL_BIG_ROWS` on, which is why every
+ * #UI_UNIT_Y everywhere except a Stack Layers row with `SO_SL_SMALL_ROWS` off, which is why every
  * place that steps from one row to the next has to ask rather than assume. Anything that compares
  * a mouse position against a row, walks to the next row, or measures the tree goes through here.
  */
@@ -801,6 +802,8 @@ bool outliner_stack_row_is_active(const ed::outliner::StackReadContext &ctx,
                                   int ordinal);
 /** Forget whatever the sources remember by address; see #StackSource::undo_reset. */
 void outliner_stack_sources_undo_reset();
+
+void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot);
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
 

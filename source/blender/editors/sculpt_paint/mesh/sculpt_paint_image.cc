@@ -508,20 +508,41 @@ static void mix_paint_over_transparent_scene(float4 &paint,
   paint[3] = mt * scene[3] + paint[3];
 }
 
-/** Same #IMB_BLEND_NORMAL_MIX body as #blend_colors. */
+/**
+ * Same #IMB_BLEND_NORMAL_MIX body as #blend_colors (and as `blend_color_normal_mix_*` in rectop).
+ *
+ * The map gains coverage with a straight-alpha "over", so a stroke on a transparent normal map
+ * (a fresh layer) becomes visible. The tangent normal is mixed by `t / alpha_out`, which equals `t`
+ * for an opaque map. \a scene_premul tells that \a scene and the result go through the generic
+ * pre-multiplied read/write conversion (straight byte storage): a normal is data and must not be
+ * scaled by alpha, so it is un-multiplied here and multiplied again on the way out.
+ */
 static void mix_normal_over_scene(float4 &paint,
                                   const float4 &scene,
                                   const float brush_alpha,
-                                  const bool is_float_storage)
+                                  const bool is_float_storage,
+                                  const bool scene_premul)
 {
   const float t = math::clamp(paint[3] * brush_alpha, 0.0f, 1.0f);
+  const float alpha_out = scene[3] + t * (1.0f - scene[3]);
+  const float weight = (alpha_out > 0.0f) ? t / alpha_out : 0.0f;
+
+  float4 straight_scene = scene;
+  if (scene_premul && scene[3] > 0.0f) {
+    const float inv_alpha = 1.0f / scene[3];
+    straight_scene[0] *= inv_alpha;
+    straight_scene[1] *= inv_alpha;
+    straight_scene[2] *= inv_alpha;
+  }
+
   float target_n[3] = {paint[0] * 2.0f - 1.0f, paint[1] * 2.0f - 1.0f, paint[2] * 2.0f - 1.0f};
   float out[3];
-  BKE_pbr_normal_blend_mix(scene, target_n, t, is_float_storage, out);
-  paint[0] = out[0];
-  paint[1] = out[1];
-  paint[2] = out[2];
-  paint[3] = scene[3];
+  BKE_pbr_normal_blend_mix(straight_scene, target_n, weight, is_float_storage, out);
+  const float scale = scene_premul ? alpha_out : 1.0f;
+  paint[0] = out[0] * scale;
+  paint[1] = out[1] * scale;
+  paint[2] = out[2] * scale;
+  paint[3] = alpha_out;
 }
 
 static void blend_colors(MutableSpan<float4> paint_pixels,
@@ -530,7 +551,8 @@ static void blend_colors(MutableSpan<float4> paint_pixels,
                          const IMB_BlendMode blend_mode,
                          const bool is_float_storage,
                          const bool material_blend,
-                         const bool single_over = false)
+                         const bool single_over = false,
+                         const bool scene_premul = false)
 {
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(paint_pixels.size() == scene_linear_pixels.size());
@@ -545,7 +567,7 @@ static void blend_colors(MutableSpan<float4> paint_pixels,
   if (blend_mode == IMB_BLEND_NORMAL_MIX) {
     for (const int i : paint_pixels.index_range()) {
       mix_normal_over_scene(
-          paint_pixels[i], scene_linear_pixels[i], brush.alpha, is_float_storage);
+          paint_pixels[i], scene_linear_pixels[i], brush.alpha, is_float_storage, scene_premul);
     }
     return;
   }
@@ -786,7 +808,8 @@ static void blend_paint_range(PaintChannelRangeState &state,
                state.blend_mode,
                !state.float_buffer.is_empty(),
                state.material_blend,
-               use_single_over(state));
+               use_single_over(state),
+               state.float_buffer.is_empty() && !state.premul_storage);
 }
 
 /** Write one blended paint range to a channel image. */
@@ -839,7 +862,7 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
     for (const int i : paint_pixels.index_range()) {
       const float4 scene = image[i];
       if (normal_mix) {
-        mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, true);
+        mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, true, false);
       }
       else if (single_over) {
         mix_paint_over_transparent_scene(paint_pixels[i], scene, brush_alpha);
@@ -861,7 +884,7 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
         straight_to_premul_v4(scene);
       }
       if (normal_mix) {
-        mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, false);
+        mix_normal_over_scene(paint_pixels[i], scene, brush_alpha, false, !state.premul_storage);
       }
       else if (single_over) {
         mix_paint_over_transparent_scene(paint_pixels[i], scene, brush_alpha);

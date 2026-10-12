@@ -1979,15 +1979,22 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
           const float t = std::clamp(factor, 0.0f, 1.0f);
           const float target_n[3] = {
               paint_rgb.x * 2.0f - 1.0f, paint_rgb.y * 2.0f - 1.0f, paint_rgb.z * 2.0f - 1.0f};
+          /* The one exception to "alpha is carried through": a normal patch over a transparent map
+           * would stay invisible, so coverage accumulates with the straight-alpha "over" and the
+           * normal mixes by `t / alpha_out`. An opaque map gives `t` and alpha 1 as before, the
+           * same rule as #IMB_BLEND_NORMAL_MIX in the imbuf blend. `orig` is the frozen
+           * pre-patch value, so a restamp stays idempotent. */
+          const float alpha_out = orig.w + t * (1.0f - orig.w);
+          const float weight = (alpha_out > 0.0f) ? t / alpha_out : 0.0f;
           const float3 orig_rgb(orig);
           float blended_normal[3];
           BKE_pbr_normal_blend_mix(orig_rgb,
                                    target_n,
-                                   t,
+                                   weight,
                                    chunk.image_buffer->float_data() != nullptr,
                                    blended_normal);
           chunk.values[pixel.local] = float4(
-              blended_normal[0], blended_normal[1], blended_normal[2], orig.w);
+              blended_normal[0], blended_normal[1], blended_normal[2], alpha_out);
         }
         else if (blend_mode == IMB_BLEND_MIX) {
           /* `composite_coverage()` would compute the same RGB for Mix, but it is a lerp either

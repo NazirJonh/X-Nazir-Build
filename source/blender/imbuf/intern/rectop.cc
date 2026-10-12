@@ -44,12 +44,17 @@ static void blend_color_normal_mix_byte(uchar dst[4],
   const float target_n[3] = {src2[0] / 255.0f * 2.0f - 1.0f,
                              src2[1] / 255.0f * 2.0f - 1.0f,
                              src2[2] / 255.0f * 2.0f - 1.0f};
+  /* A transparent map must gain coverage, or the stroke stays invisible.
+   * Straight-alpha "over": mixing by `t / alpha_out` keeps opaque maps identical to a plain mix. */
+  const float alpha_in = src1[3] / 255.0f;
+  const float alpha_out = alpha_in + t * (1.0f - alpha_in);
+  const float weight = (alpha_out > 0.0f) ? t / alpha_out : 0.0f;
   float out[3];
-  BKE_pbr_normal_blend_mix(current_packed, target_n, t, false, out);
+  BKE_pbr_normal_blend_mix(current_packed, target_n, weight, false, out);
   dst[0] = unit_float_to_uchar_clamp(out[0]);
   dst[1] = unit_float_to_uchar_clamp(out[1]);
   dst[2] = unit_float_to_uchar_clamp(out[2]);
-  dst[3] = src1[3];
+  dst[3] = unit_float_to_uchar_clamp(alpha_out);
 }
 
 static void blend_color_normal_mix_byte_alpha(uchar dst[4],
@@ -68,10 +73,13 @@ static void blend_color_normal_mix_float(float dst[4],
                                          const float t)
 {
   const float target_n[3] = {src2[0] * 2.0f - 1.0f, src2[1] * 2.0f - 1.0f, src2[2] * 2.0f - 1.0f};
+  /* See #blend_color_normal_mix_byte: a transparent map gains coverage. */
+  const float alpha_out = src1[3] + t * (1.0f - src1[3]);
+  const float weight = (alpha_out > 0.0f) ? t / alpha_out : 0.0f;
   float out[3];
-  BKE_pbr_normal_blend_mix(src1, target_n, t, true, out);
+  BKE_pbr_normal_blend_mix(src1, target_n, weight, true, out);
   copy_v3_v3(dst, out);
-  dst[3] = src1[3];
+  dst[3] = alpha_out;
 }
 
 static void blend_color_normal_mix_float_alpha(float dst[4],

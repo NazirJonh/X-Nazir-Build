@@ -124,7 +124,7 @@ std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterial
 {
   switch (eBrushMaterialPaintMaskSource(brush_paint.mask_source)) {
     case BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA:
-      if (brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use != 0) {
+      if (BKE_paint_material_mask_alpha_active(brush_paint)) {
         return PAINT_MATERIAL_CHANNEL_ALPHA;
       }
       return std::nullopt;
@@ -134,6 +134,21 @@ std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterial
       break;
   }
   return std::nullopt;
+}
+
+float scalar_source_finish(const BrushMaterialPaint &brush_paint,
+                           const eMaterialPaintChannel channel,
+                           const float2 &range,
+                           const float sampled)
+{
+  /* Inversion belongs to the Alpha texture itself, so every Alpha read goes through here and the
+   * Sculpt and Image 2D engines cannot disagree. Off by default, which leaves the plain clamp. */
+  if (channel == PAINT_MATERIAL_CHANNEL_ALPHA &&
+      brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert != 0)
+  {
+    return BKE_paint_material_value_invert(range.x, range.y, sampled);
+  }
+  return math::clamp(sampled, range.x, range.y);
 }
 
 ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
@@ -925,7 +940,7 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                         rgba);
   /* Scalar channels use the texture's intensity (mask/factor), not its color, so unlike
    * #color() below there is no RGB to decode here. */
-  return math::clamp(value, range.x, range.y);
+  return scalar_source_finish(brush_paint_, channel, range, value);
 }
 
 float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
@@ -954,7 +969,7 @@ float ChannelSourceSampler::scalar(const eMaterialPaintChannel channel,
                         area_local_mat_for(channel, source),
                         &value,
                         rgba);
-  return math::clamp(value, range.x, range.y);
+  return scalar_source_finish(brush_paint_, channel, range, value);
 }
 
 bool ChannelSourceSampler::needs_linear_conversion(const eMaterialPaintChannel channel) const
@@ -1096,7 +1111,7 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
   if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba)) {
     return fallback;
   }
-  return math::clamp(value, range.x, range.y);
+  return scalar_source_finish(brush_paint_, channel, range, value);
 }
 
 float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
@@ -1333,7 +1348,7 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
                                       area_local_mat,
                                       &value,
                                       rgba);
-    r_values[i] = math::clamp(value, range.x, range.y);
+    r_values[i] = scalar_source_finish(brush_paint_, channel, range, value);
   }
 }
 

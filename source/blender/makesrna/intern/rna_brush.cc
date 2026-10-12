@@ -3829,6 +3829,27 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       prop, "Value", "Paint value (scalar channels use X; Normal uses XYZ tangent)");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
+  /* Only the Alpha channel's entry is read, and only in Mask mode: the second value of the Alpha
+   * pair (see #BKE_paint_material_mask_value_get). */
+  prop = RNA_def_property(srna, "value_secondary", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "value_secondary");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop,
+                           "Secondary Value",
+                           "Second paint value of the Alpha channel, used by the Mask brush "
+                           "for secondary (inverted) strokes");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  /* Inverts the texture itself, so it applies wherever the Alpha texture is sampled. */
+  prop = RNA_def_property(srna, "use_source_invert", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "source_invert", 1);
+  RNA_def_property_ui_text(prop,
+                           "Invert Source",
+                           "Invert the sampled source texture value (only used by the Alpha "
+                           "channel's entry in BrushMaterialPaint.channels)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
+
   prop = RNA_def_property(srna, "normal_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_array(prop, 3);
   RNA_def_property_float_funcs(prop,

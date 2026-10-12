@@ -579,6 +579,27 @@ static const CurveMaskCache *paint_2d_matching_curve_mask(const ImagePaintState 
  * \return Texture intensity (mask/factor). RGB is written to \a r_rgba in scene-linear for color
  * sources; Normal skips colorspace decode.
  */
+static float paint_2d_alpha_source_invert(const BrushPainter *painter,
+                                          const eMaterialPaintChannel channel,
+                                          const float sampled)
+{
+  if (channel != PAINT_MATERIAL_CHANNEL_ALPHA || painter->brush == nullptr ||
+      painter->brush->material_paint == nullptr ||
+      painter->brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert == 0)
+  {
+    /* Untouched, not clamped: this engine has always used the raw intensity. */
+    return sampled;
+  }
+  /* Alpha's range is fixed, so no #PaintModeSettings is needed; the Sculpt engine reaches the same
+   * result through #ed::sculpt_paint::material::scalar_source_finish. */
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  return ed::sculpt_paint::material::scalar_source_finish(
+      *painter->brush->material_paint,
+      channel,
+      float2(info.value_min, info.value_max),
+      sampled);
+}
+
 static float paint_2d_sample_channel_source(const BrushPainter *painter,
                                              const eMaterialPaintChannel channel,
                                              const int x,
@@ -603,7 +624,7 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
       r_rgba = float4(0.0f);
       return 0.0f;
     }
-    return value;
+    return paint_2d_alpha_source_invert(painter, channel, value);
   }
   float3 texco;
   brush_imbuf_tex_co(painter->source_mapping, x, y, texco);
@@ -646,7 +667,7 @@ static float paint_2d_sample_channel_source(const BrushPainter *painter,
   if (source.flip_green_channel) {
     r_rgba[1] = 1.0f - r_rgba[1];
   }
-  return intensity;
+  return paint_2d_alpha_source_invert(painter, channel, intensity);
 }
 
 static bool paint_2d_view_dab_material_batch_enabled(const BrushPainter *painter)
@@ -2733,7 +2754,8 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
   }
   else {
     const float2 range = BKE_paint_material_channel_range(paint_mode, channel);
-    const float intensity = math::clamp(value, range.x, range.y);
+    const float intensity = math::clamp(
+        paint_2d_alpha_source_invert(painter, channel, value), range.x, range.y);
     r_rgb = float3(intensity, intensity, intensity);
   }
   if (encode_canvas) {
@@ -2776,7 +2798,7 @@ static float paint_2d_area_sample_alpha_factor(const BrushPainter *painter,
                               pool,
                               &value,
                               sampled);
-    alpha_factor = value;
+    alpha_factor = paint_2d_alpha_source_invert(painter, PAINT_MATERIAL_CHANNEL_ALPHA, value);
   }
   return math::clamp(alpha_factor, 0.0f, 1.0f);
 }

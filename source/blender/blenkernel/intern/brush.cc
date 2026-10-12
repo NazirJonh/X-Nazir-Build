@@ -1046,29 +1046,66 @@ bool BKE_brush_is_material_mask_default(const Brush &brush)
          (brush.material_paint->mask_flag & BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH) != 0;
 }
 
+/**
+ * A local, non-asset copy of the stock "Paint Soft" brush, or null when the essentials library is
+ * unavailable (unit tests, minimal installs).
+ *
+ * The Mask brush has to stroke exactly like a regular paint brush, so every hidden setting
+ * (falloff curve, spacing and the overlap compensation derived from it, pressure flags, stroke
+ * method) is inherited from the real brush instead of being retyped here.
+ */
+static Brush *brush_material_mask_copy_from_paint_soft(Main &bmain)
+{
+  Brush *source = BKE_paint_brush_from_essentials(&bmain, PaintMode::Sculpt, "Paint Soft");
+  if (source == nullptr) {
+    source = BKE_paint_brush_from_essentials(&bmain, PaintMode::Texture3D, "Paint Soft");
+  }
+  if (source == nullptr) {
+    return nullptr;
+  }
+  /* A plain copy is a local ID and does not carry the asset metadata, so the result never shows up
+   * in the asset shelf. */
+  Brush *brush = id_cast<Brush *>(BKE_id_copy(&bmain, &source->id));
+  if (brush == nullptr) {
+    return nullptr;
+  }
+  BKE_libblock_rename(bmain, brush->id, "Mask");
+  return brush;
+}
+
 Brush *BKE_brush_material_mask_create_default(Main *bmain, Paint *paint)
 {
-  /* Created as a Sculpt brush first for the same reason as the Erase brush: the sculpt-only
-   * settings are only allocated for an exact #OB_MODE_SCULPT. */
-  Brush *brush = BKE_brush_add(bmain, "Mask", OB_MODE_SCULPT);
-  brush->ob_mode |= OB_MODE_TEXTURE_PAINT;
-  /* Sculpt Mode only paints into the material maps with a Paint brush; the default Draw type would
+  Brush *brush = brush_material_mask_copy_from_paint_soft(*bmain);
+  if (brush == nullptr) {
+    /* Created as a Sculpt brush first for the same reason as the Erase brush: the sculpt-only
+     * settings are only allocated for an exact #OB_MODE_SCULPT. */
+    brush = BKE_brush_add(bmain, "Mask", OB_MODE_SCULPT);
+    BKE_brush_size_set(paint, brush, 70);
+    brush->spacing = 10;
+    brush->jitter = 0.0f;
+    brush->alpha = 1.0f;
+    brush->flow = 1.0f;
+    brush->mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+  }
+
+  /* One brush serves Sculpt and Texture/Image paint, like the Erase brush. */
+  brush->ob_mode |= OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT;
+  BKE_brush_init_mesh_automasking_settings(brush);
+  /* Sculpt Mode only paints into the material maps with a Paint brush; any other type would
    * displace the mesh instead of painting the mask. */
   brush->sculpt_brush_type = SCULPT_BRUSH_TYPE_PAINT;
+  brush->image_brush_type = IMAGE_PAINT_BRUSH_TYPE_DRAW;
 
   BKE_brush_material_paint_ensure(brush);
   brush->material_paint->mask_flag |= BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH;
-
-  /* A hard edge keeps the painted mask crisp. The preset also turns antialiasing on, which the
-   * edge needs to stay smooth at its sub-pixel boundary. */
-  BKE_brush_material_erase_mode_apply(brush, BRUSH_MATERIAL_PAINT_ERASE_HARD);
-
-  BKE_brush_size_set(paint, brush, 70);
-  brush->spacing = 10;
-  brush->jitter = 0.0f;
-  brush->alpha = 1.0f;
-  brush->flow = 1.0f;
-  brush->mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+  /* The Alpha pair is the Mask value pair (white paints, black erases back); it is independent of
+   * the brush colors, which a copied Paint Soft would otherwise leave to drive the value. */
+  brush->material_paint->mask_source = BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA;
+  BrushMaterialPaintChannel &mask_alpha =
+      brush->material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA];
+  mask_alpha.value[0] = 1.0f;
+  mask_alpha.value_secondary = 0.0f;
+  mask_alpha.source_invert = 0;
 
   return brush;
 }

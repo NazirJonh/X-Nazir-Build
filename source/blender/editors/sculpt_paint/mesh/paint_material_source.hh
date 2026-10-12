@@ -130,12 +130,23 @@ struct DirectSampleLayout {
  * The one channel whose source texture may drive a Mask stroke, or nullopt when the Mask value is
  * a flat scalar (#BKE_paint_material_mask_value_get).
  *
- * Alpha applies only while that channel is on, matching the constant's own fallback to coverage;
- * Base Color has no on/off of its own. Both engines pick the channel here, so Sculpt and Image 2D
+ * Alpha applies only while #BKE_paint_material_mask_alpha_active (the channel is on, or the brush
+ * is the default Mask brush), matching the constant's own fallback to coverage; Base Color has no
+ * on/off of its own. Both engines pick the channel here, so Sculpt and Image 2D
  * cannot disagree. A Base Color pick is reduced to #BKE_paint_material_mask_luminance by the
  * caller after the sample is decoded to scene-linear.
  */
 std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterialPaint &brush_paint);
+
+/**
+ * Final value of a sampled scalar \a channel: clamped to \a range, and mirrored inside it first
+ * when \a channel is Alpha with #BrushMaterialPaintChannel.source_invert set. The single place the
+ * Alpha texture inversion happens, shared by every Sculpt and Image 2D scalar read.
+ */
+float scalar_source_finish(const BrushMaterialPaint &brush_paint,
+                           eMaterialPaintChannel channel,
+                           const float2 &range,
+                           float sampled);
 
 /**
  * Which #MTex each material paint channel samples from, and whether it is usable.

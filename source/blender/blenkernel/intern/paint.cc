@@ -3818,6 +3818,14 @@ float BKE_paint_material_mask_luminance(const float3 &linear_rgb)
   return 0.2126f * linear_rgb.x + 0.7152f * linear_rgb.y + 0.0722f * linear_rgb.z;
 }
 
+bool BKE_paint_material_mask_alpha_active(const BrushMaterialPaint &brush_paint)
+{
+  /* The default Mask brush always owns an Alpha pair; any other brush must opt in by enabling
+   * the Alpha channel, otherwise its Alpha is just an unused PBR value. */
+  return brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use != 0 ||
+         (brush_paint.mask_flag & BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH) != 0;
+}
+
 float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
                                         const Paint &paint,
                                         const Brush &brush,
@@ -3832,10 +3840,12 @@ float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
   /* Only the Alpha channel is read here; the other channels stay out of the Mask stroke. An
    * Alpha that is off falls back to coverage so a Mask brush never paints nothing. */
   if (source == BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA &&
-      brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use != 0)
+      BKE_paint_material_mask_alpha_active(brush_paint))
   {
     if (invert) {
-      return BKE_paint_material_channel_default_value(PAINT_MATERIAL_CHANNEL_ALPHA);
+      /* The Alpha pair's own secondary, not the channel default: the Mask brush paints with
+       * a configurable second value instead of always erasing to zero. */
+      return brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].value_secondary;
     }
     return brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].value[0];
   }

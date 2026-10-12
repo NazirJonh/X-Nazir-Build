@@ -253,8 +253,19 @@ struct BrushMaterialPaintChannel {
   char source_select_mode = 0;
   /** UI-only: collapses the inline preview grid shown when #source_select_mode is Grid. */
   char show_source_grid = 1;
-  /* #source_mtex is 8-byte aligned; pad up to its offset rather than to the next word. */
-  char _pad[6] = {};
+  /**
+   * Inverts the sampled #source_mtex value (`1 - v` over the channel range). Only read for the
+   * Alpha channel: the inversion is a property of the texture, so it applies wherever Alpha is
+   * sampled, not only for a Mask stroke.
+   */
+  char source_invert = 0;
+  char _pad1 = 0;
+  /**
+   * Second paint value of the Alpha channel. Only read in Mask mode, where Alpha primary is
+   * \a value[0] and this is the one used for an inverted (secondary) stroke.
+   */
+  float value_secondary = 0.0f;
+  /* #source_mtex is 8-byte aligned; the fields above end exactly at its offset (24). */
 
   /**
    * Source texture sampled instead of `value` / base color. Inactive when `tex` is null.

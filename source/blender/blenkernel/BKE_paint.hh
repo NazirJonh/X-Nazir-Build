@@ -1114,9 +1114,17 @@ float3 BKE_paint_material_channel_color_get(const BrushMaterialPaint &brush_pain
                                             bool invert);
 
 /**
+ * Whether the Alpha pair (#BrushMaterialPaintChannel.value / value_secondary and the Alpha source
+ * texture) drives a Mask stroke: the Alpha channel is enabled, or the brush is the default Mask
+ * brush, whose Alpha pair is always live. Shared by the value helper and the source-channel pick so
+ * the flat value and the texture can never disagree about it.
+ */
+bool BKE_paint_material_mask_alpha_active(const BrushMaterialPaint &brush_paint);
+
+/**
  * Scalar value written by a Mask stroke, chosen by #BrushMaterialPaint::mask_source.
- * Alpha reads the Alpha channel value (or its default on invert) and falls back to coverage
- * when that channel is off. Base Color is the Rec.709 luminance of
+ * Alpha reads the Alpha channel value (or its secondary value on invert) and falls back to
+ * coverage when #BKE_paint_material_mask_alpha_active is false. Base Color is the Rec.709 luminance of
  * #BKE_paint_material_base_color_get. Coverage is the grey level of the primary (or secondary on
  * invert) brush color. This is the only place that decides the Mask value, so Sculpt and
  * Image 2D cannot disagree.

@@ -981,6 +981,17 @@ static wmOperatorStatus brush_colors_flip_exec(bContext *C, wmOperator * /*op*/)
    * in sync with the brush color never runs; do it explicitly here. */
   BKE_brush_material_paint_base_color_sync_to_channel(paint, br);
 
+  /* In Mask mode the Alpha pair is the value pair, independent of the brush colors, so X has to
+   * swap it as well or the key would silently do nothing for the default Mask brush. */
+  const Scene *scene = CTX_data_scene(C);
+  if (br != nullptr && br->material_paint != nullptr && scene != nullptr &&
+      scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+  {
+    BrushMaterialPaintChannel &alpha = br->material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA];
+    SWAP(float, alpha.value[0], alpha.value_secondary);
+    BKE_brush_tag_unsaved_changes(br);
+  }
+
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, br);
 
   return OPERATOR_FINISHED;

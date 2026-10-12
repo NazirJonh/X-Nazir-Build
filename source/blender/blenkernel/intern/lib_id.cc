@@ -40,7 +40,6 @@
 #include "BLI_string_ref.hh"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
-#include "BLI_system.h"
 
 #include "BLT_translation.hh"
 
@@ -374,17 +373,6 @@ void id_us_min(ID *id)
       if (!ID_TYPE_IS_DEPRECATED(GS(id->name))) {
         /* Do not assert on deprecated ID types, we cannot really ensure that their ID
          * reference-counting is valid. */
-        /* TEMPORARY DIAGNOSTIC: print the caller before #CLOG_ERROR below reads `id->lib`, which
-         * is garbage when the ID was already freed. Remove once the dangling decrement is found. */
-        fprintf(stderr,
-                "[ID-DIAG] id_us_min error: id=%p name_empty=%d us=%d limit=%d lib=%p\n",
-                static_cast<void *>(id),
-                int(id->name[0] == '\0'),
-                id->us,
-                limit,
-                static_cast<void *>(id->lib));
-        BLI_system_backtrace(stderr);
-        fflush(stderr);
         CLOG_ERROR(&LOG,
                    "ID user decrement error: %s (from '%s'): %d <= %d",
                    id->name,

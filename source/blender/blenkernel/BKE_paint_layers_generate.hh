@@ -354,6 +354,27 @@ bool BKE_paint_layers_row_removed_clear(Material &ma, const bUUID &marker);
 void BKE_paint_layers_root_hash_invalidate(Material &ma);
 
 /**
+ * Detach the derived data of every layered material that changed since the last memfile undo push,
+ * ahead of a memfile undo or redo decode.
+ *
+ * The generated trees and the bake slots are rewritten after an operator's undo push (regeneration
+ * on redraw, a finished bake job). The undo system keeps a data-block whose stored chunks equal the
+ * state it is leaving, so such a data-block would survive the decode still pointing at maps and
+ * groups the target state does not have, and those are freed under it. The pointers are derived
+ * data: dropping them and zeroing the hashes makes the regeneration after the undo put them back.
+ */
+void BKE_paint_layers_undo_prepare(Main &bmain);
+
+/**
+ * Drop the bake change subscriptions on images that no longer exist in  bmain.
+ *
+ * Call after a memfile undo or redo decode: the subscriptions are runtime state keyed by the
+ * material's session uid, so they outlive the decode while the maps they watch (created after the
+ * target state) are freed. A row that lost a source is marked changed, so it is re-baked.
+ */
+void BKE_paint_layers_bake_subscriptions_validate(Main &bmain);
+
+/**
  * The time until the earliest row of \a ma hidden past #PAINT_LAYERS_COLD_TIER_SECONDS may leave the
  * graph, at \a now, or -1 when no row is a candidate. A row already old enough reports zero; only -1 means "no candidate".
  * The editor uses it to arm the cold-tier timer for exactly the wait that is left.

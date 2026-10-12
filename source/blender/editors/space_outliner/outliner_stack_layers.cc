@@ -1114,15 +1114,17 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
   EnumPropertyItem *items = nullptr;
   int items_num = 0;
   SpaceOutliner *space_outliner = (C == nullptr) ? nullptr : CTX_wm_space_outliner(C);
-  if (space_outliner != nullptr && space_outliner->runtime != nullptr) {
-    const StackReadContext ctx = outliner_stack_read_context(*C);
-    const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (space_outliner != nullptr) {
     const StackSource &source = *stack_source_for_space(*space_outliner);
     Vector<StackAddKindInfo> kinds;
-    if (owner != nullptr && source.can_edit(*owner)) {
-      if (const StackEditor *editor = source.editor()) {
-        editor->add_kinds(kinds);
-      }
+    /* The kinds are the source's vocabulary and do not depend on whether an owner can be edited
+     * right now. #outliner_stack_add_kinds_get, which the header reads to decide which buttons to
+     * draw, answers the same way: gating the items on the owner here left them empty while the
+     * header still drew a button, and assigning `type` from Python then failed ("enum not found
+     * in ()") on every redraw, for instance while the focus is stale after an undo. The operator's
+     * own poll is what refuses to run without an editable owner. */
+    if (const StackEditor *editor = source.editor()) {
+      editor->add_kinds(kinds);
     }
     for (const int64_t index : kinds.index_range()) {
       EnumPropertyItem item = {};

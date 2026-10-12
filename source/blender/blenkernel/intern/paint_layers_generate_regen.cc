@@ -945,6 +945,59 @@ void BKE_paint_layers_root_hash_invalidate(Material &ma)
   }
 }
 
+void BKE_paint_layers_undo_prepare(Main &bmain)
+{
+  for (Material &ma : bmain.materials) {
+    if (!paint_layers_is_layered(ma)) {
+      continue;
+    }
+    /* Tags accumulate between two undo pushes and are cleared by each push, so a non-zero value
+     * on the material or one of its trees means derived data was rewritten after the last step. */
+    bool dirty = ma.id.recalc_after_undo_push != 0;
+    Vector<bNodeTree *> owned;
+    for (bNodeTree &tree : bmain.nodetrees) {
+      if (BLI_uuid_equal(tree_owner_uid_get(tree), ma.paint_layers_owner_uid) &&
+          !BLI_uuid_is_nil(ma.paint_layers_owner_uid))
+      {
+        owned.append(&tree);
+        dirty |= tree.id.recalc_after_undo_push != 0;
+      }
+    }
+    if (!dirty) {
+      continue;
+    }
+
+    Vector<const MaterialPaintLayer *> layers;
+    BKE_paint_layers_flatten_all(ma, layers);
+    for (const MaterialPaintLayer *layer_const : layers) {
+      MaterialPaintLayer &layer = *const_cast<MaterialPaintLayer *>(layer_const);
+      if (layer.bake == nullptr) {
+        continue;
+      }
+      for (Image *&image : layer.bake->images) {
+        image = nullptr;
+      }
+      layer.bake->coverage = nullptr;
+      layer.bake->hash[0] = 0;
+      layer.bake->hash[1] = 0;
+    }
+
+    for (bNodeTree *tree : owned) {
+      for (bNode &node : tree->nodes) {
+        if (node.id != nullptr && ELEM(GS(node.id->name), ID_IM, ID_NT)) {
+          node.id = nullptr;
+        }
+      }
+      tree_topology_hash_set(*tree, 0);
+      tree_root_hash_set(*tree, 0);
+      /* The evaluated copy still names the old data-blocks until it is copied again. */
+      DEG_id_tag_update(&tree->id, ID_RECALC_SYNC_TO_EVAL);
+    }
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_SLOTS_STALE;
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  }
+}
+
 /**
  * Whether \a layer is a row the cold tier may drop at \a now: disabled, not a Pass Through folder,
  * not in the active subtree, not already out, and hidden longer than the tier. The same gates

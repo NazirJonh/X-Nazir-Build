@@ -25,6 +25,7 @@
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
 #include "BKE_node.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
 #include "BKE_scene_runtime.hh"
@@ -173,6 +174,9 @@ static void memfile_undosys_step_decode(
     }
   }
 
+  /* Derived paint-layer data rewritten after the last push must not be carried into the decode. */
+  BKE_paint_layers_undo_prepare(*bmain);
+
   /* Extract depsgraphs from current bmain (which may be freed during undo step reading),
    * and store them for re-use. */
   GHash *depsgraphs = nullptr;
@@ -203,6 +207,7 @@ static void memfile_undosys_step_decode(
 
   /* bmain has been freed. */
   bmain = CTX_data_main(C);
+  BKE_paint_layers_bake_subscriptions_validate(*bmain);
   ED_editors_init_for_undo(bmain);
 
   if (use_old_bmain_data) {

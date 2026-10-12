@@ -321,6 +321,9 @@ void BKE_paint_layers_custom_bake_apply(Main &bmain,
   layer.bake->hash[1] = hash[1];
   BKE_paint_layers_bake_subscribe(ma, layer);
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  /* The bake slots live in the material's data; without a tag the undo system sees an unchanged
+   * material and keeps it, pointing at maps the restored state does not have. */
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
 }
 
 /* --- Runtime partial-update subscription of the bake cache. Not saved; a load starts empty. --- */
@@ -519,6 +522,30 @@ void BKE_paint_layers_bake_notice_changes(Material &ma)
   }
   if (any) {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+  }
+}
+
+void BKE_paint_layers_bake_subscriptions_validate(Main &bmain)
+{
+  /* Compared by address only, a freed image is never dereferenced. */
+  Set<const Image *> images;
+  for (const Image &image : bmain.images) {
+    images.add(&image);
+  }
+  std::lock_guard lock(bake_subscriptions_mutex());
+  for (BakeMaterialSubscription &sub : bake_subscriptions().values()) {
+    for (BakeLayerSubscription &entry : sub.layers) {
+      for (int i = 0; i < entry.sources.size();) {
+        if (images.contains(entry.sources[i].image)) {
+          i++;
+          continue;
+        }
+        BKE_image_partial_update_free(entry.sources[i].user);
+        entry.sources.remove_and_reorder(i);
+        entry.changed = true;
+        entry.has_region = false;
+      }
+    }
   }
 }
 
@@ -1175,6 +1202,9 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
   }
   if (changed) {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    /* Same reason as in #BKE_paint_layers_bake_job_commit: bake maps were written into the layers
+     * and the undo system must see the material as changed. */
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
   }
   /* The queue is drained once no baked row is invalid any more; only then is the signal cleared.
    * The same role-agnostic walk as the AUTO cycle above, so a Stack correction/mask folder's stale
@@ -2020,6 +2050,10 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
   }
   if (changed) {
     ma->paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    /* New bake maps were written into the layers outside any operator. Tagging the material is
+     * what marks it changed for the next undo push; otherwise a memfile undo reuses it as it is and
+     * frees the maps, leaving the layers' bake slots dangling. */
+    DEG_id_tag_update(&ma->id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
   }
   /* The queue is drained once no baked row is invalid any more, exactly as the synchronous
    * planner decides it (role-agnostic, see #BKE_paint_layers_bake_plan_run). */

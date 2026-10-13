@@ -437,6 +437,70 @@ bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char
   return true;
 }
 
+int BKE_paint_layers_blend_to_ramp(const eMaterialPaintLayerBlend blend)
+{
+  switch (blend) {
+    case MA_PAINT_LAYER_BLEND_MIX:
+      return MA_RAMP_BLEND;
+    case MA_PAINT_LAYER_BLEND_MULTIPLY:
+      return MA_RAMP_MULT;
+    case MA_PAINT_LAYER_BLEND_OVERLAY:
+      return MA_RAMP_OVERLAY;
+    case MA_PAINT_LAYER_BLEND_ADD:
+      return MA_RAMP_ADD;
+    case MA_PAINT_LAYER_BLEND_DARKEN:
+      return MA_RAMP_DARK;
+    case MA_PAINT_LAYER_BLEND_BURN:
+      return MA_RAMP_BURN;
+    case MA_PAINT_LAYER_BLEND_LIGHTEN:
+      return MA_RAMP_LIGHT;
+    case MA_PAINT_LAYER_BLEND_SCREEN:
+      return MA_RAMP_SCREEN;
+    case MA_PAINT_LAYER_BLEND_DODGE:
+      return MA_RAMP_DODGE;
+    case MA_PAINT_LAYER_BLEND_SUBTRACT:
+      return MA_RAMP_SUB;
+    case MA_PAINT_LAYER_BLEND_DIVIDE:
+      return MA_RAMP_DIV;
+    case MA_PAINT_LAYER_BLEND_DIFFERENCE:
+      return MA_RAMP_DIFF;
+    case MA_PAINT_LAYER_BLEND_EXCLUSION:
+      return MA_RAMP_EXCLUSION;
+    case MA_PAINT_LAYER_BLEND_SOFT_LIGHT:
+      return MA_RAMP_SOFT;
+    case MA_PAINT_LAYER_BLEND_LINEAR_LIGHT:
+      return MA_RAMP_LINEAR;
+    case MA_PAINT_LAYER_BLEND_HUE:
+      return MA_RAMP_HUE;
+    case MA_PAINT_LAYER_BLEND_SATURATION:
+      return MA_RAMP_SAT;
+    case MA_PAINT_LAYER_BLEND_COLOR:
+      return MA_RAMP_COLOR;
+    case MA_PAINT_LAYER_BLEND_VALUE:
+      return MA_RAMP_VAL;
+    case MA_PAINT_LAYER_BLEND_NORMAL_COMBINE:
+      return MA_RAMP_BLEND;
+  }
+  return MA_RAMP_BLEND;
+}
+
+bool BKE_paint_layers_set_blend(Material &ma,
+                                MaterialPaintLayer *layer,
+                                const eMaterialPaintLayerBlend blend)
+{
+  if (!paint_layer_in_stack(ma, layer)) {
+    return false;
+  }
+  /* The Normal channel forces the combine operation by itself, and no other channel can express
+   * it; a stored value would only ever be a switch the user cannot make effective. */
+  if (blend == MA_PAINT_LAYER_BLEND_NORMAL_COMBINE) {
+    return false;
+  }
+  layer->blend = blend;
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer)
 {
   if ((layer.flag & MA_PAINT_LAYER_ENABLED) == 0) {

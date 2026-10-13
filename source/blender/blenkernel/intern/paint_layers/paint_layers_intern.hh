@@ -67,4 +67,13 @@ inline bool paint_layer_channel_contributes(const MaterialPaintLayerChannel *rec
   return paint_layer_channel_live(record) && (record->image != nullptr || record->value[3] > 0.0f);
 }
 
+/**
+ * The `MA_RAMP_*` blend code a description blend stands for.
+ *
+ * The one table the generator's Mix nodes and the CPU's `ramp_blend` both read, so a blend cannot
+ * mean two different things. #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is not a Mix mode and has no ramp
+ * code; it answers #MA_RAMP_BLEND, and the Normal channel never reaches this with it.
+ */
+int BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend blend);
+
 }  // namespace blender

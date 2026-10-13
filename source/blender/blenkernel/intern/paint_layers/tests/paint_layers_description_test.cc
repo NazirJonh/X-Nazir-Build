@@ -836,4 +836,19 @@ TEST_F(PaintLayersDescription, rna_paint_layers_new_find_remove_round_trip)
 
 /** \} */
 
+TEST_F(PaintLayersDescription, set_blend_writes_and_refuses_the_internal_normal_combine)
+{
+  Material *ma = BKE_material_add(bmain, "BlendMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, "L", nullptr, PaintLayerPlace::Above);
+
+  ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  EXPECT_EQ(layer->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
+
+  /* The Normal channel forces the combine operation on its own; a stored value would only ever be
+   * a switch the user cannot make effective. */
+  EXPECT_FALSE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_NORMAL_COMBINE));
+  EXPECT_EQ(layer->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
+}
+
 }  // namespace blender::bke::tests

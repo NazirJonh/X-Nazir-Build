@@ -68,7 +68,9 @@ NodeOutput PaintLayersTreeBuilder::multiply_nodes_add(bNodeTree &tree,
   return {product, out};
 }
 
-BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree, const int channel)
+BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
+                                                 const int channel,
+                                                 const int ramp_blend)
 {
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && ctx_.normal_combine_group != nullptr &&
       tree.typeinfo != nullptr && tree.typeinfo->group_idname != nullptr)
@@ -105,7 +107,7 @@ BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree, const int chan
     }
   }
 
-  bNode *mix = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+  bNode *mix = mix_node_add(tree, ramp_blend, 0.0f, 0.0f);
   if (mix == nullptr) {
     return {};
   }
@@ -239,8 +241,9 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   }
 
   /* The blend over Below. Normal combines two tangent-space maps rather than interpolating their
-   * encoded values, which would flatten the relief; everything else mixes. */
-  const BlendNode blend = this->blend_node_add(tree, channel);
+   * encoded values, which would flatten the relief; everything else uses the row's own blend. */
+  const BlendNode blend = this->blend_node_add(
+      tree, channel, BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(layer.blend)));
   if (blend.node == nullptr) {
     return {};
   }

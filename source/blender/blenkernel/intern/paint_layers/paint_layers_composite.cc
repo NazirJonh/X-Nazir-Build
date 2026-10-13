@@ -78,12 +78,15 @@ static void composite_normal_channel_normalize(ImBuf &ibuf, const rcti *region)
  * The CPU blend a row takes in \a channel.
  *
  * The Normal channel is always combined rather than mixed -- interpolating encoded normals would
- * flatten the relief -- whatever the row's own blend is; every other channel mixes.
+ * flatten the relief -- whatever the row's own blend is; every other channel uses the row's blend,
+ * through the one table the generator reads too.
  */
-static CompositeBlend layer_channel_blend(const int channel)
+static CompositeBlend layer_channel_blend(const MaterialPaintLayer &layer, const int channel)
 {
-  return (channel == PAINT_MATERIAL_CHANNEL_NORMAL) ? CompositeBlend::NormalCombine :
-                                                      CompositeBlend::Mix;
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return CompositeBlend::NormalCombine;
+  }
+  return CompositeBlend(BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(layer.blend)));
 }
 
 /**
@@ -128,7 +131,7 @@ bool BKE_paint_layers_composite_image_layers(
       copy_v4_v4(out.constant_color, record->value);
       out.has_constant_color = true;
     }
-    out.blend = layer_channel_blend(channel);
+    out.blend = layer_channel_blend(layer, channel);
     out.opacity = BKE_paint_layers_effective_opacity(layer);
     out.enabled = true;
     r_layers.append(out);

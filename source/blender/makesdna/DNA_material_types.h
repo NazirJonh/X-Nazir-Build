@@ -401,6 +401,31 @@ enum eMaterialPaintLayerFlag : int16_t {
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
+/** #MaterialPaintLayer::blend -- how the row combines with what is below it. */
+enum eMaterialPaintLayerBlend : int8_t {
+  MA_PAINT_LAYER_BLEND_MIX = 0,
+  MA_PAINT_LAYER_BLEND_MULTIPLY = 1,
+  MA_PAINT_LAYER_BLEND_OVERLAY = 2,
+  MA_PAINT_LAYER_BLEND_ADD = 3,
+  /** Internal: the Normal channel forces it. Never offered as a user choice. */
+  MA_PAINT_LAYER_BLEND_NORMAL_COMBINE = 4,
+  MA_PAINT_LAYER_BLEND_DARKEN = 5,
+  MA_PAINT_LAYER_BLEND_BURN = 6,
+  MA_PAINT_LAYER_BLEND_LIGHTEN = 7,
+  MA_PAINT_LAYER_BLEND_SCREEN = 8,
+  MA_PAINT_LAYER_BLEND_DODGE = 9,
+  MA_PAINT_LAYER_BLEND_SUBTRACT = 10,
+  MA_PAINT_LAYER_BLEND_DIVIDE = 11,
+  MA_PAINT_LAYER_BLEND_DIFFERENCE = 12,
+  MA_PAINT_LAYER_BLEND_EXCLUSION = 13,
+  MA_PAINT_LAYER_BLEND_SOFT_LIGHT = 14,
+  MA_PAINT_LAYER_BLEND_LINEAR_LIGHT = 15,
+  MA_PAINT_LAYER_BLEND_HUE = 16,
+  MA_PAINT_LAYER_BLEND_SATURATION = 17,
+  MA_PAINT_LAYER_BLEND_COLOR = 18,
+  MA_PAINT_LAYER_BLEND_VALUE = 19,
+};
+
 /** #MaterialPaintLayerChannel::state */
 enum eMaterialPaintLayerChannelState : int8_t {
   /** No map: the channel keeps its record but carries no coverage. */
@@ -441,9 +466,11 @@ struct MaterialPaintLayer {
   char name[/*MAX_NAME*/ 64] = "";
   /** Stable identity of the row; it survives reordering and copying. */
   bUUID marker = {};
+  /** #eMaterialPaintLayerBlend. */
+  int8_t blend = MA_PAINT_LAYER_BLEND_MIX;
+  char _pad0[1] = {};
   /** #eMaterialPaintLayerFlag. */
   int16_t flag = MA_PAINT_LAYER_ENABLED;
-  char _pad0[2] = {};
   float opacity = 1.0f;
   struct MaterialPaintLayerChannel *channels = nullptr;
   int channels_num = 0;

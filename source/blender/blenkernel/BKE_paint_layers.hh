@@ -31,6 +31,7 @@ struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
 enum eMaterialPaintChannel : int8_t;
+enum eMaterialPaintLayerBlend : int8_t;
 
 /* -------------------------------------------------------------------- */
 /** \name Layered material
@@ -222,6 +223,16 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool 
 
 /** Rename \a layer. */
 bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char *name);
+
+/**
+ * Set how \a layer combines with what is below it; see #eMaterialPaintLayerBlend.
+ *
+ * #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is refused: the Normal channel forces its operation on its
+ * own, so a stored value would only ever be a switch the user cannot make effective.
+ */
+bool BKE_paint_layers_set_blend(Material &ma,
+                                MaterialPaintLayer *layer,
+                                eMaterialPaintLayerBlend blend);
 
 /** \} */
 

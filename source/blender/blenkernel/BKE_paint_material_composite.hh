@@ -50,18 +50,32 @@ struct Material;
 struct rcti;
 
 /**
- * How a layer combines with what is below it.
+ * How a layer combines with what is below it: every mode a Mix node offers.
  *
- * Deliberately a short list: it is the set of Mix node blend modes the composite evaluator has a
- * formula for. A chain using any other mode is not expressible as a stack and falls to the bake
- * instead of being approximated here.
- *
+ * The values match the `MA_RAMP_*` codes the node itself stores, so the description's one table
+ * (#BKE_paint_layers_blend_to_ramp) maps straight onto this and no second table can drift from it.
+ * #NormalCombine is the one non-Mix operation and sits past the end of the ramp range.
  */
 enum class CompositeBlend : int8_t {
-  Mix = 0,
-  Multiply,
-  Overlay,
-  Add,
+  Mix = 0,          /* MA_RAMP_BLEND */
+  Add = 1,          /* MA_RAMP_ADD */
+  Multiply = 2,     /* MA_RAMP_MULT */
+  Subtract = 3,     /* MA_RAMP_SUB */
+  Screen = 4,       /* MA_RAMP_SCREEN */
+  Divide = 5,       /* MA_RAMP_DIV */
+  Difference = 6,   /* MA_RAMP_DIFF */
+  Darken = 7,       /* MA_RAMP_DARK */
+  Lighten = 8,      /* MA_RAMP_LIGHT */
+  Overlay = 9,      /* MA_RAMP_OVERLAY */
+  Dodge = 10,       /* MA_RAMP_DODGE */
+  Burn = 11,        /* MA_RAMP_BURN */
+  Hue = 12,         /* MA_RAMP_HUE */
+  Saturation = 13,  /* MA_RAMP_SAT */
+  Value = 14,       /* MA_RAMP_VAL */
+  Color = 15,       /* MA_RAMP_COLOR */
+  SoftLight = 16,   /* MA_RAMP_SOFT */
+  LinearLight = 17, /* MA_RAMP_LINEAR */
+  Exclusion = 18,   /* MA_RAMP_EXCLUSION */
   /**
    * Combine two tangent-space normal maps, rather than blending their encoded bytes.
    *
@@ -75,7 +89,7 @@ enum class CompositeBlend : int8_t {
    * values, and reproducing it any other way would make the composite disagree with the render.
    * It exists for the graph shapes that genuinely combine normals.
    */
-  NormalCombine,
+  NormalCombine = 19,
 };
 
 /**

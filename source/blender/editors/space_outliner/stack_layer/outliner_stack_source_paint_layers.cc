@@ -143,6 +143,12 @@ void paint_stack_rows_from_description(const Material &material,
     row.value_prop = "opacity";
     row.value_inherited = (layer.opacity == 1.0f);
 
+    /* The mode column edits how the row blends over what is below it; Mix is the inherited
+     * default, so the control dims until the user picks another mode. */
+    row.mode_ptr = layer_ptr;
+    row.mode_prop = "blend_type";
+    row.mode_inherited = (layer.blend == MA_PAINT_LAYER_BLEND_MIX);
+
     /* The content slot shows the row's first channel map, blank or not. */
     StackRowPreview channels_slot;
     channels_slot.section_id = "CHANNELS";
@@ -266,6 +272,8 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
     for (const MaterialPaintLayer &layer : material.paint_layers) {
       hash = hash * 1000003u ^ UUID(layer.marker).hash();
       hash ^= uint64_t(layer.flag);
+      /* Mixed, not shifted into the flag bits: `flag` is 16 bits wide and would overlap. */
+      hash = hash * 1000003u ^ uint64_t(layer.blend);
       /* The swatch and the columns show these, so a change to them has to reach the rows. */
       hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(layer.opacity));
       for (const char *ch = layer.name; *ch != '\0'; ch++) {
@@ -306,8 +314,8 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
   {
     StackColumnLayout layout;
     layout.value_width = 2.6f;
-    /* The blend mode column arrives with the blend modes; until then the row shows no mode. */
-    layout.mode_width = 0.0f;
+    /* Wide enough for the compact "NN% Abr" label; the blend column shares the width. */
+    layout.mode_width = 2.6f;
     layout.action_width = 0.0f;
     return layout;
   }

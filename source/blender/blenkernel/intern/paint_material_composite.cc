@@ -61,7 +61,9 @@ namespace blender {
  * Everything here only reads the tree, so it is as cheap as the resolver and may run on a redraw.
  * \{ */
 
-/** The subset of Mix blend modes that #blend_row_linear reproduces exactly. */
+/** The subset of Mix blend modes that the legacy graph-as-truth reader reproduces exactly. The
+ * description path (a layered material) is not limited by this: it reads the row's blend through
+ * #BKE_paint_layers_blend_to_ramp and #blend_row_linear handles every Mix mode. */
 static bool composite_blend_from_ramp_blend(const int ramp_blend, CompositeBlend &r_blend)
 {
   switch (ramp_blend) {
@@ -78,9 +80,9 @@ static bool composite_blend_from_ramp_blend(const int ramp_blend, CompositeBlend
       r_blend = CompositeBlend::Add;
       return true;
     default:
-      /* Screen, Difference, Hue and the rest have no byte blend function here. Reporting them as
-       * not-a-stack sends the channel to the bake, which evaluates them properly, rather than
-       * showing the user a composite that quietly differs from the render. */
+      /* The legacy reader only takes the modes it always did; a chain using any other falls to the
+       * bake, which evaluates it properly, rather than being read as a stack that the old byte path
+       * would approximate. */
       return false;
   }
 }
@@ -737,28 +739,17 @@ static void blend_row_linear(float dst[4],
                              const float factor)
 {
   const float fac = clamp_f(factor, 0.0f, 1.0f);
-  switch (blend) {
-    case CompositeBlend::Mix:
-      ramp_blend(MA_RAMP_BLEND, dst, fac, top);
-      break;
-    case CompositeBlend::Multiply:
-      ramp_blend(MA_RAMP_MULT, dst, fac, top);
-      break;
-    case CompositeBlend::Overlay:
-      ramp_blend(MA_RAMP_OVERLAY, dst, fac, top);
-      break;
-    case CompositeBlend::Add:
-      ramp_blend(MA_RAMP_ADD, dst, fac, top);
-      break;
-    case CompositeBlend::NormalCombine: {
-      float combined[3];
-      blend_normal_combine(dst, top, combined);
-      for (const int i : IndexRange(3)) {
-        dst[i] = dst[i] * (1.0f - fac) + combined[i] * fac;
-      }
-      break;
+  if (blend == CompositeBlend::NormalCombine) {
+    float combined[3];
+    blend_normal_combine(dst, top, combined);
+    for (const int i : IndexRange(3)) {
+      dst[i] = dst[i] * (1.0f - fac) + combined[i] * fac;
     }
+    return;
   }
+  /* Every other mode is a Mix mode, and CompositeBlend holds the very `MA_RAMP_*` code the node
+   * stores, so this is the same call the shader makes. */
+  ramp_blend(int(blend), dst, fac, top);
 }
 
 /**

@@ -89,4 +89,30 @@ TEST_F(PaintLayersGraphEvalTest, rows_of_different_channels_do_not_leak_into_eac
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
 }
 
+TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top, 0.7f));
+
+  /* Every user-facing Mix mode: the generated node's blend and the CPU's `ramp_blend` read the one
+   * table, so each must land on the same pixel. Normal Combine is the Normal channel's own doing
+   * and is covered by `normal_rows_combine_like_the_cpu`. */
+  const eMaterialPaintLayerBlend blends[] = {
+      MA_PAINT_LAYER_BLEND_MIX,        MA_PAINT_LAYER_BLEND_MULTIPLY,
+      MA_PAINT_LAYER_BLEND_OVERLAY,    MA_PAINT_LAYER_BLEND_ADD,
+      MA_PAINT_LAYER_BLEND_SUBTRACT,   MA_PAINT_LAYER_BLEND_SCREEN,
+      MA_PAINT_LAYER_BLEND_DIFFERENCE, MA_PAINT_LAYER_BLEND_DARKEN,
+      MA_PAINT_LAYER_BLEND_LIGHTEN,    MA_PAINT_LAYER_BLEND_BURN,
+      MA_PAINT_LAYER_BLEND_DODGE,      MA_PAINT_LAYER_BLEND_EXCLUSION,
+      MA_PAINT_LAYER_BLEND_SOFT_LIGHT, MA_PAINT_LAYER_BLEND_LINEAR_LIGHT,
+      MA_PAINT_LAYER_BLEND_HUE,        MA_PAINT_LAYER_BLEND_SATURATION,
+      MA_PAINT_LAYER_BLEND_COLOR,      MA_PAINT_LAYER_BLEND_VALUE,
+  };
+  for (const eMaterialPaintLayerBlend blend : blends) {
+    ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, top, blend));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
+}
+
 }  // namespace blender::bke::tests

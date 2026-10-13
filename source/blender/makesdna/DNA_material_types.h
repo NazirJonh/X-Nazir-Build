@@ -11,6 +11,7 @@
 #include "DNA_ID.h"
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
+#include "DNA_uuid_types.h"
 
 #include "BLI_enum_flags.hh"
 
@@ -90,6 +91,15 @@ enum eMaterial_Flag : short {
   MA_DS_SHOW_TEXS = 1 << 2,
 };
 ENUM_OPERATORS(eMaterial_Flag)
+
+/** #Material::paint_layers_flag */
+enum eMaterialPaintLayersFlag : short {
+  /** The material carries a paint layer description, a stack of rows addressed by marker. */
+  MA_PAINT_LAYERED = 1 << 0,
+  /** The description changed; whatever is derived from it is out of date. */
+  MA_PAINT_LAYERS_REGEN = 1 << 2,
+};
+ENUM_OPERATORS(eMaterialPaintLayersFlag)
 
 /* ramps */
 enum eMaterial_RampBlend : int {
@@ -384,6 +394,62 @@ struct MaterialLineArt {
   char _pad = {};
 };
 
+/** #MaterialPaintLayer::flag */
+enum eMaterialPaintLayerFlag : int16_t {
+  /** The layer takes part in the stack. */
+  MA_PAINT_LAYER_ENABLED = 1 << 0,
+};
+ENUM_OPERATORS(eMaterialPaintLayerFlag)
+
+/** #MaterialPaintLayerChannel::state */
+enum eMaterialPaintLayerChannelState : int8_t {
+  /** No map: the channel keeps its record but carries no coverage. */
+  MA_PAINT_LAYER_CHANNEL_ABSENT = 0,
+  /** A map feeds the channel and its coverage is live. */
+  MA_PAINT_LAYER_CHANNEL_ENABLED = 1,
+  /** The map is kept but switched off. */
+  MA_PAINT_LAYER_CHANNEL_DISABLED = 2,
+};
+
+/**
+ * One channel of a #MaterialPaintLayer. A layer owns a `channels` array with one entry per channel
+ * it takes part in; #channel names which #eMaterialPaintChannel the record stands for.
+ */
+struct MaterialPaintLayerChannel {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerChannel)
+
+  /** #eMaterialPaintChannel. */
+  int8_t channel = 0;
+  /** #eMaterialPaintLayerChannelState. */
+  int8_t state = MA_PAINT_LAYER_CHANNEL_ABSENT;
+  char _pad[6] = {};
+  /** The channel's map, or null when it has none. */
+  struct Image *image = nullptr;
+  /** Constant value used while the channel carries no map. */
+  float value[4] = {};
+};
+
+/**
+ * One row of a layered material's stack, the DNA description of what the material is painted with.
+ *
+ * The list is stored bottom-to-top.
+ */
+struct MaterialPaintLayer {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayer)
+
+  struct MaterialPaintLayer *next = nullptr, *prev = nullptr;
+  char name[/*MAX_NAME*/ 64] = "";
+  /** Stable identity of the row; it survives reordering and copying. */
+  bUUID marker = {};
+  /** #eMaterialPaintLayerFlag. */
+  int16_t flag = MA_PAINT_LAYER_ENABLED;
+  char _pad0[2] = {};
+  float opacity = 1.0f;
+  struct MaterialPaintLayerChannel *channels = nullptr;
+  int channels_num = 0;
+  char _pad1[4] = {};
+};
+
 struct Material {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Material)
@@ -479,6 +545,17 @@ struct Material {
   /** Grease pencil color. */
   struct MaterialGPencilStyle *gp_style = nullptr;
   struct MaterialLineArt lineart;
+
+  /**
+   * The DNA description of the paint layer stack, bottom-to-top. When #MA_PAINT_LAYERED is set,
+   * this is the source of truth of what the material is painted with.
+   */
+  ListBaseT<MaterialPaintLayer> paint_layers = {nullptr, nullptr};
+  /** Marker of the active layer; an index is ambiguous, a marker survives reordering. */
+  bUUID active_layer_marker = {};
+  /** #eMaterialPaintLayersFlag. */
+  eMaterialPaintLayersFlag paint_layers_flag = {};
+  char _pad_paint_layers[6] = {};
 };
 
 }  // namespace blender

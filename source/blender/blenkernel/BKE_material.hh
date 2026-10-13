@@ -26,6 +26,7 @@ struct Scene;
 struct bNode;
 struct bNodeTree;
 struct MaterialGPencilStyle;
+struct MaterialPaintLayer;
 
 namespace bke {
 class MutableAttributeAccessor;
@@ -202,6 +203,21 @@ Material *BKE_id_material_pop(Main *bmain,
                               /* index is an int because of RNA. */
                               int index);
 void BKE_id_material_clear(Main *bmain, ID *id);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Paint layer description
+ * \{ */
+
+/**
+ * Free a paint layer description row and its channel array. The row must already be unlinked from
+ * its list; nothing here touches the owning #Material.
+ *
+ * The description's lifecycle lives with the material; the edit API in `BKE_paint_layers.hh`
+ * reuses this to remove a row.
+ */
+void BKE_material_paint_layer_free(MaterialPaintLayer *layer);
 
 /** \} */
 

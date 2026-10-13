@@ -98,6 +98,78 @@ static void material_init_data(ID *id)
       nullptr, &material->id, "Shader Nodetree", "ShaderNodeTree");
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Paint layer description
+ *
+ * The DNA description of the paint layer stack (`Material::paint_layers`) is plain sub-data of the
+ * material: it is never shared between materials, and its ID references (`Image`) are owned
+ * elsewhere. The helpers below are the single place that knows how to free, copy, walk and
+ * serialize it.
+ * \{ */
+
+void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
+{
+  MEM_SAFE_DELETE(layer->channels);
+  layer->channels_num = 0;
+  MEM_delete(layer);
+}
+
+static void material_paint_layers_free(Material &material)
+{
+  for (MaterialPaintLayer &layer : material.paint_layers.items_mutable()) {
+    BKE_material_paint_layer_free(&layer);
+  }
+  material.paint_layers = {nullptr, nullptr};
+}
+
+static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &src)
+{
+  MaterialPaintLayer *dst = static_cast<MaterialPaintLayer *>(MEM_dupalloc(&src));
+  dst->next = nullptr;
+  dst->prev = nullptr;
+  dst->channels = nullptr;
+  dst->channels_num = 0;
+  if (src.channels != nullptr && src.channels_num > 0) {
+    dst->channels = static_cast<MaterialPaintLayerChannel *>(MEM_dupalloc(src.channels));
+    dst->channels_num = src.channels_num;
+  }
+  return dst;
+}
+
+static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryForeachIDData *data)
+{
+  for (int i = 0; i < layer->channels_num; i++) {
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->channels[i].image, IDWALK_CB_USER);
+  }
+}
+
+static void material_paint_layers_blend_write(BlendWriter *writer, const Material &material)
+{
+  writer->write_struct_list(&material.paint_layers);
+  for (const MaterialPaintLayer &layer : material.paint_layers) {
+    if (layer.channels != nullptr && layer.channels_num > 0) {
+      writer->write_struct_array(layer.channels_num, layer.channels);
+    }
+  }
+}
+
+static void material_paint_layers_blend_read(BlendDataReader *reader, Material &material)
+{
+  BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
+  for (MaterialPaintLayer &layer : material.paint_layers) {
+    if (layer.channels != nullptr) {
+      BLO_read_array_and_validate_size(reader, &layer.channels, &layer.channels_num);
+    }
+    else {
+      /* A corrupt file can carry a count without the matching array; a non-zero count with a null
+       * pointer would make later readers dereference null. Do not trust the file's count. */
+      layer.channels_num = 0;
+    }
+  }
+}
+
+/** \} */
+
 static void material_copy_data(Main *bmain,
                                std::optional<Library *> owner_library,
                                ID *id_dst,
@@ -146,6 +218,12 @@ static void material_copy_data(Main *bmain,
         MEM_dupalloc(material_src->gp_style));
   }
 
+  /* The description is owned sub-data: never share the source's list or its elements. */
+  material_dst->paint_layers = {nullptr, nullptr};
+  for (const MaterialPaintLayer &layer : material_src->paint_layers) {
+    BLI_addtail(&material_dst->paint_layers, material_paint_layer_copy(layer));
+  }
+
   material_dst->gpumaterial.clear_no_delete();
   BKE_paint_material_channel_cache_invalidate(material_dst);
 
@@ -192,6 +270,10 @@ static void material_free_data(ID *id)
 
   MEM_SAFE_DELETE(material->gp_style);
 
+  /* The whole DNA description is owned sub-data; the IDs it references are owned elsewhere and
+   * must not be freed here. */
+  material_paint_layers_free(*material);
+
   BKE_previewimg_id_free(&material->id);
 
   BKE_icon_id_delete(id_cast<ID *>(material));
@@ -210,6 +292,10 @@ static void material_foreach_id(ID *id, LibraryForeachIDData *data)
   if (material->gp_style != nullptr) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->gp_style->sima, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->gp_style->ima, IDWALK_CB_USER);
+  }
+
+  for (MaterialPaintLayer &layer : material->paint_layers) {
+    BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&layer, data));
   }
 }
 
@@ -259,6 +345,9 @@ static void material_blend_write(BlendWriter *writer, ID *id, const void *id_add
   if (ma->gp_style) {
     writer->write_struct(ma->gp_style);
   }
+
+  /* Paint layer description. */
+  material_paint_layers_blend_write(writer, *ma);
 }
 
 static void material_blend_read_data(BlendDataReader *reader, ID *id)
@@ -274,6 +363,9 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
   BKE_paint_material_channel_cache_invalidate(ma);
 
   BLO_read_struct(reader, MaterialGPencilStyle, &ma->gp_style);
+
+  /* Paint layer description. */
+  material_paint_layers_blend_read(reader, *ma);
 }
 
 IDTypeInfo IDType_ID_MA = {

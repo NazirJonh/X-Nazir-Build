@@ -132,6 +132,7 @@ class EEVEE_MATERIAL_PT_context_material(MaterialButtonsPanel, Panel):
 
         if ob:
             row.template_ID(ob, "active_material", new="material.new")
+            row.operator("material.new_layered", text="", icon='ADD')
 
             if slot:
                 row.prop(slot, "link", icon_only=True)

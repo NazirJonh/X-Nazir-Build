@@ -158,6 +158,23 @@ void ED_undosys_type_free();
 bool ED_undosys_autosave_compatible(UndoStack *ustack);
 
 /**
+ * Callbacks a data domain registers to take part in a memfile undo or redo decode, for derived data
+ * that the undo tags alone do not describe (see #ED_undosys_memfile_decode_hooks_add).
+ */
+struct UndoMemfileDecodeHooks {
+  /** Runs while the old #Main is still intact, before it is replaced by the decode. Optional. */
+  void (*pre_decode)(Main &bmain) = nullptr;
+  /** Runs on the new #Main right after the decode, before editors are re-initialized. Optional. */
+  void (*post_decode)(Main &bmain) = nullptr;
+};
+
+/**
+ * Register \a hooks for every memfile undo/redo decode. Meant to be called once from a module's
+ * startup registration; registered hooks live for the whole session and run in registration order.
+ */
+void ED_undosys_memfile_decode_hooks_add(const UndoMemfileDecodeHooks &hooks);
+
+/**
  * If the last undo step is a memfile one, find the first #MemFileChunk matching given ID
  * (using its session UUID), and tag it as "changed in the future".
  *

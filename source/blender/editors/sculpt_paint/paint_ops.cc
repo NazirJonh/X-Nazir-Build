@@ -55,6 +55,7 @@
 #include "BKE_material.hh"
 #include "BKE_name_matching.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
@@ -2415,6 +2416,13 @@ void ED_operatormacros_paint()
 
 void ED_operatortypes_paint()
 {
+  /* The generated paint-layer trees are rewritten after an operator's undo push, so the undo tags
+   * do not describe them; the module takes part in the decode itself. */
+  UndoMemfileDecodeHooks undo_hooks;
+  undo_hooks.pre_decode = BKE_paint_layers_undo_prepare;
+  undo_hooks.post_decode = BKE_paint_layers_undo_validate;
+  ED_undosys_memfile_decode_hooks_add(undo_hooks);
+
   /* palette */
   using namespace blender::ed::sculpt_paint;
   WM_operatortype_append(PALETTE_OT_new);

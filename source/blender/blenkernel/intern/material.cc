@@ -68,6 +68,8 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_pointcloud.hh"
@@ -223,6 +225,9 @@ static void material_copy_data(Main *bmain,
   for (const MaterialPaintLayer &layer : material_src->paint_layers) {
     BLI_addtail(&material_dst->paint_layers, material_paint_layer_copy(layer));
   }
+  /* The generator owns the uid and the generated tree of a copy: a real copy gets its own, an
+   * evaluated one shares the pointer under COW. */
+  BKE_paint_layers_generate_copy_data(bmain, *material_dst, *material_src, flag);
 
   material_dst->gpumaterial.clear_no_delete();
   BKE_paint_material_channel_cache_invalidate(material_dst);
@@ -293,6 +298,10 @@ static void material_foreach_id(ID *id, LibraryForeachIDData *data)
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->gp_style->sima, IDWALK_CB_USER);
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->gp_style->ima, IDWALK_CB_USER);
   }
+
+  /* The generated stack tree is owned by the material (one user) and shared by the instance node
+   * in #nodetree; walking it keeps it alive across purge and remaps it on file read. */
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->paint_layers_tree, IDWALK_CB_USER);
 
   for (MaterialPaintLayer &layer : material->paint_layers) {
     BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&layer, data));

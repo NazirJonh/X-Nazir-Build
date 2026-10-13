@@ -57,6 +57,8 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_texture.h"
@@ -797,6 +799,55 @@ void OBJECT_OT_material_slot_remove_all(wmOperatorType *ot)
 /** \name New Material Operator
  * \{ */
 
+/**
+ * Hand the freshly created \a ma, which holds exactly its creation user, to its destination: the
+ * template-ID pointer property \a prop (of \a ptr, with \a ob the object that owns it, if any), or,
+ * when there is no property, a slot of \a ob. Either way the slot or property ends up holding the
+ * one and only user.
+ */
+static void new_material_assign(bContext *C,
+                                Main &bmain,
+                                Material &ma,
+                                PointerRNA &ptr,
+                                PropertyRNA *prop,
+                                Object *ob)
+{
+  if (prop) {
+    if (ob != nullptr) {
+      /* Add slot follows user-preferences for creating new slots,
+       * RNA pointer assignment doesn't, see: #60014. */
+      if (BKE_object_material_get_p(ob, ob->actcol) == nullptr) {
+        BKE_object_material_slot_add(&bmain, ob);
+      }
+    }
+
+    /* when creating new ID blocks, use is already 1, but RNA
+     * pointer use also increases user, so this compensates it */
+    id_us_min(&ma.id);
+
+    if (ptr.owner_id) {
+      BKE_id_move_to_same_lib(bmain, ma.id, *ptr.owner_id);
+    }
+
+    PointerRNA idptr = RNA_id_pointer_create(&ma.id);
+    RNA_property_pointer_set(&ptr, prop, idptr, nullptr);
+    RNA_property_update(C, &ptr, prop);
+  }
+  else if (ob != nullptr) {
+    /* Invoked outside a material button, the material still has to reach the object, so it goes
+     * into a slot of its own and that slot is made active, so the material list shows it
+     * immediately rather than leaving the previous material selected. */
+    const int index = BKE_object_material_ensure(&bmain, ob, &ma);
+    /* The slot holds a user of its own; give back the creation one. */
+    id_us_min(&ma.id);
+    if (index >= 0) {
+      ob->actcol = short(index + 1);
+    }
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+    WM_event_add_notifier(C, NC_OBJECT | ND_OB_SHADING, ob);
+  }
+}
+
 static wmOperatorStatus new_material_exec(bContext *C, wmOperator * /*op*/)
 {
   Material *ma = static_cast<Material *>(
@@ -828,27 +879,7 @@ static wmOperatorStatus new_material_exec(bContext *C, wmOperator * /*op*/)
     nodes::node_tree_shader_default(C, bmain, &ma->id);
   }
 
-  if (prop) {
-    if (ob != nullptr) {
-      /* Add slot follows user-preferences for creating new slots,
-       * RNA pointer assignment doesn't, see: #60014. */
-      if (BKE_object_material_get_p(ob, ob->actcol) == nullptr) {
-        BKE_object_material_slot_add(bmain, ob);
-      }
-    }
-
-    /* when creating new ID blocks, use is already 1, but RNA
-     * pointer use also increases user, so this compensates it */
-    id_us_min(&ma->id);
-
-    if (ptr.owner_id) {
-      BKE_id_move_to_same_lib(*bmain, ma->id, *ptr.owner_id);
-    }
-
-    PointerRNA idptr = RNA_id_pointer_create(&ma->id);
-    RNA_property_pointer_set(&ptr, prop, idptr, nullptr);
-    RNA_property_update(C, &ptr, prop);
-  }
+  new_material_assign(C, *bmain, *ma, ptr, prop, ob);
 
   WM_event_add_notifier(C, NC_MATERIAL | NA_ADDED, ma);
 
@@ -868,6 +899,57 @@ void MATERIAL_OT_new(wmOperatorType *ot)
 
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+}
+
+/**
+ * Create a fresh layered material and give it its first Paint layer. The material is otherwise an
+ * ordinary one: the stack is the DNA description and the node tree is generated from it.
+ */
+static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator * /*op*/)
+{
+  Main *bmain = CTX_data_main(C);
+  PointerRNA ptr;
+  PropertyRNA *prop;
+  ui::context_active_but_prop_get_templateID(C, &ptr, &prop);
+  Object *ob = static_cast<Object *>((prop && RNA_struct_is_a(ptr.type, RNA_Object)) ? ptr.data :
+                                                                                       nullptr);
+  if (prop == nullptr) {
+    /* Invoked from a plain button (next to the material dropdown) rather than a template ID's
+     * "new" callback, so no material button is active: the active object is what the new material
+     * goes onto. */
+    ob = ed::object::context_object(C);
+  }
+
+  Material *ma = BKE_material_add(bmain, DATA_("Layered Material"));
+  nodes::node_tree_shader_default(C, bmain, &ma->id);
+  /* A Paint row whose Base Color is the default grey, so a fresh layered material looks like any
+   * other new one until something is painted into the row. */
+  PaintLayerAddParams add_params;
+  add_params.name = "Base Color";
+  MaterialPaintLayer *base = BKE_paint_layers_add_with_policy(*ma, add_params);
+  const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+  BKE_paint_layers_channel_set_value(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_color);
+  BKE_paint_layers_active_set(*ma, base->marker);
+
+  new_material_assign(C, *bmain, *ma, ptr, prop, ob);
+
+  WM_event_add_notifier(C, NC_MATERIAL | NA_ADDED, ma);
+  return OPERATOR_FINISHED;
+}
+
+void MATERIAL_OT_new_layered(wmOperatorType *ot)
+{
+  /* identifiers */
+  ot->name = "New Layered Material";
+  ot->idname = "MATERIAL_OT_new_layered";
+  ot->description = "Add a new paint-layer stack material, generated from its layer description";
+
+  /* API callbacks. */
+  ot->exec = new_layered_material_exec;
+  ot->poll = object_materials_supported_poll;
+
+  /* flags */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
 /** \} */

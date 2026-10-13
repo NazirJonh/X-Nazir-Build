@@ -553,6 +553,14 @@ struct Material {
   ListBaseT<MaterialPaintLayer> paint_layers = {nullptr, nullptr};
   /** Marker of the active layer; an index is ambiguous, a marker survives reordering. */
   bUUID active_layer_marker = {};
+  /** The generated node group holding the stack, see the paint layer generator. */
+  struct bNodeTree *paint_layers_tree = nullptr;
+  /**
+   * Identity of this material as the owner of #paint_layers_tree, stamped on the generated tree so
+   * a pointer at a tree that belongs to someone else is never overwritten. Assigned the first time
+   * the tree is generated and renewed on a copy.
+   */
+  bUUID paint_layers_owner_uid = {};
   /** #eMaterialPaintLayersFlag. */
   eMaterialPaintLayersFlag paint_layers_flag = {};
   char _pad_paint_layers[6] = {};

@@ -1004,13 +1004,10 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
   }
   else {
+    /* The stack was validated: a layer without a map is a constant. */
+    BLI_assert(layer.has_constant_color);
     for (int64_t i = 0; i < count; i++) {
-      if (layer.has_constant_color) {
-        copy_v4_v4(r_color + i * 4, layer.constant_color);
-      }
-      else {
-        zero_v4(r_color + i * 4);
-      }
+      copy_v4_v4(r_color + i * 4, layer.constant_color);
     }
   }
 
@@ -1039,6 +1036,17 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
   }
 }
 
+/**
+ * Whether a layer paints anything: it has a map, or a flat colour. The one rule behind both the
+ * validation of a hand-built stack (which refuses an empty layer) and the building of a stack from
+ * image layers (which leaves one out).
+ */
+template<typename LayerT>
+static bool composite_layer_has_content(const LayerT &layer, const bool has_map)
+{
+  return has_map || layer.has_constant_color;
+}
+
 static bool composite_stack_validate_linear(const PaintMaterialCompositeStack &stack)
 {
   if (stack.width <= 0 || stack.height <= 0 || stack.layers.is_empty()) {
@@ -1054,8 +1062,7 @@ static bool composite_stack_validate_linear(const PaintMaterialCompositeStack &s
         return false;
       }
     }
-    else if (!layer.has_constant_color) {
-      /* A layer without a map has nothing to composite unless it is a constant. */
+    else if (!composite_layer_has_content(layer, false)) {
       return false;
     }
     if (layer.mask_ibuf != nullptr &&
@@ -1071,8 +1078,38 @@ static bool composite_stack_validate_linear(const PaintMaterialCompositeStack &s
 /** One 256x256 tile: the scratch a layer is decoded and mixed in, never a full-size copy. */
 static constexpr int COMPOSITE_TILE_SIZE = 256;
 
+PaintMaterialCompositeLinearTarget PaintMaterialCompositeLinearTarget::frame(
+    const MutableSpan<float> storage, const int width)
+{
+  PaintMaterialCompositeLinearTarget target;
+  target.pixels = storage;
+  target.row_stride = int64_t(width) * 4;
+  return target;
+}
+
+PaintMaterialCompositeLinearTarget PaintMaterialCompositeLinearTarget::packed(
+    const MutableSpan<float> storage, const rcti &area)
+{
+  PaintMaterialCompositeLinearTarget target;
+  target.pixels = storage;
+  target.row_stride = int64_t(BLI_rcti_size_x(&area)) * 4;
+  return target;
+}
+
+PaintMaterialCompositeLinearTarget PaintMaterialCompositeLinearTarget::in_frame(
+    const MutableSpan<float> storage, const int width, const rcti &area)
+{
+  PaintMaterialCompositeLinearTarget target;
+  const int64_t offset = (int64_t(area.ymin) * width + area.xmin) * 4;
+  if (offset <= storage.size()) {
+    target.pixels = storage.drop_front(offset);
+  }
+  target.row_stride = int64_t(width) * 4;
+  return target;
+}
+
 bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack &stack,
-                                              float *dst,
+                                              const PaintMaterialCompositeLinearTarget &target,
                                               const rcti *region,
                                               PaintMaterialCompositeEvalStats *r_stats)
 {
@@ -1087,6 +1124,16 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
       *r_stats = {};
     }
     return true;
+  }
+
+  /* Refused, never written out of bounds: a target that does not describe the area would
+   * otherwise be a silent overrun. */
+  const int64_t area_width = BLI_rcti_size_x(&area);
+  const int64_t area_height = BLI_rcti_size_y(&area);
+  if (target.row_stride < area_width * 4 ||
+      target.pixels.size() < (area_height - 1) * target.row_stride + area_width * 4)
+  {
+    return false;
   }
 
   const double start_time = BLI_time_now_seconds();
@@ -1139,7 +1186,9 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
 
       /* Copy the tile back into the caller's buffer; only the region is ever touched. */
       for (int row = 0; row < th; row++) {
-        float *dst_row = dst + ((int64_t(tile.ymin + row) * stack.width + tile.xmin) * 4);
+        float *dst_row = target.pixels.data() +
+                         int64_t(tile.ymin - area.ymin + row) * target.row_stride +
+                         int64_t(tile.xmin - area.xmin) * 4;
         memcpy(dst_row, tile_dst + int64_t(row) * tw * 4, size_t(tw) * 4 * sizeof(float));
       }
     }
@@ -1223,10 +1272,8 @@ static bool composite_stack_build(Span<PaintMaterialCompositeImageLayer> image_l
         return false;
       }
     }
-    layer.blend = image_layer.blend;
-    layer.opacity = image_layer.opacity;
-    layer.mask_influence = image_layer.mask_influence;
-    layer.mask_from_alpha = image_layer.mask_from_alpha;
+    /* One value copy, so a field added to the shared params can never be forgotten here. */
+    static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
     r_stack.layers.append(layer);
   }
   return !r_stack.layers.is_empty();
@@ -1263,7 +1310,7 @@ static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> 
     if (!image_layer.enabled) {
       continue;
     }
-    if (image_layer.color_image == nullptr && !image_layer.has_constant_color) {
+    if (!composite_layer_has_content(image_layer, image_layer.color_image != nullptr)) {
       continue;
     }
     PaintMaterialCompositeLayer layer;
@@ -1285,13 +1332,7 @@ static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> 
       }
       layer.mask_colorspace_name = composite_buffer_colorspace_name(layer.mask_ibuf);
     }
-    copy_v4_v4(layer.constant_color, image_layer.constant_color);
-    layer.has_constant_color = image_layer.has_constant_color;
-    layer.color_alpha_coverage = image_layer.color_alpha_coverage;
-    layer.mask_from_alpha = image_layer.mask_from_alpha;
-    layer.blend = image_layer.blend;
-    layer.opacity = image_layer.opacity;
-    layer.mask_influence = image_layer.mask_influence;
+    static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
     r_stack.layers.append(layer);
   }
   return !r_stack.layers.is_empty();
@@ -1299,7 +1340,7 @@ static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> 
 
 bool BKE_paint_material_composite_eval_images_linear(
     Span<PaintMaterialCompositeImageLayer> image_layers,
-    float *dst,
+    const PaintMaterialCompositeLinearTarget &target,
     const rcti *region,
     PaintMaterialCompositeEvalStats *r_stats,
     const float bottom_color[4])
@@ -1312,7 +1353,7 @@ bool BKE_paint_material_composite_eval_images_linear(
     stack.has_bottom_color = true;
   }
   if (ok) {
-    ok = BKE_paint_material_composite_eval_linear(stack, dst, region, r_stats);
+    ok = BKE_paint_material_composite_eval_linear(stack, target, region, r_stats);
   }
   composite_images_release(locks);
   return ok;

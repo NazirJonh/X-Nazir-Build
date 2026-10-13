@@ -265,6 +265,14 @@ set(SRC
   intern/paint_layers/paint_layers.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_edit.cc
+  intern/paint_layers/paint_layers_generate_build.cc
+  intern/paint_layers/paint_layers_generate_build_chain.cc
+  intern/paint_layers/paint_layers_generate_build_intern.hh
+  intern/paint_layers/paint_layers_generate_common.cc
+  intern/paint_layers/paint_layers_generate_intern.hh
+  intern/paint_layers/paint_layers_generate_layout.cc
+  intern/paint_layers/paint_layers_generate_layout.hh
+  intern/paint_layers/paint_layers_generate_regen.cc
   intern/paint_material_cache_common.cc
   intern/paint_material_combined.cc
   intern/paint_material_composite.cc
@@ -530,6 +538,7 @@ set(SRC
   BKE_paint_layers.hh
   BKE_paint_layers_composite.hh
   BKE_paint_layers_edit.hh
+  BKE_paint_layers_generate.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
@@ -834,6 +843,9 @@ if(WITH_GTESTS)
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
+    intern/paint_layers/tests/paint_layers_generate_test.cc
+    intern/paint_layers/tests/paint_layers_graph_eval_formulas_test.cc
+    intern/paint_layers/tests/paint_layers_graph_eval_test.cc
     intern/paint_layers/tests/paint_layers_refactor_test.cc
     intern/paint_layers/tests/paint_layers_test_util.cc
     intern/paint_material_channel_test.cc

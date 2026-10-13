@@ -54,4 +54,17 @@ inline bool paint_layer_channel_live(const MaterialPaintLayerChannel *record)
   return record != nullptr && record->state == MA_PAINT_LAYER_CHANNEL_ENABLED;
 }
 
+/**
+ * Whether \a record lays something down: it is live and carries a map, or a flat value with some
+ * alpha. A map covers by its own alpha; a flat value only takes part when it has any, so an
+ * unpainted row stays out of the generated graph exactly as it stays out of the CPU stack.
+ *
+ * The one place the rule is written: the generator's participation test and the CPU adapter both
+ * call it, so a row cannot take part on one side and drop out on the other.
+ */
+inline bool paint_layer_channel_contributes(const MaterialPaintLayerChannel *record)
+{
+  return paint_layer_channel_live(record) && (record->image != nullptr || record->value[3] > 0.0f);
+}
+
 }  // namespace blender

@@ -55,6 +55,23 @@ struct MemFileUndoStep {
   MemFileUndoData *data;
 };
 
+static Vector<UndoMemfileDecodeHooks> &memfile_decode_hooks()
+{
+  static Vector<UndoMemfileDecodeHooks> hooks;
+  return hooks;
+}
+
+void ED_undosys_memfile_decode_hooks_add(const UndoMemfileDecodeHooks &hooks)
+{
+  /* Registration happens from operator-type setup; a second call must not run the hooks twice. */
+  for (const UndoMemfileDecodeHooks &existing : memfile_decode_hooks()) {
+    if (existing.pre_decode == hooks.pre_decode && existing.post_decode == hooks.post_decode) {
+      return;
+    }
+  }
+  memfile_decode_hooks().append(hooks);
+}
+
 static bool memfile_undosys_poll(bContext *C)
 {
   /* other poll functions must run first, this is a catch-all. */
@@ -177,6 +194,12 @@ static void memfile_undosys_step_decode(
     }
   }
 
+  for (const UndoMemfileDecodeHooks &hooks : memfile_decode_hooks()) {
+    if (hooks.pre_decode) {
+      hooks.pre_decode(*bmain);
+    }
+  }
+
   /* Extract depsgraphs from current bmain (which may be freed during undo step reading),
    * and store them for re-use. */
   GHash *depsgraphs = nullptr;
@@ -207,6 +230,11 @@ static void memfile_undosys_step_decode(
 
   /* bmain has been freed. */
   bmain = CTX_data_main(C);
+  for (const UndoMemfileDecodeHooks &hooks : memfile_decode_hooks()) {
+    if (hooks.post_decode) {
+      hooks.post_decode(*bmain);
+    }
+  }
   ED_editors_init_for_undo(bmain);
 
   if (use_old_bmain_data) {

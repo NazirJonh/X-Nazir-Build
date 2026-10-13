@@ -1,0 +1,646 @@
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * Paint Layers generator tests: the pure build, regeneration into a material, the ownership of the
+ * generated groups across a copy, and the undo hooks.
+ *
+ * The fixture lives in `paint_layers_generate_test_fixture.hh`.
+ */
+
+#include "paint_layers_generate_test_fixture.hh"
+
+#include "BKE_node_tree_interface.hh"
+
+#include "BKE_paint_layers_composite.hh"
+
+#include "../paint_layers_generate_intern.hh"
+#include "../paint_layers_generate_layout.hh"
+
+namespace blender::bke::tests {
+
+/* -------------------------------------------------------------------- */
+/** \name Pure build
+ * \{ */
+
+TEST_F(PaintLayersGenerateTest, color_chain_builds_one_mix_over_two_maps)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+
+  bNodeTree *tree = make_tree("PBR Layers A");
+  ASSERT_NE(tree, nullptr);
+  build_into(*tree);
+
+  /* One Color channel is wired here (Base Color). The two maps are two Image Textures, each over
+   * what is below through one Mix of its own. */
+  EXPECT_EQ(count_type(*tree, SH_NODE_TEX_IMAGE), 2);
+  EXPECT_EQ(count_type(*tree, SH_NODE_MIX), 2);
+  EXPECT_TRUE(interface_has_socket(*tree, "Result Base Color", true));
+}
+
+TEST_F(PaintLayersGenerateTest, build_is_deterministic)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+
+  bNodeTree *first = make_tree("PBR Layers First");
+  bNodeTree *second = make_tree("PBR Layers Second");
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  build_into(*first);
+  build_into(*second);
+
+  EXPECT_EQ(count_type(*first, SH_NODE_TEX_IMAGE), count_type(*second, SH_NODE_TEX_IMAGE));
+  EXPECT_EQ(count_type(*first, SH_NODE_MIX), count_type(*second, SH_NODE_MIX));
+  EXPECT_EQ(count_type(*first, SH_NODE_MATH), count_type(*second, SH_NODE_MATH));
+}
+
+TEST_F(PaintLayersGenerateTest, pure_build_instantiates_normal_combine_with_links)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Bottom", add_image("Bottom"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
+
+  bNodeTree *tree = make_tree("PBR Layers Normal");
+  ASSERT_NE(tree, nullptr);
+  bNodeTree *normal_combine = BKE_paint_material_normal_combine_group_ensure(*bmain);
+  ASSERT_NE(normal_combine, nullptr);
+  /* No #Main reachable from the build itself: the group sockets come from the node declaration. */
+  build_into(*tree, normal_combine);
+
+  /* The combine lives inside the layer group, so walk the tree recursively. */
+  int combines = 0;
+  auto visit = [&](auto &self, bNodeTree &t) -> void {
+    t.ensure_topology_cache();
+    for (bNode &node : t.nodes) {
+      if (BKE_paint_material_is_normal_combine_group(node)) {
+        combines++;
+        bNodeSocket *a = bke::node_find_socket(
+            node, SOCK_IN, UString::from_ptr_noinline(NORMAL_COMBINE_ID_A));
+        ASSERT_NE(a, nullptr);
+        EXPECT_FALSE(a->directly_linked_links().is_empty());
+      }
+      else if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT) {
+        self(self, *reinterpret_cast<bNodeTree *>(node.id));
+      }
+    }
+  };
+  visit(visit, *tree);
+  EXPECT_EQ(combines, 1);
+}
+
+TEST_F(PaintLayersGenerateTest, pure_build_matches_regenerate_topology)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  add_channel(*bottom, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("Normal"));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_image("Top"));
+  add_channel(*top, PAINT_MATERIAL_CHANNEL_NORMAL, add_image("TopNormal"));
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  add_constant_channel(*top, PAINT_MATERIAL_CHANNEL_ROUGHNESS, grey);
+
+  bNodeTree *pure = make_tree("PBR Layers Pure");
+  ASSERT_NE(pure, nullptr);
+  build_into(*pure, BKE_paint_material_normal_combine_group_ensure(*bmain));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  /* The multiset of node types is the same, group by group, down the whole tree. */
+  auto idnames = [](auto &self, const bNodeTree &tree, Vector<std::string> &r_names) -> void {
+    for (const bNode &node : tree.nodes) {
+      r_names.append(std::string(node.idname));
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+          !BKE_paint_material_is_normal_combine_group(node))
+      {
+        self(self, *reinterpret_cast<const bNodeTree *>(node.id), r_names);
+      }
+    }
+  };
+  Vector<std::string> pure_names;
+  Vector<std::string> regen_names;
+  idnames(idnames, *pure, pure_names);
+  idnames(idnames, *ma->paint_layers_tree, regen_names);
+  std::sort(pure_names.begin(), pure_names.end());
+  std::sort(regen_names.begin(), regen_names.end());
+  EXPECT_EQ(pure_names, regen_names);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Regeneration into a material
+ * \{ */
+
+TEST_F(PaintLayersGenerateTest, regenerate_builds_group_instance_and_principled)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  EXPECT_TRUE(report.created_principled);
+
+  ASSERT_NE(instance_find(), nullptr);
+  EXPECT_TRUE(interface_has_socket(*ma->paint_layers_tree, "Result Base Color", true));
+
+  bNodeSocket *base_color = principled_input("Base Color");
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_FALSE(base_color->directly_linked_links().is_empty());
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_FALSE(BLI_uuid_is_nil(ma->paint_layers_owner_uid));
+}
+
+TEST_F(PaintLayersGenerateTest, unpainted_default_channels_are_not_generated)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_add(
+      *ma, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *layer);
+  ASSERT_GT(layer->channels_num, 0);
+
+  /* Records with no map and no coverage lay nothing down, so nothing is wired and the material
+   * keeps what the user had on its Principled inputs. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  ma->paint_layers_tree->ensure_interface_cache();
+  EXPECT_TRUE(ma->paint_layers_tree->interface_outputs().is_empty());
+  EXPECT_EQ(layer_tree_count(*bmain), 0);
+  bNodeSocket *base_color = principled_input("Base Color");
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_TRUE(base_color->directly_linked_links().is_empty());
+
+  /* A value with coverage is a row that takes part: its channel is wired, with no map behind it. */
+  const float value[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, value));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(interface_has_socket(*ma->paint_layers_tree, "Result Base Color", true));
+  EXPECT_FALSE(interface_has_socket(*ma->paint_layers_tree, "Result Roughness", true));
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 0);
+  EXPECT_EQ(layer_tree_count(*bmain), 1);
+  base_color = principled_input("Base Color");
+  ASSERT_NE(base_color, nullptr);
+  EXPECT_FALSE(base_color->directly_linked_links().is_empty());
+  bNodeSocket *roughness = principled_input("Roughness");
+  ASSERT_NE(roughness, nullptr);
+  EXPECT_TRUE(roughness->directly_linked_links().is_empty());
+}
+
+TEST_F(PaintLayersGenerateTest, row_values_are_inputs_of_the_row_group)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  const float value[4] = {0.2f, 0.4f, 0.6f, 1.0f};
+  add_constant_channel(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, value);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.4f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
+  ASSERT_NE(instance, nullptr);
+
+  const bNodeTreeInterfaceSocket *opacity_iface = interface_input_find(
+      *group, "Paint Base Color Opacity");
+  const bNodeTreeInterfaceSocket *fill_iface = interface_input_find(*group, "Paint Base Color");
+  ASSERT_NE(opacity_iface, nullptr);
+  ASSERT_NE(fill_iface, nullptr);
+  bNodeSocket *opacity = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(opacity_iface->identifier));
+  bNodeSocket *fill = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(fill_iface->identifier));
+  ASSERT_NE(opacity, nullptr);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(opacity->default_value)->value, 0.4f);
+  const float *color = static_cast<bNodeSocketValueRGBA *>(fill->default_value)->value;
+  EXPECT_FLOAT_EQ(color[0], 0.2f);
+  EXPECT_FLOAT_EQ(color[1], 0.4f);
+  EXPECT_FLOAT_EQ(color[2], 0.6f);
+  EXPECT_FLOAT_EQ(color[3], 1.0f);
+
+  /* A switched-off row stays in the graph with no opacity. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  instance = group_instance_find(*ma->paint_layers_tree, *group);
+  ASSERT_NE(instance, nullptr);
+  opacity_iface = interface_input_find(*group, "Paint Base Color Opacity");
+  ASSERT_NE(opacity_iface, nullptr);
+  opacity = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(opacity_iface->identifier));
+  ASSERT_NE(opacity, nullptr);
+  EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(opacity->default_value)->value, 0.0f);
+}
+
+TEST_F(PaintLayersGenerateTest, leaf_group_has_the_layer_contract)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *bottom = layer_tree_find(*bmain, "Bottom");
+  bNodeTree *top = layer_tree_find(*bmain, "Top");
+  ASSERT_NE(bottom, nullptr);
+  ASSERT_NE(top, nullptr);
+
+  for (bNodeTree *group : {bottom, top}) {
+    EXPECT_TRUE(interface_has_socket(*group, "Below Base Color", false));
+    EXPECT_TRUE(interface_has_socket(*group, "Result Base Color", true));
+    /* The tree is marked as that layer's own group. */
+    const IDProperty *props = IDP_GetProperties(&group->id);
+    ASSERT_NE(props, nullptr);
+    EXPECT_NE(IDP_GetPropertyTypeFromGroup(props, "pbr_paint_layers_layer_tree", IDP_STRING),
+              nullptr);
+  }
+
+  /* One instance per layer, and nothing else that is a group, in the root tree. */
+  int instances = 0;
+  for (bNode &node : ma->paint_layers_tree->nodes) {
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+        (node.id == &bottom->id || node.id == &top->id))
+    {
+      instances++;
+    }
+  }
+  EXPECT_EQ(instances, 2);
+}
+
+TEST_F(PaintLayersGenerateTest, regenerate_reuses_layer_trees)
+{
+  Image *bottom_image = add_image("Bottom");
+  Image *top_image = add_image("Top");
+  add_paint_layer("Bottom", bottom_image);
+  add_paint_layer("Top", top_image);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *root = ma->paint_layers_tree;
+  bNodeTree *bottom = layer_tree_find(*bmain, "Bottom");
+  bNodeTree *top = layer_tree_find(*bmain, "Top");
+  ASSERT_NE(bottom, nullptr);
+  ASSERT_NE(top, nullptr);
+  EXPECT_EQ(layer_tree_count(*bmain), 2);
+  EXPECT_EQ(ID_REAL_USERS(&bottom->id), 1);
+  EXPECT_EQ(ID_REAL_USERS(&top->id), 1);
+  const int bottom_image_users = ID_REAL_USERS(&bottom_image->id);
+  const int top_image_users = ID_REAL_USERS(&top_image->id);
+  EXPECT_GT(bottom_image_users, 1);
+  EXPECT_GT(top_image_users, 1);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), bottom);
+  EXPECT_EQ(layer_tree_find(*bmain, "Top"), top);
+  EXPECT_EQ(layer_tree_count(*bmain), 2);
+  /* A rebuild takes and drops its own user references; the groups and the maps keep exactly the
+   * users they had, or every regeneration would leak one. */
+  EXPECT_EQ(ID_REAL_USERS(&bottom->id), 1);
+  EXPECT_EQ(ID_REAL_USERS(&top->id), 1);
+  EXPECT_EQ(ID_REAL_USERS(&bottom_image->id), bottom_image_users);
+  EXPECT_EQ(ID_REAL_USERS(&top_image->id), top_image_users);
+}
+
+TEST_F(PaintLayersGenerateTest, removed_layer_drops_its_tree)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *top_tree = layer_tree_find(*bmain, "Top");
+  ASSERT_NE(layer_tree_find(*bmain, "Bottom"), nullptr);
+  ASSERT_NE(top_tree, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, bottom));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), nullptr);
+  EXPECT_EQ(layer_tree_count(*bmain), 1);
+  EXPECT_EQ(layer_tree_find(*bmain, "Top"), top_tree);
+}
+
+TEST_F(PaintLayersGenerateTest, renamed_layer_keeps_its_tree)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *bottom_tree = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(bottom_tree, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_rename(*ma, bottom, "Renamed"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Renamed"), bottom_tree);
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), nullptr);
+}
+
+TEST_F(PaintLayersGenerateTest, foreign_tree_is_replaced_not_overwritten)
+{
+  bNodeTree *foreign = make_tree("Foreign Tree");
+  ASSERT_NE(foreign, nullptr);
+  ma->paint_layers_tree = foreign;
+  add_paint_layer("Bottom", add_image("Bottom"));
+
+  PaintLayersRegenerateReport report;
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma, &report));
+  EXPECT_TRUE(report.replaced_foreign_tree);
+  EXPECT_NE(ma->paint_layers_tree, foreign);
+  EXPECT_EQ(count_type(*foreign, SH_NODE_TEX_IMAGE), 0);
+}
+
+TEST_F(PaintLayersGenerateTest, tagged_regenerate_is_the_single_scheduling_point)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  /* The mutator only marked the description stale; nothing generated it yet. */
+  EXPECT_EQ(ma->paint_layers_tree, nullptr);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  BKE_paint_layers_regenerate_tagged(*bmain);
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  bNodeTree *tree = ma->paint_layers_tree;
+
+  /* A new edit marks it stale again, and only the scheduling point rebuilds it. */
+  add_paint_layer("Top", add_image("Top"));
+  EXPECT_EQ(count_type(*tree, SH_NODE_TEX_IMAGE), 1);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  BKE_paint_layers_regenerate_tagged(*bmain);
+  EXPECT_EQ(ma->paint_layers_tree, tree);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_EQ(count_type(*tree, SH_NODE_TEX_IMAGE), 2);
+}
+
+TEST_F(PaintLayersGenerateTest, non_layered_material_is_not_regenerated)
+{
+  Material *plain = BKE_material_add(bmain, "Plain");
+  BKE_paint_layers_regenerate_tagged(*bmain);
+  EXPECT_EQ(plain->paint_layers_tree, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_regenerate(*bmain, *plain));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Copy
+ * \{ */
+
+TEST_F(PaintLayersGenerateTest, copy_does_not_share_generated_tree)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  ASSERT_NE(copy->paint_layers_tree, nullptr);
+  EXPECT_NE(copy->paint_layers_tree, ma->paint_layers_tree);
+  EXPECT_FALSE(BLI_uuid_equal(copy->paint_layers_owner_uid, ma->paint_layers_owner_uid));
+
+  bNode *copy_instance = nullptr;
+  for (bNode &node : copy->nodetree->nodes) {
+    if (node.id == &copy->paint_layers_tree->id) {
+      copy_instance = &node;
+      break;
+    }
+  }
+  EXPECT_NE(copy_instance, nullptr);
+
+  BKE_id_free(bmain, copy);
+}
+
+TEST_F(PaintLayersGenerateTest, no_main_copy_shares_tree_and_uid)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  const int trees_before = BLI_listbase_count(&bmain->nodetrees);
+  const int users_before = ma->paint_layers_tree->id.us;
+
+  /* A copy outside Main is a view of its source, not a second owner: it must not put a second
+   * generated tree into Main nor take the uid the source's trees are keyed by. */
+  Material *copy = id_cast<Material *>(
+      BKE_id_copy_ex(bmain, &ma->id, nullptr, LIB_ID_COPY_DEFAULT | LIB_ID_CREATE_NO_MAIN));
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(copy->paint_layers_tree, ma->paint_layers_tree);
+  EXPECT_TRUE(BLI_uuid_equal(copy->paint_layers_owner_uid, ma->paint_layers_owner_uid));
+  EXPECT_EQ(BLI_listbase_count(&bmain->nodetrees), trees_before);
+
+  BKE_id_free(nullptr, copy);
+  EXPECT_EQ(ma->paint_layers_tree->id.us, users_before);
+}
+
+TEST_F(PaintLayersGenerateTest, copied_material_owns_its_layer_trees)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *bottom_tree = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(bottom_tree, nullptr);
+  bNodeTree *original_root = ma->paint_layers_tree;
+  const int original_images = count_type(*original_root, SH_NODE_TEX_IMAGE);
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  ASSERT_NE(copy->paint_layers_tree, nullptr);
+  EXPECT_NE(copy->paint_layers_tree, original_root);
+
+  /* The copy's layer tree is its own, marked with the copy's owner. */
+  bNodeTree *copy_bottom = nullptr;
+  for (bNode &node : copy->paint_layers_tree->nodes) {
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+        node.id != &copy->paint_layers_tree->id)
+    {
+      copy_bottom = id_cast<bNodeTree *>(node.id);
+    }
+  }
+  ASSERT_NE(copy_bottom, nullptr);
+  EXPECT_NE(copy_bottom, bottom_tree);
+  const IDProperty *props = IDP_GetProperties(&copy_bottom->id);
+  ASSERT_NE(props, nullptr);
+  const IDProperty *owner = IDP_GetPropertyTypeFromGroup(
+      props, "pbr_paint_layers_owner", IDP_STRING);
+  ASSERT_NE(owner, nullptr);
+  char formatted[UUID_STRING_SIZE];
+  BLI_uuid_format(formatted, copy->paint_layers_owner_uid);
+  EXPECT_STREQ(IDP_string_get(owner), formatted);
+
+  /* Regenerating the copy leaves the original's tree and groups untouched. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *copy));
+  EXPECT_EQ(ma->paint_layers_tree, original_root);
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), bottom_tree);
+  EXPECT_EQ(count_type(*original_root, SH_NODE_TEX_IMAGE), original_images);
+
+  BKE_id_free(bmain, copy);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Undo
+ *
+ * A memfile undo decodes the data-blocks whose stored state changed and keeps the others as they
+ * were; the generated trees are rewritten after an undo push, so the decode can leave a tree that
+ * names a map or a group the target state does not have. No node may keep an ID that is not in
+ * #Main, or the next regeneration decrements the users of freed memory.
+ * \{ */
+
+TEST_F(PaintLayersGenerateTest, undo_validate_clears_dangling_node_ids_and_regenerates)
+{
+  Image *image = add_image("Bottom");
+  add_paint_layer("Bottom", image);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(group, nullptr);
+
+  bNode *map = nullptr;
+  for (bNode &node : group->nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE) {
+      map = &node;
+    }
+  }
+  ASSERT_NE(map, nullptr);
+  ASSERT_EQ(map->id, &image->id);
+
+  /* An image the target state does not have: it is a real data-block, but not one of #Main's. */
+  Image *stray = BKE_id_new_nomain<Image>("Stray");
+  ASSERT_NE(stray, nullptr);
+  map->id = &stray->id;
+
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  BKE_paint_layers_undo_validate(*bmain);
+  EXPECT_EQ(map->id, nullptr);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* A pointer that is still in #Main is left alone. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), group);
+  map = nullptr;
+  for (bNode &node : group->nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE) {
+      map = &node;
+    }
+  }
+  ASSERT_NE(map, nullptr);
+  EXPECT_EQ(map->id, &image->id);
+  BKE_paint_layers_undo_validate(*bmain);
+  EXPECT_EQ(map->id, &image->id);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  BKE_id_free(nullptr, stray);
+}
+
+TEST_F(PaintLayersGenerateTest, undo_prepare_detaches_generated_data_and_the_next_pass_restores)
+{
+  Image *image = add_image("Bottom");
+  add_paint_layer("Bottom", image);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Bottom");
+  ASSERT_NE(group, nullptr);
+  bNode *instance = instance_find();
+  ASSERT_NE(instance, nullptr);
+  ASSERT_EQ(instance->id, &ma->paint_layers_tree->id);
+
+  BKE_paint_layers_undo_prepare(*bmain);
+  EXPECT_EQ(instance->id, nullptr);
+  for (bNode &node : group->nodes) {
+    EXPECT_EQ(node.id, nullptr);
+  }
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* The scheduling point puts the derived data back, into the groups the material already owns. */
+  BKE_paint_layers_regenerate_tagged(*bmain);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_EQ(layer_tree_count(*bmain), 1);
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), group);
+  instance = instance_find();
+  ASSERT_NE(instance, nullptr);
+  EXPECT_EQ(instance->id, &ma->paint_layers_tree->id);
+  EXPECT_EQ(count_type(*ma->paint_layers_tree, SH_NODE_TEX_IMAGE), 1);
+  for (bNode &node : group->nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE) {
+      EXPECT_EQ(node.id, &image->id);
+    }
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Participation
+ * \{ */
+
+TEST_F(PaintLayersGenerateTest, participation_cpu_matches_generator)
+{
+  /* One predicate decides whether a row takes part, for the generated graph and for the CPU stack
+   * alike: every state of a record has to give the same answer on both sides. */
+  const float alphas[] = {0.0f, 0.5f};
+  for (const bool enabled : {true, false}) {
+    for (const bool with_map : {true, false}) {
+      for (const float alpha : alphas) {
+        MaterialPaintLayer *layer = BKE_paint_layers_add(
+            *ma, "L", nullptr, PaintLayerPlace::Above);
+        ASSERT_NE(layer, nullptr);
+        ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                  nullptr);
+        BKE_paint_layers_channel_set_enabled(
+            *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, enabled);
+        const float value[4] = {1.0f, 0.0f, 0.0f, alpha};
+        BKE_paint_layers_channel_set_value(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, value);
+        if (with_map) {
+          BKE_paint_layers_channel_set_image(
+              *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("Map"));
+        }
+
+        Vector<PaintMaterialCompositeImageLayer> layers;
+        const bool cpu = BKE_paint_layers_composite_image_layers(
+            *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers);
+        EXPECT_EQ(cpu,
+                  paint_layers::leaf_participates(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+            << "enabled=" << enabled << " map=" << with_map << " alpha=" << alpha;
+        BKE_paint_layers_remove(*ma, layer);
+      }
+    }
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Layout grid
+ * \{ */
+
+TEST(PaintLayersLayoutGrid, grids_are_independent)
+{
+  paint_layers::layout::LayoutGrid a;
+  paint_layers::layout::LayoutGrid b;
+  a.at(paint_layers::layout::Column::Source, 5);
+  /* A second grid starts from row zero, whatever the first one has claimed. */
+  const paint_layers::layout::Cursor fresh = b.at(paint_layers::layout::Column::Source, 0);
+  EXPECT_FLOAT_EQ(fresh.y, 0.0f);
+  EXPECT_FLOAT_EQ(fresh.x, paint_layers::layout::kColumnWidth);
+}
+
+TEST(PaintLayersLayoutGrid, lane_starts_past_the_previous_lane)
+{
+  paint_layers::layout::LayoutGrid grid;
+  {
+    paint_layers::layout::LayoutGrid::LaneScope lane0(grid, 0);
+    grid.at(paint_layers::layout::Column::Source, 3);
+  }
+  paint_layers::layout::LayoutGrid::LaneScope lane1(grid, 1);
+  const paint_layers::layout::Cursor cursor = grid.at(paint_layers::layout::Column::Source, 0);
+  /* Base of lane 1: the tallest row of lane 0 (3) plus the two-row gap. */
+  EXPECT_FLOAT_EQ(cursor.y, -5.0f * paint_layers::layout::kRowPitch);
+}
+
+TEST(PaintLayersLayoutGrid, lane_scope_restores_the_previous_lane)
+{
+  paint_layers::layout::LayoutGrid grid;
+  paint_layers::layout::LayoutGrid::LaneScope outer(grid, 0);
+  grid.at(paint_layers::layout::Column::Source, 2);
+  {
+    paint_layers::layout::LayoutGrid::LaneScope inner(grid, 1);
+  }
+  /* Back in lane 0: row 0 is the lane's own first row again. */
+  EXPECT_FLOAT_EQ(grid.at(paint_layers::layout::Column::Source, 0).y, 0.0f);
+}
+
+/** \} */
+
+}  // namespace blender::bke::tests

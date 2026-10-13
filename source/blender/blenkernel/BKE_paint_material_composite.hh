@@ -78,31 +78,30 @@ enum class CompositeBlend : int8_t {
   NormalCombine,
 };
 
-/** One layer of a stack, as data-blocks. This is what a material resolves to. */
-struct PaintMaterialCompositeImageLayer {
-  Image *color_image = nullptr;
-  /**
-   * The image node's own #ImageUser, or null. Owned by the material: copy it before acquiring a
-   * buffer, since acquisition writes to it.
-   */
-  const ImageUser *color_iuser = nullptr;
-  /**
-   * The flat colour the layer paints with when it has no map, scene linear.
-   *
-   * A channel with no map reduces to a constant; carrying it here rather than manufacturing a
-   * one-pixel image keeps the CPU path free of sampling. Read by the linear evaluator only.
-   */
+/**
+ * A flat colour standing in for a map, scene linear.
+ *
+ * A channel with no map reduces to a constant; carrying it here rather than manufacturing a
+ * one-pixel image keeps the CPU path free of sampling. Its alpha is content alpha, never coverage
+ * (see #PaintMaterialCompositeRowParams::color_alpha_coverage). Read by the linear evaluator only.
+ */
+struct PaintMaterialCompositeConstant {
   float constant_color[4] = {};
   bool has_constant_color = false;
+};
+
+/**
+ * What an image layer and its buffer twin share verbatim. The stack builders copy it as one value
+ * (`static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer`), so a field added here
+ * can never be forgotten in one of the copies. Only plain values belong here, never pointers.
+ */
+struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   /**
    * The layer's own map alpha multiplies into the factor, so a texel the map leaves transparent
    * shows what is below instead of covering it with the map's (black) color. Set for a painted
-   * channel map. Read by the linear evaluator only.
+   * channel map; a constant covers by its opacity alone. Read by the linear evaluator only.
    */
   bool color_alpha_coverage = false;
-  /** Modulates #opacity per pixel. Null when the layer's factor is a plain value. */
-  Image *mask_image = nullptr;
-  const ImageUser *mask_iuser = nullptr;
   /**
    * The mask is the image's alpha rather than its colour.
    *
@@ -113,13 +112,26 @@ struct PaintMaterialCompositeImageLayer {
   bool mask_from_alpha = false;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
-  /** How much of #mask_image applies; 0 ignores the mask entirely. */
+  /** How much of the mask applies; 0 ignores the mask entirely. */
   float mask_influence = 1.0f;
   bool enabled = true;
 };
 
+/** One layer of a stack, as data-blocks. This is what a material resolves to. */
+struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
+  Image *color_image = nullptr;
+  /**
+   * The image node's own #ImageUser, or null. Owned by the material: copy it before acquiring a
+   * buffer, since acquisition writes to it.
+   */
+  const ImageUser *color_iuser = nullptr;
+  /** Modulates #opacity per pixel. Null when the layer's factor is a plain value. */
+  Image *mask_image = nullptr;
+  const ImageUser *mask_iuser = nullptr;
+};
+
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
-struct PaintMaterialCompositeLayer {
+struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
   /** Byte or float RGBA, matching the stack dimensions; null for a constant layer. */
   ImBuf *color_ibuf = nullptr;
   ImBuf *mask_ibuf = nullptr;
@@ -130,17 +142,6 @@ struct PaintMaterialCompositeLayer {
    */
   const char *color_colorspace_name = nullptr;
   const char *mask_colorspace_name = nullptr;
-  /** See #PaintMaterialCompositeImageLayer.constant_color. */
-  float constant_color[4] = {};
-  bool has_constant_color = false;
-  /** See #PaintMaterialCompositeImageLayer.color_alpha_coverage. */
-  bool color_alpha_coverage = false;
-  /** See #PaintMaterialCompositeImageLayer.mask_from_alpha. */
-  bool mask_from_alpha = false;
-  CompositeBlend blend = CompositeBlend::Mix;
-  float opacity = 1.0f;
-  float mask_influence = 1.0f;
-  bool enabled = true;
 };
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */
@@ -191,7 +192,31 @@ bool BKE_paint_material_composite_area_get(int width,
                                            rcti &r_area);
 
 /**
- * Composite \a stack into \a dst as straight scene-linear float RGBA, `width * height * 4` values.
+ * Where a linear evaluation lands: a window of float RGBA texels.
+ *
+ * \a pixels starts at the first texel of the area being written (the region clipped to the frame,
+ * see #BKE_paint_material_composite_area_get; the whole frame without a region) and runs to the end
+ * of the storage; \a row_stride is the distance between two rows, in floats. One type covers the
+ * three callers: a whole frame, a buffer that holds just the area, and the area of a frame in
+ * place (an ImBuf), so the cost of refreshing a small region never depends on the frame's size.
+ * The evaluation refuses a target too small for the area, it never writes out of it.
+ */
+struct PaintMaterialCompositeLinearTarget {
+  MutableSpan<float> pixels;
+  int64_t row_stride = 0;
+
+  /** A whole `width`-wide frame, rows packed: for an evaluation without a region. */
+  static PaintMaterialCompositeLinearTarget frame(MutableSpan<float> storage, int width);
+  /** A buffer holding exactly \a area, rows packed: `area_width * area_height * 4` floats. */
+  static PaintMaterialCompositeLinearTarget packed(MutableSpan<float> storage, const rcti &area);
+  /** The \a area of a `width`-wide frame in place: offset to its corner, the frame's stride. */
+  static PaintMaterialCompositeLinearTarget in_frame(MutableSpan<float> storage,
+                                                     int width,
+                                                     const rcti &area);
+};
+
+/**
+ * Composite \a stack into \a target as straight scene-linear float RGBA.
  *
  * Every source sample is first decoded out of its own buffer's colorspace (see the layers'
  * `*_colorspace_name`), then the rows are mixed in scene linear the way the shader mixes them; a
@@ -199,12 +224,13 @@ bool BKE_paint_material_composite_area_get(int width,
  * this accepts float buffers and constant layers, starts from the stack's bottom colour and does
  * no encoding: that is the caller's job when it writes a byte map.
  *
- * \param region: when given, only this rectangle is written and the rest of \a dst is left as it
- *                was. Same contract as the byte evaluation.
- * \return false when the stack is empty, dimensions disagree, or a buffer is unusable.
+ * \param region: when given, only this rectangle (clipped to the frame) is written; \a target has
+ *                to describe exactly that area. Same contract as the byte evaluation.
+ * \return false when the stack is empty, dimensions disagree, a buffer is unusable or \a target is
+ *         too small for the area.
  */
 bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack &stack,
-                                              float *dst,
+                                              const PaintMaterialCompositeLinearTarget &target,
                                               const rcti *region = nullptr,
                                               PaintMaterialCompositeEvalStats *r_stats = nullptr);
 
@@ -218,7 +244,7 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
  */
 bool BKE_paint_material_composite_eval_images_linear(
     Span<PaintMaterialCompositeImageLayer> image_layers,
-    float *dst,
+    const PaintMaterialCompositeLinearTarget &target,
     const rcti *region = nullptr,
     PaintMaterialCompositeEvalStats *r_stats = nullptr,
     const float bottom_color[4] = nullptr);

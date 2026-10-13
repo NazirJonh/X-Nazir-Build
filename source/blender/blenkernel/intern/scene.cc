@@ -84,6 +84,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_pointcache.h"
 #include "BKE_preview_image.hh"
 #include "BKE_rigidbody.h"
@@ -3151,6 +3152,12 @@ static void scene_graph_update_tagged(Depsgraph *depsgraph, Main *bmain, bool on
     return;
   }
 
+  /* Rebuild the generated trees of layered materials edited since the last update, before the
+   * graph is evaluated: the single scheduling point for the paths that do not run the event loop
+   * -- scripts calling depsgraph.update(), and background renders. Main thread, before eval, and
+   * never from the depsgraph flush callback. */
+  BKE_paint_layers_regenerate_tagged(*bmain);
+
   Scene *scene = DEG_get_input_scene(depsgraph);
   ViewLayer *view_layer = DEG_get_input_view_layer(depsgraph);
   bool used_multiple_passes = false;
@@ -3238,6 +3245,10 @@ void BKE_scene_graph_update_for_newframe_ex(Depsgraph *depsgraph, const bool cle
   Scene *scene = DEG_get_input_scene(depsgraph);
   Main *bmain = DEG_get_bmain(depsgraph);
   bool used_multiple_passes = false;
+
+  /* Scheduling point for frame changes without the event loop: rebuild the generated trees of
+   * layered materials edited since the last update, before the graph evaluates them. */
+  BKE_paint_layers_regenerate_tagged(*bmain);
 
   /* Keep this first. */
   BKE_callback_exec_id(bmain, &scene->id, BKE_CB_EVT_FRAME_CHANGE_PRE);

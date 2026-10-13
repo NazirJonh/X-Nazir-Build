@@ -32,37 +32,56 @@ namespace blender {
 /** \name Normal Combine Group
  * \{ */
 
-/** Name of the ID property that marks the group, and the value that identifies this one. */
-static const char *NORMAL_COMBINE_PROP = "pbr_paint_node_group";
-static const char *NORMAL_COMBINE_VALUE = "NORMAL_COMBINE";
-/* NOTE: DO NOT translate, it is what an existing group is found by. */
-static const char *NORMAL_COMBINE_TREE_NAME = "PBR Normal Combine";
+/** Name of the shared Normal Combine group data-block. The leading dot keeps it out of every ID
+ * picker and #Node Groups list (see #interface_template_id). NOTE: do not translate. */
+static const char *NORMAL_COMBINE_TREE_NAME = ".PBR Normal Combine";
+
+/**
+ * The IDProperty marking the trees this module recognizes as one of its own groups, told apart by
+ * value. Kept local here: the Normal Combine group is the only group the new path marks.
+ */
+static constexpr const char *NODE_GROUP_MARKER_PROP = "pbr_paint_node_group";
+/** #NODE_GROUP_MARKER_PROP value of the Normal Combine group. */
+static constexpr const char *NORMAL_COMBINE_MARKER_VALUE = "NORMAL_COMBINE";
+
+/** The #NODE_GROUP_MARKER_PROP value on \a tree_id, or null when unmarked. */
+static const char *node_tree_group_marker_get(const ID &tree_id)
+{
+  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(&tree_id));
+  if (properties == nullptr) {
+    return nullptr;
+  }
+  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
+      properties, NODE_GROUP_MARKER_PROP, IDP_STRING);
+  return (marker != nullptr) ? IDP_string_get(marker) : nullptr;
+}
+
+/** Stamp the shared Normal Combine group tree. */
+static void normal_combine_tree_marker_set(bNodeTree &group)
+{
+  IDProperty *properties = IDP_EnsureProperties(&group.id);
+  IDPropertyTemplate value = {0};
+  value.string.str = const_cast<char *>(NORMAL_COMBINE_MARKER_VALUE);
+  value.string.len = int(strlen(NORMAL_COMBINE_MARKER_VALUE)) + 1;
+  value.string.subtype = IDP_STRING_SUB_UTF8;
+  IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, NODE_GROUP_MARKER_PROP));
+}
 
 bool BKE_paint_material_is_normal_combine_group(const bNode &node)
 {
   if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
     return false;
   }
-  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(node.id));
-  if (properties == nullptr) {
-    return false;
-  }
-  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-      properties, NORMAL_COMBINE_PROP, IDP_STRING);
-  return marker != nullptr && STREQ(IDP_string_get(marker), NORMAL_COMBINE_VALUE);
+  const char *marker = node_tree_group_marker_get(*node.id);
+  return marker != nullptr && STREQ(marker, NORMAL_COMBINE_MARKER_VALUE);
 }
 
 /** The group already in \a bmain, or null. Found by its marker, so a rename does not lose it. */
 static bNodeTree *normal_combine_group_find(Main &bmain)
 {
   for (bNodeTree &ntree : bmain.nodetrees) {
-    const IDProperty *properties = IDP_GetProperties(&ntree.id);
-    if (properties == nullptr) {
-      continue;
-    }
-    const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-        properties, NORMAL_COMBINE_PROP, IDP_STRING);
-    if (marker != nullptr && STREQ(IDP_string_get(marker), NORMAL_COMBINE_VALUE)) {
+    const char *marker = node_tree_group_marker_get(ntree.id);
+    if (marker != nullptr && STREQ(marker, NORMAL_COMBINE_MARKER_VALUE)) {
       return &ntree;
     }
   }
@@ -93,16 +112,16 @@ static void normal_combine_range_map_set(bNode &node, const float scale, const f
 bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
 {
   if (bNodeTree *existing = normal_combine_group_find(bmain)) {
+    /* A file saved before the dot scheme carries the bare name; rename it in place. Found by
+     * marker, so the name never decides which tree this is. */
+    if (!STREQ(existing->id.name + 2, NORMAL_COMBINE_TREE_NAME)) {
+      BKE_id_rename(bmain, existing->id, NORMAL_COMBINE_TREE_NAME);
+    }
     return existing;
   }
 
   bNodeTree *group = bke::node_tree_add_tree(&bmain, NORMAL_COMBINE_TREE_NAME, "ShaderNodeTree");
-  IDProperty *properties = IDP_EnsureProperties(&group->id);
-  IDPropertyTemplate value = {0};
-  value.string.str = NORMAL_COMBINE_VALUE;
-  value.string.len = int(strlen(NORMAL_COMBINE_VALUE)) + 1;
-  value.string.subtype = IDP_STRING_SUB_UTF8;
-  IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, NORMAL_COMBINE_PROP));
+  normal_combine_tree_marker_set(*group);
 
   /* Interface identifiers are handed out in creation order: `Socket_0` .. `Socket_3`. */
   group->tree_interface.add_socket(
@@ -188,7 +207,12 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
   link(*group_input, "Socket_2", *mix, "Factor_Float");
   link(*mix, "Result_Color", *group_output, "Socket_3");
 
+  /* The Mix node's `data_type` and the Vector Math nodes' `operation` were set on the storage
+   * after the nodes were created, so their socket declarations are still the defaults. Tag the
+   * whole tree and run the update now: without this the group instantiates into a shader with
+   * the wrong sockets and the node inliner asserts when EEVEE compiles a material using it. */
   BKE_ntree_update_tag_all(group);
+  BKE_ntree_update_after_single_tree_change(bmain, *group);
   return group;
 }
 

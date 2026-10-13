@@ -35,6 +35,16 @@ struct rcti;
  * colour (#BKE_paint_layers_channel_bottom_color) and every row is blended over it with its
  * opacity.
  *
+ * Alpha is not one thing. A map's own alpha is its coverage: a texel the painter left transparent
+ * shows what is below. A flat value's alpha is never coverage: the row covers by its opacity (and
+ * mask) alone, and the value's alpha only does two things -- it decides whether the row takes part
+ * (an alpha of 0 lays nothing down) and it travels, as the row's content alpha, in the result's
+ * alpha component, mixed in exactly like its colour:
+ * `a = a_below * (1 - f) + a_row * f` with `f = opacity * mask`.
+ * The result's alpha is therefore "how much of the rows' own content is present", not a coverage
+ * of the stack: consumers decide what to do with it (the float export premultiplies by it, a byte
+ * export writes it as is). The generated graph's factor follows the same rule.
+ *
  * \return false when the channel has no participating row at all.
  */
 bool BKE_paint_layers_composite_image_layers(

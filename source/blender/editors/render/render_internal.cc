@@ -39,6 +39,7 @@
 #include "BKE_main.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -916,6 +917,11 @@ static wmOperatorStatus screen_render_invoke(bContext *C, wmOperator *op, const 
 {
   /* new render clears all callbacks */
   Main *bmain = CTX_data_main(C);
+  /* Rebuild the generated trees of layered materials edited since the last event loop pass, here on
+   * the main thread before the render job starts. The worker thread runs the graph update but must
+   * not regenerate (it would touch Main while the UI uses it), so this one pass covers F12 in the
+   * same handler turn. */
+  BKE_paint_layers_regenerate_tagged(*bmain);
   ViewLayer *single_layer = nullptr;
   Render *re;
   wmJob *wm_job;

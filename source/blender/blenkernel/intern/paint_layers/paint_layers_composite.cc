@@ -93,16 +93,13 @@ static CompositeBlend layer_channel_blend(const int channel)
  */
 static bool composite_channel_linear(const Span<PaintMaterialCompositeImageLayer> image_layers,
                                      const int channel,
-                                     const int width,
-                                     const int height,
-                                     const rcti *region,
-                                     Vector<float> &r_linear)
+                                     const PaintMaterialCompositeLinearTarget &target,
+                                     const rcti *region)
 {
   float bottom_color[4];
   BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel(channel), bottom_color);
-  r_linear.resize(int64_t(width) * height * 4);
   return BKE_paint_material_composite_eval_images_linear(
-      image_layers, r_linear.data(), region, nullptr, bottom_color);
+      image_layers, target, region, nullptr, bottom_color);
 }
 
 bool BKE_paint_layers_composite_image_layers(
@@ -114,7 +111,7 @@ bool BKE_paint_layers_composite_image_layers(
   }
   for (const MaterialPaintLayer &layer : ma.paint_layers) {
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-    if (!paint_layer_channel_live(record)) {
+    if (!paint_layer_channel_contributes(record)) {
       continue;
     }
     PaintMaterialCompositeImageLayer out;
@@ -127,11 +124,7 @@ bool BKE_paint_layers_composite_image_layers(
       out.color_alpha_coverage = true;
     }
     else {
-      /* A channel with no map: a flat value. One with no coverage covers nothing, so a row nobody
-       * has painted yet drops out instead of filling the channel with its empty (black) constant. */
-      if (record->value[3] <= 0.0f) {
-        continue;
-      }
+      /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
       copy_v4_v4(out.constant_color, record->value);
       out.has_constant_color = true;
     }
@@ -161,15 +154,21 @@ bool BKE_paint_layers_composite_channel(const Material &ma,
     return false;
   }
 
-  Vector<float> linear;
-  if (!composite_channel_linear(image_layers, channel, width, height, region, linear)) {
-    return false;
-  }
-
   rcti area;
   if (!BKE_paint_material_composite_area_get(width, height, region, area)) {
     /* Nothing of the tagged region is inside the buffer; the destination is already correct. */
     return true;
+  }
+
+  /* Scratch the size of the area, never of the frame: a small refresh costs the same on any map. */
+  const int64_t area_width = BLI_rcti_size_x(&area);
+  Vector<float> linear(area_width * BLI_rcti_size_y(&area) * 4);
+  if (!composite_channel_linear(image_layers,
+                                channel,
+                                PaintMaterialCompositeLinearTarget::packed(linear, area),
+                                region))
+  {
+    return false;
   }
 
   /* The byte result is written in the channel's own colorspace: sRGB for a colour channel, data
@@ -191,9 +190,8 @@ bool BKE_paint_layers_composite_channel(const Material &ma,
                       !IMB_colormanagement_space_is_scene_linear(colorspace);
 
   uchar *pixels = r_dst.byte_data_for_write();
-  const int64_t area_width = BLI_rcti_size_x(&area);
   for (int y = area.ymin; y < area.ymax; y++) {
-    float *row = linear.data() + (int64_t(y) * width + area.xmin) * 4;
+    float *row = linear.data() + int64_t(y - area.ymin) * area_width * 4;
     if (encode) {
       IMB_colormanagement_scene_linear_to_colorspace(row, int(area_width), 1, 4, colorspace);
     }
@@ -255,22 +253,30 @@ bool BKE_paint_layers_composite_image(const Material &ma,
   if (ibuf->float_buffer.data != nullptr) {
     /* A float destination takes the linear result directly, premultiplied: that is what a float
      * ImBuf holds, and what the shader's own output compares against. */
-    Vector<float> linear;
-    ok = composite_channel_linear(image_layers, channel, width, height, region, linear);
-    if (ok) {
+    rcti area;
+    if (!BKE_paint_material_composite_area_get(width, height, region, area)) {
+      /* Nothing of the tagged region is inside the image; it is already correct. */
+      ok = true;
+    }
+    else {
+      /* Straight into the destination, no second frame-sized buffer: the area is evaluated in
+       * place and premultiplied there, and the rest of the image is never touched. */
       float *dst_pixels = ibuf->float_data_for_write();
-      rcti area;
-      if (!BKE_paint_material_composite_area_get(width, height, region, area)) {
-        BLI_rcti_init(&area, 0, 0, 0, 0);
-      }
-      for (int y = area.ymin; y < area.ymax; y++) {
-        for (int x = area.xmin; x < area.xmax; x++) {
-          const int64_t i = int64_t(y) * width + x;
-          const float alpha = linear[i * 4 + 3];
-          dst_pixels[i * 4 + 0] = linear[i * 4 + 0] * alpha;
-          dst_pixels[i * 4 + 1] = linear[i * 4 + 1] * alpha;
-          dst_pixels[i * 4 + 2] = linear[i * 4 + 2] * alpha;
-          dst_pixels[i * 4 + 3] = alpha;
+      const MutableSpan<float> storage(dst_pixels, int64_t(width) * height * 4);
+      ok = composite_channel_linear(
+          image_layers,
+          channel,
+          PaintMaterialCompositeLinearTarget::in_frame(storage, width, area),
+          region);
+      if (ok) {
+        for (int y = area.ymin; y < area.ymax; y++) {
+          float *row = dst_pixels + (int64_t(y) * width + area.xmin) * 4;
+          for (int x = 0; x < BLI_rcti_size_x(&area); x++) {
+            float *p = row + int64_t(x) * 4;
+            p[0] *= p[3];
+            p[1] *= p[3];
+            p[2] *= p[3];
+          }
         }
       }
     }
@@ -280,7 +286,7 @@ bool BKE_paint_layers_composite_image(const Material &ma,
   }
   if (ok) {
     /* The write bypasses the paint path, so nothing else tells the display buffer or the GPU copy
-     * of  dst that its pixels changed. */
+     * of \a dst that its pixels changed. */
     ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
     BKE_image_mark_dirty(&dst, ibuf);
     BKE_image_partial_update_mark_full_update(&dst);

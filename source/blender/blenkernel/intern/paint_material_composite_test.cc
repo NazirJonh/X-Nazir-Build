@@ -86,7 +86,8 @@ class PaintMaterialCompositeEvalTest : public bke::BlenderGTestBase {
                                            const int y)
   {
     Vector<float> linear(int64_t(stack.width) * stack.height * 4);
-    EXPECT_TRUE(BKE_paint_material_composite_eval_linear(stack, linear.data()));
+    EXPECT_TRUE(BKE_paint_material_composite_eval_linear(
+        stack, PaintMaterialCompositeLinearTarget::frame(linear, stack.width)));
     const float *p = linear.data() + (int64_t(y) * stack.width + x) * 4;
     return {p[0], p[1], p[2], p[3]};
   }
@@ -722,7 +723,9 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_region_leaves_the_rest_of_the_buff
   Vector<float> linear(int64_t(size) * size * 4, sentinel);
   rcti region;
   BLI_rcti_init(&region, 0, 2, 0, 2);
-  EXPECT_TRUE(BKE_paint_material_composite_eval_linear(stack, linear.data(), &region));
+  /* The target describes exactly the region: its corner, the frame's stride. */
+  EXPECT_TRUE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::in_frame(linear, size, region), &region));
   EXPECT_NEAR(linear[0], 1.0f, 1e-5f);
   EXPECT_NEAR(linear[(int64_t(1) * size + 1) * 4], 1.0f, 1e-5f);
   EXPECT_FLOAT_EQ(linear[(int64_t(3) * size + 3) * 4], sentinel);
@@ -731,7 +734,8 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_region_leaves_the_rest_of_the_buff
   /* A region outside the buffer is a no-op that still reports success. */
   Vector<float> untouched(int64_t(size) * size * 4, sentinel);
   BLI_rcti_init(&region, 100, 110, 100, 110);
-  EXPECT_TRUE(BKE_paint_material_composite_eval_linear(stack, untouched.data(), &region));
+  EXPECT_TRUE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::frame(untouched, size), &region));
   EXPECT_FLOAT_EQ(untouched[0], sentinel);
 }
 
@@ -746,7 +750,8 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_layer_of_a_different_size_is_rejec
   stack.layers.append(layer);
 
   Vector<float> linear(int64_t(size) * size * 4);
-  EXPECT_FALSE(BKE_paint_material_composite_eval_linear(stack, linear.data()));
+  EXPECT_FALSE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::frame(linear, size)));
 }
 
 TEST_F(PaintMaterialCompositeEvalTest, linear_empty_stack_is_rejected)
@@ -755,7 +760,8 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_empty_stack_is_rejected)
   stack.width = size;
   stack.height = size;
   Vector<float> linear(int64_t(size) * size * 4);
-  EXPECT_FALSE(BKE_paint_material_composite_eval_linear(stack, linear.data()));
+  EXPECT_FALSE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::frame(linear, size)));
 }
 
 TEST_F(PaintMaterialCompositeEvalTest, bottom_color_is_what_the_first_layer_blends_over)
@@ -799,7 +805,59 @@ TEST_F(PaintMaterialCompositeEvalTest, constant_layer_needs_no_buffer_and_a_bare
   /* A layer with neither a map nor a constant has nothing to composite. */
   stack.layers.append(PaintMaterialCompositeLayer());
   Vector<float> linear(int64_t(size) * size * 4);
-  EXPECT_FALSE(BKE_paint_material_composite_eval_linear(stack, linear.data()));
+  EXPECT_FALSE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::frame(linear, size)));
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, linear_target_too_small_is_refused)
+{
+  PaintMaterialCompositeStack stack;
+  stack.width = size;
+  stack.height = size;
+  PaintMaterialCompositeLayer layer;
+  layer.has_constant_color = true;
+  layer.constant_color[0] = 0.5f;
+  layer.constant_color[3] = 1.0f;
+  stack.layers.append(layer);
+
+  /* One float short of the frame: refused, and nothing is written. */
+  const float sentinel = -1.0f;
+  Vector<float> linear(int64_t(size) * size * 4 - 1, sentinel);
+  EXPECT_FALSE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::frame(linear, size)));
+  EXPECT_FLOAT_EQ(linear[0], sentinel);
+}
+
+TEST_F(PaintMaterialCompositeEvalTest, linear_packed_region_matches_full_frame)
+{
+  const int big = 300;
+  PaintMaterialCompositeStack stack;
+  stack.width = big;
+  stack.height = big;
+  PaintMaterialCompositeLayer layer;
+  layer.has_constant_color = true;
+  layer.constant_color[0] = 0.25f;
+  layer.constant_color[3] = 1.0f;
+  stack.layers.append(layer);
+
+  Vector<float> full(int64_t(big) * big * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::frame(full, big)));
+
+  /* A buffer that holds just the region, straddling a tile edge: the cost of a refresh no longer
+   * depends on the frame, and the texels are the ones of the full evaluation. */
+  rcti region;
+  BLI_rcti_init(&region, 250, 300, 250, 300);
+  Vector<float> packed(int64_t(50) * 50 * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::packed(packed, region), &region));
+  for (int y = 0; y < 50; y++) {
+    for (int x = 0; x < 50; x++) {
+      const int64_t packed_offset = (int64_t(y) * 50 + x) * 4;
+      const int64_t full_offset = (int64_t(y + 250) * big + (x + 250)) * 4;
+      EXPECT_FLOAT_EQ(packed[packed_offset], full[full_offset]) << x << "," << y;
+    }
+  }
 }
 
 TEST_F(PaintMaterialCompositeEvalTest, region_refresh_matches_the_full_evaluation)
@@ -823,13 +881,15 @@ TEST_F(PaintMaterialCompositeEvalTest, region_refresh_matches_the_full_evaluatio
   stack.layers.append(top);
 
   Vector<float> full(int64_t(big) * big * 4);
-  ASSERT_TRUE(BKE_paint_material_composite_eval_linear(stack, full.data()));
+  ASSERT_TRUE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::frame(full, big)));
 
   const float sentinel = -1.0f;
   Vector<float> partial(int64_t(big) * big * 4, sentinel);
   rcti region;
   BLI_rcti_init(&region, 250, 300, 250, 300);
-  ASSERT_TRUE(BKE_paint_material_composite_eval_linear(stack, partial.data(), &region));
+  ASSERT_TRUE(BKE_paint_material_composite_eval_linear(
+      stack, PaintMaterialCompositeLinearTarget::in_frame(partial, big, region), &region));
 
   for (int y = region.ymin; y < region.ymax; y++) {
     for (int x = region.xmin; x < region.xmax; x++) {
@@ -978,7 +1038,7 @@ class PaintMaterialCompositeStackTest : public bke::BlenderGTestBase {
     return *bke::node_find_socket(*principled, SOCK_IN, "Base Color"_ustr);
   }
 
-  /** Link the "Color" output of  from_node to the Principled Base Color input. */
+  /** Link the "Color" output of \a from_node to the Principled Base Color input. */
   void link_to_base_color(Material &ma, bNode &from_node)
   {
     bNode *principled = find_node(ma, SH_NODE_BSDF_PRINCIPLED);
@@ -1823,7 +1883,7 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
     float bottom[4];
     BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel(channel), bottom);
     EXPECT_TRUE(BKE_paint_material_composite_eval_images_linear(
-        layers, linear.data(), nullptr, nullptr, bottom));
+        layers, PaintMaterialCompositeLinearTarget::frame(linear, width), nullptr, nullptr, bottom));
     const float *p = linear.data() + (int64_t(y) * width + x) * 4;
     return {p[0], p[1], p[2], p[3]};
   }
@@ -2078,6 +2138,40 @@ TEST_F(PaintLayersCompositeTest, region_refresh_touches_only_the_region)
   EXPECT_EQ(pixel(*ibuf, 3, 3)[2], 7);
   EXPECT_EQ(pixel(*ibuf, 2, 0)[2], 7);
   IMB_freeImBuf(ibuf);
+}
+
+TEST_F(PaintLayersCompositeTest, composite_image_float_region_leaves_the_rest)
+{
+  add_paint_layer("L", add_solid_image("Map", 4, 0, 0, 0, 255, true));
+
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *dst = BKE_image_add_generated(
+      bmain, 4, 4, "Dst", 32, true, IMA_GENTYPE_BLANK, color, false, true, false);
+  ASSERT_NE(dst, nullptr);
+
+  /* A sentinel everywhere, then a region: only the region may change, and in place. */
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(dst, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  float *pixels = ibuf->float_data_for_write();
+  for (int i = 0; i < 4 * 4 * 4; i++) {
+    pixels[i] = 7.0f;
+  }
+  BKE_image_release_ibuf(dst, ibuf, lock);
+
+  rcti region;
+  BLI_rcti_init(&region, 0, 2, 0, 2);
+  ASSERT_TRUE(BKE_paint_layers_composite_image(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *dst, &region, nullptr));
+
+  ibuf = BKE_image_acquire_ibuf(dst, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  const float *p = ibuf->float_data();
+  EXPECT_FLOAT_EQ(p[3], 1.0f);                                   /* (0, 0): written. */
+  EXPECT_FLOAT_EQ(p[(int64_t(1) * 4 + 1) * 4 + 3], 1.0f);       /* (1, 1): written. */
+  EXPECT_FLOAT_EQ(p[(int64_t(3) * 4 + 3) * 4], 7.0f);           /* (3, 3): untouched. */
+  EXPECT_FLOAT_EQ(p[(int64_t(0) * 4 + 2) * 4], 7.0f);           /* (2, 0): untouched. */
+  BKE_image_release_ibuf(dst, ibuf, lock);
 }
 
 TEST_F(PaintLayersCompositeTest, constant_alpha_is_content_alpha_not_coverage)

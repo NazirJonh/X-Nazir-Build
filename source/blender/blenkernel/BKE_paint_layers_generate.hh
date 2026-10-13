@@ -120,6 +120,13 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain);
 bool BKE_paint_layers_values_sync(Material &ma);
 
 /**
+ * Tag the generated trees of \a ma (the root and every row group) so their evaluated copies pick up
+ * what #BKE_paint_layers_values_sync wrote. Only for the original material: the sync itself also
+ * runs during evaluation, where tagging would retrigger the evaluation.
+ */
+void BKE_paint_layers_values_tag_trees(Material &ma);
+
+/**
  * Take ownership of the generated tree for a copied material.
  *
  * A regular copy gets its own deep copy of the tree (a copy that shared it would change the

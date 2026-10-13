@@ -137,13 +137,26 @@ bool BKE_paint_layers_values_sync(Material &ma)
       }
       ok = values_sync_socket(ma, *iface, *socket) && ok;
     }
-    /* The row's group is a data-block of its own: the evaluated copy the shader reads is only
-     * refreshed when that tree is tagged, tagging the material alone leaves it on the old value. */
-    DEG_id_tag_update(&group_tree->id, ID_RECALC_SYNC_TO_EVAL);
   }
-  /* The instances' sockets live in the root tree, which is likewise its own data-block. */
-  DEG_id_tag_update(&root->id, ID_RECALC_SYNC_TO_EVAL);
   return ok;
+}
+
+void BKE_paint_layers_values_tag_trees(Material &ma)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return;
+  }
+  /* Every row's group is a data-block of its own, and so is the root holding their instances: the
+   * evaluated copy the shader reads is only refreshed when that tree is tagged, tagging the
+   * material alone leaves it on the old value. Kept apart from #BKE_paint_layers_values_sync,
+   * which the evaluation itself calls on an evaluated copy and must therefore tag nothing. */
+  for (bNode &node : root->nodes) {
+    if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT) {
+      DEG_id_tag_update(node.id, ID_RECALC_SYNC_TO_EVAL);
+    }
+  }
+  DEG_id_tag_update(&root->id, ID_RECALC_SYNC_TO_EVAL);
 }
 
 }  // namespace blender

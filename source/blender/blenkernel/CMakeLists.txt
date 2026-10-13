@@ -273,6 +273,7 @@ set(SRC
   intern/paint_layers/paint_layers_generate_layout.cc
   intern/paint_layers/paint_layers_generate_layout.hh
   intern/paint_layers/paint_layers_generate_regen.cc
+  intern/paint_layers/paint_layers_generate_topology.cc
   intern/paint_layers/paint_layers_generate_values.cc
   intern/paint_layers/paint_layers_target.cc
   intern/paint_material_cache_common.cc

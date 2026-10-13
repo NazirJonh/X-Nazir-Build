@@ -2533,6 +2533,13 @@ void ramp_blend(int type, float r_col[4], const float fac, const float col[4])
 void BKE_material_eval(Depsgraph *depsgraph, Material *material)
 {
   DEG_debug_print_eval(depsgraph, __func__, material->id.name, material);
+  /* Topology and values are separate: copy the description's animatable values (each row's opacity,
+   * a Fill row's constant) into the group instances' sockets of this evaluated tree, so an animated
+   * value is a uniform update and never a rebuild. This runs on the evaluated copy, whose own copy
+   * of the description carries the animated value. */
+  if (BKE_paint_layers_is_layered(*material)) {
+    BKE_paint_layers_values_sync(*material);
+  }
   GPU_material_free(&material->gpumaterial);
 }
 

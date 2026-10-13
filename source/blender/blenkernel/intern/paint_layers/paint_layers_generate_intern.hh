@@ -112,6 +112,8 @@ void topology_hash_uid(uint64_t &hash, const bUUID &uid);
 /** Store/read a 64-bit hash as two 32-bit IDProperty words (IDProperty has no 64-bit int). */
 void tree_hash_set(bNodeTree &tree, const char *low_key, const char *high_key, uint64_t hash);
 bool tree_hash_get(bNodeTree &tree, const char *low_key, const char *high_key, uint64_t &r_hash);
+/** Drop every stored topology hash of \a tree, so it reads as "changed" until a build sets one. */
+void tree_hash_clear(bNodeTree &tree);
 void tree_topology_hash_set(bNodeTree &tree, uint64_t hash);
 bool tree_topology_hash_get(bNodeTree &tree, uint64_t &r_hash);
 void tree_root_hash_set(bNodeTree &tree, uint64_t hash);

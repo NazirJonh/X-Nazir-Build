@@ -53,7 +53,10 @@ void BKE_paint_layers_tag_value_edited(Material &ma)
    * the evaluated copy the shader reads is refreshed. If the tree does not match the description's
    * values (it was hand-edited), fall back to a full regeneration rather than leaving a stale one. */
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
-  if (!BKE_paint_layers_values_sync(ma)) {
+  if (BKE_paint_layers_values_sync(ma)) {
+    BKE_paint_layers_values_tag_trees(ma);
+  }
+  else {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   }
 }

@@ -758,6 +758,9 @@ static const EnumPropertyItem spreadsheet_table_id_type_items[] = {
 #  include "BKE_nla.hh"
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_layers.hh"
+#  include "BKE_paint_layers_composite.hh"
+#  include "BKE_paint_layers_target.hh"
 #  include "BKE_paint_material_composite.hh"
 #  include "BKE_preferences.h"
 #  include "BKE_scene.hh"
@@ -2568,6 +2571,31 @@ static bUUID space_image_active_layer_id(const SpaceImage &sima)
 }
 
 /**
+ * The maps of the description row of layered \a ma that the canvas the editor is showing belongs
+ * to, indexed by #eMaterialPaintChannel. The row is found through the description alone, so a map
+ * needs no #Image::paint_layer_id.
+ *
+ * \return false when the canvas is not a map of \a ma.
+ */
+static bool space_image_layered_maps_get(Material &ma,
+                                         const SpaceImage &sima,
+                                         MutableSpan<Image *> r_maps)
+{
+  r_maps.fill(nullptr);
+  PaintLayersImageUse use;
+  if (sima.image == nullptr || !BKE_paint_layers_find_image_use(ma, *sima.image, use)) {
+    return false;
+  }
+  for (int i = 0; i < use.layer->channels_num; i++) {
+    const int channel = use.layer->channels[i].channel;
+    if (r_maps.index_range().contains(channel)) {
+      r_maps[channel] = use.layer->channels[i].image;
+    }
+  }
+  return true;
+}
+
+/**
  * Paint-slot images of the active material, deduplicated, in node order: the same set and order
  * #PAINT_OT_material_canvas_cycle steps through, so the `C` / `Shift-C` hotkey and this selector
  * never disagree about what comes next.
@@ -2667,9 +2695,12 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
       RNA_enum_item_add(&item, &totitem, &combined_item);
       continue;
     }
-    const bool resolvable = bmain != nullptr &&
-                            BKE_paint_material_composite_stack_from_material(
-                                *bmain, *ma, pass, composite_layers);
+    const bool resolvable =
+        bmain != nullptr && (BKE_paint_layers_is_layered(*ma) ?
+                                 BKE_paint_layers_composite_image_layers(
+                                     *ma, pass, composite_layers) :
+                                 BKE_paint_material_composite_stack_from_material(
+                                     *bmain, *ma, pass, composite_layers));
     EnumPropertyItem pass_item{};
     pass_item.value = space_image_canvas_pass_value(pass);
     pass_item.identifier = identifiers->pass_identifier;
@@ -2681,15 +2712,24 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
   }
 
   /* Section 2: one map of the active layer, which is what a stroke actually writes into. */
-  const bUUID layer_id = space_image_active_layer_id(*static_cast<SpaceImage *>(ptr->data));
-  if (BLI_uuid_is_nil(layer_id) || bmain == nullptr) {
+  const SpaceImage &sima = *static_cast<SpaceImage *>(ptr->data);
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
+  bool has_active_layer;
+  if (BKE_paint_layers_is_layered(*ma)) {
+    has_active_layer = space_image_layered_maps_get(*ma, sima, layer_maps);
+  }
+  else {
+    const bUUID layer_id = space_image_active_layer_id(sima);
+    has_active_layer = !BLI_uuid_is_nil(layer_id) && bmain != nullptr;
+    if (has_active_layer) {
+      BKE_paint_material_layer_maps_get(*bmain, *ma, layer_id, layer_maps);
+    }
+  }
+  if (!has_active_layer) {
     RNA_enum_item_end(&item, &totitem);
     *r_free = true;
     return item;
   }
-
-  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
-  BKE_paint_material_layer_maps_get(*bmain, *ma, layer_id, layer_maps);
 
   EnumPropertyItem layer_heading{};
   layer_heading.identifier = "";

@@ -181,25 +181,7 @@ bool BKE_paint_layers_composite_channel(const Material &ma,
         &r_dst, IMB_colormanagement_role_colorspace_name_get(role));
   }
 
-  /* Encode into the buffer's own colorspace, so the preview and a saved map are the same pixels. */
-  const char *colorspace_name = IMB_colormanagement_get_byte_colorspace(&r_dst);
-  const ColorSpace *colorspace = (colorspace_name != nullptr) ?
-                                     IMB_colormanagement_space_get_named(colorspace_name) :
-                                     nullptr;
-  const bool encode = colorspace != nullptr && !IMB_colormanagement_space_is_data(colorspace) &&
-                      !IMB_colormanagement_space_is_scene_linear(colorspace);
-
-  uchar *pixels = r_dst.byte_data_for_write();
-  for (int y = area.ymin; y < area.ymax; y++) {
-    float *row = linear.data() + int64_t(y - area.ymin) * area_width * 4;
-    if (encode) {
-      IMB_colormanagement_scene_linear_to_colorspace(row, int(area_width), 1, 4, colorspace);
-    }
-    uchar *out = pixels + (int64_t(y) * width + area.xmin) * 4;
-    for (int64_t i = 0; i < area_width * 4; i++) {
-      out[i] = uchar(clamp_i(int(row[i] * 255.0f + 0.5f), 0, 255));
-    }
-  }
+  BKE_paint_material_composite_linear_to_byte(linear, area, r_dst);
 
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     composite_normal_channel_normalize(r_dst, region);

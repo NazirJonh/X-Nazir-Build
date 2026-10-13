@@ -249,6 +249,11 @@ struct TileColorspaceProcessor : NonCopyable {
 struct ImageData : NonCopyable {
   Image *image = nullptr;
   ImageUser *image_user = nullptr;
+  /**
+   * The user #image_user points at when the caller had none: a layered material's map carries no
+   * per-node #ImageUser. Lives here so the pointer stays valid as long as the buffers do.
+   */
+  ImageUser owned_image_user = {};
 
   Map<bke::image::TileNumber, ImBuf *> buffers = {};
   Map<bke::image::TileNumber, TileColorspaceProcessor> processors = {};

@@ -439,6 +439,74 @@ class TestPaintLayerIdOldFile(unittest.TestCase):
         self.skipTest("pre-field fixture not yet added")
 
 
+class TestLayeredPaintTarget(unittest.TestCase):
+    """A layered material paints into the active row's channel maps, not into graph nodes."""
+
+    def _new_layered_object(self, name):
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        generate_monkey(BackendType.MESH)
+        ob = bpy.context.active_object
+
+        mat = bpy.data.materials.new(name)
+        ob.data.materials.append(mat)
+        row = mat.paint_layers.new(name="Row")
+        self.assertTrue(mat.is_layered)
+        self.assertEqual(mat.paint_layers.active, row)
+
+        bpy.context.tool_settings.paint_mode.canvas_source = 'MATERIAL'
+
+        brush = bpy.data.brushes.new(name + "Brush", mode='SCULPT')
+        brush.sculpt_brush_type = 'PAINT'
+        brush.strength = 1.0
+        bpy.context.tool_settings.sculpt.brush = brush
+        self.addCleanup(bpy.data.brushes.remove, brush)
+        self.assertEqual(bpy.ops.paint.material_paint_brush_ensure(), {'FINISHED'})
+        return mat, row, brush
+
+    @staticmethod
+    def _record(row, channel):
+        return {c.channel: c for c in row.channels}[channel]
+
+    def test_no_per_channel_image_binding_is_left(self):
+        # The description is the only source of what a channel paints into.
+        paint_mode = bpy.context.tool_settings.paint_mode
+        self.assertFalse(hasattr(paint_mode, "channel_image_bindings"))
+
+    def test_create_pbr_paint_maps_grows_the_row(self):
+        mat, row, brush = self._new_layered_object("LayeredEnsureMat")
+        channels = {c.channel: c for c in brush.material_paint.channels}
+        channels['ROUGHNESS'].use = True
+
+        self.assertIsNone(self._record(row, 'ROUGHNESS').image)
+        self.assertEqual(bpy.ops.paint.material_paint_images_ensure(), {'FINISHED'})
+
+        image = self._record(row, 'ROUGHNESS').image
+        self.assertIsNotNone(image)
+        # The map belongs to the description: no layer id tags it.
+        self.assertEqual(image.paint_layer_id, "")
+        # Asked again, the same map answers and nothing new is created.
+        n_images = len(bpy.data.images)
+        bpy.ops.paint.material_paint_images_ensure()
+        self.assertEqual(len(bpy.data.images), n_images)
+        self.assertEqual(self._record(row, 'ROUGHNESS').image, image)
+
+    def test_sculpt_stroke_writes_the_active_rows_map(self):
+        mat, row, brush = self._new_layered_object("LayeredStrokeMat")
+        metallic = brush.material_paint.channels[METALLIC_CHANNEL_INDEX]
+        metallic.use = True
+        metallic.value = (1.0, 0.0, 0.0)
+
+        bpy.ops.object.mode_set(mode='SCULPT')
+        _paint_stroke()
+
+        image = self._record(row, 'METALLIC').image
+        self.assertIsNotNone(image, "the first stroke did not create the row's map")
+        # A fresh record is transparent and the map starts that way; the stroke gives it coverage.
+        self.assertGreater(max(image.pixels[0::4]), 0.5)
+        # Nothing was minted outside the description.
+        self.assertIsNone(_find_metallic_image())
+
+
 class TestChannelSourceLifecycle(unittest.TestCase):
     def setUp(self):
         self.brush = bpy.data.brushes.new("LifecycleTest", mode='SCULPT')
@@ -511,6 +579,7 @@ if __name__ == "__main__":
     suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerId))
     suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdCreation))
     suite.addTests(loader.loadTestsFromTestCase(TestPaintLayerIdOldFile))
+    suite.addTests(loader.loadTestsFromTestCase(TestLayeredPaintTarget))
     suite.addTests(loader.loadTestsFromTestCase(TestChannelSourceLifecycle))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():

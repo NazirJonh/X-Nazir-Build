@@ -55,7 +55,9 @@
 #include "BKE_material.hh"
 #include "BKE_name_matching.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
@@ -1821,11 +1823,33 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
     return OPERATOR_FINISHED;
   }
 
-  if (sima->image != nullptr && !BLI_uuid_is_nil(sima->image->paint_layer_id)) {
-    /* A map of a paint layer: step through that layer's other maps, in the order the selector
-     * lists them, skipping the channels the layer does not author. */
-    std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
-    BKE_paint_material_layer_maps_get(*bmain, *ma, sima->image->paint_layer_id, layer_maps);
+  /* A map of a paint layer: a layered material finds it through its description, any other
+   * through the layer id the map is tagged with. */
+  std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> layer_maps;
+  bool is_layer_map = false;
+  if (sima->image != nullptr) {
+    if (BKE_paint_layers_is_layered(*ma)) {
+      PaintLayersImageUse use;
+      if (BKE_paint_layers_find_image_use(*ma, *sima->image, use)) {
+        layer_maps.fill(nullptr);
+        for (int i = 0; i < use.layer->channels_num; i++) {
+          const int channel = use.layer->channels[i].channel;
+          if (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) {
+            layer_maps[channel] = use.layer->channels[i].image;
+          }
+        }
+        is_layer_map = true;
+      }
+    }
+    else if (!BLI_uuid_is_nil(sima->image->paint_layer_id)) {
+      BKE_paint_material_layer_maps_get(*bmain, *ma, sima->image->paint_layer_id, layer_maps);
+      is_layer_map = true;
+    }
+  }
+
+  if (is_layer_map) {
+    /* Step through that layer's other maps, in the order the selector lists them, skipping the
+     * channels the layer does not author. */
 
     Vector<Image *> present;
     for (const int role : BKE_paint_material_composite_passes()) {

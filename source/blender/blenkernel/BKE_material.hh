@@ -165,6 +165,17 @@ MaterialGPencilStyle *BKE_gpencil_material_settings(Object *ob, short act);
 
 void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *ob);
 void BKE_texpaint_slots_refresh_object(Scene *scene, Object *ob);
+
+/**
+ * The #eMaterialPaintChannel a paint slot of a layered material stands for, or -1 for an index
+ * outside the slots.
+ *
+ * A layered material's slots are not read from its node tree: there is one per image-paint channel,
+ * in the channel table order, holding the active row's map for it (empty while the row has none).
+ * The index is therefore a pure function of the channel, and the active slot
+ * (#Material::paint_active_slot) names the channel a single-target Texture Paint stroke writes.
+ */
+int BKE_paint_layers_texpaint_slot_channel(int slot_index);
 std::pair<bNodeTree *, bNode *> BKE_texpaint_slot_material_find_node(Material *ma,
                                                                      short texpaint_slot);
 

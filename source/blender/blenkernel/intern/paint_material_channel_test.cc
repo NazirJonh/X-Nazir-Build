@@ -21,6 +21,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -603,62 +604,90 @@ TEST_F(PaintMaterialChannelTest, no_material_or_no_principled_not_found)
       *ob, PAINT_MATERIAL_CHANNEL_CUSTOM, &resolved_image, &resolved_iuser));
 }
 
-TEST_F(PaintMaterialChannelTest, channel_image_binding_overrides_principled_resolution)
+TEST_F(PaintMaterialChannelTest, layered_material_resolves_the_active_row_map)
 {
-  Object *ob = add_mesh_object("ImageBindingOb");
-  Image *layer_image = add_image("LayerImage");
+  Object *ob = add_mesh_object("LayeredResolveOb");
+  Material *ma = add_material_with_principled(*ob, "LayeredResolveMat");
+  Image *map = add_image("RowMap");
 
-  PaintModeSettings mode_settings{};
-  mode_settings.channel_image_bindings[PAINT_MATERIAL_CHANNEL_METALLIC].image = layer_image;
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *row);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, row, PAINT_MATERIAL_CHANNEL_METALLIC, map));
+  BKE_paint_layers_active_set(*ma, row->marker);
 
   Image *resolved_image = nullptr;
   ImageUser *resolved_iuser = nullptr;
-  /* No material assigned at all - the override must still resolve, since it bypasses the
-   * Principled BSDF socket lookup entirely instead of falling back to it. */
   EXPECT_TRUE(BKE_paint_principled_channel_image_get(
-      *ob, PAINT_MATERIAL_CHANNEL_METALLIC, &resolved_image, &resolved_iuser, &mode_settings));
-  EXPECT_EQ(resolved_image, layer_image);
-  EXPECT_EQ(resolved_iuser,
-            &mode_settings.channel_image_bindings[PAINT_MATERIAL_CHANNEL_METALLIC].iuser);
+      *ob, PAINT_MATERIAL_CHANNEL_METALLIC, &resolved_image, &resolved_iuser));
+  EXPECT_EQ(resolved_image, map);
+  /* A description map carries no per-node #ImageUser. */
+  EXPECT_EQ(resolved_iuser, nullptr);
 
-  /* A different channel's override must not leak into this one. */
+  /* A channel the row takes but has no map for yet is not a target, and another channel's map does
+   * not leak into it. */
   Image *other_image = nullptr;
   ImageUser *other_iuser = nullptr;
-  EXPECT_FALSE(BKE_paint_principled_channel_image_get(*ob,
-                                                       PAINT_MATERIAL_CHANNEL_ROUGHNESS,
-                                                       &other_image,
-                                                       &other_iuser,
-                                                       &mode_settings));
-
-  /* Without a mode_settings argument, the override is never consulted - every pre-existing call
-   * site keeps its old (socket-only) behavior. */
-  Image *unaware_image = nullptr;
-  ImageUser *unaware_iuser = nullptr;
   EXPECT_FALSE(BKE_paint_principled_channel_image_get(
-      *ob, PAINT_MATERIAL_CHANNEL_METALLIC, &unaware_image, &unaware_iuser));
+      *ob, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &other_image, &other_iuser));
+  EXPECT_EQ(other_image, nullptr);
+
+  /* Switching the record off keeps the map in the description but takes it out of the stroke. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, row, PAINT_MATERIAL_CHANNEL_METALLIC, false));
+  EXPECT_FALSE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_METALLIC, &resolved_image, &resolved_iuser));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, row, PAINT_MATERIAL_CHANNEL_METALLIC, true));
+  EXPECT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_METALLIC, &resolved_image, &resolved_iuser));
+
+  /* With no active row there is nothing to paint into. */
+  BKE_paint_layers_active_set(*ma, {});
+  EXPECT_FALSE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_METALLIC, &resolved_image, &resolved_iuser));
 }
 
-TEST_F(PaintMaterialChannelTest, channel_image_binding_skips_auto_creation)
+TEST_F(PaintMaterialChannelTest, layered_material_ensure_grows_the_row_not_the_node_tree)
 {
-  Object *ob = add_mesh_object("ImageBindingEnsureOb");
-  Material *ma = add_material_with_principled(*ob, "ImageBindingEnsureMat");
-  Image *layer_image = add_image("LayerImageEnsure");
+  Object *ob = add_mesh_object("LayeredEnsureOb");
+  Material *ma = add_material_with_principled(*ob, "LayeredEnsureMat");
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *row);
+  BKE_paint_layers_active_set(*ma, row->marker);
+  const int records_before = row->channels_num;
 
   PaintModeSettings mode_settings{};
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
   const int visible_channels = paint_material_channel_test_default_visibility();
-  mode_settings.channel_image_bindings[PAINT_MATERIAL_CHANNEL_METALLIC].image = layer_image;
 
+  /* Specular is written by the brush but the row has no record for it: the row's channels are the
+   * user's choice, so a stroke neither adds the record nor a map. */
   BrushMaterialPaint brush_paint{};
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_SPECULAR].use = 1;
 
   const PaintMaterialImagesEnsureResult ensure_result = BKE_paint_material_images_ensure_writable(
       *bmain, *ob, brush_paint, mode_settings, visible_channels);
-  EXPECT_EQ(ensure_result.created, 0);
+  EXPECT_EQ(ensure_result.created, 1);
   EXPECT_FALSE(ensure_result.conflicting_layer_ids);
+  EXPECT_EQ(row->channels_num, records_before);
 
-  /* Overriding a channel must not wire anything into the shader graph - the Principled BSDF's
-   * Metallic socket stays exactly as unconnected as it started; any display wiring is the
-   * add-on's own responsibility. */
+  Image *metallic_map = nullptr;
+  for (int i = 0; i < row->channels_num; i++) {
+    if (row->channels[i].channel == PAINT_MATERIAL_CHANNEL_METALLIC) {
+      metallic_map = row->channels[i].image;
+    }
+  }
+  ASSERT_NE(metallic_map, nullptr);
+  /* The record is the map's only user, and no layer id tags a description map. */
+  EXPECT_EQ(metallic_map->id.us, 1);
+  EXPECT_TRUE(BLI_uuid_is_nil(metallic_map->paint_layer_id));
+
+  /* Nothing was wired into the shader graph: the Principled BSDF's Metallic socket stays exactly as
+   * unconnected as it started, since the description is what the generated group is built from. */
   bNode *principled = nullptr;
   for (bNode &node : ma->nodetree->nodes) {
     if (node.type_legacy == SH_NODE_BSDF_PRINCIPLED) {
@@ -678,14 +707,18 @@ TEST_F(PaintMaterialChannelTest, channel_image_binding_skips_auto_creation)
   }
   EXPECT_FALSE(has_link);
 
-  /* The stroke target list must resolve to the override image, not create/find a Principled
-   * one. */
+  /* The stroke target list resolves to the row's map, with no #ImageUser. */
   const Vector<PaintMaterialImageTarget> targets = BKE_paint_material_image_targets_get(
       *ob, mode_settings, &brush_paint, visible_channels);
   ASSERT_EQ(targets.size(), 1);
-  EXPECT_EQ(targets[0].image, layer_image);
-}
+  EXPECT_EQ(targets[0].image, metallic_map);
+  EXPECT_EQ(targets[0].iuser, nullptr);
 
+  /* A second call finds the map and creates nothing. */
+  const PaintMaterialImagesEnsureResult again = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+  EXPECT_EQ(again.created, 0);
+}
 TEST_F(PaintMaterialChannelTest, image_paint_layer_id_defaults_to_nil)
 {
   Image *image = add_image("LayerIdDefault");

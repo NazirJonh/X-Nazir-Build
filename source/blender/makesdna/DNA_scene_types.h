@@ -2206,20 +2206,6 @@ struct MaterialPaintChannelLayerBinding {
   char attribute_name[64] = {};
 };
 
-struct MaterialPaintChannelImageBinding {
-  DNA_DEFINE_CXX_METHODS(MaterialPaintChannelImageBinding)
-
-  /** Null = no override; the channel resolves its target Image through the Principled BSDF
-   * socket link as before (see #BKE_paint_principled_channel_image_get). Non-null = an
-   * add-on-managed Image this channel's stroke paints into instead, regardless of what (if
-   * anything) is wired into the shader graph - wiring it up for display is the add-on's
-   * responsibility, same as #MaterialPaintChannelLayerBinding does not touch the mesh's active
-   * color attribute for a redirected color channel. */
-  Image *image = nullptr;
-  /** Owned by this binding, mirroring #PaintModeSettings::image_user for #canvas_image. */
-  ImageUser iuser;
-};
-
 struct PaintModeSettings {
   /** Source to select canvas from to paint on. */
   ePaintCanvasSource canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
@@ -2247,12 +2233,6 @@ struct PaintModeSettings {
    * #MaterialPaintChannelLayerBinding); for #PAINT_MATERIAL_CHANNEL_CUSTOM, which has no built-in
    * name, this slot holds the attribute name Custom paints, configured by the user. */
   MaterialPaintChannelLayerBinding channel_layer_bindings[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
-
-  /** Per-channel target Image override, indexed by #eMaterialPaintChannel, for the
-   * #PAINT_CANVAS_SOURCE_MATERIAL (image/texture) canvas. Lets an add-on's layer stack become a
-   * channel's paint target the same way #channel_layer_bindings does for the attribute canvas.
-   * #PAINT_MATERIAL_CHANNEL_CUSTOM has no Principled socket and is never resolved through this. */
-  MaterialPaintChannelImageBinding channel_image_bindings[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
 
   /** Width/height (in pixels) used for newly auto-created per-channel material paint images.
    * \see ePaintNewChannelImageSize. */

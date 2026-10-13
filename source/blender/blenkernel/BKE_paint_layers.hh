@@ -118,6 +118,12 @@ void BKE_paint_layers_active_set(Material &ma, const bUUID &marker);
 bUUID BKE_paint_layers_active_get(const Material &ma);
 
 /**
+ * The active row of \a ma (`Material::active_layer_marker`), or null when the marker is nil or
+ * names no row.
+ */
+MaterialPaintLayer *BKE_paint_layers_active_layer_get(Material &ma);
+
+/**
  * Move \a layer relative to \a anchor in \a ma's stack.
  *
  * Same placement rules as #BKE_paint_layers_add: a null anchor appends the row on top of the stack,

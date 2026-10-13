@@ -1323,6 +1323,12 @@ struct MaterialPaintChannelInfo {
    * this flag and not test #socket_name, precisely so that the two can diverge.
    */
   bool supports_image_paint;
+  /**
+   * The `NODE_TEX_IMAGE_SLOT_*` value the Texture Slots list shows an icon for, set by the slot of
+   * a layered material that has no Image Texture node to ask. #NODE_TEX_IMAGE_SLOT_NONE for a
+   * channel without one.
+   */
+  char slot_type;
 };
 
 /**
@@ -1660,16 +1666,18 @@ float3 BKE_paint_material_channel_stroke_color_get(
 void BKE_paint_material_channel_cache_invalidate(Material *ma);
 
 /**
- * Resolves the Image Texture directly linked to the Principled BSDF input for
- * \a channel on the active material of \a ob.
+ * Resolves the map \a channel paints into on the active material of \a ob.
+ *
+ * For a layered material that is the channel map of the active row of its description (see
+ * #BKE_paint_layers_target_get), and \a r_iuser is left null: a description map has no per-node
+ * #ImageUser, the caller supplies a default one.
+ *
+ * Otherwise it is the Image Texture directly linked to the Principled BSDF input for \a channel.
  * Channels without a socket (Custom) always return false. Only a direct link is followed;
  * anything routed through an intermediate node (Math, Mix, etc.) is left alone, since there is no
  * single image such a chain could be said to paint into.
- * \param mode_settings: When given and \a channel has a non-null
- * #PaintModeSettings.channel_image_bindings entry, that Image is returned directly and the
- * Principled BSDF socket is never consulted. Null (the default) preserves the socket-only
- * resolution every existing caller relied on before this override existed.
- * \return true when \a r_image and \a r_iuser were set.
+ * \param mode_settings: Unused, kept so existing callers need no change.
+ * \return true when \a r_image was set; \a r_iuser is set for a Principled map only.
  */
 bool BKE_paint_principled_channel_image_get(Object &ob,
                                             eMaterialPaintChannel channel,
@@ -1689,7 +1697,8 @@ Image *BKE_paint_material_preferred_display_image(Object &ob);
  * Same as #BKE_paint_principled_channel_image_get, but when \a channel's Principled
  * socket exists and has no incoming link, creates a generated blank Image with the color space
  * required by the channel, adds an Image Texture node for it, and links it to the socket, then
- * returns it.
+ * returns it. Never touches a layered material, whose maps belong to its description: it only
+ * returns the map the active row already has.
  * Used by #PAINT_OT_material_paint_images_ensure and by Material-canvas stroke init when a
  * writable channel has no map yet. Created Image IDs persist if the stroke itself is undone.
  * Does nothing and returns false when there is no material, no node tree, no Principled
@@ -1697,9 +1706,8 @@ Image *BKE_paint_material_preferred_display_image(Object &ob);
  * (missing/invalid) Image Texture. Channels without a socket (Custom) always return false.
  * \param image_size: Width and height (in pixels) used for a newly created image. Ignored when
  * the channel already resolves to an existing image.
- * \param mode_settings: Forwarded to #BKE_paint_principled_channel_image_get; when \a channel has
- * an image override, it is returned as-is and nothing is created or wired into the shader graph.
- * \return true when \a r_image and \a r_iuser were set.
+ * \param mode_settings: Forwarded to #BKE_paint_principled_channel_image_get.
+ * \return true when \a r_image was set.
  */
 bool BKE_paint_principled_channel_image_ensure(Main &bmain,
                                                Object &ob,
@@ -1723,10 +1731,13 @@ struct PaintMaterialImagesEnsureResult {
 };
 
 /**
- * Create missing Principled maps for every channel this brush currently writes to. Channels with
- * a #PaintModeSettings.channel_image_bindings override never create anything - the add-on manages
- * that Image's lifetime itself. Maps created in one call are tagged with a single
- * #Image::paint_layer_id (see the spec).
+ * Create missing Principled maps for every channel this brush currently writes to. Maps created in
+ * one call are tagged with a single #Image::paint_layer_id (see the spec).
+ *
+ * A layered material grows its description instead: the active row gets a map for every channel
+ * the brush writes and the row has a record for (a record that is switched off, or a channel the row
+ * lacks, is left alone). No #Image::paint_layer_id is written: the map's owner is the description.
+ * This is an ID creation, so it runs in a stroke's invoke, inside the stroke's undo group.
  */
 PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     Main &bmain,
@@ -1744,8 +1755,8 @@ PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
  * it" -- and passes that mask here, so override channels the brush does not write still get their
  * maps created. The brush version above computes its mask the same way and delegates.
  *
- * The layer-aware resolution and the MASK target mode hook into the internal function this
- * forwards to when Stack Layers merge; keep this entry point alongside it.
+ * A layered material is handled in the internal function this forwards to, so the brush and the
+ * shape path agree on it.
  */
 PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable_for_channels(
     Main &bmain, Object &ob, PaintModeSettings &mode_settings, uint32_t channel_mask);
@@ -1764,6 +1775,7 @@ void BKE_paint_material_enable_added_visible_channels(Paint &paint, int added_ch
 struct PaintMaterialImageTarget {
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
   Image *image = nullptr;
+  /** Null for a layered material's map: a description carries no per-node #ImageUser. */
   ImageUser *iuser = nullptr;
   float value = 0.0f;
   float color[3] = {0.0f, 0.0f, 0.0f};
@@ -1773,7 +1785,8 @@ struct PaintMaterialImageTarget {
 
 /**
  * Collects enabled channels that successfully resolve to a target Image on \a ob - either a
- * Principled Image Texture, or an add-on's #PaintModeSettings.channel_image_bindings override.
+ * Principled Image Texture, or the active row's channel map of a layered material (whose
+ * #PaintMaterialImageTarget::iuser is null).
  * Missing maps are skipped. Channels without a socket (Custom) are never included.
  * Order follows #BKE_paint_material_channels.
  * When \a brush_paint is null, returns an empty list (no channels enabled).
@@ -1796,7 +1809,7 @@ Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(
  * merge; unused in this tree (there are no mask targets yet), declared now so the signature does
  * not change at the merge point.
  *
- * As in the brush version, only a direct Image Texture link / add-on binding resolves; missing
+ * As in the brush version, only a direct Image Texture link or a layered row's map resolves; missing
  * maps are skipped and channels without a socket (Custom) are never included.
  */
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get_for_channels(

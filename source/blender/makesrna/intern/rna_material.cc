@@ -488,11 +488,7 @@ static void rna_Material_paint_layers_begin(CollectionPropertyIterator *iter, Po
 static PointerRNA rna_Material_paint_layers_active_get(PointerRNA *ptr)
 {
   Material *ma = static_cast<Material *>(ptr->data);
-  const bUUID marker = BKE_paint_layers_active_get(*ma);
-  if (BLI_uuid_is_nil(marker)) {
-    return PointerRNA_NULL;
-  }
-  MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, marker);
+  MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*ma);
   if (layer == nullptr) {
     return PointerRNA_NULL;
   }

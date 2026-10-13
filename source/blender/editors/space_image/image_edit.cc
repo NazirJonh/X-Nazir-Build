@@ -27,6 +27,9 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
@@ -283,6 +286,13 @@ static bool space_image_composite_material_contains(
     const Image &image,
     Vector<PaintMaterialCompositeImageLayer> &layers)
 {
+  /* A layered material answers from its description alone: a map belongs to the row whose channels
+   * hold it, so there is no graph to walk and no stored back-pointer to trust. */
+  if (BKE_paint_layers_is_layered(ma)) {
+    PaintLayersImageUse use;
+    return BKE_paint_layers_find_image_use(ma, image, use);
+  }
+
   /* A map that is part of a layer without being wired into the graph -- a baked Ambient Occlusion
    * map, a layer mask -- is recognized through the layer it is tagged with rather than by asking
    * for its own channel. Asking would make this loop derive every channel from the layer tags for
@@ -496,7 +506,11 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   }
 
   Vector<PaintMaterialCompositeImageLayer> layers;
-  if (!BKE_paint_material_composite_stack_from_material(*bmain, *ma, pass, layers)) {
+  const bool has_stack = BKE_paint_layers_is_layered(*ma) ?
+                             BKE_paint_layers_composite_image_layers(*ma, pass, layers) :
+                             BKE_paint_material_composite_stack_from_material(
+                                 *bmain, *ma, pass, layers);
+  if (!has_stack) {
     return nullptr;
   }
   const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);

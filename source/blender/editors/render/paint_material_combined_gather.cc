@@ -17,6 +17,8 @@
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -329,8 +331,13 @@ ImBuf *combined_preview_ensure(Main &bmain,
   std::array<Vector<PaintMaterialCompositeImageLayer>, combined_shading_channels.size()> stacks;
   std::array<bool, combined_shading_channels.size()> has_stack;
   for (const int i : IndexRange(int64_t(combined_shading_channels.size()))) {
-    has_stack[i] = BKE_paint_material_composite_stack_from_material(
-        bmain, ma, combined_shading_channels[i], stacks[i]);
+    /* A layered material is read from its description: its generated tree is not a Mix chain the
+     * graph walk could follow. */
+    has_stack[i] = BKE_paint_layers_is_layered(ma) ?
+                       BKE_paint_layers_composite_image_layers(
+                           ma, combined_shading_channels[i], stacks[i]) :
+                       BKE_paint_material_composite_stack_from_material(
+                           bmain, ma, combined_shading_channels[i], stacks[i]);
   }
 
   /* The canonical size is the first channel that resolves to a layer stack or to a direct image,

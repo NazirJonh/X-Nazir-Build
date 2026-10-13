@@ -39,6 +39,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "ED_paint.hh"
@@ -127,10 +128,19 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
 {
   CloneStrokeTargets targets;
 
+  /* The layers of a layered material are the rows of its description; their maps are read from it
+   * directly, so no layer id tag and no graph walk is involved. */
+  const bool layered = BKE_paint_layers_is_layered(material);
+
   /* Step 1: discover layer IDs via wired composite stacks of visible channels.
    * A tag-only layer with no wired channel is picked up by the fallback scan below. */
   Vector<bUUID> layer_ids;
-  for (int ch = 0; ch < PAINT_MATERIAL_CHANNEL_NUM; ch++) {
+  if (layered) {
+    for (const MaterialPaintLayer &row : material.paint_layers) {
+      layer_ids.append(row.marker);
+    }
+  }
+  for (int ch = 0; ch < PAINT_MATERIAL_CHANNEL_NUM && !layered; ch++) {
     if ((visible_material_channels & (1 << ch)) == 0) {
       continue;
     }
@@ -154,7 +164,7 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
   /* Fallback: if no wired stack resolved (e.g. tag-only AO/mask layers), scan all images
    * for non-nil layer IDs whose channel role is visible. These are file-global IDs, so
    * restrict to images that actually carry a visible channel role. */
-  if (layer_ids.is_empty()) {
+  if (layer_ids.is_empty() && !layered) {
     for (Image &image : const_cast<Main &>(bmain).images) {
       if (BLI_uuid_is_nil(image.paint_layer_id)) {
         continue;
@@ -179,7 +189,25 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
      * and whose default constructor gives an EMPTY array) — same pattern as paint_ops.cc. */
     std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> maps;
     maps.fill(nullptr);
-    BKE_paint_material_layer_maps_get(bmain, material, layer_id, maps);
+    if (layered) {
+      for (const MaterialPaintLayer &row : material.paint_layers) {
+        if (!BLI_uuid_equal(row.marker, layer_id)) {
+          continue;
+        }
+        for (int i = 0; i < row.channels_num; i++) {
+          const MaterialPaintLayerChannel &record = row.channels[i];
+          /* A switched-off record keeps its map in the file but is not a paint target. */
+          if (record.state == MA_PAINT_LAYER_CHANNEL_ENABLED && record.channel >= 0 &&
+              record.channel < PAINT_MATERIAL_CHANNEL_NUM)
+          {
+            maps[record.channel] = record.image;
+          }
+        }
+      }
+    }
+    else {
+      BKE_paint_material_layer_maps_get(bmain, material, layer_id, maps);
+    }
 
     CloneLayerTarget layer_target;
     layer_target.layer_id = layer_id;

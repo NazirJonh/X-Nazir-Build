@@ -20,6 +20,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_rect.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include <cfloat>
 #include <cstdlib>
@@ -31,9 +32,13 @@
 #include "BKE_layer.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_undo_system.hh"
+
+#include "BLT_translation.hh"
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -744,6 +749,10 @@ struct PaintOperation : public PaintModeData {
    * dab by dab and acts when the stroke ends -- see #ImageStrokeMethodHook. */
   std::unique_ptr<ImageStrokeMethodHook> method_hook;
 
+  /* A layered material's first-stroke map creation opened an undo group that spans the memfile
+   * step and the stroke's image undo step; closed in #ImagePaintStroke::done. */
+  bool undo_group_open = false;
+
   PaintOperation() = default;
   ~PaintOperation() override
   {
@@ -800,6 +809,93 @@ static void gradient_draw_line(bContext * /*C*/,
   }
 }
 
+/**
+ * Grow a layered material's description for the stroke about to start, wrapped in one undo group:
+ * the map creation is a memfile step and the stroke itself an image undo step, and both have to
+ * collapse into one Ctrl+Z. The group is left open for the stroke and closed in
+ * #ImagePaintStroke::done.
+ *
+ * Projection paint writes the channel of the active texture slot of every layered material the
+ * object has; the Image Editor writes the channels its brush enables on the active material, like
+ * the Sculpt Mode canvas does.
+ */
+static void texture_paint_prepare_layered_maps(bContext *C,
+                                               PaintOperation &pop,
+                                               Object *ob,
+                                               const bool is_projection)
+{
+  if (ob == nullptr) {
+    return;
+  }
+
+  Vector<Material *> materials;
+  if (is_projection) {
+    for (int slot = 1; slot <= ob->totcol; slot++) {
+      Material *ma = BKE_object_material_get(ob, short(slot));
+      if (ma != nullptr && BKE_paint_layers_is_layered(*ma) && !materials.contains(ma)) {
+        materials.append(ma);
+      }
+    }
+  }
+  else if (Material *ma = BKE_paint_layers_active_material_get(ob)) {
+    materials.append(ma);
+  }
+  if (materials.is_empty()) {
+    return;
+  }
+
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+
+  ED_undo_group_begin(C);
+  int created = 0;
+  if (is_projection) {
+    for (Material *ma : materials) {
+      const int channel = BKE_paint_layers_texpaint_slot_channel(ma->paint_active_slot);
+      PaintLayersTarget target;
+      if (channel < 0 || !BKE_paint_layers_target_get(*ma, channel, target)) {
+        continue;
+      }
+      if (BKE_paint_layers_target_image(target) != nullptr) {
+        continue;
+      }
+      /* The slot names a channel the user chose to paint, so a row that has no record for it yet
+       * gets one together with the map. */
+      if (BKE_paint_layers_target_ensure_writable(
+              *bmain, target, paint_mode.new_channel_image_size) != nullptr)
+      {
+        created++;
+      }
+    }
+  }
+  else {
+    const Brush *brush = BKE_paint_brush(&scene->toolsettings->imapaint.paint);
+    if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL && brush != nullptr &&
+        brush->material_paint != nullptr)
+    {
+      created = BKE_paint_material_images_ensure_writable(
+                    *bmain,
+                    *ob,
+                    *brush->material_paint,
+                    paint_mode,
+                    scene->toolsettings->imapaint.paint.visible_material_channels)
+                    .created;
+    }
+  }
+  if (created > 0) {
+    ED_undo_push(C, RPT_("Add Layer Maps"));
+    pop.undo_group_open = true;
+  }
+  else {
+    ED_undo_group_end(C);
+  }
+  /* The slots mirror the active rows' maps. Switching a row only moves a marker, and a map that
+   * already exists creates nothing here, so they are rebuilt for every stroke -- otherwise the
+   * stroke lands in whatever the previous target was. */
+  BKE_texpaint_slots_refresh_object(scene, ob);
+}
+
 static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
                                                           wmOperator *op,
                                                           const float mouse[2])
@@ -854,8 +950,14 @@ static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
     }
   }
 
+  texture_paint_prepare_layered_maps(C, *pop, ob, CTX_wm_region_view3d(C) != nullptr);
+
   pop->stroke_handle = pop->mode->paint_new_stroke(C, op, ob, mouse, mode, brush_switch_mode);
   if (!pop->stroke_handle) {
+    if (pop->undo_group_open) {
+      ED_undo_group_end(C);
+      pop->undo_group_open = false;
+    }
     return nullptr;
   }
 
@@ -1064,6 +1166,13 @@ void ImagePaintStroke::done(const bool is_cancel, const bool stroke_started)
 
   if (!undo_step_taken_over && !is_cancel) {
     ED_image_undo_push_end();
+  }
+
+  /* Close the first-stroke group on every exit, cancel included: the stroke's undo step and the
+   * map-creation memfile step become one Ctrl+Z. */
+  if (pop->undo_group_open) {
+    ED_undo_group_end(this->evil_C);
+    pop->undo_group_open = false;
   }
 
 /* duplicate warning, see texpaint_init */

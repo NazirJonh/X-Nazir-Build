@@ -35,6 +35,11 @@
 
 namespace blender {
 
+namespace ocio {
+class ColorSpace;
+}
+using ColorSpace = ocio::ColorSpace;
+
 struct ImBuf;
 struct Image;
 struct Main;
@@ -51,11 +56,6 @@ struct rcti;
  * formula for. A chain using any other mode is not expressible as a stack and falls to the bake
  * instead of being approximated here.
  *
- * \note The reproduction is exact for a Non-Color channel -- Roughness, Metallic, a normal map --
- * whose bytes are the values the shader mixes. It is an approximation for a color-managed one:
- * Base Color and Emission are mixed here in the buffers' own encoding and by the shader in scene
- * linear, which agree at factor 0 and 1 and diverge in between by as much as the transfer function
- * is non-linear. See #blend_layer_byte.
  */
 enum class CompositeBlend : int8_t {
   Mix = 0,
@@ -165,21 +165,6 @@ struct PaintMaterialCompositeEvalStats {
 };
 
 /**
- * Composite \a stack bottom to top into \a composite_ibuf, which must be byte RGBA of the stack's
- * dimensions.
- *
- * \param region: when given, only this rectangle is recomputed and the rest of \a composite_ibuf
- *                is left as it was. Clipped to the buffer. This is the whole point of compositing
- *                on the CPU: a dab touches a few thousand pixels, and refreshing only those keeps
- *                the cost of a stroke independent of the canvas resolution.
- * \return false when the stack is empty, dimensions disagree, or a buffer is unusable.
- */
-bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
-                                       ImBuf *composite_ibuf,
-                                       const rcti *region = nullptr,
-                                       PaintMaterialCompositeEvalStats *r_stats = nullptr);
-
-/**
  * The part of a \a width x \a height buffer an evaluation has to write into \a r_area: all of it, or
  * \a region clipped to it.
  *
@@ -220,12 +205,14 @@ struct PaintMaterialCompositeLinearTarget {
  *
  * Every source sample is first decoded out of its own buffer's colorspace (see the layers'
  * `*_colorspace_name`), then the rows are mixed in scene linear the way the shader mixes them; a
- * premultiplied float buffer is straightened before it is read. Unlike #BKE_paint_material_composite_eval
- * this accepts float buffers and constant layers, starts from the stack's bottom colour and does
- * no encoding: that is the caller's job when it writes a byte map.
+ * premultiplied float buffer is straightened before it is read. Byte and float buffers and
+ * constant layers are accepted, the evaluation starts from the stack's bottom colour and does no
+ * encoding: that is the caller's job when it writes a byte map.
  *
- * \param region: when given, only this rectangle (clipped to the frame) is written; \a target has
- *                to describe exactly that area. Same contract as the byte evaluation.
+ * \param region: when given, only this rectangle (clipped to the frame) is written and the rest of
+ *                the frame is left alone; \a target has to describe exactly that area. A dab
+ *                touches a few thousand pixels, so refreshing only those keeps the cost of a
+ *                stroke independent of the canvas resolution.
  * \return false when the stack is empty, dimensions disagree, a buffer is unusable or \a target is
  *         too small for the area.
  */
@@ -250,16 +237,41 @@ bool BKE_paint_material_composite_eval_images_linear(
     const float bottom_color[4] = nullptr);
 
 /**
+ * Whether scene-linear values must be converted to or from \a colorspace: it is a known colour
+ * space that is neither a data space nor scene linear. False for null.
+ */
+bool BKE_paint_material_composite_colorspace_is_converted(const ColorSpace *colorspace);
+
+/**
+ * Write the scene-linear \a linear result of an evaluation as bytes into \a r_dst.
+ *
+ * \a linear holds exactly \a area, rows packed (see #PaintMaterialCompositeLinearTarget::packed);
+ * it is encoded in place into \a r_dst's own colorspace first, so a preview and a saved map are the
+ * same pixels. Only \a area of \a r_dst is written. \a linear is clobbered.
+ */
+void BKE_paint_material_composite_linear_to_byte(MutableSpan<float> linear,
+                                                 const rcti &area,
+                                                 ImBuf &r_dst);
+
+/**
  * Acquire every layer's buffer, evaluate, and release the locks again.
+ *
+ * The evaluation is the linear one (#BKE_paint_material_composite_eval_linear): every source is
+ * decoded out of its own colorspace, float buffers and constant layers are accepted, and the result
+ * is encoded into \a composite_ibuf's colorspace with #BKE_paint_material_composite_linear_to_byte.
+ * The scratch is the size of the area written, never of the frame.
  *
  * The layer images are acquired for the duration of the evaluation only. Nothing is written back
  * to them, so a caller holding no lock of its own is safe here.
+ *
+ * \param bottom_color: the value the stack starts from, or null to start transparent.
  */
 bool BKE_paint_material_composite_eval_images(
     Span<PaintMaterialCompositeImageLayer> image_layers,
     ImBuf *composite_ibuf,
     const rcti *region = nullptr,
-    PaintMaterialCompositeEvalStats *r_stats = nullptr);
+    PaintMaterialCompositeEvalStats *r_stats = nullptr,
+    const float bottom_color[4] = nullptr);
 
 /**
  * Dimensions of the composite, taken from the bottom-most enabled layer.

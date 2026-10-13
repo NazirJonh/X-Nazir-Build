@@ -80,6 +80,8 @@
 #include "BKE_paint.hh"
 #include "BKE_sculpt_layers.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -3831,7 +3833,7 @@ int BKE_paint_face_set_find_by_custom_color(const Mesh *mesh, const float color[
  * presence of these attributes.
  */
 /* Fields in order: channel, ui_name, attribute_name, socket_name, value_min, value_max, is_color,
- * supports_vertex_paint, supports_image_paint. */
+ * supports_vertex_paint, supports_image_paint, slot_type. */
 static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
     {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
      "Base Color",
@@ -3841,7 +3843,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      true,
      true,
-     true},
+     true,
+     NODE_TEX_IMAGE_SLOT_BASE_COLOR},
     {PAINT_MATERIAL_CHANNEL_METALLIC,
      "Metallic",
      "material_metallic",
@@ -3850,7 +3853,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      true,
-     true},
+     true,
+     NODE_TEX_IMAGE_SLOT_METALLIC},
     {PAINT_MATERIAL_CHANNEL_ROUGHNESS,
      "Roughness",
      "material_roughness",
@@ -3859,7 +3863,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      true,
-     true},
+     true,
+     NODE_TEX_IMAGE_SLOT_ROUGHNESS},
     {PAINT_MATERIAL_CHANNEL_SPECULAR,
      "Specular",
      "material_specular",
@@ -3868,7 +3873,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      true,
-     true},
+     true,
+     NODE_TEX_IMAGE_SLOT_SPECULAR},
     /* Normal is authored as a tangent-space map (Image Texture -> Normal Map); a per-vertex float
      * cannot represent it, so the vertex canvas skips it. */
     {PAINT_MATERIAL_CHANNEL_NORMAL,
@@ -3879,7 +3885,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      false,
-     true},
+     true,
+     NODE_TEX_IMAGE_SLOT_NORMAL},
     /* Custom targets a user-named attribute. Image paint has no way to resolve a map for it yet -
      * it would need a user-assigned image rather than a Principled input. */
     {PAINT_MATERIAL_CHANNEL_CUSTOM,
@@ -3890,7 +3897,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      true,
-     false},
+     false,
+     NODE_TEX_IMAGE_SLOT_NONE},
     /* Height has no per-vertex display and no Principled input to resolve a map through; it needs
      * a displacement/bump target before either canvas can take it. */
     {PAINT_MATERIAL_CHANNEL_HEIGHT,
@@ -3901,7 +3909,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      false,
-     false},
+     false,
+     NODE_TEX_IMAGE_SLOT_NONE},
     {PAINT_MATERIAL_CHANNEL_ALPHA,
      "Alpha",
      "material_alpha",
@@ -3910,7 +3919,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      true,
-     true},
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE},
     /* AO has no Principled BSDF socket to resolve an image through (same as Custom). */
     {PAINT_MATERIAL_CHANNEL_AO,
      "AO",
@@ -3920,7 +3930,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      false,
      true,
-     false},
+     false,
+     NODE_TEX_IMAGE_SLOT_NONE},
     /* Emission is a color channel; is_color routes it through the generic color-attribute path. */
     {PAINT_MATERIAL_CHANNEL_EMISSION,
      "Emission",
@@ -3930,7 +3941,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      1.0f,
      true,
      false,
-     true},
+     true,
+     NODE_TEX_IMAGE_SLOT_NONE},
 };
 
 static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,
@@ -3949,10 +3961,6 @@ static_assert(sizeof(PaintModeSettings::channel_layer_bindings) /
                       sizeof(MaterialPaintChannelLayerBinding) ==
                   PAINT_MATERIAL_CHANNEL_NUM,
               "PaintModeSettings::channel_layer_bindings must have one entry per channel");
-static_assert(sizeof(PaintModeSettings::channel_image_bindings) /
-                      sizeof(MaterialPaintChannelImageBinding) ==
-                  PAINT_MATERIAL_CHANNEL_NUM,
-              "PaintModeSettings::channel_image_bindings must have one entry per channel");
 
 Span<MaterialPaintChannelInfo> BKE_paint_material_channels()
 {
@@ -4557,22 +4565,20 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
                                             eMaterialPaintChannel channel,
                                             Image **r_image,
                                             ImageUser **r_iuser,
-                                            PaintModeSettings *mode_settings)
+                                            PaintModeSettings * /*mode_settings*/)
 {
   *r_image = nullptr;
   *r_iuser = nullptr;
 
-  if (mode_settings != nullptr) {
-    BLI_assert(channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM);
-    MaterialPaintChannelImageBinding &binding = mode_settings->channel_image_bindings[channel];
-    if (binding.image != nullptr) {
-      /* An add-on-managed layer image takes over this channel's paint target, bypassing the
-       * Principled BSDF socket resolution entirely - the add-on is responsible for any shader
-       * wiring needed to display it, same contract as #channel_layer_bindings for attributes. */
-      *r_image = binding.image;
-      *r_iuser = &binding.iuser;
-      return true;
+  /* A layered material has no Principled-socket map to resolve: its target is the active row's
+   * channel map, read from the description. The cache below is only for the graph-truth path. */
+  if (Material *layered = BKE_paint_layers_active_material_get(&ob)) {
+    PaintLayersTarget target;
+    if (!BKE_paint_layers_target_get(*layered, channel, target)) {
+      return false;
     }
+    *r_image = BKE_paint_layers_target_image(target);
+    return *r_image != nullptr;
   }
 
   const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
@@ -4633,6 +4639,13 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
 {
   if (BKE_paint_principled_channel_image_get(ob, channel, r_image, r_iuser, mode_settings)) {
     return true;
+  }
+
+  /* This is the graph-truth writer: it mints Image and Image Texture nodes into
+   * Material.nodetree. A layered material owns its tree through the description, so this must
+   * never touch it; its maps are created through #BKE_paint_layers_target_ensure_writable. */
+  if (BKE_paint_layers_active_material_get(&ob) != nullptr) {
+    return false;
   }
 
   const char *socket_name = BKE_paint_material_channel_info(channel).socket_name;
@@ -4743,13 +4756,64 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
 }
 
 /**
+ * The layered material's counterpart of the graph path of
+ * #paint_material_images_ensure_writable_for_mask: the active row grows a map for every channel in
+ * \a channel_mask it takes and has none for.
+ *
+ * A layered material grows its description on the first stroke: the active row's record gets a
+ * map, with no node touched. The stroke's invoke owns the undo group around this.
+ */
+static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_mask(
+    Main &bmain, Object &ob, const PaintModeSettings &mode_settings, const uint32_t channel_mask)
+{
+  PaintMaterialImagesEnsureResult result;
+
+  /* The channels the row takes and that have no map yet. Collected first and resolved again one by
+   * one below: adding a map edits the row, and a target points into its records. */
+  Vector<int> channels;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint || (channel_mask & (1u << int(info.channel))) == 0) {
+      continue;
+    }
+    PaintLayersTarget target;
+    if (!BKE_paint_layers_target_get(ob, -1, info.channel, target)) {
+      /* No active row: nothing to paint into. */
+      return result;
+    }
+    /* Only a record the row already has takes the stroke. A row that lacks the channel, or has
+     * switched it off, is the user's choice and is left as it is. */
+    if (BKE_paint_layers_target_is_live(target) &&
+        BKE_paint_layers_target_image(target) == nullptr)
+    {
+      channels.append(info.channel);
+    }
+  }
+
+  for (const int channel : channels) {
+    PaintLayersTarget target;
+    if (!BKE_paint_layers_target_get(ob, -1, channel, target)) {
+      continue;
+    }
+    const Image *image = BKE_paint_layers_target_ensure_writable(
+        bmain, target, mode_settings.new_channel_image_size);
+    if (image != nullptr) {
+      result.created++;
+    }
+  }
+  return result;
+}
+
+/**
  * Ensure the maps for every channel in \a channel_mask (a bit mask of #eMaterialPaintChannel).
- * The shared body of both public entry points; the layer-aware resolution added when Stack Layers
- * merge hooks in here, so both the brush and the shape path get it.
+ * The shared body of both public entry points, so both the brush and the shape path get it.
  */
 static PaintMaterialImagesEnsureResult paint_material_images_ensure_writable_for_mask(
     Main &bmain, Object &ob, PaintModeSettings &mode_settings, const uint32_t channel_mask)
 {
+  if (BKE_paint_layers_active_material_get(&ob) != nullptr) {
+    return paint_layers_images_ensure_writable_for_mask(bmain, ob, mode_settings, channel_mask);
+  }
+
   BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
 
   PaintMaterialImagesEnsureResult result;

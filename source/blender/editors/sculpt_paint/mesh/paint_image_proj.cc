@@ -79,6 +79,8 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -6643,6 +6645,15 @@ bool ED_paint_proj_mesh_data_check(Scene &scene,
 
         if (ma && ID_IS_EDITABLE(ma) && !ID_IS_OVERRIDE_LIBRARY(ma)) {
           has_mat = true;
+          if (BKE_paint_layers_is_layered(*ma)) {
+            /* A layered material paints into the active row's map, which the stroke creates when
+             * it is missing: an active row is all it needs. */
+            if (BKE_paint_layers_active_layer_get(*ma) != nullptr) {
+              has_tex = true;
+              break;
+            }
+            continue;
+          }
           if (ma->texpaintslot == nullptr) {
             /* refresh here just in case */
             BKE_texpaint_slot_refresh_cache(&scene, ma, &ob);
@@ -6925,6 +6936,76 @@ static void default_paint_slot_color_get(int layer_type, Material *ma, float col
   }
 }
 
+/** The material paint channel a layer type of the Add Paint Slot dialog stands for, or -1. */
+static int proj_paint_layer_type_channel(const int type)
+{
+  switch (type) {
+    case LAYER_BASE_COLOR:
+      return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+    case LAYER_SPECULAR:
+      return PAINT_MATERIAL_CHANNEL_SPECULAR;
+    case LAYER_ROUGHNESS:
+      return PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+    case LAYER_METALLIC:
+      return PAINT_MATERIAL_CHANNEL_METALLIC;
+    case LAYER_NORMAL:
+      return PAINT_MATERIAL_CHANNEL_NORMAL;
+    default:
+      /* Bump and Displacement have no map a layered row can carry. */
+      return -1;
+  }
+}
+
+/**
+ * The "+" of a layered material: its slots are the active row's channel maps, so adding one means
+ * giving the row a map for the chosen channel instead of minting nodes.
+ */
+static bool proj_paint_add_layered_slot(bContext *C, wmOperator *op, Object &ob, Material &ma)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+
+  const int channel = proj_paint_layer_type_channel(RNA_enum_get(op->ptr, "type"));
+  if (channel < 0) {
+    BKE_report(op->reports, RPT_ERROR, "A layered material has no map for this layer type");
+    return false;
+  }
+  PaintLayersTarget target;
+  if (!BKE_paint_layers_target_get(ma, channel, target)) {
+    BKE_report(op->reports, RPT_ERROR, "Select a layer of the material before adding a map");
+    return false;
+  }
+
+  Image *image = BKE_paint_layers_target_image(target);
+  const bool created = image == nullptr;
+  if (created) {
+    image = BKE_paint_layers_target_ensure_writable(
+        *bmain, target, scene->toolsettings->paint_mode.new_channel_image_size);
+  }
+  if (image == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "The channel is switched off on the active layer");
+    return false;
+  }
+
+  /* The new map becomes the slot the next stroke paints. */
+  BKE_texpaint_slot_refresh_cache(scene, &ma, &ob);
+  for (int slot = 0; slot < ma.tot_slots; slot++) {
+    if (BKE_paint_layers_texpaint_slot_channel(slot) == channel) {
+      ma.paint_active_slot = slot;
+      break;
+    }
+  }
+
+  if (created) {
+    BKE_image_signal(bmain, image, nullptr, IMA_SIGNAL_USER_NEW_IMAGE);
+    WM_event_add_notifier(C, NC_IMAGE | NA_ADDED, image);
+    ED_space_image_sync(bmain, image, false);
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma.id);
+  ED_area_tag_redraw(CTX_wm_area(C));
+  return true;
+}
+
 static bool proj_paint_add_slot(bContext *C, wmOperator *op)
 {
   Object *ob = ed::object::context_active_object(C);
@@ -6938,6 +7019,10 @@ static bool proj_paint_add_slot(bContext *C, wmOperator *op)
   }
 
   ma = get_or_create_current_material(C, ob);
+
+  if (ma != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    return proj_paint_add_layered_slot(C, op, *ob, *ma);
+  }
 
   if (ma) {
     Main *bmain = CTX_data_main(C);

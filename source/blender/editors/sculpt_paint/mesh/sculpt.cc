@@ -74,6 +74,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_sculpt_layers.hh"
@@ -7855,6 +7856,20 @@ struct SculptPaintStroke final : public PaintStroke {
    * #layer_recording_finish after record-end and eraser disarm. */
   Map<Object *, int> layer_recording_saved_active_uid_;
 
+  /* A layered material's first stroke opened an undo group around the map creation. Closed once,
+   * from #done, so a cancel and every early return of #done share the one close. */
+  bool layer_undo_group_open_ = false;
+
+  /**
+   * Grow the active layered material's maps before the stroke's own undo step opens, wrapping the
+   * memfile step of the map creation and the stroke in one undo group. Does nothing for any other
+   * material or brush.
+   */
+  void layered_maps_ensure(bContext *C);
+
+  /** Close the first-stroke group if it is open; safe to call more than once. */
+  void layer_undo_group_close(bContext *C);
+
   SculptPaintStroke(bContext *C, wmOperator *op, const int event_type)
       : PaintStroke(C, op, event_type)
   {
@@ -7892,6 +7907,49 @@ struct SculptPaintStroke final : public PaintStroke {
   void done(bool is_cancel, bool stroke_started) override;
   void post_done(bContext *C, bool is_cancel, bool stroke_started) override;
 };
+
+void SculptPaintStroke::layered_maps_ensure(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  Brush *brush = BKE_paint_brush(&sculpt_->paint);
+  if (ob == nullptr || brush == nullptr || brush->material_paint == nullptr ||
+      brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_PAINT ||
+      paint_mode_settings_->canvas_source != PAINT_CANVAS_SOURCE_MATERIAL)
+  {
+    return;
+  }
+  if (BKE_paint_layers_active_material_get(ob) == nullptr ||
+      !sculpt_brush_uses_image_canvas(*brush, *paint_mode_settings_, sculpt_->paint, *ob))
+  {
+    return;
+  }
+
+  ED_undo_group_begin(C);
+  const PaintMaterialImagesEnsureResult result = BKE_paint_material_images_ensure_writable(
+      *bmain_,
+      *ob,
+      *brush->material_paint,
+      *paint_mode_settings_,
+      sculpt_->paint.visible_material_channels);
+  if (result.created > 0) {
+    ED_undo_push(C, RPT_("Add Layer Maps"));
+    layer_undo_group_open_ = true;
+    /* The slots mirror the active row's maps, which this just grew: a classic Texture Paint
+     * stroke reads them, so they are rebuilt now rather than left to the next mode switch. */
+    BKE_texpaint_slots_refresh_object(CTX_data_scene(C), ob);
+  }
+  else {
+    ED_undo_group_end(C);
+  }
+}
+
+void SculptPaintStroke::layer_undo_group_close(bContext *C)
+{
+  if (layer_undo_group_open_) {
+    ED_undo_group_end(C);
+    layer_undo_group_open_ = false;
+  }
+}
 
 bool SculptPaintStroke::get_location(float out[3], const float mouse[2], bool force_original)
 {
@@ -10300,6 +10358,10 @@ bool SculptPaintStroke::activate_curve_patch_target(Object &target)
 
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
+  /* One close for every path: the early return below, a cancel and the curve patch hand-offs all
+   * pass through here. */
+  this->layer_undo_group_close(this->evil_C);
+
   Sculpt &sd = *this->sculpt_;
   const Span<Object *> objects = this->multi_.mode_objects;
 
@@ -10824,6 +10886,10 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_PASS_THROUGH;
   }
 
+  /* Every early refusal is behind us; only now may the first stroke grow the description and open
+   * the undo group -- a click that misses the mesh must leave no maps and no undo step. */
+  stroke->layered_maps_ensure(C);
+
   const wmOperatorStatus retval = op->type->modal(C, op, event);
   OPERATOR_RETVAL_CHECK(retval);
 
@@ -10879,6 +10945,8 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
 
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, 0);
   op->customdata = stroke;
+
+  stroke->layered_maps_ensure(C);
 
   stroke->exec(C, op);
 

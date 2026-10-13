@@ -1,0 +1,259 @@
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup bke
+ *
+ * See #BKE_paint_layers_target.hh: the paint target of a layered material, and growing the
+ * description on the first stroke into a channel the active row has no map for yet.
+ */
+
+#include "BKE_paint_layers_target.hh"
+
+#include "BLI_index_range.hh"
+#include "BLI_listbase_iterator.hh"
+#include "BLI_math_base.h"
+#include "BLI_math_vector.h"
+#include "BLI_string.h"
+
+#include "BKE_image.hh"
+#include "BKE_lib_id.hh"
+#include "BKE_material.hh"
+#include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_material_composite.hh"
+
+#include "paint_layers_intern.hh"
+
+#include "IMB_colormanagement.hh"
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
+
+#include "DNA_image_types.h"
+#include "DNA_material_types.h"
+#include "DNA_object_types.h"
+#include "DNA_scene_types.h"
+
+namespace blender {
+
+/** The neutral a brand-new Paint map starts from: flat tangent for Normal, opaque black else. */
+static void paint_layer_channel_neutral(const int channel, float r_color[4])
+{
+  zero_v4(r_color);
+  r_color[3] = 1.0f;
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    r_color[0] = 0.5f;
+    r_color[1] = 0.5f;
+    r_color[2] = 1.0f;
+  }
+}
+
+/** Encode a scene-linear colour into \a image's stored colorspace; data colorspaces stay as is. */
+static void paint_layers_image_encode(const Image &image, float rgba[4])
+{
+  if (image.colorspace_settings.name[0] == '\0') {
+    return;
+  }
+  const ColorSpace *colorspace = IMB_colormanagement_space_get_named(image.colorspace_settings.name);
+  if (!BKE_paint_material_composite_colorspace_is_converted(colorspace)) {
+    return;
+  }
+  IMB_colormanagement_scene_linear_to_colorspace(rgba, 1, 1, 4, colorspace);
+}
+
+/** Write one solid colour into \a image's byte buffer, encoded into the image's colorspace. */
+static void paint_layers_image_fill(Image &image, const bool is_color, const float rgba[4])
+{
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  if (ibuf == nullptr) {
+    return;
+  }
+  uchar *pixels = ibuf->byte_data_for_write();
+  if (pixels != nullptr) {
+    float encoded[4];
+    copy_v4_v4(encoded, rgba);
+    if (is_color) {
+      /* The constant is scene linear; the byte buffer stores the map's colorspace. */
+      paint_layers_image_encode(image, encoded);
+    }
+    const uchar r = uchar(clamp_f(encoded[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+    const uchar g = uchar(clamp_f(encoded[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+    const uchar b = uchar(clamp_f(encoded[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+    const uchar a = uchar(clamp_f(encoded[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+    for (const int64_t i : IndexRange(int64_t(ibuf->x) * ibuf->y)) {
+      pixels[i * 4 + 0] = r;
+      pixels[i * 4 + 1] = g;
+      pixels[i * 4 + 2] = b;
+      pixels[i * 4 + 3] = a;
+    }
+  }
+  BKE_image_release_ibuf(&image, ibuf, lock);
+}
+
+static Image *paint_layers_map_create(
+    Main &bmain, const char *name, const int size, const bool is_color, const float rgba[4])
+{
+  Image *image = BKE_image_add_generated(
+      &bmain, size, size, name, 24, false, IMA_GENTYPE_BLANK, rgba, false, !is_color, false);
+  if (image == nullptr) {
+    return nullptr;
+  }
+  /* One convention for every paint-layer map: the byte buffer stays straight, so the generated
+   * graph's Image Texture alpha is the map's own coverage and the CPU composite reads it unchanged. */
+  image->alpha_mode = IMA_ALPHA_STRAIGHT;
+  image->flag |= IMA_PAINT_CANVAS;
+  paint_layers_image_fill(*image, is_color, rgba);
+  return image;
+}
+
+bool BKE_paint_layers_target_get(Material &ma, const int channel, PaintLayersTarget &r_target)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return false;
+  }
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(ma);
+  if (layer == nullptr) {
+    return false;
+  }
+  r_target = {};
+  r_target.material = &ma;
+  r_target.layer = layer;
+  r_target.channel = channel;
+  r_target.channel_record = paint_layer_channel_find(*layer, channel);
+  return true;
+}
+
+Material *BKE_paint_layers_active_material_get(Object *ob)
+{
+  if (ob == nullptr) {
+    return nullptr;
+  }
+  Material *ma = BKE_object_material_get(ob, ob->actcol);
+  return (ma != nullptr && BKE_paint_layers_is_layered(*ma)) ? ma : nullptr;
+}
+
+bool BKE_paint_layers_find_image_use(Material &ma,
+                                     const Image &image,
+                                     PaintLayersImageUse &r_use)
+{
+  for (MaterialPaintLayer &layer : ma.paint_layers) {
+    for (const int i : IndexRange(layer.channels_num)) {
+      if (layer.channels[i].image == &image) {
+        r_use.layer = &layer;
+        r_use.channel = layer.channels[i].channel;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_target_get(
+    Object &ob, const int material_slot, const int channel, PaintLayersTarget &r_target)
+{
+  /* The active slot goes through the one helper that names the active layered material; an
+   * explicit slot resolves its own material here. */
+  Material *ma = (material_slot < 0) ?
+                     BKE_paint_layers_active_material_get(&ob) :
+                     BKE_object_material_get(&ob, short(material_slot + 1));
+  if (ma == nullptr) {
+    return false;
+  }
+  return BKE_paint_layers_target_get(*ma, channel, r_target);
+}
+
+bool BKE_paint_layers_target_is_live(const PaintLayersTarget &target)
+{
+  return target.layer != nullptr && paint_layer_channel_live(target.channel_record);
+}
+
+Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
+{
+  if (!BKE_paint_layers_target_is_live(target)) {
+    return nullptr;
+  }
+  return target.channel_record->image;
+}
+
+Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
+                                               PaintLayersTarget &target,
+                                               const int image_size,
+                                               const float *new_channel_fill_linear)
+{
+  if (target.material == nullptr || target.layer == nullptr) {
+    return nullptr;
+  }
+  const eMaterialPaintChannel channel = eMaterialPaintChannel(target.channel);
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+
+  MaterialPaintLayerChannel *record = paint_layer_channel_find(*target.layer, target.channel);
+  /* A disabled record refuses writability rather than being switched back on behind the user's
+   * back: the stroke must not silently re-enable a channel the user turned off. */
+  if (record != nullptr && !paint_layer_channel_live(record)) {
+    return nullptr;
+  }
+  const bool had_record = record != nullptr;
+  if (!had_record) {
+    record = BKE_paint_layers_channel_add(*target.material, target.layer, channel);
+    if (record == nullptr) {
+      return nullptr;
+    }
+    if (new_channel_fill_linear != nullptr) {
+      copy_v4_v4(record->value, new_channel_fill_linear);
+    }
+  }
+  target.channel_record = record;
+  if (record->image != nullptr) {
+    return record->image;
+  }
+
+  /* A record the row already had carries a flat value, and the first map keeps that look; one this
+   * call had to add starts from the caller's colour or the channel's neutral. */
+  float fill[4];
+  if (had_record) {
+    copy_v4_v4(fill, record->value);
+  }
+  else if (new_channel_fill_linear != nullptr) {
+    copy_v4_v4(fill, new_channel_fill_linear);
+  }
+  else {
+    paint_layer_channel_neutral(target.channel, fill);
+  }
+  /* A transparent texel still takes part in bilinear filtering: the GPU texture holds straight
+   * bytes, so across a stroke's edge the colour is interpolated on its own and a black background
+   * decodes to a tilted normal. The empty texels of a Normal map therefore hold the flat tangent,
+   * which is what interpolates to nothing. */
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && fill[3] <= 0.0f) {
+    fill[0] = 0.5f;
+    fill[1] = 0.5f;
+    fill[2] = 1.0f;
+  }
+
+  /* `"<layer> <channel>"`, the naming a fresh channel map gets. Never translated. */
+  char name[192];
+  BLI_snprintf(name,
+               sizeof(name),
+               "%s %s",
+               target.layer->name[0] != '\0' ? target.layer->name : "Layer",
+               info.ui_name);
+  Image *image = paint_layers_map_create(bmain, name, image_size, info.is_color, fill);
+  if (image == nullptr) {
+    return nullptr;
+  }
+  if (!BKE_paint_layers_channel_set_image(*target.material, target.layer, channel, image)) {
+    BKE_id_free(&bmain, image);
+    return nullptr;
+  }
+  /* The channel took its own user; the one the new image was born with was only ever the first
+   * reference's, so it goes, or the map could never become an orphan once its row is removed. */
+  id_us_min(&image->id);
+  /* #BKE_paint_layers_channel_set_image does not reallocate the records, so \a record stays valid. */
+  return record->image;
+}
+
+}  // namespace blender

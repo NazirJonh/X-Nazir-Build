@@ -70,6 +70,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_pointcloud.hh"
@@ -2066,6 +2067,73 @@ static ePaintSlotFilter material_paint_slot_filter(const Object *ob)
   return slot_filter;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Layered Material Paint Slots
+ *
+ * A layered material has no Image Texture nodes to walk: its slots are the channel maps of the
+ * active row, one slot per image-paint channel in the channel table order, whether or not the
+ * row has a map for it yet. The slot index is then a pure function of the channel, so selecting an
+ * empty channel in the Texture Slots list names it and the first stroke creates exactly that map.
+ * \{ */
+
+int BKE_paint_layers_texpaint_slot_channel(const int slot_index)
+{
+  if (slot_index < 0) {
+    return -1;
+  }
+  int index = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    if (index == slot_index) {
+      return int(info.channel);
+    }
+    index++;
+  }
+  return -1;
+}
+
+/**
+ * Fill the slots of layered \a ma from its description. Reads the description only and never
+ * touches the node tree. The caller has detached the previous slot array.
+ */
+static void paint_layers_texpaint_slots_fill(Material &ma)
+{
+  Vector<const MaterialPaintChannelInfo *> infos;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (info.supports_image_paint) {
+      infos.append(&info);
+    }
+  }
+  const int count = int(infos.size());
+  if (count == 0) {
+    ma.paint_active_slot = 0;
+    ma.paint_clone_slot = 0;
+    return;
+  }
+
+  ma.texpaintslot = MEM_new_array<TexPaintSlot>(count, "texpaint_slots");
+  for (const int index : IndexRange(count)) {
+    const MaterialPaintChannelInfo &info = *infos[index];
+    TexPaintSlot &slot = ma.texpaintslot[index];
+    PaintLayersTarget target;
+    if (BKE_paint_layers_target_get(ma, int(info.channel), target)) {
+      /* A switched-off record keeps its map in the file but is not a paint target, so it reads as
+       * an empty slot. */
+      slot.ima = BKE_paint_layers_target_image(target);
+    }
+    slot.valid = slot.ima != nullptr;
+    slot.slot_type = info.slot_type;
+  }
+  ma.tot_slots = count;
+  /* The active slot is a choice of the user, kept across the refresh. */
+  ma.paint_active_slot = clamp_i(ma.paint_active_slot, 0, count - 1);
+  ma.paint_clone_slot = clamp_i(ma.paint_clone_slot, 0, count - 1);
+}
+
+/** \} */
+
 void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *ob)
 {
   if (!ma) {
@@ -2087,6 +2155,10 @@ void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *o
   if (scene->toolsettings->imapaint.mode == IMAGEPAINT_MODE_IMAGE) {
     ma->paint_active_slot = 0;
     ma->paint_clone_slot = 0;
+  }
+  else if (BKE_paint_layers_is_layered(*ma)) {
+    /* A layered material's slots come from the description, never from the node tree. */
+    paint_layers_texpaint_slots_fill(*ma);
   }
   else if (!(ma->nodetree)) {
     ma->paint_active_slot = 0;

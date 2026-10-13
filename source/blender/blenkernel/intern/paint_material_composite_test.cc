@@ -93,382 +93,44 @@ class PaintMaterialCompositeEvalTest : public bke::BlenderGTestBase {
   }
 };
 
-TEST_F(PaintMaterialCompositeEvalTest, single_layer_is_copied_not_blended)
-{
-  /* A lone layer has nothing under it, so its alpha must survive rather than being composited
-   * over whatever the destination buffer happened to contain. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer layer;
-  layer.color_ibuf = add_buffer(200, 100, 50, 128);
-  stack.layers.append(layer);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 255);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  const uchar *result = pixel(*composite, 1, 1);
-  EXPECT_EQ(result[0], 200);
-  EXPECT_EQ(result[3], 128);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, opaque_mix_layer_replaces_what_is_below)
-{
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(0, 0, 0, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(255, 255, 255, 255);
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  const uchar *result = pixel(*composite, 0, 0);
-  EXPECT_EQ(result[0], 255);
-  EXPECT_EQ(result[3], 255);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, opacity_scales_the_layer_coverage)
-{
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(0, 0, 0, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(255, 255, 255, 255);
-  top.opacity = 0.5f;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  const uchar *result = pixel(*composite, 0, 0);
-  EXPECT_NEAR(result[0], 128, 2);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, partial_factor_mixes_in_the_buffers_own_encoding)
-{
-  /* Pins the one place the composite is knowingly not the shader.
-   *
-   * The Mix node runs in scene-linear space: for an sRGB Base Color layer, half of black and white
-   * is 0.5 linear, which encodes back to about 188. This evaluator mixes the encoded bytes and
-   * arrives at 128 instead. The difference only exists for a color-managed channel at a factor
-   * strictly between 0 and 1 -- a Non-Color channel's bytes *are* the values the shader mixes, and
-   * a hard layer edge is factor 0 or 1 and therefore exact either way.
-   *
-   * Compositing in float would close the gap and cost the cheap partial refresh this module exists
-   * for, so the approximation is deliberate. The test is here so that changing that decision has
-   * to be a decision: if this ever reads ~188, the module moved to linear and its documented
-   * contract has to move with it. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(0, 0, 0, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(255, 255, 255, 255);
-  top.opacity = 0.5f;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  ASSERT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  const uchar *result = pixel(*composite, 0, 0);
-  EXPECT_NEAR(result[0], 128, 2);
-  EXPECT_LT(result[0], 180) << "compositing moved to linear; the documented contract has to follow";
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, zero_opacity_layer_leaves_the_stack_unchanged)
+TEST_F(PaintMaterialCompositeEvalTest, linear_zero_opacity_layer_leaves_the_stack_unchanged)
 {
   PaintMaterialCompositeStack stack;
   stack.width = size;
   stack.height = size;
   PaintMaterialCompositeLayer bottom;
   bottom.color_ibuf = add_buffer(10, 20, 30, 255);
+  make_data(bottom.color_ibuf);
   stack.layers.append(bottom);
   PaintMaterialCompositeLayer top;
   top.color_ibuf = add_buffer(255, 255, 255, 255);
   top.opacity = 0.0f;
   stack.layers.append(top);
 
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  const uchar *result = pixel(*composite, 0, 0);
-  EXPECT_EQ(result[0], 10);
-  EXPECT_EQ(result[1], 20);
+  const std::array<float, 4> result = linear_pixel(stack, 0, 0);
+  EXPECT_NEAR(result[0], 10.0f / 255.0f, 1e-5f);
+  EXPECT_NEAR(result[1], 20.0f / 255.0f, 1e-5f);
 }
 
-TEST_F(PaintMaterialCompositeEvalTest, disabled_layer_is_skipped)
+TEST_F(PaintMaterialCompositeEvalTest, linear_multiply_darkens_and_keeps_the_bottom_alpha)
 {
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(10, 20, 30, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(255, 255, 255, 255);
-  top.enabled = false;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_EQ(pixel(*composite, 0, 0)[0], 10);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, multiply_blend_darkens)
-{
+  /* `node_mix_mult` writes `outcol.a = col1.a`; only Mix carries the top's alpha. */
   PaintMaterialCompositeStack stack;
   stack.width = size;
   stack.height = size;
   PaintMaterialCompositeLayer bottom;
   bottom.color_ibuf = add_buffer(200, 200, 200, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(128, 128, 128, 255);
-  top.blend = CompositeBlend::Multiply;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_LT(pixel(*composite, 0, 0)[0], 200);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, mask_modulates_opacity_per_pixel)
-{
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(0, 0, 0, 255);
-  stack.layers.append(bottom);
-
-  ImBuf *mask = add_buffer(255, 255, 255, 255);
-  /* Black out one pixel of the mask; the layer must not reach the composite there. */
-  uchar *masked = mask->byte_data_for_write();
-  masked[0] = masked[1] = masked[2] = 0;
-
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(255, 255, 255, 255);
-  top.mask_ibuf = mask;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_EQ(pixel(*composite, 0, 0)[0], 0);
-  EXPECT_EQ(pixel(*composite, 1, 0)[0], 255);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, top_alpha_is_not_coverage)
-{
-  /* The Mix node interpolates by the factor alone. A fully transparent top layer at factor 1
-   * therefore replaces what is below, and a compositor that treated its alpha as coverage would
-   * show the bottom layer where the render shows the top one. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(200, 200, 200, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(10, 10, 10, 0);
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  const uchar *result = pixel(*composite, 0, 0);
-  EXPECT_EQ(result[0], 10);
-  EXPECT_EQ(result[3], 0);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, mask_from_alpha_reads_alpha_not_luminance)
-{
-  /* The layer stack case: the factor comes from the layer's own Alpha output. Its colour is
-   * black, so a mask read as luminance would hide the layer entirely. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(200, 200, 200, 255);
-  stack.layers.append(bottom);
-
-  ImBuf *black_but_opaque = add_buffer(0, 0, 0, 255);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = black_but_opaque;
-  top.mask_ibuf = black_but_opaque;
-  top.mask_from_alpha = true;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_EQ(pixel(*composite, 0, 0)[0], 0);
-
-  /* The same mask read as colour leaves the bottom layer showing through. */
-  stack.layers[1].mask_from_alpha = false;
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_EQ(pixel(*composite, 0, 0)[0], 200);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, multiply_keeps_the_bottom_alpha)
-{
-  /* `node_mix_mult` and friends write `outcol.a = col1.a`; only Mix carries the top's alpha. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(200, 200, 200, 255);
+  make_data(bottom.color_ibuf);
   stack.layers.append(bottom);
   PaintMaterialCompositeLayer top;
   top.color_ibuf = add_buffer(128, 128, 128, 0);
+  make_data(top.color_ibuf);
   top.blend = CompositeBlend::Multiply;
   stack.layers.append(top);
 
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_EQ(pixel(*composite, 0, 0)[3], 255);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, normal_combine_lays_relief_over_relief)
-{
-  /* Two normal maps tilted the same way along X. Combining them must tilt further than either,
-   * where a plain Mix would average them back towards the base. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(160, 128, 255, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(160, 128, 255, 255);
-  top.blend = CompositeBlend::NormalCombine;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  const uchar *result = pixel(*composite, 0, 0);
-  EXPECT_GT(result[0], 160);
-  /* Still a unit normal: the encoded Z has to drop as X grows. */
-  EXPECT_LT(result[2], 255);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, normal_combine_over_a_flat_normal_keeps_the_detail)
-{
-  /* The flat map is the identity of this operation, which is what makes an unpainted layer
-   * invisible in the composited normal pass. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(128, 128, 255, 255);
-  stack.layers.append(bottom);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(200, 128, 255, 255);
-  top.blend = CompositeBlend::NormalCombine;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_NEAR(pixel(*composite, 0, 0)[0], 200, 2);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, mask_influence_zero_ignores_the_mask)
-{
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer bottom;
-  bottom.color_ibuf = add_buffer(0, 0, 0, 255);
-  stack.layers.append(bottom);
-
-  ImBuf *mask = add_buffer(0, 0, 0, 255);
-  PaintMaterialCompositeLayer top;
-  top.color_ibuf = add_buffer(255, 255, 255, 255);
-  top.mask_ibuf = mask;
-  top.mask_influence = 0.0f;
-  stack.layers.append(top);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 0);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite));
-  EXPECT_EQ(pixel(*composite, 0, 0)[0], 255);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, region_leaves_the_rest_of_the_buffer_alone)
-{
-  /* The whole point of the region: a stroke recomputes only what it touched, and everything else
-   * keeps the pixels of the previous evaluation. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer layer;
-  layer.color_ibuf = add_buffer(255, 255, 255, 255);
-  stack.layers.append(layer);
-
-  ImBuf *composite = add_buffer(7, 7, 7, 255);
-  rcti region;
-  BLI_rcti_init(&region, 0, 2, 0, 2);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite, &region));
-  EXPECT_EQ(pixel(*composite, 0, 0)[0], 255);
-  EXPECT_EQ(pixel(*composite, 1, 1)[0], 255);
-  EXPECT_EQ(pixel(*composite, 3, 3)[0], 7);
-  EXPECT_EQ(pixel(*composite, 2, 0)[0], 7);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, region_outside_the_buffer_is_a_no_op)
-{
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer layer;
-  layer.color_ibuf = add_buffer(255, 255, 255, 255);
-  stack.layers.append(layer);
-
-  ImBuf *composite = add_buffer(7, 7, 7, 255);
-  rcti region;
-  BLI_rcti_init(&region, 100, 110, 100, 110);
-  EXPECT_TRUE(BKE_paint_material_composite_eval(stack, composite, &region));
-  EXPECT_EQ(pixel(*composite, 0, 0)[0], 7);
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, layer_of_a_different_size_is_rejected)
-{
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer layer;
-  layer.color_ibuf = IMB_allocImBuf(uint(size * 2), uint(size), ImBufFlags::ByteData);
-  owned_buffers.append(layer.color_ibuf);
-  stack.layers.append(layer);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 255);
-  EXPECT_FALSE(BKE_paint_material_composite_eval(stack, composite));
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, float_only_layer_is_rejected)
-{
-  /* Converting scene-referred float to display-referred byte is a colour management step, not
-   * something the evaluator may improvise; such a material belongs to the bake. */
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  PaintMaterialCompositeLayer layer;
-  layer.color_ibuf = IMB_allocImBuf(uint(size), uint(size), ImBufFlags::FloatData);
-  owned_buffers.append(layer.color_ibuf);
-  stack.layers.append(layer);
-
-  ImBuf *composite = add_buffer(0, 0, 0, 255);
-  EXPECT_FALSE(BKE_paint_material_composite_eval(stack, composite));
-}
-
-TEST_F(PaintMaterialCompositeEvalTest, empty_stack_is_rejected)
-{
-  PaintMaterialCompositeStack stack;
-  stack.width = size;
-  stack.height = size;
-  ImBuf *composite = add_buffer(0, 0, 0, 255);
-  EXPECT_FALSE(BKE_paint_material_composite_eval(stack, composite));
+  const std::array<float, 4> result = linear_pixel(stack, 0, 0);
+  EXPECT_LT(result[0], 200.0f / 255.0f);
+  EXPECT_NEAR(result[3], 1.0f, 1e-5f);
 }
 
 TEST_F(PaintMaterialCompositeEvalTest, linear_opaque_mix_layer_replaces_what_is_below)
@@ -702,9 +364,6 @@ TEST_F(PaintMaterialCompositeEvalTest, premultiplied_float_layer_is_straightened
   }
   stack.layers.append(layer);
 
-  /* The byte evaluation refuses a float layer; the linear one reads it. */
-  ImBuf *composite = add_buffer(0, 0, 0, 255);
-  EXPECT_FALSE(BKE_paint_material_composite_eval(stack, composite));
   const std::array<float, 4> result = linear_pixel(stack, 0, 0);
   EXPECT_NEAR(result[0], 0.25f, 1e-5f);
   EXPECT_NEAR(result[1], 0.25f, 1e-5f);
@@ -2258,6 +1917,68 @@ TEST_F(PaintLayersCompositeTest, composite_image_refuses_a_channel_without_a_sta
   ASSERT_NE(dst, nullptr);
   EXPECT_FALSE(BKE_paint_layers_composite_image(
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, *dst, nullptr, nullptr));
+}
+
+/**
+ * The Image Editor reads a layered material through the composite cache, not through
+ * #BKE_paint_layers_composite_channel: its rows have to start from the channel's own neutral value
+ * and a flat value has to take part, or what a stroke is judged against differs from the render.
+ */
+TEST_F(PaintLayersCompositeTest, cache_lays_the_rows_over_the_channels_neutral_value)
+{
+  const int channel = PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+  /* A map that is transparent everywhere shows what is below it: the neutral value, 0.5. */
+  Image *map = add_solid_image("Map", 4, 0, 0, 0, 0, true);
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, row, eMaterialPaintChannel(channel)), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, row, eMaterialPaintChannel(channel), map));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+  const uint64_t map_hash = BKE_paint_material_composite_stack_hash(layers);
+  ImBuf *composite = BKE_paint_material_composite_cache_ensure(*ma, channel, layers, map_hash);
+  ASSERT_NE(composite, nullptr);
+  EXPECT_NEAR(float(composite->byte_data()[0]), 128.0f, 1.0f);
+
+  /* A flat value half-covering it: 0.5 * 0.5 + 0.5 * 1. */
+  MaterialPaintLayer *top = BKE_paint_layers_add(*ma, "Top", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, top, eMaterialPaintChannel(channel)), nullptr);
+  const float one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_value(*ma, top, eMaterialPaintChannel(channel), one));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+  ASSERT_EQ(layers.size(), 2);
+  const uint64_t value_hash = BKE_paint_material_composite_stack_hash(layers);
+  EXPECT_NE(value_hash, map_hash);
+  composite = BKE_paint_material_composite_cache_ensure(*ma, channel, layers, value_hash);
+  ASSERT_NE(composite, nullptr);
+  EXPECT_NEAR(float(composite->byte_data()[0]), 191.0f, 1.0f);
+
+  /* An edit of the flat value alone moves the hash, so the cached pixels are not served stale. */
+  const float quarter[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_value(*ma, top, eMaterialPaintChannel(channel), quarter));
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), value_hash);
+}
+
+TEST_F(PaintLayersCompositeTest, stack_hash_follows_the_order_of_the_rows)
+{
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  MaterialPaintLayer *a = add_paint_layer("A", add_solid_image("A", 4, 10, 10, 10, 255));
+  MaterialPaintLayer *b = add_paint_layer("B", add_solid_image("B", 4, 20, 20, 20, 255));
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+  const uint64_t before = BKE_paint_material_composite_stack_hash(layers);
+
+  /* The same rows with the same values, reordered: a different composite, so a different hash. */
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, b, 0));
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), before);
 }
 
 /** \} */

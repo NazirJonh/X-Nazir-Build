@@ -835,14 +835,11 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                       IDWALK_CB_USER);
   }
 
-  /* Poly Paint: the canvas Image and the per-channel Image overrides an add-on can bind. Without
-   * these the pointers are never remapped and are left dangling when the Image is deleted - the
-   * next stroke would then paint through freed memory.
+  /* Poly Paint: the canvas Image. Without this the pointer is never remapped and is left dangling
+   * when the Image is deleted - the next stroke would then paint through freed memory.
    *
-   * #canvas_image is #IDWALK_CB_NOP because nothing reference-counts it (its RNA property has no
-   * #PROP_ID_REFCOUNT and it is assigned from C in several places); the bindings are
-   * #IDWALK_CB_USER because their only assignment path,
-   * #rna_MaterialPaintChannelImageBinding_image_set, does count the reference. */
+   * It is #IDWALK_CB_NOP because nothing reference-counts it (its RNA property has no
+   * #PROP_ID_REFCOUNT and it is assigned from C in several places). */
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
                                                     &toolsett->paint_mode.canvas_image,
                                                     do_undo_restore,
@@ -850,16 +847,6 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     reader,
                                                     &toolsett_old->paint_mode.canvas_image,
                                                     IDWALK_CB_NOP);
-  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
-    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(
-        data,
-        &toolsett->paint_mode.channel_image_bindings[i].image,
-        do_undo_restore,
-        SCENE_FOREACH_UNDO_RESTORE,
-        reader,
-        &toolsett_old->paint_mode.channel_image_bindings[i].image,
-        IDWALK_CB_USER);
-  }
 
   /* These two Object pointers should just follow the normal Undo behavior. See #153065. */
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
@@ -1759,11 +1746,6 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
     }
 
     BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.canvas_image);
-    for (MaterialPaintChannelImageBinding &binding :
-        sce->toolsettings->paint_mode.channel_image_bindings)
-    {
-      BLO_read_raw_address(reader, &binding.image);
-    }
     BLO_read_struct(reader, SequencerToolSettings, &sce->toolsettings->sequencer_tool_settings);
 
     BLO_read_struct_list(reader,

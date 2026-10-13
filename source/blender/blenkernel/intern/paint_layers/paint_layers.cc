@@ -218,6 +218,15 @@ bUUID BKE_paint_layers_active_get(const Material &ma)
   return ma.active_layer_marker;
 }
 
+MaterialPaintLayer *BKE_paint_layers_active_layer_get(Material &ma)
+{
+  const bUUID marker = BKE_paint_layers_active_get(ma);
+  if (BLI_uuid_is_nil(marker)) {
+    return nullptr;
+  }
+  return BKE_paint_layers_find(ma, marker);
+}
+
 bool BKE_paint_layers_move(Material &ma,
                            MaterialPaintLayer *layer,
                            MaterialPaintLayer *anchor,

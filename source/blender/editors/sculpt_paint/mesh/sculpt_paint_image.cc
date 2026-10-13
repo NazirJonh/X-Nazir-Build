@@ -83,11 +83,15 @@ ImageData::~ImageData()
 
 std::unique_ptr<ImageData> ImageData::from_image(Image *image, ImageUser *image_user)
 {
-  if (image == nullptr || image_user == nullptr) {
+  if (image == nullptr) {
     return nullptr;
   }
   std::unique_ptr<ImageData> image_data = std::make_unique<ImageData>();
   image_data->image = image;
+  if (image_user == nullptr) {
+    BKE_imageuser_default(&image_data->owned_image_user);
+    image_user = &image_data->owned_image_user;
+  }
   image_data->image_user = image_user;
   return image_data;
 }

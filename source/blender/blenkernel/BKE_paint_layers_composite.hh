@@ -57,7 +57,7 @@ bool BKE_paint_layers_composite_image_layers(
  * own (sRGB for a colour channel, data for a scalar or Normal one).
  *
  * \param region: when given, only this rectangle is recomputed, exactly as
- *                #BKE_paint_material_composite_eval takes it.
+ *                #BKE_paint_material_composite_eval_linear takes it.
  * \return false when the channel is not compositable from the description (see
  *         #BKE_paint_layers_composite_image_layers).
  */

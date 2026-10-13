@@ -11,6 +11,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
@@ -81,172 +82,6 @@ static bool composite_blend_from_ramp_blend(const int ramp_blend, CompositeBlend
       return false;
   }
 }
-
-/* -------------------------------------------------------------------- */
-/** \name Normal Combine Group
- * \{ */
-
-/** Name of the ID property that marks the group, and the value that identifies this one. */
-static const char *NORMAL_COMBINE_PROP = "pbr_paint_node_group";
-static const char *NORMAL_COMBINE_VALUE = "NORMAL_COMBINE";
-/* NOTE: DO NOT translate, it is what an existing group is found by. */
-static const char *NORMAL_COMBINE_TREE_NAME = "PBR Normal Combine";
-
-bool BKE_paint_material_is_normal_combine_group(const bNode &node)
-{
-  if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
-    return false;
-  }
-  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(node.id));
-  if (properties == nullptr) {
-    return false;
-  }
-  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-      properties, NORMAL_COMBINE_PROP, IDP_STRING);
-  return marker != nullptr && STREQ(IDP_string_get(marker), NORMAL_COMBINE_VALUE);
-}
-
-/** The group already in \a bmain, or null. Found by its marker, so a rename does not lose it. */
-static bNodeTree *normal_combine_group_find(Main &bmain)
-{
-  for (bNodeTree &ntree : bmain.nodetrees) {
-    const IDProperty *properties = IDP_GetProperties(&ntree.id);
-    if (properties == nullptr) {
-      continue;
-    }
-    const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-        properties, NORMAL_COMBINE_PROP, IDP_STRING);
-    if (marker != nullptr && STREQ(IDP_string_get(marker), NORMAL_COMBINE_VALUE)) {
-      return &ntree;
-    }
-  }
-  return nullptr;
-}
-
-/** A Vector Math node set to \a operation. */
-static bNode *normal_combine_vector_math_add(bNodeTree &group,
-                                             const int operation,
-                                             const float2 location)
-{
-  bNode *node = bke::node_add_node(nullptr, group, "ShaderNodeVectorMath"_ustr);
-  node->custom1 = operation;
-  node->location[0] = location.x;
-  node->location[1] = location.y;
-  return node;
-}
-
-/** Sets the second and third Vector inputs of a Multiply Add, which decode or encode a normal. */
-static void normal_combine_range_map_set(bNode &node, const float scale, const float offset)
-{
-  bNodeSocket *scale_socket = bke::node_find_socket(node, SOCK_IN, "Vector_001"_ustr);
-  bNodeSocket *offset_socket = bke::node_find_socket(node, SOCK_IN, "Vector_002"_ustr);
-  copy_v3_fl(static_cast<bNodeSocketValueVector *>(scale_socket->default_value)->value, scale);
-  copy_v3_fl(static_cast<bNodeSocketValueVector *>(offset_socket->default_value)->value, offset);
-}
-
-bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
-{
-  if (bNodeTree *existing = normal_combine_group_find(bmain)) {
-    return existing;
-  }
-
-  bNodeTree *group = bke::node_tree_add_tree(&bmain, NORMAL_COMBINE_TREE_NAME, "ShaderNodeTree");
-  IDProperty *properties = IDP_EnsureProperties(&group->id);
-  IDPropertyTemplate value = {0};
-  value.string.str = NORMAL_COMBINE_VALUE;
-  value.string.len = int(strlen(NORMAL_COMBINE_VALUE)) + 1;
-  value.string.subtype = IDP_STRING_SUB_UTF8;
-  IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, NORMAL_COMBINE_PROP));
-
-  /* Interface identifiers are handed out in creation order: `Socket_0` .. `Socket_3`. */
-  group->tree_interface.add_socket(
-      DATA_("A"), "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
-  group->tree_interface.add_socket(
-      DATA_("B"), "", "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT, nullptr);
-  bNodeTreeInterfaceSocket *factor = group->tree_interface.add_socket(
-      DATA_("Factor"), "", "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT, nullptr);
-  auto &factor_data = *static_cast<bNodeSocketValueFloat *>(factor->socket_data);
-  factor_data.subtype = PROP_FACTOR;
-  factor_data.min = 0.0f;
-  factor_data.max = 1.0f;
-  factor_data.value = 1.0f;
-  group->tree_interface.add_socket(
-      DATA_("Result"), "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
-
-  bNode *group_input = bke::node_add_node(nullptr, *group, "NodeGroupInput"_ustr);
-  group_input->location[0] = -800;
-  bNode *group_output = bke::node_add_node(nullptr, *group, "NodeGroupOutput"_ustr);
-  group_output->location[0] = 400;
-
-  /* Decode both maps out of [0, 1] and into vectors. */
-  bNode *decode_a = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY_ADD, float2(-600.0f, 120.0f));
-  normal_combine_range_map_set(*decode_a, 2.0f, -1.0f);
-  bNode *decode_b = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY_ADD, float2(-600.0f, -120.0f));
-  normal_combine_range_map_set(*decode_b, 2.0f, -1.0f);
-
-  /* Whiteout: the slopes add, the two Z multiply. */
-  bNode *slopes = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_ADD, float2(-400.0f, 120.0f));
-  bNode *depths = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY, float2(-400.0f, -120.0f));
-
-  bNode *split_slopes = bke::node_add_node(nullptr, *group, "ShaderNodeSeparateXYZ"_ustr);
-  split_slopes->location[0] = -220;
-  split_slopes->location[1] = 120;
-  bNode *split_depths = bke::node_add_node(nullptr, *group, "ShaderNodeSeparateXYZ"_ustr);
-  split_depths->location[0] = -220;
-  split_depths->location[1] = -120;
-  bNode *rebuilt = bke::node_add_node(nullptr, *group, "ShaderNodeCombineXYZ"_ustr);
-  rebuilt->location[0] = -60;
-
-  bNode *normalize = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_NORMALIZE, float2(100.0f, 0.0f));
-  bNode *encode = normal_combine_vector_math_add(
-      *group, NODE_VECTOR_MATH_MULTIPLY_ADD, float2(240.0f, 0.0f));
-  normal_combine_range_map_set(*encode, 0.5f, 0.5f);
-
-  /* The factor interpolates between the layer below and the combined result, so that a masked
-   * layer fades out to what it covers rather than to a flat normal. */
-  bNode *mix = bke::node_add_node(nullptr, *group, "ShaderNodeMix"_ustr);
-  auto &mix_storage = *static_cast<NodeShaderMix *>(mix->storage);
-  mix_storage.data_type = SOCK_RGBA;
-  mix->location[0] = 240;
-  mix->location[1] = 180;
-
-  auto link = [&](bNode &from, const char *from_socket, bNode &to, const char *to_socket) {
-    bke::node_add_link(
-        *group,
-        from,
-        *bke::node_find_socket(from, SOCK_OUT, UString::from_ptr_noinline(from_socket)),
-        to,
-        *bke::node_find_socket(to, SOCK_IN, UString::from_ptr_noinline(to_socket)));
-  };
-
-  link(*group_input, "Socket_0", *decode_a, "Vector");
-  link(*group_input, "Socket_1", *decode_b, "Vector");
-  link(*decode_a, "Vector", *slopes, "Vector");
-  link(*decode_b, "Vector", *slopes, "Vector_001");
-  link(*decode_a, "Vector", *depths, "Vector");
-  link(*decode_b, "Vector", *depths, "Vector_001");
-  link(*slopes, "Vector", *split_slopes, "Vector");
-  link(*depths, "Vector", *split_depths, "Vector");
-  link(*split_slopes, "X", *rebuilt, "X");
-  link(*split_slopes, "Y", *rebuilt, "Y");
-  link(*split_depths, "Z", *rebuilt, "Z");
-  link(*rebuilt, "Vector", *normalize, "Vector");
-  link(*normalize, "Vector", *encode, "Vector");
-  link(*group_input, "Socket_0", *mix, "A_Color");
-  link(*encode, "Vector", *mix, "B_Color");
-  link(*group_input, "Socket_2", *mix, "Factor_Float");
-  link(*mix, "Result_Color", *group_output, "Socket_3");
-
-  BKE_ntree_update_tag_all(group);
-  return group;
-}
-
-/** \} */
 
 /** The inputs of \a node when it is a colour Mix node, in either the legacy or the current form.
  */
@@ -922,6 +757,17 @@ static bool composite_stack_validate(const PaintMaterialCompositeStack &stack)
   return any_enabled;
 }
 
+bool BKE_paint_material_composite_area_get(
+    const int width, const int height, const rcti *region, rcti &r_area)
+{
+  BLI_rcti_init(&r_area, 0, width, 0, height);
+  if (region == nullptr) {
+    return true;
+  }
+  rcti clipped = *region;
+  return BLI_rcti_isect(&r_area, &clipped, &r_area);
+}
+
 bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
                                        ImBuf *composite_ibuf,
                                        const rcti *region,
@@ -935,16 +781,12 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
   }
 
   rcti area;
-  BLI_rcti_init(&area, 0, stack.width, 0, stack.height);
-  if (region != nullptr) {
-    rcti clipped = *region;
-    if (!BLI_rcti_isect(&area, &clipped, &area)) {
-      /* Nothing of the tagged region is inside the buffer; the composite is already correct. */
-      if (r_stats != nullptr) {
-        *r_stats = {};
-      }
-      return true;
+  if (!BKE_paint_material_composite_area_get(stack.width, stack.height, region, area)) {
+    /* Nothing of the tagged region is inside the buffer; the composite is already correct. */
+    if (r_stats != nullptr) {
+      *r_stats = {};
     }
+    return true;
   }
 
   const double start_time = BLI_time_now_seconds();
@@ -1002,6 +844,311 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
     r_stats->elapsed_seconds = BLI_time_now_seconds() - start_time;
     r_stats->layers_evaluated = layers_evaluated;
     r_stats->pixels_processed = area_width * BLI_rcti_size_y(&area);
+  }
+  return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Linear Evaluation
+ *
+ * The scene-linear float pipeline. Where the byte evaluation above blends in the buffers' own
+ * encoding, this one decodes every source into scene linear first and mixes the way the shader
+ * does, so a CPU composite and the render agree beyond a rounding step.
+ * \{ */
+
+/** Whether \a ibuf is a byte or float RGBA buffer of the stack's dimensions. */
+static bool composite_ibuf_is_rgba(const ImBuf *ibuf, const int width, const int height)
+{
+  if (ibuf == nullptr || ibuf->x != width || ibuf->y != height) {
+    return false;
+  }
+  if (!ELEM(ibuf->channels, 0, 4)) {
+    return false;
+  }
+  return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
+}
+
+/** The colorspace name of \a ibuf's own buffer, or null when its buffer names none. */
+static const char *composite_buffer_colorspace_name(const ImBuf *ibuf)
+{
+  const ColorSpace *colorspace = (ibuf->byte_buffer.data != nullptr) ?
+                                     ibuf->byte_buffer.colorspace :
+                                     ibuf->float_buffer.colorspace;
+  if (colorspace == nullptr) {
+    return nullptr;
+  }
+  return IMB_colormanagement_colorspace_get_name(colorspace);
+}
+
+/**
+ * Decode one tile of \a ibuf into \a dst as straight scene-linear RGBA: `tw * th * 4` floats.
+ *
+ * A byte buffer is straight already; a float one is premultiplied and is straightened here, before
+ * the colorspace conversion, and the conversion is one buffer call per tile rather than a per-pixel
+ * one -- what keeps a 4K map cheap. A data or scene-linear space is left as it is.
+ */
+static void composite_decode_tile(const ImBuf *ibuf,
+                                  const char *colorspace_name,
+                                  const rcti &tile,
+                                  float *dst)
+{
+  const int tw = BLI_rcti_size_x(&tile);
+  const int th = BLI_rcti_size_y(&tile);
+  const bool is_float = ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr;
+  const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
+  const bool four = channels == 4;
+  for (int ty = 0; ty < th; ty++) {
+    const int y = tile.ymin + ty;
+    for (int tx = 0; tx < tw; tx++) {
+      const int x = tile.xmin + tx;
+      float *out = dst + (int64_t(ty) * tw + tx) * 4;
+      if (!is_float) {
+        const uchar *pixel = ibuf->byte_data() + (int64_t(y) * ibuf->x + x) * 4;
+        out[0] = float(pixel[0]) / 255.0f;
+        out[1] = float(pixel[1]) / 255.0f;
+        out[2] = float(pixel[2]) / 255.0f;
+        out[3] = float(pixel[3]) / 255.0f;
+      }
+      else {
+        const float *pixel = ibuf->float_buffer.data + (int64_t(y) * ibuf->x + x) * channels;
+        out[0] = pixel[0];
+        out[1] = pixel[1];
+        out[2] = pixel[2];
+        out[3] = four ? pixel[3] : 1.0f;
+      }
+    }
+  }
+  if (is_float) {
+    /* A float buffer is premultiplied: straighten it before anything reads the colour. */
+    for (int64_t i = 0; i < int64_t(tw) * th; i++) {
+      const float alpha = dst[i * 4 + 3];
+      if (alpha > 0.0f) {
+        const float inv = 1.0f / alpha;
+        dst[i * 4 + 0] *= inv;
+        dst[i * 4 + 1] *= inv;
+        dst[i * 4 + 2] *= inv;
+      }
+    }
+  }
+  /* The name is resolved by the acquisition path from the buffer it hands over; a stack built by
+   * hand (a test) leaves it null, and the buffer's own colorspace is then the right answer. */
+  const ColorSpace *colorspace = (colorspace_name != nullptr) ?
+                                     IMB_colormanagement_space_get_named(colorspace_name) :
+                                     nullptr;
+  if (colorspace == nullptr) {
+    colorspace = (ibuf->byte_buffer.data != nullptr) ? ibuf->byte_buffer.colorspace :
+                                                       ibuf->float_buffer.colorspace;
+  }
+  if (colorspace != nullptr && !IMB_colormanagement_space_is_data(colorspace) &&
+      !IMB_colormanagement_space_is_scene_linear(colorspace))
+  {
+    IMB_colormanagement_colorspace_to_scene_linear(dst, tw, th, 4, colorspace, false);
+  }
+}
+
+/**
+ * Blend one scene-linear pixel: the shader's own `ramp_blend` for every colour mode, and the
+ * whiteout for #CompositeBlend::NormalCombine, which no Mix node expresses.
+ *
+ * \a top carries the row's coverage in its alpha: Mix mixes all four components like the node does,
+ * the other modes keep the destination's alpha.
+ * Nothing is clamped beyond the factor: the encode step is where a byte output is finally clamped.
+ */
+static void blend_row_linear(float dst[4],
+                             const float top[4],
+                             const CompositeBlend blend,
+                             const float factor)
+{
+  const float fac = clamp_f(factor, 0.0f, 1.0f);
+  switch (blend) {
+    case CompositeBlend::Mix:
+      ramp_blend(MA_RAMP_BLEND, dst, fac, top);
+      break;
+    case CompositeBlend::Multiply:
+      ramp_blend(MA_RAMP_MULT, dst, fac, top);
+      break;
+    case CompositeBlend::Overlay:
+      ramp_blend(MA_RAMP_OVERLAY, dst, fac, top);
+      break;
+    case CompositeBlend::Add:
+      ramp_blend(MA_RAMP_ADD, dst, fac, top);
+      break;
+    case CompositeBlend::NormalCombine: {
+      float combined[3];
+      blend_normal_combine(dst, top, combined);
+      for (const int i : IndexRange(3)) {
+        dst[i] = dst[i] * (1.0f - fac) + combined[i] * fac;
+      }
+      break;
+    }
+  }
+}
+
+/**
+ * Render one layer onto tile-sized buffers: its straight colour in \a r_color and the coverage it
+ * blends by in \a r_factor, before the layer's own opacity.
+ *
+ * The coverage is the mask times the layer's own content coverage: a map's alpha for a painted
+ * channel map, or full. A mask is decoded like any map, in one tile call.
+ */
+static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
+                                   const rcti &tile,
+                                   float *r_color,
+                                   float *r_factor)
+{
+  const int64_t count = int64_t(BLI_rcti_size_x(&tile)) * BLI_rcti_size_y(&tile);
+
+  if (layer.color_ibuf != nullptr) {
+    composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
+  }
+  else {
+    for (int64_t i = 0; i < count; i++) {
+      if (layer.has_constant_color) {
+        copy_v4_v4(r_color + i * 4, layer.constant_color);
+      }
+      else {
+        zero_v4(r_color + i * 4);
+      }
+    }
+  }
+
+  Vector<float> mask_storage;
+  const float *mask = nullptr;
+  if (layer.mask_ibuf != nullptr) {
+    mask_storage.resize(count * 4);
+    composite_decode_tile(layer.mask_ibuf, layer.mask_colorspace_name, tile, mask_storage.data());
+    mask = mask_storage.data();
+  }
+
+  for (int64_t i = 0; i < count; i++) {
+    float mask_value = 1.0f;
+    if (mask != nullptr) {
+      const float *m = mask + i * 4;
+      const float value = layer.mask_from_alpha ? m[3] : (m[0] + m[1] + m[2]) / 3.0f;
+      mask_value = (1.0f - layer.mask_influence) +
+                   layer.mask_influence * clamp_f(value, 0.0f, 1.0f);
+    }
+    /* A layer whose factor is its own alpha, with no mask map to say otherwise, and a painted map
+     * both cover by the map's alpha; a transparent texel shows what is below. */
+    const bool own_alpha = (layer.color_alpha_coverage && layer.color_ibuf != nullptr) ||
+                           (mask == nullptr && layer.mask_from_alpha);
+    const float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
+    r_factor[i] = mask_value * content;
+  }
+}
+
+static bool composite_stack_validate_linear(const PaintMaterialCompositeStack &stack)
+{
+  if (stack.width <= 0 || stack.height <= 0 || stack.layers.is_empty()) {
+    return false;
+  }
+  bool any_enabled = false;
+  for (const PaintMaterialCompositeLayer &layer : stack.layers) {
+    if (!layer.enabled) {
+      continue;
+    }
+    if (layer.color_ibuf != nullptr) {
+      if (!composite_ibuf_is_rgba(layer.color_ibuf, stack.width, stack.height)) {
+        return false;
+      }
+    }
+    else if (!layer.has_constant_color) {
+      /* A layer without a map has nothing to composite unless it is a constant. */
+      return false;
+    }
+    if (layer.mask_ibuf != nullptr &&
+        !composite_mask_ibuf_is_valid(layer.mask_ibuf, stack.width, stack.height))
+    {
+      return false;
+    }
+    any_enabled = true;
+  }
+  return any_enabled;
+}
+
+/** One 256x256 tile: the scratch a layer is decoded and mixed in, never a full-size copy. */
+static constexpr int COMPOSITE_TILE_SIZE = 256;
+
+bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack &stack,
+                                              float *dst,
+                                              const rcti *region,
+                                              PaintMaterialCompositeEvalStats *r_stats)
+{
+  if (!composite_stack_validate_linear(stack)) {
+    return false;
+  }
+
+  rcti area;
+  if (!BKE_paint_material_composite_area_get(stack.width, stack.height, region, area)) {
+    /* Nothing of the tagged region is inside the buffer; the composite is already correct. */
+    if (r_stats != nullptr) {
+      *r_stats = {};
+    }
+    return true;
+  }
+
+  const double start_time = BLI_time_now_seconds();
+  int layers_evaluated = 0;
+  Vector<float> tile_storage;
+  Vector<float> color_storage;
+  Vector<float> factor_storage;
+
+  for (int tile_y = area.ymin; tile_y < area.ymax; tile_y += COMPOSITE_TILE_SIZE) {
+    for (int tile_x = area.xmin; tile_x < area.xmax; tile_x += COMPOSITE_TILE_SIZE) {
+      rcti tile;
+      BLI_rcti_init(&tile,
+                    tile_x,
+                    min_ii(tile_x + COMPOSITE_TILE_SIZE, area.xmax),
+                    tile_y,
+                    min_ii(tile_y + COMPOSITE_TILE_SIZE, area.ymax));
+      const int tw = BLI_rcti_size_x(&tile);
+      const int th = BLI_rcti_size_y(&tile);
+      const int64_t count = int64_t(tw) * th;
+      tile_storage.resize(count * 4);
+      color_storage.resize(count * 4);
+      factor_storage.resize(count);
+      float *tile_dst = tile_storage.data();
+
+      /* The tile starts from the shared bottom colour and every layer, the lowest included, is
+       * blended over it like any other. */
+      for (int64_t i = 0; i < count; i++) {
+        if (stack.has_bottom_color) {
+          copy_v4_v4(tile_dst + i * 4, stack.bottom_color);
+        }
+        else {
+          zero_v4(tile_dst + i * 4);
+        }
+      }
+
+      for (const PaintMaterialCompositeLayer &layer : stack.layers) {
+        /* A layer that blends by nothing leaves the tile as it is; do not decode its buffers. */
+        if (!layer.enabled || layer.opacity <= 0.0f) {
+          continue;
+        }
+        composite_layer_render(layer, tile, color_storage.data(), factor_storage.data());
+        for (int64_t i = 0; i < count; i++) {
+          blend_row_linear(tile_dst + i * 4,
+                           color_storage.data() + i * 4,
+                           layer.blend,
+                           layer.opacity * factor_storage[i]);
+        }
+        layers_evaluated++;
+      }
+
+      /* Copy the tile back into the caller's buffer; only the region is ever touched. */
+      for (int row = 0; row < th; row++) {
+        float *dst_row = dst + ((int64_t(tile.ymin + row) * stack.width + tile.xmin) * 4);
+        memcpy(dst_row, tile_dst + int64_t(row) * tw * 4, size_t(tw) * 4 * sizeof(float));
+      }
+    }
+  }
+
+  if (r_stats != nullptr) {
+    r_stats->elapsed_seconds = BLI_time_now_seconds() - start_time;
+    r_stats->layers_evaluated = layers_evaluated;
+    r_stats->pixels_processed = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
   }
   return true;
 }
@@ -1095,6 +1242,77 @@ bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLa
   bool ok = composite_stack_build(image_layers, locks, stack);
   if (ok) {
     ok = BKE_paint_material_composite_eval(stack, composite_ibuf, region, r_stats);
+  }
+  composite_images_release(locks);
+  return ok;
+}
+
+/**
+ * Acquire the buffers of \a image_layers into \a r_stack for the linear evaluator, which unlike the
+ * byte one takes float buffers and constant layers.
+ */
+static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> image_layers,
+                                         Vector<CompositeImageLock> &r_locks,
+                                         PaintMaterialCompositeStack &r_stack)
+{
+  if (!BKE_paint_material_composite_stack_dimensions(image_layers, r_stack.width, r_stack.height))
+  {
+    return false;
+  }
+  for (const PaintMaterialCompositeImageLayer &image_layer : image_layers) {
+    if (!image_layer.enabled) {
+      continue;
+    }
+    if (image_layer.color_image == nullptr && !image_layer.has_constant_color) {
+      continue;
+    }
+    PaintMaterialCompositeLayer layer;
+    if (image_layer.color_image != nullptr) {
+      layer.color_ibuf = composite_image_acquire(
+          image_layer.color_image, image_layer.color_iuser, r_locks);
+      if (layer.color_ibuf == nullptr) {
+        return false;
+      }
+      /* The buffer's own colorspace, not the Image setting: the two can disagree, and the
+       * evaluator has to decode what it is actually handed. */
+      layer.color_colorspace_name = composite_buffer_colorspace_name(layer.color_ibuf);
+    }
+    if (image_layer.mask_image != nullptr) {
+      layer.mask_ibuf = composite_image_acquire(
+          image_layer.mask_image, image_layer.mask_iuser, r_locks);
+      if (layer.mask_ibuf == nullptr) {
+        return false;
+      }
+      layer.mask_colorspace_name = composite_buffer_colorspace_name(layer.mask_ibuf);
+    }
+    copy_v4_v4(layer.constant_color, image_layer.constant_color);
+    layer.has_constant_color = image_layer.has_constant_color;
+    layer.color_alpha_coverage = image_layer.color_alpha_coverage;
+    layer.mask_from_alpha = image_layer.mask_from_alpha;
+    layer.blend = image_layer.blend;
+    layer.opacity = image_layer.opacity;
+    layer.mask_influence = image_layer.mask_influence;
+    r_stack.layers.append(layer);
+  }
+  return !r_stack.layers.is_empty();
+}
+
+bool BKE_paint_material_composite_eval_images_linear(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    float *dst,
+    const rcti *region,
+    PaintMaterialCompositeEvalStats *r_stats,
+    const float bottom_color[4])
+{
+  Vector<CompositeImageLock> locks;
+  PaintMaterialCompositeStack stack;
+  bool ok = composite_stack_build_linear(image_layers, locks, stack);
+  if (ok && bottom_color != nullptr) {
+    copy_v4_v4(stack.bottom_color, bottom_color);
+    stack.has_bottom_color = true;
+  }
+  if (ok) {
+    ok = BKE_paint_material_composite_eval_linear(stack, dst, region, r_stats);
   }
   composite_images_release(locks);
   return ok;

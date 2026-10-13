@@ -395,4 +395,42 @@ bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char
   return true;
 }
 
+float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer)
+{
+  if ((layer.flag & MA_PAINT_LAYER_ENABLED) == 0) {
+    return 0.0f;
+  }
+  return layer.opacity;
+}
+
+void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, float r_color[4])
+{
+  zero_v4(r_color);
+  r_color[3] = 1.0f;
+  switch (channel) {
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
+      /* A neutral mid value, so a partially covered scalar row fades towards the Principled
+       * default rather than towards zero. */
+      r_color[0] = r_color[1] = r_color[2] = 0.5f;
+      break;
+    case PAINT_MATERIAL_CHANNEL_NORMAL:
+      /* Flat tangent-space: straight out of the surface. */
+      r_color[0] = 0.5f;
+      r_color[1] = 0.5f;
+      r_color[2] = 1.0f;
+      break;
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+    case PAINT_MATERIAL_CHANNEL_AO:
+      r_color[0] = r_color[1] = r_color[2] = 1.0f;
+      break;
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+    case PAINT_MATERIAL_CHANNEL_CUSTOM:
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
+      break;
+  }
+}
+
 }  // namespace blender

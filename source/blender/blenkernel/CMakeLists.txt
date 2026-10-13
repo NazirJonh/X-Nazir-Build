@@ -263,10 +263,12 @@ set(SRC
   intern/paint_brush_group_override.cc
   intern/paint_canvas.cc
   intern/paint_layers/paint_layers.cc
+  intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_edit.cc
   intern/paint_material_cache_common.cc
   intern/paint_material_combined.cc
   intern/paint_material_composite.cc
+  intern/paint_material_normal_combine.cc
   intern/paint_material_resolve.cc
   intern/paint_material_sync.cc
   intern/paint_runtime.cc
@@ -526,6 +528,7 @@ set(SRC
   BKE_paint_bvh.hh
   BKE_paint_bvh_pixels.hh
   BKE_paint_layers.hh
+  BKE_paint_layers_composite.hh
   BKE_paint_layers_edit.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh

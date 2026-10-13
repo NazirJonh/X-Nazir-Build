@@ -41,4 +41,17 @@ inline MaterialPaintLayerChannel *paint_layer_channel_find(MaterialPaintLayer &l
       paint_layer_channel_find(const_cast<const MaterialPaintLayer &>(layer), channel));
 }
 
+/**
+ * Whether \a record is a live channel: not null and #MA_PAINT_LAYER_CHANNEL_ENABLED.
+ *
+ * #MA_PAINT_LAYER_CHANNEL_DISABLED keeps the record and its map but unlinks the channel, so the row
+ * takes part nowhere while the map stays in the file; #MA_PAINT_LAYER_CHANNEL_ABSENT has no map at
+ * all. Every reader of the description shares this one predicate, so a row cannot take part in a
+ * channel on one side and drop out on the other.
+ */
+inline bool paint_layer_channel_live(const MaterialPaintLayerChannel *record)
+{
+  return record != nullptr && record->state == MA_PAINT_LAYER_CHANNEL_ENABLED;
+}
+
 }  // namespace blender

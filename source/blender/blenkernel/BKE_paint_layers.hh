@@ -205,4 +205,27 @@ bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Values the stack is evaluated with
+ * \{ */
+
+/**
+ * The opacity \a layer blends by: its own opacity, or zero while the row is switched off.
+ *
+ * The one reader of "how much does this row show", for every evaluator of the description.
+ */
+float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer);
+
+/**
+ * The value \a channel's stack starts from, before any row is laid over it: the shader-space RGBA
+ * a CPU composite must initialise its buffer to.
+ *
+ * The values are the channel's neutral default -- what the Principled BSDF shows where nothing
+ * covers it -- and the alpha is used only where a channel has one. Every evaluator reads this one
+ * table, or a partially covered row would fade towards different values in each of them.
+ */
+void BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel channel, float r_color[4]);
+
+/** \} */
+
 }  // namespace blender

@@ -86,6 +86,20 @@ struct PaintMaterialCompositeImageLayer {
    * buffer, since acquisition writes to it.
    */
   const ImageUser *color_iuser = nullptr;
+  /**
+   * The flat colour the layer paints with when it has no map, scene linear.
+   *
+   * A channel with no map reduces to a constant; carrying it here rather than manufacturing a
+   * one-pixel image keeps the CPU path free of sampling. Read by the linear evaluator only.
+   */
+  float constant_color[4] = {};
+  bool has_constant_color = false;
+  /**
+   * The layer's own map alpha multiplies into the factor, so a texel the map leaves transparent
+   * shows what is below instead of covering it with the map's (black) color. Set for a painted
+   * channel map. Read by the linear evaluator only.
+   */
+  bool color_alpha_coverage = false;
   /** Modulates #opacity per pixel. Null when the layer's factor is a plain value. */
   Image *mask_image = nullptr;
   const ImageUser *mask_iuser = nullptr;
@@ -106,9 +120,21 @@ struct PaintMaterialCompositeImageLayer {
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
 struct PaintMaterialCompositeLayer {
-  /** Byte or float RGBA, matching the stack dimensions. */
+  /** Byte or float RGBA, matching the stack dimensions; null for a constant layer. */
   ImBuf *color_ibuf = nullptr;
   ImBuf *mask_ibuf = nullptr;
+  /**
+   * Colorspace names of #color_ibuf / #mask_ibuf's own buffers, resolved once at acquisition, or
+   * null for scene linear. Taken from the buffer the linear evaluator actually reads, never from
+   * the #Image setting, which can disagree with the buffer that was handed over.
+   */
+  const char *color_colorspace_name = nullptr;
+  const char *mask_colorspace_name = nullptr;
+  /** See #PaintMaterialCompositeImageLayer.constant_color. */
+  float constant_color[4] = {};
+  bool has_constant_color = false;
+  /** See #PaintMaterialCompositeImageLayer.color_alpha_coverage. */
+  bool color_alpha_coverage = false;
   /** See #PaintMaterialCompositeImageLayer.mask_from_alpha. */
   bool mask_from_alpha = false;
   CompositeBlend blend = CompositeBlend::Mix;
@@ -122,6 +148,13 @@ struct PaintMaterialCompositeStack {
   Vector<PaintMaterialCompositeLayer> layers;
   int width = 0;
   int height = 0;
+  /**
+   * The value the linear evaluation starts from, before the first row:
+   * #BKE_paint_layers_channel_bottom_color for a description-driven stack. When #has_bottom_color is
+   * false the buffer starts transparent.
+   */
+  float bottom_color[4] = {};
+  bool has_bottom_color = false;
 };
 
 struct PaintMaterialCompositeEvalStats {
@@ -144,6 +177,51 @@ bool BKE_paint_material_composite_eval(const PaintMaterialCompositeStack &stack,
                                        ImBuf *composite_ibuf,
                                        const rcti *region = nullptr,
                                        PaintMaterialCompositeEvalStats *r_stats = nullptr);
+
+/**
+ * The part of a \a width x \a height buffer an evaluation has to write into \a r_area: all of it, or
+ * \a region clipped to it.
+ *
+ * \return false when nothing of \a region is inside the buffer, so the composite is already
+ * correct and there is nothing to write.
+ */
+bool BKE_paint_material_composite_area_get(int width,
+                                           int height,
+                                           const rcti *region,
+                                           rcti &r_area);
+
+/**
+ * Composite \a stack into \a dst as straight scene-linear float RGBA, `width * height * 4` values.
+ *
+ * Every source sample is first decoded out of its own buffer's colorspace (see the layers'
+ * `*_colorspace_name`), then the rows are mixed in scene linear the way the shader mixes them; a
+ * premultiplied float buffer is straightened before it is read. Unlike #BKE_paint_material_composite_eval
+ * this accepts float buffers and constant layers, starts from the stack's bottom colour and does
+ * no encoding: that is the caller's job when it writes a byte map.
+ *
+ * \param region: when given, only this rectangle is written and the rest of \a dst is left as it
+ *                was. Same contract as the byte evaluation.
+ * \return false when the stack is empty, dimensions disagree, or a buffer is unusable.
+ */
+bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack &stack,
+                                              float *dst,
+                                              const rcti *region = nullptr,
+                                              PaintMaterialCompositeEvalStats *r_stats = nullptr);
+
+/**
+ * Acquire the layer buffers, evaluate through #BKE_paint_material_composite_eval_linear, and
+ * release them again: the linear counterpart of #BKE_paint_material_composite_eval_images, for a
+ * caller that will encode the scene-linear result itself (an export, a test that compares against
+ * the shader's own linear space).
+ *
+ * \param bottom_color: the value the stack starts from, or null to start transparent.
+ */
+bool BKE_paint_material_composite_eval_images_linear(
+    Span<PaintMaterialCompositeImageLayer> image_layers,
+    float *dst,
+    const rcti *region = nullptr,
+    PaintMaterialCompositeEvalStats *r_stats = nullptr,
+    const float bottom_color[4] = nullptr);
 
 /**
  * Acquire every layer's buffer, evaluate, and release the locks again.

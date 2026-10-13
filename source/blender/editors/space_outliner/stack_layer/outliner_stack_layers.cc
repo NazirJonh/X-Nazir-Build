@@ -123,8 +123,18 @@ wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op)
    * stays and only steps back to the objects list. */
   if (!RNA_boolean_get(op->ptr, "keep_view")) {
     space_outliner->outlinevis = SO_VIEW_LAYER;
+    space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
+    /* Leaving the mode through an operator skips #rna_SpaceOutliner_display_mode_update, so the
+     * tool header that carries only the Stack Layers controls is synced here through the same
+     * helper the RNA update calls. */
+    if (ScrArea *area = CTX_wm_area(C)) {
+      outliner_tool_header_visibility_sync(C, area, *space_outliner);
+      ED_area_tag_redraw(area);
+    }
   }
-  space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
+  else {
+    space_outliner->stack_layers_view = SO_SL_VIEW_OBJECTS;
+  }
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
   return OPERATOR_FINISHED;
 }
@@ -895,6 +905,9 @@ bool outliner_stack_focus_set(bContext *C,
   space_outliner.outlinevis = SO_STACK_LAYERS;
   space_outliner.stack_layers_view = SO_SL_VIEW_STACK;
   if (ScrArea *area = CTX_wm_area(C)) {
+    /* Focusing a stack sets the display mode directly, so it skips the RNA update that would show
+     * the tool header; sync it here through the same helper that update calls. */
+    outliner_tool_header_visibility_sync(C, area, space_outliner);
     ED_area_tag_redraw(area);
   }
 

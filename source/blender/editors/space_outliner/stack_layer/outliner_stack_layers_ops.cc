@@ -14,6 +14,7 @@
 
 #include <cfloat>
 #include <climits>
+#include <string>
 
 #include "DNA_ID.h"
 #include "DNA_object_types.h"
@@ -219,11 +220,25 @@ void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+/**
+ * The name a button for one kind shows: the kinds are the source's own vocabulary, so the operator
+ * cannot name them itself, and two icon buttons that both read "Add Stack Layer" cannot be told
+ * apart. The caller that knows the kind passes its name in `label`.
+ */
+static std::string stack_row_add_get_name(wmOperatorType * /*ot*/, PointerRNA *ptr)
+{
+  if (ptr == nullptr || !RNA_struct_property_is_set(ptr, "label")) {
+    return "";
+  }
+  return RNA_string_get(ptr, "label");
+}
+
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
 {
   ot->name = "Add Stack Layer";
   ot->idname = "OUTLINER_OT_stack_layer_add";
   ot->description = "Add a layer to the stack";
+  ot->get_name = stack_row_add_get_name;
   ot->exec = stack_row_add_exec;
   ot->invoke = stack_row_add_invoke;
   ot->ui = stack_row_add_ui;
@@ -235,6 +250,13 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   PropertyRNA *prop = RNA_def_enum(
       ot->srna, "type", rna_enum_dummy_NULL_items, 0, "Type", "What the new layer holds");
   RNA_def_enum_funcs(prop, stack_add_type_itemf);
+  PropertyRNA *label_prop = RNA_def_string(ot->srna,
+                                           "label",
+                                           nullptr,
+                                           64,
+                                           "Label",
+                                           "Name shown for this button, e.g. \"Add Fill Layer\"");
+  RNA_def_property_flag(label_prop, PROP_HIDDEN | PROP_SKIP_SAVE);
   RNA_def_int(ot->srna,
               "ordinal",
               -1,

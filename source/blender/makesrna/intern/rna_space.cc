@@ -870,6 +870,19 @@ static ScrArea *rna_area_from_space(const PointerRNA *ptr)
   return BKE_screen_find_area_from_space(screen, link);
 }
 
+static void rna_SpaceOutliner_display_mode_update(bContext *C, PointerRNA *ptr)
+{
+  ScrArea *area = rna_area_from_space(ptr);
+  if (area != nullptr) {
+    /* The tool header only carries the Stack Layers controls, so it follows the display mode.
+     * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed. */
+    SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+    ed::outliner::outliner_tool_header_visibility_sync(C, area, *space_outliner);
+    ED_area_tag_redraw(area);
+    ED_area_tag_refresh(area);
+  }
+}
+
 static void rna_SpaceOutliner_stack_focus_name_get(PointerRNA *ptr, char *value)
 {
   const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
@@ -5330,7 +5343,8 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "outlinevis");
   RNA_def_property_enum_items(prop, display_mode_items);
   RNA_def_property_ui_text(prop, "Display Mode", "Type of information to display");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_display_mode_update");
 
   prop = RNA_def_property(srna, "stack_layers_view", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stack_layers_view");

@@ -19,6 +19,63 @@ def has_selected_ids_in_context(context):
     return False
 
 
+class OUTLINER_HT_tool_header(Header):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'TOOL_HEADER'
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.display_mode == 'STACK_LAYERS'
+
+    def draw(self, context):
+        layout = self.layout
+        space = context.space_data
+
+        if space.stack_layers_view != 'STACK':
+            props = layout.operator("wm.context_set_enum", text="Outliner", icon='OUTLINER')
+            props.data_path = "space_data.display_mode"
+            props.value = 'VIEW_LAYER'
+
+            # Which source's stacks the object list is drawn from. It belongs on this row, next to
+            # the other Stack Layers controls, pushed to the far right edge.
+            layout.separator_spacer()
+            layout.prop(space, "stack_source", text="")
+            return
+
+        layout.operator("outliner.stack_layers_back", text="", icon='BACK')
+        if space.stack_source == 'PAINT_MATERIAL':
+            # Which channel's value the rows below show and edit. Width is capped so the dropdown
+            # does not stretch to the widest item and crowd the Add buttons.
+            sub = layout.row()
+            sub.ui_units_x = 4.0
+            sub.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
+
+        layout.separator_spacer()
+
+        if space.stack_source == 'PAINT_MATERIAL':
+            # The Add verb is built from the source's own kinds; the paint stack offers Paint and
+            # Fill, so a quick-access button each stands in for the menu (the source's kind list is
+            # not exposed through RNA yet, so the two buttons are written out here).
+            row = layout.row(align=True)
+            props = row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB')
+            props.type = 'PAINT'
+            props.label = "Add Paint Layer"
+            props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
+            props.type = 'FILL'
+            props.label = "Add Fill Layer"
+
+        if space.show_stack_layer_move_buttons:
+            layout.separator()
+            row = layout.row(align=True)
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
+            row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+
+        layout.separator()
+
+        row = layout.row(align=True)
+        row.operator("outliner.stack_layer_remove", text="", icon='TRASH')
+
+
 class OUTLINER_HT_header(Header):
     bl_space_type = 'OUTLINER'
 
@@ -38,23 +95,6 @@ class OUTLINER_HT_header(Header):
             OUTLINER_MT_editor_menus.draw_collapsible(context, layout)
         if display_mode == 'LIBRARY_OVERRIDES':
             layout.prop(space, "lib_override_view_mode", text="")
-        if display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK':
-            layout.operator("outliner.stack_layers_back", text="", icon='BACK')
-            if space.stack_source == 'PAINT_MATERIAL':
-                # Which channel's value the rows below show and edit. Width is capped so the
-                # dropdown does not stretch to the widest item.
-                sub = layout.row()
-                sub.ui_units_x = 4.0
-                sub.prop(context.tool_settings.paint_mode, "stack_layer_channel", text="")
-                # The Add verb is built from the source's own kinds; the paint stack offers only
-                # Paint for now, so a single quick-access button stands in for the menu.
-                row = layout.row(align=True)
-                row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB').type = 'PAINT'
-                row.operator("outliner.stack_layer_remove", text="", icon='REMOVE')
-            if space.show_stack_layer_move_buttons:
-                row = layout.row(align=True)
-                row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
-                row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
 
         layout.separator_spacer()
 
@@ -76,9 +116,6 @@ class OUTLINER_HT_header(Header):
             )
 
         layout.separator_spacer()
-
-        if display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'OBJECTS':
-            layout.prop(space, "stack_source", text="")
 
         if display_mode == 'SEQUENCE':
             row = layout.row(align=True)
@@ -654,6 +691,7 @@ class OUTLINER_PT_options_filter(Panel):
 
 classes = (
     OUTLINER_HT_header,
+    OUTLINER_HT_tool_header,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,

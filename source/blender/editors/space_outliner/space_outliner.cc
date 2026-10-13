@@ -25,6 +25,7 @@
 #include "BKE_outliner_treehash.hh"
 #include "BKE_screen.hh"
 
+#include "ED_outliner_stack.hh"
 #include "ED_screen.hh"
 #include "ED_space_api.hh"
 
@@ -173,6 +174,16 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
         case ND_FRAME:
           /* Rebuilding the outliner tree is expensive and shouldn't be done when scrubbing. */
           ED_region_tag_redraw_no_rebuild(region);
+          break;
+        case ND_TOOLSETTINGS:
+          /* The Stack Layers header's channel cursor is a toolsetting; the rows it addresses have
+           * to be re-read, but a change of channel is not a change of tree, so no rebuild. */
+          if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+            ED_region_tag_redraw_no_rebuild(region);
+          }
+          else {
+            ED_region_tag_redraw(region);
+          }
           break;
         case ND_OB_VISIBLE:
         case ND_OB_RENDER:
@@ -452,6 +463,15 @@ static SpaceLink *outliner_create(const ScrArea * /*area*/, const Scene * /*scen
   region->regiontype = RGN_TYPE_HEADER;
   region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
 
+  /* Tool header: only the Stack Layers display mode puts anything in it, so it starts hidden and
+   * the display-mode update shows it. */
+  region = BKE_area_region_new();
+
+  BLI_addtail(&space_outliner->regionbase, region);
+  region->regiontype = RGN_TYPE_TOOL_HEADER;
+  region->alignment = (U.uiflag & USER_HEADER_BOTTOM) ? RGN_ALIGN_BOTTOM : RGN_ALIGN_TOP;
+  region->flag = RGN_FLAG_HIDDEN;
+
   /* main region */
   region = BKE_area_region_new();
 
@@ -474,8 +494,75 @@ static void outliner_free(SpaceLink *sl)
   MEM_delete(space_outliner->runtime);
 }
 
+void outliner_tool_header_visibility_sync(bContext * /*C*/,
+                                          ScrArea *area,
+                                          const SpaceOutliner &space_outliner)
+{
+  const bool show = space_outliner.outlinevis == SO_STACK_LAYERS;
+  for (ARegion &region : area->regionbase) {
+    if (region.regiontype != RGN_TYPE_TOOL_HEADER) {
+      continue;
+    }
+    const bool hidden = !show || (region.flag & RGN_FLAG_HIDDEN_BY_USER);
+    if (bool(region.flag & RGN_FLAG_HIDDEN) == hidden) {
+      continue;
+    }
+    SET_FLAG_FROM_TEST(region.flag, hidden, RGN_FLAG_HIDDEN);
+    /* Defer the re-layout to the size-update pass of the next window draw rather than running
+     * `ED_area_init` here. This runs from a property update (inside interface handling), where
+     * re-initializing the area's regions -- freeing UI blocks and re-laying them out -- leaves the
+     * strip without its rectangle until some later resize. `AREA_FLAG_REGION_SIZE_UPDATE` is what
+     * `wm_draw_window_offscreen` -> `ED_area_update_region_sizes` processes, giving the region its
+     * rectangle on the very next draw. */
+    ED_area_tag_region_size_update(area, &region);
+    ED_region_tag_redraw(&region);
+  }
+}
+
+/**
+ * Give an Outliner area created before the tool header existed (startup file, saved layouts) its
+ * region. #outliner_create only covers new spaces, and nothing else adds the region to an area
+ * that was read from a file, so without this the header never appears there.
+ */
+static void outliner_tool_header_ensure(ScrArea *area)
+{
+  ARegion *header = nullptr;
+  for (ARegion &region : area->regionbase) {
+    if (region.regiontype == RGN_TYPE_TOOL_HEADER) {
+      return;
+    }
+    if (region.regiontype == RGN_TYPE_HEADER) {
+      header = &region;
+    }
+  }
+
+  ARegion *tool_header = BKE_area_region_new();
+  tool_header->regiontype = RGN_TYPE_TOOL_HEADER;
+  /* The area's region types were resolved before this ran (it runs from the space's own init),
+   * so the new region would otherwise carry a null type until the next `ED_area_init`, which the
+   * size-update path that shows the strip never reaches on its own. */
+  if (area->type != nullptr) {
+    tool_header->runtime->type = BKE_regiontype_from_id(area->type, RGN_TYPE_TOOL_HEADER);
+  }
+  tool_header->alignment = (header != nullptr) ? header->alignment : RGN_ALIGN_TOP;
+  tool_header->flag = RGN_FLAG_HIDDEN;
+  if (header != nullptr) {
+    BLI_insertlinkafter(&area->regionbase, header, tool_header);
+  }
+  else {
+    BLI_addhead(&area->regionbase, tool_header);
+  }
+}
+
 /* spacetype; init callback */
-static void outliner_init(wmWindowManager * /*wm*/, ScrArea * /*area*/) {}
+static void outliner_init(wmWindowManager * /*wm*/, ScrArea *area)
+{
+  outliner_tool_header_ensure(area);
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(area->spacedata.first);
+  if (space_outliner != nullptr) {
+    outliner_tool_header_visibility_sync(nullptr, area, *space_outliner);
+  }
+}
 
 static SpaceLink *outliner_duplicate(SpaceLink *sl)
 {
@@ -752,6 +839,21 @@ void ED_spacetype_outliner()
   art->free = outliner_header_region_free;
   art->listener = outliner_header_region_listener;
   BLI_addhead(&st->regiontypes, art);
+
+  /* regions: tool header. Shares the header's callbacks: it is an ordinary header region that
+   * happens to be shown only in one display mode. No `ED_KEYMAP_FRAMES` -- the Outliner has no
+   * notion of the current frame to navigate. */
+  art = MEM_new_zeroed<ARegionType>("spacetype outliner tool header region");
+  art->regionid = RGN_TYPE_TOOL_HEADER;
+  art->prefsizey = HEADERY;
+  art->keymapflag = ED_KEYMAP_UI | ED_KEYMAP_VIEW2D | ED_KEYMAP_HEADER;
+
+  art->init = outliner_header_region_init;
+  art->draw = outliner_header_region_draw;
+  art->free = outliner_header_region_free;
+  art->listener = outliner_header_region_listener;
+  BLI_addhead(&st->regiontypes, art);
+
   BKE_spacetype_register(std::move(st));
 }
 

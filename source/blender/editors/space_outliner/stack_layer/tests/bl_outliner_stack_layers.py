@@ -68,6 +68,28 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.space.display_mode = 'VIEW_LAYER'
         self.assertEqual(self.space.display_mode, 'VIEW_LAYER')
 
+    def tool_header_region(self):
+        return next((region for region in self.area.regions if region.type == 'TOOL_HEADER'),
+                    None)
+
+    def test_tool_header_region_exists(self):
+        # The Stack Layers controls live in a dedicated tool header rather than the main header.
+        # The region belongs to the Outliner area whether or not the mode is active; the display
+        # mode only shows or hides it.
+        region = self.tool_header_region()
+        self.assertIsNotNone(region)
+        self.assertEqual(region.type, 'TOOL_HEADER')
+        self.assertEqual(bpy.types.OUTLINER_HT_tool_header.bl_region_type, 'TOOL_HEADER')
+
+    def test_tool_header_polls_only_in_stack_layers(self):
+        # The tool header is drawn only in the Stack Layers display mode, so its poll answers for
+        # that one mode and no other.
+        with self.outliner_override():
+            self.space.display_mode = 'STACK_LAYERS'
+            self.assertTrue(bpy.types.OUTLINER_HT_tool_header.poll(bpy.context))
+            self.space.display_mode = 'VIEW_LAYER'
+            self.assertFalse(bpy.types.OUTLINER_HT_tool_header.poll(bpy.context))
+
     def test_stack_source_default_is_paint_material(self):
         # Paint layers are the mode's primary source and the one a space starts at; shape keys is
         # the other source a user can switch to.

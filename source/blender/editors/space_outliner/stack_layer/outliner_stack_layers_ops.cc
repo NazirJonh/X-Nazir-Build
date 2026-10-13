@@ -21,6 +21,8 @@
 #include "DNA_space_types.h"
 #include "DNA_windowmanager_types.h"
 
+#include "BKE_context.hh"
+
 #include "BLI_string.h"
 
 #include "ED_screen.hh"
@@ -120,6 +122,61 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot)
               "Ordinal",
               "Position of the layer in the stack",
               0,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+static wmOperatorStatus stack_row_action_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  const StackRow *row = (owner != nullptr) ? outliner_stack_row_find(*space_outliner, ordinal) :
+                                             nullptr;
+  const StackEditor *editor = stack_source_for_space(*space_outliner)->editor();
+  if (row == nullptr || editor == nullptr || !editor->row_action(*C, *owner, ordinal, *row)) {
+    return OPERATOR_CANCELLED;
+  }
+  ED_region_tag_redraw(CTX_wm_region(C));
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_stack_row_action(wmOperatorType *ot)
+{
+  ot->name = "Row Action";
+  ot->idname = "OUTLINER_OT_stack_row_action";
+  ot->description = "Run the row's own action";
+  ot->exec = stack_row_action_exec;
+  ot->poll = ED_operator_outliner_active;
+  /* No undo: the action is UI state, not data. */
+  ot->flag = OPTYPE_INTERNAL;
+  RNA_def_int(ot->srna, "ordinal", -1, -1, SHRT_MAX, "Ordinal", "", -1, SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Stack Layer Visibility";
+  ot->idname = "OUTLINER_OT_stack_layer_visibility_toggle";
+  /* Phrased as an edit rather than a view setting on purpose: for a paint stack this mutes the
+   * layer's nodes, so it changes what renders. */
+  ot->description = "Turn a layer of the stack on or off";
+  ot->exec = stack_row_visibility_toggle_exec;
+  ot->poll = stack_row_visibility_toggle_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to toggle; -1 uses the active one",
+              -1,
               SHRT_MAX);
   rna_def_stack_row_marker(ot);
 }

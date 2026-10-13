@@ -262,12 +262,11 @@ enum eSpaceOutliner_StackLayersView : short {
  * stays a reachable state.
  */
 enum eSpaceOutliner_StackLayersFlag : short {
-  SO_SL_HIDE_OPACITY = (1 << 0),
+  SO_SL_HIDE_VALUE = (1 << 0),
   SO_SL_HIDE_BLEND = (1 << 1),
   SO_SL_HIDE_ITEMS = (1 << 2),
   /** Compact one-unit rows instead of the tall rows with a thumbnail. */
   SO_SL_SMALL_ROWS = (1 << 3),
-  SO_SL_SORT_BY_NAME = (1 << 4),
   /** Keep the focused stack when the active object changes. */
   SO_SL_PINNED = (1 << 5),
   /**

@@ -5291,6 +5291,46 @@ static void rna_def_space_outliner(BlenderRNA *brna)
                            "last resolved it; empty before the first stack is shown");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_ID);
 
+  prop = RNA_def_property(srna, "show_stack_layer_value", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_VALUE);
+  RNA_def_property_ui_text(
+      prop, "Show Value", "Show the column that modulates each layer, such as its opacity");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "show_stack_layer_blend", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_BLEND);
+  RNA_def_property_ui_text(
+      prop, "Show Mode", "Show the column that says how each layer combines with the one below");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "show_stack_items", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_ITEMS);
+  RNA_def_property_ui_text(
+      prop, "Show Contents", "Show the data-blocks each layer is made of, below it");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_big_rows", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_SMALL_ROWS);
+  RNA_def_property_ui_text(prop, "Large Rows", "Use larger Stack Layers rows");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_pair_sub_rows", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PAIR_SUB_ROWS);
+  RNA_def_property_ui_text(prop,
+                           "Pair Sub-Rows",
+                           "Use one color for each pair of a row's sub-rows, where the source "
+                           "pairs them");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  prop = RNA_def_property(srna, "use_stack_layer_visibility_left", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "stack_layers_flag", SO_SL_VISIBILITY_RIGHT);
+  RNA_def_property_ui_text(prop,
+                           "Visibility Left Side",
+                           "Put the visibility toggle before the layer's name instead of in the "
+                           "columns on the right");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
   prop = RNA_def_property(srna, "lib_override_view_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, lib_override_view_mode);
   RNA_def_property_ui_text(prop,

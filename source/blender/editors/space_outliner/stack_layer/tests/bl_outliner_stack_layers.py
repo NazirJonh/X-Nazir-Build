@@ -123,11 +123,43 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.space.use_stack_layer_pin = False
         self.assertFalse(self.space.use_stack_layer_pin)
 
+    def test_stack_layers_flags_defaults_all_shown(self):
+        self.assertTrue(self.space.show_stack_layer_value)
+        self.assertTrue(self.space.show_stack_layer_blend)
+        self.assertTrue(self.space.show_stack_items)
+        # A stack opens like a layer manager: tall rows, visibility toggle on the left.
+        self.assertTrue(self.space.use_stack_layer_big_rows)
+        self.assertTrue(self.space.use_stack_layer_visibility_left)
+
+    def test_filter_panel_properties_exist(self):
+        for name in (
+            "show_stack_layer_value",
+            "show_stack_layer_blend",
+            "show_stack_items",
+            "use_stack_layer_big_rows",
+            "use_stack_layer_pair_sub_rows",
+            "use_stack_layer_visibility_left",
+            "use_stack_layer_pin",
+            "stack_source",
+        ):
+            self.assertIn(name, bpy.types.SpaceOutliner.bl_rna.properties)
+
+    def test_large_rows_and_columns_draw(self):
+        # Both row heights draw the value column of a shape key stack without a fault.
+        object = self.add_object_with_shape_keys()
+        self.focus_and_draw_stack(object)
+        for big_rows in (True, False):
+            self.space.use_stack_layer_big_rows = big_rows
+            for value_column in (True, False):
+                self.space.show_stack_layer_value = value_column
+                self.redraw_window()
+
     def test_stack_operators_are_registered(self):
         for name in (
             "stack_layer_focus",
             "stack_layers_back",
             "stack_layer_activate",
+            "stack_layer_visibility_toggle",
         ):
             self.assertTrue(hasattr(bpy.ops.outliner, name), name)
 

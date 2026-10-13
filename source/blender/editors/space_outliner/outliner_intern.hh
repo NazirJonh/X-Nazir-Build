@@ -51,6 +51,10 @@ struct wmOperatorType;
 struct wmEvent;
 struct WorkSpace;
 
+namespace ui {
+struct Block;
+}  // namespace ui
+
 namespace bke::outliner::treehash {
 class TreeHash;
 }
@@ -730,6 +734,16 @@ rctf outliner_stack_slot_preview_rect(float row_x, float content_y, int slot_ind
 
 /** How far outside the preview its frame sits, in pixels before the interface scale. */
 constexpr float OUTLINER_STACK_PREVIEW_FRAME_MARGIN = 2.0f;
+/** Text shrink of a compact row's column label and value/mode buttons, so they read in one unit. */
+constexpr float OUTLINER_STACK_COLUMN_TEXT_SCALE = 0.84f;
+/** Width of the value/mode popup, in UI units. */
+constexpr float OUTLINER_STACK_COLUMN_POPUP_WIDTH = 7.0f;
+/** Vertical breathing room above and below a column button, in pixels before interface scale. */
+constexpr float OUTLINER_STACK_COLUMN_BUTTON_PAD_Y = 1.0f;
+/** Height of each of the two stacked value/mode buttons in a Large row, in UI units. */
+constexpr float OUTLINER_STACK_COLUMN_STACKED_BUTTON_HEIGHT = 0.86f;
+/** The gap, in UI units, between the stacked value and mode buttons. */
+constexpr float OUTLINER_STACK_COLUMN_STACKED_GAP = 3.2f;
 
 /** Width a Stack Layers row's preview slots occupy, from the leading icon to the last frame. */
 float outliner_stack_preview_row_width(bool leading_icon, int num_previews);
@@ -739,6 +753,24 @@ int stack_row_content_offset(int row_bottom, int row_height);
 int stack_row_content_y(const SpaceOutliner &space_outliner, const TreeElement &te);
 /** The x a child of a Stack Layers row is drawn at. */
 int stack_child_start_x(const SpaceOutliner &space_outliner, const TreeElement &te, int startx);
+/** Whether the row's visibility toggle is drawn inline in the row, rather than in a column. */
+bool stack_row_has_inline_toggle(const StackRow *row);
+
+void outliner_draw_stack_row_icons(ui::Block *block,
+                                   ARegion *region,
+                                   SpaceOutliner *space_outliner,
+                                   const bContext &C,
+                                   const TreeViewContext &tvc);
+/** The width the Stack Layers value, mode, action and toggle columns take at the right edge. */
+float outliner_stack_columns_width(const SpaceOutliner &space_outliner);
+void outliner_draw_stack_columns(bContext *C,
+                                 ui::Block *block,
+                                 ARegion *region,
+                                 SpaceOutliner *space_outliner,
+                                 const TreeViewContext &tvc);
+void outliner_draw_stack_row_bands(const ARegion *region,
+                                   const SpaceOutliner *space_outliner,
+                                   const int startx);
 
 /** The empty-slot placeholder: a faint frame with  icon at preview size. */
 void stack_preview_empty_draw(const rctf &preview_rect, int icon, const float alpha_fac);
@@ -754,7 +786,16 @@ bool stack_layer_row_active(const TreeElement &te);
 /** Whether any of the tree's stack rows is the active element right now. */
 bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner);
 
+/** Shared with the tree drawing: whether \a te draws faded out (its data is linked, hidden...). */
+bool element_should_draw_faded(const TreeViewContext &tvc,
+                               const SpaceOutliner *space_outliner,
+                               const TreeElement *te,
+                               const TreeStoreElem *tselem);
+
 /** \} */
+/** The identity of the row currently at \a ordinal, for #outliner_stack_identity_resolve. */
+ed::outliner::StackItemIdentity outliner_stack_identity_of(const SpaceOutliner &space_outliner,
+                                                            int ordinal);
 /** Ordinals of the stack rows the user has selected, in ascending order. Empty when none are. */
 void stack_selected_ordinals_get(SpaceOutliner &space_outliner, blender::Vector<int> &r_ordinals);
 wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op);
@@ -763,6 +804,8 @@ wmOperatorStatus stack_focus_exec(bContext *C, wmOperator *op);
 int stack_operator_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op);
 wmOperatorStatus stack_row_activate_exec(bContext *C, wmOperator *op);
 bool stack_row_activate_poll(bContext *C);
+wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
+bool stack_row_visibility_toggle_poll(bContext *C);
 
 /** The stack's owning data-block for the current focus, or null. */
 ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,
@@ -800,12 +843,19 @@ int outliner_stack_active_ordinal_get(const ed::outliner::StackReadContext &ctx,
 bool outliner_stack_row_is_active(const ed::outliner::StackReadContext &ctx,
                                   SpaceOutliner &space_outliner,
                                   int ordinal);
+bool outliner_stack_row_set_enabled(bContext *C,
+                                    SpaceOutliner &space_outliner,
+                                    int ordinal,
+                                    bool enable);
 /** Forget whatever the sources remember by address; see #StackSource::undo_reset. */
 void outliner_stack_sources_undo_reset();
 
 void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot);
+void OUTLINER_OT_stack_row_action(wmOperatorType *ot);
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
+void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);
 void OUTLINER_OT_orphans_manage(wmOperatorType *ot);

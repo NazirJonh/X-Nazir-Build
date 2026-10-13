@@ -376,7 +376,7 @@ float outliner_right_columns_width(const SpaceOutliner *space_outliner)
       num_columns = 3;
       break;
     case SO_STACK_LAYERS:
-      return 0.0f;
+      return outliner_stack_columns_width(*space_outliner);
     case SO_VIEW_LAYER:
       if (space_outliner->show_restrict_flags & SO_RESTRICT_ENABLE) {
         num_columns++;

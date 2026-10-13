@@ -182,6 +182,94 @@ void stack_row_ui_state_capture(SpaceOutliner &space_outliner)
 }
 
 /**
+ * The selection an edit just left behind: the row it names reads as selected and active once the
+ * tree rebuilds, and every other row reads as not -- an edit renumbers the stack, and without
+ * this the tree store would hand the old ordinal's selection to whichever row moved into it.
+ *
+ * The edit has already run, so the rows re-read here are the renumbered ones and \a select_ordinal
+ * addresses them. -1 names nothing -- an edit that took a row away, such as a remove or an
+ * ungroup -- and only clears. The map is what carries the selection across the rebuild; a row
+ * without a #StackRow::stable_id cannot be addressed by it and keeps the tree store's state.
+ */
+void stack_row_ui_state_edit_select(const StackReadContext &ctx,
+                                    SpaceOutliner &space_outliner,
+                                    ID &owner,
+                                    const int select_ordinal)
+{
+  SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
+  outliner_stack_rows_ensure(ctx, space_outliner, owner);
+  for (StackRowUiState &state : runtime.stack_row_ui_state.values()) {
+    state.selected = false;
+    state.active = false;
+  }
+  if (select_ordinal < 0) {
+    return;
+  }
+  const StackItemIdentity identity = outliner_stack_identity_of(space_outliner, select_ordinal);
+  if (BLI_uuid_is_nil(identity.row_id)) {
+    return;
+  }
+  StackRowUiState &state = runtime.stack_row_ui_state.lookup_or_add_default(identity.row_id);
+  state.selected = true;
+  state.active = true;
+}
+
+/**
+ * The prologue and epilogue every mutating wrapper below shares: resolve the owner, get the
+ * source's editor, run \a fn, invalidate the cached rows and notify on success.
+ *
+ * \param fn: `bool(const StackSource &source, const StackEditor &editor, const StackFocus &focus,
+ * ID &owner, int &r_select_ordinal)` -- the one call that differs between callers, including
+ * whichever guard it needs beyond an editor existing at all: #StackEditor::can_reorder for a
+ * reorder, #StackSource::is_editable for the rest of what used to be separate `can_*` predicates,
+ * or nothing at all for an edit that never had one. Returning false leaves the stack exactly as
+ * this found it. \a r_select_ordinal starts at -1; a caller whose edit renumbers the stack sets it
+ * to whichever row should read as selected once the tree rebuilds.
+ * \param needs_renumber: whether the edit changes which row sits at which ordinal at all. A
+ * rename or a visibility toggle does not, and leaves every row under the tree-store key it
+ * already had -- no selection to re-target. \a r_ordinal: when given, receives \a
+ * select_ordinal, for a caller that needs the row's new position for something of its own, such
+ * as activating it.
+ */
+template<typename Fn>
+bool stack_mutate(bContext &C,
+                  SpaceOutliner &space_outliner,
+                  const bool needs_renumber,
+                  Fn &&fn,
+                  int *r_ordinal = nullptr)
+{
+  const StackReadContext ctx = outliner_stack_read_context(C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr) {
+    return false;
+  }
+  const StackSource &source = *stack_source_for_space(space_outliner);
+  const StackEditor *editor = source.editor();
+  /* The one editability check of the middle layer: the polls grey the UI out, the source's own
+   * methods guard the seam, and a check in every lambda here would only be a third copy of the
+   * same question. */
+  if (editor == nullptr || !source.is_editable(*owner)) {
+    return false;
+  }
+  int select_ordinal = -1;
+  if (!fn(source, *editor, space_outliner.runtime->stack_focus, *owner, select_ordinal)) {
+    return false;
+  }
+  if (r_ordinal != nullptr) {
+    *r_ordinal = select_ordinal;
+  }
+  /* Invalidating captures the rows' UI state into the identity-keyed map before the rows go
+   * away; a renumbering edit then re-targets the selection on the map, which is what carries it
+   * across the rebuild. */
+  outliner_stack_rows_invalidate(space_outliner);
+  if (needs_renumber) {
+    stack_row_ui_state_edit_select(ctx, space_outliner, *owner, select_ordinal);
+  }
+  WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  return true;
+}
+
+/**
  * The ordinal of the row the operator's \a marker names, or -1.
  *
  * A marker is the row's identity -- #StackRow::stable_id, as an earlier call of the mode handed it
@@ -211,6 +299,38 @@ static int stack_operator_marker_ordinal_get(bContext &C,
   outliner_stack_rows_ensure(ctx, space_outliner, *owner);
   const StackRow *row = outliner_stack_row_resolve(space_outliner, marker, -1);
   return (row != nullptr) ? row->ordinal : -1;
+}
+
+wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  if (ID *owner = outliner_stack_owner_get(ctx, *space_outliner)) {
+    outliner_stack_rows_ensure(ctx, *space_outliner, *owner);
+  }
+  const StackRow *row = (ordinal < 0) ? nullptr :
+                                        outliner_stack_row_find(*space_outliner, ordinal);
+  if (row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  return outliner_stack_row_set_enabled(C, *space_outliner, ordinal, !row->enabled) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
+bool stack_row_visibility_toggle_poll(bContext *C)
+{
+  if (!ED_operator_outliner_active(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  return owner != nullptr && stack_source_for_space(*space_outliner)->can_edit(*owner);
 }
 
 StackReadContext outliner_stack_read_context(const bContext &C)
@@ -485,6 +605,24 @@ const StackRow *outliner_stack_row_find(const SpaceOutliner &space_outliner, con
   return (index != nullptr) ? &space_outliner.runtime->stack_rows[*index] : nullptr;
 }
 
+StackItemIdentity outliner_stack_identity_of(const SpaceOutliner &space_outliner,
+                                             const int ordinal)
+{
+  StackItemIdentity identity;
+  const SpaceOutliner_Runtime *runtime = space_outliner.runtime;
+  if (runtime == nullptr || runtime->stack_owner_uid == 0) {
+    return identity;
+  }
+  identity.owner_uid = runtime->stack_owner_uid;
+  identity.source_type = space_outliner.stack_source;
+  identity.ordinal_hint = int16_t(ordinal);
+  const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+  if (row != nullptr) {
+    identity.row_id = row->stable_id;
+  }
+  return identity;
+}
+
 ID *outliner_stack_owner_get(const StackReadContext &ctx, SpaceOutliner &space_outliner)
 {
   /* Resolving here, so that a focus left pointing at a deleted object drops itself, and the rows
@@ -714,6 +852,26 @@ bool outliner_stack_row_is_active(const StackReadContext &ctx,
   }
   return stack_source_for_space(space_outliner)
       ->row_is_active(ctx, space_outliner.runtime->stack_focus, *owner, *row);
+}
+
+bool outliner_stack_row_set_enabled(bContext *C,
+                                    SpaceOutliner &space_outliner,
+                                    const int ordinal,
+                                    const bool enable)
+{
+  if (ordinal < 0) {
+    return false;
+  }
+  return stack_mutate(*C,
+                      space_outliner,
+                      false,
+                      [&](const StackSource & /*source*/,
+                          const StackEditor &editor,
+                          const StackFocus &focus,
+                          ID &owner,
+                          int & /*r_select_ordinal*/) {
+                        return editor.row_set_enabled(*C, focus, owner, ordinal, enable);
+                      });
 }
 
 void outliner_stack_sources_undo_reset()

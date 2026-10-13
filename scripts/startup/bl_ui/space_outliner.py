@@ -70,7 +70,12 @@ class OUTLINER_HT_header(Header):
             row.prop(space, "use_sync_select", icon='UV_SYNC_SELECT', text="")
 
         row = layout.row(align=True)
-        if display_mode in {'SCENES', 'VIEW_LAYER', 'LIBRARY_OVERRIDES'}:
+        if display_mode == 'STACK_LAYERS':
+            row.popover(
+                panel="OUTLINER_PT_stack_layers_filter",
+                text="",
+            )
+        elif display_mode in {'SCENES', 'VIEW_LAYER', 'LIBRARY_OVERRIDES'}:
             row.popover(
                 panel="OUTLINER_PT_filter",
                 text="",
@@ -488,6 +493,34 @@ class OUTLINER_PT_filter(Panel):
             row.prop(space, "use_filter_lib_override_system", text="System Overrides")
 
 
+class OUTLINER_PT_stack_layers_filter(Panel):
+    bl_space_type = 'OUTLINER'
+    bl_region_type = 'HEADER'
+    bl_label = "Stack Layers"
+
+    @classmethod
+    def poll(cls, context):
+        return context.space_data.display_mode == 'STACK_LAYERS'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        space = context.space_data
+
+        col = layout.column(heading="Columns", align=True)
+        col.prop(space, "show_stack_layer_value", text="Value")
+        col.prop(space, "show_stack_layer_blend", text="Mode")
+        col.prop(space, "use_stack_layer_visibility_left", text="Visibility Left Side")
+
+        col = layout.column(heading="Rows", align=True)
+        col.prop(space, "show_stack_items", text="Contents")
+        col.prop(space, "use_stack_layer_big_rows", text="Large")
+        col.prop(space, "use_stack_layer_pair_sub_rows", text="Pair Sub-Rows")
+
+        layout.prop(space, "use_stack_layer_pin")
+
+
 class OUTLINER_PT_options_search(Panel):
     bl_space_type = 'OUTLINER'
     bl_region_type = 'HEADER'
@@ -619,6 +652,7 @@ classes = (
     OUTLINER_MT_context_menu_view,
     OUTLINER_MT_view_pie,
     OUTLINER_PT_filter,
+    OUTLINER_PT_stack_layers_filter,
     OUTLINER_PT_options_search,
     OUTLINER_PT_options_filter,
 )

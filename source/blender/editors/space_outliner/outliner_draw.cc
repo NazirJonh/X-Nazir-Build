@@ -3400,10 +3400,10 @@ static void outliner_set_subtree_coords(TreeElement *te)
   });
 }
 
-static bool element_should_draw_faded(const TreeViewContext &tvc,
-                                      const SpaceOutliner *space_outliner,
-                                      const TreeElement *te,
-                                      const TreeStoreElem *tselem)
+bool element_should_draw_faded(const TreeViewContext &tvc,
+                               const SpaceOutliner *space_outliner,
+                               const TreeElement *te,
+                               const TreeStoreElem *tselem)
 {
   if (tselem->type == TSE_SOME_ID) {
     switch (te->idcode) {
@@ -3605,11 +3605,19 @@ static void outliner_draw_tree_element(ui::Block *block,
       }
     }
 
+    /* A correction or mask row has its visibility toggle right before its icon, instead of in the
+     * left column with the layers' own; the space is reserved here so the icon, name and active
+     * indicator all move past it. #outliner_draw_stack_row_icons places the button itself. */
+    const StackRow *toggle_row = (tselem->type == TSE_STACK_LAYER) ?
+                                     outliner_stack_row_find(*space_outliner, tselem->nr) :
+                                     nullptr;
+    const int inline_toggle_width = stack_row_has_inline_toggle(toggle_row) ? int(UI_UNIT_X) : 0;
+
     /* Active circle. */
     if (active != OL_DRAWSEL_NONE) {
-      outliner_draw_active_indicator(float(startx) + offsx + UI_UNIT_X,
+      outliner_draw_active_indicator(float(startx) + offsx + UI_UNIT_X + inline_toggle_width,
                                      float(*starty),
-                                     float(startx) + offsx + 2.0f * UI_UNIT_X,
+                                     float(startx) + offsx + 2.0f * UI_UNIT_X + inline_toggle_width,
                                      float(*starty) + UI_UNIT_Y,
                                      icon_bgcolor,
                                      icon_border);
@@ -3634,7 +3642,7 @@ static void outliner_draw_tree_element(ui::Block *block,
             float(icon_x) + 2 * ufac, float(*starty) + 1 * ufac, ICON_RIGHTARROW, alpha_fac);
       }
     }
-    offsx += UI_UNIT_X;
+    offsx += UI_UNIT_X + inline_toggle_width;
 
     /* Data-type icon. A stack layer row with a preview available shows that instead, filling
      * more of its two-unit-tall row than a unit icon would. */
@@ -4262,6 +4270,15 @@ static void outliner_draw_tree(ui::Block *block,
     columns_offset += UI_UNIT_X;
   }
 
+  /* Keep a dedicated column for the left-side stack visibility toggles, so the whole hierarchy --
+   * names, expand arrows and guide lines -- begins after them. */
+  if (space_outliner->outlinevis == SO_STACK_LAYERS &&
+      space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
+      (space_outliner->stack_layers_flag & SO_SL_VISIBILITY_RIGHT) == 0)
+  {
+    columns_offset += UI_UNIT_X;
+  }
+
   GPU_blend(GPU_BLEND_ALPHA); /* Only once. */
 
   if (space_outliner->outlinevis == SO_DATA_API) {
@@ -4275,6 +4292,7 @@ static void outliner_draw_tree(ui::Block *block,
   {
     int starty = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
     int startx = 0;
+    outliner_draw_stack_row_bands(region, space_outliner, columns_offset);
     outliner_draw_highlights(region, space_outliner, startx, &starty);
 
     /* Set scissor so tree elements or lines can't overlap restriction icons. */
@@ -4329,8 +4347,15 @@ static void outliner_draw_tree(ui::Block *block,
   }
 }
 
-static void outliner_back(ARegion *region)
+static void outliner_back(const SpaceOutliner &space_outliner, ARegion *region)
 {
+  if (space_outliner.outlinevis == SO_STACK_LAYERS &&
+      space_outliner.stack_layers_view == SO_SL_VIEW_STACK)
+  {
+    /* Stack Layers draws alternating bands from the actual tree geometry below. */
+    return;
+  }
+
   int ystart;
 
   ystart = int(region->v2d.tot.ymax);
@@ -4474,7 +4499,7 @@ void draw_outliner(const bContext *C, bool do_rebuild)
 
   /* Draw outliner stuff (background, hierarchy lines and names). */
   const float right_column_width = outliner_right_columns_width(space_outliner);
-  outliner_back(region);
+  outliner_back(*space_outliner, region);
   block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
   outliner_draw_tree(block,
                      tvc,
@@ -4519,6 +4544,14 @@ void draw_outliner(const bContext *C, bool do_rebuild)
       outliner_draw_overrides_restrictbuts(
           mainvar, block, region, space_outliner, &space_outliner->runtime->tree, x);
     }
+  }
+  else if (space_outliner->outlinevis == SO_STACK_LAYERS) {
+    /* The row toggles stay embossless, like the restriction icons: they sit inside the row. */
+    outliner_draw_stack_row_icons(block, region, space_outliner, *C, tvc);
+    block_emboss_set(block, ui::EmbossType::Emboss);
+    /* The RNA enum-name lookup the compact labels use takes a mutable context. */
+    outliner_draw_stack_columns(const_cast<bContext *>(C), block, region, space_outliner, tvc);
+    block_emboss_set(block, ui::EmbossType::NoneOrStatus);
   }
   else if (right_column_width > 0.0f) {
     /* draw restriction columns */

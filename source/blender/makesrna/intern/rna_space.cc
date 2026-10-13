@@ -884,6 +884,33 @@ static int rna_SpaceOutliner_stack_focus_name_length(PointerRNA *ptr)
   return int(strlen(ed::outliner::outliner_stack_focus_name_get(*space_outliner)));
 }
 
+static int rna_SpaceOutliner_stack_focus_sub_index_get(PointerRNA *ptr)
+{
+  const SpaceOutliner *space_outliner = static_cast<const SpaceOutliner *>(ptr->data);
+  return ed::outliner::outliner_stack_focus_sub_index_get(*space_outliner);
+}
+
+static void rna_SpaceOutliner_stack_focus_sub_index_set(PointerRNA *ptr, int value)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  ed::outliner::outliner_stack_focus_sub_index_set(*space_outliner, value);
+}
+
+static void rna_SpaceOutliner_stack_focus_sub_index_update(bContext *C,
+                                                           PointerRNA *ptr,
+                                                           PropertyRNA * /*prop*/)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  ed::outliner::outliner_stack_focus_sub_index_apply(*C, *space_outliner);
+}
+
+static const EnumPropertyItem *rna_SpaceOutliner_stack_focus_sub_index_itemf(
+    bContext *C, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  return ed::outliner::outliner_stack_focus_sub_index_itemf(C, *space_outliner, r_free);
+}
+
 static void area_region_from_regiondata(bScreen *screen,
                                         void *regiondata,
                                         ScrArea **r_area,
@@ -5335,6 +5362,19 @@ static void rna_def_space_outliner(BlenderRNA *brna)
                            "Name of the data-block the displayed stack belongs to, as the source "
                            "last resolved it; empty before the first stack is shown");
   RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_ID);
+
+  prop = RNA_def_property(srna, "stack_focus_sub_index", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_SpaceOutliner_stack_focus_sub_index_get",
+                              "rna_SpaceOutliner_stack_focus_sub_index_set",
+                              "rna_SpaceOutliner_stack_focus_sub_index_itemf");
+  RNA_def_property_ui_text(prop,
+                           "Stack Material",
+                           "Material slot whose layer stack is shown and used for painting");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_stack_focus_sub_index_update");
+  RNA_def_property_flag(prop, PROP_CONTEXT_PROPERTY_UPDATE);
 
   prop = RNA_def_property(srna, "show_stack_layer_value", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "stack_layers_flag", SO_SL_HIDE_VALUE);

@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <climits>
 #include <functional>
+#include <set>
+#include <string>
 
 #include "DNA_ID.h"
 #include "DNA_defs.h"
@@ -1128,6 +1130,344 @@ bool outliner_stack_row_set_enabled(bContext *C,
                       });
 }
 
+/* The Stack Layers clipboard holds row identities rather than raw source data. A paste asks the
+ * source to duplicate those rows, so every source keeps ownership of its data and copy semantics. */
+static Vector<StackItemIdentity> stack_layer_clipboard;
+
+wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  Vector<int> selected;
+  stack_selected_ordinals_get(*space_outliner, selected);
+  if (selected.is_empty()) {
+    const int active_ordinal = outliner_stack_active_ordinal_get(outliner_stack_read_context(*C),
+                                                                 *space_outliner);
+    if (active_ordinal >= 0) {
+      selected.append(active_ordinal);
+    }
+  }
+  /* A row kept by a folder is already carried by that folder; the copy takes only the roots. */
+  stack_ordinals_drop_covered_descendants(*space_outliner, selected);
+
+  stack_layer_clipboard.clear();
+  for (const int ordinal : selected) {
+    const StackItemIdentity identity = outliner_stack_identity_of(*space_outliner, ordinal);
+    if (identity.is_valid()) {
+      stack_layer_clipboard.append(identity);
+    }
+  }
+  if (stack_layer_clipboard.is_empty()) {
+    BKE_report(op->reports, RPT_INFO, "No stack layers to copy");
+    return OPERATOR_CANCELLED;
+  }
+  BKE_reportf(
+      op->reports, RPT_INFO, "Copied %d stack layer(s)", int(stack_layer_clipboard.size()));
+  return OPERATOR_FINISHED;
+}
+
+wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op)
+{
+  if (stack_layer_clipboard.is_empty()) {
+    BKE_report(op->reports, RPT_INFO, "No stack layers to paste");
+    return OPERATOR_CANCELLED;
+  }
+
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  const int active_ordinal = outliner_stack_active_ordinal_get(ctx, *space_outliner);
+  if (active_ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The first copy lands above the active row; each further copy above the one before it, so the
+   * pasted rows keep the order they were copied in. */
+  StackItemIdentity anchor = outliner_stack_identity_of(*space_outliner, active_ordinal);
+  if (!anchor.is_valid()) {
+    return OPERATOR_CANCELLED;
+  }
+  bool pasted_any = false;
+  int last_ordinal = -1;
+  for (const StackItemIdentity &source_identity : stack_layer_clipboard) {
+    const int source_ordinal = outliner_stack_identity_resolve(
+        ctx, *space_outliner, source_identity);
+    const int anchor_ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, anchor);
+    if (source_ordinal < 0 || anchor_ordinal < 0) {
+      continue;
+    }
+
+    int copied_ordinal = -1;
+    const bool copied = stack_mutate(
+        *C,
+        *space_outliner,
+        true,
+        [&](const StackSource & /*source*/,
+            const StackEditor &editor,
+            const StackFocus &focus,
+            ID &owner,
+            int &r_select_ordinal) {
+          r_select_ordinal = editor.row_duplicate(*C, focus, owner, source_ordinal);
+          return r_select_ordinal >= 0;
+        },
+        &copied_ordinal);
+    if (!copied || copied_ordinal < 0) {
+      continue;
+    }
+
+    const StackItemIdentity copied_identity = outliner_stack_identity_of(*space_outliner,
+                                                                         copied_ordinal);
+    if (!copied_identity.is_valid()) {
+      continue;
+    }
+    const int copied_ordinal_now = outliner_stack_identity_resolve(
+        ctx, *space_outliner, copied_identity);
+    const int anchor_ordinal_now = outliner_stack_identity_resolve(ctx, *space_outliner, anchor);
+    if (copied_ordinal_now < 0 || anchor_ordinal_now < 0 ||
+        !outliner_stack_row_move(
+            C, *space_outliner, copied_ordinal_now, anchor_ordinal_now, StackMovePlace::Above))
+    {
+      continue;
+    }
+    anchor = copied_identity;
+    last_ordinal = copied_ordinal_now;
+    pasted_any = true;
+  }
+
+  if (!pasted_any) {
+    BKE_report(op->reports, RPT_INFO, "Could not paste the copied stack layers here");
+    return OPERATOR_CANCELLED;
+  }
+  if (last_ordinal >= 0) {
+    outliner_stack_row_activate(C, *space_outliner, last_ordinal);
+  }
+  BKE_reportf(
+      op->reports, RPT_INFO, "Pasted %d stack layer(s)", int(stack_layer_clipboard.size()));
+  return OPERATOR_FINISHED;
+}
+
+bool stack_row_clipboard_poll(bContext *C)
+{
+  if (!stack_row_add_poll(C)) {
+    return false;
+  }
+  const SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  return space_outliner != nullptr && space_outliner->outlinevis == SO_STACK_LAYERS &&
+         space_outliner->stack_layers_view == SO_SL_VIEW_STACK;
+}
+
+wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  int new_ordinal = -1;
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int &r_select_ordinal) {
+        r_select_ordinal = editor.row_duplicate(*C, focus, owner, ordinal);
+        return r_select_ordinal >= 0;
+      },
+      &new_ordinal);
+  if (!ok) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The copy sits directly above the original and becomes the row the user works on next. */
+  outliner_stack_row_activate(C, *space_outliner, new_ordinal);
+  return OPERATOR_FINISHED;
+}
+
+wmOperatorStatus stack_row_rename_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  char name[MAX_NAME];
+  RNA_string_get(op->ptr, "name", name);
+  if (name[0] == '\0') {
+    BKE_report(op->reports, RPT_ERROR, "A layer needs a name");
+    return OPERATOR_CANCELLED;
+  }
+  return outliner_stack_row_rename(C, *space_outliner, ordinal, name) ? OPERATOR_FINISHED :
+                                                                       OPERATOR_CANCELLED;
+}
+
+wmOperatorStatus stack_row_rename_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  const StackRow *row = (ordinal < 0) ? nullptr :
+                                        outliner_stack_row_find(*space_outliner, ordinal);
+  if (row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Start from the current name: a rename dialog that opens empty is a delete-and-retype. */
+  PropertyRNA *prop = RNA_struct_find_property(op->ptr, "name");
+  if (!RNA_property_is_set(op->ptr, prop)) {
+    RNA_property_string_set(op->ptr, prop, row->name.c_str());
+  }
+  return WM_operator_props_popup_confirm(C, op, nullptr);
+}
+
+char *outliner_stack_row_name_buffer(const SpaceOutliner &space_outliner, const int ordinal)
+{
+  const StackRow *row = (ordinal < 0) ? nullptr : outliner_stack_row_find(space_outliner, ordinal);
+  return (row != nullptr) ? row->name_buffer : nullptr;
+}
+
+bool outliner_stack_row_rename(bContext *C,
+                               SpaceOutliner &space_outliner,
+                               const int ordinal,
+                               const StringRefNull name)
+{
+  if (ordinal < 0 || name.is_empty()) {
+    return false;
+  }
+  /* A rename leaves every ordinal where it was, so the rows come back under the same tree store
+   * keys and there is no pending state to carry across. */
+  return stack_mutate(
+      *C,
+      space_outliner,
+      false,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int & /*r_select_ordinal*/) {
+        return editor.row_rename(*C, focus, owner, ordinal, name);
+      });
+}
+
+/**
+ * A copy of \a text that lives as long as the program.
+ *
+ * Dynamic enum items have to point at strings that outlive the item array, which RNA frees
+ * without freeing them. Interning keeps the storage bounded by the number of distinct strings
+ * rather than by the number of redraws.
+ */
+static const char *stack_enum_string_intern(const StringRefNull text)
+{
+  static std::set<std::string> pool;
+  return pool.emplace(text.c_str()).first->c_str();
+}
+
+/** The enum identifier of a sub-selection: its index. */
+static const char *stack_sub_index_identifier(const int index)
+{
+  return stack_enum_string_intern(std::to_string(index));
+}
+
+/**
+ * The sub-selections of the focused object, as enum items.
+ *
+ * Built from the source's own sub-selections, so the Outliner offers "which material slot" without
+ * knowing that a slot is what a paint stack's sub-index means.
+ */
+static const EnumPropertyItem *stack_sub_index_itemf_impl(bContext *C,
+                                                          SpaceOutliner &space_outliner,
+                                                          bool *r_free)
+{
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  if (C != nullptr && space_outliner.runtime != nullptr) {
+    const StackReadContext ctx = outliner_stack_read_context(*C);
+    Vector<StackSubSelection> selections;
+    stack_source_for_space(space_outliner)
+        ->sub_selections_get(ctx, space_outliner.runtime->stack_focus, selections);
+    for (const int index : selections.index_range()) {
+      /* The strings have to outlive the item array, which RNA frees without freeing them: the
+       * identifier comes from a pool that only grows, the name from the data-block itself. */
+      EnumPropertyItem item = {};
+      item.value = index;
+      item.identifier = stack_sub_index_identifier(index);
+      item.name = (selections[index].preview_id != nullptr) ?
+                      selections[index].preview_id->name + 2 :
+                      IFACE_("Empty Slot");
+      item.description = "";
+      RNA_enum_item_add(&items, &items_num, &item);
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
+}
+
+const EnumPropertyItem *stack_sub_index_itemf(bContext *C,
+                                              PointerRNA * /*ptr*/,
+                                              PropertyRNA * /*prop*/,
+                                              bool *r_free)
+{
+  SpaceOutliner *space_outliner = (C != nullptr) ? CTX_wm_space_outliner(C) : nullptr;
+  if (space_outliner == nullptr) {
+    *r_free = true;
+    return nullptr;
+  }
+  return stack_sub_index_itemf_impl(C, *space_outliner, r_free);
+}
+
+const EnumPropertyItem *outliner_stack_focus_sub_index_itemf(bContext *C,
+                                                              SpaceOutliner &space_outliner,
+                                                              bool *r_free)
+{
+  return stack_sub_index_itemf_impl(C, space_outliner, r_free);
+}
+
+wmOperatorStatus stack_sub_index_set_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  outliner_stack_focus_sub_index_set(*space_outliner, RNA_enum_get(op->ptr, "sub_index"));
+  return outliner_stack_focus_sub_index_apply(*C, *space_outliner) ? OPERATOR_FINISHED :
+                                                                      OPERATOR_CANCELLED;
+}
+
+bool stack_sub_index_set_poll(bContext *C)
+{
+  if (!ED_operator_outliner_active(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  return space_outliner != nullptr && space_outliner->runtime != nullptr &&
+         outliner_stack_focus_object_get(outliner_stack_read_context(*C),
+                                         space_outliner->runtime->stack_focus) != nullptr;
+}
+
+int outliner_stack_focus_sub_index_get(const SpaceOutliner &space_outliner)
+{
+  return (space_outliner.runtime != nullptr) ? space_outliner.runtime->stack_focus.sub_index : -1;
+}
+
+void outliner_stack_focus_sub_index_set(SpaceOutliner &space_outliner, const int sub_index)
+{
+  if (space_outliner.runtime != nullptr) {
+    space_outliner.runtime->stack_focus.sub_index = sub_index;
+  }
+}
+
+bool outliner_stack_focus_sub_index_apply(bContext &C, SpaceOutliner &space_outliner)
+{
+  if (space_outliner.runtime == nullptr) {
+    return false;
+  }
+  Object *object = outliner_stack_focus_object_resolve(outliner_stack_read_context(C),
+                                                        space_outliner);
+  if (object == nullptr) {
+    return false;
+  }
+  const int sub_index = outliner_stack_focus_sub_index_get(space_outliner);
+  /* The sub-selection's own side effects in the data -- moving the material slot pointer along,
+   * for one -- are the source's business; the generic path only passes through. */
+  stack_source_for_space(space_outliner)->sub_selection_apply(
+      C, space_outliner.runtime->stack_focus, *object);
+  return outliner_stack_focus_set(&C, space_outliner, *object, sub_index, false);
+}
+
 void outliner_stack_sources_undo_reset()
 {
   for (const StackSource *source : stack_sources_get()) {
@@ -1357,9 +1697,9 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
     for (const int64_t index : kinds.index_range()) {
       EnumPropertyItem item = {};
       item.value = int(index);
-      item.identifier = BLI_strdup(kinds[index].identifier.c_str());
-      item.name = BLI_strdup(IFACE_(kinds[index].name.c_str()));
-      item.description = BLI_strdup(TIP_(kinds[index].description.c_str()));
+      item.identifier = stack_enum_string_intern(kinds[index].identifier);
+      item.name = stack_enum_string_intern(IFACE_(kinds[index].name.c_str()));
+      item.description = stack_enum_string_intern(TIP_(kinds[index].description.c_str()));
       item.icon = kinds[index].icon;
       RNA_enum_item_add(&items, &items_num, &item);
     }

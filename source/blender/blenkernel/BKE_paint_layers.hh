@@ -26,6 +26,7 @@
 namespace blender {
 
 struct Image;
+struct Main;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
@@ -80,6 +81,19 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
                                          const char *name,
                                          MaterialPaintLayer *anchor,
                                          PaintLayerPlace place);
+
+/**
+ * Deep-copy \a layer into a new row placed directly above it.
+ *
+ * The copy gets a fresh #bUUID marker unique within \a ma, a copy of the row's own state (flag,
+ * opacity, name) and its channel records, and -- never the shared map -- a copy of each image a
+ * channel references. The row is linked into \a ma's stack by the caller's insertion.
+ *
+ * \return the copy, or null when \a layer is null or not part of \a ma.
+ */
+MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
+                                               Material &ma,
+                                               MaterialPaintLayer *layer);
 
 /**
  * Give a freshly authored Paint \a layer the channels it takes part in by default: an enabled

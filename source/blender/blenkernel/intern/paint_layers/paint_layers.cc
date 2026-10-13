@@ -152,6 +152,39 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
   return layer;
 }
 
+MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
+                                               Material &ma,
+                                               MaterialPaintLayer *layer)
+{
+  if (!paint_layer_in_stack(ma, layer)) {
+    return nullptr;
+  }
+
+  MaterialPaintLayer *copy = paint_layer_alloc(ma, layer->name);
+  copy->flag = layer->flag;
+  copy->opacity = layer->opacity;
+  if (layer->channels_num > 0 && layer->channels != nullptr) {
+    copy->channels = MEM_new_array<MaterialPaintLayerChannel>(layer->channels_num, __func__);
+    copy->channels_num = layer->channels_num;
+    /* The record is plain data and DNA types delete their copy assignment, so it is copied as one
+     * block, the way #BKE_paint_layers_channel_add grows the array. */
+    memcpy(copy->channels, layer->channels, sizeof(*copy->channels) * layer->channels_num);
+    for (const int i : IndexRange(layer->channels_num)) {
+      /* A map is painted in place, so a copy sharing its source's image would turn every stroke on
+       * one into a stroke on the other: the copy gets its own. The fresh image carries the one user
+       * that this record is; no separate id_us_plus is taken (as #BKE_id_copy returns it). */
+      if (copy->channels[i].image != nullptr) {
+        copy->channels[i].image = id_cast<Image *>(
+            BKE_id_copy(&bmain, &copy->channels[i].image->id));
+      }
+    }
+  }
+  BLI_insertlinkafter(&ma.paint_layers, layer, copy);
+
+  BKE_paint_layers_tag_edited(ma);
+  return copy;
+}
+
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer)
 {
   for (const eMaterialPaintChannel channel : paint_layer_default_channels) {

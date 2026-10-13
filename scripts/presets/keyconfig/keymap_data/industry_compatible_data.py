@@ -600,6 +600,10 @@ def km_outliner(params):
         ("anim.keyframe_delete", {"type": 'S', "value": 'PRESS', "alt": True}, None),
         ("outliner.drivers_add_selected", {"type": 'D', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.drivers_delete_selected", {"type": 'D', "value": 'PRESS', "ctrl": True, "alt": True}, None),
+        # Before `outliner.delete`: the first entry that polls wins. The Stack Layers one polls false
+        # in every other display mode.
+        ("outliner.stack_layer_remove", {"type": 'BACK_SPACE', "value": 'PRESS'}, None),
+        ("outliner.stack_layer_remove", {"type": 'DEL', "value": 'PRESS'}, None),
         ("outliner.delete", {"type": 'BACK_SPACE', "value": 'PRESS'}, None),
         ("outliner.delete", {"type": 'DEL', "value": 'PRESS'}, None),
         op_menu("OBJECT_MT_move_to_collection", {"type": 'G', "value": 'PRESS', "ctrl": True}),
@@ -611,6 +615,8 @@ def km_outliner(params):
         ("outliner.start_filter", {"type": 'F', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.clear_filter", {"type": 'F', "value": 'PRESS', "alt": True}, None),
         # Copy/paste.
+        ("outliner.stack_layer_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        ("outliner.stack_layer_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
     ])

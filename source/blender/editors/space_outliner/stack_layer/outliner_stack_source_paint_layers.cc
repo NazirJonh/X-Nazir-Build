@@ -19,20 +19,26 @@
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_mesh_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 #include "DNA_uuid_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_editmesh.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
+#include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_mesh.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_report.hh"
 
 #include "BLI_assert.h"
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
@@ -193,6 +199,22 @@ int paint_layers_ordinal_of(const Material &material, const MaterialPaintLayer *
   return -1;
 }
 
+bool paint_layers_edit_rename(Material &material, const int ordinal, const char *name)
+{
+  MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+  return layer != nullptr && BKE_paint_layers_rename(material, layer, name);
+}
+
+int paint_layers_edit_duplicate(Main &bmain, Material &material, const int ordinal)
+{
+  MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+  if (layer == nullptr) {
+    return -1;
+  }
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(bmain, material, layer);
+  return (copy != nullptr) ? paint_layers_ordinal_of(material, copy) : -1;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -321,6 +343,49 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
            BLI_uuid_equal(material.active_layer_marker, row.stable_id);
   }
 
+  void sub_selections_get(const StackReadContext &ctx,
+                          const StackFocus &focus,
+                          Vector<StackSubSelection> &r_items) const override
+  {
+    Object *object = outliner_stack_focus_object_get(ctx, focus);
+    if (object == nullptr) {
+      return;
+    }
+    /* One entry per material slot: the stack the Outliner shows is one material's, and an object
+     * can carry several. */
+    for (const int slot : IndexRange(object->totcol)) {
+      const Material *material = BKE_object_material_get(object, short(slot + 1));
+      StackSubSelection item;
+      item.name = material != nullptr ? material->id.name + 2 : "";
+      item.preview_id = (material != nullptr) ? &const_cast<Material *>(material)->id : nullptr;
+      r_items.append(std::move(item));
+    }
+  }
+
+  int default_sub_index(const StackReadContext &ctx, const StackFocus &focus) const override
+  {
+    Object *object = outliner_stack_focus_object_get(ctx, focus);
+    return (object != nullptr && object->actcol > 0) ? int(object->actcol) - 1 : -1;
+  }
+
+  void sub_selection_apply(bContext & /*C*/,
+                           const StackFocus &focus,
+                           Object &object) const override
+  {
+    /* Choosing a stack slot is choosing the object's active material slot. */
+    if (focus.sub_index >= 0 && focus.sub_index < object.totcol) {
+      object.actcol = short(focus.sub_index + 1);
+      /* As `Object.active_material_index` does: an edit-mesh assigns new faces from its own copy
+       * of the slot. */
+      if (object.type == OB_MESH) {
+        Mesh *mesh = id_cast<Mesh *>(object.data);
+        if (mesh->runtime->edit_mesh) {
+          mesh->runtime->edit_mesh->mat_nr = focus.sub_index;
+        }
+      }
+    }
+  }
+
   const StackEditor *editor() const override
   {
     return this;
@@ -440,6 +505,39 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
+  }
+
+  bool row_rename(bContext &C,
+                  const StackFocus & /*focus*/,
+                  ID &owner,
+                  const int ordinal,
+                  const StringRefNull name) const override
+  {
+    Material &material = layers_owner(owner);
+    if (!paint_layers_edit_rename(material, ordinal, name.c_str())) {
+      BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Cannot rename this row");
+      return false;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  int row_duplicate(bContext &C,
+                    const StackFocus & /*focus*/,
+                    ID &owner,
+                    const int ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    Main *bmain = CTX_data_main(&C);
+    if (bmain == nullptr) {
+      return -1;
+    }
+    const int copy = paint_layers_edit_duplicate(*bmain, material, ordinal);
+    if (copy < 0) {
+      return -1;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return copy;
   }
 
   bool row_move(bContext &C,

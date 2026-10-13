@@ -20,6 +20,7 @@
 
 namespace blender {
 
+struct Main;
 struct Material;
 struct MaterialPaintLayer;
 
@@ -41,6 +42,10 @@ MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, int or
 
 /** The ordinal #paint_stack_rows_from_description gives \a target, or -1. */
 int paint_layers_ordinal_of(const Material &material, const MaterialPaintLayer *target);
+
+/** The description edits behind the source's rename and duplicate verbs, free of a #bContext. */
+bool paint_layers_edit_rename(Material &material, int ordinal, const char *name);
+int paint_layers_edit_duplicate(Main &bmain, Material &material, int ordinal);
 
 }  // namespace ed::outliner
 }  // namespace blender

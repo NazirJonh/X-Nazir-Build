@@ -292,4 +292,84 @@ void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot)
+{
+  ot->name = "Rename Stack Layer";
+  ot->idname = "OUTLINER_OT_stack_layer_rename";
+  ot->description = "Give a layer of the stack a new name";
+  ot->exec = stack_row_rename_exec;
+  ot->invoke = stack_row_rename_invoke;
+  ot->poll = stack_row_add_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to rename; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  RNA_def_string(ot->srna, "name", nullptr, MAX_NAME, "Name", "New name for the layer");
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot)
+{
+  ot->name = "Duplicate Stack Layer";
+  ot->idname = "OUTLINER_OT_stack_layer_duplicate";
+  ot->description = "Copy a layer, maps and all, and put the copy above it";
+  ot->exec = stack_row_duplicate_exec;
+  ot->poll = stack_row_add_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to copy; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot)
+{
+  ot->name = "Copy Stack Layers";
+  ot->idname = "OUTLINER_OT_stack_layer_copy";
+  ot->description = "Copy the selected stack layers to the Stack Layers clipboard";
+  ot->exec = stack_row_copy_exec;
+  ot->poll = stack_row_clipboard_poll;
+}
+
+void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot)
+{
+  ot->name = "Paste Stack Layers";
+  ot->idname = "OUTLINER_OT_stack_layer_paste";
+  ot->description = "Paste copied stack layers above the active layer";
+  ot->exec = stack_row_paste_exec;
+  ot->poll = stack_row_clipboard_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot)
+{
+  ot->name = "Set Stack";
+  ot->idname = "OUTLINER_OT_stack_focus_sub_index";
+  ot->description = "Choose which of the object's stacks to show, such as a material slot";
+  ot->exec = stack_sub_index_set_exec;
+  ot->invoke = WM_enum_search_invoke;
+  ot->poll = stack_sub_index_set_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  PropertyRNA *prop = RNA_def_enum(
+      ot->srna, "sub_index", rna_enum_dummy_NULL_items, 0, "Stack", "");
+  RNA_def_enum_funcs(prop, stack_sub_index_itemf);
+  RNA_def_property_flag(prop, PROP_ENUM_NO_TRANSLATE);
+  ot->prop = prop;
+}
+
 }  // namespace blender::ed::outliner

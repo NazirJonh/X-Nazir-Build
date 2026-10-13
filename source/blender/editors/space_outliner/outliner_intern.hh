@@ -857,6 +857,18 @@ bool stack_row_add_poll(bContext *C);
 void stack_row_add_ui(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op);
 bool stack_row_remove_poll(bContext *C);
+bool stack_row_clipboard_poll(bContext *C);
+wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_rename_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_rename_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+const EnumPropertyItem *stack_sub_index_itemf(bContext *C,
+                                              PointerRNA * /*ptr*/,
+                                              PropertyRNA * /*prop*/,
+                                              bool *r_free);
+wmOperatorStatus stack_sub_index_set_exec(bContext *C, wmOperator *op);
+bool stack_sub_index_set_poll(bContext *C);
 void stack_layer_drop_data_init(SpaceOutliner &space_outliner,
                                 wmDrag *drag,
                                 const TreeStoreElem &tselem);
@@ -933,6 +945,18 @@ int outliner_stack_row_add(bContext *C,
                            int kind,
                            int ordinal,
                            const ed::outliner::StackAddArgs &args = {});
+/**
+ * The storage a rename field types into for a row, or null when the row cannot be renamed.
+ *
+ * See #ed::outliner::StackRow::name_buffer: it holds at least #MAX_NAME bytes and outlives the
+ * rows, which is what a text button being edited across redraws needs.
+ */
+char *outliner_stack_row_name_buffer(const SpaceOutliner &space_outliner, int ordinal);
+/** Give a row a new name, reporting to the user's status bar when the source refuses. */
+bool outliner_stack_row_rename(bContext *C,
+                               SpaceOutliner &space_outliner,
+                               int ordinal,
+                               StringRefNull name);
 /** Whether the space's source lets its rows change places right now. */
 bool outliner_stack_can_reorder(const bContext &C, SpaceOutliner &space_outliner);
 /** Forget whatever the sources remember by address; see #StackSource::undo_reset. */
@@ -947,6 +971,11 @@ void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot);
+void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);
 void OUTLINER_OT_orphans_manage(wmOperatorType *ot);

@@ -7,11 +7,13 @@
 #include "BLI_uuid.h"
 
 #include "BKE_gtest_base.hh"
+#include "BKE_image.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_space_types.h"
 
@@ -136,6 +138,52 @@ TEST_F(OutlinerStackPaintLayersSourceTest, columns_show_value_and_hide_mode)
   const StackColumnLayout layout = source().column_layout();
   EXPECT_GT(layout.value_width, 0.0f);
   EXPECT_LE(layout.mode_width, 0.0f);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, rename_writes_the_row_name)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  const bUUID marker = layer->marker;
+  ASSERT_TRUE(paint_layers_edit_rename(*material, 0, "Renamed"));
+  const MaterialPaintLayer *renamed = BKE_paint_layers_find(*material, marker);
+  ASSERT_NE(renamed, nullptr);
+  EXPECT_STREQ(renamed->name, "Renamed");
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, duplicate_copies_the_row_and_its_map)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      bmain, 8, 8, "Map", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *material, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*material, layer, 0.25f));
+
+  const int copy_ordinal = paint_layers_edit_duplicate(*bmain, *material, 0);
+  ASSERT_EQ(copy_ordinal, 1);
+  MaterialPaintLayer *copy = paint_description_row_for_ordinal(*material, 1);
+  ASSERT_NE(copy, nullptr);
+  /* A fresh marker and the row's own state; the name is copied verbatim. */
+  EXPECT_FALSE(BLI_uuid_equal(copy->marker, layer->marker));
+  EXPECT_STREQ(copy->name, "A");
+  EXPECT_FLOAT_EQ(copy->opacity, 0.25f);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 2u);
+  EXPECT_FALSE(BLI_uuid_equal(rows[0].stable_id, rows[1].stable_id));
+
+  /* The copy gets its own map, never the shared one. */
+  MaterialPaintLayerChannel *copy_channel = nullptr;
+  for (int c = 0; c < copy->channels_num; c++) {
+    if (copy->channels[c].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      copy_channel = &copy->channels[c];
+    }
+  }
+  ASSERT_NE(copy_channel, nullptr);
+  ASSERT_NE(copy_channel->image, nullptr);
+  EXPECT_NE(copy_channel->image, image);
 }
 
 }  // namespace tests

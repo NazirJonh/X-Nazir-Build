@@ -1294,6 +1294,8 @@ enum eWM_DragDataType : int8_t {
   WM_DRAG_BONE_COLLECTION,
   WM_DRAG_SHAPE_KEY,
   WM_DRAG_SCULPT_LAYER,
+  /** Reorder a row of the Outliner's Stack Layers mode. */
+  WM_DRAG_STACK_LAYER,
   /** Reorder an item within an asset-backed grid (Shift+drag) — the asset shelf's Favorites list
    *  today, any future template_grid_view_asset consumer that opts in tomorrow. */
   WM_DRAG_GRID_ITEM_REORDER_ASSET,
@@ -1441,6 +1443,13 @@ struct wmDrag {
   int icon;
   eWM_DragDataType type;
   void *poin;
+  /**
+   * Destructor for #poin, set by the module that built the payload when #WM_drag_data_free has no
+   * branch for its type -- a payload that belongs to an editor and carries C++ members. Called by
+   * #WM_drag_free when #WM_DRAG_FREE_DATA is set; it must free the whole allocation, destructors
+   * included. When it is left null the switch in #WM_drag_data_free answers, as before.
+   */
+  void (*poin_free_fn)(void *poin) = nullptr;
 
   /** If no small icon but imbuf should be drawn around cursor. */
   const ImBuf *imb;

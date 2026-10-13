@@ -137,7 +137,9 @@ static TreeElement *outliner_drop_insert_find(bContext *C,
   if (te_hovered) {
     /* Mouse hovers an element (ignoring x-axis),
      * now find out how to insert the dragged item exactly. */
-    const float margin = UI_UNIT_Y * (1.0f / 4);
+    /* A quarter of the row this time, not of a fixed unit: the insert margins have to scale with
+     * the row or a tall row is nearly all "into". */
+    const float margin = outliner_tree_element_height(*space_outliner, *te_hovered) * (1.0f / 4);
 
     if (view_mval[1] < (te_hovered->ys + margin)) {
       if (TSELEM_OPEN(TREESTORE(te_hovered), space_outliner) && !te_hovered->subtree.is_empty()) {
@@ -169,7 +171,7 @@ static TreeElement *outliner_drop_insert_find(bContext *C,
     *r_insert_type = TE_INSERT_AFTER;
     return last;
   }
-  if (view_mval[1] > (first->ys + UI_UNIT_Y)) {
+  if (view_mval[1] > (first->ys + outliner_tree_element_height(*space_outliner, *first))) {
     *r_insert_type = TE_INSERT_BEFORE;
     return first;
   }
@@ -1479,8 +1481,11 @@ static wmOperatorStatus outliner_item_drag_drop_invoke(bContext *C,
   }
 
   TreeStoreElem *tselem = TREESTORE(te);
+  /* A stack row has no draggable ID of its own -- see #tree_element_get_icon -- so it is the one
+   * kind of row that may start a drag without one. */
+  const bool use_stack_layer_drag = tselem->type == TSE_STACK_LAYER;
   TreeElementIcon data = tree_element_get_icon(tselem, te);
-  if (!data.drag_id) {
+  if (!use_stack_layer_drag && !data.drag_id) {
     return (OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH);
   }
 
@@ -1491,6 +1496,12 @@ static wmOperatorStatus outliner_item_drag_drop_invoke(bContext *C,
   }
   if (outliner_is_co_within_mode_column(space_outliner, view_mval)) {
     return OPERATOR_CANCELLED | OPERATOR_PASS_THROUGH;
+  }
+
+  if (use_stack_layer_drag && (tselem->flag & TSE_SELECTED) == 0) {
+    /* Match the regular Outliner's drag behavior: a row that was not part of the current block
+     * becomes the only selected and active row before its drag payload is collected. */
+    outliner_item_select(C, space_outliner, te, OL_ITEM_SELECT | OL_ITEM_ACTIVATE);
   }
 
   /* Scroll the view when dragging near edges, but not
@@ -1511,10 +1522,15 @@ static wmOperatorStatus outliner_item_drag_drop_invoke(bContext *C,
                                        TSE_GPENCIL_EFFECT,
                                        TSE_GPENCIL_EFFECT_BASE);
 
-  const eWM_DragDataType wm_drag_type = use_datastack_drag ? WM_DRAG_DATASTACK : WM_DRAG_ID;
+  const eWM_DragDataType wm_drag_type = use_stack_layer_drag ? WM_DRAG_STACK_LAYER :
+                                        use_datastack_drag  ? WM_DRAG_DATASTACK :
+                                                              WM_DRAG_ID;
   wmDrag *drag = WM_drag_data_create(C, data.icon, wm_drag_type, nullptr, WM_DRAG_NOP);
 
-  if (use_datastack_drag) {
+  if (use_stack_layer_drag) {
+    stack_layer_drop_data_init(*space_outliner, drag, *tselem);
+  }
+  else if (use_datastack_drag) {
     TreeElement *te_bone = nullptr;
     bPoseChannel *pchan = outliner_find_parent_bone(te, &te_bone);
     datastack_drop_data_init(
@@ -1648,6 +1664,12 @@ void outliner_dropboxes()
                  nullptr,
                  nullptr,
                  datastack_drop_tooltip);
+  WM_dropbox_add(lb,
+                 "OUTLINER_OT_stack_layer_drop",
+                 stack_layer_drop_poll,
+                 nullptr,
+                 nullptr,
+                 stack_layer_drop_tooltip);
   WM_dropbox_add(lb,
                  "OUTLINER_OT_collection_drop",
                  collection_drop_poll,

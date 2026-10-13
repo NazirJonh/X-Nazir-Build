@@ -126,6 +126,43 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+void OUTLINER_OT_stack_layer_move(wmOperatorType *ot)
+{
+  static const EnumPropertyItem direction_items[] = {
+      {0, "UP", 0, "Up", "Move the layer towards the top of the stack"},
+      {1, "DOWN", 0, "Down", "Move the layer towards the bottom of the stack"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  ot->name = "Move Stack Layer";
+  ot->idname = "OUTLINER_OT_stack_layer_move";
+  ot->description = "Change the position of a layer in the stack";
+  ot->exec = stack_row_move_exec;
+  ot->poll = stack_row_reorder_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to move; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  RNA_def_enum(ot->srna, "direction", direction_items, 0, "Direction", "Which way to move it");
+  RNA_def_int(ot->srna,
+              "to_ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Target",
+              "Position to move the layer to; -1 uses the direction instead",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
 static wmOperatorStatus stack_row_action_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);

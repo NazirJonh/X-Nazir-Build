@@ -40,6 +40,10 @@ class OUTLINER_HT_header(Header):
             layout.prop(space, "lib_override_view_mode", text="")
         if display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK':
             layout.operator("outliner.stack_layers_back", text="", icon='BACK')
+            if space.show_stack_layer_move_buttons:
+                row = layout.row(align=True)
+                row.operator("outliner.stack_layer_move", text="", icon='TRIA_UP').direction = 'UP'
+                row.operator("outliner.stack_layer_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
 
         layout.separator_spacer()
 
@@ -517,6 +521,7 @@ class OUTLINER_PT_stack_layers_filter(Panel):
         col.prop(space, "show_stack_items", text="Contents")
         col.prop(space, "use_stack_layer_big_rows", text="Large")
         col.prop(space, "use_stack_layer_pair_sub_rows", text="Pair Sub-Rows")
+        col.prop(space, "show_stack_layer_move_buttons", text="Move Buttons")
 
         layout.prop(space, "use_stack_layer_pin")
 

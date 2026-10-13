@@ -160,8 +160,30 @@ class StackLayersOutlinerTest(unittest.TestCase):
             "stack_layers_back",
             "stack_layer_activate",
             "stack_layer_visibility_toggle",
+            "stack_layer_move",
+            "stack_layer_drop",
         ):
             self.assertTrue(hasattr(bpy.ops.outliner, name), name)
+
+    def test_shape_key_source_reorders(self):
+        # Reorder goes through the same operator and the same ordinals as any other stack does;
+        # only what happens at the bottom of the seam differs.
+        object = self.add_object_with_shape_keys()
+        self.focus_and_draw_stack(object)
+        with self.outliner_override():
+            result = bpy.ops.outliner.stack_layer_move(ordinal=1, to_ordinal=2)
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual([key.name for key in object.data.shape_keys.key_blocks],
+                         ["Basis", "Key 2", "Key 1"])
+
+    def test_move_direction_steps_one_row(self):
+        object = self.add_object_with_shape_keys()
+        self.focus_and_draw_stack(object)
+        with self.outliner_override():
+            result = bpy.ops.outliner.stack_layer_move(ordinal=2, direction='DOWN')
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual([key.name for key in object.data.shape_keys.key_blocks],
+                         ["Basis", "Key 2", "Key 1"])
 
 
 if __name__ == "__main__":

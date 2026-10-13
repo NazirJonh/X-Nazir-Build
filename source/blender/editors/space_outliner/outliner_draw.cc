@@ -4129,9 +4129,20 @@ static void outliner_draw_highlights(const ARegion *region,
                                      const float col_active[4],
                                      const float col_highlight[4],
                                      const float col_searchmatch[4],
+                                     const bool drag_active,
                                      int /* start_x */,
                                      int *io_start_y)
 {
+  /* Where a drop on the Stack Layers list is pointing, kept by the stack's own polls. Its rows
+   * read this rather than the tree store's #TSE_DRAG_ANY flags: every drop poll in the Outliner
+   * clears those before deciding whether it wants the drop, so which poll's flags survive to this
+   * draw depends on the order the window manager polls in. Only meaningful while a drag is live;
+   * what it holds between drags is last time's answer. */
+  const SpaceOutliner_Runtime::StackDropIndicator &stack_drop =
+      space_outliner->runtime->stack_drop_indicator;
+  const bool stack_drop_shown = drag_active && space_outliner->outlinevis == SO_STACK_LAYERS &&
+                                stack_drop.ordinal >= 0;
+
   const bool is_searching = (SEARCHING_OUTLINER(space_outliner) ||
                              (space_outliner->outlinevis == SO_DATA_API &&
                               space_outliner->search_string[0] != 0));
@@ -4178,19 +4189,37 @@ static void outliner_draw_highlights(const ARegion *region,
       ui::draw_roundbox_4fv(&rect, true, radius, col_selection);
     }
 
+    /* What the drop under way is pointing at for this row: the stack's own indicator where it
+     * applies, the tree store's drag flags everywhere else. */
+    std::optional<TreeElementInsertType> drop_insert_type;
+    if (stack_drop_shown && tselem->type == TSE_STACK_LAYER &&
+        int(tselem->nr) == stack_drop.ordinal)
+    {
+      drop_insert_type = stack_drop.insert_type;
+    }
+    else if (tselem->flag & TSE_DRAG_BEFORE) {
+      drop_insert_type = TE_INSERT_BEFORE;
+    }
+    else if (tselem->flag & TSE_DRAG_AFTER) {
+      drop_insert_type = TE_INSERT_AFTER;
+    }
+    else if (tselem->flag & TSE_DRAG_INTO) {
+      drop_insert_type = TE_INSERT_INTO;
+    }
+
     /* Highlights. */
-    if (tselem->flag & (TSE_DRAG_ANY | TSE_HIGHLIGHTED | TSE_SEARCHMATCH)) {
-      if (tselem->flag & TSE_DRAG_ANY) {
+    if (drop_insert_type.has_value() || (tselem->flag & (TSE_HIGHLIGHTED | TSE_SEARCHMATCH))) {
+      if (drop_insert_type.has_value()) {
         /* Drag and drop highlight. */
         float col_outline[4];
         ui::theme::get_color_blend_4f(TH_TEXT, TH_BACK, 0.4f, col_outline);
 
-        if (tselem->flag & TSE_DRAG_BEFORE) {
+        if (*drop_insert_type == TE_INSERT_BEFORE) {
           rect.ymax += (1.0f * UI_SCALE_FAC) + (1.0f * U.pixelsize);
           rect.ymin = rect.ymax - (2.0f * U.pixelsize);
           ui::draw_roundbox_4fv(&rect, true, 0.0f, col_outline);
         }
-        else if (tselem->flag & TSE_DRAG_AFTER) {
+        else if (*drop_insert_type == TE_INSERT_AFTER) {
           rect.ymin -= (1.0f * UI_SCALE_FAC) + (1.0f * U.pixelsize);
           rect.ymax = rect.ymin + (2.0f * U.pixelsize);
           ui::draw_roundbox_4fv(&rect, true, 0.0f, col_outline);
@@ -4220,6 +4249,7 @@ static void outliner_draw_highlights(const ARegion *region,
 
 static void outliner_draw_highlights(ARegion *region,
                                      SpaceOutliner *space_outliner,
+                                     const bool drag_active,
                                      int startx,
                                      int *starty)
 {
@@ -4240,6 +4270,7 @@ static void outliner_draw_highlights(ARegion *region,
                            col_active,
                            col_highlight,
                            col_searchmatch,
+                           drag_active,
                            startx,
                            starty);
   GPU_blend(GPU_BLEND_NONE);
@@ -4252,6 +4283,7 @@ static void outliner_draw_tree(ui::Block *block,
                                const float right_column_width,
                                const bool use_mode_column,
                                const bool use_warning_column,
+                               const bool drag_active,
                                TreeElement **te_edit)
 {
   const uiFontStyle *fstyle = UI_FSTYLE_WIDGET;
@@ -4293,7 +4325,7 @@ static void outliner_draw_tree(ui::Block *block,
     int starty = int(region->v2d.tot.ymax) - UI_UNIT_Y - OL_Y_OFFSET;
     int startx = 0;
     outliner_draw_stack_row_bands(region, space_outliner, columns_offset);
-    outliner_draw_highlights(region, space_outliner, startx, &starty);
+    outliner_draw_highlights(region, space_outliner, drag_active, startx, &starty);
 
     /* Set scissor so tree elements or lines can't overlap restriction icons. */
     if (right_column_width > 0.0f) {
@@ -4508,6 +4540,9 @@ void draw_outliner(const bContext *C, bool do_rebuild)
                      right_column_width,
                      use_mode_column,
                      use_warning_column,
+                     /* A drop indicator is only worth anything while something is being dragged;
+                      * between drags it holds last time's answer. */
+                     !CTX_wm_manager(C)->runtime->drags.is_empty(),
                      &te_edit);
 
   /* Compute outliner dimensions after it has been drawn. */

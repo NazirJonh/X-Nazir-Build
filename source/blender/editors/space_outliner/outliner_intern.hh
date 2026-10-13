@@ -48,6 +48,8 @@ struct bPoseChannel;
 struct View2D;
 struct wmKeyConfig;
 struct wmOperatorType;
+struct wmDrag;
+struct wmDropBox;
 struct wmEvent;
 struct WorkSpace;
 
@@ -94,6 +96,12 @@ struct StackRowUiState {
    * but never enters DNA or survives session restart.
    */
   std::string active_content_section;
+};
+
+enum TreeElementInsertType {
+  TE_INSERT_BEFORE,
+  TE_INSERT_AFTER,
+  TE_INSERT_INTO,
 };
 
 struct SpaceOutliner_Runtime {
@@ -156,17 +164,27 @@ struct SpaceOutliner_Runtime {
    * entry seen at neither this nor the previous build belongs to a row that is gone.
    */
   Set<UUID> stack_row_ui_state_seen;
+  /**
+   * Which row the drop under way is pointing at, and how -- what the drag draws as a line or an
+   * outline.
+   *
+   * The Stack Layers rows draw this instead of reading the tree store's #TSE_DRAG_ANY flags: every
+   * drop poll in the Outliner clears those flags before deciding, so which of them survives to the
+   * next draw depends on the order the window manager happens to poll in. This is written by the
+   * stack's own polls only, and read only while a drag is live.
+   *
+   * By ordinal rather than by #TreeElement, so a tree rebuilt mid-drag leaves nothing dangling;
+   * -1 is "no row".
+   */
+  struct StackDropIndicator {
+    int ordinal = -1;
+    TreeElementInsertType insert_type = TE_INSERT_BEFORE;
+  } stack_drop_indicator;
 
   SpaceOutliner_Runtime() = default;
   /** Copies focus for a duplicated space, not cached tree data. */
   SpaceOutliner_Runtime(const SpaceOutliner_Runtime &);
   ~SpaceOutliner_Runtime() = default;
-};
-
-enum TreeElementInsertType {
-  TE_INSERT_BEFORE,
-  TE_INSERT_AFTER,
-  TE_INSERT_INTO,
 };
 
 enum TreeTraversalAction {
@@ -578,6 +596,7 @@ void OUTLINER_OT_parent_clear(wmOperatorType *ot);
 void OUTLINER_OT_scene_drop(wmOperatorType *ot);
 void OUTLINER_OT_material_drop(wmOperatorType *ot);
 void OUTLINER_OT_datastack_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot);
 void OUTLINER_OT_collection_drop(wmOperatorType *ot);
 
 /* ...................................................... */
@@ -793,19 +812,43 @@ bool element_should_draw_faded(const TreeViewContext &tvc,
                                const TreeStoreElem *tselem);
 
 /** \} */
+
+/**
+ * The identity of the row \a identity names, or -1 when it can no longer be found: the owner or
+ * source changed, or the row itself is gone.
+ *
+ * Resolution matches #StackItemIdentity::row_id first when it is not nil, falling back to
+ * #StackItemIdentity::ordinal_hint otherwise -- see #StackItemIdentity.
+ */
+int outliner_stack_identity_resolve(const ed::outliner::StackReadContext &ctx,
+                                    SpaceOutliner &space_outliner,
+                                    const ed::outliner::StackItemIdentity &identity);
 /** The identity of the row currently at \a ordinal, for #outliner_stack_identity_resolve. */
 ed::outliner::StackItemIdentity outliner_stack_identity_of(const SpaceOutliner &space_outliner,
                                                             int ordinal);
 /** Ordinals of the stack rows the user has selected, in ascending order. Empty when none are. */
 void stack_selected_ordinals_get(SpaceOutliner &space_outliner, blender::Vector<int> &r_ordinals);
+/**
+ * Remove from \a r_ordinals every row that a folder also in the set already carries, keeping only
+ * the roots of the selection. Shared by copy and drag, which both act on whole folders at once.
+ */
+void stack_ordinals_drop_covered_descendants(const SpaceOutliner &space_outliner,
+                                             blender::Vector<int> &r_ordinals);
 wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_back_invoke(bContext *C, wmOperator *op, const wmEvent *event);
 wmOperatorStatus stack_focus_exec(bContext *C, wmOperator *op);
 int stack_operator_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op);
 wmOperatorStatus stack_row_activate_exec(bContext *C, wmOperator *op);
 bool stack_row_activate_poll(bContext *C);
+wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op);
+bool stack_row_reorder_poll(bContext *C);
 wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_visibility_toggle_poll(bContext *C);
+void stack_layer_drop_data_init(SpaceOutliner &space_outliner,
+                                wmDrag *drag,
+                                const TreeStoreElem &tselem);
+bool stack_layer_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
+std::string stack_layer_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);
 
 /** The stack's owning data-block for the current focus, or null. */
 ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,
@@ -843,10 +886,29 @@ int outliner_stack_active_ordinal_get(const ed::outliner::StackReadContext &ctx,
 bool outliner_stack_row_is_active(const ed::outliner::StackReadContext &ctx,
                                   SpaceOutliner &space_outliner,
                                   int ordinal);
+bool outliner_stack_row_reorder(bContext *C,
+                                SpaceOutliner &space_outliner,
+                                int from_ordinal,
+                                int to_ordinal);
+/**
+ * Move a row next to another one, above it or below it; see #StackSource::row_move.
+ *
+ * What a drop means, as opposed to the position #outliner_stack_row_reorder takes.
+ *
+ * \param r_ordinal: when given, receives the ordinal the moved row has afterwards.
+ */
+bool outliner_stack_row_move(bContext *C,
+                             SpaceOutliner &space_outliner,
+                             int from_ordinal,
+                             int anchor_ordinal,
+                             ed::outliner::StackMovePlace place,
+                             int *r_ordinal = nullptr);
 bool outliner_stack_row_set_enabled(bContext *C,
                                     SpaceOutliner &space_outliner,
                                     int ordinal,
                                     bool enable);
+/** Whether the space's source lets its rows change places right now. */
+bool outliner_stack_can_reorder(const bContext &C, SpaceOutliner &space_outliner);
 /** Forget whatever the sources remember by address; see #StackSource::undo_reset. */
 void outliner_stack_sources_undo_reset();
 
@@ -855,6 +917,7 @@ void OUTLINER_OT_stack_row_action(wmOperatorType *ot);
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
 void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);

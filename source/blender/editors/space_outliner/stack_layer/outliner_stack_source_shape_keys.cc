@@ -77,7 +77,7 @@ bUUID stable_id_from_name(const StringRef name)
   return id;
 }
 
-class ShapeKeyStackSource final : public StackSource {
+class ShapeKeyStackSource final : public StackSource, public StackEditor {
  public:
   eSpaceOutliner_StackSource type() const override
   {
@@ -174,6 +174,37 @@ class ShapeKeyStackSource final : public StackSource {
   {
     const Object *object = outliner_stack_focus_object_get(ctx, focus);
     return object != nullptr && object->shapenr - 1 == row.ordinal;
+  }
+
+  const StackEditor *editor() const override
+  {
+    return this;
+  }
+
+  bool can_reorder(const ID &owner) const override
+  {
+    return this->is_editable(owner);
+  }
+
+  bool row_reorder(bContext &C,
+                   const StackFocus &focus,
+                   ID & /*owner*/,
+                   const int from_ordinal,
+                   const int to_ordinal) const override
+  {
+    /* Shape keys reorder by moving one list entry, and #BKE_keyblock_move already fixes up the
+     * relative-key references that a move would otherwise break. Nothing about the Outliner side
+     * of a reorder differs from the paint stack's; that is the point of the seam. */
+    Object *object = outliner_stack_focus_object_get(outliner_stack_read_context(C), focus);
+    if (object == nullptr) {
+      return false;
+    }
+    if (!BKE_keyblock_move(object, from_ordinal, to_ordinal)) {
+      return false;
+    }
+    DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(&C, NC_OBJECT | ND_DATA, &object->id);
+    return true;
   }
 };
 

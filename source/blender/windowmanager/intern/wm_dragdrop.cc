@@ -512,7 +512,13 @@ void WM_drag_free(wmDrag *drag)
     drag->drop_state.active_dropbox->on_exit(drag->drop_state.active_dropbox, drag);
   }
   if (drag->flags & WM_DRAG_FREE_DATA) {
-    WM_drag_data_free(drag->type, drag->poin);
+    if (drag->poin_free_fn != nullptr) {
+      /* The payload's owner supplied its own destructor; WM never needed the type. */
+      drag->poin_free_fn(drag->poin);
+    }
+    else {
+      WM_drag_data_free(drag->type, drag->poin);
+    }
   }
   if (drag->imb_is_owned && drag->imb) {
     /* Preview image buffer generated for this drag (e.g. an external image file). */

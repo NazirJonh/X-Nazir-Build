@@ -301,6 +301,106 @@ static int stack_operator_marker_ordinal_get(bContext &C,
   return (row != nullptr) ? row->ordinal : -1;
 }
 
+/**
+ * The ordinal \a row shifts to for a one-step move up or down the listed order, or -1 when no
+ * sibling sits in that direction.
+ *
+ * Rows attached to a parent's content section share the run of ordinals with the plain rows around
+ * them but only reorder among themselves, so the step walks past everything the sibling predicate
+ * refuses -- an attached row never lands among plain rows, and a plain row never lands between
+ * another row's attached rows.
+ */
+static int stack_row_sibling_ordinal_find(const SpaceOutliner &space_outliner,
+                                          const StackRow &row,
+                                          const bool move_up)
+{
+  const int step = move_up ? 1 : -1;
+  for (int candidate = row.ordinal + step; candidate >= 0 && candidate <= STACK_ROW_ORDINAL_MAX;
+       candidate += step)
+  {
+    const StackRow *candidate_row = outliner_stack_row_find(space_outliner, candidate);
+    if (candidate_row != nullptr && stack_rows_are_siblings(row, *candidate_row)) {
+      return candidate;
+    }
+  }
+  return -1;
+}
+
+wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+
+  /* A marker or position the operator was given names one row; without one, the whole selection
+   * moves together, and with nothing selected the active row -- the same vocabulary every other
+   * operator reads. #stack_operator_ordinal_get cannot be shared here, because it answers a
+   * selection with its first row, and a move of one row is not a move of the selection. */
+  Vector<int> ordinals_to_move;
+  int ordinal = stack_operator_marker_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    ordinal = RNA_int_get(op->ptr, "ordinal");
+  }
+  if (ordinal >= 0) {
+    ordinals_to_move.append(ordinal);
+  }
+  else {
+    stack_selected_ordinals_get(*space_outliner, ordinals_to_move);
+  }
+  if (ordinals_to_move.is_empty()) {
+    /* Nothing picked: the row the user was on, which is what a bare Move has always meant. */
+    const int active_ordinal = outliner_stack_active_ordinal_get(outliner_stack_read_context(*C),
+                                                                 *space_outliner);
+    if (active_ordinal < 0) {
+      return OPERATOR_CANCELLED;
+    }
+    ordinals_to_move.append(active_ordinal);
+  }
+
+  /* Up is toward the top of the screen, and the screen lists a stack top first: row 0 is the
+   * bottom, so up means a larger ordinal. The block walks like a line of people, its leading row
+   * first -- the row closest to where the block is going -- which is the highest ordinal moving
+   * up and the lowest moving down: any other order makes the block step over itself. */
+  const bool move_up = RNA_enum_get(op->ptr, "direction") == 0;
+  if (move_up) {
+    std::sort(ordinals_to_move.begin(), ordinals_to_move.end(), std::greater<int>());
+  }
+  else {
+    std::sort(ordinals_to_move.begin(), ordinals_to_move.end());
+  }
+
+  /* Move each row one sibling step in the direction, resolving its ordinal fresh: every move
+   * renumbers the stack, so an ordinal read before a move can name a different row after it. The
+   * step lands on the nearest sibling rather than the next ordinal -- rows attached to a parent's
+   * section and rows under another parent share the run of ordinals but reorder among themselves
+   * only, so they are passed over rather than landed between. */
+  bool any_moved = false;
+  for (const int original_ordinal : ordinals_to_move) {
+    const StackItemIdentity identity = outliner_stack_identity_of(*space_outliner,
+                                                                  original_ordinal);
+    if (!identity.is_valid()) {
+      continue; /* Row disappeared mid-operation. */
+    }
+    const StackReadContext ctx = outliner_stack_read_context(*C);
+    const int current_ordinal = outliner_stack_identity_resolve(ctx, *space_outliner, identity);
+    if (current_ordinal < 0) {
+      continue;
+    }
+    const StackRow *current_row = outliner_stack_row_find(*space_outliner, current_ordinal);
+    if (current_row == nullptr) {
+      continue;
+    }
+    const int target_ordinal = stack_row_sibling_ordinal_find(
+        *space_outliner, *current_row, move_up);
+    if (target_ordinal < 0) {
+      continue;
+    }
+    if (outliner_stack_row_reorder(C, *space_outliner, current_ordinal, target_ordinal)) {
+      any_moved = true;
+    }
+  }
+
+  return any_moved ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
 wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
@@ -331,6 +431,16 @@ bool stack_row_visibility_toggle_poll(bContext *C)
   const StackReadContext ctx = outliner_stack_read_context(*C);
   const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
   return owner != nullptr && stack_source_for_space(*space_outliner)->can_edit(*owner);
+}
+
+bool stack_row_reorder_poll(bContext *C)
+{
+  if (!ED_operator_outliner_active(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  return space_outliner != nullptr && space_outliner->runtime != nullptr &&
+         outliner_stack_can_reorder(*C, *space_outliner);
 }
 
 StackReadContext outliner_stack_read_context(const bContext &C)
@@ -391,6 +501,14 @@ void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner)
   runtime.stack_owner_uid = 0;
   runtime.stack_state_hash = 0;
   runtime.stack_rows_valid = false;
+  /* The rows are about to go away, and the drop indicator names one of them.
+   *
+   * What a drop was aimed at is deliberately *not* cleared with them: it names its row by
+   * identity, not by address, and is resolved against whatever rows exist when the drop lands.
+   * Clearing it here loses the aim of a drop that is already under way -- importing a dragged
+   * asset remaps data-blocks, which reaches this function through #outliner_id_remap, between the
+   * poll that recorded the aim and the operator that reads it back. */
+  runtime.stack_drop_indicator.ordinal = -1;
 }
 
 void outliner_stack_row_ui_state_capture_now(SpaceOutliner &space_outliner, const ID &owner)
@@ -634,6 +752,36 @@ ID *outliner_stack_owner_get(const StackReadContext &ctx, SpaceOutliner &space_o
       ->owner_get(ctx, space_outliner.runtime->stack_focus);
 }
 
+int outliner_stack_identity_resolve(const StackReadContext &ctx,
+                                    SpaceOutliner &space_outliner,
+                                    const StackItemIdentity &identity)
+{
+  if (!identity.is_valid()) {
+    return -1;
+  }
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr || owner->session_uid != identity.owner_uid ||
+      space_outliner.stack_source != identity.source_type)
+  {
+    return -1;
+  }
+  outliner_stack_rows_ensure(ctx, space_outliner, *owner);
+  if (!BLI_uuid_is_nil(identity.row_id)) {
+    for (const StackRow &row : space_outliner.runtime->stack_rows) {
+      if (BLI_uuid_equal(row.stable_id, identity.row_id)) {
+        return row.ordinal;
+      }
+    }
+    return -1;
+  }
+  if (identity.ordinal_hint >= 0 &&
+      outliner_stack_row_find(space_outliner, identity.ordinal_hint) != nullptr)
+  {
+    return identity.ordinal_hint;
+  }
+  return -1;
+}
+
 /**
  * The ordinal the operator was given, or the row the user is pointing at when it was left at -1.
  *
@@ -671,6 +819,35 @@ void stack_selected_ordinals_get(SpaceOutliner &space_outliner, Vector<int> &r_o
     }
   });
   std::sort(r_ordinals.begin(), r_ordinals.end());
+}
+
+void stack_ordinals_drop_covered_descendants(const SpaceOutliner &space_outliner,
+                                             Vector<int> &r_ordinals)
+{
+  /* A folder in the set already carries every row it holds; a descendant kept alongside it is a
+   * second copy of a row that is going to move anyway -- and its group-child ordinal, which is not
+   * a position, breaks any code that treats the set as a contiguous run. A row attached to a
+   * parent's content section needs no separate case: its #StackRow::parent_ordinal is the row it
+   * hangs under, so selecting that row drops it from the set with everything else the walk lifts
+   * out. */
+  Set<int> ordinal_set;
+  ordinal_set.add_multiple(r_ordinals);
+  Vector<int> roots;
+  for (const int ordinal : r_ordinals) {
+    const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+    bool has_selected_ancestor = false;
+    while (row != nullptr && row->parent_ordinal >= 0) {
+      if (ordinal_set.contains(row->parent_ordinal)) {
+        has_selected_ancestor = true;
+        break;
+      }
+      row = outliner_stack_row_find(space_outliner, row->parent_ordinal);
+    }
+    if (!has_selected_ancestor) {
+      roots.append(ordinal);
+    }
+  }
+  r_ordinals = std::move(roots);
 }
 
 bool outliner_stack_focus_set(bContext *C,
@@ -852,6 +1029,83 @@ bool outliner_stack_row_is_active(const StackReadContext &ctx,
   }
   return stack_source_for_space(space_outliner)
       ->row_is_active(ctx, space_outliner.runtime->stack_focus, *owner, *row);
+}
+
+bool outliner_stack_can_reorder(const bContext &C, SpaceOutliner &space_outliner)
+{
+  const StackReadContext ctx = outliner_stack_read_context(C);
+  const ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  const StackEditor *editor = stack_source_for_space(space_outliner)->editor();
+  return owner != nullptr && editor != nullptr && editor->can_reorder(*owner);
+}
+
+bool outliner_stack_row_reorder(bContext *C,
+                                SpaceOutliner &space_outliner,
+                                const int from_ordinal,
+                                const int to_ordinal)
+{
+  if (from_ordinal == to_ordinal || from_ordinal < 0 || to_ordinal < 0) {
+    return false;
+  }
+  /* Ordinals are positions, so every row past the move has a new one. The moved row keeps the
+   * selection -- it is the one the user just acted on -- and the groups they had open have to be
+   * asked for by identity rather than by a number that just changed under them. */
+  return stack_mutate(*C,
+                      space_outliner,
+                      true,
+                      [&](const StackSource & /*source*/,
+                          const StackEditor &editor,
+                          const StackFocus &focus,
+                          ID &owner,
+                          int &r_select_ordinal) {
+                        if (!editor.can_reorder(owner)) {
+                          return false;
+                        }
+                        r_select_ordinal = to_ordinal;
+                        return editor.row_reorder(*C, focus, owner, from_ordinal, to_ordinal);
+                      });
+}
+
+bool outliner_stack_row_move(bContext *C,
+                             SpaceOutliner &space_outliner,
+                             const int from_ordinal,
+                             const int anchor_ordinal,
+                             const StackMovePlace place,
+                             int *r_ordinal)
+{
+  if (from_ordinal < 0 || anchor_ordinal < 0) {
+    return false;
+  }
+  /* Ordinals are positions, so every row past the move has a new one. The moved row itself is the
+   * one the user was just working with, so it stays the one selected and active rather than the
+   * drop reading as if it landed on nothing. */
+  int new_ordinal = -1;
+  const bool ok = stack_mutate(
+      *C,
+      space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int &r_select_ordinal) {
+        if (!editor.can_reorder(owner)) {
+          return false;
+        }
+        return editor.row_move(
+            *C, focus, owner, from_ordinal, anchor_ordinal, place, &r_select_ordinal);
+      },
+      &new_ordinal);
+  if (!ok) {
+    return false;
+  }
+  if (r_ordinal != nullptr) {
+    *r_ordinal = new_ordinal;
+  }
+  if (new_ordinal >= 0) {
+    outliner_stack_row_activate(C, space_outliner, new_ordinal);
+  }
+  return true;
 }
 
 bool outliner_stack_row_set_enabled(bContext *C,

@@ -37,18 +37,6 @@
 
 namespace blender {
 
-/** The neutral a brand-new Paint map starts from: flat tangent for Normal, opaque black else. */
-static void paint_layer_channel_neutral(const int channel, float r_color[4])
-{
-  zero_v4(r_color);
-  r_color[3] = 1.0f;
-  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    r_color[0] = 0.5f;
-    r_color[1] = 0.5f;
-    r_color[2] = 1.0f;
-  }
-}
-
 /** Encode a scene-linear colour into \a image's stored colorspace; data colorspaces stay as is. */
 static void paint_layers_image_encode(const Image &image, float rgba[4])
 {
@@ -222,7 +210,9 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
     copy_v4_v4(fill, new_channel_fill_linear);
   }
   else {
-    paint_layer_channel_neutral(target.channel, fill);
+    /* The same table the composite starts from, so a first stroke on Specular or Roughness fills
+     * the rest of the map with the neutral mid value instead of a zero that darkens the whole mesh. */
+    BKE_paint_layers_channel_bottom_color(channel, fill);
   }
   /* A transparent texel still takes part in bilinear filtering: the GPU texture holds straight
    * bytes, so across a stroke's edge the colour is interpolated on its own and a black background

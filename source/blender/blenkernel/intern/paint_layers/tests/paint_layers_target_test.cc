@@ -196,10 +196,11 @@ TEST_F(PaintLayersTargetTest, ensure_creates_channel_and_neutral_map)
   /* Named after the row and the channel. */
   EXPECT_STREQ(image->id.name + 2, "L Roughness");
 
-  /* A record the row did not have starts from the channel's neutral: opaque black. */
+  /* A record the row did not have starts from the channel's neutral, the composite's own bottom
+   * colour: opaque mid grey for Roughness. */
   uchar pixel[4];
   first_byte_pixel(*image, pixel);
-  EXPECT_EQ(pixel[0], 0);
+  EXPECT_EQ(pixel[0], 128);
   EXPECT_EQ(pixel[3], 255);
 
   /* A second call returns the same map, minting nothing new. */
@@ -252,7 +253,7 @@ TEST_F(PaintLayersTargetTest, ensure_encodes_a_color_value_into_the_maps_colorsp
   MaterialPaintLayer *layer = add_active_row("L");
   const float linear[4] = {0.25f, 0.5f, 0.75f, 1.0f};
 
-  /* A channel the row does not have yet takes the caller's colour, not the neutral black. */
+  /* A channel the row does not have yet takes the caller's colour, not the channel's neutral. */
   PaintLayersTarget target;
   ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
   Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 2, linear);

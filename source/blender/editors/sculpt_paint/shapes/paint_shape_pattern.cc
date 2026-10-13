@@ -301,7 +301,6 @@ void pattern_tile_rasterize(const PaintShape &shape,
       const float2 tile_offset_px = float2(-float(sx) * resolution, -float(sy) * resolution);
       const ShapeCoverage cov = shape_rasterize(Span<PaintShape>(&shape, 1), style, rect,
                                                 tile_offset_px, outputs);
-      const int64_t pixel_num = int64_t(resolution) * resolution;
       threading::parallel_for(IndexRange(int64_t(resolution)), 64, [&](const IndexRange rows) {
         for (const int y : rows) {
           for (const int x : IndexRange(int64_t(resolution))) {

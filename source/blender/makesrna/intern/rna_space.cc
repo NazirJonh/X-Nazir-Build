@@ -5258,6 +5258,11 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   };
 
   static const EnumPropertyItem stack_source_items[] = {
+      {SO_STACK_SRC_PAINT_MATERIAL,
+       "PAINT_MATERIAL",
+       ICON_IMAGE_RGB,
+       "Paint Layers",
+       "Paint layers of the active material, read from its stack description"},
       {SO_STACK_SRC_SHAPE_KEYS,
        "SHAPE_KEYS",
        ICON_SHAPEKEY_DATA,

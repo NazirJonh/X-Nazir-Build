@@ -76,6 +76,7 @@
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_preview_image.hh"
 #include "BKE_report.hh"
 #include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -7918,25 +7919,41 @@ void SculptPaintStroke::layered_maps_ensure(bContext *C)
   {
     return;
   }
-  if (BKE_paint_layers_active_material_get(ob) == nullptr ||
-      !sculpt_brush_uses_image_canvas(*brush, *paint_mode_settings_, sculpt_->paint, *ob))
-  {
-    return;
+  /* Every object of the stroke grows its maps here, inside the one undo group: a secondary object
+   * of a multi-object stroke would otherwise get its maps later, in #test_start, outside the
+   * memfile step and so outside the Ctrl+Z that removes the stroke. */
+  const ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
+  Vector<Object *> objects = sculpt_mode_objects(vc);
+  if (!objects.contains(ob)) {
+    objects.append(ob);
   }
 
   ED_undo_group_begin(C);
-  const PaintMaterialImagesEnsureResult result = BKE_paint_material_images_ensure_writable(
-      *bmain_,
-      *ob,
-      *brush->material_paint,
-      *paint_mode_settings_,
-      sculpt_->paint.visible_material_channels);
-  if (result.created > 0) {
+  int created = 0;
+  for (Object *object : objects) {
+    if (object->type != OB_MESH || BKE_paint_layers_active_material_get(object) == nullptr ||
+        !sculpt_brush_uses_image_canvas(*brush, *paint_mode_settings_, sculpt_->paint, *object))
+    {
+      continue;
+    }
+    created += BKE_paint_material_images_ensure_writable(
+                   *bmain_,
+                   *object,
+                   *brush->material_paint,
+                   *paint_mode_settings_,
+                   sculpt_->paint.visible_material_channels)
+                   .created;
+  }
+  if (created > 0) {
     ED_undo_push(C, RPT_("Add Layer Maps"));
     layer_undo_group_open_ = true;
     /* The slots mirror the active row's maps, which this just grew: a classic Texture Paint
      * stroke reads them, so they are rebuilt now rather than left to the next mode switch. */
-    BKE_texpaint_slots_refresh_object(CTX_data_scene(C), ob);
+    for (Object *object : objects) {
+      if (object->type == OB_MESH && BKE_paint_layers_active_material_get(object) != nullptr) {
+        BKE_texpaint_slots_refresh_object(CTX_data_scene(C), object);
+      }
+    }
   }
   else {
     ED_undo_group_end(C);
@@ -10558,6 +10575,23 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     return;
   }
 
+  /* The maps this PBR image stroke wrote: their Outliner-stack thumbnails have to refresh once the
+   * brush is lifted. Collect them before the stroke caches go. */
+  Vector<Image *> painted_images;
+  for (Object *object_ptr : objects) {
+    SculptSession *object_ss = object_ptr->runtime->sculpt_session;
+    if (object_ss == nullptr || object_ss->cache == nullptr) {
+      continue;
+    }
+    for (const auto &target : object_ss->cache->image_paint_targets) {
+      if (target.data != nullptr && target.data->image != nullptr &&
+          !painted_images.contains(target.data->image))
+      {
+        painted_images.append(target.data->image);
+      }
+    }
+  }
+
   /* Free caches. */
   for (Object *object_ptr : objects) {
     Object &ob_iter = *object_ptr;
@@ -10629,6 +10663,19 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 
     flush_update_done(this->vc, *wm_, ob_iter, update_type);
     WM_event_add_notifier(this->evil_C, NC_OBJECT | ND_DRAW, &ob_iter);
+  }
+
+  /* Once per stroke, not per dab: the Outliner stack rebuilds its rows on NC_IMAGE|NA_EDITED, and
+   * each painted map's preview is flagged so its thumbnail re-renders from the new pixels. */
+  for (Image *image : painted_images) {
+    WM_main_add_notifier(NC_IMAGE | NA_EDITED, image);
+    if (PreviewImage *preview = BKE_previewimg_id_get(&image->id)) {
+      /* Mark rather than free: a preview job may be rendering into the rect from a background
+       * thread; the icon draw re-renders on the flag and shows the old image until then. */
+      for (int size = 0; size < NUM_ICON_SIZES; size++) {
+        preview->flag[size] |= PRV_CHANGED;
+      }
+    }
   }
 
   brush_exit_tex(sd);

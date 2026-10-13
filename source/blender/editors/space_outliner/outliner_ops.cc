@@ -53,6 +53,8 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_column_popup);
   WM_operatortype_append(OUTLINER_OT_stack_layer_visibility_toggle);
   WM_operatortype_append(OUTLINER_OT_stack_layer_move);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_add);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_remove);
   WM_operatortype_append(OUTLINER_OT_stack_layer_drop);
 
   WM_operatortype_append(OUTLINER_OT_show_one_level);

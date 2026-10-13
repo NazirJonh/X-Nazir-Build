@@ -297,8 +297,10 @@ ENUM_OPERATORS(eSpaceOutliner_StackLayersFlag)
 enum eSpaceOutliner_StackSource : short {
   /** No source at all: the default of an identity that has not been issued by any of them. */
   SO_STACK_SRC_NONE = -1,
+  /** Paint layers of the active material, read from its DNA description. */
+  SO_STACK_SRC_PAINT_MATERIAL = 0,
   /** Shape keys of the active object. */
-  SO_STACK_SRC_SHAPE_KEYS = 0,
+  SO_STACK_SRC_SHAPE_KEYS = 1,
 };
 
 /** #SpaceOutliner.outlinevis */

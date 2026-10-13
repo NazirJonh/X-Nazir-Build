@@ -3353,6 +3353,16 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "shown, without either affecting painting");
   RNA_def_property_enum_sdna(prop, nullptr, "material_shader_visible_channels");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* The channel the Stack Layers header selects: which per (row, channel) value the Outliner's
+   * columns address. Distinct from the Layer Material tab's own channel cursor. */
+  prop = RNA_def_property(srna, "stack_layer_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "stack_layer_channel");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_ui_text(prop,
+                           "Stack Layer Channel",
+                           "The channel whose value the Stack Layers columns show and edit");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 }
 
 static const EnumPropertyItem rna_shape_blend_items[] = {

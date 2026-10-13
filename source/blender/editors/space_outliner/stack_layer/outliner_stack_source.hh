@@ -1310,6 +1310,7 @@ class StackSource {
 };
 
 /* The built-in sources. Defined in their own files, listed by `outliner_stack_source.cc`. */
+std::unique_ptr<StackSource> stack_source_paint_layers_create();
 std::unique_ptr<StackSource> stack_source_shape_keys_create();
 
 /** Every source built into this Blender, in the order they are listed to the user. */

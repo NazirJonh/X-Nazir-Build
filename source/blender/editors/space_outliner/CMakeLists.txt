@@ -32,6 +32,7 @@ set(SRC
   stack_layer/outliner_stack_layers_ops.cc
   stack_layer/outliner_stack_dragdrop.cc
   stack_layer/outliner_stack_source.cc
+  stack_layer/outliner_stack_source_paint_layers.cc
   stack_layer/outliner_stack_source_shape_keys.cc
   stack_layer/tree_display_stack_layers.cc
   stack_layer/tree_element_stack_layer.cc
@@ -137,6 +138,7 @@ set(SRC
   tree/tree_element_view_layer.hh
   tree/tree_iterator.hh
   stack_layer/outliner_stack_source.hh
+  stack_layer/outliner_stack_source_paint_layers_intern.hh
   stack_layer/tree_element_stack_layer.hh
 )
 
@@ -164,3 +166,16 @@ blender_add_lib(bf_editor_space_outliner "${SRC}" "${INC}" "${INC_SYS}" "${LIB}"
 
 # RNA_prototypes.hh dna_type_offsets.h
 add_dependencies(bf_editor_space_outliner bf_rna)
+
+if(WITH_GTESTS)
+  set(TEST_SRC
+    stack_layer/tests/outliner_stack_source_paint_layers_test.cc
+  )
+  set(TEST_INC
+  )
+  set(TEST_LIB
+    bf_editor_space_outliner
+  )
+  blender_add_test_suite_lib(
+    editor_space_outliner "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${LIB};${TEST_LIB}")
+endif()

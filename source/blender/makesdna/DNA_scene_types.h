@@ -2262,6 +2262,10 @@ struct PaintModeSettings {
   /** Per-brush PBR Paint channel/texture presets, keyed by brush identity.
    *  See #PaintMaterialBrushPreset. */
   ListBaseT<PaintMaterialBrushPreset> material_paint_brush_presets = {nullptr, nullptr};
+
+  /** The channel the Stack Layers header selects, which the Outliner's value columns address. */
+  int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  char _pad_stack_layer[4] = {};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

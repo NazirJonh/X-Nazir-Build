@@ -12,6 +12,7 @@
  * below never mention a material, an image or a node.
  */
 
+#include <cfloat>
 #include <climits>
 
 #include "DNA_ID.h"
@@ -213,6 +214,79 @@ void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot)
               SHRT_MAX,
               "Ordinal",
               "Layer to toggle; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
+{
+  ot->name = "Add Stack Layer";
+  ot->idname = "OUTLINER_OT_stack_layer_add";
+  ot->description = "Add a layer to the stack";
+  ot->exec = stack_row_add_exec;
+  ot->invoke = stack_row_add_invoke;
+  ot->ui = stack_row_add_ui;
+  ot->poll = stack_add_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  /* What the kinds are is the source's own vocabulary, built into items as the menu asks for them;
+   * a source that declares none is polled out entirely. */
+  PropertyRNA *prop = RNA_def_enum(
+      ot->srna, "type", rna_enum_dummy_NULL_items, 0, "Type", "What the new layer holds");
+  RNA_def_enum_funcs(prop, stack_add_type_itemf);
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Row to anchor the new layer to; it lands above that row. -1 uses the selected or "
+              "active row, or the top of the stack",
+              -1,
+              SHRT_MAX);
+  /* Read only by the kinds that asked for a colour; the others leave it at its white default. */
+  static const float fill_color_default[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  PropertyRNA *fill_prop = RNA_def_float_color(ot->srna,
+                                               "fill_color",
+                                               4,
+                                               fill_color_default,
+                                               0.0f,
+                                               FLT_MAX,
+                                               "Fill Color",
+                                               "Color a fill layer starts out filled with",
+                                               0.0f,
+                                               1.0f);
+  RNA_def_property_subtype(fill_prop, PROP_COLOR_GAMMA);
+  /* The data-block a kind with #StackAddKindInfo::source_id_type is made from, by name: what a UI
+   * picked, and what a repeat or a script names again. */
+  PropertyRNA *source_prop = RNA_def_string(ot->srna,
+                                            "source",
+                                            nullptr,
+                                            MAX_ID_NAME - 2,
+                                            "Source",
+                                            "Name of the data-block the new layer is made from, "
+                                            "for a kind that is made from one");
+  RNA_def_property_flag(source_prop, PROP_HIDDEN);
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot)
+{
+  ot->name = "Remove Stack Layer";
+  ot->idname = "OUTLINER_OT_stack_layer_remove";
+  ot->description = "Delete a layer from the stack";
+  ot->exec = stack_row_remove_exec;
+  ot->poll = stack_row_remove_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to remove; -1 uses the active one",
               -1,
               SHRT_MAX);
   rna_def_stack_row_marker(ot);

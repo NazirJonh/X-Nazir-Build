@@ -52,6 +52,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
 
     def focus_and_draw_stack(self, object):
         self.space.display_mode = 'STACK_LAYERS'
+        self.space.stack_source = 'SHAPE_KEYS'
         with self.outliner_override():
             result = bpy.ops.outliner.stack_layer_focus(
                 object=object.name,
@@ -67,12 +68,16 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.space.display_mode = 'VIEW_LAYER'
         self.assertEqual(self.space.display_mode, 'VIEW_LAYER')
 
-    def test_stack_source_default_is_shape_keys(self):
-        # Shape keys are the one stack source of this mode so far, and the one a space starts at.
-        self.assertEqual(self.space.stack_source, 'SHAPE_KEYS')
+    def test_stack_source_default_is_paint_material(self):
+        # Paint layers are the mode's primary source and the one a space starts at; shape keys is
+        # the other source a user can switch to.
+        self.assertEqual(self.space.stack_source, 'PAINT_MATERIAL')
         items = [item.identifier for item in
                  bpy.types.SpaceOutliner.bl_rna.properties['stack_source'].enum_items]
-        self.assertEqual(items, ['SHAPE_KEYS'])
+        self.assertEqual(items, ['PAINT_MATERIAL', 'SHAPE_KEYS'])
+        # The channel the paint stack's value column addresses lives on the paint settings.
+        self.assertTrue(
+            hasattr(bpy.context.tool_settings.paint_mode, "stack_layer_channel"))
 
     def test_back_leaves_the_mode(self):
         self.space.display_mode = 'STACK_LAYERS'
@@ -93,6 +98,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
         # object's active shape key: no image or material is involved anywhere.
         object = self.add_object_with_shape_keys()
         self.space.display_mode = 'STACK_LAYERS'
+        self.space.stack_source = 'SHAPE_KEYS'
         self.space.stack_layers_view = 'STACK'
         self.redraw_window()
         self.assertEqual(self.space.stack_focus_name, "Key")
@@ -161,6 +167,8 @@ class StackLayersOutlinerTest(unittest.TestCase):
             "stack_layer_activate",
             "stack_layer_visibility_toggle",
             "stack_layer_move",
+            "stack_layer_add",
+            "stack_layer_remove",
             "stack_layer_drop",
         ):
             self.assertTrue(hasattr(bpy.ops.outliner, name), name)

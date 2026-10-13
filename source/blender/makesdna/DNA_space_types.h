@@ -229,7 +229,7 @@ struct SpaceOutliner {
    */
   eSpaceOutliner_StackLayersFlag stack_layers_flag = {};
   /** Which kind of stack #SO_STACK_LAYERS lists. */
-  eSpaceOutliner_StackSource stack_source = SO_STACK_SRC_SHAPE_KEYS;
+  eSpaceOutliner_StackSource stack_source = SO_STACK_SRC_PAINT_MATERIAL;
 
   eSpaceOutliner_Filter filter = {};
   eSpaceOutliner_StateFilter filter_state = SO_FILTER_OB_ALL;

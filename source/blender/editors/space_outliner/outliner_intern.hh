@@ -844,6 +844,19 @@ wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op);
 bool stack_row_reorder_poll(bContext *C);
 wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_visibility_toggle_poll(bContext *C);
+/* The Add/Remove operator bodies live in outliner_stack_layers.cc; these are the exec, invoke,
+ * poll and itemf hooks the registrations in outliner_stack_layers_ops.cc hand in. */
+bool stack_add_poll(bContext *C);
+const EnumPropertyItem *stack_add_type_itemf(bContext *C,
+                                             PointerRNA * /*ptr*/,
+                                             PropertyRNA * /*prop*/,
+                                             bool *r_free);
+wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+bool stack_row_add_poll(bContext *C);
+void stack_row_add_ui(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op);
+bool stack_row_remove_poll(bContext *C);
 void stack_layer_drop_data_init(SpaceOutliner &space_outliner,
                                 wmDrag *drag,
                                 const TreeStoreElem &tselem);
@@ -907,6 +920,19 @@ bool outliner_stack_row_set_enabled(bContext *C,
                                     SpaceOutliner &space_outliner,
                                     int ordinal,
                                     bool enable);
+/** Remove a row and everything it carries; see #StackEditor::row_remove. */
+bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, int ordinal);
+/**
+ * Create a row of \a kind placed relative to \a ordinal and activate it; see
+ * #StackEditor::row_add.
+ *
+ * \return the new ordinal, or -1 when nothing was created.
+ */
+int outliner_stack_row_add(bContext *C,
+                           SpaceOutliner &space_outliner,
+                           int kind,
+                           int ordinal,
+                           const ed::outliner::StackAddArgs &args = {});
 /** Whether the space's source lets its rows change places right now. */
 bool outliner_stack_can_reorder(const bContext &C, SpaceOutliner &space_outliner);
 /** Forget whatever the sources remember by address; see #StackSource::undo_reset. */
@@ -919,6 +945,8 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
 void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);
 void OUTLINER_OT_orphans_manage(wmOperatorType *ot);

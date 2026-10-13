@@ -131,7 +131,8 @@ void paint_stack_rows_from_description(const Material &material,
     row.supported = true;
     row.name = layer.name[0] != '\0' ? layer.name : "Layer";
     row.name_buffer = const_cast<char *>(layer.name);
-    row.icon = ICON_IMAGE_RGB;
+    row.icon = (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? ICON_GP_DRAW_FILL :
+                                                                  ICON_IMAGE_RGB;
 
     /* The value column edits the row's opacity; a value left at its default reads as inherited
      * rather than deliberately set, so the control dims until the user moves it. */
@@ -149,20 +150,36 @@ void paint_stack_rows_from_description(const Material &material,
     row.mode_prop = "blend_type";
     row.mode_inherited = (layer.blend == MA_PAINT_LAYER_BLEND_MIX);
 
-    /* The content slot shows the row's first channel map, blank or not. */
-    StackRowPreview channels_slot;
-    channels_slot.section_id = "CHANNELS";
-    for (int c = 0; c < layer.channels_num; c++) {
-      const Image *image = layer.channels[c].image;
-      if (image == nullptr) {
-        continue;
+    if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+      /* A Fill is its colour: one swatch with the bucket drawn over it, and no channel-texture
+       * placeholder. With the Base Color record removed or switched off the row lays no colour, so
+       * no swatch is drawn. */
+      if (BKE_paint_layers_base_color_active(layer)) {
+        StackRowPreview fill_swatch;
+        fill_swatch.is_color_swatch = true;
+        fill_swatch.icon = ICON_GP_DRAW_FILL;
+        fill_swatch.section_id = "CHANNELS";
+        BKE_paint_layers_base_color_get(layer, fill_swatch.color);
+        fill_swatch.label = IFACE_("Fill Color");
+        row.preview_slots.append(std::move(fill_swatch));
       }
-      channels_slot.id_uid = image->id.session_uid;
-      channels_slot.id_type = ID_IM;
-      channels_slot.is_blank = paint_image_is_blank(*image);
-      break;
     }
-    row.preview_slots.append(std::move(channels_slot));
+    else {
+      /* The content slot shows the row's first channel map, blank or not. */
+      StackRowPreview channels_slot;
+      channels_slot.section_id = "CHANNELS";
+      for (int c = 0; c < layer.channels_num; c++) {
+        const Image *image = layer.channels[c].image;
+        if (image == nullptr) {
+          continue;
+        }
+        channels_slot.id_uid = image->id.session_uid;
+        channels_slot.id_type = ID_IM;
+        channels_slot.is_blank = paint_image_is_blank(*image);
+        break;
+      }
+      row.preview_slots.append(std::move(channels_slot));
+    }
 
     /* The channel maps are the layer's internals rather than rows of their own; the section stays
      * so the brush can switch to the content and later rows can attach to it. */
@@ -274,6 +291,7 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
       hash ^= uint64_t(layer.flag);
       /* Mixed, not shifted into the flag bits: `flag` is 16 bits wide and would overlap. */
       hash = hash * 1000003u ^ uint64_t(layer.blend);
+      hash ^= uint64_t(layer.source) << 16;
       /* The swatch and the columns show these, so a change to them has to reach the rows. */
       hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(layer.opacity));
       for (const char *ch = layer.name; *ch != '\0'; ch++) {
@@ -450,12 +468,18 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
 
   void add_kinds(Vector<StackAddKindInfo> &r_kinds) const override
   {
-    /* Paint is the only kind that exists yet; Fill, Material and the corrections are appended
-     * here as their features land, in the order #row_add dispatches by index. */
+    /* The kinds whose features exist: Paint and Fill. Material and the corrections are appended
+     * here as they land, in the order #row_add dispatches by index. */
     r_kinds.append({"PAINT",
                     N_("Paint Layer"),
                     "A layer that shows nothing until it is painted on",
                     ICON_BRUSH_DATA});
+    StackAddKindInfo fill{"FILL",
+                          N_("Fill Layer"),
+                          "A layer of one flat colour",
+                          ICON_GP_DRAW_FILL};
+    fill.takes_color = true;
+    r_kinds.append(fill);
   }
 
   int row_add(bContext &C,
@@ -463,9 +487,9 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
               ID &owner,
               const int kind,
               const int ordinal,
-              const StackAddArgs & /*args*/ = {}) const override
+              const StackAddArgs &args = {}) const override
   {
-    if (kind != 0 || !this->is_editable(owner)) {
+    if ((kind != 0 && kind != 1) || !this->is_editable(owner)) {
       return -1;
     }
     Material &material = layers_owner(owner);
@@ -476,8 +500,12 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
       return -1;
     }
     PaintLayerAddParams params;
+    params.kind = (kind == 1) ? PaintLayerAddKind::Fill : PaintLayerAddKind::Paint;
     params.anchor = anchor;
     params.place = PaintLayerPlace::Above;
+    if (params.kind == PaintLayerAddKind::Fill && args.color != nullptr) {
+      params.fill_color = args.color;
+    }
     MaterialPaintLayer *created = BKE_paint_layers_add_with_policy(material, params);
     if (created == nullptr) {
       return -1;

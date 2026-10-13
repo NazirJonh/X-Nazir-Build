@@ -501,6 +501,81 @@ bool BKE_paint_layers_set_blend(Material &ma,
   return true;
 }
 
+bool BKE_paint_layers_set_source(Material &ma,
+                                 MaterialPaintLayer *layer,
+                                 const eMaterialPaintLayerSource source)
+{
+  if (!paint_layer_in_stack(ma, layer)) {
+    return false;
+  }
+  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    return false;
+  }
+  if (layer->source == source) {
+    return true;
+  }
+  MaterialPaintLayerChannel *base = paint_layer_channel_find(*layer,
+                                                             PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+    /* A painted map is not a constant, so the maps go; the records stay, because a per-channel
+     * setting is not a pixel. Base Color already lives in its record, so it survives the flip; a
+     * transparent one becomes an opaque black Fill so the row lays a clean constant. The users are
+     * let go first, as a removed row does, so the orphaned maps are not saved as if still used. */
+    paint_layer_release_users(*layer);
+    for (const int i : IndexRange(layer->channels_num)) {
+      layer->channels[i].image = nullptr;
+    }
+    if (base != nullptr && paint_layer_channel_live(base) && base->value[3] == 0.0f) {
+      base->value[0] = base->value[1] = base->value[2] = 0.0f;
+      base->value[3] = 1.0f;
+    }
+  }
+  else {
+    /* A Paint row lays nothing until it is painted, so the Fill's colour must not stay in the
+     * record: an opaque value there would cover everything below. The record goes back to the
+     * transparent state a fresh one has, and the first stroke's map starts blank. */
+    if (base != nullptr && paint_layer_channel_live(base)) {
+      zero_v4(base->value);
+    }
+  }
+  layer->source = source;
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_color[4])
+{
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (record != nullptr) {
+    copy_v4_v4(r_color, record->value);
+    return;
+  }
+  zero_v4(r_color);
+}
+
+bool BKE_paint_layers_base_color_active(const MaterialPaintLayer &layer)
+{
+  return paint_layer_channel_live(
+      paint_layer_channel_find(layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+}
+
+bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, const float color[4])
+{
+  if (!paint_layer_in_stack(ma, layer)) {
+    return false;
+  }
+  /* A Fill's colour lives in its Base-Color record like every other channel; the record is created
+   * on demand so a script cannot write into a field nothing reads. */
+  if (paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
+    if (BKE_paint_layers_channel_add(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
+      return false;
+    }
+  }
+  return BKE_paint_layers_channel_set_value(
+      ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color);
+}
+
 float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer)
 {
   if ((layer.flag & MA_PAINT_LAYER_ENABLED) == 0) {

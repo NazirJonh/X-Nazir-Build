@@ -529,12 +529,16 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                                                          const char *name,
                                                          PointerRNA *anchor_ptr,
                                                          int place,
-                                                         bool make_active)
+                                                         bool make_active,
+                                                         int source)
 {
   /* The authoring policy is the shared BKE one (#BKE_paint_layers_add_with_policy): the same
    * default names and channels every other authoring path gets. An empty name means the unique
    * default. */
   PaintLayerAddParams params;
+  params.kind = (eMaterialPaintLayerSource(source) == MA_PAINT_LAYER_SOURCE_CONSTANT) ?
+                    PaintLayerAddKind::Fill :
+                    PaintLayerAddKind::Paint;
   params.name = (name[0] != '\0') ? name : nullptr;
   /* An unset optional pointer reaches the callback as null, not as a null #PointerRNA. */
   params.anchor = (anchor_ptr != nullptr) ? static_cast<MaterialPaintLayer *>(anchor_ptr->data) :
@@ -677,6 +681,35 @@ static void rna_MaterialPaintLayer_blend_set(PointerRNA *ptr, int value)
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     BKE_paint_layers_set_blend(*ma, layer, eMaterialPaintLayerBlend(value));
+  }
+}
+
+static int rna_MaterialPaintLayer_source_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->source;
+}
+
+static void rna_MaterialPaintLayer_source_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_source(*ma, layer, eMaterialPaintLayerSource(value));
+  }
+}
+
+static void rna_MaterialPaintLayer_fill_color_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  /* A Fill keeps its colour in the Base-Color record; the single reader answers for it. */
+  BKE_paint_layers_base_color_get(*layer, value);
+}
+
+static void rna_MaterialPaintLayer_fill_color_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_fill_color(*ma, layer, value);
   }
 }
 
@@ -900,6 +933,13 @@ static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/** What a row paints with: a painted map, or a flat Fill colour. */
+static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
+    {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
+    {MA_PAINT_LAYER_SOURCE_CONSTANT, "CONSTANT", 0, "Constant", "A flat colour"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_def_material_paint_layer(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -941,6 +981,22 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_enum_funcs(
       prop, "rna_MaterialPaintLayer_blend_get", "rna_MaterialPaintLayer_blend_set", nullptr);
   RNA_def_property_ui_text(prop, "Blend Type", "How the layer blends over what is below it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_source_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayer_source_get", "rna_MaterialPaintLayer_source_set", nullptr);
+  RNA_def_property_ui_text(prop, "Source", "What the layer reads its values from");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "fill_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 4);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_fill_color_get",
+                               "rna_MaterialPaintLayer_fill_color_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Fill Color", "Constant color of a Fill layer");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
@@ -1076,6 +1132,13 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                       "Where to put the layer relative to the anchor");
   RNA_def_boolean(
       func, "make_active", true, "Make Active", "Move the active-layer cursor onto the new row");
+  /* Last, and optional: existing callers pass the earlier parameters by position or keyword. */
+  RNA_def_enum(func,
+               "source",
+               rna_enum_material_paint_layer_source_items,
+               MA_PAINT_LAYER_SOURCE_IMAGE,
+               "Source",
+               "Source of the new layer");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
   RNA_def_function_return(func, parm);
 

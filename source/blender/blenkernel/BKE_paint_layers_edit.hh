@@ -25,7 +25,17 @@
 
 namespace blender {
 
+/** What kind of row the Add creates. */
+enum class PaintLayerAddKind : int8_t {
+  /** A painted layer. */
+  Paint = 0,
+  /** A flat-colour Fill layer. */
+  Fill,
+};
+
 struct PaintLayerAddParams {
+  /** What the new row is. */
+  PaintLayerAddKind kind = PaintLayerAddKind::Paint;
   /** The row the Add was aimed at, or null for the top of the stack. */
   MaterialPaintLayer *anchor = nullptr;
   /** Where to put the new row relative to \a anchor. */
@@ -35,6 +45,8 @@ struct PaintLayerAddParams {
    * the highest N in use).
    */
   const char *name = nullptr;
+  /** The initial colour for a Fill; null keeps the transparent default. */
+  const float *fill_color = nullptr;
 };
 
 /**

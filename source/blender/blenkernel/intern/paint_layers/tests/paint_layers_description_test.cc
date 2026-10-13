@@ -15,6 +15,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_report.hh"
 
 #include "../paint_layers_intern.hh"
@@ -835,6 +836,51 @@ TEST_F(PaintLayersDescription, rna_paint_layers_new_find_remove_round_trip)
 }
 
 /** \} */
+
+TEST_F(PaintLayersDescription, add_fill_layer_lays_its_colour)
+{
+  Material *ma = BKE_material_add(bmain, "FillMat");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  const float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  params.fill_color = color;
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(fill->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_STREQ(fill->name, "Fill 1");
+
+  float read[4];
+  BKE_paint_layers_base_color_get(*fill, read);
+  EXPECT_FLOAT_EQ(read[0], 1.0f);
+  EXPECT_FLOAT_EQ(read[3], 1.0f);
+  EXPECT_TRUE(BKE_paint_layers_base_color_active(*fill));
+
+  /* A Fill lays its constant whatever its alpha, so a transparent colour is still its value. */
+  const float transparent[4] = {0.2f, 0.4f, 0.6f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, transparent));
+  BKE_paint_layers_base_color_get(*fill, read);
+  EXPECT_FLOAT_EQ(read[1], 0.4f);
+  EXPECT_FLOAT_EQ(read[3], 0.0f);
+}
+
+TEST_F(PaintLayersDescription, set_source_flips_between_paint_and_fill)
+{
+  Material *ma = BKE_material_add(bmain, "SrcMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  BKE_paint_layers_default_channels_apply(*ma, *layer);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  float fill[4];
+  BKE_paint_layers_base_color_get(*layer, fill);
+  EXPECT_FLOAT_EQ(fill[3], 1.0f) << "a transparent Base Color becomes an opaque Fill";
+
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE));
+  EXPECT_EQ(layer->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  /* A Paint row lays nothing until painted: the Fill's colour must not stay behind. */
+  float paint[4];
+  BKE_paint_layers_base_color_get(*layer, paint);
+  EXPECT_FLOAT_EQ(paint[3], 0.0f);
+}
 
 TEST_F(PaintLayersDescription, set_blend_writes_and_refuses_the_internal_normal_combine)
 {

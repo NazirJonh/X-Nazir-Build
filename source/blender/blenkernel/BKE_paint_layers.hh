@@ -32,6 +32,7 @@ struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
+enum eMaterialPaintLayerSource : int8_t;
 
 /* -------------------------------------------------------------------- */
 /** \name Layered material
@@ -233,6 +234,37 @@ bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char
 bool BKE_paint_layers_set_blend(Material &ma,
                                 MaterialPaintLayer *layer,
                                 eMaterialPaintLayerBlend blend);
+
+/**
+ * Change what \a layer paints with between a painted map (#MA_PAINT_LAYER_SOURCE_IMAGE) and a flat
+ * colour (#MA_PAINT_LAYER_SOURCE_CONSTANT, a Fill). What the two disagree on is converted: the maps
+ * are let go when the row becomes a Fill (a transparent Base Color becomes opaque black), and the
+ * Base Color goes back to transparent when it becomes Paint again, so the row lays nothing until
+ * it is painted.
+ */
+bool BKE_paint_layers_set_source(Material &ma,
+                                 MaterialPaintLayer *layer,
+                                 eMaterialPaintLayerSource source);
+
+/**
+ * The Base Color \a layer shows: the value of its Base-Color channel record, which is where a Fill's
+ * colour lives (a Layer row keeps every channel, Base Color included, in records). Zero when the row
+ * has no Base-Color record.
+ *
+ * The one reader of the Base-Color constant for code that has only the row, not a channel index --
+ * the Outliner swatch and the RNA `fill_color` property.
+ */
+void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_color[4]);
+
+/**
+ * Whether the Base Color #BKE_paint_layers_base_color_get reads is live: the row's Base-Color record
+ * exists and is ENABLED. The UI asks this before drawing a colour control that would stand for a
+ * channel the row no longer paints with.
+ */
+bool BKE_paint_layers_base_color_active(const MaterialPaintLayer &layer);
+
+/** Set the fill color of \a layer, the constant a Fill shows; creates its Base-Color record on demand. */
+bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, const float color[4]);
 
 /** \} */
 

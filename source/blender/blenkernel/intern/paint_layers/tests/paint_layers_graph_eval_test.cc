@@ -115,4 +115,16 @@ TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
   }
 }
 
+TEST_F(PaintLayersGraphEvalTest, fill_layer_lays_its_colour)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  /* Alpha 0: a Fill still lays its constant, unlike a Paint row, whose alpha 0 lays nothing. */
+  const float color[4] = {0.2f, 0.4f, 0.6f, 0.0f};
+  MaterialPaintLayer *fill = add_constant_layer("Fill", color);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, color));
+
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
 }  // namespace blender::bke::tests

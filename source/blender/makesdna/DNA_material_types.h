@@ -426,6 +426,14 @@ enum eMaterialPaintLayerBlend : int8_t {
   MA_PAINT_LAYER_BLEND_VALUE = 19,
 };
 
+/** #MaterialPaintLayer::source -- what the row paints with. */
+enum eMaterialPaintLayerSource : int8_t {
+  /** A painted map per channel. */
+  MA_PAINT_LAYER_SOURCE_IMAGE = 0,
+  /** A flat colour the row lays whatever its channels' alpha; a Fill. */
+  MA_PAINT_LAYER_SOURCE_CONSTANT = 1,
+};
+
 /** #MaterialPaintLayerChannel::state */
 enum eMaterialPaintLayerChannelState : int8_t {
   /** No map: the channel keeps its record but carries no coverage. */
@@ -468,7 +476,8 @@ struct MaterialPaintLayer {
   bUUID marker = {};
   /** #eMaterialPaintLayerBlend. */
   int8_t blend = MA_PAINT_LAYER_BLEND_MIX;
-  char _pad0[1] = {};
+  /** #eMaterialPaintLayerSource: a painted map (Image) or a flat colour (Constant). */
+  int8_t source = MA_PAINT_LAYER_SOURCE_IMAGE;
   /** #eMaterialPaintLayerFlag. */
   int16_t flag = MA_PAINT_LAYER_ENABLED;
   float opacity = 1.0f;

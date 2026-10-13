@@ -205,7 +205,7 @@ void interface_name_unique(const bNodeTreeInterface &interface,
 
 bool leaf_participates(const MaterialPaintLayer &layer, const int channel)
 {
-  return paint_layer_channel_contributes(paint_layer_channel_find(layer, channel));
+  return paint_layer_channel_contributes(layer, paint_layer_channel_find(layer, channel));
 }
 
 Vector<int> paint_layers_wired_channels(const Material &ma)

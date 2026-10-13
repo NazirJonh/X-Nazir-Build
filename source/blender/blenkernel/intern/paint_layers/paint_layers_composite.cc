@@ -114,7 +114,7 @@ bool BKE_paint_layers_composite_image_layers(
   }
   for (const MaterialPaintLayer &layer : ma.paint_layers) {
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-    if (!paint_layer_channel_contributes(record)) {
+    if (!paint_layer_channel_contributes(layer, record)) {
       continue;
     }
     PaintMaterialCompositeImageLayer out;

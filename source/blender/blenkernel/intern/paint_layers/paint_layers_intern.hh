@@ -68,6 +68,23 @@ inline bool paint_layer_channel_contributes(const MaterialPaintLayerChannel *rec
 }
 
 /**
+ * Whether \a layer takes part in \a channel, from the row rather than the record alone.
+ *
+ * A Fill lays its constant whatever its channels' alpha, so a live record always takes part; every
+ * other row follows #paint_layer_channel_contributes (a map, or a flat value with some alpha). The
+ * generator's participation test and the CPU adapter both call this, so a Fill cannot take part on
+ * one side and drop out on the other.
+ */
+inline bool paint_layer_channel_contributes(const MaterialPaintLayer &layer,
+                                            const MaterialPaintLayerChannel *record)
+{
+  if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+    return paint_layer_channel_live(record);
+  }
+  return paint_layer_channel_contributes(record);
+}
+
+/**
  * The `MA_RAMP_*` blend code a description blend stands for.
  *
  * The one table the generator's Mix nodes and the CPU's `ramp_blend` both read, so a blend cannot

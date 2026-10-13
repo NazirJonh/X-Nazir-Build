@@ -58,15 +58,25 @@ std::string BKE_paint_layers_unique_default_name(const Material &ma, const Strin
 MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
                                                      const PaintLayerAddParams &params)
 {
+  const char *name_base = (params.kind == PaintLayerAddKind::Fill) ? "Fill" : "Layer";
   const std::string name = (params.name != nullptr) ?
                                std::string(params.name) :
-                               BKE_paint_layers_unique_default_name(ma, "Layer");
+                               BKE_paint_layers_unique_default_name(ma, name_base);
   MaterialPaintLayer *created = BKE_paint_layers_add(
       ma, name.c_str(), params.anchor, params.place);
-  if (created != nullptr) {
-    /* The default channel set is a policy of its own (see the BKE helper); the Add only places
-     * the row. */
-    BKE_paint_layers_default_channels_apply(ma, *created);
+  if (created == nullptr) {
+    return nullptr;
+  }
+  /* A Fill is a Constant row. Set before the channels, so a fresh Fill's default Base Color starts
+   * transparent, the way a Fill expects until #BKE_paint_layers_set_fill_color gives it a colour. */
+  if (params.kind == PaintLayerAddKind::Fill) {
+    created->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  }
+  /* The default channel set is a policy of its own (see the BKE helper); the Add only places
+   * the row. */
+  BKE_paint_layers_default_channels_apply(ma, *created);
+  if (params.kind == PaintLayerAddKind::Fill && params.fill_color != nullptr) {
+    BKE_paint_layers_set_fill_color(ma, created, params.fill_color);
   }
   return created;
 }

@@ -30,6 +30,12 @@ namespace bke::paint_layers::layout {
 inline constexpr float kColumnWidth = 260.0f;
 inline constexpr float kRowPitch = 220.0f;
 
+/**
+ * Bump when the node layout of a generated group changes, so the topology hash of every row moves
+ * and every kept group is rebuilt once on the next regeneration instead of keeping its old grid.
+ */
+inline constexpr int kLayoutVersion = 1;
+
 enum class Column : int {
   Inputs = 0,
   Source,

@@ -61,11 +61,46 @@ void refresh_layer_group(LayerGroup &group)
   }
 }
 
+bNodeTreeInterfaceSocket *layer_group_socket_find(const LayerGroup &group,
+                                                  const char *name,
+                                                  const StringRef socket_type,
+                                                  const bool input)
+{
+  if (group.tree == nullptr || name == nullptr) {
+    return nullptr;
+  }
+  bNodeTreeInterfaceSocket *found = nullptr;
+  group.tree->tree_interface.foreach_item([&](const bNodeTreeInterfaceItem &item) {
+    if (item.item_type != NodeTreeInterfaceItemType::Socket) {
+      return true;
+    }
+    const auto &socket = reinterpret_cast<const bNodeTreeInterfaceSocket &>(item);
+    if (((socket.flag & NODE_INTERFACE_SOCKET_INPUT) != 0) != input) {
+      return true;
+    }
+    if (socket.name != nullptr && STREQ(socket.name, name) && socket.socket_type != nullptr &&
+        StringRef(socket.socket_type) == socket_type)
+    {
+      found = const_cast<bNodeTreeInterfaceSocket *>(&socket);
+      return false;
+    }
+    return true;
+  });
+  return found;
+}
+
 bNodeTreeInterfaceSocket *layer_group_add_socket(LayerGroup &group,
                                                  const char *base,
                                                  const StringRef socket_type,
                                                  const NodeTreeInterfaceSocketFlag flag)
 {
+  /* Find before adding: a group whose interface was kept across a rebuild hands the same socket
+   * back, so re-running the build never grows the interface with a duplicate. */
+  if (bNodeTreeInterfaceSocket *existing = layer_group_socket_find(
+          group, base, socket_type, (flag & NODE_INTERFACE_SOCKET_INPUT) != 0))
+  {
+    return existing;
+  }
   char name[256];
   interface_name_unique(group.tree->tree_interface, base, name, sizeof(name));
   bNodeTreeInterfaceSocket *socket = group.tree->tree_interface.add_socket(
@@ -193,14 +228,32 @@ LayerGroup *PaintLayersTreeBuilder::layer_group_ensure(const MaterialPaintLayer 
   layer_groups_.add(&layer, &group);
   group.tree = group_tree;
   group.parent_tree = &tree_;
-  /* The factory hands out an empty tree: the Group Input/Output nodes are this build's. */
-  group.group_input = bke::node_add_node(nullptr, *group_tree, "NodeGroupInput"_ustr);
-  group.group_output = bke::node_add_node(nullptr, *group_tree, "NodeGroupOutput"_ustr);
-  if (group.group_input == nullptr || group.group_output == nullptr) {
-    return nullptr;
+  const bool reused = ctx_.layer_unchanged && ctx_.layer_unchanged(layer);
+  if (reused) {
+    /* The factory kept this group: its Group Input/Output nodes and value inputs are already in
+     * place, so find them instead of adding a second set on top. */
+    for (bNode &node : group_tree->nodes) {
+      if (node.is_group_input()) {
+        group.group_input = &node;
+      }
+      else if (node.is_group_output()) {
+        group.group_output = &node;
+      }
+    }
+    if (group.group_input == nullptr || group.group_output == nullptr) {
+      return nullptr;
+    }
   }
-  group.group_input->location[0] = 0.0f;
-  group.group_output->location[0] = float(int(layout::Column::Extra) + 1) * layout::kColumnWidth;
+  else {
+    /* A fresh (or rebuilt) tree: the Group Input/Output nodes are this build's. */
+    group.group_input = bke::node_add_node(nullptr, *group_tree, "NodeGroupInput"_ustr);
+    group.group_output = bke::node_add_node(nullptr, *group_tree, "NodeGroupOutput"_ustr);
+    if (group.group_input == nullptr || group.group_output == nullptr) {
+      return nullptr;
+    }
+    group.group_input->location[0] = 0.0f;
+    group.group_output->location[0] = float(int(layout::Column::Extra) + 1) * layout::kColumnWidth;
+  }
   bNode *instance = bke::node_add_node(nullptr, tree_, tree_.typeinfo->group_idname);
   if (instance == nullptr) {
     return nullptr;
@@ -213,7 +266,9 @@ LayerGroup *PaintLayersTreeBuilder::layer_group_ensure(const MaterialPaintLayer 
   instance->location[1] = location_y;
   group.instance = instance;
   refresh_layer_group(group);
-  create_value_inputs(group, layer);
+  if (!reused) {
+    create_value_inputs(group, layer);
+  }
   return &group;
 }
 
@@ -280,7 +335,11 @@ NodeOutput PaintLayersTreeBuilder::channel_chain_build(const int channel,
     if (group == nullptr) {
       continue;
     }
-    const RowResult row = build_row(layer, *group, channel);
+    /* A group the factory kept already holds the row: only its instance is re-linked, so its nodes
+     * are never rebuilt and a value-only pass touches nothing. */
+    const bool reused = ctx_.layer_unchanged && ctx_.layer_unchanged(layer);
+    const RowResult row = reused ? row_link_reused(layer, *group, channel) :
+                                   build_row(layer, *group, channel);
     if (!row.valid) {
       continue;
     }

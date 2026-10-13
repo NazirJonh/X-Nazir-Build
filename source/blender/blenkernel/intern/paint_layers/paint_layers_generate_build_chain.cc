@@ -272,5 +272,34 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   return result;
 }
 
+RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer & /*layer*/,
+                                                  LayerGroup &group,
+                                                  const int channel)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  char socket_name[192];
+  SNPRINTF(socket_name, "Below %s", info.ui_name);
+  bNodeTreeInterfaceSocket *below_iface = layer_group_socket_find(
+      group, socket_name, "NodeSocketColor", true);
+  SNPRINTF(socket_name, "Result %s", info.ui_name);
+  bNodeTreeInterfaceSocket *result_iface = layer_group_socket_find(
+      group, socket_name, "NodeSocketColor", false);
+  if (below_iface == nullptr || result_iface == nullptr) {
+    return {};
+  }
+  RowResult result;
+  result.valid = true;
+  result.instance = group.instance;
+  result.below = bke::node_find_socket(
+      *group.instance, SOCK_IN, UString::from_ptr_noinline(below_iface->identifier));
+  result.result = bke::node_find_socket(
+      *group.instance, SOCK_OUT, UString::from_ptr_noinline(result_iface->identifier));
+  if (result.below == nullptr || result.result == nullptr) {
+    return {};
+  }
+  return result;
+}
+
 }  // namespace bke::paint_layers
 }  // namespace blender

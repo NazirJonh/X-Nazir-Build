@@ -13,6 +13,7 @@
 #include "BKE_paint_layers_generate.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
@@ -43,9 +44,140 @@
 #include "DNA_uuid_types.h"
 
 #include "paint_layers_generate_intern.hh"
+#include "paint_layers_generate_layout.hh"
 
 namespace blender {
 using namespace bke::paint_layers;
+
+namespace bke::paint_layers {
+
+/* -------------------------------------------------------------------- */
+/** \name Topology hashes
+ *
+ * A row's group and the root are a function of the description's structure alone. Their values
+ * (opacity, a Fill constant, the enabled flag) are group inputs and never move these hashes, which
+ * is what lets a value edit keep every group and sync only the values.
+ * \{ */
+
+uint64_t topology_hash_mix(uint64_t hash, const uint64_t value)
+{
+  hash ^= value;
+  hash *= 1099511628211ull;
+  return hash;
+}
+
+void topology_hash_string(uint64_t &hash, const char *text)
+{
+  if (text == nullptr) {
+    hash = topology_hash_mix(hash, 0);
+    return;
+  }
+  for (const char *c = text; *c != '\0'; c++) {
+    hash = topology_hash_mix(hash, uint8_t(*c));
+  }
+  hash = topology_hash_mix(hash, 1);
+}
+
+void topology_hash_uid(uint64_t &hash, const bUUID &uid)
+{
+  char formatted[UUID_STRING_SIZE];
+  BLI_uuid_format(formatted, uid);
+  topology_hash_string(hash, formatted);
+}
+
+void tree_hash_set(bNodeTree &tree, const char *low_key, const char *high_key, const uint64_t hash)
+{
+  prop_int_set(tree.id.properties, low_key, int(uint32_t(hash & 0xFFFFFFFFu)));
+  prop_int_set(tree.id.properties, high_key, int(uint32_t(hash >> 32)));
+}
+
+bool tree_hash_get(bNodeTree &tree, const char *low_key, const char *high_key, uint64_t &r_hash)
+{
+  const IDProperty *props = IDP_GetProperties(&tree.id);
+  if (props == nullptr) {
+    return false;
+  }
+  const IDProperty *low = IDP_GetPropertyTypeFromGroup(props, low_key, IDP_INT);
+  const IDProperty *high = IDP_GetPropertyTypeFromGroup(props, high_key, IDP_INT);
+  if (low == nullptr || high == nullptr) {
+    return false;
+  }
+  r_hash = (uint64_t(uint32_t(IDP_int_get(high))) << 32) | uint64_t(uint32_t(IDP_int_get(low)));
+  return true;
+}
+
+void tree_topology_hash_set(bNodeTree &tree, const uint64_t hash)
+{
+  tree_hash_set(tree, TREE_TOPOLOGY_LOW_PROP, TREE_TOPOLOGY_HIGH_PROP, hash);
+}
+
+bool tree_topology_hash_get(bNodeTree &tree, uint64_t &r_hash)
+{
+  return tree_hash_get(tree, TREE_TOPOLOGY_LOW_PROP, TREE_TOPOLOGY_HIGH_PROP, r_hash);
+}
+
+void tree_root_hash_set(bNodeTree &tree, const uint64_t hash)
+{
+  tree_hash_set(tree, TREE_ROOT_TOPOLOGY_LOW_PROP, TREE_ROOT_TOPOLOGY_HIGH_PROP, hash);
+}
+
+bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash)
+{
+  return tree_hash_get(tree, TREE_ROOT_TOPOLOGY_LOW_PROP, TREE_ROOT_TOPOLOGY_HIGH_PROP, r_hash);
+}
+
+namespace {
+constexpr uint64_t TOPOLOGY_SEED = 1469598103934665603ull;
+}  // namespace
+
+uint64_t paint_layers_layer_topology_hash(const Material & /*ma*/,
+                                          const MaterialPaintLayer &layer,
+                                          const Span<int> wired_channels)
+{
+  uint64_t hash = TOPOLOGY_SEED;
+  hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
+  /* Source and blend decide the nodes; the enabled flag and every value are inputs, so they are
+   * deliberately absent. */
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
+  topology_hash_string(hash, layer.name);
+  for (const int channel : wired_channels) {
+    hash = topology_hash_mix(hash, uint64_t(channel));
+    hash = topology_hash_mix(hash, leaf_participates(layer, channel) ? 1 : 0);
+  }
+  return hash;
+}
+
+uint64_t paint_layers_root_topology_hash(const Material &ma, const Span<int> wired_channels)
+{
+  uint64_t hash = TOPOLOGY_SEED;
+  hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
+  for (const int channel : wired_channels) {
+    hash = topology_hash_mix(hash, uint64_t(channel));
+  }
+  /* The rows in order, each with its own topology: adding, removing or reordering a row moves this,
+   * a value edit does not. A row that takes part in no wired channel builds no group and is left
+   * out, so a change to it cannot make the root rebuild for nothing. */
+  for (const MaterialPaintLayer &layer : ma.paint_layers) {
+    bool participates = false;
+    for (const int channel : wired_channels) {
+      if (leaf_participates(layer, channel)) {
+        participates = true;
+        break;
+      }
+    }
+    if (!participates) {
+      continue;
+    }
+    topology_hash_uid(hash, layer.marker);
+    hash = topology_hash_mix(hash, paint_layers_layer_topology_hash(ma, layer, wired_channels));
+  }
+  return hash;
+}
+
+}  // namespace bke::paint_layers
+
+/** \} */
 
 /**
  * The root tree of \a ma: the one it already owns, or a fresh one. A tree in the pointer that is
@@ -98,7 +230,8 @@ static bNodeTree *root_tree_ensure(Main &bmain,
  */
 class LayerTreeFactory {
  public:
-  LayerTreeFactory(Main &bmain, Material &ma, const bNodeTree &root) : bmain_(bmain), ma_(ma)
+  LayerTreeFactory(Main &bmain, Material &ma, const bNodeTree &root, const Span<int> wired_channels)
+      : bmain_(bmain), ma_(ma), wired_channels_(wired_channels)
   {
     /* The layer groups this material already owns, found in #Main rather than through the root's
      * instances: an undo detaches those, and groups only reachable through them would be left
@@ -113,23 +246,41 @@ class LayerTreeFactory {
     }
   }
 
-  /** The group holding \a layer's nodes: its old one, emptied, or a fresh one. */
+  /** The group holding \a layer's nodes: its old one (kept or emptied), or a fresh one. */
   bNodeTree *layer_tree_get(const MaterialPaintLayer &layer)
   {
+    /* Handed out once per pass: the build asks per channel, and a second ask must return the same
+     * tree rather than create a fresh one. */
+    if (bNodeTree **handed = handed_.lookup_ptr(&layer)) {
+      return *handed;
+    }
     char name[MAX_ID_NAME - 2];
     SNPRINTF(name, ".PL Layer %s", layer.name[0] != '\0' ? layer.name : "Layer");
+    const uint64_t topology = paint_layers_layer_topology_hash(ma_, layer, wired_channels_);
     for (bNodeTree *candidate : old_) {
       if (used_.contains(candidate)) {
         continue;
       }
       bUUID marker = BLI_uuid_nil();
       if (layer_tree_marker_get(*candidate, marker) && BLI_uuid_equal(marker, layer.marker)) {
-        /* The root was cleared before the build, so nothing instantiates the group any more. */
+        uint64_t stored = 0;
+        if (tree_topology_hash_get(*candidate, stored) && stored == topology) {
+          /* Unchanged: keep the nodes and the interface; the build only re-links the instance. */
+          used_.append(candidate);
+          unchanged_.add(&layer);
+          handed_.add(&layer, candidate);
+          return candidate;
+        }
+        /* The structure changed: the root was cleared before the build, so nothing instantiates
+         * the group any more, and a full clear drops the stale nodes and interface. The stored hash
+         * is written before the build so a later pass can see what was built. */
         tree_clear(bmain_, *candidate);
+        tree_topology_hash_set(*candidate, topology);
         if (!STREQ(candidate->id.name + 2, name)) {
           BKE_id_rename(bmain_, candidate->id, name);
         }
         used_.append(candidate);
+        handed_.add(&layer, candidate);
         return candidate;
       }
     }
@@ -141,9 +292,17 @@ class LayerTreeFactory {
     id_us_min(&fresh->id);
     tree_owner_uid_set(*fresh, ma_.paint_layers_owner_uid);
     uid_prop_set(fresh->id.properties, TREE_LAYER_PROP, layer.marker);
+    tree_topology_hash_set(*fresh, topology);
     used_.append(fresh);
+    handed_.add(&layer, fresh);
     created_ = true;
     return fresh;
+  }
+
+  /** Whether \a layer's group was kept unchanged in this pass. */
+  bool is_unchanged(const MaterialPaintLayer &layer) const
+  {
+    return unchanged_.contains(&layer);
   }
 
   /** The groups handed out so far. */
@@ -186,10 +345,15 @@ class LayerTreeFactory {
  private:
   Main &bmain_;
   Material &ma_;
+  Span<int> wired_channels_;
   /** The groups this material owned before the regeneration. */
   Vector<bNodeTree *> old_;
   /** The groups handed out in this regeneration. */
   Vector<bNodeTree *> used_;
+  /** The group handed to each row this pass, so a second ask returns the same tree. */
+  Map<const MaterialPaintLayer *, bNodeTree *> handed_;
+  /** The rows whose group was kept unchanged (its topology hash matched). */
+  Set<const MaterialPaintLayer *> unchanged_;
   bool created_ = false;
   bool deleted_ = false;
 };
@@ -285,6 +449,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   }
 
   PaintLayersBuildContext ctx;
+  Vector<int> wired_channels = paint_layers_wired_channels(ma);
   /* The Normal chain needs the shared combine group; create it only when a Normal row exists. */
   for (const MaterialPaintLayer &layer : ma.paint_layers) {
     if (leaf_participates(layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
@@ -293,39 +458,68 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     }
   }
 
-  /* The factory outlives the build, which only holds a non-owning reference to it. */
-  LayerTreeFactory factory(bmain, ma, *tree);
-  const auto layer_tree_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
-    return factory.layer_tree_get(layer);
-  };
-  ctx.layer_tree_get = layer_tree_get;
+  /* A value edit changes no structure, so the root's stored hash still matches its description:
+   * every group is kept and only the values are written. Nothing is rebuilt, and the groups' nodes
+   * (and anything a user put in them) survive. A missing or mismatched stored hash -- a file written
+   * before this feature, or a structural edit -- falls through to a full rebuild. */
+  const uint64_t root_hash = paint_layers_root_topology_hash(ma, wired_channels);
+  uint64_t stored_root = 0;
+  const bool keep_root = !created_tree && tree_root_hash_get(*tree, stored_root) &&
+                         stored_root == root_hash;
 
-  tree_clear(bmain, *tree);
-  BKE_paint_layers_tree_build(ma, *tree, ctx);
-
-  generated_trees_update(bmain, factory.used(), *tree);
-  factory.prune_unused();
-
-  bNode *instance = instance_ensure(ma, *tree);
-  if (instance == nullptr) {
-    report_out();
-    return false;
+  bool relations_changed = report.replaced_foreign_tree;
+  if (keep_root) {
+    BKE_paint_layers_values_sync(ma);
+    regenerate_tags(bmain, ma, *tree, false);
   }
-  BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
-  /* The root was rebuilt with a new interface: the instance has to follow it before its outputs
-   * are looked up for the routing below. */
-  nodes::update_node_declaration_and_sockets(*ma.nodetree, *instance);
+  else {
+    /* The factory outlives the build, which only holds a non-owning reference to it. */
+    LayerTreeFactory factory(bmain, ma, *tree, wired_channels);
+    const auto layer_tree_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
+      return factory.layer_tree_get(layer);
+    };
+    /* Named like #layer_tree_get: a #FunctionRef keeps a pointer to its callable, so a lambda
+     * assigned straight to it would be gone by the time the build calls it. */
+    const auto layer_unchanged = [&](const MaterialPaintLayer &layer) -> bool {
+      return factory.is_unchanged(layer);
+    };
+    ctx.layer_tree_get = layer_tree_get;
+    ctx.layer_unchanged = layer_unchanged;
 
-  principled_ensure(ma, report);
-  wire_instance_to_material(ma, *tree, *instance, report);
+    tree_clear(bmain, *tree);
+    BKE_paint_layers_tree_build(ma, *tree, ctx);
+    tree_root_hash_set(*tree, root_hash);
 
-  BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
+    generated_trees_update(bmain, factory.used(), *tree);
+    factory.prune_unused();
+
+    bNode *instance = instance_ensure(ma, *tree);
+    if (instance == nullptr) {
+      report_out();
+      return false;
+    }
+    BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
+    /* The root was rebuilt with a new interface: the instance has to follow it before its outputs
+     * are looked up for the routing below. */
+    nodes::update_node_declaration_and_sockets(*ma.nodetree, *instance);
+
+    principled_ensure(ma, report);
+    wire_instance_to_material(ma, *tree, *instance, report);
+
+    BKE_ntree_update_after_single_tree_change(bmain, *ma.nodetree);
+
+    /* A group that was kept unchanged had its value inputs written by an earlier pass; this makes
+     * the instances the root just re-created carry the description's current values. */
+    BKE_paint_layers_values_sync(ma);
+
+    relations_changed = factory.groups_created() || factory.groups_deleted() || created_tree ||
+                        report.replaced_foreign_tree;
+    regenerate_tags(bmain, ma, *tree, relations_changed);
+  }
 
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
 
-  report.relations_changed = factory.groups_created() || factory.groups_deleted() ||
-                             created_tree || report.replaced_foreign_tree;
-  regenerate_tags(bmain, ma, *tree, report.relations_changed);
+  report.relations_changed = relations_changed;
   report_out();
   return true;
 }

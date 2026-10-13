@@ -100,6 +100,12 @@ class PaintLayersTreeBuilder {
   RowResult build_row(const MaterialPaintLayer &layer, LayerGroup &group, int channel);
 
   /**
+   * The instance sockets of a row whose group was kept unchanged: its nodes and interface already
+   * hold the row, so only the Below/Result contract sockets are looked up again in the new instance.
+   */
+  RowResult row_link_reused(const MaterialPaintLayer &layer, LayerGroup &group, int channel);
+
+  /**
    * The blend node of a row in \a channel: a Normal Combine instance for Normal when the shared
    * group exists, a Mix otherwise. Empty when its sockets cannot be found.
    */
@@ -154,11 +160,18 @@ class PaintLayersTreeBuilder {
 /** Refresh the Group Input/Output and parent instance sockets of \a group after its interface grew. */
 void refresh_layer_group(LayerGroup &group);
 
-/** Add an interface socket of \a group and grow its three nodes to match. */
+/** Add an interface socket of \a group and grow its three nodes to match; find it first, so a
+ * rebuild of a group with a kept interface reuses the socket rather than duplicating it. */
 bNodeTreeInterfaceSocket *layer_group_add_socket(LayerGroup &group,
                                                  const char *base,
                                                  StringRef socket_type,
                                                  NodeTreeInterfaceSocketFlag flag);
+
+/** The interface socket of \a group named \a name of the given type and direction, or null. */
+bNodeTreeInterfaceSocket *layer_group_socket_find(const LayerGroup &group,
+                                                  const char *name,
+                                                  StringRef socket_type,
+                                                  bool input);
 
 /**
  * Link the blend of one row: \a below into its first input, \a source into its second and

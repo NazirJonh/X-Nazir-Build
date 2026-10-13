@@ -49,6 +49,13 @@ bool BKE_paint_layers_is_layered(const Material &ma);
 /** A description edit: whatever is derived from the description is stale until it is rebuilt. */
 void BKE_paint_layers_tag_edited(Material &ma);
 
+/**
+ * A strictly value-only edit (a row's opacity, a Fill row's constant): the generated tree keeps its
+ * nodes and only its values are re-synced, so no shader rebuild happens. Falls back to
+ * #BKE_paint_layers_tag_edited when the tree no longer matches the description's values.
+ */
+void BKE_paint_layers_tag_value_edited(Material &ma);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

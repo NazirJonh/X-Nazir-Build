@@ -22,6 +22,7 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
@@ -54,6 +55,18 @@ inline constexpr const char *INPUT_ROLE_PROP = "pbr_paint_layers_role";
 inline constexpr const char *INPUT_MARKER_PROP = "pbr_paint_layers_layer";
 /** On a generated group interface input: the channel the value belongs to. */
 inline constexpr const char *INPUT_CHANNEL_PROP = "pbr_paint_layers_channel";
+/**
+ * On a layer's own node group: its topology hash, low and high 32-bit words. The factory compares it
+ * with #paint_layers_layer_topology_hash and skips the rebuild of a group whose hash is unchanged.
+ * A missing or unreadable pair is treated as changed, so a file written before this feature never
+ * keeps a stale group.
+ */
+inline constexpr const char *TREE_TOPOLOGY_LOW_PROP = "pbr_paint_layers_topology";
+inline constexpr const char *TREE_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_topology_hi";
+/** On the root generated tree: the hash of the rows in order and their per-channel participation.
+ * When it matches the stored one the root is left alone and only its groups' values are synced. */
+inline constexpr const char *TREE_ROOT_TOPOLOGY_LOW_PROP = "pbr_paint_layers_root_topology";
+inline constexpr const char *TREE_ROOT_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_root_topology_hi";
 
 /** #INPUT_ROLE_PROP value of a layer's opacity (enabled already folded in). */
 inline constexpr const char *ROLE_OPACITY = "opacity";
@@ -82,6 +95,42 @@ bUUID tree_owner_uid_get(const bNodeTree &tree);
 void tree_owner_uid_set(bNodeTree &tree, const bUUID &uid);
 void instance_uid_set(bNode &node, const bUUID &uid);
 bool layer_tree_marker_get(const bNodeTree &tree, bUUID &r_marker);
+
+/* -------------------------------------------------------------------- */
+/** \name Topology hashes
+ *
+ * A row's group and the root are a function of the description's structure alone; their values
+ * (opacity, a Fill constant, the enabled flag) are inputs and never move these hashes. When a hash
+ * matches the one stored on the tree, the tree is kept as it is and only its values are re-synced.
+ * \{ */
+
+/** Order-sensitive mix into the FNV-1a style accumulator. */
+uint64_t topology_hash_mix(uint64_t hash, uint64_t value);
+void topology_hash_string(uint64_t &hash, const char *text);
+void topology_hash_uid(uint64_t &hash, const bUUID &uid);
+
+/** Store/read a 64-bit hash as two 32-bit IDProperty words (IDProperty has no 64-bit int). */
+void tree_hash_set(bNodeTree &tree, const char *low_key, const char *high_key, uint64_t hash);
+bool tree_hash_get(bNodeTree &tree, const char *low_key, const char *high_key, uint64_t &r_hash);
+void tree_topology_hash_set(bNodeTree &tree, uint64_t hash);
+bool tree_topology_hash_get(bNodeTree &tree, uint64_t &r_hash);
+void tree_root_hash_set(bNodeTree &tree, uint64_t hash);
+bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash);
+
+/**
+ * The structure of one row: its source, blend, name and per-channel participation. Never a value.
+ */
+uint64_t paint_layers_layer_topology_hash(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          Span<int> wired_channels);
+
+/**
+ * The structure of the root: the wired channels, and the participating rows in order with their
+ * per-channel participation. A reorder or a structural edit moves it; a value edit does not.
+ */
+uint64_t paint_layers_root_topology_hash(const Material &ma, Span<int> wired_channels);
+
+/** \} */
 
 /**
  * Whether \a layer takes part in \a channel: it carries a live record that has a map, or a flat value

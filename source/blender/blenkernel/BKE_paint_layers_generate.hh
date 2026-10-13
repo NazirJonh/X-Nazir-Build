@@ -41,6 +41,12 @@ struct PaintLayersBuildContext {
    * create data-blocks cannot build.
    */
   FunctionRef<bNodeTree *(const MaterialPaintLayer &layer)> layer_tree_get;
+  /**
+   * Whether \a layer's group was kept unchanged by the caller: its nodes and interface already hold
+   * the row, so the build only re-links its instance into the new root instead of rebuilding it.
+   * Empty (the default) means every group is built from scratch.
+   */
+  FunctionRef<bool(const MaterialPaintLayer &layer)> layer_unchanged;
 };
 
 /**
@@ -102,6 +108,16 @@ bool BKE_paint_layers_regenerate(Main &bmain,
  * already built.
  */
 void BKE_paint_layers_regenerate_tagged(Main &bmain);
+
+/**
+ * Copy the description's animatable values (each row's opacity, a Fill row's constant) into the
+ * layer groups' input sockets of \a ma's generated tree, without touching any topology.
+ *
+ * A value edit only calls this; the socket set is fixed by the structure, so a slider move never
+ * rebuilds a group. \return false when a value input the description owns has no socket in the
+ * tree (the tree was hand-edited), so the caller can fall back to a full regeneration.
+ */
+bool BKE_paint_layers_values_sync(Material &ma);
 
 /**
  * Take ownership of the generated tree for a copied material.

@@ -602,6 +602,149 @@ TEST_F(PaintLayersGenerateTest, participation_cpu_matches_generator)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Values and topology
+ * \{ */
+
+/** A node a test drops into a generated tree to tell whether a later pass rebuilt it. */
+static bool tree_sentinel_set(bNodeTree &tree)
+{
+  return bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE) != nullptr;
+}
+
+static bool tree_sentinel_get(const bNodeTree &tree)
+{
+  for (const bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_VALUE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TEST_F(PaintLayersGenerateTest, value_edit_does_not_rebuild_any_group)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom", add_image("Bottom"));
+  MaterialPaintLayer *fill = BKE_paint_layers_add(*ma, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  add_constant_channel(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, grey);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *bottom_tree = layer_tree_find(*bmain, "Bottom");
+  bNodeTree *fill_tree = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(bottom_tree, nullptr);
+  ASSERT_NE(fill_tree, nullptr);
+  ASSERT_TRUE(tree_sentinel_set(*bottom_tree));
+  ASSERT_TRUE(tree_sentinel_set(*fill_tree));
+
+  /* Opacity and a Fill constant are group inputs: they change values, not topology, and never mark
+   * the stack for a rebuild. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, bottom, 0.42f));
+  const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, fill, green));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Bottom"), bottom_tree);
+  EXPECT_EQ(layer_tree_find(*bmain, "Fill"), fill_tree);
+  EXPECT_TRUE(tree_sentinel_get(*bottom_tree));
+  EXPECT_TRUE(tree_sentinel_get(*fill_tree));
+}
+
+TEST_F(PaintLayersGenerateTest, paint_opacity_does_not_rebuild_the_group)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  ASSERT_TRUE(tree_sentinel_set(*group));
+
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.3f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Paint"), group);
+  EXPECT_TRUE(tree_sentinel_get(*group));
+}
+
+TEST_F(PaintLayersGenerateTest, reorder_rebuilds_the_root)
+{
+  add_paint_layer("Bottom", add_image("Bottom"));
+  add_paint_layer("Top", add_image("Top"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  ASSERT_TRUE(tree_sentinel_set(*root));
+  const int maps_before = count_type(*root, SH_NODE_TEX_IMAGE);
+
+  /* Row order is structure: a reorder moves a row's own group in the root's chain, so the root is
+   * rebuilt (the groups themselves may be kept). */
+  MaterialPaintLayer *bottom = static_cast<MaterialPaintLayer *>(ma->paint_layers.first);
+  MaterialPaintLayer *top = bottom->next;
+  ASSERT_NE(top, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, top, 0));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_FALSE(tree_sentinel_get(*root));
+  EXPECT_EQ(count_type(*root, SH_NODE_TEX_IMAGE), maps_before);
+}
+
+TEST_F(PaintLayersGenerateTest, set_source_rebuilds_the_row)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  ASSERT_TRUE(tree_sentinel_set(*group));
+
+  /* Source is structure (it decides the row's nodes and whether it carries a map at all). */
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Paint"), group);
+  EXPECT_FALSE(tree_sentinel_get(*group));
+}
+
+TEST_F(PaintLayersGenerateTest, rna_opacity_is_value_only)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.5f));
+  /* No rebuild is pending, so the tagged scheduler leaves the group exactly as it is. */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  BKE_paint_layers_regenerate_tagged(*bmain);
+  EXPECT_EQ(layer_tree_find(*bmain, "Paint"), group);
+}
+
+TEST_F(PaintLayersGenerateTest, repeated_regenerate_does_not_grow_the_group)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  add_constant_channel(*layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, grey);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  group->ensure_interface_cache();
+  const int inputs_before = int(group->interface_inputs().size());
+
+  /* A value edit and a regenerate with nothing else changed keep the root, so the row's interface
+   * cannot gain a duplicate input on any pass. */
+  for (int i = 0; i < 3; i++) {
+    ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.3f + 0.1f * float(i)));
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    group = layer_tree_find(*bmain, "Paint");
+    ASSERT_NE(group, nullptr);
+    group->ensure_interface_cache();
+    EXPECT_EQ(int(group->interface_inputs().size()), inputs_before);
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Layout grid
  * \{ */
 

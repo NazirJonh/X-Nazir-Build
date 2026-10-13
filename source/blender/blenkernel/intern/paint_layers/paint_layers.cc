@@ -11,6 +11,7 @@
  */
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 
 #include <cstring>
 
@@ -43,6 +44,18 @@ void BKE_paint_layers_tag_edited(Material &ma)
 {
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
+}
+
+void BKE_paint_layers_tag_value_edited(Material &ma)
+{
+  /* A value edit changes no socket set: every row's inputs already exist, so the generated tree
+   * keeps its nodes and only its values are re-synced. Never MA_PAINT_LAYERS_REGEN; SYNC_TO_EVAL so
+   * the evaluated copy the shader reads is refreshed. If the tree does not match the description's
+   * values (it was hand-edited), fall back to a full regeneration rather than leaving a stale one. */
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+  if (!BKE_paint_layers_values_sync(ma)) {
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  }
 }
 
 bool BKE_paint_layers_is_layered(const Material &ma)
@@ -311,7 +324,15 @@ bool BKE_paint_layers_channel_set_value(Material &ma,
     return false;
   }
   copy_v4_v4(record->value, value);
-  BKE_paint_layers_tag_edited(ma);
+  /* A Fill row lays its Base-Color (and every other map-less channel's) constant through a group
+   * input, so changing a value there is value-only. A Paint row's value alpha decides whether the
+   * channel takes part at all, which is topology: it stays a regeneration. */
+  if (layer != nullptr && layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+    BKE_paint_layers_tag_value_edited(ma);
+  }
+  else {
+    BKE_paint_layers_tag_edited(ma);
+  }
   return true;
 }
 
@@ -413,7 +434,8 @@ bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, const
     return false;
   }
   layer->opacity = clamp_f(opacity, 0.0f, 1.0f);
-  BKE_paint_layers_tag_edited(ma);
+  /* Opacity is an input of the row's group, so this is value-only. */
+  BKE_paint_layers_tag_value_edited(ma);
   return true;
 }
 
@@ -423,7 +445,9 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, const
     return false;
   }
   SET_FLAG_FROM_TEST(layer->flag, enabled, MA_PAINT_LAYER_ENABLED);
-  BKE_paint_layers_tag_edited(ma);
+  /* The enabled flag is folded into the row's opacity input (see BKE_paint_layers_effective_opacity),
+   * so switching a row off is a value, not a different shape of graph. */
+  BKE_paint_layers_tag_value_edited(ma);
   return true;
 }
 

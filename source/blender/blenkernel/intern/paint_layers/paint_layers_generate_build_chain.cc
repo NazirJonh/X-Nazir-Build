@@ -10,6 +10,9 @@
  * what the group's Below input carries.
  */
 
+#include <algorithm>
+#include <array>
+
 #include "BKE_paint_layers_generate.hh"
 
 #include "BLI_string.h"
@@ -68,6 +71,198 @@ NodeOutput PaintLayersTreeBuilder::multiply_nodes_add(bNodeTree &tree,
   return {product, out};
 }
 
+bNode *PaintLayersTreeBuilder::image_map_node_add(bNodeTree &tree, Image &image)
+{
+  bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+  if (map == nullptr) {
+    return nullptr;
+  }
+  map->id = &image.id;
+  id_us_plus(&image.id);
+  return map;
+}
+
+NodeOutput PaintLayersTreeBuilder::rgb_mean_nodes_add(bNodeTree &tree,
+                                                      const NodeOutput color,
+                                                      Vector<bNode *> &r_nodes)
+{
+  bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+  bNode *add_xy = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  bNode *add_z = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  bNode *divide = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  const std::array<bNode *, 4> created = {separate, add_xy, add_z, divide};
+  /* Nothing is linked yet, so a node that cannot be completed is simply removed again. */
+  const auto discard = [&]() {
+    for (bNode *node : created) {
+      if (node != nullptr) {
+        bke::node_remove_node(nullptr, tree, *node, true, false);
+      }
+    }
+  };
+  if (separate == nullptr || add_xy == nullptr || add_z == nullptr || divide == nullptr ||
+      color.node == nullptr || color.socket == nullptr)
+  {
+    discard();
+    return {};
+  }
+
+  bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+  bNodeSocket *sep_x = socket_out(*separate, "X");
+  bNodeSocket *sep_y = socket_out(*separate, "Y");
+  bNodeSocket *sep_z = socket_out(*separate, "Z");
+  bNodeSocket *xy_a = socket_in(*add_xy, "Value");
+  bNodeSocket *xy_b = socket_in(*add_xy, "Value_001");
+  bNodeSocket *xy_out = socket_out(*add_xy, "Value");
+  bNodeSocket *z_a = socket_in(*add_z, "Value");
+  bNodeSocket *z_b = socket_in(*add_z, "Value_001");
+  bNodeSocket *z_out = socket_out(*add_z, "Value");
+  bNodeSocket *d_a = socket_in(*divide, "Value");
+  bNodeSocket *d_b = socket_in(*divide, "Value_001");
+  bNodeSocket *d_out = socket_out(*divide, "Value");
+  const std::array<const bNodeSocket *, 13> sockets = {sep_vector,
+                                                       sep_x,
+                                                       sep_y,
+                                                       sep_z,
+                                                       xy_a,
+                                                       xy_b,
+                                                       xy_out,
+                                                       z_a,
+                                                       z_b,
+                                                       z_out,
+                                                       d_a,
+                                                       d_b,
+                                                       d_out};
+  if (std::find(sockets.begin(), sockets.end(), nullptr) != sockets.end()) {
+    discard();
+    return {};
+  }
+
+  add_xy->custom1 = NODE_MATH_ADD;
+  add_z->custom1 = NODE_MATH_ADD;
+  divide->custom1 = NODE_MATH_DIVIDE;
+  grid_.place(*separate, layout::Column::Mask, 1);
+  grid_.place(*add_xy, layout::Column::Mask, 2);
+  grid_.place(*add_z, layout::Column::Mask, 3);
+  grid_.place(*divide, layout::Column::Mask, 4);
+  bke::node_add_link(tree, *color.node, *color.socket, *separate, *sep_vector);
+  bke::node_add_link(tree, *separate, *sep_x, *add_xy, *xy_a);
+  bke::node_add_link(tree, *separate, *sep_y, *add_xy, *xy_b);
+  bke::node_add_link(tree, *add_xy, *xy_out, *add_z, *z_a);
+  bke::node_add_link(tree, *separate, *sep_z, *add_z, *z_b);
+  bke::node_add_link(tree, *add_z, *z_out, *divide, *d_a);
+  if (d_b->default_value != nullptr) {
+    static_cast<bNodeSocketValueFloat *>(d_b->default_value)->value = 3.0f;
+  }
+  for (bNode *node : created) {
+    r_nodes.append(node);
+  }
+  return {divide, d_out};
+}
+
+NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
+                                                      LayerGroup &group,
+                                                      const MaterialPaintLayer &layer)
+{
+  if (const NodeOutput *cached = mask_factors_.lookup_ptr(&layer)) {
+    return *cached;
+  }
+  const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer);
+  bNodeTreeInterfaceSocket **opacity_iface = mask_opacity_inputs_.lookup_ptr(&layer);
+  if (mask == nullptr || opacity_iface == nullptr) {
+    return {};
+  }
+  bNodeSocket *opacity = this->group_input_socket(group, **opacity_iface);
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (opacity == nullptr || record == nullptr) {
+    return {};
+  }
+
+  /* Every node this function adds, so that a failure part way leaves nothing half built behind. */
+  Vector<bNode *> nodes;
+  const auto discard = [&]() {
+    for (bNode *node : nodes) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+  };
+
+  /* The grey of the item and, for a map, its own alpha: the CPU composite reads the mean of the
+   * stored RGB and the texel's alpha, so a texel the mask has not been painted on (transparent)
+   * leaves the row visible. */
+  NodeOutput grey;
+  NodeOutput alpha;
+  if (record->image != nullptr) {
+    bNode *map = this->image_map_node_add(tree, *record->image);
+    if (map == nullptr) {
+      return {};
+    }
+    nodes.append(map);
+    grid_.place(*map, layout::Column::Mask, 0);
+    bNodeSocket *map_color = socket_out(*map, "Color");
+    bNodeSocket *map_alpha = socket_out(*map, "Alpha");
+    if (map_color == nullptr || map_alpha == nullptr) {
+      discard();
+      return {};
+    }
+    grey = this->rgb_mean_nodes_add(tree, {map, map_color}, nodes);
+    if (grey.node == nullptr) {
+      discard();
+      return {};
+    }
+    alpha = {map, map_alpha};
+  }
+  else {
+    bNodeTreeInterfaceSocket **value_iface = mask_value_inputs_.lookup_ptr(&layer);
+    bNodeSocket *value = (value_iface != nullptr) ? this->group_input_socket(group, **value_iface) :
+                                                    nullptr;
+    if (value == nullptr) {
+      return {};
+    }
+    grey = {group.group_input, value};
+  }
+
+  /* `F = mix(1, C, A * opacity)`: the Multiply item over a factor of one. */
+  NodeOutput weight = {group.group_input, opacity};
+  if (alpha.node != nullptr) {
+    weight = this->multiply_nodes_add(tree, alpha, weight);
+    if (weight.node == nullptr) {
+      discard();
+      return {};
+    }
+  }
+  bNode *mix = bke::node_add_static_node(nullptr, tree, SH_NODE_MIX);
+  if (mix == nullptr) {
+    discard();
+    return {};
+  }
+  nodes.append(mix);
+  NodeShaderMix *storage = static_cast<NodeShaderMix *>(mix->storage);
+  storage->data_type = SOCK_FLOAT;
+  storage->factor_mode = NODE_MIX_MODE_UNIFORM;
+  storage->clamp_factor = true;
+  storage->clamp_result = false;
+  grid_.place(*mix, layout::Column::Mask, 5);
+  bNodeSocket *factor_in = socket_in(*mix, "Factor_Float");
+  bNodeSocket *a_in = socket_in(*mix, "A_Float");
+  bNodeSocket *b_in = socket_in(*mix, "B_Float");
+  bNodeSocket *result = socket_out(*mix, "Result_Float");
+  if (factor_in == nullptr || a_in == nullptr || b_in == nullptr || result == nullptr ||
+      weight.socket == nullptr || grey.socket == nullptr)
+  {
+    discard();
+    return {};
+  }
+  if (a_in->default_value != nullptr) {
+    static_cast<bNodeSocketValueFloat *>(a_in->default_value)->value = 1.0f;
+  }
+  bke::node_add_link(tree, *weight.node, *weight.socket, *mix, *factor_in);
+  bke::node_add_link(tree, *grey.node, *grey.socket, *mix, *b_in);
+  layout::frame_add(tree, "Mask", nodes);
+
+  const NodeOutput out = {mix, result};
+  mask_factors_.add(&layer, out);
+  return out;
+}
 BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
                                                  const int channel,
                                                  const int ramp_blend)
@@ -182,13 +377,10 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   bNode *map_node = nullptr;
   Vector<bNode *> source_nodes;
   if (record->image != nullptr) {
-    Image *image = record->image;
-    bNode *map = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_IMAGE);
+    bNode *map = this->image_map_node_add(tree, *record->image);
     if (map == nullptr) {
       return {};
     }
-    map->id = &image->id;
-    id_us_plus(&image->id);
     /* Why grid: the row source opens the Source column at the origin. */
     grid_.place(*map, layout::Column::Source, 0);
     source_nodes.append(map);
@@ -233,6 +425,22 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     else if (map_alpha != nullptr) {
       const NodeOutput product = this->multiply_nodes_add(
           tree, {factor_node, factor}, {map_node, map_alpha});
+      if (product.node != nullptr) {
+        factor_node = product.node;
+        factor = product.socket;
+      }
+    }
+  }
+
+  /* The row's mask lays its own factor over the row's, the same for every channel. */
+  const NodeOutput mask = this->mask_factor_ensure(tree, group, layer);
+  if (mask.node != nullptr) {
+    if (factor == nullptr) {
+      factor_node = mask.node;
+      factor = mask.socket;
+    }
+    else {
+      const NodeOutput product = this->multiply_nodes_add(tree, {factor_node, factor}, mask);
       if (product.node != nullptr) {
         factor_node = product.node;
         factor = product.socket;

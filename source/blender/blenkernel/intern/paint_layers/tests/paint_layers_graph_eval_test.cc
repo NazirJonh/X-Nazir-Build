@@ -115,6 +115,69 @@ TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
   }
 }
 
+TEST_F(PaintLayersGraphEvalTest, constant_mask_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 0.25f), nullptr);
+
+  /* The mask hides three quarters of the row: the pixel is mostly what is below. */
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalTest, painted_mask_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, top, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  /* A mask map that is grey and half covered: the mask only bites where it was painted. */
+  Image *map = add_solid_image("Mask", 60, 60, 60, 128);
+  make_image_data(map);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalTest, mask_on_a_translucent_row_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 128));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top, 0.8f));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 0.5f), nullptr);
+
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalTest, disabled_mask_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, top, 0.0f);
+  ASSERT_NE(mask, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, mask, false));
+
+  /* An off mask is not a mask that hides everything: the row is wholly visible. */
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalTest, mask_reaches_every_channel_of_its_row)
+{
+  Image *color = add_solid_image("Color", 200, 100, 50, 255);
+  Image *rough = add_solid_image("Rough", 200, 200, 200, 255);
+  make_image_data(rough);
+  add_layer("Bottom", add_solid_image("Bottom", 30, 30, 30, 255));
+  MaterialPaintLayer *top = add_layer("Top", color);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, top, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, top, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 0.3f), nullptr);
+
+  /* One mask per row, not per channel: both chains read the same factor. */
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+}
+
 TEST_F(PaintLayersGraphEvalTest, fill_layer_lays_its_colour)
 {
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));

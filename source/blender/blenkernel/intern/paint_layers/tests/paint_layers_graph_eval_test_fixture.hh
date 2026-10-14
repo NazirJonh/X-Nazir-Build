@@ -196,6 +196,19 @@ class GraphInterpreter {
         return {};
       case SH_NODE_MIX: {
         const NodeShaderMix &storage = *static_cast<const NodeShaderMix *>(node.storage);
+        if (storage.data_type == SOCK_FLOAT) {
+          /* The mask's factor: a plain interpolation of two scalars by a clamped factor. */
+          const float a =
+              eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "A_Float"_ustr)).r;
+          const float b =
+              eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "B_Float"_ustr)).r;
+          const float fac = clamp_f(
+              eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Factor_Float"_ustr)).r,
+              0.0f,
+              1.0f);
+          const float value = a * (1.0f - fac) + b * fac;
+          return {value, value, value, value};
+        }
         const RGBA bottom = eval_socket(
             *bke::node_find_socket(mutable_node, SOCK_IN, "A_Color"_ustr));
         const RGBA top = eval_socket(
@@ -230,6 +243,15 @@ class GraphInterpreter {
           default:
             break;
         }
+        return {value, value, value, value};
+      }
+      case SH_NODE_SEPXYZ: {
+        /* The mask's grey is the mean of a map's colour, split into its three components. */
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const float value = STREQ(out_identifier, "X") ? vector.r :
+                            STREQ(out_identifier, "Y") ? vector.g :
+                                                         vector.b;
         return {value, value, value, value};
       }
       case SH_NODE_VECTOR_MATH: {

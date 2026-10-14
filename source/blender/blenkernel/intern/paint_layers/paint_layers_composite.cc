@@ -134,6 +134,20 @@ bool BKE_paint_layers_composite_image_layers(
     out.blend = layer_channel_blend(layer, channel);
     out.opacity = BKE_paint_layers_effective_opacity(layer);
     out.enabled = true;
+    /* The mask is one for all channels of the row, so the same item reaches every channel's
+     * stack, exactly as the generator reads the one set of mask inputs in every channel chain. */
+    if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
+      if (const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
+              *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+      {
+        PaintMaterialCompositeMaskItem item;
+        item.opacity = BKE_paint_layers_effective_opacity(*mask);
+        item.image = mask_record->image;
+        item.iuser = nullptr;
+        item.constant_gray = paint_layer_mask_constant(*mask_record);
+        out.mask_items.append(item);
+      }
+    }
     r_layers.append(out);
   }
   return !r_layers.is_empty();

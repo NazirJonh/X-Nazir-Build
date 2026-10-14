@@ -26,6 +26,7 @@
 
 namespace blender {
 
+struct Image;
 struct Material;
 struct MaterialPaintLayer;
 struct PaintLayersBuildContext;
@@ -93,8 +94,16 @@ class PaintLayersTreeBuilder {
   LayerGroup *layer_group_ensure(const MaterialPaintLayer &layer, float location_x, float location_y);
 
   /** The value inputs of \a layer: one opacity per wired channel the row takes part in, and the
-   * constant of every map-less channel. Their values are written where they are created. */
+   * constant of every map-less channel; plus the base mask's opacity and, while the mask has no
+   * map, its constant. Their values are written where they are created. */
   void create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer);
+
+  /**
+   * The factor of \a layer's base mask, built once in the row's group and shared by every channel
+   * chain: `mix(1, C, A * opacity)`, with `C` the grey of the mask map (or the constant input) and
+   * `A` the map's alpha. Empty when the row has no mask, or its inputs are not there.
+   */
+  NodeOutput mask_factor_ensure(bNodeTree &tree, LayerGroup &group, const MaterialPaintLayer &layer);
 
   /** One row of one channel: its group contents, and the instance sockets the root chains. */
   RowResult build_row(const MaterialPaintLayer &layer, LayerGroup &group, int channel);
@@ -113,6 +122,19 @@ class PaintLayersTreeBuilder {
 
   /** `a * b` as a Math node in \a tree; empty when it cannot be built. */
   NodeOutput multiply_nodes_add(bNodeTree &tree, NodeOutput a, NodeOutput b);
+
+  /**
+   * An Image Texture node of \a tree reading \a image, holding one user of it, so every map source
+   * is made the same way. Null when the node cannot be created; the caller places it.
+   */
+  bNode *image_map_node_add(bNodeTree &tree, Image &image);
+
+  /**
+   * The mean of \a color's RGB as a float: Separate XYZ, two Adds and a Divide by three, which is
+   * what the CPU composite reads of a mask map. The nodes made are appended to \a r_nodes. Empty
+   * when a node or socket is missing, in which case nothing was added.
+   */
+  NodeOutput rgb_mean_nodes_add(bNodeTree &tree, NodeOutput color, Vector<bNode *> &r_nodes);
 
   /** The interface and the group output node; false when the output node cannot be created. */
   bool result_interface_create();
@@ -143,6 +165,11 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> opacity_inputs_;
   /** The constant input of a row's map-less channel, keyed by the row and the channel. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_inputs_;
+  /** A row's base mask opacity and constant inputs, keyed by the row. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_opacity_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_value_inputs_;
+  /** A row's built mask factor, so the second channel reads the nodes the first one made. */
+  Map<const MaterialPaintLayer *, NodeOutput> mask_factors_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;
   bNode *group_output_ = nullptr;
   /** Node positions of this build; a fresh builder starts from row zero. */

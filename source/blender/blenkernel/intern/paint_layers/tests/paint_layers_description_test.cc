@@ -1029,4 +1029,268 @@ TEST_F(PaintLayersDescription, material_channel_set_round_trip)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Layer mask
+ * \{ */
+
+TEST_F(PaintLayersDescription, mask_add_creates_a_constant_base_item)
+{
+  Material *ma = BKE_material_add(bmain, "MaskMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*layer), nullptr);
+
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.4f);
+  ASSERT_NE(item, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*layer), item);
+  EXPECT_EQ(item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_NE(item->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  EXPECT_NE(item->flag & MA_PAINT_LAYER_ENABLED, 0);
+  EXPECT_EQ(item->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(item->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
+  EXPECT_FALSE(BLI_uuid_is_nil(item->marker));
+  EXPECT_FALSE(BLI_uuid_equal(item->marker, layer->marker));
+
+  /* The constant is the item's Base Color record: opaque grey of the given value, no map yet. */
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      *item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  EXPECT_EQ(record->state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+  EXPECT_EQ(record->image, nullptr);
+  EXPECT_FLOAT_EQ(record->value[0], 0.4f);
+  EXPECT_FLOAT_EQ(record->value[2], 0.4f);
+  EXPECT_FLOAT_EQ(record->value[3], 1.0f);
+
+  /* The item belongs to its row, not to the stack: nothing new is a row of the material. */
+  EXPECT_EQ(BLI_listbase_count(&ma->paint_layers), 1);
+  EXPECT_EQ(BKE_paint_layers_find(*ma, item->marker), nullptr);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* One base mask per row; a foreign row is refused. */
+  EXPECT_EQ(BKE_paint_layers_mask_add(*ma, layer, 1.0f), nullptr);
+  Material *other = BKE_material_add(bmain, "OtherMaskMat");
+  MaterialPaintLayer *other_layer = BKE_paint_layers_add(
+      *other, "O", nullptr, PaintLayerPlace::Above);
+  EXPECT_EQ(BKE_paint_layers_mask_add(*ma, other_layer, 1.0f), nullptr);
+}
+
+TEST_F(PaintLayersDescription, mask_edits_go_through_the_item)
+{
+  Material *ma = BKE_material_add(bmain, "MaskEditMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(item, nullptr);
+
+  const float dark[4] = {0.1f, 0.1f, 0.1f, 1.0f};
+  EXPECT_TRUE(
+      BKE_paint_layers_channel_set_value(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, dark));
+  EXPECT_FLOAT_EQ(paint_layer_mask_constant(*paint_layer_channel_find(
+                      *item, PAINT_MATERIAL_CHANNEL_BASE_COLOR)),
+                  0.1f);
+
+  /* The enabled flag is folded into the item's opacity, like a row's. */
+  EXPECT_FLOAT_EQ(BKE_paint_layers_effective_opacity(*item), 1.0f);
+  EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, item, false));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_effective_opacity(*item), 0.0f);
+  EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, item, true));
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, item, 0.5f));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_effective_opacity(*item), 0.5f);
+
+  /* The item is not a row: structural edits stay refused. */
+  EXPECT_FALSE(BKE_paint_layers_rename(*ma, item, "Renamed"));
+  EXPECT_FALSE(BKE_paint_layers_remove(*ma, item));
+  EXPECT_FALSE(BKE_paint_layers_set_source(*ma, item, MA_PAINT_LAYER_SOURCE_IMAGE));
+}
+
+TEST_F(PaintLayersDescription, mask_remove_lets_go_of_its_map)
+{
+  Material *ma = BKE_material_add(bmain, "MaskRemoveMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(item, nullptr);
+
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "MaskMap"));
+  const int users_before = map->id.us;
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  EXPECT_EQ(map->id.us, users_before + 1);
+
+  EXPECT_TRUE(BKE_paint_layers_mask_remove(*ma, layer));
+  EXPECT_EQ(BKE_paint_layers_mask_base(*layer), nullptr);
+  EXPECT_EQ(map->id.us, users_before);
+  EXPECT_FALSE(BKE_paint_layers_mask_remove(*ma, layer));
+
+  /* Removing the row takes its mask with it, and its map's user too. */
+  item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  EXPECT_EQ(map->id.us, users_before + 1);
+  EXPECT_TRUE(BKE_paint_layers_remove(*ma, layer));
+  EXPECT_EQ(map->id.us, users_before);
+}
+
+TEST_F(PaintLayersDescription, mask_is_deep_copied_with_material_and_duplicate)
+{
+  Material *ma = BKE_material_add(bmain, "MaskCopyMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.3f);
+  ASSERT_NE(item, nullptr);
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "MaskCopyMap"));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  /* A material copy owns its own item and record array; the map stays the shared data-block. */
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  MaterialPaintLayer *copy_layer = paint_layers_first(*copy);
+  ASSERT_NE(copy_layer, nullptr);
+  const MaterialPaintLayer *copy_item = BKE_paint_layers_mask_base(*copy_layer);
+  ASSERT_NE(copy_item, nullptr);
+  EXPECT_NE(copy_item, item);
+  EXPECT_NE(copy_item->channels, item->channels);
+  EXPECT_TRUE(BLI_uuid_equal(copy_item->marker, item->marker));
+  ASSERT_EQ(copy_item->channels_num, 1);
+  EXPECT_EQ(copy_item->channels[0].image, map);
+  EXPECT_NE(copy_item->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  BKE_id_free(bmain, copy);
+
+  /* Duplicating a row gives the copy its own mask and its own map: a stroke on one must not paint
+   * the other, and the copy's markers stay unique. */
+  MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, layer);
+  ASSERT_NE(duplicate, nullptr);
+  const MaterialPaintLayer *duplicate_item = BKE_paint_layers_mask_base(*duplicate);
+  ASSERT_NE(duplicate_item, nullptr);
+  EXPECT_NE(duplicate_item, item);
+  EXPECT_FALSE(BLI_uuid_equal(duplicate_item->marker, item->marker));
+  ASSERT_EQ(duplicate_item->channels_num, 1);
+  ASSERT_NE(duplicate_item->channels[0].image, nullptr);
+  EXPECT_NE(duplicate_item->channels[0].image, map);
+  EXPECT_FLOAT_EQ(duplicate_item->channels[0].value[0], 0.3f);
+}
+
+TEST_F(PaintLayersDescription, mask_foreach_id_walks_its_map)
+{
+  Material *ma = BKE_material_add(bmain, "MaskWalkMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(item, nullptr);
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "MaskWalkMap"));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  Vector<ID *> visited;
+  auto collector = [](LibraryIDLinkCallbackData *data) -> int {
+    if (*data->id_pointer != nullptr) {
+      static_cast<Vector<ID *> *>(data->user_data)->append(*data->id_pointer);
+    }
+    return IDWALK_RET_NOP;
+  };
+  BKE_library_foreach_ID_link(bmain, &ma->id, collector, &visited, IDWALK_READONLY);
+  EXPECT_TRUE(visited.contains(&map->id));
+}
+
+TEST_F(PaintLayersDescription, mask_blend_round_trip_keeps_item_and_map)
+{
+  Material *ma = BKE_material_add(bmain, "MaskRoundTripMat");
+  id_us_plus(&ma->id);
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.6f);
+  ASSERT_NE(item, nullptr);
+  const bUUID item_marker = item->marker;
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "MaskRoundTripMap"));
+  id_us_plus(&map->id);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, item, 0.5f));
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "paint_layers_mask_round_trip.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "MaskRoundTripMat")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_layer = paint_layers_first(*reloaded);
+  ASSERT_NE(reloaded_layer, nullptr);
+  const MaterialPaintLayer *reloaded_item = BKE_paint_layers_mask_base(*reloaded_layer);
+  ASSERT_NE(reloaded_item, nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(reloaded_item->marker, item_marker));
+  EXPECT_EQ(reloaded_item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_FLOAT_EQ(reloaded_item->opacity, 0.5f);
+  ASSERT_EQ(reloaded_item->channels_num, 1);
+  ASSERT_NE(reloaded_item->channels, nullptr);
+  EXPECT_FLOAT_EQ(reloaded_item->channels[0].value[0], 0.6f);
+  /* The map is remapped on read, not left as a stale address. */
+  ASSERT_NE(reloaded_item->channels[0].image, nullptr);
+  EXPECT_STREQ(reloaded_item->channels[0].image->id.name + 2, "MaskRoundTripMap");
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
+TEST_F(PaintLayersDescription, rna_mask_items_expose_the_item)
+{
+  Material *ma = BKE_material_add(bmain, "RnaMaskMat");
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
+  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, "L");
+  ASSERT_NE(layer, nullptr);
+  PointerRNA layer_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, layer);
+
+  PropertyRNA *items = RNA_struct_find_property(&layer_ptr, "mask_items");
+  ASSERT_NE(items, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&layer_ptr, items), 0);
+
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.7f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_EQ(RNA_property_collection_length(&layer_ptr, items), 1);
+
+  CollectionPropertyIterator iter;
+  RNA_property_collection_begin(&layer_ptr, items, &iter);
+  ASSERT_TRUE(iter.valid);
+  EXPECT_EQ(iter.ptr.data, item);
+  PointerRNA item_ptr = iter.ptr;
+  RNA_property_collection_end(&iter);
+
+  PropertyRNA *is_base = RNA_struct_find_property(&item_ptr, "is_mask_base");
+  ASSERT_NE(is_base, nullptr);
+  EXPECT_TRUE(RNA_property_boolean_get(&item_ptr, is_base));
+
+  /* The item is addressed like a row, so its opacity and enabled flag reach DNA through RNA. */
+  PropertyRNA *opacity = RNA_struct_find_property(&item_ptr, "opacity");
+  PropertyRNA *enabled = RNA_struct_find_property(&item_ptr, "enabled");
+  ASSERT_NE(opacity, nullptr);
+  ASSERT_NE(enabled, nullptr);
+  RNA_property_float_set(&item_ptr, opacity, 25.0f);
+  EXPECT_FLOAT_EQ(item->opacity, 0.25f);
+  RNA_property_boolean_set(&item_ptr, enabled, false);
+  EXPECT_EQ(item->flag & MA_PAINT_LAYER_ENABLED, 0);
+
+  /* Its Base Color record is reachable through the item's own channels. */
+  PropertyRNA *channels = RNA_struct_find_property(&item_ptr, "channels");
+  ASSERT_NE(channels, nullptr);
+  ASSERT_EQ(RNA_property_collection_length(&item_ptr, channels), 1);
+  MaterialPaintLayerChannel *record = &item->channels[0];
+  PointerRNA record_ptr = RNA_pointer_create_with_parent(
+      item_ptr, RNA_MaterialPaintLayerChannel, record);
+  PropertyRNA *value = RNA_struct_find_property(&record_ptr, "value");
+  ASSERT_NE(value, nullptr);
+  const float color[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+  RNA_property_float_set_array(&record_ptr, value, color);
+  EXPECT_FLOAT_EQ(record->value[0], 0.2f);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

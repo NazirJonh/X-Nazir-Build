@@ -112,6 +112,10 @@ static void material_init_data(ID *id)
 
 void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
 {
+  for (MaterialPaintLayer &item : layer->mask_stack.items_mutable()) {
+    BKE_material_paint_layer_free(&item);
+  }
+  layer->mask_stack = {nullptr, nullptr};
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
   MEM_delete(layer);
@@ -136,6 +140,11 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
     dst->channels = static_cast<MaterialPaintLayerChannel *>(MEM_dupalloc(src.channels));
     dst->channels_num = src.channels_num;
   }
+  /* The duplicate above copied the list head: the items are owned sub-data, so each gets its own. */
+  dst->mask_stack = {nullptr, nullptr};
+  for (const MaterialPaintLayer &item : src.mask_stack) {
+    BLI_addtail(&dst->mask_stack, material_paint_layer_copy(item));
+  }
   return dst;
 }
 
@@ -144,15 +153,44 @@ static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryFo
   for (int i = 0; i < layer->channels_num; i++) {
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->channels[i].image, IDWALK_CB_USER);
   }
+  for (MaterialPaintLayer &item : layer->mask_stack) {
+    material_paint_layer_foreach_id(&item, data);
+  }
+}
+
+/** Write \a layer's channel records and, recursively, the items of its mask stack. */
+static void material_paint_layer_blend_write(BlendWriter *writer, const MaterialPaintLayer &layer)
+{
+  if (layer.channels != nullptr && layer.channels_num > 0) {
+    writer->write_struct_array(layer.channels_num, layer.channels);
+  }
+  writer->write_struct_list(&layer.mask_stack);
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    material_paint_layer_blend_write(writer, item);
+  }
 }
 
 static void material_paint_layers_blend_write(BlendWriter *writer, const Material &material)
 {
   writer->write_struct_list(&material.paint_layers);
   for (const MaterialPaintLayer &layer : material.paint_layers) {
-    if (layer.channels != nullptr && layer.channels_num > 0) {
-      writer->write_struct_array(layer.channels_num, layer.channels);
-    }
+    material_paint_layer_blend_write(writer, layer);
+  }
+}
+
+static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPaintLayer &layer)
+{
+  if (layer.channels != nullptr) {
+    BLO_read_array_and_validate_size(reader, &layer.channels, &layer.channels_num);
+  }
+  else {
+    /* A corrupt file can carry a count without the matching array; a non-zero count with a null
+     * pointer would make later readers dereference null. Do not trust the file's count. */
+    layer.channels_num = 0;
+  }
+  BLO_read_struct_list(reader, MaterialPaintLayer, &layer.mask_stack);
+  for (MaterialPaintLayer &item : layer.mask_stack) {
+    material_paint_layer_blend_read(reader, item);
   }
 }
 
@@ -160,14 +198,7 @@ static void material_paint_layers_blend_read(BlendDataReader *reader, Material &
 {
   BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
   for (MaterialPaintLayer &layer : material.paint_layers) {
-    if (layer.channels != nullptr) {
-      BLO_read_array_and_validate_size(reader, &layer.channels, &layer.channels_num);
-    }
-    else {
-      /* A corrupt file can carry a count without the matching array; a non-zero count with a null
-       * pointer would make later readers dereference null. Do not trust the file's count. */
-      layer.channels_num = 0;
-    }
+    material_paint_layer_blend_read(reader, layer);
   }
 }
 

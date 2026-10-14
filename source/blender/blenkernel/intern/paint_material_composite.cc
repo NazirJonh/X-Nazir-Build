@@ -800,6 +800,32 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     const float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
     r_factor[i] = mask_value * content;
   }
+
+  /* The mask stack lays its coverage over the factor, item by item: `F = mix(F, F * C, A * op)`,
+   * the Mix the generator builds for the same item. A transparent texel (A = 0) leaves the row
+   * visible, which is what a fresh mask map must do. */
+  Vector<float> item_storage;
+  for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
+    if (item.opacity <= 0.0f) {
+      continue;
+    }
+    if (item.ibuf == nullptr) {
+      const float weight = clamp_f(item.opacity, 0.0f, 1.0f);
+      const float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
+      for (int64_t i = 0; i < count; i++) {
+        r_factor[i] *= 1.0f - weight * (1.0f - gray);
+      }
+      continue;
+    }
+    item_storage.resize(count * 4);
+    composite_decode_tile(item.ibuf, item.colorspace_name, tile, item_storage.data());
+    for (int64_t i = 0; i < count; i++) {
+      const float *c = item_storage.data() + i * 4;
+      const float gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
+      const float weight = clamp_f(c[3], 0.0f, 1.0f) * clamp_f(item.opacity, 0.0f, 1.0f);
+      r_factor[i] *= 1.0f - weight * (1.0f - gray);
+    }
+  }
 }
 
 /**
@@ -835,6 +861,13 @@ static bool composite_stack_validate_linear(const PaintMaterialCompositeStack &s
         !composite_mask_ibuf_is_valid(layer.mask_ibuf, stack.width, stack.height))
     {
       return false;
+    }
+    for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
+      if (item.ibuf != nullptr &&
+          !composite_mask_ibuf_is_valid(item.ibuf, stack.width, stack.height))
+      {
+        return false;
+      }
     }
     any_enabled = true;
   }
@@ -1084,6 +1117,19 @@ static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> 
       }
       layer.mask_colorspace_name = composite_buffer_colorspace_name(layer.mask_ibuf);
     }
+    for (const PaintMaterialCompositeMaskItem &item : image_layer.mask_items) {
+      PaintMaterialCompositeMaskBuffer buffer;
+      buffer.constant_gray = item.constant_gray;
+      buffer.opacity = item.opacity;
+      if (item.image != nullptr) {
+        buffer.ibuf = composite_image_acquire(item.image, item.iuser, r_locks);
+        if (buffer.ibuf == nullptr) {
+          return false;
+        }
+        buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
+      }
+      layer.mask_items.append(buffer);
+    }
     static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
     r_stack.layers.append(layer);
   }
@@ -1226,6 +1272,14 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.constant_color[2],
                             layer.constant_color[3]);
     hash = get_default_hash(hash, layer.color_alpha_coverage);
+    /* A mask item changes the factor: its map (by session uid, like the layer's), its constant and
+     * its opacity all have to move the hash, or an edit would keep serving the cached composite. */
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      hash *= 0x100000001b3ULL;
+      hash = get_default_hash(
+          hash, item.image != nullptr ? item.image->id.session_uid : 0, item.opacity);
+      hash = get_default_hash(hash, item.constant_gray);
+    }
   }
   return hash;
 }
@@ -1357,6 +1411,9 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     /* Nulls and duplicates are the poll's business, not this function's. */
     r_images.append(layer.color_image);
     r_images.append(layer.mask_image);
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      r_images.append(item.image);
+    }
   }
 }
 

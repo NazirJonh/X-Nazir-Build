@@ -131,6 +131,25 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   bool enabled = true;
 };
 
+/**
+ * One item of a row's mask stack, as data-blocks.
+ *
+ * The item lays its coverage over the row's factor F by the Multiply blend the generator builds:
+ * `F = mix(F, F * C, A * opacity)`, where `C` is the mean of the map's RGB and `A` its alpha, or
+ * #constant_gray and one when the item has no map. An unpainted (transparent) texel therefore
+ * leaves the row visible; an opaque black one hides it.
+ */
+struct PaintMaterialCompositeMaskItem {
+  /** The painted map, or null while the item is still a constant. */
+  Image *image = nullptr;
+  /** Null selects the default #ImageUser. */
+  const ImageUser *iuser = nullptr;
+  /** The constant coverage, used while #image is null. */
+  float constant_gray = 1.0f;
+  /** The item's effective opacity (enabled folded in). */
+  float opacity = 1.0f;
+};
+
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
 struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   Image *color_image = nullptr;
@@ -142,6 +161,17 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   /** Modulates #opacity per pixel. Null when the layer's factor is a plain value. */
   Image *mask_image = nullptr;
   const ImageUser *mask_iuser = nullptr;
+  /** The row's mask items, bottom to top; each multiplies the factor. */
+  Vector<PaintMaterialCompositeMaskItem> mask_items;
+};
+
+/** A mask item as the evaluator reads it: a buffer, or a constant when #ibuf is null. */
+struct PaintMaterialCompositeMaskBuffer {
+  ImBuf *ibuf = nullptr;
+  /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
+  const char *colorspace_name = nullptr;
+  float constant_gray = 1.0f;
+  float opacity = 1.0f;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
@@ -156,6 +186,8 @@ struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
    */
   const char *color_colorspace_name = nullptr;
   const char *mask_colorspace_name = nullptr;
+  /** The row's mask items, bottom to top. */
+  Vector<PaintMaterialCompositeMaskBuffer> mask_items;
 };
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */

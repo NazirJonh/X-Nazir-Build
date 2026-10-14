@@ -234,6 +234,96 @@ TEST_F(PaintLayersGenerateTest, row_values_are_inputs_of_the_row_group)
   EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(opacity->default_value)->value, 0.0f);
 }
 
+TEST_F(PaintLayersGenerateTest, mask_constant_and_opacity_are_inputs_of_the_row_group)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, layer, 0.4f);
+  ASSERT_NE(mask, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  const bNodeTreeInterfaceSocket *value_iface = interface_input_find(*group, "Paint Mask");
+  const bNodeTreeInterfaceSocket *opacity_iface = interface_input_find(*group,
+                                                                       "Paint Mask Opacity");
+  ASSERT_NE(value_iface, nullptr);
+  ASSERT_NE(opacity_iface, nullptr);
+  /* The map of the row and the Mix of its blend, plus one Mix for the mask and no second map. */
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 2);
+
+  bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
+  ASSERT_NE(instance, nullptr);
+  bNodeSocket *value = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(value_iface->identifier));
+  ASSERT_NE(value, nullptr);
+  EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(value->default_value)->value, 0.4f);
+}
+
+TEST_F(PaintLayersGenerateTest, mask_edits_are_value_only_until_the_item_gets_a_map)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, layer, 0.4f);
+  ASSERT_NE(mask, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* The constant and the switch reach the instance without any rebuild. */
+  const float half[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, half));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, mask, false));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
+  ASSERT_NE(instance, nullptr);
+  const bNodeTreeInterfaceSocket *value_iface = interface_input_find(*group, "Paint Mask");
+  const bNodeTreeInterfaceSocket *opacity_iface = interface_input_find(*group,
+                                                                       "Paint Mask Opacity");
+  ASSERT_NE(value_iface, nullptr);
+  ASSERT_NE(opacity_iface, nullptr);
+  bNodeSocket *value = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(value_iface->identifier));
+  bNodeSocket *opacity = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(opacity_iface->identifier));
+  ASSERT_NE(value, nullptr);
+  ASSERT_NE(opacity, nullptr);
+  EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(value->default_value)->value, 0.5f);
+  EXPECT_FLOAT_EQ(static_cast<bNodeSocketValueFloat *>(opacity->default_value)->value, 0.0f);
+
+  /* A map is nodes: the constant input goes and an Image Texture takes its place. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("MaskMap")));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 2);
+  EXPECT_EQ(interface_input_find(*group, "Paint Mask"), nullptr);
+  EXPECT_NE(interface_input_find(*group, "Paint Mask Opacity"), nullptr);
+}
+
+TEST_F(PaintLayersGenerateTest, removing_the_mask_drops_its_inputs)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, layer, 0.4f), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  ASSERT_NE(interface_input_find(*group, "Paint Mask"), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_mask_remove(*ma, layer));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Paint");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(interface_input_find(*group, "Paint Mask"), nullptr);
+  EXPECT_EQ(interface_input_find(*group, "Paint Mask Opacity"), nullptr);
+  /* The row is back to its one map and one blend. */
+  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 1);
+}
+
 TEST_F(PaintLayersGenerateTest, leaf_group_has_the_layer_contract)
 {
   add_paint_layer("Bottom", add_image("Bottom"));

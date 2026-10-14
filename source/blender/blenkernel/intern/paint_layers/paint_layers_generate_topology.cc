@@ -150,6 +150,22 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
       hash = topology_hash_mix(hash, 0);
     }
   }
+  /* A mask is nodes (an Image Texture and its grey chain against a value input), so its presence
+   * and whether it has a map are structure; its constant, opacity and enabled flag are inputs. */
+  if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
+    hash = topology_hash_mix(hash, 1);
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (record != nullptr && record->image != nullptr) {
+      topology_hash_string(hash, record->image->id.name);
+    }
+    else {
+      hash = topology_hash_mix(hash, 0);
+    }
+  }
+  else {
+    hash = topology_hash_mix(hash, 0);
+  }
   return hash;
 }
 

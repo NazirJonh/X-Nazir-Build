@@ -73,14 +73,36 @@ static bool paint_layer_in_stack(const Material &ma, const MaterialPaintLayer *l
 }
 
 /**
- * The record of \a channel when \a layer is a row of \a ma's stack and carries one, otherwise null.
- * Every channel edit starts with this, so a foreign row and a missing record are refused alike.
+ * Whether \a layer is a row of \a ma's stack or an item of one row's mask stack: the rows the
+ * channel, enabled and opacity edits may touch. Structural edits (move, duplicate, source, blend)
+ * stay on #paint_layer_in_stack.
+ */
+static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *layer)
+{
+  if (layer == nullptr) {
+    return false;
+  }
+  if (BLI_findindex(&ma.paint_layers, layer) != -1) {
+    return true;
+  }
+  for (const MaterialPaintLayer &row : ma.paint_layers) {
+    if (BLI_findindex(&row.mask_stack, layer) != -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The record of \a channel when \a layer is owned by \a ma (see #paint_layer_owned) and carries
+ * one, otherwise null. Every channel edit starts with this, so a foreign row and a missing record
+ * are refused alike.
  */
 static MaterialPaintLayerChannel *paint_layer_channel_in_stack(const Material &ma,
                                                                MaterialPaintLayer *layer,
                                                                const eMaterialPaintChannel channel)
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  if (!paint_layer_owned(ma, layer)) {
     return nullptr;
   }
   return paint_layer_channel_find(*layer, channel);
@@ -117,6 +139,15 @@ static bUUID paint_layer_unique_marker(const Material &ma)
     for (const MaterialPaintLayer &layer : ma.paint_layers) {
       if (BLI_uuid_equal(layer.marker, marker)) {
         in_use = true;
+        break;
+      }
+      for (const MaterialPaintLayer &item : layer.mask_stack) {
+        if (BLI_uuid_equal(item.marker, marker)) {
+          in_use = true;
+          break;
+        }
+      }
+      if (in_use) {
         break;
       }
     }
@@ -161,6 +192,29 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
   return layer;
 }
 
+/** Give \a dst a copy of \a src's channel records, each map copied into an image of its own. */
+static void paint_layer_channels_duplicate(Main &bmain,
+                                           MaterialPaintLayer &dst,
+                                           const MaterialPaintLayer &src)
+{
+  if (src.channels_num <= 0 || src.channels == nullptr) {
+    return;
+  }
+  dst.channels = MEM_new_array<MaterialPaintLayerChannel>(src.channels_num, __func__);
+  dst.channels_num = src.channels_num;
+  /* The record is plain data and DNA types delete their copy assignment, so it is copied as one
+   * block, the way #BKE_paint_layers_channel_add grows the array. */
+  memcpy(dst.channels, src.channels, sizeof(*dst.channels) * src.channels_num);
+  for (const int i : IndexRange(src.channels_num)) {
+    /* A map is painted in place, so a copy sharing its source's image would turn every stroke on
+     * one into a stroke on the other: the copy gets its own. The fresh image carries the one user
+     * that this record is; no separate id_us_plus is taken (as #BKE_id_copy returns it). */
+    if (dst.channels[i].image != nullptr) {
+      dst.channels[i].image = id_cast<Image *>(BKE_id_copy(&bmain, &dst.channels[i].image->id));
+    }
+  }
+}
+
 MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
                                                Material &ma,
                                                MaterialPaintLayer *layer)
@@ -172,23 +226,21 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   MaterialPaintLayer *copy = paint_layer_alloc(ma, layer->name);
   copy->flag = layer->flag;
   copy->opacity = layer->opacity;
-  if (layer->channels_num > 0 && layer->channels != nullptr) {
-    copy->channels = MEM_new_array<MaterialPaintLayerChannel>(layer->channels_num, __func__);
-    copy->channels_num = layer->channels_num;
-    /* The record is plain data and DNA types delete their copy assignment, so it is copied as one
-     * block, the way #BKE_paint_layers_channel_add grows the array. */
-    memcpy(copy->channels, layer->channels, sizeof(*copy->channels) * layer->channels_num);
-    for (const int i : IndexRange(layer->channels_num)) {
-      /* A map is painted in place, so a copy sharing its source's image would turn every stroke on
-       * one into a stroke on the other: the copy gets its own. The fresh image carries the one user
-       * that this record is; no separate id_us_plus is taken (as #BKE_id_copy returns it). */
-      if (copy->channels[i].image != nullptr) {
-        copy->channels[i].image = id_cast<Image *>(
-            BKE_id_copy(&bmain, &copy->channels[i].image->id));
-      }
-    }
-  }
+  paint_layer_channels_duplicate(bmain, *copy, *layer);
   BLI_insertlinkafter(&ma.paint_layers, layer, copy);
+
+  /* The mask goes with its row, with a map of its own for the same reason as the channel maps. The
+   * copy is linked first so that the items' markers are unique against it. */
+  for (const MaterialPaintLayer &item : layer->mask_stack) {
+    MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
+    item_copy->role = item.role;
+    item_copy->source = item.source;
+    item_copy->blend = item.blend;
+    item_copy->flag = item.flag;
+    item_copy->opacity = item.opacity;
+    paint_layer_channels_duplicate(bmain, *item_copy, item);
+    BLI_addtail(&copy->mask_stack, item_copy);
+  }
 
   BKE_paint_layers_tag_edited(ma);
   return copy;
@@ -314,6 +366,9 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
       id_us_min(&layer.channels[i].image->id);
     }
   }
+  for (MaterialPaintLayer &item : layer.mask_stack) {
+    paint_layer_release_users(item);
+  }
 }
 
 bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
@@ -332,6 +387,73 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
   BLI_remlink(&ma.paint_layers, layer);
   BKE_material_paint_layer_free(layer);
 
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+MaterialPaintLayer *BKE_paint_layers_mask_base(MaterialPaintLayer &layer)
+{
+  for (MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+      return &item;
+    }
+  }
+  return nullptr;
+}
+
+const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &layer)
+{
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+      return &item;
+    }
+  }
+  return nullptr;
+}
+
+MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma,
+                                              MaterialPaintLayer *layer,
+                                              const float value)
+{
+  if (!paint_layer_in_stack(ma, layer) || BKE_paint_layers_mask_base(*layer) != nullptr) {
+    return nullptr;
+  }
+  /* The base mask is a constant item with the Multiply blend, so the row's coverage starts at
+   * `F = value`. Its Base Color record holds the constant (opaque grey) until a stroke gives the
+   * item a map; the item itself is never a row of the stack. */
+  MaterialPaintLayer *item = paint_layer_alloc(ma, "Mask");
+  item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  item->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  item->blend = MA_PAINT_LAYER_BLEND_MULTIPLY;
+  item->flag = MA_PAINT_LAYER_ENABLED | MA_PAINT_LAYER_MASK_BASE;
+  item->channels = MEM_new_array<MaterialPaintLayerChannel>(1, __func__);
+  item->channels_num = 1;
+  MaterialPaintLayerChannel &record = item->channels[0];
+  record.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  record.image = nullptr;
+  const float gray = clamp_f(value, 0.0f, 1.0f);
+  record.value[0] = record.value[1] = record.value[2] = gray;
+  record.value[3] = 1.0f;
+  BLI_addhead(&layer->mask_stack, item);
+
+  BKE_paint_layers_tag_edited(ma);
+  return item;
+}
+
+bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer)
+{
+  if (!paint_layer_in_stack(ma, layer) || layer->mask_stack.first == nullptr) {
+    return false;
+  }
+  /* The whole mask goes: the base item is never removed on its own (#MA_PAINT_LAYER_MASK_BASE), so
+   * dropping every item is the one removal the data model has. A single non-base item will need its
+   * own call once the stack holds more than the base. */
+  for (MaterialPaintLayer &item : layer->mask_stack.items_mutable()) {
+    paint_layer_release_users(item);
+    BLI_remlink(&layer->mask_stack, &item);
+    BKE_material_paint_layer_free(&item);
+  }
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -452,7 +574,7 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
                                                         MaterialPaintLayer *layer,
                                                         const eMaterialPaintChannel channel)
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  if (!paint_layer_owned(ma, layer)) {
     return nullptr;
   }
   if (MaterialPaintLayerChannel *existing = paint_layer_channel_find(*layer, channel)) {
@@ -535,7 +657,7 @@ bool BKE_paint_layers_channel_set_enabled(Material &ma,
 
 bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, const float opacity)
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  if (!paint_layer_owned(ma, layer)) {
     return false;
   }
   layer->opacity = clamp_f(opacity, 0.0f, 1.0f);
@@ -546,7 +668,7 @@ bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, const
 
 bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, const bool enabled)
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  if (!paint_layer_owned(ma, layer)) {
     return false;
   }
   SET_FLAG_FROM_TEST(layer->flag, enabled, MA_PAINT_LAYER_ENABLED);

@@ -398,8 +398,24 @@ struct MaterialLineArt {
 enum eMaterialPaintLayerFlag : int16_t {
   /** The layer takes part in the stack. */
   MA_PAINT_LAYER_ENABLED = 1 << 0,
+  /**
+   * The mask item that is the layer's base mask. Always the first item of the owner's
+   * #MaterialPaintLayer::mask_stack, and removed only together with the whole mask.
+   */
+  MA_PAINT_LAYER_MASK_BASE = 1 << 1,
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
+
+/**
+ * #MaterialPaintLayer::role. Numerically matches the reference's role table: 1 is reserved for the
+ * effect role, which arrives with corrections.
+ */
+enum eMaterialPaintLayerRole : int8_t {
+  /** A row of the stack. */
+  MA_PAINT_LAYER_ROLE_LAYER = 0,
+  /** An item of an owner row's #MaterialPaintLayer::mask_stack: coverage laid over its factor. */
+  MA_PAINT_LAYER_ROLE_MASK_ITEM = 2,
+};
 
 /** #MaterialPaintLayer::blend -- how the row combines with what is below it. */
 enum eMaterialPaintLayerBlend : int8_t {
@@ -483,7 +499,16 @@ struct MaterialPaintLayer {
   float opacity = 1.0f;
   struct MaterialPaintLayerChannel *channels = nullptr;
   int channels_num = 0;
-  char _pad1[4] = {};
+  /** #eMaterialPaintLayerRole. */
+  int8_t role = MA_PAINT_LAYER_ROLE_LAYER;
+  char _pad1[3] = {};
+  /**
+   * The coverage items of this row, bottom to top: they lay a factor over the row's own, so the row
+   * is partly or wholly hidden. Owned by the row (freed, copied and written with it); every item
+   * is a #MA_PAINT_LAYER_ROLE_MASK_ITEM row with no children of its own. The base mask, when there
+   * is one, is the first.
+   */
+  ListBaseT<MaterialPaintLayer> mask_stack = {nullptr, nullptr};
 };
 
 struct Material {

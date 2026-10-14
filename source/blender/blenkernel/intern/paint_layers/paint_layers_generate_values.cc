@@ -79,6 +79,30 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_MASK_OPACITY) || STREQ(role, ROLE_MASK_VALUE)) {
+    /* The marker names the owner row; the item is whatever base mask it carries now. */
+    const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(*layer);
+    if (mask == nullptr || socket.default_value == nullptr) {
+      return false;
+    }
+    float value = 0.0f;
+    if (STREQ(role, ROLE_MASK_OPACITY)) {
+      value = BKE_paint_layers_effective_opacity(*mask);
+    }
+    else {
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+          *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+      if (record == nullptr) {
+        return false;
+      }
+      value = paint_layer_mask_constant(*record);
+    }
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_FILL)) {
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer,
                                                                       eMaterialPaintChannel(channel));

@@ -209,6 +209,30 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       fill_inputs_.lookup_or_add_default(&layer).add(channel, fill);
     }
   }
+
+  /* The base mask is one for every channel of the row, so its inputs exist once per group. */
+  if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
+    char base[200];
+    SNPRINTF(base, "%s Mask Opacity", layer_name);
+    bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_MASK_OPACITY, layer.marker, -1);
+    if (opacity != nullptr) {
+      group_input_default_set(group, *opacity, BKE_paint_layers_effective_opacity(*mask));
+      mask_opacity_inputs_.add(&layer, opacity);
+    }
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (record != nullptr && record->image == nullptr) {
+      /* A map is read by an Image Texture; the constant is only an input while there is none. */
+      SNPRINTF(base, "%s Mask", layer_name);
+      bNodeTreeInterfaceSocket *value = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_MASK_VALUE, layer.marker, -1);
+      if (value != nullptr) {
+        group_input_default_set(group, *value, paint_layer_mask_constant(*record));
+        mask_value_inputs_.add(&layer, value);
+      }
+    }
+  }
 }
 
 LayerGroup *PaintLayersTreeBuilder::layer_group_ensure(const MaterialPaintLayer &layer,

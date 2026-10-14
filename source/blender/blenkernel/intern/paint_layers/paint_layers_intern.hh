@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include "BLI_math_base.h"
+
 #include "BKE_paint_layers.hh"
 
 #include "DNA_material_types.h"
@@ -102,6 +104,17 @@ inline bool paint_layer_channel_contributes(const Material &ma,
     return paint_layer_channel_live(record);
   }
   return paint_layer_channel_contributes(record);
+}
+
+/**
+ * The constant coverage a mask item's Base Color \a record carries: the mean of its RGB, clamped.
+ * The CPU composite and the generator's value input read the one number, so the two cannot
+ * disagree about what a constant mask hides.
+ */
+inline float paint_layer_mask_constant(const MaterialPaintLayerChannel &record)
+{
+  const float mean = (record.value[0] + record.value[1] + record.value[2]) / 3.0f;
+  return clamp_f(mean, 0.0f, 1.0f);
 }
 
 /**

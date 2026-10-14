@@ -184,6 +184,33 @@ void BKE_paint_layers_channels_materialize(Material &ma);
 bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer);
 
 /**
+ * The base mask item of \a layer (#MA_PAINT_LAYER_MASK_BASE), or null when the row has no mask.
+ *
+ * A mask is a coverage factor laid over its row: the row is wholly visible where the mask reads
+ * one and hidden where it reads zero. The item is a #MA_PAINT_LAYER_ROLE_MASK_ITEM row that lives in
+ * #MaterialPaintLayer::mask_stack, never in the stack itself; its Base Color record holds the
+ * mask's constant until a stroke gives it a map. The channel, enabled and opacity edits below
+ * accept the item like any row.
+ */
+MaterialPaintLayer *BKE_paint_layers_mask_base(MaterialPaintLayer &layer);
+const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &layer);
+
+/**
+ * Give \a layer a base mask of constant \a value (clamped to 0..1): the row's coverage starts at
+ * `F = value`, and a Mask-mode stroke turns the constant into a map.
+ *
+ * \return the new item, or null when \a layer is not part of \a ma or already has a mask.
+ */
+MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *layer, float value);
+
+/**
+ * Remove the whole mask of \a layer (the base item and any item over it), letting go of their maps.
+ *
+ * \return false when \a layer is not part of \a ma or has no mask.
+ */
+bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer);
+
+/**
  * Find the row of \a ma whose marker is \a marker, never by position, so a row keeps resolving
  * after a reorder.
  *

@@ -647,10 +647,19 @@ static bool rna_Material_paint_layers_channel_in_set(Material *ma, int channel)
 static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer)
 {
   Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
-  if (ma == nullptr || BKE_paint_layers_find(*ma, layer->marker) != layer) {
+  if (ma == nullptr) {
     return nullptr;
   }
-  return ma;
+  if (BKE_paint_layers_find(*ma, layer->marker) == layer) {
+    return ma;
+  }
+  /* A mask item is not a row of the stack: it is judged by address in its owner row's list. */
+  for (const MaterialPaintLayer &row : ma->paint_layers) {
+    if (BLI_findindex(&row.mask_stack, layer) != -1) {
+      return ma;
+    }
+  }
+  return nullptr;
 }
 
 static void rna_MaterialPaintLayer_name_set(PointerRNA *ptr, const char *value)
@@ -748,10 +757,18 @@ static std::optional<std::string> rna_MaterialPaintLayer_path(const PointerRNA *
   const Material *ma = reinterpret_cast<const Material *>(ptr->owner_id);
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   const int index = BLI_findindex(&ma->paint_layers, layer);
-  if (index == -1) {
-    return std::nullopt;
+  if (index != -1) {
+    return fmt::format("paint_layers[{}]", index);
   }
-  return fmt::format("paint_layers[{}]", index);
+  int row_index = 0;
+  for (const MaterialPaintLayer &row : ma->paint_layers) {
+    const int item_index = BLI_findindex(&row.mask_stack, layer);
+    if (item_index != -1) {
+      return fmt::format("paint_layers[{}].mask_items[{}]", row_index, item_index);
+    }
+    row_index++;
+  }
+  return std::nullopt;
 }
 
 /** The material and row a layer pointer stands for, or null when the pointer is stale. */
@@ -823,19 +840,66 @@ static void rna_MaterialPaintLayer_channels_begin(CollectionPropertyIterator *it
                            nullptr);
 }
 
+static void rna_MaterialPaintLayer_mask_items_begin(CollectionPropertyIterator *iter,
+                                                    PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &layer->mask_stack, nullptr);
+}
+
+static MaterialPaintLayer *rna_MaterialPaintLayer_mask_add(PointerRNA ptr,
+                                                           ReportList *reports,
+                                                           const float value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    if (MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, value)) {
+      return item;
+    }
+    /* A mask item is resolved by the owner lookup too, but only a row of the stack takes a mask. */
+    BKE_report(reports,
+               RPT_ERROR,
+               (BKE_paint_layers_mask_base(*layer) != nullptr) ?
+                   "Cannot add a mask to this paint layer: it has one already" :
+                   "Cannot add a mask to this paint layer: it is not a row of the stack");
+    return nullptr;
+  }
+  BKE_report(reports, RPT_ERROR, "Paint layer is not part of this material");
+  return nullptr;
+}
+
+static void rna_MaterialPaintLayer_mask_remove(PointerRNA ptr, ReportList *reports)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    if (BKE_paint_layers_mask_remove(*ma, layer)) {
+      return;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "This paint layer has no mask");
+}
+
 static int rna_MaterialPaintLayer_channels_length(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return layer->channels_num;
 }
 
-/** The layer whose channel record is \a channel, or null when it is not in \a ma's stack. */
+/**
+ * The layer whose channel record is \a channel, or null when it is not in \a ma's stack. A row's
+ * mask items are searched too: their records are addressed like any row's.
+ */
 static MaterialPaintLayer *rna_paint_layer_by_channel(Material &ma,
                                                       const MaterialPaintLayerChannel *channel)
 {
   for (MaterialPaintLayer &layer : ma.paint_layers) {
     if (channel >= layer.channels && channel < layer.channels + layer.channels_num) {
       return &layer;
+    }
+    for (MaterialPaintLayer &item : layer.mask_stack) {
+      if (channel >= item.channels && channel < item.channels + item.channels_num) {
+        return &item;
+      }
     }
   }
   return nullptr;
@@ -867,6 +931,16 @@ static std::optional<std::string> rna_MaterialPaintLayerChannel_path(const Point
     if (record >= layer.channels && record < layer.channels + layer.channels_num) {
       return fmt::format(
           "paint_layers[{}].channels[{}]", layer_index, int(record - layer.channels));
+    }
+    int item_index = 0;
+    for (const MaterialPaintLayer &item : layer.mask_stack) {
+      if (record >= item.channels && record < item.channels + item.channels_num) {
+        return fmt::format("paint_layers[{}].mask_items[{}].channels[{}]",
+                           layer_index,
+                           item_index,
+                           int(record - item.channels));
+      }
+      item_index++;
     }
     layer_index++;
   }
@@ -1199,6 +1273,39 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                     nullptr,
                                     nullptr);
   RNA_def_property_ui_text(prop, "Channels", "Per-channel maps and values of the layer");
+
+  prop = RNA_def_property(srna, "mask_items", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_mask_items_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Mask Items", "The coverage items laid over the layer, bottom to top; the first is the "
+                          "base mask");
+
+  prop = RNA_def_property(srna, "is_mask_base", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_PAINT_LAYER_MASK_BASE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Is Mask Base", "Whether this is the base mask item of a layer");
+
+  func = RNA_def_function(srna, "mask_add", "rna_MaterialPaintLayer_mask_add");
+  RNA_def_function_ui_description(
+      func, "Give the layer a base mask of a constant value; a stroke in Mask mode paints it");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_float(func, "value", 1.0f, 0.0f, 1.0f, "Value", "Constant coverage", 0.0f, 1.0f);
+  parm = RNA_def_pointer(func, "item", "MaterialPaintLayer", "", "The new mask item");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "mask_remove", "rna_MaterialPaintLayer_mask_remove");
+  RNA_def_function_ui_description(func, "Remove the layer's mask");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
 
   func = RNA_def_function(srna, "channel_add", "rna_MaterialPaintLayer_channel_add");
   RNA_def_function_ui_description(func, "Add a channel record to the layer");

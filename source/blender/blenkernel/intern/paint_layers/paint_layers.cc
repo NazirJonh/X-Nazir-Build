@@ -469,6 +469,13 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
   record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   record.image = nullptr;
   zero_v4(record.value);
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    /* Still transparent, but the colour is the flat tangent (#8080FF), the brush channel's default,
+     * so a Fill's constant and the UI swatch do not read as a black, tilted normal. */
+    record.value[0] = 0.5f;
+    record.value[1] = 0.5f;
+    record.value[2] = 1.0f;
+  }
 
   MEM_delete(layer->channels);
   layer->channels = channels;

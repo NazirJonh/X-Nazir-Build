@@ -809,8 +809,43 @@ static wmOperatorStatus material_paint_source_material_set_exec(bContext *C, wmO
   return OPERATOR_FINISHED;
 }
 
+/** Invert one stack layer's channel constant, addressed by the layer's UUID marker. */
+static wmOperatorStatus material_layer_channel_value_invert(bContext *C, wmOperator *op)
+{
+  Material *ma = BKE_paint_layers_active_material_get(CTX_data_active_object(C));
+  char marker_str[UUID_STRING_SIZE];
+  RNA_string_get(op->ptr, "marker", marker_str);
+  bUUID marker;
+  if (ma == nullptr || !BLI_uuid_parse_string(&marker, marker_str)) {
+    BKE_report(op->reports, RPT_ERROR, "No layered material or paint layer");
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *layer = BKE_paint_layers_find(*ma, marker);
+  const eMaterialPaintChannel channel_id = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  if (layer == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "Paint layer not found");
+    return OPERATOR_CANCELLED;
+  }
+  for (const MaterialPaintLayerChannel &record : Span(layer->channels, layer->channels_num)) {
+    if (record.channel != channel_id) {
+      continue;
+    }
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel_id);
+    float value[4];
+    copy_v4_v4(value, record.value);
+    value[0] = BKE_paint_material_value_invert(info.value_min, info.value_max, value[0]);
+    BKE_paint_layers_channel_set_value(*ma, layer, channel_id, value);
+    return OPERATOR_FINISHED;
+  }
+  BKE_report(op->reports, RPT_ERROR, "Layer has no such channel");
+  return OPERATOR_CANCELLED;
+}
+
 static wmOperatorStatus material_channel_value_invert_exec(bContext *C, wmOperator *op)
 {
+  if (RNA_struct_property_is_set(op->ptr, "marker")) {
+    return material_layer_channel_value_invert(C, op);
+  }
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
   if (brush == nullptr || brush->material_paint == nullptr) {
@@ -846,6 +881,11 @@ void PAINT_OT_material_channel_value_invert(wmOperatorType *ot)
                           PAINT_MATERIAL_CHANNEL_METALLIC,
                           "Channel",
                           "Material paint channel to invert");
+
+  /* Set by the layer panel: inverts that stack layer's channel instead of the brush's. */
+  PropertyRNA *prop = RNA_def_string(
+      ot->srna, "marker", nullptr, UUID_STRING_SIZE, "Layer", "UUID marker of a paint layer");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 static wmOperatorStatus material_channel_source_clear_exec(bContext *C, wmOperator *op)

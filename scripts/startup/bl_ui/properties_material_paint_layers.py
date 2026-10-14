@@ -14,6 +14,8 @@ from bl_ui.properties_paint_common import (
     _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
     _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X,
     _MATERIAL_PAINT_CHANNEL_UI_ORDER,
+    MaterialPaintChannelView,
+    _draw_channel_panel,
 )
 
 # Channel count at which a row is considered heavy: five records weigh 34 generated nodes, six
@@ -60,16 +62,105 @@ def draw_material_channel_set(layout, material):
         row.prop_enum(material, "paint_layers_channels", channel_id)
 
 
-def draw_material_layer_channels(layout, _context, material, layer):
-    """Draw a stack layer's channels: toggles driven by the material's set, then each enabled
-    channel's own value and map.
+def _layer_images_locked(layer):
+    """Whether a row's channel maps belong to the row and must not be replaced or unlinked.
 
-    Every channel of the material's set is offered as a toggle, and one the layer carries no record
-    for (or carries DISABLED) reads as off; enabling it lazily creates the record through
-    `material.paint_layer_channel_toggle`, and disabling keeps its record and map. A channel outside
-    the set is never shown, even when the row still holds its record. An enabled channel then shows
-    its own constant value and, when the user assigns one, a source image -- a Paint row can be
-    given a constant or a map without a stroke.
+    A Paint (IMAGE) layer creates and owns its maps, which the brush writes into; a Fill (CONSTANT)
+    is never painted, so the user may assign their own maps there.
+    """
+    return layer.source == 'IMAGE'
+
+
+def _draw_layer_channel_source_preview(layout, record, locked=False):
+    """Compact preview of a layer channel's own image, in the panel header."""
+    if record.image is not None:
+        row = layout.row(align=True)
+        row.enabled = not locked
+        row.template_ID_browser(
+            record, "image", compact=True, image_filter='PAINT_SOURCE',
+        )
+
+
+def _draw_layer_channel_source(panel, record, locked=False):
+    """The layer channel's source row: a "Drop image" picker writing the record's own image.
+
+    `locked` draws it read-only, so the map owned by a Paint row can be seen but not swapped.
+    """
+    row = panel.row(align=True)
+    row.enabled = not locked
+    row.template_ID_browser(
+        record,
+        "image",
+        open="image.open",
+        text="Drop image: {:s}".format(record.channel),
+        image_filter='PAINT_SOURCE',
+        use_unlink=True,
+        use_users=False,
+    )
+
+
+def _layer_color_eyedropper_path(record):
+    """Path of the record's `color` that `ui.eyedropper_color` resolves from the context.
+
+    The operator resolves `prop_data_path` against #Context, which has no `material` member, so the
+    path goes through `blend_data.materials` by name. A linked material is not editable and gets no
+    eyedropper.
+    """
+    material = record.id_data
+    if material is None or material.library is not None:
+        return None
+    name = material.name.replace("\\", "\\\\").replace('"', '\\"')
+    return 'blend_data.materials["{:s}"].{:s}'.format(name, record.path_from_id("color"))
+
+
+def _layer_channel_view(layer, record, channel_id, name):
+    """A #MaterialPaintLayerChannel under the shared widget's contract.
+
+    The layer has no brush-side source slot or grid: its source is the channel record's own image,
+    assigned through RNA. Its value lives in the record (`color`, RGB without alpha, for colors; `value_scalar` for
+    scalars) and is edited through the layer's BKE setters. Its socket menu is the layer's own
+    (#PAINT_MT_material_layer_channel_socket), which needs both the record and the owning layer.
+    """
+    color = None
+    scalar = None
+    value_color = None
+    if channel_id in ('BASE_COLOR', 'NORMAL', 'EMISSION'):
+        color = (record, "color")
+    else:
+        scalar = (record, "value_scalar")
+        value_color = (record, "value_color")
+    return MaterialPaintChannelView(
+        record,
+        channel_id,
+        name,
+        use=(record, "use"),
+        color=color,
+        scalar=scalar,
+        value_color=value_color,
+        image=(record, "image"),
+        socket_menu="PAINT_MT_material_layer_channel_socket",
+        socket_context_set=(("material_paint_layer_channel", record),
+                            ("material_paint_layer_owner", layer)),
+        source_draw=lambda panel, ctx, enabled: _draw_layer_channel_source(
+            panel, record, locked=_layer_images_locked(layer)),
+        source_preview=lambda layout: _draw_layer_channel_source_preview(
+            layout, record, locked=_layer_images_locked(layer)),
+        source_has=lambda: record.image is not None,
+        source_active=lambda enabled: record.image is not None,
+        invert_channel=channel_id if scalar is not None else None,
+        invert_marker=layer.marker,
+        eyedropper_path=_layer_color_eyedropper_path(record) if color is not None else None,
+    )
+
+
+def draw_material_layer_channels(layout, context, material, layer):
+    """Draw a stack layer's channels with the shared PBR Paint channel widget.
+
+    The same fixed channel order and toggle buttons as the brush panel, but each channel's value
+    and source come from the layer's own #MaterialPaintLayerChannel records. The channel set drives
+    the rows: every channel of the material's set is offered, and one the layer carries no record
+    for (or carries DISABLED) reads as off. Enabling it lazily creates the record; a channel outside
+    the set is never shown, even when the row still holds its record and map.
     """
     channel_ids = material_layer_visible_channels(material)
     if not channel_ids:
@@ -84,7 +175,7 @@ def draw_material_layer_channels(layout, _context, material, layer):
     flow.use_property_decorate = False
     for channel_id in channel_ids:
         record = records.get(channel_id)
-        enabled = record is not None and record.state == 'ENABLED'
+        enabled = record is not None and record.use
         col = flow.column(align=False)
         col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
         op = col.operator(
@@ -107,12 +198,16 @@ def draw_material_layer_channels(layout, _context, material, layer):
     first = True
     for channel_id in channel_ids:
         record = records.get(channel_id)
-        if record is None or record.state != 'ENABLED':
+        if record is None or not record.use:
             continue
         if not first:
             channel_col.separator()
         first = False
-        row = channel_col.row(align=True)
-        row.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
-        row.prop(record, "value", text="")
-        channel_col.template_ID(record, "image", open="image.open", text="Map")
+        _draw_channel_panel(
+            channel_col,
+            context,
+            _layer_channel_view(
+                layer, record, channel_id,
+                _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id]),
+            source_enabled=True,
+        )

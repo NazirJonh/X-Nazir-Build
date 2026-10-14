@@ -6,6 +6,7 @@
  * \ingroup RNA
  */
 
+#include <algorithm>
 #include <cfloat>
 #include <climits>
 #include <cstdlib>
@@ -19,6 +20,7 @@
 #include "BLT_translation.hh"
 
 #include "BKE_customdata.hh"
+#include "BKE_paint.hh"
 
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
@@ -851,6 +853,26 @@ static Material *rna_paint_layer_sub_owner(PointerRNA *ptr, MaterialPaintLayer *
   return (*r_layer != nullptr) ? ma : nullptr;
 }
 
+/** Path of a record below its material, so a property of it can be addressed (eyedropper). */
+static std::optional<std::string> rna_MaterialPaintLayerChannel_path(const PointerRNA *ptr)
+{
+  const Material *ma = reinterpret_cast<const Material *>(ptr->owner_id);
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  if (ma == nullptr) {
+    return std::nullopt;
+  }
+  int layer_index = 0;
+  for (const MaterialPaintLayer &layer : ma->paint_layers) {
+    if (record >= layer.channels && record < layer.channels + layer.channels_num) {
+      return fmt::format(
+          "paint_layers[{}].channels[{}]", layer_index, int(record - layer.channels));
+    }
+    layer_index++;
+  }
+  return std::nullopt;
+}
+
 static int rna_MaterialPaintLayerChannel_channel_get(PointerRNA *ptr)
 {
   const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
@@ -895,6 +917,149 @@ static void rna_MaterialPaintLayerChannel_value_set(PointerRNA *ptr, const float
         layer,
         eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)),
         value);
+  }
+}
+
+/**
+ * The colour channels' constant without its alpha, as the brush channel's colour reads. Alpha is
+ * coverage in the record (zero until the constant is written), not part of what the user picks, so
+ * a write keeps a live alpha and makes a transparent record opaque.
+ */
+static void rna_MaterialPaintLayerChannel_color_get(PointerRNA *ptr, float *values)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  copy_v3_v3(values, record->value);
+}
+
+static void rna_MaterialPaintLayerChannel_color_set(PointerRNA *ptr, const float *values)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+        ptr->data);
+    const float rgba[4] = {
+        values[0], values[1], values[2], record->value[3] > 0.0f ? record->value[3] : 1.0f};
+    BKE_paint_layers_channel_set_value(
+        *ma,
+        layer,
+        eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)),
+        rgba);
+  }
+}
+
+/** Whether \a channel's constant is a single scalar (stored in `value[0]`) or a colour. Mirrors the
+ * brush channel's own test, so the shared layer widget reads a layer channel as a brush one. */
+static bool rna_MaterialPaintLayerChannel_is_scalar_channel(const eMaterialPaintChannel channel)
+{
+  return ELEM(channel,
+              PAINT_MATERIAL_CHANNEL_METALLIC,
+              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+              PAINT_MATERIAL_CHANNEL_SPECULAR,
+              PAINT_MATERIAL_CHANNEL_HEIGHT,
+              PAINT_MATERIAL_CHANNEL_ALPHA,
+              PAINT_MATERIAL_CHANNEL_AO,
+              PAINT_MATERIAL_CHANNEL_CUSTOM);
+}
+
+/**
+ * The scalar channels store their constant in `value[0]`; Base Color and Normal are colours and use
+ * the `value` array directly. This is the one float a scalar channel's UI edits, routed through
+ * #BKE_paint_layers_channel_set_value so the value-only / topology tags stay in one place.
+ */
+static float rna_MaterialPaintLayerChannel_value_scalar_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return record->value[0];
+}
+
+/** The channel's own range (0..1, Height -1..1), the same one the brush channel's value uses. */
+static void rna_MaterialPaintLayerChannel_value_scalar_range(
+    PointerRNA *ptr, float *min, float *max, float *softmin, float *softmax)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)));
+  *min = *softmin = info.value_min;
+  *max = *softmax = info.value_max;
+}
+
+static void rna_MaterialPaintLayerChannel_value_scalar_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(
+        rna_MaterialPaintLayerChannel_channel_get(ptr));
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+    float rgba[4];
+    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+        ptr->data);
+    copy_v4_v4(rgba, record->value);
+    rgba[0] = std::clamp(value, info.value_min, info.value_max);
+    BKE_paint_layers_channel_set_value(*ma, layer, channel, rgba);
+  }
+}
+
+/**
+ * Whether the channel takes part. Mirrors #BrushMaterialPaintChannel.use so one widget can read a
+ * brush channel and a layer channel the same way: on for ENABLED, off for DISABLED and ABSENT.
+ * Writing goes through #BKE_paint_layers_channel_set_enabled, which owns the tags and rebuild; a
+ * switched-off record keeps its value and map, so re-enabling restores the channel untouched.
+ */
+static bool rna_MaterialPaintLayerChannel_use_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return record->state == MA_PAINT_LAYER_CHANNEL_ENABLED;
+}
+
+static void rna_MaterialPaintLayerChannel_use_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    BKE_paint_layers_channel_set_enabled(
+        *ma, layer, eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)), value);
+  }
+}
+
+/**
+ * A scalar channel's value as the grayscale colour of its gradient ramp, so the shared channel
+ * widget draws the same swatch for a layer as for a brush. Colour channels (Base Color, Normal,
+ * Emission) read black and ignore writes, as the widget never sends them here.
+ */
+static void rna_MaterialPaintLayerChannel_value_color_get(PointerRNA *ptr, float *values)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  const eMaterialPaintChannel channel = eMaterialPaintChannel(
+      rna_MaterialPaintLayerChannel_channel_get(ptr));
+  if (!rna_MaterialPaintLayerChannel_is_scalar_channel(channel)) {
+    zero_v3(values);
+    return;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  const float t = BKE_paint_material_t_from_value(info.value_min, info.value_max, record->value[0]);
+  BKE_paint_material_value_gradient_color(info.value_min, info.value_max, t, values);
+}
+
+static void rna_MaterialPaintLayerChannel_value_color_set(PointerRNA *ptr, const float *values)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(
+        rna_MaterialPaintLayerChannel_channel_get(ptr));
+    if (!rna_MaterialPaintLayerChannel_is_scalar_channel(channel)) {
+      return;
+    }
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+    const float gray = (values[0] + values[1] + values[2]) / 3.0f;
+    const float t = BKE_paint_material_t_from_value(info.value_min, info.value_max, gray);
+    float rgba[4];
+    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+        ptr->data);
+    copy_v4_v4(rgba, record->value);
+    rgba[0] = BKE_paint_material_value_from_t(info.value_min, info.value_max, t);
+    BKE_paint_layers_channel_set_value(*ma, layer, channel, rgba);
   }
 }
 
@@ -1079,6 +1244,7 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
 
   srna = RNA_def_struct(brna, "MaterialPaintLayerChannel", nullptr);
   RNA_def_struct_sdna(srna, "MaterialPaintLayerChannel");
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintLayerChannel_path");
   RNA_def_struct_ui_text(srna, "Paint Layer Channel", "One channel record of a paint layer");
 
   /* Read-only: the record is keyed by its channel; the key is set when the record is added. */
@@ -1111,6 +1277,43 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
                                "rna_MaterialPaintLayerChannel_value_set",
                                nullptr);
   RNA_def_property_ui_text(prop, "Value", "Constant value used while the channel has no map");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannel_color_get",
+                               "rna_MaterialPaintLayerChannel_color_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Color", "The colour channels' constant, without alpha");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Read-only in the sense of the shared widget: it reads a layer channel exactly as it reads a
+   * brush channel (on for ENABLED). The setter routes through BKE_paint_layers_channel_set_enabled. */
+  prop = RNA_def_property(srna, "use", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayerChannel_use_get", "rna_MaterialPaintLayerChannel_use_set");
+  RNA_def_property_ui_text(prop, "Enabled", "Whether the channel takes part");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The scalar channels' single value, stored in `value[0]`; colour channels use `value`. */
+  prop = RNA_def_property(srna, "value_scalar", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannel_value_scalar_get",
+                               "rna_MaterialPaintLayerChannel_value_scalar_set",
+                               "rna_MaterialPaintLayerChannel_value_scalar_range");
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Value", "The scalar channel's constant value");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The scalar channels' grayscale swatch, matching the brush channel's value_color. */
+  prop = RNA_def_property(srna, "value_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannel_value_color_get",
+                               "rna_MaterialPaintLayerChannel_value_color_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Value Color", "The scalar channel's value as a gradient swatch");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 }
 

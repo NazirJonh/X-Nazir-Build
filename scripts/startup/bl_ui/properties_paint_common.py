@@ -1242,6 +1242,47 @@ class PAINT_MT_material_paint_channel_socket(Menu):
         layout.prop(channel, "use_grid_source_picker", text="Source Picker: Grid")
 
 
+class PAINT_MT_material_layer_channel_socket(Menu):
+    """Socket popup for a layer channel (#MaterialPaintLayerChannel).
+
+    The layer counterpart of #PAINT_MT_material_paint_channel_socket, but the layer has none of
+    the brush-side options (Sync with Brush, Alpha Use For, Source Picker): those belong to the
+    brush's paint semantics, not to a stack row's stored value. What is left is the channel's
+    source image color space and a way to remove the record.
+    """
+
+    bl_label = "Paint Layer Channel"
+
+    def draw(self, context):
+        layout = self.layout
+
+        # The record and its layer are handed over through the layout context by the layer
+        # adapter's `socket_context_set`; without them only the generic info is shown.
+        channel = getattr(context, "material_paint_layer_channel", None)
+        layer = getattr(context, "material_paint_layer_owner", None)
+        if channel is None or layer is None:
+            layout.label(text="Paint Layer Channel", icon='INFO')
+            layout.label(text="The row's value and source for this channel.")
+            return
+
+        drawn_any = False
+        if channel.image is not None:
+            layout.prop_menu_enum(
+                channel.image.colorspace_settings, "name", text="Color Space",
+            )
+            drawn_any = True
+
+        # Parity with the old Channels box: remove the record from here. Every channel of a layer
+        # removes the same way; the material's global set is what always keeps Base Color.
+        if drawn_any:
+            layout.separator()
+        row = layout.row()
+        op = row.operator(
+            "material.paint_layer_channel_remove", text="Remove Channel", icon='X')
+        op.marker = layer.marker
+        op.channel = channel.channel
+
+
 class PAINT_MT_material_paint_brush_sync(Menu):
     bl_label = "Sync Brush"
 
@@ -1737,7 +1778,8 @@ def _material_paint_channel_socket_color(channel_id):
     return _MATERIAL_PAINT_SOCKET_COLOR_FLOAT
 
 
-def _material_paint_channel_socket_icon_draw(layout, channel_id, channel):
+def _material_paint_channel_socket_icon_draw(layout, channel_id, channel, menu=None,
+                                             context_set=None):
     """Colored socket button matching the Principled BSDF socket for this channel.
 
     Routed through ``menu=`` (instead of the plain, background-less socket) so the button is
@@ -1747,14 +1789,21 @@ def _material_paint_channel_socket_icon_draw(layout, channel_id, channel):
     border against the panel background.
 
     The channel is handed to the popup menu through the layout context so it can offer the
-    channel's source-image color space and its per-channel paint options.
+    channel's source-image color space and its per-channel paint options. \a context_set carries
+    any further pointers a specific menu needs (the layer menu also wants the owning layer); it is
+    empty for a channel with no menu, so the plain socket is drawn.
     """
     socket = layout.row(align=True)
     socket.context_pointer_set("material_paint_channel", channel)
-    socket.template_node_socket(
-        color=_material_paint_channel_socket_color(channel_id),
-        menu="PAINT_MT_material_paint_channel_socket",
-    )
+    for name, value in (context_set or ()):
+        socket.context_pointer_set(name, value)
+    if menu:
+        socket.template_node_socket(
+            color=_material_paint_channel_socket_color(channel_id),
+            menu=menu,
+        )
+    else:
+        socket.template_node_socket(color=_material_paint_channel_socket_color(channel_id))
 
 
 def _material_paint_channel_color_eyedropper_path(context, data, prop):
@@ -1834,16 +1883,87 @@ def _material_paint_channel_source_active(channel, *, source_enabled):
     return channel.material_source_resolution in {'CONSTANT', 'IMAGE', 'BAKED'}
 
 
-def _draw_material_paint_subpanel_header(
+class MaterialPaintChannelView:
+    """One channel of a brush (#BrushMaterialPaintChannel) or a layer
+    (#MaterialPaintLayerChannel), exposed under the property names the shared channel widget reads.
+
+    The widget branches on the channel id (Base Color / Normal / scalar / ...), never on the owning
+    type: an adapter supplies where the color, scalar, toggle and image live, and how the source row
+    is drawn. A brush and a layer therefore share one draw path.
+    """
+
+    def __init__(
+        self,
+        channel,
+        channel_id,
+        name,
+        *,
+        use,
+        color=None,
+        scalar=None,
+        scalar_index=None,
+        value_color=None,
+        image=None,
+        blend=None,
+        socket_menu=None,
+        socket_context_set=(),
+        source_draw=None,
+        source_preview=None,
+        source_has=None,
+        source_active=None,
+        invert_channel=None,
+        invert_marker=None,
+        eyedropper=False,
+        eyedropper_path=None,
+    ):
+        self.channel = channel
+        self.channel_id = channel_id
+        self.name = name
+        #: (data, propname) of the enable toggle.
+        self.use = use
+        #: (data, propname) of a color channel's color, else None.
+        self.color = color
+        #: (data, propname) of a scalar channel's numeric value, else None.
+        self.scalar = scalar
+        #: Array index for the scalar value (brush `value`), or None for a plain float.
+        self.scalar_index = scalar_index
+        #: (data, propname) of a scalar channel's gradient swatch, else None.
+        self.value_color = value_color
+        #: (data, propname) of the source image, else None.
+        self.image = image
+        #: (data, propname) of the channel's own blend, else None.
+        self.blend = blend
+        #: Popup menu idname for the socket button, or None.
+        self.socket_menu = socket_menu
+        #: Extra (name, value) pointers the socket menu needs beyond the channel itself.
+        self.socket_context_set = socket_context_set
+        #: callable(panel, context, enabled) drawing the source row, or None.
+        self.source_draw = source_draw
+        #: callable(layout) drawing the compact source preview in the header, or None.
+        self.source_preview = source_preview
+        #: callable() -> bool, whether a source is assigned.
+        self.source_has = source_has
+        #: callable(source_enabled) -> bool, whether a source drives the channel.
+        self.source_active = source_active
+        #: Channel id string for the value-invert operator, or None when the owner has none.
+        self.invert_channel = invert_channel
+        #: UUID marker of the stack layer the invert operator acts on, or None for the brush.
+        self.invert_marker = invert_marker
+        #: Whether the color field offers the eyedropper (brush only; its path resolves via the
+        #: active paint brush, which a layer channel is not).
+        self.eyedropper = eyedropper
+        #: Full context path of the color the eyedropper writes (an owner that is not the active
+        #: brush, e.g. a layer channel), or None to use the brush path.
+        self.eyedropper_path = eyedropper_path
+
+
+def _draw_channel_subpanel_header(
     header,
     context,
-    channel_id,
-    channel,
-    prop=None,
-    prop_data=None,
-    color_picker_after_socket=False,
+    view,
+    *,
     value_active=True,
-    **prop_kwargs,
+    color_picker_after_socket=False,
 ):
     """Panel header: label | socket button | optional value/color field (Principled-style split).
 
@@ -1855,36 +1975,151 @@ def _draw_material_paint_subpanel_header(
     row = header.row(align=True)
     # Match UI_ITEM_PROP_SEP_DIVIDE (0.4) used by property split labels in the Properties editor.
     split = row.split(factor=0.4, align=True)
-    split.label(text=channel.name)
-    data = prop_data if prop_data is not None else channel
-    if prop is not None and color_picker_after_socket:
+    split.label(text=view.name)
+    if view.color is not None and color_picker_after_socket:
         # Color channels: socket + color strip merged; eyedropper fused to color strip.
         controls = split.row(align=True)
-        _material_paint_channel_socket_icon_draw(controls, channel_id, channel)
-        if _material_paint_channel_source_draw(controls, channel):
+        _material_paint_channel_socket_icon_draw(controls, view.channel_id, view.channel,
+                                                 menu=view.socket_menu,
+                                                 context_set=view.socket_context_set)
+        if view.source_preview is not None and view.source_has is not None and view.source_has():
+            view.source_preview(controls)
             return
         value_controls = controls.row(align=True)
         value_controls.active = value_active
-        if "text" not in prop_kwargs:
-            prop_kwargs["text"] = ""
-        value_controls.prop(data, prop, **prop_kwargs)
-        _material_paint_channel_color_eyedropper_draw(value_controls, context, data, prop)
+        data, prop = view.color
+        value_controls.prop(data, prop, text="")
+        if view.eyedropper_path:
+            eye = value_controls.operator("ui.eyedropper_color", text="", icon='EYEDROPPER')
+            eye.prop_data_path = view.eyedropper_path
+        elif view.eyedropper:
+            _material_paint_channel_color_eyedropper_draw(value_controls, context, data, prop)
     else:
         value_row = split.row(align=True)
-        _material_paint_channel_socket_icon_draw(value_row, channel_id, channel)
-        if _material_paint_channel_source_draw(value_row, channel):
+        _material_paint_channel_socket_icon_draw(value_row, view.channel_id, view.channel,
+                                                 menu=view.socket_menu,
+                                                 context_set=view.socket_context_set)
+        if view.source_preview is not None and view.source_has is not None and view.source_has():
+            view.source_preview(value_row)
             return
-        if prop is not None:
+        if view.scalar is not None:
             controls = value_row.row(align=True)
             controls.active = value_active
-            if prop == "value":
-                # Scalar channels: gradient-matched grayscale swatch beside a value slider.
-                controls.prop(data, "value_color", text="")
-            if "text" not in prop_kwargs:
-                prop_kwargs["text"] = ""
-            if prop == "value":
-                prop_kwargs["slider"] = True
-            controls.prop(data, prop, **prop_kwargs)
+            if view.value_color is not None:
+                data, prop = view.value_color
+                controls.prop(data, prop, text="")
+            data, prop = view.scalar
+            kwargs = {"text": "", "slider": True}
+            if view.scalar_index is not None:
+                kwargs["index"] = view.scalar_index
+            controls.prop(data, prop, **kwargs)
+
+
+def _draw_channel_panel(layout, context, view, *, source_enabled=True):
+    """One channel's collapsible panel: header (socket + value) and body (source, value, extras).
+
+    Dispatches on the channel id only; every owner-specific property comes from \a view.
+    """
+    is_scalar = view.scalar is not None
+    is_color = view.color is not None
+    panel_id = "material_paint_value_%s" % view.channel_id.lower()
+    header, panel = layout.panel(panel_id, default_closed=False)
+
+    if view.source_active is not None:
+        has_source = view.source_active(source_enabled)
+    else:
+        has_source = False
+
+    if is_color:
+        _draw_channel_subpanel_header(
+            header,
+            context,
+            view,
+            color_picker_after_socket=True,
+            value_active=not has_source,
+        )
+    else:
+        _draw_channel_subpanel_header(
+            header,
+            context,
+            view,
+            value_active=not has_source,
+        )
+    if not panel:
+        return
+
+    if is_color:
+        # Base Color is the only color channel with its own blend; Normal and Emission have none.
+        if view.blend is not None:
+            panel.use_property_split = False
+        panel.separator()
+        if view.blend is not None:
+            data, prop = view.blend
+            row = panel.row(align=True)
+            row.prop(data, prop, text="Blend")
+            panel.separator()
+        if view.source_draw is not None:
+            view.source_draw(panel, context, source_enabled)
+        return
+
+    panel.separator()
+    if view.source_draw is not None:
+        view.source_draw(panel, context, source_enabled)
+    if not has_source and is_scalar:
+        panel.separator()
+        data, prop = view.scalar
+        row = panel.row(align=True)
+        row.template_material_paint_value_slider(data, prop, index=0)
+        if view.invert_channel is not None:
+            op = row.operator(
+                "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
+            )
+            op.channel = view.invert_channel
+            if view.invert_marker:
+                op.marker = view.invert_marker
+    panel.separator()
+
+
+def _brush_channel_view(channel, channel_id, material_paint):
+    """A #BrushMaterialPaintChannel under the shared widget's contract."""
+    color = None
+    scalar = None
+    scalar_index = None
+    value_color = None
+    blend = None
+    if channel_id == 'BASE_COLOR':
+        # Base Color's color is the brush paint's own, not the channel's.
+        color = (material_paint, "base_color")
+        blend = (channel, "blend")
+    elif channel_id == 'NORMAL':
+        color = (channel, "normal_color")
+    elif channel_id == 'EMISSION':
+        color = (channel, "emission_color")
+    else:
+        scalar = (channel, "value")
+        scalar_index = 0
+        value_color = (channel, "value_color")
+    return MaterialPaintChannelView(
+        channel,
+        channel_id,
+        channel.name,
+        use=(channel, "use"),
+        color=color,
+        scalar=scalar,
+        scalar_index=scalar_index,
+        value_color=value_color,
+        image=(channel, "source_image"),
+        blend=blend,
+        socket_menu="PAINT_MT_material_paint_channel_socket",
+        source_draw=lambda panel, ctx, enabled: _draw_material_paint_source_texture(
+            panel, ctx, channel, enabled=enabled),
+        source_preview=lambda layout: _material_paint_channel_source_draw(layout, channel),
+        source_has=lambda: _material_paint_channel_has_source(channel),
+        source_active=lambda enabled: _material_paint_channel_source_active(
+            channel, source_enabled=enabled),
+        invert_channel=channel_id,
+        eyedropper=True,
+    )
 
 
 def _draw_material_paint_source_grid(layout, context, channel):
@@ -2118,132 +2353,6 @@ def _draw_material_paint_shared_mapping(layout, material_paint):
 
     col.separator()
     col.prop(material_paint, "size_random", text="Size Random", slider=True)
-
-
-def _draw_material_paint_value_ramp(layout, context, channel, channel_id, *, source_enabled=True):
-    # One subpanel per scalar ramp channel; open by default.
-    # Header: socket + value color swatch + numeric value. Body: gradient + Invert.
-    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
-    header, panel = layout.panel(
-        "material_paint_value_%s" % channel_id.lower(),
-        default_closed=False,
-    )
-    _draw_material_paint_subpanel_header(
-        header, context, channel_id, channel, "value", index=0, value_active=not has_source,
-    )
-    if not panel:
-        return
-    panel.separator()
-    # The source row (and the grid below it) is not part of the value row's aligned column: it is
-    # a separate control, and sharing the column would glue them together, unlike every other
-    # channel panel.
-    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
-    if not has_source:
-        panel.separator()
-        row = panel.row(align=True)
-        row.template_material_paint_value_slider(channel, "value", index=0)
-        row.operator(
-            "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
-        ).channel = channel_id
-    panel.separator()
-
-
-def _draw_material_paint_alpha_panel(layout, context, channel, channel_id, *, source_enabled=True):
-    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
-    header, panel = layout.panel(
-        "material_paint_value_%s" % channel_id.lower(),
-        default_closed=False,
-    )
-    _draw_material_paint_subpanel_header(
-        header, context, channel_id, channel, "value", index=0, value_active=not has_source,
-    )
-    if not panel:
-        return
-    panel.separator()
-    # "Use For: Alpha Map / Brush Mask" now lives in the socket-button popup menu,
-    # #PAINT_MT_material_paint_channel_socket.
-    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
-    if not has_source:
-        panel.separator()
-        row = panel.row(align=True)
-        row.template_material_paint_value_slider(channel, "value", index=0)
-        row.operator(
-            "paint.material_channel_value_invert", text="", icon='ARROW_LEFTRIGHT',
-        ).channel = channel_id
-    panel.separator()
-
-
-def _draw_material_paint_base_color_panel(
-        layout, context, channel, material_paint, *, source_enabled=True):
-    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
-    header, panel = layout.panel(
-        "material_paint_value_base_color",
-        default_closed=False,
-    )
-    _draw_material_paint_subpanel_header(
-        header,
-        context,
-        'BASE_COLOR',
-        channel,
-        "base_color",
-        prop_data=material_paint,
-        color_picker_after_socket=True,
-        value_active=not has_source,
-    )
-    if not panel:
-        return
-    panel.use_property_split = False
-    panel.separator()
-    # "Sync with Brush" now lives in the socket-button popup menu,
-    # #PAINT_MT_material_paint_channel_socket.
-    # Base Color is the only blendable channel.
-    row = panel.row(align=True)
-    row.prop(channel, "blend", text="Blend")
-    panel.separator()
-    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
-
-
-def _draw_material_paint_normal_panel(layout, context, channel, *, source_enabled=True):
-    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
-    header, panel = layout.panel(
-        "material_paint_value_normal",
-        default_closed=False,
-    )
-    # normal_color maps tangent XYZ [-1, 1] to RGB [0, 1]; default flat +Z is #8080FF.
-    _draw_material_paint_subpanel_header(
-        header,
-        context,
-        'NORMAL',
-        channel,
-        "normal_color",
-        color_picker_after_socket=True,
-        value_active=not has_source,
-    )
-    if not panel:
-        return
-    panel.separator()
-    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
-
-
-def _draw_material_paint_emission_panel(layout, context, channel, *, source_enabled=True):
-    has_source = _material_paint_channel_source_active(channel, source_enabled=source_enabled)
-    header, panel = layout.panel(
-        "material_paint_value_emission",
-        default_closed=False,
-    )
-    _draw_material_paint_subpanel_header(
-        header,
-        context,
-        'EMISSION',
-        channel,
-        "emission_color",
-        color_picker_after_socket=True,
-        value_active=not has_source,
-    )
-    if not panel:
-        return
-    panel.separator()
-    _draw_material_paint_source_texture(panel, context, channel, enabled=source_enabled)
 
 
 def material_paint_visible_channels_owner(context):
@@ -2528,55 +2637,26 @@ def draw_material_paint_channels(
         channel_panel_sep = True
 
     # Value rows are only drawn for enabled channels, so a disabled channel does not clutter the
-    # panel with a grayed-out row.
-    channel = channels['BASE_COLOR']
-    if channel.use and 'BASE_COLOR' in visible:
-        _channel_panel_sep()
-        _draw_material_paint_base_color_panel(
-            channel_col, context, channel, material_paint, source_enabled=source_maps_enabled,
-        )
-
-    for channel_id in ('METALLIC', 'ROUGHNESS', 'AO'):
+    # panel with a grayed-out row. Normal and Emission are texture-map-only channels: a vertex
+    # canvas has no per-vertex storage for them (see `_MATERIAL_PAINT_VERTEX_CHANNELS`), so skip
+    # them for Material Paint; their `use`/visibility bits can still be set from a prior Material
+    # (image) canvas session, so this is an explicit `not show_custom` guard, not just membership in
+    # `visible`.
+    for channel_id in ('BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'AO', 'ALPHA', 'NORMAL', 'EMISSION',
+                       'SPECULAR'):
+        if show_custom and channel_id in ('NORMAL', 'EMISSION'):
+            continue
         channel = channels[channel_id]
-        if channel.use and channel_id in visible:
-            _channel_panel_sep()
-            _draw_material_paint_value_ramp(
-                channel_col, context, channel, channel_id, source_enabled=source_maps_enabled,
-            )
-
-    channel = channels['ALPHA']
-    if channel.use and 'ALPHA' in visible:
+        if not (channel.use and channel_id in visible):
+            continue
         _channel_panel_sep()
-        _draw_material_paint_alpha_panel(
-            channel_col, context, channel, 'ALPHA', source_enabled=source_maps_enabled,
-        )
-
-    # Normal, Emission and Height are texture-map-only channels: a vertex canvas has no per-vertex
-    # storage for them (see `_MATERIAL_PAINT_VERTEX_CHANNELS`), so skip them for Material Paint.
-    # Their `use`/visibility bits can still be set from a prior Material (image) canvas session,
-    # so this must be an explicit `not show_custom` guard, not just membership in `channel_ids`.
-    if not show_custom:
-        # Normal: tangent vector as a single color (#8080FF = flat +Z); blend is always
-        # NORMAL_MIX.
-        channel = channels['NORMAL']
-        if channel.use and 'NORMAL' in visible:
-            _channel_panel_sep()
-            _draw_material_paint_normal_panel(
-                channel_col, context, channel, source_enabled=source_maps_enabled,
-            )
-
-        channel = channels['EMISSION']
-        if channel.use and 'EMISSION' in visible:
-            _channel_panel_sep()
-            _draw_material_paint_emission_panel(
-                channel_col, context, channel, source_enabled=source_maps_enabled,
-            )
-
-    channel = channels['SPECULAR']
-    if channel.use and 'SPECULAR' in visible:
-        _channel_panel_sep()
-        _draw_material_paint_value_ramp(
-            channel_col, context, channel, 'SPECULAR', source_enabled=source_maps_enabled,
+        # One shared channel widget for the brush and the layer stack; the adapter supplies where
+        # this channel's color/scalar/source live.
+        _draw_channel_panel(
+            channel_col,
+            context,
+            _brush_channel_view(channel, channel_id, material_paint),
+            source_enabled=source_maps_enabled,
         )
 
     if show_custom:
@@ -2585,7 +2665,8 @@ def draw_material_paint_channels(
             _channel_panel_sep()
             row = channel_col.row(align=True)
             row.use_property_split = False
-            _material_paint_channel_socket_icon_draw(row, 'CUSTOM', channel)
+            _material_paint_channel_socket_icon_draw(
+                row, 'CUSTOM', channel, menu="PAINT_MT_material_paint_channel_socket")
             controls = row.row(align=True)
             controls.prop(channel, "value_color", text="")
             controls.prop(channel, "value", index=0, text=channel.name, slider=True)
@@ -3884,6 +3965,7 @@ class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
 classes = (
     PAINT_GT_mp_source,
     PAINT_MT_material_paint_channel_socket,
+    PAINT_MT_material_layer_channel_socket,
     PAINT_MT_material_paint_brush_sync,
     PAINT_PT_material_paint_channel_visibility,
     SCULPT_UL_curve_patch_textures,

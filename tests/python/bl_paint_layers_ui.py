@@ -33,6 +33,13 @@ class _MockLayout:
     def grid_flow(self, *args, **kwargs):
         return self._record("grid_flow", args, kwargs)
 
+    def split(self, *args, **kwargs):
+        return self._record("split", args, kwargs)
+
+    def panel(self, *args, **kwargs):
+        self._record("panel", args, kwargs)
+        return self, self
+
     def label(self, *args, **kwargs):
         return self._record("label", args, kwargs)
 
@@ -50,6 +57,18 @@ class _MockLayout:
 
     def template_ID(self, *args, **kwargs):
         return self._record("template_ID", args, kwargs)
+
+    def template_ID_browser(self, *args, **kwargs):
+        return self._record("template_ID_browser", args, kwargs)
+
+    def template_node_socket(self, *args, **kwargs):
+        return self._record("template_node_socket", args, kwargs)
+
+    def template_material_paint_value_slider(self, *args, **kwargs):
+        return self._record("value_slider", args, kwargs)
+
+    def context_pointer_set(self, *args, **kwargs):
+        return self._record("context_pointer_set", args, kwargs)
 
     def __setattr__(self, name, value):
         self._values[name] = value

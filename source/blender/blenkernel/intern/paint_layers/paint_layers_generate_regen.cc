@@ -600,6 +600,10 @@ void BKE_paint_layers_undo_prepare(Main &bmain)
           }
         }
       }
+      /* The maps and groups are gone, so a stored hash no longer describes what the tree holds. A
+       * tree the decode keeps as it is would otherwise be taken for unchanged (a kept root, a reused
+       * group) and never get them back; a re-read tree carries its own hash from the snapshot. */
+      tree_hash_clear(*tree);
       /* The evaluated copy still names the old data-blocks until it is copied again. */
       DEG_id_tag_update(&tree->id, ID_RECALC_SYNC_TO_EVAL);
     }
@@ -680,10 +684,7 @@ void BKE_paint_layers_undo_validate(Main &bmain)
 
   for (const int i : materials.index_range()) {
     Material &ma = *materials[i];
-    bool stale = false;
-    if (undo_dangling_id_clear(ma.paint_layers_tree, live)) {
-      stale = true;
-    }
+    undo_dangling_id_clear(ma.paint_layers_tree, live);
 
     /* The generated trees a material owns, which a decode may have kept as they were while the
      * maps and groups they name were freed. The material's own tree holds the group instances. */
@@ -692,15 +693,13 @@ void BKE_paint_layers_undo_validate(Main &bmain)
       trees.append(ma.nodetree);
     }
     for (bNodeTree *tree : trees) {
-      if (undo_tree_dangling_clear(*tree, live)) {
-        /* Rebuilt by the next regeneration. */
-        stale = true;
-      }
+      undo_tree_dangling_clear(*tree, live);
     }
-    if (stale) {
-      ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
-      DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
-    }
+    /* Always regenerated: a material the decode re-read takes its flag from the snapshot, which
+     * drops the one #BKE_paint_layers_undo_prepare set, and a tree it kept has had its maps and
+     * groups nulled there, which no dangling check can tell from a deliberately empty pointer. */
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+    DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
   }
 }
 

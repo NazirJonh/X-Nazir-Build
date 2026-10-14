@@ -10,6 +10,11 @@ from bpy_extras.node_utils import find_node_input
 
 from bl_ui.space_properties import PropertiesAnimationMixin
 
+from bl_ui.properties_material_paint_layers import (
+    draw_material_channel_set,
+    draw_material_layer_channels,
+)
+
 
 class MATERIAL_MT_context_menu(Menu):
     bl_label = "Material Specials"
@@ -539,6 +544,114 @@ class BRUSH_MATERIAL_PT_custom_props(BrushMaterialButtonsPanel, PropertyPanel, P
     _property_type = bpy.types.Material
 
 
+class LayerMaterialButtonsPanel:
+    """Base for the Layer Material tab, which edits the material of the active paint layer.
+
+    The owner material is reached through the active object's active material slot, so the tab
+    follows whichever stack the object shows; `context.material` in this tab is that same owner
+    (the context path holds exactly one Material). Like #BrushMaterialButtonsPanel, these panels
+    share drawing through module level helpers rather than by subclassing registered panels.
+    """
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "layer_material"
+
+    @staticmethod
+    def _owner_material(context):
+        """The layered material that owns the stack, or None."""
+        ob = context.object
+        mat = ob.active_material if ob is not None else None
+        return mat if (mat is not None and mat.is_layered) else None
+
+    @staticmethod
+    def _active_layer(context):
+        """The active row of the owning material, or `(None, None)` when there is none."""
+        owner = LayerMaterialButtonsPanel._owner_material(context)
+        if owner is None:
+            return None, None
+        return owner, owner.paint_layers.active
+
+    @classmethod
+    def poll(cls, context):
+        # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the generated tree
+        # feeds the viewport whatever the scene's render engine is.
+        mat = context.material
+        return mat is not None and not mat.grease_pencil
+
+
+class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
+    """The Layer Material tab for a layered material: the active layer read from the description,
+    its opacity and its channels.
+
+    The layer add/remove/duplicate operators and the row list live in the Outliner stack; only the
+    active row is edited here.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_layers"
+    bl_label = "Layer"
+
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        owner, layer = self._active_layer(context)
+        if owner is None:
+            return
+        if layer is None:
+            layout.label(text="No active layer", icon='INFO')
+            return
+
+        layout.prop(layer, "opacity", text="Opacity")
+        layout.separator()
+        draw_material_layer_channels(layout, context, owner, layer)
+
+
+class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
+    """The owner material's global paint channel set: which channels the stack works with.
+
+    A channel removed here leaves each row's record and map untouched; the rows simply stop showing
+    it. Base Color is the material's constant and is always in the set. The stack starts with the
+    set chosen in the New Layered Material dialog.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_channels"
+    bl_label = "Channels"
+
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        draw_material_channel_set(layout, self._owner_material(context))
+
+
+class MATERIAL_PT_paint_layers_channels(MaterialButtonsPanel, Panel):
+    """The material's global paint channel set, in the Material tab.
+
+    A channel removed here leaves each row's record and map untouched; the rows simply stop showing
+    it. Base Color is the material's constant and is always in the set.
+    """
+
+    bl_idname = "MATERIAL_PT_paint_layers_channels"
+    bl_label = "Paint Layers Channels"
+    COMPAT_ENGINES = {'BLENDER_EEVEE', 'CYCLES'}
+
+    @classmethod
+    def poll(cls, context):
+        mat = context.material
+        return mat is not None and mat.is_layered and not mat.grease_pencil
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        draw_material_channel_set(layout, context.material)
+
+
 classes = (
     MATERIAL_MT_context_menu,
     MATERIAL_UL_matslots,
@@ -562,6 +675,9 @@ classes = (
     BRUSH_MATERIAL_PT_settings_surface,
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
+    MATERIAL_PT_paint_layers_channels,
+    LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_channels,
 )
 
 

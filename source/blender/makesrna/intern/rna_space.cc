@@ -650,6 +650,11 @@ const EnumPropertyItem buttons_context_items[] = {
      ICON_MATERIAL,
      "Brush Material",
      "Active Brush Source Material Properties"},
+    {BCONTEXT_LAYER_MATERIAL,
+     "LAYER_MATERIAL",
+     ICON_MATERIAL,
+     "Layer Material",
+     "Source Material Properties of the active Material paint layer"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -7460,6 +7465,7 @@ static void rna_def_space_properties_filter(StructRNA *srna)
       "show_properties_strip",
       "show_properties_strip_modifier",
       "show_properties_brush_material",
+      "show_properties_layer_material",
   };
 
   for (const int i : IndexRange(BCONTEXT_TOT)) {

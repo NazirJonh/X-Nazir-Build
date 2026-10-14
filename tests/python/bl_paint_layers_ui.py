@@ -13,6 +13,51 @@ from types import SimpleNamespace
 import bpy
 
 
+class _MockLayout:
+    """Records the draw calls a widget makes, so the panel helpers run without a window."""
+
+    def __init__(self):
+        object.__setattr__(self, "calls", [])
+        object.__setattr__(self, "_values", {})
+
+    def _record(self, kind, args, kwargs):
+        self.calls.append((kind, args, kwargs))
+        return self
+
+    def row(self, *args, **kwargs):
+        return self._record("row", args, kwargs)
+
+    def column(self, *args, **kwargs):
+        return self._record("column", args, kwargs)
+
+    def grid_flow(self, *args, **kwargs):
+        return self._record("grid_flow", args, kwargs)
+
+    def label(self, *args, **kwargs):
+        return self._record("label", args, kwargs)
+
+    def separator(self, *args, **kwargs):
+        return self._record("separator", args, kwargs)
+
+    def operator(self, idname, *args, **kwargs):
+        return self._record("operator", (idname,), kwargs)
+
+    def prop(self, *args, **kwargs):
+        return self._record("prop", args, kwargs)
+
+    def prop_enum(self, *args, **kwargs):
+        return self._record("prop_enum", args, kwargs)
+
+    def template_ID(self, *args, **kwargs):
+        return self._record("template_ID", args, kwargs)
+
+    def __setattr__(self, name, value):
+        self._values[name] = value
+
+    def operator_ids(self):
+        return [call[1][0] for call in self.calls if call[0] == "operator"]
+
+
 class PaintLayersUiTest(unittest.TestCase):
     def setUp(self):
         bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -144,6 +189,38 @@ class PaintLayersUiTest(unittest.TestCase):
         # Dropping the set to one channel leaves the records on the row but counts only that channel.
         self.material.paint_layers_channels = {'BASE_COLOR'}
         self.assertEqual(material_layer_weight_record_count(self.material, layer), 1)
+
+    def test_layer_widget_draws_a_toggle_per_visible_channel(self):
+        from bl_ui.properties_material_paint_layers import draw_material_layer_channels
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        layout = _MockLayout()
+        draw_material_layer_channels(layout, None, self.material, layer)
+        ids = layout.operator_ids()
+        self.assertTrue(ids)
+        self.assertTrue(
+            all(idname == "material.paint_layer_channel_toggle" for idname in ids))
+        # One toggle per channel the set shows (the five built-in channels).
+        self.assertEqual(len(ids), 5)
+
+    def test_layer_widget_hides_a_channel_out_of_the_set(self):
+        from bl_ui.properties_material_paint_layers import draw_material_layer_channels
+
+        layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers_channels = {'BASE_COLOR', 'SPECULAR'}
+        layout = _MockLayout()
+        draw_material_layer_channels(layout, None, self.material, layer)
+        self.assertEqual(len(layout.operator_ids()), 2)
+
+    def test_channel_set_widget_draws_a_checkbox_per_channel(self):
+        from bl_ui.properties_material_paint_layers import draw_material_channel_set
+
+        self.material.paint_layers.new(source='IMAGE', name="Layer")
+        layout = _MockLayout()
+        draw_material_channel_set(layout, self.material)
+        drawn = [call[1][2] for call in layout.calls if call[0] == "prop_enum"]
+        self.assertEqual(drawn, ['BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'ALPHA',
+                                 'AO', 'EMISSION', 'SPECULAR'])
 
 
 if __name__ == "__main__":

@@ -98,6 +98,21 @@ static Image *paint_layers_map_create(
 
 bool BKE_paint_layers_target_get(Material &ma, const int channel, PaintLayersTarget &r_target)
 {
+  return BKE_paint_layers_target_get(ma, channel, PaintLayersTargetMode::Content, r_target);
+}
+
+PaintLayersTargetMode BKE_paint_layers_target_mode(const PaintModeSettings *settings)
+{
+  return (settings != nullptr && settings->layer_target_mode == PAINT_LAYER_TARGET_MASK) ?
+             PaintLayersTargetMode::Mask :
+             PaintLayersTargetMode::Content;
+}
+
+bool BKE_paint_layers_target_get(Material &ma,
+                                 const int channel,
+                                 const PaintLayersTargetMode mode,
+                                 PaintLayersTarget &r_target)
+{
   if (!BKE_paint_layers_is_layered(ma)) {
     return false;
   }
@@ -112,7 +127,21 @@ bool BKE_paint_layers_target_get(Material &ma, const int channel, PaintLayersTar
   r_target.material = &ma;
   r_target.layer = layer;
   r_target.channel = channel;
-  r_target.channel_record = paint_layer_channel_find(*layer, channel);
+  r_target.mode = mode;
+  if (mode == PaintLayersTargetMode::Content) {
+    r_target.channel_record = paint_layer_channel_find(*layer, channel);
+    return true;
+  }
+  /* A mask is one grey map in the item's Base Color record: a stroke's other channels have nothing
+   * to write into, and a row without a mask has nothing to paint (the mode switch adds one). */
+  if (channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    return false;
+  }
+  r_target.mask_item = BKE_paint_layers_mask_base(*layer);
+  if (r_target.mask_item == nullptr) {
+    return false;
+  }
+  r_target.channel_record = paint_layer_channel_find(*r_target.mask_item, channel);
   return true;
 }
 
@@ -134,7 +163,19 @@ bool BKE_paint_layers_find_image_use(Material &ma,
       if (layer.channels[i].image == &image) {
         r_use.layer = &layer;
         r_use.channel = layer.channels[i].channel;
+        r_use.is_mask = false;
         return true;
+      }
+    }
+    /* A mask item's map: reported as the item, so the caller reads its channels like a row's. */
+    for (MaterialPaintLayer &item : layer.mask_stack) {
+      for (const int i : IndexRange(item.channels_num)) {
+        if (item.channels[i].image == &image) {
+          r_use.layer = &item;
+          r_use.channel = item.channels[i].channel;
+          r_use.is_mask = true;
+          return true;
+        }
       }
     }
   }
@@ -155,9 +196,30 @@ bool BKE_paint_layers_target_get(
   return BKE_paint_layers_target_get(*ma, channel, r_target);
 }
 
+bool BKE_paint_layers_target_get(Object &ob,
+                                 const int material_slot,
+                                 const int channel,
+                                 const PaintLayersTargetMode mode,
+                                 PaintLayersTarget &r_target)
+{
+  Material *ma = (material_slot < 0) ?
+                     BKE_paint_layers_active_material_get(&ob) :
+                     BKE_object_material_get(&ob, short(material_slot + 1));
+  if (ma == nullptr) {
+    return false;
+  }
+  return BKE_paint_layers_target_get(*ma, channel, mode, r_target);
+}
+
 bool BKE_paint_layers_target_is_live(const PaintLayersTarget &target)
 {
-  return target.layer != nullptr && paint_layer_channel_live(target.channel_record);
+  if (target.layer == nullptr || !paint_layer_channel_live(target.channel_record)) {
+    return false;
+  }
+  /* A switched-off mask is not a paint target: it hides nothing, so a stroke into it would be
+   * invisible. */
+  return target.mode != PaintLayersTargetMode::Mask ||
+         (target.mask_item != nullptr && (target.mask_item->flag & MA_PAINT_LAYER_ENABLED) != 0);
 }
 
 Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
@@ -168,6 +230,52 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target)
   return target.channel_record->image;
 }
 
+/**
+ * The mask counterpart of #BKE_paint_layers_target_ensure_writable: the base mask item gets a map
+ * the first time a stroke lands on it. The map is filled with the constant it replaces, so the row
+ * looks the same before and after the first stroke; its colorspace is Non-Color, as a mask is a
+ * number and not a colour.
+ */
+static Image *paint_layers_mask_ensure_writable(Main &bmain,
+                                                PaintLayersTarget &target,
+                                                const int image_size)
+{
+  MaterialPaintLayer *item = target.mask_item;
+  if (item == nullptr || (item->flag & MA_PAINT_LAYER_ENABLED) == 0) {
+    return nullptr;
+  }
+  MaterialPaintLayerChannel *record = paint_layer_channel_find(*item,
+                                                               PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  /* A switched-off record is refused rather than re-enabled, as for any other channel. */
+  if (record == nullptr || !paint_layer_channel_live(record)) {
+    return nullptr;
+  }
+  target.channel_record = record;
+  if (record->image != nullptr) {
+    return record->image;
+  }
+
+  char name[192];
+  BLI_snprintf(name,
+               sizeof(name),
+               "%s Mask",
+               target.layer->name[0] != '\0' ? target.layer->name : "Layer");
+  Image *image = paint_layers_map_create(bmain, name, image_size, /*is_color=*/false, record->value);
+  if (image == nullptr) {
+    return nullptr;
+  }
+  if (!BKE_paint_layers_channel_set_image(
+          *target.material, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image))
+  {
+    BKE_id_free(&bmain, image);
+    return nullptr;
+  }
+  /* The record took its own user; the one the image was born with goes, or the map could never
+   * become an orphan once its mask is removed. */
+  id_us_min(&image->id);
+  return record->image;
+}
+
 Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
                                                PaintLayersTarget &target,
                                                const int image_size,
@@ -175,6 +283,9 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
 {
   if (target.material == nullptr || target.layer == nullptr) {
     return nullptr;
+  }
+  if (target.mode == PaintLayersTargetMode::Mask) {
+    return paint_layers_mask_ensure_writable(bmain, target, image_size);
   }
   const eMaterialPaintChannel channel = eMaterialPaintChannel(target.channel);
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);

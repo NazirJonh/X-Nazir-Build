@@ -854,7 +854,10 @@ static void texture_paint_prepare_layered_maps(bContext *C,
     for (Material *ma : materials) {
       const int channel = BKE_paint_layers_texpaint_slot_channel(ma->paint_active_slot);
       PaintLayersTarget target;
-      if (channel < 0 || !BKE_paint_layers_target_get(*ma, channel, target)) {
+      if (channel < 0 ||
+          !BKE_paint_layers_target_get(
+              *ma, channel, BKE_paint_layers_target_mode(&paint_mode), target))
+      {
         continue;
       }
       if (BKE_paint_layers_target_image(target) != nullptr) {

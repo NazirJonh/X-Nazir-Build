@@ -586,7 +586,13 @@ struct Material {
   /* Displacement. */
   float inflate_bounds = 0;
 
-  char _pad3[4] = {};
+  /**
+   * The active paint slot a layered material had before Mask mode moved it to Base Color, plus one;
+   * zero when nothing is held. The mask lives in Base Color's slot alone, so Mask mode overrides the
+   * user's choice of channel and leaving the mode has to give it back (zero in older files).
+   */
+  short paint_content_slot = 0;
+  char _pad3[2] = {};
 
   /**
    * Cached slots for texture painting, must be refreshed via

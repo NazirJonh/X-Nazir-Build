@@ -2129,8 +2129,9 @@ int BKE_paint_layers_texpaint_slot_channel(const int slot_index)
  * Fill the slots of layered \a ma from its description. Reads the description only and never
  * touches the node tree. The caller has detached the previous slot array.
  */
-static void paint_layers_texpaint_slots_fill(Material &ma)
+static void paint_layers_texpaint_slots_fill(Material &ma, const PaintModeSettings &mode_settings)
 {
+  const PaintLayersTargetMode mode = BKE_paint_layers_target_mode(&mode_settings);
   Vector<const MaterialPaintChannelInfo *> infos;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (info.supports_image_paint) {
@@ -2149,9 +2150,9 @@ static void paint_layers_texpaint_slots_fill(Material &ma)
     const MaterialPaintChannelInfo &info = *infos[index];
     TexPaintSlot &slot = ma.texpaintslot[index];
     PaintLayersTarget target;
-    if (BKE_paint_layers_target_get(ma, int(info.channel), target)) {
+    if (BKE_paint_layers_target_get(ma, int(info.channel), mode, target)) {
       /* A switched-off record keeps its map in the file but is not a paint target, so it reads as
-       * an empty slot. */
+       * an empty slot. In Mask mode only Base Color's slot holds anything: the row's mask map. */
       slot.ima = BKE_paint_layers_target_image(target);
     }
     slot.valid = slot.ima != nullptr;
@@ -2161,6 +2162,24 @@ static void paint_layers_texpaint_slots_fill(Material &ma)
   /* The active slot is a choice of the user, kept across the refresh. */
   ma.paint_active_slot = clamp_i(ma.paint_active_slot, 0, count - 1);
   ma.paint_clone_slot = clamp_i(ma.paint_clone_slot, 0, count - 1);
+  if (mode == PaintLayersTargetMode::Mask) {
+    /* The projection canvas paints the active slot, and the mask lives in Base Color's alone. The
+     * user's own choice is held (once, so a refresh in Mask mode does not take the override for it)
+     * and given back when the mode is left. */
+    for (const int index : IndexRange(count)) {
+      if (infos[index]->channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        if (ma.paint_content_slot == 0) {
+          ma.paint_content_slot = short(ma.paint_active_slot + 1);
+        }
+        ma.paint_active_slot = index;
+        break;
+      }
+    }
+  }
+  else if (ma.paint_content_slot != 0) {
+    ma.paint_active_slot = clamp_i(ma.paint_content_slot - 1, 0, count - 1);
+    ma.paint_content_slot = 0;
+  }
 }
 
 /** \} */
@@ -2189,7 +2208,7 @@ void BKE_texpaint_slot_refresh_cache(Scene *scene, Material *ma, const Object *o
   }
   else if (BKE_paint_layers_is_layered(*ma)) {
     /* A layered material's slots come from the description, never from the node tree. */
-    paint_layers_texpaint_slots_fill(*ma);
+    paint_layers_texpaint_slots_fill(*ma, scene->toolsettings->paint_mode);
   }
   else if (!(ma->nodetree)) {
     ma->paint_active_slot = 0;

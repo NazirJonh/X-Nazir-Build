@@ -1013,6 +1013,7 @@ void PAINT_OT_material_paint_source_material_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot);
 void PAINT_OT_material_paint_brush_sync(wmOperatorType *ot);
 void PAINT_OT_material_channel_value_invert(wmOperatorType *ot);
+void PAINT_OT_layer_target_mode_set(wmOperatorType *ot);
 void PAINT_OT_material_channel_source_clear(wmOperatorType *ot);
 void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot);

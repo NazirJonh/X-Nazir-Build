@@ -3381,6 +3381,26 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "Stack Layer Channel",
                            "The channel whose value the Stack Layers columns show and edit");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+
+  /* Read-only, like `Object.mode`: switching goes through PAINT_OT_layer_target_mode_set, which
+   * also gives a row entered into Mask mode the mask it lacks. */
+  static const EnumPropertyItem layer_target_mode_items[] = {
+      {PAINT_LAYER_TARGET_CONTENT,
+       "CONTENT",
+       0,
+       "Content",
+       "Paint the active layer's channel content"},
+      {PAINT_LAYER_TARGET_MASK, "MASK", 0, "Mask", "Paint the active layer's mask"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "layer_target_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "layer_target_mode");
+  RNA_def_property_enum_items(prop, layer_target_mode_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Layer Target",
+      "Whether a layered material's stroke paints the active layer's channel content or its mask");
 }
 
 static const EnumPropertyItem rna_shape_blend_items[] = {

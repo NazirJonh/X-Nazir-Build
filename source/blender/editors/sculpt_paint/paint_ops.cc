@@ -866,6 +866,76 @@ static wmOperatorStatus material_channel_value_invert_exec(bContext *C, wmOperat
   return OPERATOR_FINISHED;
 }
 
+/** Operator-only choice next to #ePaintLayerTargetMode: not a stored mode, resolved on exec. */
+static constexpr int LAYER_TARGET_MODE_TOGGLE = 2;
+
+static const EnumPropertyItem layer_target_mode_set_items[] = {
+    {PAINT_LAYER_TARGET_CONTENT, "CONTENT", 0, "Content", "Paint the active layer's content"},
+    {PAINT_LAYER_TARGET_MASK, "MASK", 0, "Mask", "Paint the active layer's mask"},
+    {LAYER_TARGET_MODE_TOGGLE, "TOGGLE", 0, "Toggle", "Switch between content and mask"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static bool layer_target_mode_set_poll(bContext *C)
+{
+  Material *ma = BKE_paint_layers_active_material_get(CTX_data_active_object(C));
+  return ma != nullptr && BKE_paint_layers_active_layer_get(*ma) != nullptr &&
+         CTX_data_scene(C) != nullptr;
+}
+
+static wmOperatorStatus layer_target_mode_set_exec(bContext *C, wmOperator *op)
+{
+  Scene *scene = CTX_data_scene(C);
+  Object *ob = CTX_data_active_object(C);
+  Material *ma = BKE_paint_layers_active_material_get(ob);
+  MaterialPaintLayer *layer = (ma != nullptr) ? BKE_paint_layers_active_layer_get(*ma) : nullptr;
+  if (scene == nullptr || layer == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint layer");
+    return OPERATOR_CANCELLED;
+  }
+  PaintModeSettings &mode_settings = scene->toolsettings->paint_mode;
+  const int requested = RNA_enum_get(op->ptr, "mode");
+  ePaintLayerTargetMode mode = ePaintLayerTargetMode(requested);
+  if (requested == LAYER_TARGET_MODE_TOGGLE) {
+    mode = (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) ?
+               PAINT_LAYER_TARGET_CONTENT :
+               PAINT_LAYER_TARGET_MASK;
+  }
+
+  /* A row entered into Mask mode without a mask gets one that hides nothing, so the mode is never
+   * a state in which strokes silently go nowhere. */
+  if (mode == PAINT_LAYER_TARGET_MASK && BKE_paint_layers_mask_base(*layer) == nullptr) {
+    if (BKE_paint_layers_mask_add(*ma, layer, 1.0f) == nullptr) {
+      BKE_report(op->reports, RPT_ERROR, "Cannot add a mask to the active paint layer");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  mode_settings.layer_target_mode = int8_t(mode);
+
+  /* The slots are what a projection stroke reads: they are the mask's map now, or the row's. */
+  BKE_texpaint_slots_refresh_object(scene, ob);
+  WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, scene);
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, ma);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_layer_target_mode_set(wmOperatorType *ot)
+{
+  ot->name = "Set Layer Target";
+  ot->idname = "PAINT_OT_layer_target_mode_set";
+  ot->description =
+      "Choose whether a layered material's stroke paints the active layer's content or its mask";
+  ot->exec = layer_target_mode_set_exec;
+  ot->poll = layer_target_mode_set_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->prop = RNA_def_enum(ot->srna,
+                          "mode",
+                          layer_target_mode_set_items,
+                          PAINT_LAYER_TARGET_CONTENT,
+                          "Mode",
+                          "Target to switch to");
+}
+
 void PAINT_OT_material_channel_value_invert(wmOperatorType *ot)
 {
   ot->name = "Invert Value";
@@ -2574,6 +2644,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_images_ensure);
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
+  WM_operatortype_append(PAINT_OT_layer_target_mode_set);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);
   WM_operatortype_append(PAINT_OT_material_channel_source_image_set);
   WM_operatortype_append(PAINT_OT_material_paint_channels_assign_images);

@@ -6965,14 +6965,23 @@ static bool proj_paint_add_layered_slot(bContext *C, wmOperator *op, Object &ob,
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
 
-  const int channel = proj_paint_layer_type_channel(RNA_enum_get(op->ptr, "type"));
+  const PaintLayersTargetMode mode = BKE_paint_layers_target_mode(
+      &scene->toolsettings->paint_mode);
+  /* In Mask mode the only map is the mask's, and Base Color names it whatever the type says. */
+  const int channel = (mode == PaintLayersTargetMode::Mask) ?
+                          int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
+                          proj_paint_layer_type_channel(RNA_enum_get(op->ptr, "type"));
   if (channel < 0) {
     BKE_report(op->reports, RPT_ERROR, "A layered material has no map for this layer type");
     return false;
   }
   PaintLayersTarget target;
-  if (!BKE_paint_layers_target_get(ma, channel, target)) {
-    BKE_report(op->reports, RPT_ERROR, "Select a layer of the material before adding a map");
+  if (!BKE_paint_layers_target_get(ma, channel, mode, target)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               mode == PaintLayersTargetMode::Mask ?
+                   "Select a layer with a mask before adding its map" :
+                   "Select a layer of the material before adding a map");
     return false;
   }
 

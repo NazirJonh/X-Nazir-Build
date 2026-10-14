@@ -23,6 +23,8 @@
  * opens undo and never runs from a sample.
  */
 
+#include <cstdint>
+
 namespace blender {
 
 struct Image;
@@ -31,6 +33,7 @@ struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
 struct Object;
+struct PaintModeSettings;
 
 /**
  * Where a description references one image: the row whose `channels` carries it and the
@@ -40,9 +43,12 @@ struct Object;
  * `channels` holds it, so a map used by two materials stays with the one that was searched.
  */
 struct PaintLayersImageUse {
+  /** The row, or the mask item (see #is_mask), whose `channels` carries the image. */
   MaterialPaintLayer *layer = nullptr;
   /** The #eMaterialPaintChannel the image drives. */
   int channel = -1;
+  /** The image is the map of a mask item, not channel content of a row. */
+  bool is_mask = false;
 };
 
 /**
@@ -56,6 +62,12 @@ struct PaintLayersImageUse {
 bool BKE_paint_layers_find_image_use(Material &ma,
                                      const Image &image,
                                      PaintLayersImageUse &r_use);
+
+/** What a stroke of a layered material paints: the row's channel content, or its mask. */
+enum class PaintLayersTargetMode : int8_t {
+  Content = 0,
+  Mask = 1,
+};
 
 /** The resolved description row and channel a stroke paints into. */
 struct PaintLayersTarget {
@@ -72,6 +84,13 @@ struct PaintLayersTarget {
   MaterialPaintLayerChannel *channel_record = nullptr;
   /** #eMaterialPaintChannel the target addresses. */
   int channel = 0;
+  /** What the stroke paints: the row's channel content, or its mask. */
+  PaintLayersTargetMode mode = PaintLayersTargetMode::Content;
+  /**
+   * The mask item a #PaintLayersTargetMode::Mask target paints: the row's base mask. Its Base Color
+   * record is #channel_record, and its map the one the stroke writes.
+   */
+  MaterialPaintLayer *mask_item = nullptr;
 };
 
 /**
@@ -82,6 +101,24 @@ struct PaintLayersTarget {
  * record is created on the first stroke.
  */
 bool BKE_paint_layers_target_get(Material &ma, int channel, PaintLayersTarget &r_target);
+
+/**
+ * Resolve the target of \a ma's active row for \a mode.
+ *
+ * In #PaintLayersTargetMode::Mask the target is the row's base mask, and only Base Color names it:
+ * a mask is one grey map, so a stroke's other channels resolve to nothing instead of being written
+ * into it.
+ *
+ * \return false as #BKE_paint_layers_target_get does, and in Mask mode also when \a channel is not
+ * Base Color or the row has no mask.
+ */
+bool BKE_paint_layers_target_get(Material &ma,
+                                 int channel,
+                                 PaintLayersTargetMode mode,
+                                 PaintLayersTarget &r_target);
+
+/** The mode a stroke runs in: #PaintModeSettings::layer_target_mode, Content for null. */
+PaintLayersTargetMode BKE_paint_layers_target_mode(const PaintModeSettings *settings);
 
 /**
  * The layered material \a ob paints into: its active material slot's material, when that material
@@ -103,6 +140,13 @@ Material *BKE_paint_layers_active_material_get(Object *ob);
  */
 bool BKE_paint_layers_target_get(
     Object &ob, int material_slot, int channel, PaintLayersTarget &r_target);
+
+/** As above, resolving the target of \a mode. */
+bool BKE_paint_layers_target_get(Object &ob,
+                                 int material_slot,
+                                 int channel,
+                                 PaintLayersTargetMode mode,
+                                 PaintLayersTarget &r_target);
 
 /**
  * Whether the active row takes strokes into the channel: it has a record for it and the record is

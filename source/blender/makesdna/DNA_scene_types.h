@@ -2206,6 +2206,14 @@ struct MaterialPaintChannelLayerBinding {
   char attribute_name[64] = {};
 };
 
+/** #PaintModeSettings::layer_target_mode: what a layered material's stroke paints. */
+enum ePaintLayerTargetMode : int8_t {
+  /** The active row's channel content. The default, so saved files need no versioning. */
+  PAINT_LAYER_TARGET_CONTENT = 0,
+  /** The active row's mask. */
+  PAINT_LAYER_TARGET_MASK = 1,
+};
+
 struct PaintModeSettings {
   /** Source to select canvas from to paint on. */
   ePaintCanvasSource canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
@@ -2265,7 +2273,13 @@ struct PaintModeSettings {
 
   /** The channel the Stack Layers header selects, which the Outliner's value columns address. */
   int stack_layer_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
-  char _pad_stack_layer[4] = {};
+  /**
+   * #ePaintLayerTargetMode: whether a stroke on a layered material paints the active row's channel
+   * content or its mask. Switched through `PAINT_OT_layer_target_mode_set`, which also adds the mask
+   * a row is entered into Mask mode without.
+   */
+  int8_t layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
+  char _pad_stack_layer[3] = {};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

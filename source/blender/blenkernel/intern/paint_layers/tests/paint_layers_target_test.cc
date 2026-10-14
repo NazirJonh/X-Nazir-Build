@@ -378,4 +378,229 @@ TEST_F(PaintLayersTargetTest, find_image_use_reads_the_description)
   EXPECT_EQ(use.channel, int(PAINT_MATERIAL_CHANNEL_ROUGHNESS));
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Mask target
+ * \{ */
+
+TEST_F(PaintLayersTargetTest, mask_target_resolves_the_base_mask_by_base_color_alone)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+
+  /* A row without a mask has nothing to paint in Mask mode; Content is unaffected. */
+  PaintLayersTarget target;
+  EXPECT_FALSE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target));
+
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.6f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_EQ(target.mode, PaintLayersTargetMode::Mask);
+  EXPECT_EQ(target.layer, layer);
+  EXPECT_EQ(target.mask_item, item);
+  EXPECT_EQ(target.channel_record,
+            paint_layer_channel_find(*item, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_TRUE(BKE_paint_layers_target_is_live(target));
+  /* No map yet: the first stroke makes it. */
+  EXPECT_EQ(BKE_paint_layers_target_image(target), nullptr);
+
+  /* A mask is one grey map: no other channel names it. */
+  EXPECT_FALSE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, PaintLayersTargetMode::Mask, target));
+}
+
+TEST_F(PaintLayersTargetTest, mask_ensure_writable_fills_the_map_with_the_constant)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.6f);
+  ASSERT_NE(item, nullptr);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(image, nullptr);
+
+  /* The item holds the map, and the map is its only user: removing the mask lets it go. */
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      *item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  EXPECT_EQ(record->image, image);
+  EXPECT_EQ(image->id.us, 1);
+  EXPECT_EQ(BKE_paint_layers_target_image(target), image);
+  EXPECT_STREQ(image->id.name + 2, "L Mask");
+
+  /* One convention for every paint-layer map: straight bytes. A mask is data, not a colour. */
+  EXPECT_EQ(image->alpha_mode, IMA_ALPHA_STRAIGHT);
+  EXPECT_NE(image->flag & IMA_PAINT_CANVAS, 0);
+  EXPECT_TRUE(IMB_colormanagement_space_name_is_data(image->colorspace_settings.name));
+
+  /* The map keeps the look of the constant it replaces: opaque grey 0.6. */
+  uchar pixel[4];
+  first_byte_pixel(*image, pixel);
+  EXPECT_EQ(pixel[0], 153);
+  EXPECT_EQ(pixel[3], 255);
+
+  /* A second call hands back the same map. */
+  EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, target, 4), image);
+
+  /* The map is the mask's: the row's content channels are untouched. */
+  EXPECT_EQ(layer->channels_num, 0);
+}
+
+TEST_F(PaintLayersTargetTest, mask_off_is_refused_not_switched_back_on)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.6f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, item, false));
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_FALSE(BKE_paint_layers_target_is_live(target));
+  EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, target, 4), nullptr);
+  EXPECT_EQ(item->flag & MA_PAINT_LAYER_ENABLED, 0);
+
+  /* A switched-off record is refused too, like any other channel's. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, item, true));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enabled(
+      *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, target, 4), nullptr);
+}
+
+TEST_F(PaintLayersTargetTest, find_image_use_reports_a_mask_map_as_the_mask_item)
+{
+  Image *content = add_solid_image("Content");
+  MaterialPaintLayer *layer = add_paint_layer("L", content);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(item, nullptr);
+  Image *map = add_solid_image("MaskMap");
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  PaintLayersImageUse use;
+  ASSERT_TRUE(BKE_paint_layers_find_image_use(*ma, *map, use));
+  EXPECT_EQ(use.layer, item);
+  EXPECT_TRUE(use.is_mask);
+  EXPECT_EQ(use.channel, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  ASSERT_TRUE(BKE_paint_layers_find_image_use(*ma, *content, use));
+  EXPECT_EQ(use.layer, layer);
+  EXPECT_FALSE(use.is_mask);
+}
+
+TEST_F(PaintLayersTargetTest, stroke_funnel_answers_the_mask_map_in_mask_mode)
+{
+  Image *content = add_solid_image("Content");
+  MaterialPaintLayer *layer = add_paint_layer("L", content);
+  Image *rough = add_solid_image("Rough");
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough));
+  /* Normal is the channel whose Content path differs most from a scalar's, so it is checked too. */
+  Image *normal = add_solid_image("Normal");
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL, normal));
+  BKE_paint_layers_active_set(*ma, layer->marker);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(item, nullptr);
+  Image *map = add_solid_image("MaskMap");
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  Object *ob = add_object_with({ma});
+
+  Image *image = nullptr;
+  ImageUser *iuser = nullptr;
+  PaintModeSettings settings;
+
+  /* Content: the row's own maps. */
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &image, &iuser, &settings));
+  EXPECT_EQ(image, content);
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &image, &iuser, &settings));
+  EXPECT_EQ(image, rough);
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_NORMAL, &image, &iuser, &settings));
+  EXPECT_EQ(image, normal);
+
+  /* Mask: Base Color is the mask's map, and the other channels have nothing to write into. */
+  settings.layer_target_mode = PAINT_LAYER_TARGET_MASK;
+  ASSERT_TRUE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &image, &iuser, &settings));
+  EXPECT_EQ(image, map);
+  EXPECT_FALSE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_ROUGHNESS, &image, &iuser, &settings));
+  EXPECT_EQ(image, nullptr);
+  EXPECT_FALSE(BKE_paint_principled_channel_image_get(
+      *ob, PAINT_MATERIAL_CHANNEL_NORMAL, &image, &iuser, &settings));
+  EXPECT_EQ(image, nullptr);
+}
+
+TEST_F(PaintLayersTargetTest, mask_mode_gives_the_active_slot_back_on_leaving)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, layer, 1.0f), nullptr);
+  Object *ob = add_object_with({ma});
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "SlotScene"));
+  ASSERT_NE(scene, nullptr);
+  PaintModeSettings &settings = scene->toolsettings->paint_mode;
+
+  /* The user's choice: the Roughness slot (by its channel, whatever its index is). */
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  int roughness_slot = -1;
+  for (const int slot : IndexRange(ma->tot_slots)) {
+    if (BKE_paint_layers_texpaint_slot_channel(slot) == PAINT_MATERIAL_CHANNEL_ROUGHNESS) {
+      roughness_slot = slot;
+    }
+  }
+  ASSERT_NE(roughness_slot, -1);
+  ma->paint_active_slot = short(roughness_slot);
+
+  /* Mask: the slot moves to Base Color, which holds the mask. */
+  settings.layer_target_mode = PAINT_LAYER_TARGET_MASK;
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_EQ(BKE_paint_layers_texpaint_slot_channel(ma->paint_active_slot),
+            int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  /* A second refresh in Mask mode must not take the override for the user's choice. */
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_EQ(BKE_paint_layers_texpaint_slot_channel(ma->paint_active_slot),
+            int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  /* Content: the choice comes back, and nothing is held any more. */
+  settings.layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_EQ(ma->paint_active_slot, roughness_slot);
+  EXPECT_EQ(ma->paint_content_slot, 0);
+}
+
+TEST_F(PaintLayersTargetTest, mask_mode_does_not_touch_the_content_maps_of_the_row)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, layer, 0.5f), nullptr);
+  Object *ob = add_object_with({ma});
+
+  /* Entering Mask mode and stroking creates the mask's map and nothing else. */
+  PaintModeSettings settings;
+  settings.layer_target_mode = PAINT_LAYER_TARGET_MASK;
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ob, -1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, BKE_paint_layers_target_mode(&settings), target));
+  ASSERT_NE(BKE_paint_layers_target_ensure_writable(*bmain, target, 4), nullptr);
+  EXPECT_EQ(layer->channels_num, 0);
+
+  /* Back in Content the row still has no map of its own. */
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ob, -1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  EXPECT_EQ(BKE_paint_layers_target_image(target), nullptr);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

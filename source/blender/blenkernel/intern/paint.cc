@@ -4565,16 +4565,20 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
                                             eMaterialPaintChannel channel,
                                             Image **r_image,
                                             ImageUser **r_iuser,
-                                            PaintModeSettings * /*mode_settings*/)
+                                            PaintModeSettings *mode_settings)
 {
   *r_image = nullptr;
   *r_iuser = nullptr;
 
   /* A layered material has no Principled-socket map to resolve: its target is the active row's
-   * channel map, read from the description. The cache below is only for the graph-truth path. */
+   * channel map, read from the description. The cache below is only for the graph-truth path. In
+   * Mask mode that is the row's mask map, which only Base Color names: the stroke's other channels
+   * resolve to nothing, so they are never written into it. */
   if (Material *layered = BKE_paint_layers_active_material_get(&ob)) {
     PaintLayersTarget target;
-    if (!BKE_paint_layers_target_get(*layered, channel, target)) {
+    if (!BKE_paint_layers_target_get(
+            *layered, channel, BKE_paint_layers_target_mode(mode_settings), target))
+    {
       return false;
     }
     *r_image = BKE_paint_layers_target_image(target);
@@ -4770,13 +4774,19 @@ static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_m
 
   /* The channels the row takes and that have no map yet. Collected first and resolved again one by
    * one below: adding a map edits the row, and a target points into its records. */
+  const PaintLayersTargetMode mode = BKE_paint_layers_target_mode(&mode_settings);
   Vector<int> channels;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!info.supports_image_paint || (channel_mask & (1u << int(info.channel))) == 0) {
       continue;
     }
     PaintLayersTarget target;
-    if (!BKE_paint_layers_target_get(ob, -1, info.channel, target)) {
+    if (!BKE_paint_layers_target_get(ob, -1, info.channel, mode, target)) {
+      if (mode == PaintLayersTargetMode::Mask) {
+        /* A mask is Base Color's alone: the stroke's other channels have no target, which is not
+         * the absence of a row. */
+        continue;
+      }
       /* No active row: nothing to paint into. */
       return result;
     }
@@ -4791,7 +4801,7 @@ static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_m
 
   for (const int channel : channels) {
     PaintLayersTarget target;
-    if (!BKE_paint_layers_target_get(ob, -1, channel, target)) {
+    if (!BKE_paint_layers_target_get(ob, -1, channel, mode, target)) {
       continue;
     }
     const Image *image = BKE_paint_layers_target_ensure_writable(

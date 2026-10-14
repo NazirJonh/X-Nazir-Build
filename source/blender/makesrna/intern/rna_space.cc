@@ -10168,6 +10168,11 @@ static void rna_def_space_node(BlenderRNA *brna)
        ICON_BRUSH_DATA,
        "Brush",
        "Edit shader nodes from the active paint brush's source material"},
+      {SNODE_SHADER_PAINT_LAYER,
+       "PAINT_LAYER",
+       ICON_MATERIAL,
+       "Paint Layer",
+       "Edit shader nodes from the material of the active paint layer"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

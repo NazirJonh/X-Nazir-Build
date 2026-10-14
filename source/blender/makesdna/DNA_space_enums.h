@@ -1005,6 +1005,7 @@ enum eSpaceNode_ShaderFrom : char {
   SNODE_SHADER_WORLD = 1,
   SNODE_SHADER_LINESTYLE = 2,
   SNODE_SHADER_BRUSH = 3,
+  SNODE_SHADER_PAINT_LAYER = 4,
 };
 
 /** #SpaceNode.nodes_type */

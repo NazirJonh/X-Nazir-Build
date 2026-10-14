@@ -293,6 +293,80 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+/**
+ * The Stack Layers header carries the add and the remove of a mask as two icon buttons of this one
+ * operator, so what each does is read from `add` rather than from the shared definition.
+ */
+static std::string stack_row_mask_get_description(bContext * /*C*/,
+                                                  wmOperatorType *ot,
+                                                  PointerRNA *ptr)
+{
+  if (ptr == nullptr || !RNA_struct_property_is_set(ptr, "add")) {
+    return ot->description;
+  }
+  return RNA_boolean_get(ptr, "add") ? "Add a mask to the active layer: a coverage factor laid over "
+                                       "it, painted in Mask mode" :
+                                       "Remove the active layer's mask together with its map";
+}
+
+void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot)
+{
+  static const EnumPropertyItem initial_color_items[] = {
+      {0, "WHITE", 0, "Add White Mask", "Add a mask that shows the layer everywhere"},
+      {1, "BLACK", 0, "Add Black Mask", "Add a mask that hides the layer until it is painted in"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  ot->name = "Stack Layer Mask";
+  ot->idname = "OUTLINER_OT_stack_layer_mask";
+  ot->description = "Add or remove the mask that modulates a layer";
+  ot->get_description = stack_row_mask_get_description;
+  ot->exec = stack_row_mask_exec;
+  ot->poll = stack_row_mask_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to mask; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+  RNA_def_boolean(
+      ot->srna, "add", true, "Add", "Add a mask, rather than removing the one already there");
+  RNA_def_enum(ot->srna,
+               "initial_color",
+               initial_color_items,
+               0,
+               "Initial Color",
+               "Initial fill of a newly added mask");
+}
+
+void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Stack Layer Mask";
+  ot->idname = "OUTLINER_OT_stack_layer_mask_toggle";
+  ot->description = "Turn a layer's mask on or off, keeping the mask and its paint content";
+  ot->exec = stack_row_mask_toggle_exec;
+  /* Only while the mask slot is the one showing, so the context menu lists it then and not before. */
+  ot->poll = stack_row_mask_section_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer whose mask to toggle; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot)
 {
   ot->name = "Remove Stack Layer";

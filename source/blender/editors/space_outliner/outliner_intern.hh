@@ -844,6 +844,12 @@ wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op);
 bool stack_row_reorder_poll(bContext *C);
 wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_visibility_toggle_poll(bContext *C);
+wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op);
+bool stack_row_mask_poll(bContext *C);
+/** As #stack_row_mask_poll, and the row's mask slot is the one showing: what Toggle and Remove Mask
+ * poll with, so the menus list them only while the mask is what is being worked on. */
+bool stack_row_mask_section_poll(bContext *C);
 /* The Add/Remove operator bodies live in outliner_stack_layers.cc; these are the exec, invoke,
  * poll and itemf hooks the registrations in outliner_stack_layers_ops.cc hand in. */
 bool stack_add_poll(bContext *C);
@@ -969,6 +975,8 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
 void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);

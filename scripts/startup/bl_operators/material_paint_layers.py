@@ -166,8 +166,93 @@ class MATERIAL_OT_paint_layer_channel_toggle(_PaintLayerOperator):
         return {'FINISHED'}
 
 
+def _leave_mask_target(context, layer):
+    """Back to painting the content when the mask being painted is about to go away or off.
+
+    Only the active layer's mask is the one a stroke is aimed at, so another layer's mask going away
+    leaves the mode alone, as the Outliner's seam does."""
+    material = context.material
+    if material is None or material.paint_layers.active is None:
+        return
+    if material.paint_layers.active.marker != layer.marker:
+        return
+    if context.scene.tool_settings.paint_mode.layer_target_mode != 'MASK':
+        return
+    try:
+        bpy.ops.paint.layer_target_mode_set(mode='CONTENT')
+    except RuntimeError:
+        # No active object to switch for (the operator's poll): nothing is being painted either.
+        pass
+
+
+class MATERIAL_OT_paint_layer_mask_add(_PaintLayerOperator):
+    """Give a layer a mask: a coverage factor laid over it. A mask of one shows the layer
+    everywhere; a stroke in Mask mode paints it."""
+
+    bl_idname = "material.paint_layer_mask_add"
+    bl_label = "Add Paint Layer Mask"
+
+    value: bpy.props.FloatProperty(
+        name="Value",
+        description="Constant coverage of the new mask: one shows the layer, zero hides it",
+        default=1.0, min=0.0, max=1.0,
+    )
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        try:
+            layer.mask_add(value=self.value)
+        except RuntimeError as ex:
+            self.report({'WARNING'}, str(ex))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_paint_layer_mask_remove(_PaintLayerOperator):
+    """Remove a layer's mask, together with its map."""
+
+    bl_idname = "material.paint_layer_mask_remove"
+    bl_label = "Remove Paint Layer Mask"
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        # A stroke into a mask that is gone would go nowhere, so the brush goes back to the content.
+        _leave_mask_target(context, layer)
+        try:
+            layer.mask_remove()
+        except RuntimeError as ex:
+            self.report({'WARNING'}, str(ex))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_paint_layer_mask_toggle(_PaintLayerOperator):
+    """Switch a layer's mask on or off, keeping the mask and its paint content."""
+
+    bl_idname = "material.paint_layer_mask_toggle"
+    bl_label = "Toggle Paint Layer Mask"
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None or not len(layer.mask_items):
+            return {'CANCELLED'}
+        item = layer.mask_items[0]
+        if item.enabled:
+            # A switched-off mask hides nothing: strokes into it would be invisible.
+            _leave_mask_target(context, layer)
+        item.enabled = not item.enabled
+        return {'FINISHED'}
+
+
 classes = (
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
     MATERIAL_OT_paint_layer_channel_toggle,
+    MATERIAL_OT_paint_layer_mask_add,
+    MATERIAL_OT_paint_layer_mask_remove,
+    MATERIAL_OT_paint_layer_mask_toggle,
 )

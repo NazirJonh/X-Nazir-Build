@@ -609,6 +609,55 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         draw_material_layer_channels(layout, context, owner, layer)
 
 
+class LAYER_MATERIAL_PT_mask(LayerMaterialButtonsPanel, Panel):
+    """The mask of the active layer: a coverage factor over the layer. Its constant until a stroke
+    in Mask mode gives it a map; the layer shows where the mask reads one and hides where it
+    reads zero."""
+
+    bl_idname = "LAYER_MATERIAL_PT_mask"
+    bl_label = "Mask"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        owner, layer = cls._active_layer(context)
+        return owner is not None and layer is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        _owner, layer = self._active_layer(context)
+        if layer is None:
+            return
+
+        if not len(layer.mask_items):
+            layout.operator("material.paint_layer_mask_add", text="Add Mask", icon='MOD_MASK')
+            return
+
+        item = layer.mask_items[0]
+        editing = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
+
+        row = layout.row(align=True)
+        row.operator("material.paint_layer_mask_toggle", text="Enabled", depress=item.enabled,
+                     icon='HIDE_OFF' if item.enabled else 'HIDE_ON')
+        sub = row.row(align=True)
+        sub.enabled = item.enabled
+        props = sub.operator("paint.layer_target_mode_set", text="Edit Mask", depress=editing,
+                             icon='BRUSH_DATA')
+        props.mode = 'CONTENT' if editing else 'MASK'
+
+        col = layout.column()
+        col.enabled = item.enabled
+        record = item.channels[0] if len(item.channels) else None
+        if record is not None and record.image is not None:
+            col.template_ID(record, "image")
+        else:
+            col.prop(item, "mask_value", text="Value", slider=True)
+        col.prop(item, "opacity", text="Opacity")
+
+        layout.operator("material.paint_layer_mask_remove", text="Remove Mask", icon='X')
+
+
 class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
     """The owner material's global paint channel set: which channels the stack works with.
 
@@ -677,6 +726,7 @@ classes = (
     BRUSH_MATERIAL_PT_custom_props,
     MATERIAL_PT_paint_layers_channels,
     LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_mask,
     LAYER_MATERIAL_PT_channels,
 )
 

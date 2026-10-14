@@ -17,6 +17,8 @@
 #include "DNA_material_types.h"
 #include "DNA_space_types.h"
 
+#include "UI_resources.hh"
+
 #include "outliner_stack_source.hh"
 #include "outliner_stack_source_paint_layers_intern.hh"
 
@@ -64,14 +66,17 @@ TEST_F(OutlinerStackPaintLayersSourceTest, source_is_registered_as_paint_layers)
   EXPECT_EQ(source().type(), SO_STACK_SRC_PAINT_MATERIAL);
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_only_paint)
+TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_paint_and_fill)
 {
   Vector<StackAddKindInfo> kinds;
   const StackEditor *editor = source().editor();
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
-  ASSERT_EQ(kinds.size(), 1u);
+  ASSERT_EQ(kinds.size(), 2u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
+  EXPECT_FALSE(kinds[0].takes_color);
+  EXPECT_EQ(kinds[1].identifier, "FILL");
+  EXPECT_TRUE(kinds[1].takes_color);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, value_column_edits_the_row_opacity)
@@ -184,6 +189,119 @@ TEST_F(OutlinerStackPaintLayersSourceTest, duplicate_copies_the_row_and_its_map)
   ASSERT_NE(copy_channel, nullptr);
   ASSERT_NE(copy_channel->image, nullptr);
   EXPECT_NE(copy_channel->image, image);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, grouping_declares_the_mask_section)
+{
+  const StackEditor *editor = source().editor();
+  ASSERT_NE(editor, nullptr);
+  const StackGroupingEditor *grouping = editor->grouping();
+  ASSERT_NE(grouping, nullptr);
+  EXPECT_EQ(grouping->aux_section_id(), "MASK");
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, row_without_a_mask_has_no_mask_slot_or_section)
+{
+  add_layer("A");
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  for (const StackRowPreview &slot : rows[0].preview_slots) {
+    EXPECT_NE(slot.section_id, "MASK");
+  }
+  for (const StackContentSection &section : rows[0].content_sections) {
+    EXPECT_NE(section.identifier, "MASK");
+  }
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, mask_adds_a_slot_a_section_and_its_switch)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*material, layer, 0.25f);
+  ASSERT_NE(mask, nullptr);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  const StackRow &row = rows[0];
+
+  const StackRowPreview *mask_slot = nullptr;
+  for (const StackRowPreview &slot : row.preview_slots) {
+    if (slot.section_id == "MASK") {
+      mask_slot = &slot;
+    }
+  }
+  ASSERT_NE(mask_slot, nullptr);
+  /* The slot is the Mask icon: no swatch of the constant, no preview of a map. */
+  EXPECT_FALSE(mask_slot->is_color_swatch);
+  EXPECT_EQ(mask_slot->id_uid, 0u);
+  EXPECT_EQ(mask_slot->icon, int(ICON_MOD_MASK));
+
+  bool has_section = false;
+  for (const StackContentSection &section : row.content_sections) {
+    has_section |= section.identifier == "MASK";
+  }
+  EXPECT_TRUE(has_section);
+  EXPECT_TRUE(row.aux_enabled);
+
+  /* A switched-off mask is kept and listed; only the row's switch reads off. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*material, mask, false));
+  rows.clear();
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_FALSE(rows[0].aux_enabled);
+  /* The icon says the same: the mask no longer shapes the coverage. */
+  for (const StackRowPreview &slot : rows[0].preview_slots) {
+    if (slot.section_id == "MASK") {
+      EXPECT_EQ(slot.icon, int(ICON_CLIPUV_HLT));
+    }
+  }
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, mask_slot_keeps_the_mask_icon_once_it_has_a_map)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*material, layer, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  const float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 8, 8, "MaskMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *material, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  const StackRowPreview *mask_slot = nullptr;
+  for (const StackRowPreview &slot : rows[0].preview_slots) {
+    if (slot.section_id == "MASK") {
+      mask_slot = &slot;
+    }
+  }
+  ASSERT_NE(mask_slot, nullptr);
+  /* A painted mask is still the Mask icon: the slot names what it opens, not what it holds. */
+  EXPECT_FALSE(mask_slot->is_color_swatch);
+  EXPECT_FALSE(mask_slot->is_blank);
+  EXPECT_EQ(mask_slot->id_uid, 0u);
+  EXPECT_EQ(mask_slot->icon, int(ICON_MOD_MASK));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_the_mask)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  StackReadContext ctx;
+  const uint64_t before = source().state_hash(ctx, material->id);
+
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*material, layer, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  const uint64_t with_mask = source().state_hash(ctx, material->id);
+  EXPECT_NE(with_mask, before);
+
+  /* The slot's swatch shows the constant, so an edit of it has to reach the rows. */
+  const float dark[4] = {0.2f, 0.2f, 0.2f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *material, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, dark));
+  EXPECT_NE(source().state_hash(ctx, material->id), with_mask);
 }
 
 }  // namespace tests

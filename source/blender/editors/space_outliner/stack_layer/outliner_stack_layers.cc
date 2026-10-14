@@ -431,6 +431,113 @@ wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op)
              OPERATOR_CANCELLED;
 }
 
+wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const bool add = RNA_boolean_get(op->ptr, "add");
+  /* The seam takes a fill colour, so a third kind of mask is a new item on this menu, not a new
+   * parameter carried through every layer between here and the description. */
+  const bool black = RNA_enum_get(op->ptr, "initial_color") == 1;
+  const float initial_color[4] = {black ? 0.0f : 1.0f,
+                                  black ? 0.0f : 1.0f,
+                                  black ? 0.0f : 1.0f,
+                                  1.0f};
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      false,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int & /*r_select_ordinal*/) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        return grouping != nullptr &&
+               grouping->row_aux_set(*C, focus, owner, ordinal, add, initial_color);
+      });
+  if (ok && add) {
+    /* The row now has a mask section; show it, as a click on the mask thumbnail would. The
+     * mutation rebuilt the rows, so the row is looked up again. */
+    const StringRefNull aux_section = stack_aux_section_id(*space_outliner);
+    if (const StackRow *rebuilt = outliner_stack_row_find(*space_outliner, ordinal)) {
+      if (!aux_section.is_empty()) {
+        outliner_stack_row_active_section_set(*space_outliner, *rebuilt, aux_section);
+      }
+    }
+  }
+  return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+bool stack_row_mask_poll(bContext *C)
+{
+  if (!ED_operator_outliner_active(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  return owner != nullptr && stack_source_for_space(*space_outliner)->can_edit(*owner);
+}
+
+bool stack_row_mask_section_poll(bContext *C)
+{
+  if (!stack_row_mask_poll(C)) {
+    return false;
+  }
+  /* The row a header button or the context menu would act on: the selected one, else the active
+   * one, as #stack_operator_ordinal_get answers for an operator with no ordinal of its own. */
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const StringRefNull aux_section = stack_aux_section_id(*space_outliner);
+  if (aux_section.is_empty()) {
+    return false;
+  }
+  Vector<int> selected;
+  stack_selected_ordinals_get(*space_outliner, selected);
+  const int ordinal = !selected.is_empty() ?
+                          selected.first() :
+                          outliner_stack_active_ordinal_get(outliner_stack_read_context(*C),
+                                                            *space_outliner);
+  const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
+  if (row == nullptr) {
+    return false;
+  }
+  /* Only a mask slot that is the one showing: a row with no mask section has nothing to act on. */
+  bool has_section = false;
+  for (const StackContentSection &section : row->content_sections) {
+    has_section |= section.identifier == aux_section;
+  }
+  return has_section && outliner_stack_row_active_section_get(*space_outliner, *row) == aux_section;
+}
+
+wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      false,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int & /*r_select_ordinal*/) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        return grouping != nullptr && grouping->row_aux_toggle(*C, focus, owner, ordinal);
+      });
+  return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
 bool stack_row_visibility_toggle_poll(bContext *C)
 {
   if (!ED_operator_outliner_active(C)) {

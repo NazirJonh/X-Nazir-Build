@@ -242,5 +242,75 @@ class PaintLayersUiTest(unittest.TestCase):
                                  'AO', 'EMISSION', 'SPECULAR'])
 
 
+class PaintLayersMaskUiTest(unittest.TestCase):
+    """The mask of a layer: the thin operators the Layer Material tab uses, and the target mode."""
+
+    def setUp(self):
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        self.material = bpy.data.materials.new("LayeredMask")
+        self.material.use_nodes = True
+        self.layer = self.material.paint_layers.new(source='IMAGE', name="Layer")
+        self.material.paint_layers.active = self.layer
+
+    def test_mask_operators_add_toggle_and_remove(self):
+        layer = self.layer
+        self.assertEqual(len(layer.mask_items), 0)
+        with bpy.context.temp_override(material=self.material):
+            self.assertEqual(
+                bpy.ops.material.paint_layer_mask_add(marker=layer.marker, value=0.3), {'FINISHED'})
+            # One mask per layer: a second add is refused, not stacked.
+            self.assertEqual(
+                bpy.ops.material.paint_layer_mask_add(marker=layer.marker), {'CANCELLED'})
+        self.assertEqual(len(layer.mask_items), 1)
+        item = layer.mask_items[0]
+        self.assertTrue(item.is_mask_base)
+        self.assertAlmostEqual(item.mask_value, 0.3, places=5)
+
+        with bpy.context.temp_override(material=self.material):
+            self.assertEqual(
+                bpy.ops.material.paint_layer_mask_toggle(marker=layer.marker), {'FINISHED'})
+        self.assertFalse(layer.mask_items[0].enabled)
+        with bpy.context.temp_override(material=self.material):
+            bpy.ops.material.paint_layer_mask_toggle(marker=layer.marker)
+        self.assertTrue(layer.mask_items[0].enabled)
+
+        with bpy.context.temp_override(material=self.material):
+            self.assertEqual(
+                bpy.ops.material.paint_layer_mask_remove(marker=layer.marker), {'FINISHED'})
+        self.assertEqual(len(layer.mask_items), 0)
+
+    def test_mask_value_edit_keeps_the_mask_and_reaches_the_record(self):
+        item = self.layer.mask_add(value=1.0)
+        item.mask_value = 0.25
+        self.assertAlmostEqual(item.mask_value, 0.25, places=5)
+        self.assertAlmostEqual(item.channels[0].value[0], 0.25, places=5)
+        self.assertAlmostEqual(item.channels[0].value[3], 1.0, places=5)
+
+    def test_target_mode_operator_adds_the_mask_and_switches(self):
+        mesh = bpy.data.meshes.new("Mesh")
+        ob = bpy.data.objects.new("Object", mesh)
+        bpy.context.collection.objects.link(ob)
+        ob.data.materials.append(self.material)
+        bpy.context.view_layer.objects.active = ob
+
+        paint_mode = bpy.context.scene.tool_settings.paint_mode
+        self.assertEqual(paint_mode.layer_target_mode, 'CONTENT')
+        self.assertEqual(bpy.ops.paint.layer_target_mode_set(mode='MASK'), {'FINISHED'})
+        self.assertEqual(paint_mode.layer_target_mode, 'MASK')
+        # A layer entered into Mask mode without a mask is given one that hides nothing.
+        self.assertEqual(len(self.layer.mask_items), 1)
+        self.assertAlmostEqual(self.layer.mask_items[0].mask_value, 1.0, places=5)
+
+        # Taking the mask away leaves Mask mode, so a stroke is never aimed at nothing.
+        with bpy.context.temp_override(material=self.material):
+            bpy.ops.material.paint_layer_mask_remove(marker=self.layer.marker)
+        self.assertEqual(paint_mode.layer_target_mode, 'CONTENT')
+
+        self.assertEqual(bpy.ops.paint.layer_target_mode_set(mode='TOGGLE'), {'FINISHED'})
+        self.assertEqual(paint_mode.layer_target_mode, 'MASK')
+        self.assertEqual(bpy.ops.paint.layer_target_mode_set(mode='CONTENT'), {'FINISHED'})
+        self.assertEqual(paint_mode.layer_target_mode, 'CONTENT')
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]] + (sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []))

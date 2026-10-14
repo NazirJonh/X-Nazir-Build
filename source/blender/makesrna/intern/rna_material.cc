@@ -840,6 +840,27 @@ static void rna_MaterialPaintLayer_channels_begin(CollectionPropertyIterator *it
                            nullptr);
 }
 
+/** The constant coverage of a mask item: the mean of its Base Color record, one for any other. */
+static float rna_MaterialPaintLayer_mask_value_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *item = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return ((item->flag & MA_PAINT_LAYER_MASK_BASE) != 0) ? BKE_paint_layers_mask_constant(*item) :
+                                                          1.0f;
+}
+
+static void rna_MaterialPaintLayer_mask_value_set(PointerRNA *ptr, const float value)
+{
+  MaterialPaintLayer *item = static_cast<MaterialPaintLayer *>(ptr->data);
+  if ((item->flag & MA_PAINT_LAYER_MASK_BASE) == 0) {
+    return;
+  }
+  if (Material *ma = rna_paint_layer_material(ptr, item)) {
+    const float gray = std::clamp(value, 0.0f, 1.0f);
+    const float rgba[4] = {gray, gray, gray, 1.0f};
+    BKE_paint_layers_channel_set_value(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rgba);
+  }
+}
+
 static void rna_MaterialPaintLayer_mask_items_begin(CollectionPropertyIterator *iter,
                                                     PointerRNA *ptr)
 {
@@ -1294,6 +1315,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_PAINT_LAYER_MASK_BASE);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Is Mask Base", "Whether this is the base mask item of a layer");
+
+  prop = RNA_def_property(srna, "mask_value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mask_value_get",
+                               "rna_MaterialPaintLayer_mask_value_set",
+                               nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Value",
+      "The constant coverage of a mask item while it has no map: one shows the layer, zero hides it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   func = RNA_def_function(srna, "mask_add", "rna_MaterialPaintLayer_mask_add");
   RNA_def_function_ui_description(

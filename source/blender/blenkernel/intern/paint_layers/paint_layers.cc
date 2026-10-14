@@ -411,6 +411,13 @@ const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &l
   return nullptr;
 }
 
+float BKE_paint_layers_mask_constant(const MaterialPaintLayer &item)
+{
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  return (record != nullptr) ? paint_layer_mask_constant(*record) : 1.0f;
+}
+
 MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma,
                                               MaterialPaintLayer *layer,
                                               const float value)

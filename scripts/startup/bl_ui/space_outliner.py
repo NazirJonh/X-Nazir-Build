@@ -64,6 +64,11 @@ class OUTLINER_HT_tool_header(Header):
             props.type = 'FILL'
             props.label = "Add Fill Layer"
 
+            # Only the add is here, as a menu of the two starting masks; switching a mask off and
+            # taking it away live in the row's context menu, while its slot is the one showing.
+            row = layout.row(align=True)
+            row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
+
         if space.show_stack_layer_move_buttons:
             layout.separator()
             row = layout.row(align=True)
@@ -74,6 +79,20 @@ class OUTLINER_HT_tool_header(Header):
 
         row = layout.row(align=True)
         row.operator("outliner.stack_layer_remove", text="", icon='TRASH')
+
+
+class OUTLINER_MT_stack_layer_mask_add(Menu):
+    bl_label = "Add Mask"
+
+    def draw(self, _context):
+        layout = self.layout
+        # `add` is set on every button rather than left to the operator's default: the Remove Mask
+        # entry stores `add = False` as the operator's last-used value, and an unset property would
+        # come back as that, so "Add Mask" would run a remove the next time it was picked.
+        for text, color in (("Add White Mask", 'WHITE'), ("Add Black Mask", 'BLACK')):
+            props = layout.operator("outliner.stack_layer_mask", text=text, icon='MOD_MASK')
+            props.add = True
+            props.initial_color = color
 
 
 class OUTLINER_HT_header(Header):
@@ -214,6 +233,18 @@ class OUTLINER_MT_context_menu(Menu):
         if space.display_mode == 'STACK_LAYERS':
             # A stack row is not a data-block, so none of the common entries (assets, overrides,
             # ID management) apply to it.
+            if (space.stack_layers_view == 'STACK' and
+                    space.stack_source == 'PAINT_MATERIAL'):
+                layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
+                # Switching the mask off and taking it away act on the mask being worked on: the
+                # toggle's poll answers whether the row's mask slot is the one showing.
+                if bpy.ops.outliner.stack_layer_mask_toggle.poll():
+                    layout.operator(
+                        "outliner.stack_layer_mask_toggle", text="Toggle Mask", icon='HIDE_OFF')
+                    props = layout.operator(
+                        "outliner.stack_layer_mask", text="Remove Mask", icon='X')
+                    props.add = False
+                layout.separator()
             layout.menu("OUTLINER_MT_context_menu_view")
             layout.separator()
             layout.menu("INFO_MT_area")
@@ -692,6 +723,7 @@ class OUTLINER_PT_options_filter(Panel):
 classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
+    OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,

@@ -196,6 +196,13 @@ MaterialPaintLayer *BKE_paint_layers_mask_base(MaterialPaintLayer &layer);
 const MaterialPaintLayer *BKE_paint_layers_mask_base(const MaterialPaintLayer &layer);
 
 /**
+ * The constant coverage of the mask item \a item, in 0..1: the mean of its Base Color record, the
+ * number the generator's value input and the CPU composite both read. One for an item with no
+ * record. The UI and RNA go through this rather than reading the record's first component.
+ */
+float BKE_paint_layers_mask_constant(const MaterialPaintLayer &item);
+
+/**
  * Give \a layer a base mask of constant \a value (clamped to 0..1): the row's coverage starts at
  * `F = value`, and a Mask-mode stroke turns the constant into a map.
  *

@@ -1291,6 +1291,36 @@ TEST_F(PaintLayersDescription, rna_mask_items_expose_the_item)
   EXPECT_FLOAT_EQ(record->value[0], 0.2f);
 }
 
+TEST_F(PaintLayersDescription, rna_mask_value_is_the_constant_of_the_mask_item)
+{
+  Material *ma = BKE_material_add(bmain, "RnaMaskValueMat");
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
+  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, "L");
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_add(*ma, layer, 0.4f);
+  ASSERT_NE(item, nullptr);
+  PointerRNA layer_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, layer);
+  PointerRNA item_ptr = RNA_pointer_create_with_parent(layer_ptr, RNA_MaterialPaintLayer, item);
+
+  PropertyRNA *mask_value = RNA_struct_find_property(&item_ptr, "mask_value");
+  ASSERT_NE(mask_value, nullptr);
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&item_ptr, mask_value), 0.4f);
+
+  /* A write lays an opaque grey in the item's record, and is a value edit: no rebuild is asked. */
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  RNA_property_float_set(&item_ptr, mask_value, 0.9f);
+  EXPECT_FLOAT_EQ(item->channels[0].value[0], 0.9f);
+  EXPECT_FLOAT_EQ(item->channels[0].value[2], 0.9f);
+  EXPECT_FLOAT_EQ(item->channels[0].value[3], 1.0f);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* A row is not a mask: the property reads one and ignores a write. */
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&layer_ptr, mask_value), 1.0f);
+  RNA_property_float_set(&layer_ptr, mask_value, 0.1f);
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&layer_ptr, mask_value), 1.0f);
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

@@ -35,6 +35,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_report.hh"
 
 #include "BLI_assert.h"
@@ -90,6 +91,64 @@ int paint_stack_selected_channel(const StackReadContext &ctx)
                                                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 }
 
+/**
+ * Rebuild the paint slots of the active object. The projection canvas paints the slots, and which
+ * map each holds depends on the mode and on the active row, so a change of either has to reach them.
+ */
+void layers_texpaint_slots_refresh(bContext &C)
+{
+  Scene *scene = CTX_data_scene(&C);
+  Object *object = CTX_data_active_object(&C);
+  if (scene != nullptr && object != nullptr) {
+    BKE_texpaint_slots_refresh_object(scene, object);
+  }
+}
+
+/** Set the target a layered material's stroke paints; true when it changed. */
+bool layers_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
+{
+  Scene *scene = CTX_data_scene(&C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return false;
+  }
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.layer_target_mode == mode) {
+    return false;
+  }
+  paint_mode.layer_target_mode = int8_t(mode);
+  layers_texpaint_slots_refresh(C);
+  WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, scene);
+  return true;
+}
+
+/** Leave Mask mode when the layer being edited in it is the one \a layer is: its mask is going
+ * away or off, and a stroke into nothing must not be what the mode means. */
+void layers_mask_edit_end_if_active(bContext &C,
+                                    const Material &material,
+                                    const MaterialPaintLayer &layer)
+{
+  const Scene *scene = CTX_data_scene(&C);
+  if (scene == nullptr || scene->toolsettings == nullptr ||
+      scene->toolsettings->paint_mode.layer_target_mode != PAINT_LAYER_TARGET_MASK)
+  {
+    return;
+  }
+  if (BLI_uuid_equal(material.active_layer_marker, layer.marker)) {
+    layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+  }
+}
+
+/** The Base Color record of a mask item, which holds its constant and its map; null when absent. */
+const MaterialPaintLayerChannel *paint_mask_record(const MaterialPaintLayer &item)
+{
+  for (int i = 0; i < item.channels_num; i++) {
+    if (item.channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      return &item.channels[i];
+    }
+  }
+  return nullptr;
+}
+
 /** A generated map whose pixels were never written is drawn as a placeholder, not as empty. */
 bool paint_image_is_blank(const Image &image)
 {
@@ -99,6 +158,20 @@ bool paint_image_is_blank(const Image &image)
   const ImageTile *base_tile = BKE_image_get_tile(const_cast<Image *>(&image), 0);
   return base_tile != nullptr && base_tile->gen_type == IMA_GENTYPE_BLANK &&
          base_tile->gen_color[3] == 0.0f && !BKE_image_is_dirty(const_cast<Image *>(&image));
+}
+
+/**
+ * The mask slot of a row: always the Mask icon (the "clip" icon while the mask is switched off),
+ * never a preview of its map. Whether the mask began white or black is unreadable once it has been
+ * painted over, and a thumbnail of the map would stop saying that the slot is the mask.
+ */
+StackRowPreview paint_mask_slot_build(const MaterialPaintLayer &item)
+{
+  StackRowPreview slot;
+  slot.section_id = "MASK";
+  slot.label = IFACE_("Mask");
+  slot.icon = ((item.flag & MA_PAINT_LAYER_ENABLED) != 0) ? ICON_MOD_MASK : ICON_CLIPUV_HLT;
+  return slot;
 }
 
 }  // namespace
@@ -188,6 +261,17 @@ void paint_stack_rows_from_description(const Material &material,
     channels.name = IFACE_("Channel Textures");
     row.content_sections.append(std::move(channels));
 
+    /* The mask: a slot of its own, whose click switches the brush to it, and the section that slot
+     * reveals. Its switch rides on the row, so a switched-off mask is kept and listed. */
+    if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
+      row.preview_slots.append(paint_mask_slot_build(*mask));
+      row.aux_enabled = (mask->flag & MA_PAINT_LAYER_ENABLED) != 0;
+      StackContentSection mask_section;
+      mask_section.identifier = "MASK";
+      mask_section.name = IFACE_("Mask Content");
+      row.content_sections.append(std::move(mask_section));
+    }
+
     r_rows.append(std::move(row));
   }
 }
@@ -244,7 +328,9 @@ int paint_layers_edit_duplicate(Main &bmain, Material &material, const int ordin
 /** \name The source
  * \{ */
 
-class PaintLayersStackSource final : public StackSource, public StackEditor {
+class PaintLayersStackSource final : public StackSource,
+                                      public StackEditor,
+                                      public StackGroupingEditor {
  public:
   eSpaceOutliner_StackSource type() const override
   {
@@ -296,6 +382,18 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
       hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(layer.opacity));
       for (const char *ch = layer.name; *ch != '\0'; ch++) {
         hash = hash * 131u ^ uint64_t(uint8_t(*ch));
+      }
+      /* The mask slot shows the mask's map, or its constant before it has one. */
+      if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
+        hash = hash * 1000003u ^ uint64_t(mask->flag);
+        if (const MaterialPaintLayerChannel *record = paint_mask_record(*mask)) {
+          hash = hash * 1000003u ^
+                 uint64_t(std::hash<float>{}(BKE_paint_layers_mask_constant(*mask)));
+          if (record->image != nullptr) {
+            hash ^= uint64_t(record->image->id.session_uid) * 2654435761u;
+            hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*record->image) ? 1 : 0);
+          }
+        }
       }
       for (int c = 0; c < layer.channels_num; c++) {
         const Image *image = layer.channels[c].image;
@@ -354,9 +452,40 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
       return false;
     }
     BKE_paint_layers_active_set(material, row.stable_id);
+    /* The mode is global: a layer with no mask is painted on its content, not left as a stroke
+     * into nothing. */
+    const MaterialPaintLayer *activated = BKE_paint_layers_active_layer_get(material);
+    if (activated != nullptr && BKE_paint_layers_mask_base(*activated) == nullptr) {
+      layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+    }
+    /* The mode may have stayed Mask while the row changed: the slots hold the new row's mask map,
+     * and a change of mode above already refreshed them once more, which is cheap. */
+    layers_texpaint_slots_refresh(C);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
     return true;
+  }
+
+  bool preview_activate(bContext &C,
+                        ID & /*owner*/,
+                        const StackRow &row,
+                        const StringRef section_id) const override
+  {
+    bool has_section = false;
+    for (const StackContentSection &section : row.content_sections) {
+      has_section |= section.identifier == section_id;
+    }
+    if (!has_section) {
+      return false;
+    }
+    /* A click on a slot switches what the brush paints: the mask, or the content. */
+    if (section_id == "MASK") {
+      return layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+    }
+    if (section_id == "CHANNELS") {
+      return layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+    }
+    return false;
   }
 
   bool row_is_active(const StackReadContext & /*ctx*/,
@@ -510,6 +639,8 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
     if (created == nullptr) {
       return -1;
     }
+    /* A new layer is painted on its content, not on the mask the previous one was edited in. */
+    layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, created);
   }
@@ -521,12 +652,94 @@ class PaintLayersStackSource final : public StackSource, public StackEditor {
   {
     Material &material = layers_owner(owner);
     MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
-    if (layer == nullptr || !BKE_paint_layers_remove(material, layer)) {
+    if (layer == nullptr) {
+      return false;
+    }
+    layers_mask_edit_end_if_active(C, material, *layer);
+    if (!BKE_paint_layers_remove(material, layer)) {
       return false;
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
   }
+
+  /* ---------------------------------------------------------------- */
+  /** \name StackGroupingEditor
+   *
+   * Only the mask half exists: folders, merging and colour tags arrive with their features, so
+   * their verbs keep the defaults that refuse.
+   * \{ */
+
+  const StackGroupingEditor *grouping() const override
+  {
+    return this;
+  }
+
+  StringRefNull aux_section_id() const override
+  {
+    return "MASK";
+  }
+
+  bool row_aux_set(bContext &C,
+                   const StackFocus & /*focus*/,
+                   ID &owner,
+                   const int ordinal,
+                   const bool add,
+                   const float initial_color[4]) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+    if (layer == nullptr) {
+      return false;
+    }
+    if (!add) {
+      layers_mask_edit_end_if_active(C, material, *layer);
+      if (!BKE_paint_layers_mask_remove(material, layer)) {
+        return false;
+      }
+      WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+      return true;
+    }
+    if (BKE_paint_layers_mask_base(*layer) != nullptr) {
+      BKE_report(CTX_wm_reports(&C), RPT_WARNING, "This layer already has a mask");
+      return false;
+    }
+    /* The constant is the colour's grey: white shows the row, black hides it until painted in. */
+    const float value = (initial_color != nullptr) ? initial_color[0] : 1.0f;
+    if (BKE_paint_layers_mask_add(material, layer, value) == nullptr) {
+      return false;
+    }
+    /* A mask the user just added is the one they mean to work on. */
+    BKE_paint_layers_active_set(material, layer->marker);
+    layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  bool row_aux_toggle(bContext &C,
+                      const StackFocus & /*focus*/,
+                      ID &owner,
+                      const int ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+    MaterialPaintLayer *base = (layer != nullptr) ? BKE_paint_layers_mask_base(*layer) : nullptr;
+    if (base == nullptr) {
+      return false;
+    }
+    const bool enable = (base->flag & MA_PAINT_LAYER_ENABLED) == 0;
+    if (!enable) {
+      /* A switched-off mask hides nothing, so a stroke into it would be invisible. */
+      layers_mask_edit_end_if_active(C, material, *layer);
+    }
+    if (!BKE_paint_layers_set_enabled(material, base, enable)) {
+      return false;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  /** \} */
 
   bool row_set_enabled(bContext &C,
                        const StackFocus & /*focus*/,

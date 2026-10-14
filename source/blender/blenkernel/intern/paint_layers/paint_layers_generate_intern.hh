@@ -140,7 +140,7 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, Span<int> wired_cha
  * (#BKE_paint_layers_composite_image_layers), so a row cannot take part on one side and drop out on
  * the other.
  */
-bool leaf_participates(const MaterialPaintLayer &layer, int channel);
+bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, int channel);
 
 /**
  * The channels \a ma wires at all, in channel order: a channel nothing participates in gets no

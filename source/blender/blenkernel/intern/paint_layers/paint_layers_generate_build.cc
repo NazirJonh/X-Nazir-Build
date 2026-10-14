@@ -181,7 +181,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
 {
   const char *layer_name = layer.name[0] != '\0' ? layer.name : "Layer";
   for (const int channel : wired_channels_) {
-    if (!leaf_participates(layer, channel)) {
+    if (!leaf_participates(ma_, layer, channel)) {
       continue;
     }
     const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
@@ -328,7 +328,7 @@ NodeOutput PaintLayersTreeBuilder::channel_chain_build(const int channel,
 {
   NodeOutput end = below;
   for (const MaterialPaintLayer &layer : ma_.paint_layers) {
-    if (!leaf_participates(layer, channel)) {
+    if (!leaf_participates(ma_, layer, channel)) {
       continue;
     }
     LayerGroup *group = layer_group_ensure(layer, location_x, location_y);

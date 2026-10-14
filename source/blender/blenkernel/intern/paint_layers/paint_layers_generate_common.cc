@@ -203,9 +203,9 @@ void interface_name_unique(const bNodeTreeInterface &interface,
 /** \name Participation
  * \{ */
 
-bool leaf_participates(const MaterialPaintLayer &layer, const int channel)
+bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, const int channel)
 {
-  return paint_layer_channel_contributes(layer, paint_layer_channel_find(layer, channel));
+  return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel));
 }
 
 Vector<int> paint_layers_wired_channels(const Material &ma)
@@ -213,7 +213,7 @@ Vector<int> paint_layers_wired_channels(const Material &ma)
   Vector<int> wired;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     for (const MaterialPaintLayer &layer : ma.paint_layers) {
-      if (leaf_participates(layer, int(info.channel))) {
+      if (leaf_participates(ma, layer, int(info.channel))) {
         wired.append(int(info.channel));
         break;
       }

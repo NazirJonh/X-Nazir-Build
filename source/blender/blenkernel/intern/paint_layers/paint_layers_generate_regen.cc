@@ -338,7 +338,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   Vector<int> wired_channels = paint_layers_wired_channels(ma);
   /* The Normal chain needs the shared combine group; create it only when a Normal row exists. */
   for (const MaterialPaintLayer &layer : ma.paint_layers) {
-    if (leaf_participates(layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
+    if (leaf_participates(ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
       ctx.normal_combine_group = BKE_paint_material_normal_combine_group_ensure(bmain);
       break;
     }

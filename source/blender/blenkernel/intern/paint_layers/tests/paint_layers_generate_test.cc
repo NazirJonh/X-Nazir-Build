@@ -591,7 +591,7 @@ TEST_F(PaintLayersGenerateTest, participation_cpu_matches_generator)
         const bool cpu = BKE_paint_layers_composite_image_layers(
             *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers);
         EXPECT_EQ(cpu,
-                  paint_layers::leaf_participates(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+                  paint_layers::leaf_participates(*ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
             << "enabled=" << enabled << " map=" << with_map << " alpha=" << alpha;
         BKE_paint_layers_remove(*ma, layer);
       }
@@ -782,6 +782,36 @@ TEST(PaintLayersLayoutGrid, lane_scope_restores_the_previous_lane)
   }
   /* Back in lane 0: row 0 is the lane's own first row again. */
   EXPECT_FLOAT_EQ(grid.at(paint_layers::layout::Column::Source, 0).y, 0.0f);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Global channel set
+ * \{ */
+
+TEST_F(PaintLayersGenerateTest, channel_out_of_the_set_is_not_wired)
+{
+  MaterialPaintLayer *layer = add_paint_layer(
+      "Paint", add_image("Map"), PAINT_MATERIAL_CHANNEL_METALLIC);
+
+  EXPECT_TRUE(paint_layers::leaf_participates(*ma, *layer, PAINT_MATERIAL_CHANNEL_METALLIC));
+  Vector<int> wired = paint_layers_wired_channels(*ma);
+  EXPECT_TRUE(std::find(wired.begin(), wired.end(), PAINT_MATERIAL_CHANNEL_METALLIC) !=
+              wired.end());
+
+  /* Dropping the channel from the set filters the row out without touching its record or map. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, false));
+  EXPECT_FALSE(paint_layers::leaf_participates(*ma, *layer, PAINT_MATERIAL_CHANNEL_METALLIC));
+  wired = paint_layers_wired_channels(*ma);
+  EXPECT_TRUE(std::find(wired.begin(), wired.end(), PAINT_MATERIAL_CHANNEL_METALLIC) ==
+              wired.end());
+  ASSERT_EQ(layer->channels_num, 1);
+  EXPECT_NE(layer->channels[0].image, nullptr);
+
+  /* Adding it back restores participation. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, true));
+  EXPECT_TRUE(paint_layers::leaf_participates(*ma, *layer, PAINT_MATERIAL_CHANNEL_METALLIC));
 }
 
 /** \} */

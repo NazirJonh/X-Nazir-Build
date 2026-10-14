@@ -897,4 +897,136 @@ TEST_F(PaintLayersDescription, set_blend_writes_and_refuses_the_internal_normal_
   EXPECT_EQ(layer->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Global channel set
+ * \{ */
+
+/** The build default: Base Color, Metallic, Roughness, Normal and AO. */
+static uint16_t channel_set_default()
+{
+  return (uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR) |
+         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS) |
+         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_NORMAL) |
+         (uint16_t(1) << PAINT_MATERIAL_CHANNEL_AO);
+}
+
+TEST_F(PaintLayersDescription, add_materializes_default_channel_set)
+{
+  Material *ma = BKE_material_add(bmain, "MaterializeOnAdd");
+  EXPECT_EQ(ma->paint_layers_channels, 0);
+
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  EXPECT_EQ(ma->paint_layers_channels, channel_set_default());
+}
+
+TEST_F(PaintLayersDescription, materialize_freezes_derived_set_and_keeps_records)
+{
+  /* A row linked straight in stands in for a file written before the field existed: the field is
+   * still zero, so the set is derived from the records and the build default. */
+  Material *ma = BKE_material_add(bmain, "MaterializeOldFile");
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Paint");
+  ASSERT_NE(layer, nullptr);
+  ASSERT_EQ(ma->paint_layers_channels, 0);
+
+  MaterialPaintLayerChannel *base = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  MaterialPaintLayerChannel *spec = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_SPECULAR);
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(spec, nullptr);
+  /* A zero field is still derived, so adding a record must not have frozen anything yet. */
+  ASSERT_EQ(ma->paint_layers_channels, 0);
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR));
+
+  const int channels_before = layer->channels_num;
+  const uint16_t expected = channel_set_default() | (uint16_t(1) << PAINT_MATERIAL_CHANNEL_SPECULAR);
+
+  BKE_paint_layers_channels_materialize(*ma);
+  EXPECT_EQ(ma->paint_layers_channels, expected);
+  /* The records and their count are untouched. */
+  EXPECT_EQ(layer->channels_num, channels_before);
+  EXPECT_EQ(paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_SPECULAR), spec);
+
+  /* Idempotent: a second call neither changes the set nor touches the records. */
+  BKE_paint_layers_channels_materialize(*ma);
+  EXPECT_EQ(ma->paint_layers_channels, expected);
+  EXPECT_EQ(layer->channels_num, channels_before);
+}
+
+TEST_F(PaintLayersDescription, material_channel_set_preserves_layer_data)
+{
+  Material *ma = BKE_material_add(bmain, "ChannelSetKeeps");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *layer);
+  ASSERT_EQ(layer->channels_num, 5);
+
+  /* Base Color is the material's constant and cannot be switched off. */
+  EXPECT_FALSE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 4, 4, "SetMap", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  ASSERT_NE(map, nullptr);
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_METALLIC);
+  ASSERT_NE(record, nullptr);
+  record->image = map;
+
+  /* Dropping the channel only edits the set: the record and its map stay on the layer, and the
+   * per-channel filter now answers false for it. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, false));
+  EXPECT_FALSE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
+  EXPECT_EQ(paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_METALLIC), record);
+  EXPECT_EQ(record->image, map);
+  EXPECT_TRUE(paint_layer_channel_filtered(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
+
+  /* Adding it back restores participation with the same map. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, true));
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
+  EXPECT_FALSE(paint_layer_channel_filtered(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
+}
+
+TEST_F(PaintLayersDescription, default_channels_apply_follows_the_set)
+{
+  Material *ma = BKE_material_add(bmain, "ApplySet");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "Paint", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+
+  /* A channel added to the set before any record is authored joins the default. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_SPECULAR, true));
+  BKE_paint_layers_default_channels_apply(*ma, *layer);
+  EXPECT_NE(paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
+  EXPECT_EQ(layer->channels_num, 6);
+}
+
+TEST_F(PaintLayersDescription, material_channel_set_round_trip)
+{
+  Material *ma = BKE_material_add(bmain, "RnaChannels");
+  BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+
+  PointerRNA ptr = RNA_id_pointer_create(&ma->id);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, "paint_layers_channels");
+  ASSERT_NE(prop, nullptr);
+
+  const int set = RNA_property_enum_get(&ptr, prop);
+  EXPECT_TRUE((set & (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR)) != 0);
+  EXPECT_TRUE((set & (1 << PAINT_MATERIAL_CHANNEL_AO)) != 0);
+
+  /* Writing routes through BKE_paint_layers_channel_set_mask_set; Base Color is forced back in. */
+  RNA_property_enum_set(&ptr, prop, 1 << PAINT_MATERIAL_CHANNEL_METALLIC);
+  const int after = RNA_property_enum_get(&ptr, prop);
+  EXPECT_TRUE((after & (1 << PAINT_MATERIAL_CHANNEL_METALLIC)) != 0);
+  EXPECT_TRUE((after & (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR)) != 0);
+
+  /* The RNA helper answers from the same set. */
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
+  EXPECT_FALSE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_AO));
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

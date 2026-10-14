@@ -105,15 +105,72 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
                                                MaterialPaintLayer *layer);
 
 /**
- * Give a freshly authored Paint \a layer the channels it takes part in by default: an enabled
- * record with no map for Base Color, Metallic, Roughness, Normal and Ambient Occlusion.
+ * Give a freshly authored Paint or Fill \a layer the channels it takes part in by default: an
+ * enabled record with no map for every channel of the material's global set
+ * (#BKE_paint_layers_channel_set_mask_get).
  *
  * A row only reaches a channel through a channel record, so a layer with no records is inert.
- * Every authoring path -- `Material.paint_layers.new` and the shared Add policy -- calls this one
- * function, so the default set is decided in exactly one place. Existing records are left as they
- * are, so the call is idempotent.
+ * Every authoring path -- `Material.paint_layers.new`, `MATERIAL_OT_new_layered` and the shared Add
+ * policy -- calls this one function, so the default set is decided in exactly one place. Existing
+ * records are left as they are, so the call is idempotent. A set that was never authored derives
+ * from the layer records and the build default, so this is also how the build default reaches a
+ * fresh stack.
  */
 void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &layer);
+
+/**
+ * The material's global paint channel set, as a bitmask over #eMaterialPaintChannel (`1 << channel`).
+ *
+ * When #Material::paint_layers_channels is zero the set is derived: the union of every layer's
+ * channel records plus the build default (Base Color, Metallic, Roughness, Normal, AO), so a file
+ * written before the field existed reads the same set it always offered. Base Color is always in
+ * the returned set, whatever is stored. This is a read-only view of the description; it never
+ * creates a channel record.
+ */
+uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma);
+
+/** Whether \a channel is in \a ma's global paint channel set. */
+bool BKE_paint_layers_channel_in_set(const Material &ma, eMaterialPaintChannel channel);
+
+/**
+ * Add or remove \a channel from \a ma's global paint channel set, materializing the derived set on
+ * the first explicit write (a zero field becomes the computed mask, then the edit is applied).
+ *
+ * The layers are never touched: no channel record or map is created or removed, so switching a
+ * channel off keeps every layer's data and switching one on does not author records. Base Color
+ * cannot be switched off -- it is the material's constant -- and a request to do so is refused.
+ *
+ * \return false when \a channel is out of range or Base Color is to be disabled.
+ */
+bool BKE_paint_layers_channel_set_enable(Material &ma,
+                                         eMaterialPaintChannel channel,
+                                         bool enabled);
+
+/**
+ * Write \a ma's global paint channel set as a whole bitmask, forcing Base Color in and tagging the
+ * material once. The layers are never touched; see #BKE_paint_layers_channel_set_enable.
+ */
+void BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
+
+/**
+ * The channel set a fresh stack offers before any set is authored: the build default (Base Color,
+ * Metallic, Roughness, Normal, AO). The default #MATERIAL_OT_new_layered proposes in its dialog,
+ * and what a zero #Material::paint_layers_channels field derives.
+ */
+uint16_t BKE_paint_layers_default_channel_set();
+
+/**
+ * Freeze the derived channel set into #Material::paint_layers_channels when the field is still zero.
+ *
+ * While the field is zero #BKE_paint_layers_channel_set_mask_get recomputes the union of every
+ * layer record plus the build default on each call, which the per-channel filter does in hot loops.
+ * This stores that derived view once, so the filter reads a plain bitmask afterwards. Quiet on
+ * purpose -- the field is derived state, not a user edit -- so no tag, regeneration or undo step is
+ * forced; callers on an authoring path already tag the material themselves.
+ *
+ * A no-op when the field is already nonzero, so it is idempotent and never touches a layer record.
+ */
+void BKE_paint_layers_channels_materialize(Material &ma);
 
 /**
  * Remove \a layer from \a ma, freeing it.

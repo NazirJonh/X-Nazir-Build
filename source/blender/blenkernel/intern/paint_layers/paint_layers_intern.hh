@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include "BKE_paint_layers.hh"
+
 #include "DNA_material_types.h"
 
 namespace blender {
@@ -68,16 +70,34 @@ inline bool paint_layer_channel_contributes(const MaterialPaintLayerChannel *rec
 }
 
 /**
+ * Whether \a channel is filtered out by \a ma's global paint channel set.
+ *
+ * A channel absent from #Material::paint_layers_channels takes part nowhere; the record and its map
+ * stay on the row, so re-adding the channel brings it back untouched. The participation helpers
+ * below and the CPU adapter share this one predicate, so a row cannot take part on one side and
+ * drop out on the other.
+ */
+inline bool paint_layer_channel_filtered(const Material &ma, const int channel)
+{
+  return !BKE_paint_layers_channel_in_set(ma, eMaterialPaintChannel(channel));
+}
+
+/**
  * Whether \a layer takes part in \a channel, from the row rather than the record alone.
  *
  * A Fill lays its constant whatever its channels' alpha, so a live record always takes part; every
- * other row follows #paint_layer_channel_contributes (a map, or a flat value with some alpha). The
+ * other row follows #paint_layer_channel_contributes (a map, or a flat value with some alpha). A
+ * channel the material's global set leaves out takes part nowhere, whatever the record says. The
  * generator's participation test and the CPU adapter both call this, so a Fill cannot take part on
  * one side and drop out on the other.
  */
-inline bool paint_layer_channel_contributes(const MaterialPaintLayer &layer,
+inline bool paint_layer_channel_contributes(const Material &ma,
+                                            const MaterialPaintLayer &layer,
                                             const MaterialPaintLayerChannel *record)
 {
+  if (record == nullptr || paint_layer_channel_filtered(ma, record->channel)) {
+    return false;
+  }
   if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
     return paint_layer_channel_live(record);
   }

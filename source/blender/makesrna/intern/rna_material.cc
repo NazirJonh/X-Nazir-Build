@@ -623,6 +623,23 @@ static bool rna_Material_is_layered_get(PointerRNA *ptr)
   return BKE_paint_layers_is_layered(*id_cast<Material *>(ptr->owner_id));
 }
 
+/* The effective set, not the raw field: an unauthored field reads the derived set. */
+static int rna_Material_paint_layers_channels_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_channel_set_mask_get(*id_cast<Material *>(ptr->owner_id));
+}
+
+static void rna_Material_paint_layers_channels_set(PointerRNA *ptr, int value)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  BKE_paint_layers_channel_set_mask_set(*ma, uint16_t(value));
+}
+
+static bool rna_Material_paint_layers_channel_in_set(Material *ma, int channel)
+{
+  return BKE_paint_layers_channel_in_set(*ma, eMaterialPaintChannel(channel));
+}
+
 /** Every layer-pointer setter goes back to the material that owns the row, which the pointer's
  * #owner_id carries. */
 static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *layer)
@@ -2020,6 +2037,36 @@ void RNA_def_material(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Layered Material", "The material's stack is a DNA description of its paint layers");
+
+  prop = RNA_def_property(srna, "paint_layers_channels", PROP_ENUM, PROP_NONE);
+  RNA_def_property_flag(prop, PROP_ENUM_FLAG);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_flag_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_Material_paint_layers_channels_get",
+                              "rna_Material_paint_layers_channels_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Channels",
+      "The material's global paint channel set; while unset it is derived from the layer records "
+      "and the build default. Base Color is always in the set");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  {
+    FunctionRNA *func = RNA_def_function(
+        srna, "paint_layers_channel_in_set", "rna_Material_paint_layers_channel_in_set");
+    RNA_def_function_ui_description(
+        func, "Whether a channel is in the material's global paint channel set");
+    PropertyRNA *parm = RNA_def_enum(func,
+                                     "channel",
+                                     rna_enum_material_paint_channel_items,
+                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                     "Channel",
+                                     "Channel to test");
+    RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+    parm = RNA_def_boolean(func, "result", false, "In Set", "Whether the channel is in the set");
+    RNA_def_function_return(func, parm);
+  }
 
   /* common */
   rna_def_animdata_common(srna);

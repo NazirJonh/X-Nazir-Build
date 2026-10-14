@@ -25,6 +25,7 @@ _modules = [
     "grease_pencil",
     "image",
     "image_as_planes",
+    "material_paint_layers",
     "mesh",
     "node",
     "object",

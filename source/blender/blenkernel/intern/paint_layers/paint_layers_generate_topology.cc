@@ -125,12 +125,10 @@ bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash)
 /** \name Topology of a row and of the root
  * \{ */
 
-uint64_t paint_layers_layer_topology_hash(const Material & /*ma*/,
+uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const Span<int> wired_channels)
 {
-  /* NOTE: \a ma is not read yet; it is part of the signature because what a row's structure
-   * depends on will include material-level state (shared groups, sources) as those land. */
   uint64_t hash = 0;
   hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
   /* Source and blend decide the nodes; the enabled flag and every value are inputs, so they are
@@ -140,7 +138,7 @@ uint64_t paint_layers_layer_topology_hash(const Material & /*ma*/,
   topology_hash_string(hash, layer.name);
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
-    hash = topology_hash_mix(hash, leaf_participates(layer, channel) ? 1 : 0);
+    hash = topology_hash_mix(hash, leaf_participates(ma, layer, channel) ? 1 : 0);
     /* A map and a flat value are different nodes (an Image Texture against a value input), and the
      * texture node names its image: assigning, swapping or removing a map is structure, even when
      * the channel took part before and after. */
@@ -168,7 +166,7 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, const Span<int> wir
   for (const MaterialPaintLayer &layer : ma.paint_layers) {
     bool participates = false;
     for (const int channel : wired_channels) {
-      if (leaf_participates(layer, channel)) {
+      if (leaf_participates(ma, layer, channel)) {
         participates = true;
         break;
       }

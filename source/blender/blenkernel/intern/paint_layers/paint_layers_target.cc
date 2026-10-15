@@ -83,8 +83,10 @@ static void paint_layers_image_fill(Image &image, const bool is_color, const flo
 static Image *paint_layers_map_create(
     Main &bmain, const char *name, const int size, const bool is_color, const float rgba[4])
 {
+  /* 32 planes, not 24: the buffer's color mode decides how many channels a PNG pack writes, and a
+   * map's alpha is its coverage, so a 24-plane map would reopen fully opaque. */
   Image *image = BKE_image_add_generated(
-      &bmain, size, size, name, 24, false, IMA_GENTYPE_BLANK, rgba, false, !is_color, false);
+      &bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, rgba, false, !is_color, false);
   if (image == nullptr) {
     return nullptr;
   }

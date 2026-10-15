@@ -1130,16 +1130,10 @@ class PaintLayersStackSource final : public StackSource,
         }
       }
     }
-    /* A fresh Paint layer owns maps for every channel of the material's set, so no "create missing
-     * maps" step is left to the user. Corrections stay as above: they carry their own maps. */
-    if (params.kind == PaintLayerAddKind::Paint) {
-      const PaintModeSettings &paint_mode = CTX_data_scene(&C)->toolsettings->paint_mode;
-      if (BKE_paint_layers_active_maps_ensure(
-              *CTX_data_main(&C), material, paint_mode.new_channel_image_size) > 0)
-      {
-        layers_texpaint_slots_refresh(C);
-      }
-    }
+    /* The other channels of a Paint layer are not made here: every paint entry point makes the
+     * maps its stroke writes before the stroke starts (inside the stroke's own undo group), so a
+     * layer nothing is painted into holds one map instead of one per channel of the set. A 4K map
+     * is 64 MiB of RAM and ~85 MiB of GPU memory each. */
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, created);
   }

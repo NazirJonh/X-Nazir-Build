@@ -649,8 +649,9 @@ void BKE_image_free_old_gputextures(Main *bmain)
         BKE_image_free_gputextures(&ima);
         ima.runtime->lastused = ctime;
       }
-      /* Otherwise, just kill the buffers */
-      else {
+      /* Otherwise, just kill the buffers. A modified image is kept: its pixels exist nowhere else,
+       * and freeing the cache does not honor the dirty flag the cache limiter does. */
+      else if (!BKE_image_is_dirty(&ima)) {
         BKE_image_free_buffers(&ima);
       }
     }

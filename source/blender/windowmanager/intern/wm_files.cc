@@ -92,6 +92,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -2286,6 +2287,11 @@ static bool wm_file_write(bContext *C,
   }
 
   /* Operator now handles overwrite checks. */
+
+  /* Regardless of auto-pack: a layered material's maps are generated images, so the file would
+   * otherwise reopen with them empty. The "save modified images" prompt only ever covered the ones
+   * modified, and not at all when it is declined. */
+  BKE_paint_layers_pack_maps(*bmain, false, reports);
 
   if (G.fileflags & G_FILE_AUTOPACK) {
     BKE_packedfile_pack_all(bmain, reports, false);

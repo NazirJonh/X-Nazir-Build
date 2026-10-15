@@ -21,7 +21,10 @@
 
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
+#include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_report.hh"
 
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
@@ -31,6 +34,7 @@
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
+#include "BLI_set.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
@@ -1679,6 +1683,86 @@ void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, 
     case PAINT_MATERIAL_CHANNEL_EMISSION:
       break;
   }
+}
+
+void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
+{
+  Set<Image *> seen;
+  const auto add_channels = [&](const MaterialPaintLayer &row) {
+    for (const int i : IndexRange(row.channels_num)) {
+      Image *image = row.channels[i].image;
+      if (image != nullptr && seen.add(image)) {
+        r_images.append(image);
+      }
+    }
+  };
+  for (const Material &ma : bmain.materials) {
+    if (!BKE_paint_layers_is_layered(ma)) {
+      continue;
+    }
+    BKE_paint_layers_foreach(
+        ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+          add_channels(layer);
+          for (const MaterialPaintLayer &effect : layer.effects) {
+            add_channels(effect);
+          }
+          for (const MaterialPaintLayer &item : layer.mask_stack) {
+            add_channels(item);
+          }
+          return true;
+        });
+  }
+}
+
+int BKE_paint_layers_pack_maps(const Main &bmain, const bool for_autosave, ReportList *reports)
+{
+  Vector<Image *> images;
+  BKE_paint_layers_maps_collect(bmain, images);
+
+  int packed_num = 0;
+  for (Image *image : images) {
+    if (!ID_IS_EDITABLE(&image->id)) {
+      continue;
+    }
+    const bool generated = image->source == IMA_SRC_GENERATED;
+    if (for_autosave) {
+      /* The image editor's own flush already wrote the modified ones; what is left is a generated
+       * map nothing has touched since it was made, which the file would still reopen empty. */
+      if (!generated || image->autosave_packedfiles.first != nullptr) {
+        continue;
+      }
+    }
+    else if (!generated && !(BKE_image_has_packedfile(image) && BKE_image_is_dirty(image))) {
+      /* A map already packed and not modified since is in the file as it stands; encoding it
+       * again would cost seconds on a 4K map for the same bytes. */
+      continue;
+    }
+
+    /* The pack encodes the buffer the image holds, so it has to be there; a packed file the pack
+     * dropped for want of one would leave the map with nothing at all. */
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    const bool has_buffer = ibuf != nullptr;
+    if (has_buffer) {
+      /* A map's alpha is its coverage; the pack writes as many channels as the color mode names,
+       * and maps made with 24 planes would lose it. */
+      ibuf->color_mode = ImColorMode::RGBA;
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+
+    const bool ok = has_buffer && (for_autosave ? BKE_image_autosave_memorypack(image) :
+                                                  BKE_image_memorypack(image));
+    if (ok) {
+      packed_num++;
+    }
+    else if (reports != nullptr) {
+      BKE_reportf(reports,
+                  RPT_WARNING,
+                  "Paint layer map \"%s\" could not be packed and will be empty in the file",
+                  image->id.name + 2);
+    }
+  }
+  return packed_num;
 }
 
 }  // namespace blender

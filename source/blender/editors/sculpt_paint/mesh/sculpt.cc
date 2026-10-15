@@ -7857,19 +7857,13 @@ struct SculptPaintStroke final : public PaintStroke {
    * #layer_recording_finish after record-end and eraser disarm. */
   Map<Object *, int> layer_recording_saved_active_uid_;
 
-  /* A layered material's first stroke opened an undo group around the map creation. Closed once,
-   * from #done, so a cancel and every early return of #done share the one close. */
-  bool layer_undo_group_open_ = false;
-
   /**
-   * Grow the active layered material's maps before the stroke's own undo step opens, wrapping the
-   * memfile step of the map creation and the stroke in one undo group. Does nothing for any other
+   * Grow the active layered material's maps before the stroke's own undo step opens, as a memfile
+   * step of their own: an undo group cannot stay open while the modal stroke runs, because the
+   * event loop requires every group closed (#ED_undo_is_state_valid). Does nothing for any other
    * material or brush.
    */
   void layered_maps_ensure(bContext *C);
-
-  /** Close the first-stroke group if it is open; safe to call more than once. */
-  void layer_undo_group_close(bContext *C);
 
   SculptPaintStroke(bContext *C, wmOperator *op, const int event_type)
       : PaintStroke(C, op, event_type)
@@ -7946,7 +7940,7 @@ void SculptPaintStroke::layered_maps_ensure(bContext *C)
   }
   if (created > 0) {
     ED_undo_push(C, RPT_("Add Layer Maps"));
-    layer_undo_group_open_ = true;
+    ED_undo_group_end(C);
     /* The slots mirror the active row's maps, which this just grew: a classic Texture Paint
      * stroke reads them, so they are rebuilt now rather than left to the next mode switch. */
     for (Object *object : objects) {
@@ -7957,14 +7951,6 @@ void SculptPaintStroke::layered_maps_ensure(bContext *C)
   }
   else {
     ED_undo_group_end(C);
-  }
-}
-
-void SculptPaintStroke::layer_undo_group_close(bContext *C)
-{
-  if (layer_undo_group_open_) {
-    ED_undo_group_end(C);
-    layer_undo_group_open_ = false;
   }
 }
 
@@ -10375,10 +10361,6 @@ bool SculptPaintStroke::activate_curve_patch_target(Object &target)
 
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
-  /* One close for every path: the early return below, a cancel and the curve patch hand-offs all
-   * pass through here. */
-  this->layer_undo_group_close(this->evil_C);
-
   Sculpt &sd = *this->sculpt_;
   const Span<Object *> objects = this->multi_.mode_objects;
 

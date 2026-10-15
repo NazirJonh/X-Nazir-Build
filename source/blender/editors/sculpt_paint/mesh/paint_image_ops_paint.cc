@@ -750,10 +750,6 @@ struct PaintOperation : public PaintModeData {
    * dab by dab and acts when the stroke ends -- see #ImageStrokeMethodHook. */
   std::unique_ptr<ImageStrokeMethodHook> method_hook;
 
-  /* A layered material's first-stroke map creation opened an undo group that spans the memfile
-   * step and the stroke's image undo step; closed in #ImagePaintStroke::done. */
-  bool undo_group_open = false;
-
   PaintOperation() = default;
   ~PaintOperation() override
   {
@@ -888,8 +884,10 @@ static void texture_paint_prepare_layered_maps(bContext *C,
     }
   }
   if (created > 0) {
+    /* Its own memfile step, and the group closed here: a group left open across the modal stroke
+     * is an invalid state for the event loop (#ED_undo_is_state_valid). */
     ED_undo_push(C, RPT_("Add Layer Maps"));
-    pop.undo_group_open = true;
+    ED_undo_group_end(C);
     /* The new map has no image node yet. Regenerating here, before the stroke captures the
      * evaluated material, keeps the first dab from landing on a graph that lacks its target. */
     BKE_paint_layers_regenerate_tagged(*bmain);
@@ -962,10 +960,6 @@ static std::unique_ptr<PaintOperation> texture_paint_init(bContext *C,
 
   pop->stroke_handle = pop->mode->paint_new_stroke(C, op, ob, mouse, mode, brush_switch_mode);
   if (!pop->stroke_handle) {
-    if (pop->undo_group_open) {
-      ED_undo_group_end(C);
-      pop->undo_group_open = false;
-    }
     return nullptr;
   }
 
@@ -1174,13 +1168,6 @@ void ImagePaintStroke::done(const bool is_cancel, const bool stroke_started)
 
   if (!undo_step_taken_over && !is_cancel) {
     ED_image_undo_push_end();
-  }
-
-  /* Close the first-stroke group on every exit, cancel included: the stroke's undo step and the
-   * map-creation memfile step become one Ctrl+Z. */
-  if (pop->undo_group_open) {
-    ED_undo_group_end(this->evil_C);
-    pop->undo_group_open = false;
   }
 
 /* duplicate warning, see texpaint_init */

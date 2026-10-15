@@ -31,6 +31,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
 
@@ -56,6 +57,7 @@
 #include "BKE_main.hh"
 #include "BKE_mask.hh"
 #include "BKE_packedFile.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 
@@ -2771,10 +2773,20 @@ int ED_image_save_all_modified_info(const Main *bmain, ReportList *reports)
 
   int num_saveable_images = 0;
 
+  /* A layered material's maps are packed by every file write (#BKE_paint_layers_pack_maps), so
+   * they are never offered here: declining the prompt must not be able to leave the graph with
+   * empty maps. */
+  Vector<Image *> paint_layer_maps;
+  BKE_paint_layers_maps_collect(*bmain, paint_layer_maps);
+
   for (Image *ima = static_cast<Image *>(bmain->images.first); ima;
        ima = static_cast<Image *>(ima->id.next))
   {
     bool is_format_writable;
+
+    if (paint_layer_maps.contains(ima)) {
+      continue;
+    }
 
     if (image_should_be_saved(ima, &is_format_writable)) {
       if (BKE_image_has_packedfile(ima) || image_should_pack_during_save_all(ima)) {
@@ -2873,6 +2885,10 @@ void ED_image_internal_autosave_flush(const Main *bmain)
       }
     }
   }
+
+  /* The maps of a layered material that nothing modified are generated images too: without this a
+   * recovered session would show them empty. Both auto-save and quit.blend come through here. */
+  BKE_paint_layers_pack_maps(*bmain, true, nullptr);
 }
 
 static bool image_save_all_modified_poll(bContext *C)

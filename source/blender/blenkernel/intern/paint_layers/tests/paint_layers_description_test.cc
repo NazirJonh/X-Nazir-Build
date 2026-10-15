@@ -1903,6 +1903,35 @@ TEST_F(PaintLayersDescription, correction_blend_round_trip_keeps_it_and_its_map)
   BLI_delete(filepath, false, false);
 }
 
+TEST_F(PaintLayersDescription, pack_maps_packs_a_generated_map_once_and_again_only_when_modified)
+{
+  Material *ma = BKE_material_add(bmain, "PackMapsMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 8, 8, "PackMapsMap", 24, false, IMA_GENTYPE_BLANK, clear, false, true, false);
+  ASSERT_NE(map, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  /* A generated map holds its pixels only in the buffer: it is packed even when never painted. */
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 1);
+  EXPECT_EQ(map->source, IMA_SRC_FILE);
+  EXPECT_TRUE(BKE_image_has_packedfile(map));
+
+  /* Packed and not modified since: the file already has it as it stands. */
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 0);
+
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(map, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  ibuf->byte_data_for_write()[0] = 200;
+  BKE_image_mark_dirty(map, ibuf);
+  BKE_image_release_ibuf(map, ibuf, lock);
+
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 1);
+  EXPECT_EQ(BKE_paint_layers_pack_maps(*bmain, false, nullptr), 0);
+}
+
 TEST_F(PaintLayersDescription, rna_effects_expose_the_correction_and_add_one)
 {
   Material *ma = BKE_material_add(bmain, "RnaCorrectionMat");

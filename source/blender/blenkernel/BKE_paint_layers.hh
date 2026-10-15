@@ -35,6 +35,7 @@ struct Main;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
+struct ReportList;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
 enum eMaterialPaintLayerSource : int8_t;
@@ -672,6 +673,27 @@ float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer
  * table, or a partially covered row would fade towards different values in each of them.
  */
 void BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel channel, float r_color[4]);
+
+/**
+ * Append every image a layered material of \a bmain holds a map in -- a row's, a correction's or a
+ * mask item's -- to \a r_images, once each.
+ */
+void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images);
+
+/**
+ * Pack the maps of every layered material of \a bmain, so a written file reopens with its pixels.
+ *
+ * A map is a generated image: its pixels exist only in the buffer, and the file keeps nothing but
+ * the generation settings (an empty map) unless the image is packed. Packing turns it into a
+ * packed file-source image; a map already packed and not modified since is left alone, so the
+ * cost follows what changed, not what exists.
+ *
+ * \param for_autosave: write into the images' auto-save packed files instead, which leaves the
+ * session's images as they are (auto-save and session recovery); only generated maps the image
+ * editor's own auto-save flush did not cover are handled.
+ * \return The number of maps packed. A map that could not be packed is reported to \a reports.
+ */
+int BKE_paint_layers_pack_maps(const Main &bmain, bool for_autosave, ReportList *reports);
 
 /** \} */
 

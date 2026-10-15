@@ -222,18 +222,35 @@ bool row_participates(const Material &ma, const MaterialPaintLayer &layer, const
   return false;
 }
 
-bool layer_in_folder(const Material &ma, const MaterialPaintLayer &layer)
+static void form_map_add(const ListBaseT<MaterialPaintLayer> &list,
+                         const PaintLayerForm &form,
+                         PaintLayerFormMap &r_forms)
 {
-  bool nested = false;
-  BKE_paint_layers_foreach(
-      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer *parent) -> bool {
-        if (&row == &layer) {
-          nested = parent != nullptr;
-          return false;
-        }
-        return true;
-      });
-  return nested;
+  for (const MaterialPaintLayer &row : list) {
+    r_forms.add(&row, form);
+    if (!BKE_paint_layers_is_folder(row)) {
+      continue;
+    }
+    PaintLayerForm inner = form;
+    if (BKE_paint_layers_folder_is_pass_through(row)) {
+      /* A hidden Pass Through folder has no row of its own to carry its visibility, so it reaches
+       * its rows as a zero factor on their opacity. */
+      if ((row.flag & MA_PAINT_LAYER_ENABLED) == 0) {
+        inner.pass_through_scale = 0.0f;
+      }
+    }
+    else {
+      inner.in_isolating_folder = true;
+    }
+    form_map_add(row.children, inner, r_forms);
+  }
+}
+
+PaintLayerFormMap paint_layers_form_map(const Material &ma)
+{
+  PaintLayerFormMap forms;
+  form_map_add(ma.paint_layers, {}, forms);
+  return forms;
 }
 
 Vector<int> paint_layers_wired_channels(const Material &ma)

@@ -191,7 +191,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
         group, base, "NodeSocketFloat", ROLE_OPACITY, layer.marker, channel);
     if (opacity != nullptr) {
-      group_input_default_set(group, *opacity, BKE_paint_layers_effective_opacity(layer));
+      group_input_default_set(group,
+                              *opacity,
+                              BKE_paint_layers_effective_opacity(layer) *
+                                  forms_.lookup_default(&layer, {}).pass_through_scale);
       opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
     }
 
@@ -418,6 +421,16 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
 {
   for (const MaterialPaintLayer &layer : list) {
     if (!row_participates(ma_, layer, channel)) {
+      continue;
+    }
+
+    /* A Pass Through folder is expanded in place: its rows are chained straight onto the parent's
+     * chain, in the parent's own form, as if the folder were not there. Over is associative for the
+     * Mix blend at full weight, so this equals the isolated result the predicate stands for, without
+     * its group, divide and coverage nodes. A hidden one scales its rows' opacity to zero instead
+     * (#PaintLayerForm::pass_through_scale), which keeps hiding a value edit. */
+    if (BKE_paint_layers_folder_is_pass_through(layer)) {
+      end = this->list_build(layer.children, end, channel, location_y, location_x, isolated);
       continue;
     }
 

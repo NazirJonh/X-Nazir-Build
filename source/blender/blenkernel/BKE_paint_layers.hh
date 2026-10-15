@@ -81,6 +81,17 @@ bool BKE_paint_layers_is_folder(const MaterialPaintLayer &layer);
 bool BKE_paint_layers_has_children(const MaterialPaintLayer &layer);
 
 /**
+ * Whether \a folder is a Pass Through folder: a folder that adds nothing but grouping, so its rows
+ * are laid in the stack exactly as if it were not there.
+ *
+ * True for a folder with no mask, the Mix blend and full opacity. Visibility is deliberately not
+ * part of it: a hidden Pass Through folder has no row to carry its visibility, so it multiplies its
+ * rows' opacity by zero instead, which is a value edit, not a different graph. The one reader of
+ * the mode, for the generator and the CPU composite alike.
+ */
+bool BKE_paint_layers_folder_is_pass_through(const MaterialPaintLayer &folder);
+
+/**
  * Visit every row of \a ma's stack, depth first: a row, then -- for a folder -- the rows it holds,
  * each with its parent folder (null at the top level). This is the one order the Outliner numbers
  * rows by and every nested walk of the description uses.

@@ -21,6 +21,7 @@
 #include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
 
+#include "paint_layers_generate_intern.hh"
 #include "paint_layers_generate_layout.hh"
 
 #include <memory>
@@ -105,7 +106,7 @@ struct BlendNode {
 class PaintLayersTreeBuilder {
  public:
   PaintLayersTreeBuilder(const Material &ma, bNodeTree &tree, const PaintLayersBuildContext &ctx)
-      : ma_(ma), tree_(tree), ctx_(ctx)
+      : ma_(ma), tree_(tree), ctx_(ctx), forms_(paint_layers_form_map(ma))
   {
   }
 
@@ -205,6 +206,8 @@ class PaintLayersTreeBuilder {
   const Material &ma_;
   bNodeTree &tree_;
   const PaintLayersBuildContext &ctx_;
+  /** The place-dependent form of every row, walked once per build. */
+  PaintLayerFormMap forms_;
   Vector<int> wired_channels_;
 
   /** A row's opacity input per channel, keyed by the row. */

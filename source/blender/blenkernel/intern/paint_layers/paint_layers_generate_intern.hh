@@ -22,6 +22,7 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include "BLI_map.hh"
 #include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
@@ -124,11 +125,33 @@ void tree_root_hash_set(bNodeTree &tree, uint64_t hash);
 bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash);
 
 /**
+ * What a row's place in the stack decides about how it is built: whether an isolating folder lies
+ * above it (the row then works on the folder's pre-multiplied accumulation, in a group of its own
+ * shape), and the factor the Pass Through folders above it put on its opacity (zero when one of
+ * them is hidden).
+ */
+struct PaintLayerForm {
+  bool in_isolating_folder = false;
+  float pass_through_scale = 1.0f;
+};
+
+/** The form of every row of \a ma, found by one walk instead of one search per row. */
+using PaintLayerFormMap = Map<const MaterialPaintLayer *, PaintLayerForm>;
+
+/**
+ * Walk \a ma's stack once and record the #PaintLayerForm of every row, at any depth. The one place
+ * the rule lives, so the topology hash, the builder and the value sync cannot disagree on it.
+ */
+PaintLayerFormMap paint_layers_form_map(const Material &ma);
+
+/**
  * The structure of one row: its source, blend, name and per-channel participation. Never a value.
+ * \a forms is #paint_layers_form_map of \a ma, built once by the caller for all its rows.
  */
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
-                                          Span<int> wired_channels);
+                                          Span<int> wired_channels,
+                                          const PaintLayerFormMap &forms);
 
 /**
  * The structure of the root: the wired channels, and the participating rows in order with their
@@ -152,12 +175,6 @@ bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, int 
  * participation is the union of its children's; an emptied folder takes part in nothing.
  */
 bool row_participates(const Material &ma, const MaterialPaintLayer &layer, int channel);
-
-/**
- * Whether \a layer hangs inside a folder. Such a row is built in the isolated (pre-multiplied)
- * form, which is a different group, so this is part of its topology.
- */
-bool layer_in_folder(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
  * The channels \a ma wires at all, in channel order: a channel nothing participates in gets no

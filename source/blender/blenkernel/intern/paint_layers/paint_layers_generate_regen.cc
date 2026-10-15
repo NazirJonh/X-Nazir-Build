@@ -104,7 +104,7 @@ static bNodeTree *root_tree_ensure(Main &bmain,
 class LayerTreeFactory {
  public:
   LayerTreeFactory(Main &bmain, Material &ma, const bNodeTree &root, const Span<int> wired_channels)
-      : bmain_(bmain), ma_(ma), wired_channels_(wired_channels)
+      : bmain_(bmain), ma_(ma), wired_channels_(wired_channels), forms_(paint_layers_form_map(ma))
   {
     /* The layer groups this material already owns, found in #Main rather than through the root's
      * instances: an undo detaches those, and groups only reachable through them would be left
@@ -129,7 +129,7 @@ class LayerTreeFactory {
     }
     char name[MAX_ID_NAME - 2];
     SNPRINTF(name, ".PL Layer %s", layer.name[0] != '\0' ? layer.name : "Layer");
-    const uint64_t topology = paint_layers_layer_topology_hash(ma_, layer, wired_channels_);
+    const uint64_t topology = paint_layers_layer_topology_hash(ma_, layer, wired_channels_, forms_);
     for (bNodeTree *candidate : old_) {
       if (used_.contains(candidate)) {
         continue;
@@ -230,6 +230,8 @@ class LayerTreeFactory {
   Main &bmain_;
   Material &ma_;
   Span<int> wired_channels_;
+  /** The place-dependent form of every row, walked once for the whole regeneration. */
+  PaintLayerFormMap forms_;
   /** The groups this material owned before the regeneration. */
   Vector<bNodeTree *> old_;
   /** The groups handed out in this regeneration. */

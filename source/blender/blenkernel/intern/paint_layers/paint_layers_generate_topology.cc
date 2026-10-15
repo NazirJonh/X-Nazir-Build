@@ -130,7 +130,8 @@ bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash)
 
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
-                                          const Span<int> wired_channels)
+                                          const Span<int> wired_channels,
+                                          const PaintLayerFormMap &forms)
 {
   uint64_t hash = 0;
   hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
@@ -139,8 +140,11 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
   topology_hash_string(hash, layer.name);
-  /* A row inside a folder is built in the isolated form, with sockets of its own. */
-  hash = topology_hash_mix(hash, layer_in_folder(ma, layer) ? 1 : 0);
+  /* A row inside an isolating folder is built in the isolated form, with sockets of its own. */
+  hash = topology_hash_mix(hash, forms.lookup_default(&layer, {}).in_isolating_folder ? 1 : 0);
+  /* A Pass Through folder builds no group, an isolating one does: the mode is structure, although
+   * what decides it (mask, blend, opacity) is not all in the hash below. */
+  hash = topology_hash_mix(hash, BKE_paint_layers_folder_is_pass_through(layer) ? 1 : 0);
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, row_participates(ma, layer, channel) ? 1 : 0);
@@ -184,6 +188,7 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, const Span<int> wir
   /* The rows in order, each with its own topology: adding, removing or reordering a row moves this,
    * a value edit does not. A row that takes part in no wired channel builds no group and is left
    * out, so a change to it cannot make the root rebuild for nothing. */
+  const PaintLayerFormMap forms = paint_layers_form_map(ma);
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *parent) -> bool {
         bool participates = false;
@@ -200,7 +205,8 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, const Span<int> wir
          * even when the order of the rows does not change. */
         topology_hash_uid(hash, layer.marker);
         topology_hash_uid(hash, parent != nullptr ? parent->marker : bUUID{});
-        hash = topology_hash_mix(hash, paint_layers_layer_topology_hash(ma, layer, wired_channels));
+        hash = topology_hash_mix(hash,
+                                 paint_layers_layer_topology_hash(ma, layer, wired_channels, forms));
         return true;
       });
   return hash;

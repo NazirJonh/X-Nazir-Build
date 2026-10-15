@@ -114,13 +114,22 @@ static bool composite_channel_linear(const Span<PaintMaterialCompositeImageLayer
 static void composite_image_layers_collect(const Material &ma,
                                            const ListBaseT<MaterialPaintLayer> &list,
                                            const int channel,
+                                           const float pass_through_scale,
                                            Vector<PaintMaterialCompositeImageLayer> &r_layers)
 {
   for (const MaterialPaintLayer &layer : list) {
+    /* A Pass Through folder is flattened into this list, the way the generator expands it in the
+     * chain. It has no row to carry its visibility, so a hidden one hands its rows a zero factor
+     * on their opacity, accumulated on the way down (the same rule as #paint_layers_form_map). */
+    if (BKE_paint_layers_folder_is_pass_through(layer)) {
+      const float scale = (layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? pass_through_scale : 0.0f;
+      composite_image_layers_collect(ma, layer.children, channel, scale, r_layers);
+      continue;
+    }
     PaintMaterialCompositeImageLayer out;
     if (BKE_paint_layers_is_folder(layer)) {
       Vector<PaintMaterialCompositeImageLayer> children;
-      composite_image_layers_collect(ma, layer.children, channel, children);
+      composite_image_layers_collect(ma, layer.children, channel, pass_through_scale, children);
       if (children.is_empty()) {
         continue;
       }
@@ -149,7 +158,7 @@ static void composite_image_layers_collect(const Material &ma,
       }
     }
     out.blend = layer_channel_blend(layer, channel);
-    out.opacity = BKE_paint_layers_effective_opacity(layer);
+    out.opacity = BKE_paint_layers_effective_opacity(layer) * pass_through_scale;
     out.enabled = true;
     /* The mask is one for all channels of the row, so the same item reaches every channel's
      * stack, exactly as the generator reads the one set of mask inputs in every channel chain. */
@@ -176,7 +185,7 @@ bool BKE_paint_layers_composite_image_layers(
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
-  composite_image_layers_collect(ma, ma.paint_layers, channel, r_layers);
+  composite_image_layers_collect(ma, ma.paint_layers, channel, 1.0f, r_layers);
   return !r_layers.is_empty();
 }
 

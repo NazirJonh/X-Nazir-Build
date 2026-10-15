@@ -80,6 +80,24 @@ bool BKE_paint_layers_has_children(const MaterialPaintLayer &layer)
   return BKE_paint_layers_is_folder(layer) && !BLI_listbase_is_empty(&layer.children);
 }
 
+bool BKE_paint_layers_folder_is_pass_through(const MaterialPaintLayer &folder)
+{
+  if (!BKE_paint_layers_is_folder(folder)) {
+    return false;
+  }
+  /* A mask folds a per-pixel factor into the folder's own row; an inlined folder has no row. The
+   * list is read directly because emptiness is the question: a disabled mask item still has to flip
+   * the mode, so toggling its visibility later stays a value edit. */
+  if (!BLI_listbase_is_empty(&folder.mask_stack)) {
+    return false;
+  }
+  /* The isolated folder computes `over(below, P/a, a)`; laying the children one after another is
+   * the same only for the Mix blend at full weight. Opacity below one breaks it for two or more
+   * children, because scaling the whole isolated result is not scaling each child's own factor.
+   * The raw opacity is read on purpose: the enabled flag must not change the mode. */
+  return folder.blend == MA_PAINT_LAYER_BLEND_MIX && folder.opacity == 1.0f;
+}
+
 /**
  * The list of \a list's subtree that directly holds \a layer: \a list itself or the children of a
  * folder under it, at any depth. Only a folder's children are read -- a leaf row that somehow
@@ -914,9 +932,16 @@ bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, const
   if (!paint_layer_owned(ma, layer)) {
     return false;
   }
+  const bool was_pass_through = BKE_paint_layers_folder_is_pass_through(*layer);
   layer->opacity = clamp_f(opacity, 0.0f, 1.0f);
-  /* Opacity is an input of the row's group, so this is value-only. */
-  BKE_paint_layers_tag_value_edited(ma);
+  /* Opacity is an input of the row's group, so this is value-only -- unless it moves a folder
+   * across the Pass Through boundary, which changes which nodes exist. */
+  if (BKE_paint_layers_folder_is_pass_through(*layer) != was_pass_through) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  else {
+    BKE_paint_layers_tag_value_edited(ma);
+  }
   return true;
 }
 

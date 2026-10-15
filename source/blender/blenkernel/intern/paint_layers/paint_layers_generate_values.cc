@@ -51,6 +51,7 @@ namespace {
  * contract socket (Below/Result), not a value, and is left alone.
  */
 bool values_sync_socket(Material &ma,
+                        const PaintLayerFormMap &forms,
                         const bNodeTreeInterfaceSocket &iface,
                         bNodeSocket &socket)
 {
@@ -72,7 +73,8 @@ bool values_sync_socket(Material &ma,
     if (socket.default_value == nullptr) {
       return false;
     }
-    const float value = BKE_paint_layers_effective_opacity(*layer);
+    const float value = BKE_paint_layers_effective_opacity(*layer) *
+                        forms.lookup_default(layer, {}).pass_through_scale;
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
     if (iface.socket_data != nullptr) {
       static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
@@ -129,6 +131,7 @@ bool BKE_paint_layers_values_sync(Material &ma)
   /* The value inputs live on the row groups' own interfaces and on their instances in this root.
    * The shader reads the instance sockets, so those are what must agree with the description. */
   bool ok = true;
+  const PaintLayerFormMap forms = paint_layers_form_map(ma);
   for (bNode &node : root->nodes) {
     if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
       continue;
@@ -159,7 +162,7 @@ bool BKE_paint_layers_values_sync(Material &ma)
         }
         continue;
       }
-      ok = values_sync_socket(ma, *iface, *socket) && ok;
+      ok = values_sync_socket(ma, forms, *iface, *socket) && ok;
     }
   }
   return ok;

@@ -460,6 +460,9 @@ wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
                grouping->row_aux_set(*C, focus, owner, ordinal, add, initial_color);
       });
   if (ok && add) {
+    /* A mask the user just asked for is the one they mean to work on: the layer it belongs to
+     * becomes the selected and active row, even when the Add was aimed at another one. */
+    outliner_stack_row_activate(C, *space_outliner, ordinal);
     /* The row now has a mask section; show it, as a click on the mask thumbnail would. The
      * mutation rebuilt the rows, so the row is looked up again. */
     const StringRefNull aux_section = stack_aux_section_id(*space_outliner);
@@ -506,6 +509,12 @@ bool stack_row_mask_section_poll(bContext *C)
                                                             *space_outliner);
   const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
   if (row == nullptr) {
+    return false;
+  }
+  /* A row hung on its parent's section (a mask correction) has a mask slot of its own, but no mask
+   * to copy: the layer's whole mask is the parent's. Left to the layer copy, which carries the
+   * correction itself and lets it be pasted onto the mask of another layer. */
+  if (!row->parent_section_id.empty()) {
     return false;
   }
   /* Only a mask slot that is the one showing: a row with no mask section has nothing to act on. */
@@ -1321,6 +1330,7 @@ wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op)
     }
 
     int copied_ordinal = -1;
+    bool pasted_onto_layer = false;
     const bool copied = stack_mutate(
         *C,
         *space_outliner,
@@ -1330,11 +1340,26 @@ wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op)
             const StackFocus &focus,
             ID &owner,
             int &r_select_ordinal) {
+          /* A correction or a mask item goes onto the layer the paste is aimed at, whichever layer
+           * it was copied from; a duplicate would only make another one beside the original. */
+          const int onto = editor.row_paste_correction(
+              *C, focus, owner, source_ordinal, anchor_ordinal);
+          if (onto != STACK_PASTE_NOT_APPLICABLE) {
+            pasted_onto_layer = true;
+            r_select_ordinal = onto;
+            return onto >= 0;
+          }
           r_select_ordinal = editor.row_duplicate(*C, focus, owner, source_ordinal);
           return r_select_ordinal >= 0;
         },
         &copied_ordinal);
     if (!copied || copied_ordinal < 0) {
+      continue;
+    }
+    if (pasted_onto_layer) {
+      /* It sits where its layer keeps it; there is no row to move above the anchor. */
+      last_ordinal = copied_ordinal;
+      pasted_any = true;
       continue;
     }
 

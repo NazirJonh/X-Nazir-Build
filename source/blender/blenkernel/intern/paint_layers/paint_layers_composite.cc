@@ -130,7 +130,9 @@ static void composite_image_layers_collect(const Material &ma,
     if (BKE_paint_layers_is_folder(layer)) {
       Vector<PaintMaterialCompositeImageLayer> children;
       composite_image_layers_collect(ma, layer.children, channel, pass_through_scale, children);
-      if (children.is_empty()) {
+      /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
+       * here is not: the correction brings the coverage in over nothing. */
+      if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
         continue;
       }
       out.is_folder = true;

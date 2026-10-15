@@ -942,16 +942,20 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   }
 
   /* Content corrections lay their maps over the colour before the row's own blend, and raise the
-   * coverage the row lays with. Only a leaf has any (a folder takes them in a later change). */
-  if (!folder) {
+   * coverage the row lays with. A folder's colour is the straightened result of what it holds and
+   * its coverage what that accumulated, so the correction works on those two exactly as it does on
+   * a row's map and alpha. */
+  NodeOutput folder_cover = {group_input, folder_coverage};
+  {
     NodeOutput content = {source_node, source};
+    NodeOutput &coverage_in_out = folder ? folder_cover : row_coverage;
     for (const MaterialPaintLayer &effect : layer.effects) {
       this->correction_lay(tree,
                            group,
                            effect,
                            channel,
                            content,
-                           row_coverage,
+                           coverage_in_out,
                            track_alpha ? &content_alpha : nullptr);
     }
     source_node = content.node;
@@ -987,12 +991,12 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
    * folder shows what is below however opaque its own factor is. */
   if (folder) {
     if (factor == nullptr) {
-      factor_node = group_input;
-      factor = folder_coverage;
+      factor_node = folder_cover.node;
+      factor = folder_cover.socket;
     }
     else {
       const NodeOutput product = this->multiply_nodes_add(
-          tree, {factor_node, factor}, {group_input, folder_coverage});
+          tree, {factor_node, factor}, folder_cover);
       if (product.node != nullptr) {
         factor_node = product.node;
         factor = product.socket;

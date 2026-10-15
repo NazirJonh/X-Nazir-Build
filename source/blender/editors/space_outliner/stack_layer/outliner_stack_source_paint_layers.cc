@@ -182,9 +182,32 @@ StackRowPreview paint_mask_slot_build(const MaterialPaintLayer &item)
 
 namespace {
 
+/**
+ * The description's own problems -- a folder carrying a map, a Fill correction on Normal -- shown on
+ * the row they are about, as a warning icon with the reason in its tooltip. \a correction is the
+ * correction the issue is about, or nil for the layer's own.
+ */
+void paint_issue_slots_append(const Span<PaintLayersIssue> issues,
+                              const bUUID &layer,
+                              const bUUID &correction,
+                              StackRow &row)
+{
+  for (const PaintLayersIssue &issue : issues) {
+    if (!BLI_uuid_equal(issue.layer, layer) || !BLI_uuid_equal(issue.correction, correction)) {
+      continue;
+    }
+    StackRowPreview warning;
+    warning.icon = ICON_ERROR;
+    warning.label = issue.text != nullptr ? issue.text : "";
+    row.preview_slots.append(std::move(warning));
+  }
+}
+
 /** The row of one content correction, hung off the row \a owner_ordinal names. */
 StackRow paint_correction_row_build(const Material &material,
                                     const MaterialPaintLayer &effect,
+                                    const bUUID &owner_marker,
+                                    const Span<PaintLayersIssue> issues,
                                     const int depth,
                                     const int owner_ordinal,
                                     const int ordinal)
@@ -247,6 +270,7 @@ StackRow paint_correction_row_build(const Material &material,
   channels.identifier = "CHANNELS";
   channels.name = IFACE_("Channel Textures");
   row.content_sections.append(std::move(channels));
+  paint_issue_slots_append(issues, owner_marker, effect.marker, row);
   return row;
 }
 
@@ -319,6 +343,7 @@ StackRow paint_mask_item_row_build(const Material &material,
  */
 void paint_stack_rows_append(const Material &material,
                              const ListBaseT<MaterialPaintLayer> &list,
+                             const Span<PaintLayersIssue> issues,
                              const int depth,
                              const int parent_ordinal,
                              int &ordinal,
@@ -434,6 +459,8 @@ void paint_stack_rows_append(const Material &material,
       row.content_sections.append(std::move(mask_section));
     }
 
+    paint_issue_slots_append(issues, layer.marker, bUUID{}, row);
+
     const int row_ordinal = row.ordinal;
     /* The corrections are dense settings of their layer: rows attached to its content section,
      * numbered right after it (see #paint_rows_walk). */
@@ -442,7 +469,8 @@ void paint_stack_rows_append(const Material &material,
         overflow = true;
         return;
       }
-      r_rows.append(paint_correction_row_build(material, effect, depth + 1, row_ordinal, ordinal++));
+      r_rows.append(paint_correction_row_build(
+          material, effect, layer.marker, issues, depth + 1, row_ordinal, ordinal++));
     }
     /* The mask's corrections follow, numbered the same way: the base is the mask's own slot. */
     for (const MaterialPaintLayer &item : layer.mask_stack) {
@@ -457,7 +485,7 @@ void paint_stack_rows_append(const Material &material,
     }
     if (folder) {
       paint_stack_rows_append(
-          material, layer.children, depth + 1, row_ordinal, ordinal, overflow, r_rows);
+          material, layer.children, issues, depth + 1, row_ordinal, ordinal, overflow, r_rows);
     }
     r_rows.append(std::move(row));
   }
@@ -475,7 +503,11 @@ void paint_stack_rows_from_description(const Material &material,
 
   int ordinal = 0;
   bool overflow = false;
-  paint_stack_rows_append(material, material.paint_layers, 0, -1, ordinal, overflow, r_rows);
+  /* Built once: it is cheap, but a row would otherwise ask the whole description per row. */
+  Vector<PaintLayersIssue> issues;
+  BKE_paint_layers_issues_get(material, issues);
+  paint_stack_rows_append(
+      material, material.paint_layers, issues, 0, -1, ordinal, overflow, r_rows);
   if (overflow) {
     StackRow overflow_row;
     overflow_row.ordinal = STACK_ROW_ORDINAL_MAX + 1;
@@ -993,12 +1025,7 @@ class PaintLayersStackSource final : public StackSource,
         return -1;
       }
     }
-    if (is_correction && !is_mask_correction && BKE_paint_layers_is_folder(*anchor)) {
-      /* A folder has no colour of its own to correct; saying so beats a button that does nothing. A
-       * mask is its own, so a folder takes a mask correction. */
-      BKE_report(CTX_wm_reports(&C), RPT_WARNING, "A folder takes no correction; select a layer");
-      return -1;
-    }
+
     params.anchor = anchor;
     /* An Add onto a folder means filling it: the policy turns this into Into. */
     params.place = PaintLayerPlace::Above;
@@ -1350,6 +1377,51 @@ class PaintLayersStackSource final : public StackSource,
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return copy;
+  }
+
+  int row_paste_correction(bContext &C,
+                           const StackFocus & /*focus*/,
+                           ID &owner,
+                           const int source_ordinal,
+                           const int target_ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    Main *bmain = CTX_data_main(&C);
+    const MaterialPaintLayer *source = paint_description_row_for_ordinal(material, source_ordinal);
+    if (source == nullptr || !ELEM(source->role,
+                                   MA_PAINT_LAYER_ROLE_EFFECT,
+                                   MA_PAINT_LAYER_ROLE_MASK_ITEM))
+    {
+      return STACK_PASTE_NOT_APPLICABLE;
+    }
+    MaterialPaintLayer *target = paint_description_row_for_ordinal(material, target_ordinal);
+    if (target != nullptr) {
+      /* A correction or a mask item is no place to paste onto: the layer it hangs on is. */
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *target)) {
+        target = parent;
+      }
+      else if (target->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+        target = BKE_paint_layers_mask_item_owner(material, *target);
+      }
+    }
+    if (bmain == nullptr || target == nullptr) {
+      return -1;
+    }
+    MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, material, *source, target);
+    if (copy == nullptr) {
+      BKE_report(CTX_wm_reports(&C),
+                 RPT_INFO,
+                 "A mask correction needs a layer that has a mask to lay over");
+      return -1;
+    }
+    /* What was pasted is what the user works on next, in the mode it belongs to. */
+    BKE_paint_layers_active_set(material, copy->marker);
+    layers_target_mode_set(C,
+                           copy->role == MA_PAINT_LAYER_ROLE_MASK_ITEM ? PAINT_LAYER_TARGET_MASK :
+                                                                         PAINT_LAYER_TARGET_CONTENT);
+    layers_texpaint_slots_refresh(C);
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return paint_layers_ordinal_of(material, copy);
   }
 
   /** \} */

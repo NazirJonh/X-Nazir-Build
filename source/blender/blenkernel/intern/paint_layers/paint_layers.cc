@@ -36,6 +36,8 @@
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
+#include "BLT_translation.hh"
+
 #include "DEG_depsgraph.hh"
 
 #include "DNA_ID.h"
@@ -93,6 +95,11 @@ bool BKE_paint_layers_folder_is_pass_through(const MaterialPaintLayer &folder)
    * list is read directly because emptiness is the question: a disabled mask item still has to flip
    * the mode, so toggling its visibility later stays a value edit. */
   if (!BLI_listbase_is_empty(&folder.mask_stack)) {
+    return false;
+  }
+  /* A content correction edits the folder's isolated result: an inlined folder has no result of
+   * its own to lay it over. Read directly, like the mask, so hiding a correction keeps the mode. */
+  if (!BLI_listbase_is_empty(&folder.effects)) {
     return false;
   }
   /* The isolated folder computes `over(below, P/a, a)`; laying the children one after another is
@@ -679,8 +686,9 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     const char *name,
                                                     const eMaterialPaintLayerSource source)
 {
-  /* A folder has no colour of its own to correct, and a correction never carries one itself. */
-  if (!paint_layer_in_stack(ma, owner) || BKE_paint_layers_is_folder(*owner)) {
+  /* A folder takes one too: it corrects the isolated result of what the folder holds. A correction
+   * is never a row of the stack and never carries corrections of its own. */
+  if (!paint_layer_in_stack(ma, owner)) {
     return nullptr;
   }
   if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
@@ -936,6 +944,55 @@ bool BKE_paint_layers_mask_copy(Main &bmain,
   }
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+bool BKE_paint_layers_correction_can_paste(const MaterialPaintLayer &source,
+                                           const MaterialPaintLayer &target)
+{
+  if (target.role != MA_PAINT_LAYER_ROLE_LAYER) {
+    return false;
+  }
+  switch (source.role) {
+    case MA_PAINT_LAYER_ROLE_EFFECT:
+      return true;
+    case MA_PAINT_LAYER_ROLE_MASK_ITEM:
+      /* A mask is a stack over its base, so an item that is not the base needs one to sit over; the
+       * base itself is always welcome, becoming the target's base or a plain item over it. */
+      return (source.flag & MA_PAINT_LAYER_MASK_BASE) != 0 ||
+             BKE_paint_layers_mask_base(target) != nullptr;
+    default:
+      return false;
+  }
+}
+
+MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
+                                                      Material &ma,
+                                                      const MaterialPaintLayer &source,
+                                                      MaterialPaintLayer *target)
+{
+  if (!paint_layer_in_stack(ma, target) || !BKE_paint_layers_correction_can_paste(source, *target)) {
+    return nullptr;
+  }
+  /* Why copy the images: a map is painted in place, so a pasted correction sharing its source's
+   * image would turn every stroke on one into a stroke on the other. */
+  MaterialPaintLayer *copy = paint_layer_item_duplicate(bmain, ma, source);
+  if (source.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    if (BKE_paint_layers_mask_base(*target) == nullptr) {
+      /* The first item of an empty mask is its base, whatever it was in its old home. */
+      copy->flag |= MA_PAINT_LAYER_MASK_BASE;
+      BLI_addhead(&target->mask_stack, copy);
+    }
+    else {
+      /* One base per layer: the target's own stays, the copy is a plain item over it. */
+      copy->flag = eMaterialPaintLayerFlag(int(copy->flag) & ~int(MA_PAINT_LAYER_MASK_BASE));
+      BLI_addtail(&target->mask_stack, copy);
+    }
+  }
+  else {
+    BLI_addtail(&target->effects, copy);
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return copy;
 }
 
 MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
@@ -1483,6 +1540,61 @@ bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, co
   }
   return BKE_paint_layers_channel_set_value(
       ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color);
+}
+
+void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r_issues)
+{
+  const bool normal_in_set = !paint_layer_channel_filtered(ma, PAINT_MATERIAL_CHANNEL_NORMAL);
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        const bool folder = BKE_paint_layers_is_folder(layer);
+        if (folder) {
+          for (const int i : IndexRange(layer.channels_num)) {
+            if (layer.channels[i].image == nullptr) {
+              continue;
+            }
+            PaintLayersIssue issue;
+            issue.layer = layer.marker;
+            issue.channel = layer.channels[i].channel;
+            issue.code = PaintLayersIssueCode::FolderHasMaps;
+            issue.text = TIP_("A folder takes part through its layers; its own map is ignored");
+            r_issues.append(issue);
+          }
+        }
+        else if (!BLI_listbase_is_empty(&layer.children)) {
+          PaintLayersIssue issue;
+          issue.layer = layer.marker;
+          issue.code = PaintLayersIssueCode::NonFolderHasChildren;
+          issue.text = TIP_("Only a folder holds other layers; this row's nested rows are ignored");
+          r_issues.append(issue);
+        }
+        /* A Fill correction that was given the Normal channel and holds no map in it: a flat value
+         * is not a tangent normal, so it lays nothing there. One that was never given Normal says
+         * nothing, as it does not claim to lay in it. */
+        if (!normal_in_set) {
+          return true;
+        }
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          if (effect.source != MA_PAINT_LAYER_SOURCE_CONSTANT ||
+              (effect.flag & MA_PAINT_LAYER_ENABLED) == 0)
+          {
+            continue;
+          }
+          const MaterialPaintLayerChannel *normal = paint_layer_channel_find(
+              effect, PAINT_MATERIAL_CHANNEL_NORMAL);
+          if (!paint_layer_channel_live(normal) || normal->image != nullptr) {
+            continue;
+          }
+          PaintLayersIssue issue;
+          issue.layer = layer.marker;
+          issue.correction = effect.marker;
+          issue.channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+          issue.code = PaintLayersIssueCode::FillCorrectionOnNormal;
+          issue.text = TIP_("A Fill correction has no effect on the Normal channel");
+          r_issues.append(issue);
+        }
+        return true;
+      });
 }
 
 float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer)

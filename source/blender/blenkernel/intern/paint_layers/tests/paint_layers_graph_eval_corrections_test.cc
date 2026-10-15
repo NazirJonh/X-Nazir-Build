@@ -429,6 +429,77 @@ TEST_F(PaintLayersCorrectionTest, fill_correction_on_a_row_of_an_isolating_folde
   expect_graph_matches_cpu(kColor);
 }
 
+TEST_F(PaintLayersCorrectionTest, correction_on_an_isolating_folder_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *first = add_layer("First", add_solid_image("First", 30, 160, 220, 180));
+  MaterialPaintLayer *second = add_layer("Second", add_solid_image("Second", 240, 20, 90, 120));
+  MaterialPaintLayer *members[2] = {first, second};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.8f));
+
+  /* The correction lies over what the folder holds, before the folder's own blend and opacity. */
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, folder, "Corr");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, effect, kColor, add_solid_image("Corr", 20, 240, 90, 160)));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, effect, 0.7f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
+TEST_F(PaintLayersCorrectionTest, fill_correction_on_a_folder_is_a_plain_blend_over_its_result)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 0, 0, 0, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 255));
+  MaterialPaintLayer *members[1] = {row};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  /* Nothing but grouping: laid in the stack as if it were not there. */
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*folder));
+  const RGBA plain = graph_pixel(kColor);
+
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, folder, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, effect, red));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, effect, 0.5f));
+  /* Having a correction, it has a result of its own to lay it over: it isolates. */
+  EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
+
+  expect_graph_matches_cpu(kColor);
+  const RGBA with = graph_pixel(kColor);
+  EXPECT_NEAR(with.r, plain.r + (1.0f - plain.r) * 0.5f, 2e-3f);
+  EXPECT_NEAR(with.g, plain.g * 0.5f, 2e-3f);
+  EXPECT_NEAR(with.b, plain.b * 0.5f, 2e-3f);
+
+  /* Hidden, it is a value edit and nothing is laid. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, effect, false));
+  expect_graph_matches_cpu(kColor);
+  EXPECT_NEAR(graph_pixel(kColor).g, plain.g, 2e-3f);
+}
+
+TEST_F(PaintLayersCorrectionTest, folder_correction_with_a_mask_and_a_translucent_content_matches_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *first = add_layer("First", add_solid_image("First", 30, 160, 220, 100));
+  MaterialPaintLayer *second = add_layer("Second", add_solid_image("Second", 240, 20, 90, 90));
+  MaterialPaintLayer *members[2] = {first, second};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, folder, 0.6f), nullptr);
+  const float color[4] = {0.2f, 0.8f, 0.4f, 1.0f};
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, folder, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, effect, color));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, effect, 0.6f));
+
+  expect_graph_matches_cpu(kColor);
+}
+
 TEST_F(PaintLayersCorrectionTest, a_map_less_correction_lays_nothing)
 {
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));

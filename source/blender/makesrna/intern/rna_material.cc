@@ -569,6 +569,36 @@ static bool rna_paint_layer_in_stack(const Material &ma, const MaterialPaintLaye
   return found;
 }
 
+/**
+ * Paste a copy of the content correction or mask item \a source onto \a target. The source may
+ * belong to another material, which is how a preset or another material's correction is handed
+ * over; images are copied, never shared.
+ */
+static MaterialPaintLayer *rna_Material_paint_layers_paste_correction(Material *ma,
+                                                                      Main *bmain,
+                                                                      ReportList *reports,
+                                                                      PointerRNA *source_ptr,
+                                                                      PointerRNA *target_ptr)
+{
+  const MaterialPaintLayer *source = (source_ptr != nullptr) ?
+                                         static_cast<const MaterialPaintLayer *>(source_ptr->data) :
+                                         nullptr;
+  MaterialPaintLayer *target = (target_ptr != nullptr) ?
+                                   static_cast<MaterialPaintLayer *>(target_ptr->data) :
+                                   nullptr;
+  if (source == nullptr || target == nullptr || !rna_paint_layer_in_stack(*ma, target)) {
+    BKE_report(reports, RPT_ERROR, "Pasting a correction needs a target row of this material");
+    return nullptr;
+  }
+  MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, *ma, *source, target);
+  if (copy == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Cannot paste this correction onto that layer");
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  return copy;
+}
+
 static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                                                          ReportList *reports,
                                                          const char *name,
@@ -1025,6 +1055,96 @@ static void rna_MaterialPaintLayer_channels_begin(CollectionPropertyIterator *it
                            nullptr);
 }
 
+/** One row of the computed `MaterialPaintLayer.issues` collection, a snapshot of a description
+ * problem; the array is built on iteration and owned by the iterator. */
+struct MaterialPaintLayerIssueItem {
+  int code;
+  int channel;
+  char layer_marker[UUID_STRING_SIZE];
+  char correction_marker[UUID_STRING_SIZE];
+  char text[256];
+};
+
+static void rna_MaterialPaintLayer_issues_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayerIssueItem *array = nullptr;
+  int64_t count = 0;
+  if (ma != nullptr && layer != nullptr && BKE_paint_layers_find(*ma, layer->marker) == layer) {
+    Vector<PaintLayersIssue> issues;
+    BKE_paint_layers_issues_get(*ma, issues);
+    for (const PaintLayersIssue &issue : issues) {
+      if (BLI_uuid_equal(issue.layer, layer->marker)) {
+        count++;
+      }
+    }
+    if (count > 0) {
+      array = MEM_new_array_uninitialized<MaterialPaintLayerIssueItem>(count, __func__);
+      int64_t i = 0;
+      for (const PaintLayersIssue &issue : issues) {
+        if (!BLI_uuid_equal(issue.layer, layer->marker)) {
+          continue;
+        }
+        MaterialPaintLayerIssueItem &item = array[i++];
+        item.code = int(issue.code);
+        item.channel = issue.channel;
+        BLI_uuid_format(item.layer_marker, issue.layer);
+        BLI_uuid_format(item.correction_marker, issue.correction);
+        STRNCPY(item.text, issue.text != nullptr ? issue.text : "");
+      }
+    }
+  }
+  rna_iterator_array_begin(
+      iter, ptr, array, sizeof(MaterialPaintLayerIssueItem), count, array != nullptr, nullptr);
+}
+
+static MaterialPaintLayerIssueItem *rna_MaterialPaintLayerIssue(PointerRNA *ptr)
+{
+  return static_cast<MaterialPaintLayerIssueItem *>(ptr->data);
+}
+
+static int rna_MaterialPaintLayerIssue_code_get(PointerRNA *ptr)
+{
+  return rna_MaterialPaintLayerIssue(ptr)->code;
+}
+
+static int rna_MaterialPaintLayerIssue_channel_get(PointerRNA *ptr)
+{
+  return rna_MaterialPaintLayerIssue(ptr)->channel;
+}
+
+static void rna_MaterialPaintLayerIssue_layer_marker_get(PointerRNA *ptr, char *value)
+{
+  BLI_strncpy(value, rna_MaterialPaintLayerIssue(ptr)->layer_marker, UUID_STRING_SIZE);
+}
+
+static int rna_MaterialPaintLayerIssue_layer_marker_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialPaintLayerIssue(ptr)->layer_marker));
+}
+
+static void rna_MaterialPaintLayerIssue_correction_marker_get(PointerRNA *ptr, char *value)
+{
+  BLI_strncpy(value, rna_MaterialPaintLayerIssue(ptr)->correction_marker, UUID_STRING_SIZE);
+}
+
+static int rna_MaterialPaintLayerIssue_correction_marker_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialPaintLayerIssue(ptr)->correction_marker));
+}
+
+static void rna_MaterialPaintLayerIssue_text_get(PointerRNA *ptr, char *value)
+{
+  const MaterialPaintLayerIssueItem *item = rna_MaterialPaintLayerIssue(ptr);
+  BLI_strncpy(value, item->text, sizeof(item->text));
+}
+
+static int rna_MaterialPaintLayerIssue_text_length(PointerRNA *ptr)
+{
+  return int(strlen(rna_MaterialPaintLayerIssue(ptr)->text));
+}
+
 /** The constant coverage of a mask item: the mean of its Base Color record, one for any other. */
 static float rna_MaterialPaintLayer_mask_value_get(PointerRNA *ptr)
 {
@@ -1100,7 +1220,7 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
       return effect;
     }
   }
-  BKE_report(reports, RPT_ERROR, "Only a layer of the stack that is not a folder takes a correction");
+  BKE_report(reports, RPT_ERROR, "Only a layer of the stack takes a correction");
   return nullptr;
 }
 
@@ -1510,6 +1630,73 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values must match #PaintLayersIssueCode. */
+static const EnumPropertyItem rna_enum_material_paint_layer_issue_code_items[] = {
+    {0,
+     "FILL_CORRECTION_ON_NORMAL",
+     0,
+     "Fill Correction on Normal",
+     "A flat value is not a normal, so the correction is skipped in Normal until it holds a map"},
+    {1,
+     "FOLDER_HAS_MAPS",
+     0,
+     "Folder Has Maps",
+     "A folder takes part through its layers; a map on the folder itself is ignored"},
+    {2,
+     "NON_FOLDER_HAS_CHILDREN",
+     0,
+     "Non-Folder Has Children",
+     "Only a folder takes part through its children; the stray nesting is ignored"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static void rna_def_material_paint_layer_issue(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "MaterialPaintLayerIssue", nullptr);
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Issue", "A description problem on a paint layer, computed on read");
+
+  prop = RNA_def_property(srna, "code", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayerIssue_code_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_issue_code_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Code", "What kind of problem this is");
+
+  prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayerIssue_channel_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "Channel the issue is about");
+
+  prop = RNA_def_property(srna, "layer_marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerIssue_layer_marker_get",
+                                "rna_MaterialPaintLayerIssue_layer_marker_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Layer Marker", "Marker of the layer the issue is about");
+
+  prop = RNA_def_property(srna, "correction_marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerIssue_correction_marker_get",
+                                "rna_MaterialPaintLayerIssue_correction_marker_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Correction Marker", "Marker of the correction the issue is about, or empty");
+
+  prop = RNA_def_property(srna, "text", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerIssue_text_get",
+                                "rna_MaterialPaintLayerIssue_text_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Text", "Human-readable description of the issue");
+}
+
 static void rna_def_material_paint_layer(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -1604,6 +1791,21 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                     nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Children", "Nested rows of this folder layer, bottom to top");
+
+  prop = RNA_def_property(srna, "issues", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerIssue");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_issues_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Issues", "Description problems on this layer that the stack silently ignores");
 
   prop = RNA_def_property(srna, "mask_items", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayer");
@@ -1890,6 +2092,29 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                "Source",
                "Source of the new layer");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "paste_correction", "rna_Material_paint_layers_paste_correction");
+  RNA_def_function_ui_description(
+      func,
+      "Paste a copy of a content correction or a mask correction (of this or another material) onto "
+      "a layer");
+  RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func,
+                         "source",
+                         "MaterialPaintLayer",
+                         "Correction",
+                         "The correction or mask item to copy, possibly of another material");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func,
+                         "target",
+                         "MaterialPaintLayer",
+                         "Layer",
+                         "The layer of this material to paste the copy onto");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "copy", "MaterialPaintLayer", "", "The pasted copy");
   RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "remove", "rna_Material_paint_layers_remove");
@@ -2870,6 +3095,7 @@ void RNA_def_material(BlenderRNA *brna)
 
   rna_def_material_greasepencil(brna);
   rna_def_material_lineart(brna);
+  rna_def_material_paint_layer_issue(brna);
   rna_def_material_paint_layer(brna);
   rna_def_material_paint_layer_channel(brna);
 

@@ -131,6 +131,72 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_corrections_are_rows_under_the_m
   EXPECT_EQ(painted.icon, int(ICON_MOD_MASK));
 }
 
+TEST_F(OutlinerStackPaintLayersSourceTest, an_issue_is_a_warning_slot_on_the_row_it_is_about)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::CorrectionFill;
+  params.anchor = layer;
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(fill, nullptr);
+  params.kind = PaintLayerAddKind::Correction;
+  ASSERT_NE(BKE_paint_layers_add_with_policy(*material, params), nullptr);
+
+  /* The layer carries Normal, the Fill was never given it: nothing to say. Once it is, the Fill
+   * correction's row, and only that one, says why it does nothing there. */
+  const auto count_warnings = [&](const char *expected_name) {
+    Vector<StackRow> rows;
+    paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+    EXPECT_EQ(rows.size(), 3u);
+    int warnings = 0;
+    for (const StackRow &row : rows) {
+      for (const StackRowPreview &slot : row.preview_slots) {
+        if (slot.icon == int(ICON_ERROR)) {
+          warnings++;
+          EXPECT_EQ(row.name, expected_name);
+          EXPECT_FALSE(slot.label.empty());
+        }
+      }
+    }
+    return warnings;
+  };
+  EXPECT_EQ(count_warnings(""), 0);
+  ASSERT_NE(BKE_paint_layers_channel_add(*material, fill, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  EXPECT_EQ(count_warnings("Correction Fill 1"), 1);
+  ASSERT_TRUE(BKE_paint_layers_channel_remove(*material, fill, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_EQ(count_warnings(""), 0);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_folder_takes_a_correction_row)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  MaterialPaintLayer *members[1] = {layer};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *material, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Correction;
+  params.anchor = folder;
+  MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(effect, nullptr);
+
+  /* The folder's own correction is a row of the folder, numbered right after it. */
+  EXPECT_EQ(paint_layers_ordinal_of(*material, folder), 0);
+  EXPECT_EQ(paint_layers_ordinal_of(*material, effect), 1);
+  EXPECT_EQ(paint_description_row_for_ordinal(*material, 1), effect);
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  bool found = false;
+  for (const StackRow &row : rows) {
+    if (row.ordinal == 1) {
+      found = true;
+      EXPECT_EQ(row.parent_ordinal, 0);
+      EXPECT_EQ(row.parent_section_id, "CHANNELS");
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
 TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_a_mask_correction)
 {
   MaterialPaintLayer *layer = add_layer("A");

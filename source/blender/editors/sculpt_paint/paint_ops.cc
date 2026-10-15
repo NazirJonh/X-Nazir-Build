@@ -991,10 +991,18 @@ static wmOperatorStatus stack_layer_copy_exec(bContext *C, wmOperator *op)
                                PAINT_LAYER_TARGET_MASK &&
                            layer->role != MA_PAINT_LAYER_ROLE_EFFECT &&
                            BKE_paint_layers_mask_base(*layer) != nullptr;
+  /* A mask correction answers its layer as the active row, so it is asked for by its own marker:
+   * it is what the user selected, and what a paste onto another layer's mask has to carry. */
+  const MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(*ma);
   stack_layer_clipboard.material_uid = ma->id.session_uid;
-  stack_layer_clipboard.marker = layer->marker;
-  stack_layer_clipboard.is_mask = mask_target;
-  BKE_reportf(op->reports, RPT_INFO, "Copied %s", mask_target ? "the mask" : layer->name);
+  stack_layer_clipboard.marker = (item != nullptr) ? item->marker : layer->marker;
+  stack_layer_clipboard.is_mask = mask_target && item == nullptr;
+  BKE_reportf(op->reports,
+              RPT_INFO,
+              "Copied %s",
+              (item != nullptr) ? item->name :
+              mask_target       ? "the mask" :
+                                  layer->name);
   return OPERATOR_FINISHED;
 }
 
@@ -1017,7 +1025,24 @@ static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  if (stack_layer_clipboard.is_mask) {
+  if (ELEM(source->role, MA_PAINT_LAYER_ROLE_EFFECT, MA_PAINT_LAYER_ROLE_MASK_ITEM)) {
+    /* A correction or a mask item goes onto the layer that is active, whichever layer it was copied
+     * from: a mask item lays over that layer's base mask, a content correction over its colour. */
+    MaterialPaintLayer *target = anchor;
+    if (MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(*ma, *anchor)) {
+      target = owner;
+    }
+    MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, *ma, *source, target);
+    if (copy == nullptr) {
+      BKE_report(op->reports, RPT_INFO, "Could not paste the correction onto this layer");
+      return OPERATOR_CANCELLED;
+    }
+    BKE_paint_layers_active_set(*ma, copy->marker);
+    scene->toolsettings->paint_mode.layer_target_mode =
+        (copy->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? PAINT_LAYER_TARGET_MASK :
+                                                        PAINT_LAYER_TARGET_CONTENT;
+  }
+  else if (stack_layer_clipboard.is_mask) {
     /* A correction is not a row of the stack and has no mask to replace: paste onto its layer. */
     MaterialPaintLayer *target = anchor;
     if (MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(*ma, *anchor)) {

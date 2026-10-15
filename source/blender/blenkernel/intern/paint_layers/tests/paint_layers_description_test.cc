@@ -1509,14 +1509,13 @@ TEST_F(PaintLayersDescription, correction_hangs_on_its_row_and_is_not_a_row_of_t
   EXPECT_FALSE(paint_layer_effects_lay(ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
 }
 
-TEST_F(PaintLayersDescription, correction_refuses_a_folder_and_a_correction_as_owner)
+TEST_F(PaintLayersDescription, correction_refuses_a_correction_as_owner)
 {
   Material &ma = *BKE_material_add(bmain, "CorrectionRefuseMat");
   MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
   MaterialPaintLayer *members[1] = {a};
   MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 1));
   ASSERT_NE(folder, nullptr);
-  EXPECT_EQ(BKE_paint_layers_correction_add(ma, folder, "Corr"), nullptr);
   EXPECT_EQ(BKE_paint_layers_correction_add(ma, nullptr, "Corr"), nullptr);
 
   MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, a, "Corr");
@@ -1525,6 +1524,187 @@ TEST_F(PaintLayersDescription, correction_refuses_a_folder_and_a_correction_as_o
   /* A correction is not removed as a row, and a row not as a correction. */
   EXPECT_FALSE(BKE_paint_layers_remove(ma, effect));
   EXPECT_FALSE(BKE_paint_layers_correction_remove(ma, a));
+}
+
+TEST_F(PaintLayersDescription, a_folder_takes_a_correction_and_stops_being_pass_through)
+{
+  Material &ma = *BKE_material_add(bmain, "FolderCorrectionMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *members[1] = {a};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_folder_is_pass_through(*folder));
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, folder, "Corr");
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *effect), folder);
+  /* Read from the list, not from visibility: a hidden correction keeps the mode (a value edit). */
+  EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(ma, effect, false));
+  EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 1);
+
+  ASSERT_TRUE(BKE_paint_layers_correction_remove(ma, effect));
+  EXPECT_TRUE(BKE_paint_layers_folder_is_pass_through(*folder));
+
+  /* Participation: a folder lays through a correction that has a map even holding nothing that
+   * does, and through none otherwise. */
+  EXPECT_FALSE(paint_layer_effects_lay(ma, *folder, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  MaterialPaintLayer *fill = BKE_paint_layers_correction_add(
+      ma, folder, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_TRUE(paint_layer_effects_lay(ma, *folder, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+}
+
+TEST_F(PaintLayersDescription, issues_report_a_fill_correction_that_has_no_effect_on_normal)
+{
+  Material &ma = *BKE_material_add(bmain, "IssueNormalMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *fill = BKE_paint_layers_correction_add(
+      ma, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(fill, nullptr);
+  MaterialPaintLayer *paint = BKE_paint_layers_correction_add(ma, row, "Paint");
+  ASSERT_NE(paint, nullptr);
+
+  Vector<PaintLayersIssue> issues;
+  /* A Fill that was never given Normal does not claim to lay in it: nothing to say. */
+  BKE_paint_layers_issues_get(ma, issues);
+  EXPECT_TRUE(issues.is_empty());
+
+  ASSERT_NE(BKE_paint_layers_channel_add(ma, fill, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  BKE_paint_layers_issues_get(ma, issues);
+  ASSERT_EQ(issues.size(), 1);
+  EXPECT_EQ(issues[0].code, PaintLayersIssueCode::FillCorrectionOnNormal);
+  EXPECT_TRUE(BLI_uuid_equal(issues[0].layer, row->marker));
+  EXPECT_TRUE(BLI_uuid_equal(issues[0].correction, fill->marker));
+  EXPECT_EQ(issues[0].channel, int(PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_NE(issues[0].text, nullptr);
+
+  /* A hidden one is not a problem, and a map in Normal makes it do something. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(ma, fill, false));
+  issues.clear();
+  BKE_paint_layers_issues_get(ma, issues);
+  EXPECT_TRUE(issues.is_empty());
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(ma, fill, true));
+  const float flat[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+  Image &map = *BKE_image_add_generated(
+      bmain, 4, 4, "NormalMap", 32, false, IMA_GENTYPE_BLANK, flat, false, true, false);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, fill, PAINT_MATERIAL_CHANNEL_NORMAL, &map));
+  issues.clear();
+  BKE_paint_layers_issues_get(ma, issues);
+  EXPECT_TRUE(issues.is_empty());
+}
+
+TEST_F(PaintLayersDescription, issues_report_a_folder_with_a_map_and_a_row_with_children)
+{
+  Material &ma = *BKE_material_add(bmain, "IssueShapeMat");
+  /* Rows linked straight into the list, the way a file read or an edit around the API leaves them. */
+  MaterialPaintLayer *folder = paint_layer_add(ma, "Folder");
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  folder->channels = MEM_new_array<MaterialPaintLayerChannel>(1, __func__);
+  folder->channels_num = 1;
+  folder->channels[0].channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  folder->channels[0].state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  folder->channels[0].image = BKE_image_add_generated(
+      bmain, 4, 4, "FolderMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  MaterialPaintLayer *row = paint_layer_add(ma, "Row");
+  MaterialPaintLayer *stray = MEM_new<MaterialPaintLayer>(__func__);
+  STRNCPY(stray->name, "Stray");
+  stray->marker = BLI_uuid_generate_random();
+  stray->flag = MA_PAINT_LAYER_ENABLED;
+  stray->opacity = 1.0f;
+  BLI_addtail(&row->children, stray);
+
+  Vector<PaintLayersIssue> issues;
+  BKE_paint_layers_issues_get(ma, issues);
+  ASSERT_EQ(issues.size(), 2);
+  bool folder_maps = false;
+  bool children = false;
+  for (const PaintLayersIssue &issue : issues) {
+    folder_maps |= issue.code == PaintLayersIssueCode::FolderHasMaps &&
+                   BLI_uuid_equal(issue.layer, folder->marker);
+    children |= issue.code == PaintLayersIssueCode::NonFolderHasChildren &&
+                BLI_uuid_equal(issue.layer, row->marker);
+  }
+  EXPECT_TRUE(folder_maps);
+  EXPECT_TRUE(children);
+}
+
+TEST_F(PaintLayersDescription, correction_paste_lands_a_copy_with_maps_and_settings_of_its_own)
+{
+  Material &ma = *BKE_material_add(bmain, "PasteCorrectionMat");
+  Material &other = *BKE_material_add(bmain, "PasteCorrectionOtherMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *c = BKE_paint_layers_add(other, "C", nullptr, PaintLayerPlace::Above);
+
+  /* A content correction with a map, from this material and from another. */
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, a, "Corr");
+  ASSERT_NE(effect, nullptr);
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image &image = *BKE_image_add_generated(
+      bmain, 4, 4, "CorrMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &image));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(ma, effect, 0.4f));
+
+  MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, ma, *effect, b);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *copy), b);
+  EXPECT_FALSE(BLI_uuid_equal(copy->marker, effect->marker));
+  EXPECT_EQ(copy->opacity, 0.4f);
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      *copy, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  ASSERT_NE(record->image, nullptr);
+  EXPECT_NE(record->image, &image);
+  EXPECT_EQ(BLI_listbase_count(&a->effects), 1);
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 2);
+
+  /* Into another material: its own marker among that one's, the same rules. */
+  MaterialPaintLayer *carried = BKE_paint_layers_correction_paste(*bmain, other, *effect, c);
+  ASSERT_NE(carried, nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(other, *carried), c);
+
+  /* A row of the stack is not a correction, and a correction is not a target. */
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, ma, *a, b), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, ma, *effect, copy), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, ma, *effect, nullptr), nullptr);
+}
+
+TEST_F(PaintLayersDescription, mask_correction_paste_needs_a_base_and_keeps_its_inversion)
+{
+  Material &ma = *BKE_material_add(bmain, "PasteMaskCorrectionMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, a, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      ma, a, MA_PAINT_LAYER_SOURCE_CONSTANT, "Flat", 0.3f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_invert(
+      ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
+
+  /* B has no mask, so a correction has nothing to sit over. */
+  EXPECT_FALSE(BKE_paint_layers_correction_can_paste(*item, *b));
+  EXPECT_EQ(BKE_paint_layers_correction_paste(*bmain, ma, *item, b), nullptr);
+
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, b, 0.5f), nullptr);
+  MaterialPaintLayer *copy = BKE_paint_layers_correction_paste(*bmain, ma, *item, b);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_item_owner(ma, *copy), b);
+  EXPECT_EQ(copy->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  EXPECT_EQ(b->mask_stack.last, copy);
+  EXPECT_EQ(copy->channels[0].value[0], 0.3f);
+  EXPECT_NE(copy->channels[0].flag & MA_PAINT_LAYER_CHANNEL_INVERT, 0);
+
+  /* The base of another layer is welcome: a plain item over this one's own. */
+  MaterialPaintLayer *base_copy = BKE_paint_layers_correction_paste(
+      *bmain, ma, *BKE_paint_layers_mask_base(*a), b);
+  ASSERT_NE(base_copy, nullptr);
+  EXPECT_EQ(base_copy->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  EXPECT_NE(BKE_paint_layers_mask_base(*b), base_copy);
 }
 
 TEST_F(PaintLayersDescription, correction_edits_go_through_the_same_setters_as_a_row)

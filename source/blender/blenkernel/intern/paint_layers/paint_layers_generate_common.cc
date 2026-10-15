@@ -214,6 +214,10 @@ bool row_participates(const Material &ma, const MaterialPaintLayer &layer, const
   if (!BKE_paint_layers_is_folder(layer)) {
     return leaf_participates(ma, layer, channel);
   }
+  /* A folder takes part through what it holds, and through the corrections laid over its result. */
+  if (paint_layer_effects_lay(ma, layer, channel)) {
+    return true;
+  }
   for (const MaterialPaintLayer &child : layer.children) {
     if (row_participates(ma, child, channel)) {
       return true;

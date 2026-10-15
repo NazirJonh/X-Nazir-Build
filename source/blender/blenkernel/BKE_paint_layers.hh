@@ -23,6 +23,7 @@
 
 #include "BLI_function_ref.hh"
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
@@ -84,7 +85,9 @@ bool BKE_paint_layers_has_children(const MaterialPaintLayer &layer);
  * Whether \a folder is a Pass Through folder: a folder that adds nothing but grouping, so its rows
  * are laid in the stack exactly as if it were not there.
  *
- * True for a folder with no mask, the Mix blend and full opacity. Visibility is deliberately not
+ * True for a folder with no mask and no content correction, the Mix blend and full opacity (a
+ * mask or a correction folds a factor or a colour into the folder's own row, which an inlined
+ * folder has none of). Visibility is deliberately not
  * part of it: a hidden Pass Through folder has no row to carry its visibility, so it multiplies its
  * rows' opacity by zero instead, which is a value edit, not a different graph. The one reader of
  * the mode, for the generator and the CPU composite alike.
@@ -371,8 +374,9 @@ MaterialPaintLayer *BKE_paint_layers_active_mask_item_get(Material &ma);
  *
  * \param name: the correction's name, or null for "Correction Paint" / "Correction Fill".
  * \param source: #MA_PAINT_LAYER_SOURCE_IMAGE or #MA_PAINT_LAYER_SOURCE_CONSTANT.
- * \return the new correction, or null when \a owner is not a leaf row of \a ma's stack (a folder has
- * no colour of its own to correct) or \a source is neither.
+ * \return the new correction, or null when \a owner is not a row of \a ma's stack or \a source is
+ * neither. A folder takes one: it corrects the isolated result of what the folder holds, before the
+ * folder's own blend, and a folder that has one is no longer a Pass Through folder.
  */
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
@@ -395,6 +399,30 @@ bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect
 /** The row that holds \a effect in its #MaterialPaintLayer::effects, or null when it is not a
  * correction of a row of \a ma. */
 MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect);
+
+/**
+ * Whether #BKE_paint_layers_correction_paste can attach a copy of the content correction or mask
+ * item \a source to \a target: \a target must be a stack row (a folder included), and a mask item
+ * that is not a base needs a base on \a target to sit over.
+ */
+bool BKE_paint_layers_correction_can_paste(const MaterialPaintLayer &source,
+                                           const MaterialPaintLayer &target);
+
+/**
+ * Attach a deep copy of the content correction or mask item \a source -- which may belong to
+ * another material -- to \a target: a content correction goes to the top of its corrections, a
+ * mask item to the top of its mask. The copy gets a marker unique within \a ma and copies of the
+ * images its records hold (never the shared image), and keeps its settings, its flat colour and its
+ * inversion. A base mask lands as the target's base when it has none, and as a plain item over its
+ * own otherwise.
+ *
+ * \return the copy, or null when \a target is not a row of \a ma or
+ * #BKE_paint_layers_correction_can_paste refuses.
+ */
+MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
+                                                      Material &ma,
+                                                      const MaterialPaintLayer &source,
+                                                      MaterialPaintLayer *target);
 
 /**
  * Find the row of \a ma whose marker is \a marker, at any depth and never by position, so a row
@@ -553,6 +581,50 @@ void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_co
  * channel the row no longer paints with.
  */
 bool BKE_paint_layers_base_color_active(const MaterialPaintLayer &layer);
+
+/** Why a row of a layered material behaves differently than its settings suggest. */
+enum class PaintLayersIssueCode : int8_t {
+  /**
+   * A Fill correction that carries the Normal channel while it holds no map in it. A flat value is
+   * not a tangent normal, so the generator and the CPU composite both skip the correction in that
+   * channel.
+   */
+  FillCorrectionOnNormal = 0,
+  /**
+   * A folder carrying a map of its own. A folder takes part in a channel through its children (and
+   * its corrections), so a map on the folder itself is ignored; a record without a map is fine, it
+   * carries the pair's settings.
+   */
+  FolderHasMaps = 1,
+  /**
+   * A row that is not a folder yet holds children. Only a folder takes part through its children,
+   * so the stray nesting is ignored; this catches a malformed file or an edit made around the API.
+   */
+  NonFolderHasChildren = 2,
+};
+
+/** One entry #BKE_paint_layers_issues_get reports. */
+struct PaintLayersIssue {
+  /** The layer the issue is about. */
+  bUUID layer = {};
+  /** The correction the issue is about, or nil when it is about the layer itself. */
+  bUUID correction = {};
+  /** The channel the issue is about, an #eMaterialPaintChannel. */
+  int channel = 0;
+  PaintLayersIssueCode code = PaintLayersIssueCode::FillCorrectionOnNormal;
+  /** A human-readable description. Static storage; never freed by the caller. */
+  const char *text = nullptr;
+};
+
+/**
+ * Collect the description problems that would otherwise be silent: a row whose settings cannot do
+ * anything where the user put it.
+ *
+ * The generator and the CPU composite skip such a row (they always agree on which), and this list
+ * is how a UI is meant to say why. It is computed from the description alone, never from a graph,
+ * so it is cheap enough to call wherever a row is drawn.
+ */
+void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r_issues);
 
 /** Set the fill color of \a layer, the constant a Fill shows; creates its Base-Color record on demand. */
 bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, const float color[4]);

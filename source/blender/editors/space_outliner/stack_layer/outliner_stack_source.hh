@@ -455,6 +455,9 @@ Object *outliner_stack_focus_object_get(const StackReadContext &ctx, const Stack
  * instead. It is a lightweight POD struct on purpose, suitable for drag data and other
  * cross-module contexts.
  */
+/** What #StackEditor::row_paste_correction answers for a source that is an ordinary row. */
+static constexpr int STACK_PASTE_NOT_APPLICABLE = -2;
+
 struct StackItemIdentity {
   /** #ID.session_uid of the stack's owner. 0 means unset. */
   uint32_t owner_uid = 0;
@@ -1017,6 +1020,23 @@ class StackEditor {
                         int * /*r_ordinal*/ = nullptr) const
   {
     return false;
+  }
+
+  /**
+   * Paste a copy of the sub-row at \a source_ordinal (a correction or a mask item) onto the row
+   * \a target_ordinal, which may belong to another layer than the source: the way a duplicate cannot,
+   * since it stays where it was made.
+   *
+   * \return the ordinal of the copy; -1 when the paste was refused; #STACK_PASTE_NOT_APPLICABLE when
+   * the source is an ordinary row, which the caller duplicates and moves as it always did.
+   */
+  virtual int row_paste_correction(bContext & /*C*/,
+                                   const StackFocus & /*focus*/,
+                                   ID & /*owner*/,
+                                   int /*source_ordinal*/,
+                                   int /*target_ordinal*/) const
+  {
+    return STACK_PASTE_NOT_APPLICABLE;
   }
 
   /**

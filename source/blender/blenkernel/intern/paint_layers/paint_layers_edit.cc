@@ -43,6 +43,7 @@ static int paint_layer_name_number_max(const ListBaseT<MaterialPaintLayer> &list
     highest = std::max(highest, paint_layer_name_number_max(layer.children, base));
     /* A correction is numbered among the names too, so its default name stays unique. */
     highest = std::max(highest, paint_layer_name_number_max(layer.effects, base));
+    highest = std::max(highest, paint_layer_name_number_max(layer.mask_stack, base));
   }
   return highest;
 }
@@ -95,6 +96,47 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     }
     return effect;
   }
+  if (params.kind == PaintLayerAddKind::MaskCorrection ||
+      params.kind == PaintLayerAddKind::MaskCorrectionFill)
+  {
+    const bool fill = params.kind == PaintLayerAddKind::MaskCorrectionFill;
+    /* Aimed at a correction of either kind, an Add means one more on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+      else if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, *owner)) {
+        owner = item_parent;
+      }
+    }
+    if (owner == nullptr) {
+      return nullptr;
+    }
+    /* A correction lays over the base mask: made first, white, so it hides nothing until the
+     * correction does and the user need not add one by hand. */
+    if (BKE_paint_layers_mask_base(*owner) == nullptr &&
+        BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr)
+    {
+      return nullptr;
+    }
+    const char *mask_name_base = fill ? "Mask Fill" : "Mask Paint";
+    const std::string mask_name = (params.name != nullptr) ?
+                                      std::string(params.name) :
+                                      std::string(mask_name_base) + " " +
+                                          std::to_string(paint_layer_name_number_max(
+                                                             owner->mask_stack, mask_name_base) +
+                                                         1);
+    MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+        ma,
+        owner,
+        fill ? MA_PAINT_LAYER_SOURCE_CONSTANT : MA_PAINT_LAYER_SOURCE_IMAGE,
+        mask_name.c_str());
+    if (item != nullptr && fill && params.fill_color != nullptr) {
+      BKE_paint_layers_set_fill_color(ma, item, params.fill_color);
+    }
+    return item;
+  }
   const char *name_base = (params.kind == PaintLayerAddKind::Fill)   ? "Fill" :
                           (params.kind == PaintLayerAddKind::Folder) ? "Folder" :
                                                                        "Layer";
@@ -141,6 +183,28 @@ bool BKE_paint_layers_edit_move(Material &ma,
                                 MaterialPaintLayer *anchor,
                                 PaintLayerPlace place)
 {
+  /* A mask correction lives in its row's mask: it reorders there and never leaves it, and the base
+   * stays the first item. */
+  MaterialPaintLayer *from_item_owner = ((from.flag & MA_PAINT_LAYER_MASK_BASE) == 0) ?
+                                            BKE_paint_layers_mask_item_owner(ma, from) :
+                                            nullptr;
+  MaterialPaintLayer *anchor_item_owner = (anchor != nullptr) ?
+                                              BKE_paint_layers_mask_item_owner(ma, *anchor) :
+                                              nullptr;
+  if (from_item_owner != nullptr) {
+    if (anchor == nullptr || anchor == &from || anchor_item_owner != from_item_owner) {
+      return false;
+    }
+    BLI_remlink(&from_item_owner->mask_stack, &from);
+    if (place == PaintLayerPlace::Below && (anchor->flag & MA_PAINT_LAYER_MASK_BASE) == 0) {
+      BLI_insertlinkbefore(&from_item_owner->mask_stack, anchor, &from);
+    }
+    else {
+      BLI_insertlinkafter(&from_item_owner->mask_stack, anchor, &from);
+    }
+    BKE_paint_layers_tag_edited(ma);
+    return true;
+  }
   MaterialPaintLayer *from_owner = BKE_paint_layers_correction_owner(ma, from);
   MaterialPaintLayer *anchor_owner = (anchor != nullptr) ?
                                          BKE_paint_layers_correction_owner(ma, *anchor) :
@@ -172,9 +236,10 @@ bool BKE_paint_layers_edit_move(Material &ma,
     BKE_paint_layers_tag_edited(ma);
     return true;
   }
-  if (anchor_owner != nullptr) {
-    /* A row aimed at a correction goes beside the layer that holds it, never inside it. */
-    anchor = anchor_owner;
+  if (anchor_owner != nullptr || anchor_item_owner != nullptr) {
+    /* A row aimed at a correction, of either kind, goes beside the layer that holds it, never
+     * inside it. */
+    anchor = (anchor_owner != nullptr) ? anchor_owner : anchor_item_owner;
     if (place == PaintLayerPlace::Into) {
       place = PaintLayerPlace::Above;
     }

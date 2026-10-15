@@ -197,6 +197,11 @@ bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUU
       return true;
     }
   }
+  for (const MaterialPaintLayer &item : root.mask_stack) {
+    if (BLI_uuid_equal(item.marker, marker)) {
+      return true;
+    }
+  }
   if (BKE_paint_layers_is_folder(root)) {
     for (const MaterialPaintLayer &child : root.children) {
       if (BKE_paint_layers_subtree_contains(child, marker)) {
@@ -246,8 +251,9 @@ MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const Materi
 /** Whether \a layer is a row of \a ma's stack or one of a row's content corrections. */
 static bool paint_layer_in_stack_or_effect(Material &ma, const MaterialPaintLayer *layer)
 {
-  return paint_layer_in_stack(ma, layer) ||
-         (layer != nullptr && BKE_paint_layers_correction_owner(ma, *layer) != nullptr);
+  /* A mask correction is an item of its row's mask like a correction is of its effects: the rename,
+   * blend and colour setters treat the three alike. */
+  return paint_layer_owned(ma, layer);
 }
 
 /**
@@ -503,7 +509,12 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   MaterialPaintLayer *effect_owner = (layer != nullptr) ?
                                          BKE_paint_layers_correction_owner(ma, *layer) :
                                          nullptr;
-  if (effect_owner == nullptr && !paint_layer_in_stack(ma, layer)) {
+  /* So is a mask correction, in its row's mask; the base mask is copied with its row only. */
+  MaterialPaintLayer *item_owner = (layer != nullptr &&
+                                    (layer->flag & MA_PAINT_LAYER_MASK_BASE) == 0) ?
+                                       BKE_paint_layers_mask_item_owner(ma, *layer) :
+                                       nullptr;
+  if (effect_owner == nullptr && item_owner == nullptr && !paint_layer_in_stack(ma, layer)) {
     return nullptr;
   }
 
@@ -511,6 +522,9 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   copy->role = layer->role;
   if (effect_owner != nullptr) {
     BLI_insertlinkafter(&effect_owner->effects, layer, copy);
+  }
+  else if (item_owner != nullptr) {
+    BLI_insertlinkafter(&item_owner->mask_stack, layer, copy);
   }
   else {
     PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *layer);
@@ -805,14 +819,96 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma,
   return item;
 }
 
+MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const MaterialPaintLayer &item)
+{
+  if (item.role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return nullptr;
+  }
+  MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+        if (BLI_findindex(&row.mask_stack, &item) != -1) {
+          owner = &row;
+        }
+        return owner == nullptr;
+      });
+  return owner;
+}
+
+MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
+                                                   MaterialPaintLayer *layer,
+                                                   const eMaterialPaintLayerSource source,
+                                                   const char *name,
+                                                   const float value)
+{
+  /* A correction lays over the base mask, so there has to be one; making it is the caller's call
+   * (the Add policy does, white). */
+  if (!paint_layer_in_stack(ma, layer) || BKE_paint_layers_mask_base(*layer) == nullptr) {
+    return nullptr;
+  }
+  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    return nullptr;
+  }
+  const bool fill = source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  MaterialPaintLayer *item = paint_layer_alloc(
+      ma, name != nullptr ? name : (fill ? "Mask Fill" : "Mask Paint"));
+  item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  item->source = source;
+  /* Mix: the correction says what the coverage is where it covers, rather than scaling it as the
+   * base does. The blend is the item's own setting, like a row's. */
+  item->blend = MA_PAINT_LAYER_BLEND_MIX;
+  item->flag = MA_PAINT_LAYER_ENABLED;
+  item->channels = MEM_new_array<MaterialPaintLayerChannel>(1, __func__);
+  item->channels_num = 1;
+  MaterialPaintLayerChannel &record = item->channels[0];
+  record.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  record.image = nullptr;
+  if (fill) {
+    const float gray = clamp_f(value, 0.0f, 1.0f);
+    record.value[0] = record.value[1] = record.value[2] = gray;
+    record.value[3] = 1.0f;
+  }
+  /* A Paint item starts transparent: with no map it lays nothing, and its first map starts empty,
+   * so a fresh item changes no pixel. */
+  BLI_addtail(&layer->mask_stack, item);
+
+  BKE_paint_layers_tag_edited(ma);
+  return item;
+}
+
+bool BKE_paint_layers_mask_item_remove(Material &ma, MaterialPaintLayer *item)
+{
+  if (item == nullptr || (item->flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+    return false;
+  }
+  MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(ma, *item);
+  if (owner == nullptr) {
+    return false;
+  }
+  /* The row stays the one being worked on, so a stroke in Mask mode lands on its base mask. */
+  if (BLI_uuid_equal(ma.active_layer_marker, item->marker)) {
+    ma.active_layer_marker = owner->marker;
+  }
+  paint_layer_release_users(*item);
+  BLI_remlink(&owner->mask_stack, item);
+  BKE_material_paint_layer_free(item);
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer)
 {
   if (!paint_layer_in_stack(ma, layer) || layer->mask_stack.first == nullptr) {
     return false;
   }
-  /* The whole mask goes: the base item is never removed on its own (#MA_PAINT_LAYER_MASK_BASE), so
-   * dropping every item is the one removal the data model has. A single non-base item will need its
-   * own call once the stack holds more than the base. */
+  if (BKE_paint_layers_active_mask_item_get(ma) != nullptr &&
+      BKE_paint_layers_mask_item_owner(ma, *BKE_paint_layers_active_mask_item_get(ma)) == layer)
+  {
+    ma.active_layer_marker = layer->marker;
+  }
+  /* The whole mask goes, the base item with every correction over it: the base is never removed on
+   * its own (#MA_PAINT_LAYER_MASK_BASE), a correction through #BKE_paint_layers_mask_item_remove. */
   for (MaterialPaintLayer &item : layer->mask_stack.items_mutable()) {
     paint_layer_release_users(item);
     BLI_remlink(&layer->mask_stack, &item);
@@ -856,6 +952,12 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
             found = &effect;
           }
         }
+        /* A mask item is too: the generator's mask inputs name the item that owns them. */
+        for (MaterialPaintLayer &item : layer.mask_stack) {
+          if (found == nullptr && BLI_uuid_equal(item.marker, marker)) {
+            found = &item;
+          }
+        }
         return found == nullptr;
       });
   return found;
@@ -877,7 +979,29 @@ MaterialPaintLayer *BKE_paint_layers_active_layer_get(Material &ma)
   if (BLI_uuid_is_nil(marker)) {
     return nullptr;
   }
-  return BKE_paint_layers_find(ma, marker);
+  MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
+  /* A mask item is no row: its row is what the content is painted on, what a copy takes and what an
+   * Add anchors to, so every caller that wants "the layer" gets it. The item itself is
+   * #BKE_paint_layers_active_mask_item_get. */
+  if (layer != nullptr && layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return BKE_paint_layers_mask_item_owner(ma, *layer);
+  }
+  return layer;
+}
+
+MaterialPaintLayer *BKE_paint_layers_active_mask_item_get(Material &ma)
+{
+  const bUUID marker = BKE_paint_layers_active_get(ma);
+  if (BLI_uuid_is_nil(marker)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
+  if (layer != nullptr && layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+      (layer->flag & MA_PAINT_LAYER_MASK_BASE) == 0)
+  {
+    return layer;
+  }
+  return nullptr;
 }
 
 bool BKE_paint_layers_move(Material &ma,
@@ -1153,6 +1277,25 @@ bool BKE_paint_layers_channel_set_enabled(Material &ma,
   }
   /* A disabled record keeps its value and map, so re-enabling restores the channel untouched. */
   record->state = enabled ? MA_PAINT_LAYER_CHANNEL_ENABLED : MA_PAINT_LAYER_CHANNEL_DISABLED;
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_channel_set_invert(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         const eMaterialPaintChannel channel,
+                                         const bool invert)
+{
+  MaterialPaintLayerChannel *record = paint_layer_channel_in_stack(ma, layer, channel);
+  if (record == nullptr) {
+    return false;
+  }
+  if (invert) {
+    record->flag |= MA_PAINT_LAYER_CHANNEL_INVERT;
+  }
+  else {
+    record->flag &= ~MA_PAINT_LAYER_CHANNEL_INVERT;
+  }
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

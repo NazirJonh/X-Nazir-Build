@@ -319,6 +319,45 @@ bool BKE_paint_layers_mask_copy(Main &bmain,
                                 MaterialPaintLayer &target);
 
 /**
+ * Add a mask correction over \a layer's base mask: a #MA_PAINT_LAYER_ROLE_MASK_ITEM row with the
+ * Mix blend and one Base Color record, linked on top of \a layer's mask. It lays `C` over the mask's
+ * coverage `F` by `A * opacity`, `F = blend(F, C, A * opacity)`, with `C` the grey of its map (its
+ * alpha `A`) or, as a Fill, its constant (`A` one).
+ *
+ * A Paint correction (the Image source) lays nothing until it has a map, which the first stroke in
+ * Mask mode creates, transparent; a Fill correction (the Constant source) starts as the grey
+ * \a value. Like a row's, its opacity, blend and visibility are its own settings.
+ *
+ * \param name: the correction's name, or null for "Mask Paint" / "Mask Fill".
+ * \return the new item, or null when \a layer is not a row of \a ma's stack, has no base mask, or
+ * \a source is neither Image nor Constant.
+ */
+MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
+                                                   MaterialPaintLayer *layer,
+                                                   eMaterialPaintLayerSource source,
+                                                   const char *name,
+                                                   float value = 1.0f);
+
+/**
+ * Remove the mask correction \a item from its row, letting go of its map. The base mask stays (it
+ * goes with the whole mask, #BKE_paint_layers_mask_remove). The active marker moves to the row when
+ * it named the item.
+ *
+ * \return false when \a item is the base or not a mask item of a row of \a ma.
+ */
+bool BKE_paint_layers_mask_item_remove(Material &ma, MaterialPaintLayer *item);
+
+/** The row whose mask holds \a item (base or correction), or null when it is no mask item of
+ * \a ma. */
+MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const MaterialPaintLayer &item);
+
+/**
+ * The mask correction the active marker names, or null when it names a row, a content correction or
+ * nothing. A stroke in Mask mode paints it instead of the row's base mask.
+ */
+MaterialPaintLayer *BKE_paint_layers_active_mask_item_get(Material &ma);
+
+/**
  * Add a content correction to \a owner: a #MA_PAINT_LAYER_ROLE_EFFECT row linked on top of \a owner's
  * #MaterialPaintLayer::effects.
  *
@@ -373,7 +412,8 @@ bUUID BKE_paint_layers_active_get(const Material &ma);
 
 /**
  * The active row of \a ma (`Material::active_layer_marker`), or null when the marker is nil or
- * names no row.
+ * names no row. A content correction is answered as itself; a mask correction as the row it hangs
+ * on, whose mask is what the mode paints (the correction is #BKE_paint_layers_active_mask_item_get).
  */
 MaterialPaintLayer *BKE_paint_layers_active_layer_get(Material &ma);
 
@@ -454,6 +494,18 @@ bool BKE_paint_layers_channel_set_enabled(Material &ma,
                                           MaterialPaintLayer *layer,
                                           eMaterialPaintChannel channel,
                                           bool enabled);
+
+/**
+ * Set whether \a layer's \a channel record is read as `1 - C`. Only a mask correction's Base Color
+ * record honours it (see #MA_PAINT_LAYER_CHANNEL_INVERT); the flag is kept on any other record
+ * without effect. Part of the graph's structure, so it regenerates.
+ *
+ * \return false when \a layer carries no \a channel record or is not part of \a ma.
+ */
+bool BKE_paint_layers_channel_set_invert(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         eMaterialPaintChannel channel,
+                                         bool invert);
 
 /** Set the opacity of \a layer. */
 bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, float opacity);

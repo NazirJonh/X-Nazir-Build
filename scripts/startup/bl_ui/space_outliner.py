@@ -106,6 +106,15 @@ class OUTLINER_MT_stack_layer_mask_add(Menu):
             props = layout.operator("outliner.stack_layer_mask", text=text, icon='MOD_MASK')
             props.add = True
             props.initial_color = color
+        # Corrections laid over the layer's mask (made white first when there is none): a grey map
+        # painted in Mask mode, or one flat grey. They are Add kinds of the Stack Layers source.
+        layout.separator()
+        layout.operator(
+            "outliner.stack_layer_add", text="Add Paint Mask Correction", icon='MOD_MASK',
+        ).type = 'MASK_CORRECTION'
+        layout.operator(
+            "outliner.stack_layer_add", text="Add Fill Mask Correction", icon='GP_DRAW_FILL',
+        ).type = 'MASK_CORRECTION_FILL'
 
 
 class OUTLINER_HT_header(Header):

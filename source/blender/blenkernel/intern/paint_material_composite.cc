@@ -877,29 +877,45 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     r_factor[i] *= mask_value;
   }
 
-  /* The mask stack lays its coverage over the factor, item by item: `F = mix(F, F * C, A * op)`,
-   * the Mix the generator builds for the same item. A transparent texel (A = 0) leaves the row
-   * visible, which is what a fresh mask map must do. */
-  Vector<float> item_storage;
-  for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
-    if (item.opacity <= 0.0f) {
-      continue;
-    }
-    if (item.ibuf == nullptr) {
-      const float weight = clamp_f(item.opacity, 0.0f, 1.0f);
-      const float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
-      for (int64_t i = 0; i < count; i++) {
-        r_factor[i] *= 1.0f - weight * (1.0f - gray);
+  /* The mask stack lays its coverage over a factor `M` that starts at one, item by item, the last
+   * on top: `M = blend(M, C, A * op)`, the Mix the generator builds for the same item, so a
+   * correction can bring back what the base hid but never conjure content the row does not have
+   * (the row's coverage is scaled by `M` afterwards). The base is the Multiply item, which over one
+   * is `1 - A * op * (1 - C)`. A transparent texel (A = 0) leaves the factor alone, which is what a
+   * fresh mask map must do. */
+  if (!layer.mask_items.is_empty()) {
+    Vector<float> mask_factor(count, 1.0f);
+    Vector<float> item_storage;
+    for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
+      if (item.opacity <= 0.0f) {
+        continue;
       }
-      continue;
+      const float opacity = clamp_f(item.opacity, 0.0f, 1.0f);
+      if (item.ibuf != nullptr) {
+        item_storage.resize(count * 4);
+        composite_decode_tile(item.ibuf, item.colorspace_name, tile, item_storage.data());
+      }
+      for (int64_t i = 0; i < count; i++) {
+        float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
+        float weight = opacity;
+        if (item.ibuf != nullptr) {
+          const float *c = item_storage.data() + i * 4;
+          gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
+          weight = clamp_f(c[3], 0.0f, 1.0f) * opacity;
+        }
+        /* The grey only: a transparent texel is still one the item does not cover. */
+        if (item.invert) {
+          gray = 1.0f - gray;
+        }
+        /* The factor is a grey colour to the blend, as it is in the graph's Mix node. */
+        float value[4] = {mask_factor[i], mask_factor[i], mask_factor[i], mask_factor[i]};
+        const float top[4] = {gray, gray, gray, gray};
+        blend_row_linear(value, top, item.blend, weight);
+        mask_factor[i] = value[0];
+      }
     }
-    item_storage.resize(count * 4);
-    composite_decode_tile(item.ibuf, item.colorspace_name, tile, item_storage.data());
     for (int64_t i = 0; i < count; i++) {
-      const float *c = item_storage.data() + i * 4;
-      const float gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
-      const float weight = clamp_f(c[3], 0.0f, 1.0f) * clamp_f(item.opacity, 0.0f, 1.0f);
-      r_factor[i] *= 1.0f - weight * (1.0f - gray);
+      r_factor[i] *= mask_factor[i];
     }
   }
 }
@@ -1330,6 +1346,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       PaintMaterialCompositeMaskBuffer buffer;
       buffer.constant_gray = item.constant_gray;
       buffer.opacity = item.opacity;
+      buffer.blend = item.blend;
+      buffer.invert = item.invert;
       if (item.image != nullptr) {
         buffer.ibuf = composite_image_acquire(item.image, item.iuser, r_locks);
         if (buffer.ibuf == nullptr) {
@@ -1584,7 +1602,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash *= 0x100000001b3ULL;
       hash = get_default_hash(
           hash, item.image != nullptr ? item.image->id.session_uid : 0, item.opacity);
-      hash = get_default_hash(hash, item.constant_gray);
+      hash = get_default_hash(hash, item.constant_gray, int(item.blend), item.invert);
     }
   }
   return hash;

@@ -471,6 +471,16 @@ enum eMaterialPaintLayerChannelState : int8_t {
   MA_PAINT_LAYER_CHANNEL_DISABLED = 2,
 };
 
+/** #MaterialPaintLayerChannel::flag */
+enum eMaterialPaintLayerChannelFlag : int8_t {
+  /**
+   * The record's coverage is read as `1 - C`. Only a mask correction's Base Color record honours
+   * it: there the map (or the flat grey) is a coverage, and a black-and-white map is as often
+   * painted the wrong way round as not. Taken from the padding, so older files read as off.
+   */
+  MA_PAINT_LAYER_CHANNEL_INVERT = 1 << 0,
+};
+
 /**
  * One channel of a #MaterialPaintLayer. A layer owns a `channels` array with one entry per channel
  * it takes part in; #channel names which #eMaterialPaintChannel the record stands for.
@@ -482,7 +492,9 @@ struct MaterialPaintLayerChannel {
   int8_t channel = 0;
   /** #eMaterialPaintLayerChannelState. */
   int8_t state = MA_PAINT_LAYER_CHANNEL_ABSENT;
-  char _pad[6] = {};
+  /** #eMaterialPaintLayerChannelFlag. */
+  int8_t flag = 0;
+  char _pad[5] = {};
   /** The channel's map, or null when it has none. */
   struct Image *image = nullptr;
   /** Constant value used while the channel carries no map. */

@@ -44,6 +44,14 @@ enum class PaintLayerAddKind : int8_t {
    * correction's own opacity, taking #PaintLayerAddParams::fill_color.
    */
   CorrectionFill,
+  /**
+   * A mask correction of the anchor row (or of the row an anchor correction or mask correction hangs
+   * on): a grey map painted over its mask's coverage in Mask mode. The base mask is made first, white,
+   * when the row has none.
+   */
+  MaskCorrection,
+  /** A flat-grey mask correction of the same row, taking #PaintLayerAddParams::fill_color. */
+  MaskCorrectionFill,
 };
 
 struct PaintLayerAddParams {
@@ -61,7 +69,7 @@ struct PaintLayerAddParams {
    * the highest N in use).
    */
   const char *name = nullptr;
-  /** The initial colour for a Fill or a Fill correction; null keeps the default. */
+  /** The initial colour for a Fill, a Fill correction or a Fill mask correction; null keeps the default. */
   const float *fill_color = nullptr;
 };
 

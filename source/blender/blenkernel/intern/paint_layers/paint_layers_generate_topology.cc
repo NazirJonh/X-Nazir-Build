@@ -189,6 +189,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
    * and whether it has a map are structure; its constant, opacity and enabled flag are inputs. */
   if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
     hash = topology_hash_mix(hash, 1);
+    /* The inversion is a node of its own. */
+    hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (record != nullptr && record->image != nullptr) {
@@ -200,6 +202,29 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   }
   else {
     hash = topology_hash_mix(hash, 0);
+  }
+  /* A mask correction is nodes of its own (a map and its grey chain against a value input, and a
+   * Mix of its blend), so its place, blend and whether it has a map are structure; its constant,
+   * opacity and enabled flag are inputs. One that lays nothing yet has no nodes. */
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+      continue;
+    }
+    topology_hash_uid(hash, item.marker);
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(item.blend)));
+    /* The inversion is a node of its own. */
+    hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (!paint_layer_mask_item_lays(item) || record == nullptr) {
+      hash = topology_hash_mix(hash, 0);
+    }
+    else if (record->image != nullptr) {
+      topology_hash_string(hash, record->image->id.name);
+    }
+    else {
+      hash = topology_hash_mix(hash, 1);
+    }
   }
   return hash;
 }

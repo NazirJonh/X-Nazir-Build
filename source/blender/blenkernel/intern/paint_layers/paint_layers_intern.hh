@@ -186,6 +186,25 @@ inline bool paint_layer_row_empty_base(const Material &ma,
 }
 
 /**
+ * Whether the mask item \a item lays coverage over its row's factor.
+ *
+ * The base mask always does: its Base Color record is a coverage of its own, a constant until a
+ * stroke gives it a map. A mask correction over it lays its live record's map, or its flat grey when
+ * it is a Fill; a Paint mask correction with no map yet lays nothing, so a fresh one changes no
+ * pixel. The generator, the CPU adapter and the topology hash all ask this one rule.
+ */
+inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
+{
+  if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+    return true;
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  return paint_layer_channel_live(record) &&
+         (record->image != nullptr || item.source == MA_PAINT_LAYER_SOURCE_CONSTANT);
+}
+
+/**
  * The constant coverage a mask item's Base Color \a record carries: the mean of its RGB, clamped.
  * The CPU composite and the generator's value input read the one number, so the two cannot
  * disagree about what a constant mask hides.
@@ -194,6 +213,18 @@ inline float paint_layer_mask_constant(const MaterialPaintLayerChannel &record)
 {
   const float mean = (record.value[0] + record.value[1] + record.value[2]) / 3.0f;
   return clamp_f(mean, 0.0f, 1.0f);
+}
+
+/**
+ * Whether the mask item \a item reads its coverage as `1 - C`, its map's grey or its flat grey
+ * alike, the base mask included. The generator, the CPU adapter and the topology hash all ask this
+ * one rule.
+ */
+inline bool paint_layer_mask_item_inverted(const MaterialPaintLayer &item)
+{
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  return record != nullptr && (record->flag & MA_PAINT_LAYER_CHANNEL_INVERT) != 0;
 }
 
 /**

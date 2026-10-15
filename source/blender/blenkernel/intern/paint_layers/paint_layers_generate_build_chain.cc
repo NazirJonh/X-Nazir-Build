@@ -46,6 +46,16 @@
 namespace blender {
 namespace bke::paint_layers {
 
+/* Defined with the correction code below, which also builds Math nodes; the mask code needs it
+ * first. The default of the last argument is given at the definition. */
+static NodeOutput math_node_add(bNodeTree &tree,
+                                layout::LayoutGrid &grid,
+                                Vector<bNode *> &r_nodes,
+                                int operation,
+                                NodeOutput a,
+                                NodeOutput b,
+                                float a_default);
+
 NodeOutput PaintLayersTreeBuilder::multiply_nodes_add(bNodeTree &tree,
                                                       const NodeOutput a,
                                                       const NodeOutput b)
@@ -222,6 +232,14 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     }
     grey = {group.group_input, value};
   }
+  if (paint_layer_mask_item_inverted(*mask)) {
+    /* `1 - C` on the grey only; the alpha stays what the map says, as on the CPU. */
+    grey = math_node_add(tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, grey, 1.0f);
+    if (grey.node == nullptr) {
+      discard();
+      return {};
+    }
+  }
 
   /* `F = mix(1, C, A * opacity)`: the Multiply item over a factor of one. */
   NodeOutput weight = {group.group_input, opacity};
@@ -259,11 +277,102 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
   }
   bke::node_add_link(tree, *weight.node, *weight.socket, *mix, *factor_in);
   bke::node_add_link(tree, *grey.node, *grey.socket, *mix, *b_in);
+
+  /* The corrections over the base, in order, each the item's own blend of what is below with its
+   * grey by `A * opacity`: `M = blend(M, C, A * op)`. The blend is the shader's `ramp_blend` on a
+   * grey colour, the one call the CPU makes, with the scalar linked into a colour input and read
+   * back from the result. One that lays nothing yet has no node, as it has no pixel on the CPU. */
+  NodeOutput current = {mix, result};
+  int row = 6;
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0 || !paint_layer_mask_item_lays(item)) {
+      continue;
+    }
+    const MaterialPaintLayerChannel *item_record = paint_layer_channel_find(
+        item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    bNodeTreeInterfaceSocket **item_opacity_iface = mask_opacity_inputs_.lookup_ptr(&item);
+    bNodeSocket *item_opacity = (item_opacity_iface != nullptr) ?
+                                    this->group_input_socket(group, **item_opacity_iface) :
+                                    nullptr;
+    if (item_record == nullptr || item_opacity == nullptr) {
+      continue;
+    }
+    NodeOutput item_grey;
+    NodeOutput item_alpha;
+    if (item_record->image != nullptr) {
+      bNode *item_map = this->image_map_node_add(tree, *item_record->image);
+      if (item_map == nullptr) {
+        discard();
+        return {};
+      }
+      nodes.append(item_map);
+      grid_.place(*item_map, layout::Column::Mask, row++);
+      bNodeSocket *item_color = socket_out(*item_map, "Color");
+      bNodeSocket *item_map_alpha = socket_out(*item_map, "Alpha");
+      if (item_color == nullptr || item_map_alpha == nullptr) {
+        discard();
+        return {};
+      }
+      item_grey = this->rgb_mean_nodes_add(tree, {item_map, item_color}, nodes);
+      if (item_grey.node == nullptr) {
+        discard();
+        return {};
+      }
+      item_alpha = {item_map, item_map_alpha};
+    }
+    else {
+      bNodeTreeInterfaceSocket **item_value_iface = mask_value_inputs_.lookup_ptr(&item);
+      bNodeSocket *item_value = (item_value_iface != nullptr) ?
+                                    this->group_input_socket(group, **item_value_iface) :
+                                    nullptr;
+      if (item_value == nullptr) {
+        continue;
+      }
+      item_grey = {group.group_input, item_value};
+    }
+    if (paint_layer_mask_item_inverted(item)) {
+      /* `1 - C` on the grey only, as the CPU reads it: the alpha stays what the map says. */
+      item_grey = math_node_add(tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, item_grey, 1.0f);
+      if (item_grey.node == nullptr) {
+        discard();
+        return {};
+      }
+    }
+    NodeOutput item_weight = {group.group_input, item_opacity};
+    if (item_alpha.node != nullptr) {
+      item_weight = this->multiply_nodes_add(tree, item_alpha, item_weight);
+      if (item_weight.node == nullptr) {
+        discard();
+        return {};
+      }
+    }
+    bNode *blend = mix_node_add(
+        tree, BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(item.blend)), 0.0f, 0.0f);
+    if (blend == nullptr) {
+      discard();
+      return {};
+    }
+    nodes.append(blend);
+    grid_.place(*blend, layout::Column::Mask, row++);
+    bNodeSocket *blend_a = socket_in(*blend, "A_Color");
+    bNodeSocket *blend_b = socket_in(*blend, "B_Color");
+    bNodeSocket *blend_factor = socket_in(*blend, "Factor_Float");
+    bNodeSocket *blend_result = socket_out(*blend, "Result_Color");
+    if (blend_a == nullptr || blend_b == nullptr || blend_factor == nullptr ||
+        blend_result == nullptr || item_weight.socket == nullptr || item_grey.socket == nullptr)
+    {
+      discard();
+      return {};
+    }
+    bke::node_add_link(tree, *current.node, *current.socket, *blend, *blend_a);
+    bke::node_add_link(tree, *item_grey.node, *item_grey.socket, *blend, *blend_b);
+    bke::node_add_link(tree, *item_weight.node, *item_weight.socket, *blend, *blend_factor);
+    current = {blend, blend_result};
+  }
   layout::frame_add(tree, "Mask", nodes);
 
-  const NodeOutput out = {mix, result};
-  mask_factors_.add(&layer, out);
-  return out;
+  mask_factors_.add(&layer, current);
+  return current;
 }
 BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
                                                  const int channel,

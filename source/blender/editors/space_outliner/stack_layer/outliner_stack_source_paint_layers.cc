@@ -251,6 +251,67 @@ StackRow paint_correction_row_build(const Material &material,
 }
 
 /**
+ * The row of one mask correction, hung off the row \a owner_ordinal names under its mask section: it
+ * is listed while the mask is the content on show, the way a content correction is while the
+ * channels are.
+ */
+StackRow paint_mask_item_row_build(const Material &material,
+                                   const MaterialPaintLayer &item,
+                                   const int depth,
+                                   const int owner_ordinal,
+                                   const int ordinal)
+{
+  const bool fill = item.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  StackRow row;
+  row.ordinal = int16_t(ordinal);
+  row.depth = depth;
+  row.parent_ordinal = int16_t(owner_ordinal);
+  row.parent_section_id = "MASK";
+  row.stable_id = item.marker;
+  row.enabled = (item.flag & MA_PAINT_LAYER_ENABLED) != 0;
+  row.supported = true;
+  row.name = item.name[0] != '\0' ? item.name : (fill ? "Mask Fill" : "Mask Paint");
+  row.name_buffer = const_cast<char *>(item.name);
+  row.icon = fill ? ICON_GP_DRAW_FILL : ICON_MOD_MASK;
+  /* A correction reads as a setting of its mask rather than as a member of the stack. */
+  row.compact = true;
+
+  PointerRNA item_ptr = RNA_pointer_create_discrete(
+      &const_cast<Material &>(material).id,
+      RNA_struct_find("MaterialPaintLayer"),
+      const_cast<MaterialPaintLayer *>(&item));
+  row.value_ptr = item_ptr;
+  row.value_prop = "opacity";
+  row.value_inherited = (item.opacity == 1.0f);
+  row.mode_ptr = item_ptr;
+  row.mode_prop = "blend_type";
+  row.mode_inherited = (item.blend == MA_PAINT_LAYER_BLEND_MIX);
+
+  /* The slot switches the brush to the mask. A Fill is its grey while it has no map, as a Fill layer
+   * is its colour; a Paint one, and a Fill once painted, is the mask icon the base's slot shows. */
+  StackRowPreview slot;
+  slot.section_id = "MASK";
+  slot.label = IFACE_("Mask");
+  const MaterialPaintLayerChannel *record = paint_mask_record(item);
+  if (fill && record != nullptr && record->image == nullptr) {
+    const float gray = BKE_paint_layers_mask_constant(item);
+    slot.is_color_swatch = true;
+    slot.color[0] = slot.color[1] = slot.color[2] = gray;
+    slot.color[3] = 1.0f;
+    slot.icon = ICON_MOD_MASK;
+  }
+  else {
+    slot.icon = row.enabled ? ICON_MOD_MASK : ICON_CLIPUV_HLT;
+  }
+  row.preview_slots.append(std::move(slot));
+  StackContentSection mask_section;
+  mask_section.identifier = "MASK";
+  mask_section.name = IFACE_("Mask Content");
+  row.content_sections.append(std::move(mask_section));
+  return row;
+}
+
+/**
  * Append the rows of \a list, and recursively of every folder in it, depth first. A folder's row
  * is appended after what it holds: the tree is built walking the rows from the last one down, and a
  * child is only hung off a folder already made. The ordinals keep the walk order -- rows are looked
@@ -383,6 +444,17 @@ void paint_stack_rows_append(const Material &material,
       }
       r_rows.append(paint_correction_row_build(material, effect, depth + 1, row_ordinal, ordinal++));
     }
+    /* The mask's corrections follow, numbered the same way: the base is the mask's own slot. */
+    for (const MaterialPaintLayer &item : layer.mask_stack) {
+      if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+        continue;
+      }
+      if (ordinal > STACK_ROW_ORDINAL_MAX) {
+        overflow = true;
+        return;
+      }
+      r_rows.append(paint_mask_item_row_build(material, item, depth + 1, row_ordinal, ordinal++));
+    }
     if (folder) {
       paint_stack_rows_append(
           material, layer.children, depth + 1, row_ordinal, ordinal, overflow, r_rows);
@@ -417,8 +489,8 @@ void paint_stack_rows_from_description(const Material &material,
 namespace {
 
 /**
- * Visit every row the Outliner lists in the order it numbers them: a row, then its corrections,
- * then what a folder holds. #paint_stack_rows_append hands out the ordinals in this same order, so
+ * Visit every row the Outliner lists in the order it numbers them: a row, then its corrections, then
+ * its mask's, then what a folder holds. #paint_stack_rows_append hands out the ordinals in this same order, so
  * the two cannot disagree about which row an ordinal names. Stops when \a fn returns false.
  *
  * \a ListT is the list of rows or its const form, so a caller that needs to edit the row it finds
@@ -433,6 +505,14 @@ template<typename ListT, typename Fn> bool paint_rows_walk(ListT &list, const Fn
     }
     for (RowT &effect : layer.effects) {
       if (!fn(effect)) {
+        return false;
+      }
+    }
+    for (RowT &item : layer.mask_stack) {
+      if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+        continue;
+      }
+      if (!fn(item)) {
         return false;
       }
     }
@@ -586,6 +666,28 @@ class PaintLayersStackSource final : public StackSource,
           hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
         }
       }
+      /* A mask correction is a row of its own too: its blend, opacity, name and grey or map. */
+      for (const MaterialPaintLayer &item : layer.mask_stack) {
+        if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+          continue;
+        }
+        hash = hash * 1000003u ^ UUID(item.marker).hash();
+        hash ^= uint64_t(item.flag);
+        hash = hash * 1000003u ^ uint64_t(item.blend);
+        hash ^= uint64_t(item.source) << 16;
+        hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(item.opacity));
+        for (const char *ch = item.name; *ch != '\0'; ch++) {
+          hash = hash * 131u ^ uint64_t(uint8_t(*ch));
+        }
+        if (const MaterialPaintLayerChannel *record = paint_mask_record(item)) {
+          hash = hash * 1000003u ^
+                 uint64_t(std::hash<float>{}(BKE_paint_layers_mask_constant(item)));
+          if (record->image != nullptr) {
+            hash ^= uint64_t(record->image->id.session_uid) * 2654435761u;
+            hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*record->image) ? 1 : 0);
+          }
+        }
+      }
       /* The corrections are rows of their own: what their rows show has to reach the tree too. */
       for (const MaterialPaintLayer &effect : layer.effects) {
         hash = hash * 1000003u ^ UUID(effect.marker).hash();
@@ -660,9 +762,12 @@ class PaintLayersStackSource final : public StackSource,
     }
     BKE_paint_layers_active_set(material, row.stable_id);
     /* The mode is global: a layer with no mask is painted on its content, not left as a stroke
-     * into nothing. */
+     * into nothing, and a mask correction is only ever worked on in the mask. */
     const MaterialPaintLayer *activated = BKE_paint_layers_active_layer_get(material);
-    if (activated != nullptr && BKE_paint_layers_mask_base(*activated) == nullptr) {
+    if (BKE_paint_layers_active_mask_item_get(material) != nullptr) {
+      layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
+    }
+    else if (activated != nullptr && BKE_paint_layers_mask_base(*activated) == nullptr) {
       layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
     }
     /* The mode may have stayed Mask while the row changed: the slots hold the new row's mask map,
@@ -831,6 +936,16 @@ class PaintLayersStackSource final : public StackSource,
         ICON_GP_DRAW_FILL};
     correction_fill.takes_color = true;
     r_kinds.append(correction_fill);
+    r_kinds.append({"MASK_CORRECTION",
+                    N_("Mask Paint Correction"),
+                    "A grey map painted over the active layer's mask, in Mask mode",
+                    ICON_MOD_MASK});
+    StackAddKindInfo mask_correction_fill{"MASK_CORRECTION_FILL",
+                                          N_("Mask Fill Correction"),
+                                          "A flat grey laid over the active layer's mask",
+                                          ICON_GP_DRAW_FILL};
+    mask_correction_fill.takes_color = true;
+    r_kinds.append(mask_correction_fill);
   }
 
   int row_add(bContext &C,
@@ -840,7 +955,7 @@ class PaintLayersStackSource final : public StackSource,
               const int ordinal,
               const StackAddArgs &args = {}) const override
   {
-    if (kind < 0 || kind > 4 || !this->is_editable(owner)) {
+    if (kind < 0 || kind > 6 || !this->is_editable(owner)) {
       return -1;
     }
     Material &material = layers_owner(owner);
@@ -855,9 +970,15 @@ class PaintLayersStackSource final : public StackSource,
                   (kind == 2) ? PaintLayerAddKind::Folder :
                   (kind == 3) ? PaintLayerAddKind::Correction :
                   (kind == 4) ? PaintLayerAddKind::CorrectionFill :
+                  (kind == 5) ? PaintLayerAddKind::MaskCorrection :
+                  (kind == 6) ? PaintLayerAddKind::MaskCorrectionFill :
                                 PaintLayerAddKind::Paint;
-    const bool is_correction = ELEM(
-        params.kind, PaintLayerAddKind::Correction, PaintLayerAddKind::CorrectionFill);
+    const bool is_mask_correction = ELEM(
+        params.kind, PaintLayerAddKind::MaskCorrection, PaintLayerAddKind::MaskCorrectionFill);
+    const bool is_correction = is_mask_correction ||
+                               ELEM(params.kind,
+                                    PaintLayerAddKind::Correction,
+                                    PaintLayerAddKind::CorrectionFill);
     if (anchor != nullptr && !is_correction) {
       /* A correction is not a place a row can be added next to: the row it hangs on is. */
       if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {
@@ -872,15 +993,19 @@ class PaintLayersStackSource final : public StackSource,
         return -1;
       }
     }
-    if (is_correction && BKE_paint_layers_is_folder(*anchor)) {
-      /* A folder has no colour of its own to correct; saying so beats a button that does nothing. */
+    if (is_correction && !is_mask_correction && BKE_paint_layers_is_folder(*anchor)) {
+      /* A folder has no colour of its own to correct; saying so beats a button that does nothing. A
+       * mask is its own, so a folder takes a mask correction. */
       BKE_report(CTX_wm_reports(&C), RPT_WARNING, "A folder takes no correction; select a layer");
       return -1;
     }
     params.anchor = anchor;
     /* An Add onto a folder means filling it: the policy turns this into Into. */
     params.place = PaintLayerPlace::Above;
-    if (ELEM(params.kind, PaintLayerAddKind::Fill, PaintLayerAddKind::CorrectionFill) &&
+    if (ELEM(params.kind,
+             PaintLayerAddKind::Fill,
+             PaintLayerAddKind::CorrectionFill,
+             PaintLayerAddKind::MaskCorrectionFill) &&
         args.color != nullptr)
     {
       params.fill_color = args.color;
@@ -889,8 +1014,10 @@ class PaintLayersStackSource final : public StackSource,
     if (created == nullptr) {
       return -1;
     }
-    /* A new layer is painted on its content, not on the mask the previous one was edited in. */
-    layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+    /* A new layer is painted on its content, not on the mask the previous one was edited in; a mask
+     * correction is the mask the user means to paint. */
+    layers_target_mode_set(C, is_mask_correction ? PAINT_LAYER_TARGET_MASK :
+                                                   PAINT_LAYER_TARGET_CONTENT);
     if (is_correction) {
       /* The correction the user just added is the one they mean to paint into. */
       BKE_paint_layers_active_set(material, created->marker);
@@ -913,6 +1040,15 @@ class PaintLayersStackSource final : public StackSource,
     /* A correction is not a row of the stack: it leaves through its own call. */
     if (BKE_paint_layers_correction_owner(material, *layer) != nullptr) {
       if (!BKE_paint_layers_correction_remove(material, layer)) {
+        return false;
+      }
+      layers_texpaint_slots_refresh(C);
+      WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+      return true;
+    }
+    if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+      /* The row it hangs on becomes the active one again, so the mode stays on its mask. */
+      if (!BKE_paint_layers_mask_item_remove(material, layer)) {
         return false;
       }
       layers_texpaint_slots_refresh(C);

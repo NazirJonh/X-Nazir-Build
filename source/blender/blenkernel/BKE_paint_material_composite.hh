@@ -177,10 +177,13 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
 /**
  * One item of a row's mask stack, as data-blocks.
  *
- * The item lays its coverage over the row's factor F by the Multiply blend the generator builds:
- * `F = mix(F, F * C, A * opacity)`, where `C` is the mean of the map's RGB and `A` its alpha, or
- * #constant_gray and one when the item has no map. An unpainted (transparent) texel therefore
- * leaves the row visible; an opaque black one hides it.
+ * The item lays its coverage over the mask's factor `M` (one before the first item) by its own
+ * blend, the Mix node the generator builds: `M = blend(M, C, A * opacity)`, where `C` is the mean of
+ * the map's RGB and `A` its alpha, or #constant_gray and one when the item has no map. The base
+ * mask is the Multiply item, `M * (1 - A * opacity * (1 - C))`: an unpainted (transparent) texel
+ * leaves the row visible, an opaque black one hides it. A mask correction names its own blend, Mix
+ * by default, which says what the coverage is where the item covers. The row's coverage is scaled
+ * by the final `M`.
  */
 struct PaintMaterialCompositeMaskItem {
   /** The painted map, or null while the item is still a constant. */
@@ -191,6 +194,10 @@ struct PaintMaterialCompositeMaskItem {
   float constant_gray = 1.0f;
   /** The item's effective opacity (enabled folded in). */
   float opacity = 1.0f;
+  /** How the item combines with the factor below it: the base mask's Multiply unless set. */
+  CompositeBlend blend = CompositeBlend::Multiply;
+  /** Reads the grey #C as `1 - C`, the alpha untouched; a mask correction's choice. */
+  bool invert = false;
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
@@ -222,6 +229,8 @@ struct PaintMaterialCompositeMaskBuffer {
   const char *colorspace_name = nullptr;
   float constant_gray = 1.0f;
   float opacity = 1.0f;
+  CompositeBlend blend = CompositeBlend::Multiply;
+  bool invert = false;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */

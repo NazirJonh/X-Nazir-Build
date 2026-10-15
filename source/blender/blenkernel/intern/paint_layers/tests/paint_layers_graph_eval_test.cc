@@ -163,6 +163,115 @@ TEST_F(PaintLayersGraphEvalTest, disabled_mask_matches_the_cpu)
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 }
 
+TEST_F(PaintLayersGraphEvalTest, fill_mask_correction_replaces_the_coverage_by_its_opacity)
+{
+  /* A black bottom, so the pixel is the row's colour at the mask's coverage and nothing else. */
+  add_layer("Bottom", add_solid_image("Bottom", 0, 0, 0, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 0.2f), nullptr);
+  const RGBA hidden = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  /* A white Fill at half opacity over a base of 0.2: `lerp(0.2, 1, 0.5) = 0.6`, three times it. */
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, item, 0.5f));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA shown = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(shown.r, hidden.r * 3.0f, 3e-3f);
+  EXPECT_NEAR(shown.g, hidden.g * 3.0f, 3e-3f);
+  EXPECT_NEAR(shown.b, hidden.b * 3.0f, 3e-3f);
+}
+
+TEST_F(PaintLayersGraphEvalTest, paint_mask_correction_matches_the_cpu_and_lays_nothing_unpainted)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 0.3f), nullptr);
+  const RGBA base_only = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  /* Added, not painted: it has no map, so there is no node for it and no pixel changes. */
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_IMAGE, "Paint");
+  ASSERT_NE(item, nullptr);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA unpainted = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(unpainted.r, base_only.r, 1e-4f);
+  EXPECT_NEAR(unpainted.g, base_only.g, 1e-4f);
+  EXPECT_NEAR(unpainted.b, base_only.b, 1e-4f);
+
+  /* A white, half-covering stroke brings the coverage towards one where it was painted. */
+  Image *map = add_solid_image("MaskPaint", 255, 255, 255, 128);
+  make_image_data(map);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA painted = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(painted.b, base_only.b);
+}
+
+TEST_F(PaintLayersGraphEvalTest, mask_correction_blends_match_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 0.8f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "Fill", 0.4f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, item, 0.7f));
+
+  /* The blend of the factor below with the correction's grey: one table for both sides. */
+  const eMaterialPaintLayerBlend blends[] = {MA_PAINT_LAYER_BLEND_MIX,
+                                             MA_PAINT_LAYER_BLEND_MULTIPLY,
+                                             MA_PAINT_LAYER_BLEND_ADD,
+                                             MA_PAINT_LAYER_BLEND_SUBTRACT,
+                                             MA_PAINT_LAYER_BLEND_SCREEN,
+                                             MA_PAINT_LAYER_BLEND_DARKEN,
+                                             MA_PAINT_LAYER_BLEND_LIGHTEN,
+                                             MA_PAINT_LAYER_BLEND_DIFFERENCE};
+  for (const eMaterialPaintLayerBlend blend : blends) {
+    ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, item, blend));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
+}
+
+TEST_F(PaintLayersGraphEvalTest, mask_corrections_lay_in_order_and_are_value_edits)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 200));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *first = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "First", 0.1f);
+  MaterialPaintLayer *second = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_IMAGE, "Second");
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  Image *map = add_solid_image("SecondMap", 220, 220, 220, 150);
+  make_image_data(map);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma, second, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, first, 0.6f));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA before = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  /* Opacity, visibility and the grey are inputs of the row's group: nothing is rebuilt. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, first, 0.3f));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const float grey[4] = {0.9f, 0.9f, 0.9f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *ma, first, PAINT_MATERIAL_CHANNEL_BASE_COLOR, grey));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA after = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(std::abs(before.r - after.r) + std::abs(before.g - after.g) +
+                std::abs(before.b - after.b),
+            1e-3f);
+
+  /* A hidden correction is one that is not there. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, first, false));
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, second, false));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
 TEST_F(PaintLayersGraphEvalTest, mask_reaches_every_channel_of_its_row)
 {
   Image *color = add_solid_image("Color", 200, 100, 50, 255);

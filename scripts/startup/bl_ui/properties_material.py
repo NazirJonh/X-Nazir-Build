@@ -13,6 +13,7 @@ from bl_ui.space_properties import PropertiesAnimationMixin
 from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
     draw_material_layer_channels,
+    draw_material_mask_item,
 )
 
 
@@ -571,6 +572,22 @@ class LayerMaterialButtonsPanel:
             return None, None
         return owner, owner.paint_layers.active
 
+    @staticmethod
+    def _shown_mask_item(context, owner, layer):
+        """The mask item the tab edits instead of the layer, or None.
+
+        `paint_layers.active` answers the row a mask correction hangs on, so a correction is asked
+        for itself. The base mask is no row of the stack: it is the layer's own mask slot, and is
+        what the tab shows while the brush works in Mask mode.
+        """
+        item = owner.paint_layers.active_mask_item
+        if item is not None:
+            return item
+        if (layer is not None and len(layer.mask_items) and
+                context.tool_settings.paint_mode.layer_target_mode == 'MASK'):
+            return layer.mask_items[0]
+        return None
+
     @classmethod
     def poll(cls, context):
         # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the generated tree
@@ -604,6 +621,14 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             layout.label(text="No active layer", icon='INFO')
             return
 
+        # A mask item has one map and no colour channels, which the row's channel widget would show
+        # as filled; only its own settings are drawn.
+        item = self._shown_mask_item(context, owner, layer)
+        if item is not None:
+            layout.label(text=item.name, icon='MOD_MASK')
+            draw_material_mask_item(layout, context, item)
+            return
+
         layout.prop(layer, "opacity", text="Opacity")
         layout.separator()
         draw_material_layer_channels(layout, context, owner, layer)
@@ -621,7 +646,10 @@ class LAYER_MATERIAL_PT_mask(LayerMaterialButtonsPanel, Panel):
     @classmethod
     def poll(cls, context):
         owner, layer = cls._active_layer(context)
-        return owner is not None and layer is not None
+        # A mask item shown in the Layer panel has its controls there; this one is the base mask's
+        # while the layer itself is being edited.
+        return (owner is not None and layer is not None and
+                cls._shown_mask_item(context, owner, layer) is None)
 
     def draw(self, context):
         layout = self.layout

@@ -1828,6 +1828,149 @@ TEST_F(PaintLayersDescription, mask_copy_replaces_the_target_mask_with_items_of_
   EXPECT_FALSE(BKE_paint_layers_mask_copy(*bmain, ma, *c, *a));
 }
 
+TEST_F(PaintLayersDescription, mask_correction_is_an_item_over_the_base_and_not_a_row)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskCorrectionMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  /* Over the base, so there has to be one. */
+  EXPECT_EQ(BKE_paint_layers_mask_item_add(ma, row, MA_PAINT_LAYER_SOURCE_IMAGE, "P"), nullptr);
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(ma, row, 0.5f);
+  ASSERT_NE(base, nullptr);
+
+  MaterialPaintLayer *paint = BKE_paint_layers_mask_item_add(
+      ma, row, MA_PAINT_LAYER_SOURCE_IMAGE, "P");
+  MaterialPaintLayer *fill = BKE_paint_layers_mask_item_add(
+      ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 0.25f);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_item_add(ma, row, MA_PAINT_LAYER_SOURCE_STACK, "S"), nullptr);
+
+  /* The base stays first and the base; the corrections follow in the order they were added. */
+  EXPECT_EQ(row->mask_stack.first, base);
+  EXPECT_EQ(base->next, paint);
+  EXPECT_EQ(paint->next, fill);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*row), base);
+  EXPECT_EQ(paint->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(paint->blend, MA_PAINT_LAYER_BLEND_MIX);
+  EXPECT_EQ(paint->flag & MA_PAINT_LAYER_MASK_BASE, 0);
+  ASSERT_EQ(paint->channels_num, 1);
+  EXPECT_EQ(paint->channels[0].value[3], 0.0f);
+  EXPECT_EQ(fill->channels[0].value[0], 0.25f);
+  EXPECT_EQ(fill->channels[0].value[3], 1.0f);
+
+  /* Never a row of the stack, found by its marker, owned by its row. */
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 1);
+  EXPECT_EQ(BKE_paint_layers_find(ma, fill->marker), fill);
+  EXPECT_EQ(BKE_paint_layers_mask_item_owner(ma, *fill), row);
+  EXPECT_EQ(BKE_paint_layers_mask_item_owner(ma, *row), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_subtree_contains(*row, fill->marker));
+
+  /* Paint lays nothing until it has a map; Fill does, and so does the base. */
+  EXPECT_TRUE(paint_layer_mask_item_lays(*base));
+  EXPECT_FALSE(paint_layer_mask_item_lays(*paint));
+  EXPECT_TRUE(paint_layer_mask_item_lays(*fill));
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image &image = *BKE_image_add_generated(
+      bmain, 4, 4, "MaskMap", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &image));
+  EXPECT_TRUE(paint_layer_mask_item_lays(*paint));
+}
+
+TEST_F(PaintLayersDescription, mask_correction_is_worked_on_through_its_row)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskCorrectionActiveMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "F");
+  ASSERT_NE(item, nullptr);
+
+  BKE_paint_layers_active_set(ma, item->marker);
+  /* Every caller that wants "the layer" gets the row; the correction is its own question. */
+  EXPECT_EQ(BKE_paint_layers_active_layer_get(ma), row);
+  EXPECT_EQ(BKE_paint_layers_active_mask_item_get(ma), item);
+  BKE_paint_layers_active_set(ma, row->marker);
+  EXPECT_EQ(BKE_paint_layers_active_mask_item_get(ma), nullptr);
+
+  /* Removing it keeps the row the active one, and the base stays. */
+  BKE_paint_layers_active_set(ma, item->marker);
+  ASSERT_TRUE(BKE_paint_layers_mask_item_remove(ma, item));
+  EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_active_get(ma), row->marker));
+  EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 1);
+  EXPECT_FALSE(BKE_paint_layers_mask_item_remove(ma, BKE_paint_layers_mask_base(*row)));
+  EXPECT_FALSE(BKE_paint_layers_mask_item_remove(ma, row));
+}
+
+TEST_F(PaintLayersDescription, mask_correction_add_policy_makes_the_base_and_numbers_apart)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskCorrectionPolicyMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+
+  const float color[4] = {0.7f, 0.7f, 0.7f, 1.0f};
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskCorrectionFill;
+  params.anchor = row;
+  params.fill_color = color;
+  MaterialPaintLayer *first = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(first, nullptr);
+  /* A row with no mask got a white one first, so the correction has something to lie over. */
+  const MaterialPaintLayer *base = BKE_paint_layers_mask_base(*row);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_constant(*base), 1.0f);
+  EXPECT_STREQ(first->name, "Mask Fill 1");
+  EXPECT_EQ(first->channels[0].value[0], 0.7f);
+
+  /* Aimed at a correction, of either kind, an Add lands on its row. */
+  params.anchor = first;
+  params.kind = PaintLayerAddKind::MaskCorrection;
+  params.fill_color = nullptr;
+  MaterialPaintLayer *second = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(second, nullptr);
+  EXPECT_STREQ(second->name, "Mask Paint 1");
+  EXPECT_EQ(BKE_paint_layers_mask_item_owner(ma, *second), row);
+  EXPECT_EQ(BLI_listbase_count(&row->mask_stack), 3);
+}
+
+TEST_F(PaintLayersDescription, mask_correction_is_copied_reordered_and_carried_with_the_mask)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskCorrectionEditMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, a, 1.0f), nullptr);
+  MaterialPaintLayer *one = BKE_paint_layers_mask_item_add(
+      ma, a, MA_PAINT_LAYER_SOURCE_CONSTANT, "One");
+  MaterialPaintLayer *two = BKE_paint_layers_mask_item_add(
+      ma, a, MA_PAINT_LAYER_SOURCE_CONSTANT, "Two");
+  ASSERT_NE(one, nullptr);
+  ASSERT_NE(two, nullptr);
+
+  /* A copy lands beside it, in the same mask, with a marker of its own. */
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, ma, one);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(one->next, copy);
+  EXPECT_EQ(BKE_paint_layers_mask_item_owner(ma, *copy), a);
+  EXPECT_FALSE(BLI_uuid_equal(copy->marker, one->marker));
+  EXPECT_EQ(copy->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(BKE_paint_layers_duplicate(*bmain, ma, BKE_paint_layers_mask_base(*a)), nullptr);
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 2);
+
+  /* It reorders inside its mask, below the base never, and does not leave it. */
+  ASSERT_TRUE(BKE_paint_layers_edit_move(ma, *two, one, PaintLayerPlace::Below));
+  EXPECT_EQ(BKE_paint_layers_mask_base(*a)->next, two);
+  EXPECT_EQ(two->next, one);
+  ASSERT_TRUE(BKE_paint_layers_edit_move(
+      ma, *two, BKE_paint_layers_mask_base(*a), PaintLayerPlace::Below));
+  EXPECT_EQ(BKE_paint_layers_mask_base(*a)->next, two);
+  EXPECT_FALSE(BKE_paint_layers_edit_move(ma, *two, b, PaintLayerPlace::Above));
+
+  /* The mask goes with its corrections, and copies with them. */
+  ASSERT_TRUE(BKE_paint_layers_mask_copy(*bmain, ma, *a, *b));
+  EXPECT_EQ(BLI_listbase_count(&b->mask_stack), 4);
+  ASSERT_TRUE(BKE_paint_layers_mask_remove(ma, a));
+  EXPECT_EQ(BLI_listbase_count(&a->mask_stack), 0);
+}
+
 TEST_F(PaintLayersDescription, correction_duplicate_lands_beside_it_with_maps_of_its_own)
 {
   Material &ma = *BKE_material_add(bmain, "CorrectionDupMat");

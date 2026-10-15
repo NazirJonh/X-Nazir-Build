@@ -191,15 +191,23 @@ static void composite_image_layers_collect(const Material &ma,
     }
     /* The mask is one for all channels of the row, so the same item reaches every channel's
      * stack, exactly as the generator reads the one set of mask inputs in every channel chain. */
-    if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
-      if (const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
-              *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
-      {
+    /* The base first, then the corrections over it in the order they were added; one that lays
+     * nothing yet is not carried, as the generator builds nothing for it. */
+    if (BKE_paint_layers_mask_base(layer) != nullptr) {
+      for (const MaterialPaintLayer &mask : layer.mask_stack) {
+        const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
+            mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+        if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {
+          continue;
+        }
         PaintMaterialCompositeMaskItem item;
-        item.opacity = BKE_paint_layers_effective_opacity(*mask);
+        item.opacity = BKE_paint_layers_effective_opacity(mask);
         item.image = mask_record->image;
         item.iuser = nullptr;
         item.constant_gray = paint_layer_mask_constant(*mask_record);
+        item.blend = CompositeBlend(
+            BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+        item.invert = paint_layer_mask_item_inverted(mask);
         out.mask_items.append(item);
       }
     }

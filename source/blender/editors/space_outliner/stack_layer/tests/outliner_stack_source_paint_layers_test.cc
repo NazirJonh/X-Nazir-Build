@@ -73,7 +73,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 5u);
+  ASSERT_EQ(kinds.size(), 7u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -83,6 +83,74 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_FALSE(kinds[3].takes_color);
   EXPECT_EQ(kinds[4].identifier, "CORRECTION_FILL");
   EXPECT_TRUE(kinds[4].takes_color);
+  EXPECT_EQ(kinds[5].identifier, "MASK_CORRECTION");
+  EXPECT_FALSE(kinds[5].takes_color);
+  EXPECT_EQ(kinds[6].identifier, "MASK_CORRECTION_FILL");
+  EXPECT_TRUE(kinds[6].takes_color);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, mask_corrections_are_rows_under_the_mask_section)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskCorrectionFill;
+  params.anchor = layer;
+  const float color[4] = {0.4f, 0.4f, 0.4f, 1.0f};
+  params.fill_color = color;
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(fill, nullptr);
+  params.kind = PaintLayerAddKind::MaskCorrection;
+  params.fill_color = nullptr;
+  MaterialPaintLayer *paint = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(paint, nullptr);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  /* A row's own comes after what hangs off it, the corrections in the order they were added. */
+  ASSERT_EQ(rows.size(), 3u);
+  EXPECT_EQ(paint_description_row_for_ordinal(*material, 1), fill);
+  EXPECT_EQ(paint_description_row_for_ordinal(*material, 2), paint);
+  EXPECT_EQ(paint_layers_ordinal_of(*material, paint), 2);
+
+  const StackRow &flat = rows[0];
+  EXPECT_EQ(flat.name, "Mask Fill 1");
+  EXPECT_EQ(flat.parent_section_id, "MASK");
+  EXPECT_EQ(flat.parent_ordinal, 0);
+  EXPECT_TRUE(flat.compact);
+  ASSERT_EQ(flat.preview_slots.size(), 1u);
+  EXPECT_TRUE(flat.preview_slots[0].is_color_swatch);
+  EXPECT_EQ(flat.preview_slots[0].section_id, "MASK");
+  EXPECT_FLOAT_EQ(flat.preview_slots[0].color[0], 0.4f);
+  ASSERT_EQ(flat.content_sections.size(), 1u);
+  EXPECT_EQ(flat.content_sections[0].identifier, "MASK");
+
+  const StackRow &painted = rows[1];
+  EXPECT_EQ(painted.name, "Mask Paint 1");
+  ASSERT_EQ(painted.preview_slots.size(), 1u);
+  EXPECT_FALSE(painted.preview_slots[0].is_color_swatch);
+  EXPECT_EQ(painted.icon, int(ICON_MOD_MASK));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_a_mask_correction)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskCorrectionFill;
+  params.anchor = layer;
+  MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(item, nullptr);
+  StackReadContext ctx;
+  const uint64_t before = source().state_hash(ctx, material->id);
+
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*material, item, 0.5f));
+  const uint64_t with_opacity = source().state_hash(ctx, material->id);
+  EXPECT_NE(with_opacity, before);
+
+  /* The swatch shows the grey, so an edit of it has to reach the rows. */
+  const float dark[4] = {0.1f, 0.1f, 0.1f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *material, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, dark));
+  EXPECT_NE(source().state_hash(ctx, material->id), with_opacity);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, a_fill_correction_row_is_its_colour_swatch)
@@ -99,7 +167,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_fill_correction_row_is_its_colour_s
   Vector<StackRow> rows;
   paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
   ASSERT_EQ(rows.size(), 2u);
-  const StackRow &row = rows[1];
+  /* The layer's own row follows what hangs off it. */
+  const StackRow &row = rows[0];
   EXPECT_EQ(row.name, "Correction Fill 1");
   EXPECT_EQ(row.icon, int(ICON_GP_DRAW_FILL));
   EXPECT_TRUE(row.compact);
@@ -117,8 +186,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_fill_correction_row_is_its_colour_s
   rows.clear();
   paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
   ASSERT_EQ(rows.size(), 3u);
-  ASSERT_EQ(rows[2].preview_slots.size(), 1u);
-  EXPECT_FALSE(rows[2].preview_slots[0].is_color_swatch);
+  ASSERT_EQ(rows[1].preview_slots.size(), 1u);
+  EXPECT_FALSE(rows[1].preview_slots[0].is_color_swatch);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, value_column_edits_the_row_opacity)

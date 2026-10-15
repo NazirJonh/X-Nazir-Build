@@ -60,6 +60,32 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/** How a row blends over what is below it. The internal Normal Combine is not offered: the Normal
+ * channel forces it, and #BKE_paint_layers_set_blend refuses it. Shared by the definition and the
+ * item callback of a mask correction, which drops the modes that read hue. */
+static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
+    {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
+    {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
+    {MA_PAINT_LAYER_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", "Overlay blend"},
+    {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
+    {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
+    {MA_PAINT_LAYER_BLEND_BURN, "BURN", 0, "Color Burn", "Color burn blend"},
+    {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
+    {MA_PAINT_LAYER_BLEND_SCREEN, "SCREEN", 0, "Screen", "Screen blend"},
+    {MA_PAINT_LAYER_BLEND_DODGE, "DODGE", 0, "Color Dodge", "Color dodge blend"},
+    {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
+    {MA_PAINT_LAYER_BLEND_DIVIDE, "DIVIDE", 0, "Divide", "Divide blend"},
+    {MA_PAINT_LAYER_BLEND_DIFFERENCE, "DIFFERENCE", 0, "Difference", "Difference blend"},
+    {MA_PAINT_LAYER_BLEND_EXCLUSION, "EXCLUSION", 0, "Exclusion", "Exclusion blend"},
+    {MA_PAINT_LAYER_BLEND_SOFT_LIGHT, "SOFT_LIGHT", 0, "Soft Light", "Soft light blend"},
+    {MA_PAINT_LAYER_BLEND_LINEAR_LIGHT, "LINEAR_LIGHT", 0, "Linear Light", "Linear light blend"},
+    {MA_PAINT_LAYER_BLEND_HUE, "HUE", 0, "Hue", "Hue blend"},
+    {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
+    {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
+    {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }
 
 #ifdef RNA_RUNTIME
@@ -497,6 +523,17 @@ static PointerRNA rna_Material_paint_layers_active_get(PointerRNA *ptr)
   return RNA_pointer_create_with_parent(*ptr, RNA_MaterialPaintLayer, layer);
 }
 
+/** The active mask correction, or null when the active row is a layer, a correction or the base. */
+static PointerRNA rna_Material_paint_layers_active_mask_item_get(PointerRNA *ptr)
+{
+  Material *ma = static_cast<Material *>(ptr->data);
+  MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(*ma);
+  if (item == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_MaterialPaintLayer, item);
+}
+
 static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
                                                  PointerRNA value,
                                                  ReportList *reports)
@@ -795,6 +832,42 @@ static void rna_MaterialPaintLayer_blend_set(PointerRNA *ptr, int value)
   }
 }
 
+/**
+ * A mask correction blends a grey, which has no hue, so the modes that read one are not offered
+ * there. A value one already holds still reads and draws; only the choice is narrowed.
+ */
+static const EnumPropertyItem *rna_MaterialPaintLayer_blend_itemf(bContext * /*C*/,
+                                                                  PointerRNA *ptr,
+                                                                  PropertyRNA * /*prop*/,
+                                                                  bool *r_free)
+{
+  const MaterialPaintLayer *layer = (ptr != nullptr) ?
+                                        static_cast<const MaterialPaintLayer *>(ptr->data) :
+                                        nullptr;
+  if (layer == nullptr || layer->role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return rna_enum_material_paint_layer_blend_items;
+  }
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  for (const EnumPropertyItem *item = rna_enum_material_paint_layer_blend_items;
+       item->identifier != nullptr;
+       item++)
+  {
+    if (ELEM(item->value,
+             MA_PAINT_LAYER_BLEND_HUE,
+             MA_PAINT_LAYER_BLEND_SATURATION,
+             MA_PAINT_LAYER_BLEND_COLOR,
+             MA_PAINT_LAYER_BLEND_VALUE))
+    {
+      continue;
+    }
+    RNA_enum_item_add(&items, &items_num, item);
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
+}
+
 static int rna_MaterialPaintLayer_source_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -956,14 +1029,14 @@ static void rna_MaterialPaintLayer_channels_begin(CollectionPropertyIterator *it
 static float rna_MaterialPaintLayer_mask_value_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *item = static_cast<const MaterialPaintLayer *>(ptr->data);
-  return ((item->flag & MA_PAINT_LAYER_MASK_BASE) != 0) ? BKE_paint_layers_mask_constant(*item) :
-                                                          1.0f;
+  return (item->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? BKE_paint_layers_mask_constant(*item) :
+                                                         1.0f;
 }
 
 static void rna_MaterialPaintLayer_mask_value_set(PointerRNA *ptr, const float value)
 {
   MaterialPaintLayer *item = static_cast<MaterialPaintLayer *>(ptr->data);
-  if ((item->flag & MA_PAINT_LAYER_MASK_BASE) == 0) {
+  if (item->role != MA_PAINT_LAYER_ROLE_MASK_ITEM) {
     return;
   }
   if (Material *ma = rna_paint_layer_material(ptr, item)) {
@@ -971,6 +1044,24 @@ static void rna_MaterialPaintLayer_mask_value_set(PointerRNA *ptr, const float v
     const float rgba[4] = {gray, gray, gray, 1.0f};
     BKE_paint_layers_channel_set_value(*ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rgba);
   }
+}
+
+/**
+ * The constant coverage as a grey swatch, so a mask correction's flat value is picked the way a
+ * Fill layer's colour is. A write keeps only the mean of what was picked: the mask reads one grey.
+ */
+static void rna_MaterialPaintLayer_mask_color_get(PointerRNA *ptr, float *values)
+{
+  const MaterialPaintLayer *item = static_cast<const MaterialPaintLayer *>(ptr->data);
+  const float gray = (item->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ?
+                         BKE_paint_layers_mask_constant(*item) :
+                         1.0f;
+  values[0] = values[1] = values[2] = gray;
+}
+
+static void rna_MaterialPaintLayer_mask_color_set(PointerRNA *ptr, const float *values)
+{
+  rna_MaterialPaintLayer_mask_value_set(ptr, (values[0] + values[1] + values[2]) / 3.0f);
 }
 
 static void rna_MaterialPaintLayer_mask_items_begin(CollectionPropertyIterator *iter,
@@ -1010,6 +1101,35 @@ static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
     }
   }
   BKE_report(reports, RPT_ERROR, "Only a layer of the stack that is not a folder takes a correction");
+  return nullptr;
+}
+
+static MaterialPaintLayer *rna_MaterialPaintLayer_mask_item_add(PointerRNA ptr,
+                                                                ReportList *reports,
+                                                                const char *name,
+                                                                const int source)
+{
+  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "A mask correction is a painted map (Image) or a flat grey (Constant)");
+    return nullptr;
+  }
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    /* The policy makes the base mask first when the layer has none, and numbers an empty name among
+     * this layer's own mask items. */
+    PaintLayerAddParams params;
+    params.kind = (source == MA_PAINT_LAYER_SOURCE_CONSTANT) ?
+                      PaintLayerAddKind::MaskCorrectionFill :
+                      PaintLayerAddKind::MaskCorrection;
+    params.anchor = layer;
+    params.name = (name[0] != '\0') ? name : nullptr;
+    if (MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*ma, params)) {
+      return item;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "Only a layer of the stack takes a mask correction");
   return nullptr;
 }
 
@@ -1297,6 +1417,22 @@ static void rna_MaterialPaintLayerChannel_use_set(PointerRNA *ptr, bool value)
   }
 }
 
+static bool rna_MaterialPaintLayerChannel_invert_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return (record->flag & MA_PAINT_LAYER_CHANNEL_INVERT) != 0;
+}
+
+static void rna_MaterialPaintLayerChannel_invert_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    BKE_paint_layers_channel_set_invert(
+        *ma, layer, eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)), value);
+  }
+}
+
 /**
  * A scalar channel's value as the grayscale colour of its gradient ramp, so the shared channel
  * widget draws the same swatch for a layer as for a brush. Colour channels (Base Color, Normal,
@@ -1366,31 +1502,6 @@ static const EnumPropertyItem rna_enum_material_paint_layer_place_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-/** How a row blends over what is below it. The internal Normal Combine is not offered: the Normal
- * channel forces it, and #BKE_paint_layers_set_blend refuses it. */
-static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
-    {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
-    {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
-    {MA_PAINT_LAYER_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", "Overlay blend"},
-    {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
-    {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
-    {MA_PAINT_LAYER_BLEND_BURN, "BURN", 0, "Color Burn", "Color burn blend"},
-    {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
-    {MA_PAINT_LAYER_BLEND_SCREEN, "SCREEN", 0, "Screen", "Screen blend"},
-    {MA_PAINT_LAYER_BLEND_DODGE, "DODGE", 0, "Color Dodge", "Color dodge blend"},
-    {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
-    {MA_PAINT_LAYER_BLEND_DIVIDE, "DIVIDE", 0, "Divide", "Divide blend"},
-    {MA_PAINT_LAYER_BLEND_DIFFERENCE, "DIFFERENCE", 0, "Difference", "Difference blend"},
-    {MA_PAINT_LAYER_BLEND_EXCLUSION, "EXCLUSION", 0, "Exclusion", "Exclusion blend"},
-    {MA_PAINT_LAYER_BLEND_SOFT_LIGHT, "SOFT_LIGHT", 0, "Soft Light", "Soft light blend"},
-    {MA_PAINT_LAYER_BLEND_LINEAR_LIGHT, "LINEAR_LIGHT", 0, "Linear Light", "Linear light blend"},
-    {MA_PAINT_LAYER_BLEND_HUE, "HUE", 0, "Hue", "Hue blend"},
-    {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
-    {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
-    {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
-    {0, nullptr, 0, nullptr, nullptr},
-};
-
 /** What a row paints with: a painted map, a flat Fill colour, or the layers a folder holds. */
 static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
@@ -1438,7 +1549,10 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_blend_items);
   RNA_def_property_enum_funcs(
-      prop, "rna_MaterialPaintLayer_blend_get", "rna_MaterialPaintLayer_blend_set", nullptr);
+      prop,
+      "rna_MaterialPaintLayer_blend_get",
+      "rna_MaterialPaintLayer_blend_set",
+      "rna_MaterialPaintLayer_blend_itemf");
   RNA_def_property_ui_text(prop, "Blend Type", "How the layer blends over what is below it");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
@@ -1540,6 +1654,19 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       "The constant coverage of a mask item while it has no map: one shows the layer, zero hides it");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "mask_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mask_color_get",
+                               "rna_MaterialPaintLayer_mask_color_set",
+                               nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Mask Color",
+      "The constant coverage of a mask item as a grey swatch: white shows the layer, black hides it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   func = RNA_def_function(srna, "mask_add", "rna_MaterialPaintLayer_mask_add");
   RNA_def_function_ui_description(
       func, "Give the layer a base mask of a constant value; a stroke in Mask mode paints it");
@@ -1568,6 +1695,28 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                "Source",
                "Image for a painted map, Constant for a flat colour");
   parm = RNA_def_pointer(func, "effect", "MaterialPaintLayer", "", "The new correction");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "mask_item_add", "rna_MaterialPaintLayer_mask_item_add");
+  RNA_def_function_ui_description(
+      func,
+      "Add a mask correction over the layer's mask (made white first when there is none): a grey "
+      "map painted in Mask mode, or with the Constant source a flat grey (see mask_value), laid by "
+      "the correction's own blend and opacity");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  RNA_def_string(func,
+                 "name",
+                 nullptr,
+                 MAX_NAME,
+                 "Name",
+                 "Name of the new correction, empty for the unique default");
+  RNA_def_enum(func,
+               "source",
+               rna_enum_material_paint_layer_source_items,
+               MA_PAINT_LAYER_SOURCE_IMAGE,
+               "Source",
+               "Image for a painted map, Constant for a flat grey");
+  parm = RNA_def_pointer(func, "item", "MaterialPaintLayer", "", "The new mask correction");
   RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "mask_remove", "rna_MaterialPaintLayer_mask_remove");
@@ -1668,6 +1817,13 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(
       prop, "rna_MaterialPaintLayerChannel_use_get", "rna_MaterialPaintLayerChannel_use_set");
   RNA_def_property_ui_text(prop, "Enabled", "Whether the channel takes part");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "invert", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayerChannel_invert_get", "rna_MaterialPaintLayerChannel_invert_set");
+  RNA_def_property_ui_text(
+      prop, "Invert", "Read the map's grey (or the flat grey) of a mask correction as 1 - value");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   /* The scalar channels' single value, stored in `value[0]`; colour channels use `value`. */
@@ -1822,6 +1978,15 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                                  nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Active Layer", "Active paint layer of the material");
+
+  /* `active` answers the item's row, so the tab needs the item itself to draw its own controls. */
+  prop = RNA_def_property(srna, "active_mask_item", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_Material_paint_layers_active_mask_item_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Active Mask Correction", "Active mask correction of the active layer, if one is active");
 }
 
 static void rna_def_material_display(StructRNA *srna)

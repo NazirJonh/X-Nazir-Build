@@ -291,6 +291,34 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       }
     }
   }
+
+  /* A mask correction has an opacity of its own and, while it has no map, its grey: inputs like the
+   * base's, named by the correction's marker so the value sync finds the item they belong to. */
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0 || !paint_layer_mask_item_lays(item)) {
+      continue;
+    }
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    const char *item_name = item.name[0] != '\0' ? item.name : "Mask Correction";
+    char base[200];
+    SNPRINTF(base, "%s %s Opacity", layer_name, item_name);
+    bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_MASK_OPACITY, item.marker, -1);
+    if (opacity != nullptr) {
+      group_input_default_set(group, *opacity, BKE_paint_layers_effective_opacity(item));
+      mask_opacity_inputs_.add(&item, opacity);
+    }
+    if (record != nullptr && record->image == nullptr) {
+      SNPRINTF(base, "%s %s", layer_name, item_name);
+      bNodeTreeInterfaceSocket *value = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_MASK_VALUE, item.marker, -1);
+      if (value != nullptr) {
+        group_input_default_set(group, *value, paint_layer_mask_constant(*record));
+        mask_value_inputs_.add(&item, value);
+      }
+    }
+  }
 }
 
 LayerGroup *PaintLayersTreeBuilder::layer_group_ensure(const MaterialPaintLayer &layer,

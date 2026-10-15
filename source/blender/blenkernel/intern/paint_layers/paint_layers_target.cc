@@ -137,7 +137,11 @@ bool BKE_paint_layers_target_get(Material &ma,
   if (channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
     return false;
   }
-  r_target.mask_item = BKE_paint_layers_mask_base(*layer);
+  /* The correction being worked on, when it is one of this row's; the base mask otherwise. */
+  MaterialPaintLayer *active_item = BKE_paint_layers_active_mask_item_get(ma);
+  const bool item_of_layer = active_item != nullptr &&
+                             BKE_paint_layers_mask_item_owner(ma, *active_item) == layer;
+  r_target.mask_item = item_of_layer ? active_item : BKE_paint_layers_mask_base(*layer);
   if (r_target.mask_item == nullptr) {
     return false;
   }
@@ -276,8 +280,9 @@ static Image *paint_layers_mask_ensure_writable(Main &bmain,
   char name[192];
   BLI_snprintf(name,
                sizeof(name),
-               "%s Mask",
-               target.layer->name[0] != '\0' ? target.layer->name : "Layer");
+               "%s %s",
+               target.layer->name[0] != '\0' ? target.layer->name : "Layer",
+               item->name[0] != '\0' ? item->name : "Mask");
   Image *image = paint_layers_map_create(bmain, name, image_size, /*is_color=*/false, record->value);
   if (image == nullptr) {
     return nullptr;

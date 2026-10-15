@@ -82,8 +82,11 @@ bool values_sync_socket(Material &ma,
     return true;
   }
   if (STREQ(role, ROLE_MASK_OPACITY) || STREQ(role, ROLE_MASK_VALUE)) {
-    /* The marker names the owner row; the item is whatever base mask it carries now. */
-    const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(*layer);
+    /* The marker names the owner row, and the item is whatever base mask it carries now; a mask
+     * correction's inputs name the correction itself. */
+    const MaterialPaintLayer *mask = (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ?
+                                         layer :
+                                         BKE_paint_layers_mask_base(*layer);
     if (mask == nullptr || socket.default_value == nullptr) {
       return false;
     }

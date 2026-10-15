@@ -517,6 +517,69 @@ TEST_F(PaintLayersTargetTest, mask_target_resolves_the_base_mask_by_base_color_a
       *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, PaintLayersTargetMode::Mask, target));
 }
 
+TEST_F(PaintLayersTargetTest, mask_target_follows_the_active_correction)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(base, nullptr);
+  MaterialPaintLayer *paint = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  MaterialPaintLayer *fill = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT, "Flat", 0.6f);
+  ASSERT_NE(paint, nullptr);
+  ASSERT_NE(fill, nullptr);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_EQ(target.mask_item, base);
+
+  /* The row is still the layer; the correction is the mask item the stroke paints. */
+  BKE_paint_layers_active_set(*ma, paint->marker);
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_EQ(target.layer, layer);
+  EXPECT_EQ(target.mask_item, paint);
+  EXPECT_TRUE(BKE_paint_layers_target_is_live(target));
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target));
+  EXPECT_EQ(target.layer, layer);
+  EXPECT_EQ(target.mask_item, nullptr);
+
+  /* A Paint correction's first map is transparent, so it changes no pixel until stroked. */
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(image, nullptr);
+  EXPECT_STREQ(image->id.name + 2, "L Corr");
+  uchar pixel[4];
+  first_byte_pixel(*image, pixel);
+  EXPECT_EQ(pixel[3], 0);
+  EXPECT_EQ(paint_layer_channel_find(*paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, image);
+  EXPECT_EQ(paint_layer_channel_find(*base, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, nullptr);
+
+  /* A Fill's first map keeps its grey, opaque. */
+  BKE_paint_layers_active_set(*ma, fill->marker);
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  Image *flat = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(flat, nullptr);
+  first_byte_pixel(*flat, pixel);
+  EXPECT_EQ(pixel[3], 255);
+  EXPECT_NEAR(pixel[0], 153, 1);
+
+  /* The row itself addresses the base again. */
+  BKE_paint_layers_active_set(*ma, layer->marker);
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_EQ(target.mask_item, base);
+
+  PaintLayersImageUse use;
+  ASSERT_TRUE(BKE_paint_layers_find_image_use(*ma, *image, use));
+  EXPECT_EQ(use.layer, paint);
+  EXPECT_TRUE(use.is_mask);
+}
+
 TEST_F(PaintLayersTargetTest, mask_ensure_writable_fills_the_map_with_the_constant)
 {
   MaterialPaintLayer *layer = add_active_row("L");

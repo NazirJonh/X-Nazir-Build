@@ -71,6 +71,14 @@ struct RowResult {
   /** A folder: its contents' straight colour and coverage, the source and factor base of the row. */
   bNodeSocket *folder_color = nullptr;
   bNodeSocket *folder_coverage = nullptr;
+  /**
+   * The content alpha of a channel that tracks one: what is below (pre-multiplied inside a folder),
+   * the one with this row laid over it, and a folder's straightened alpha of what it holds. Null
+   * for a channel that tracks none.
+   */
+  bNodeSocket *below_alpha = nullptr;
+  bNodeSocket *result_alpha = nullptr;
+  bNodeSocket *folder_alpha = nullptr;
 };
 
 /** A node and one of its output sockets: what the next stage of a chain reads from. */
@@ -86,6 +94,9 @@ struct NodeOutput {
 struct ChainEnd {
   NodeOutput color;
   NodeOutput coverage;
+  /** The content alpha of a channel that tracks one; empty otherwise. Pre-multiplied (`P_a`) inside
+   * a folder, like the colour. */
+  NodeOutput alpha;
 };
 
 /** The blend of one row over what is below: a Normal Combine instance or a Mix node. */
@@ -143,15 +154,18 @@ class PaintLayersTreeBuilder {
   /**
    * Lay the content correction \a effect over \a content, the straight colour the row has so far in
    * \a channel, building its nodes into \a group's tree. \a coverage is the coverage the row's own
-   * content has, or empty while it covers fully; both move on to the result. False (and nothing
-   * built) when the correction lays no map in \a channel.
+   * content has, or empty while it covers fully; both move on to the result, and so does
+   * \a content_alpha -- the row's content alpha, raised by the over model -- when the channel
+   * tracks one (null otherwise). False (and nothing built) when the correction lays no map in
+   * \a channel.
    */
   bool correction_lay(bNodeTree &tree,
                       LayerGroup &group,
                       const MaterialPaintLayer &effect,
                       int channel,
                       NodeOutput &content,
-                      NodeOutput &coverage);
+                      NodeOutput &coverage,
+                      NodeOutput *content_alpha);
 
   /**
    * The instance sockets of a row whose group was kept unchanged: its nodes and interface already
@@ -203,7 +217,7 @@ class PaintLayersTreeBuilder {
   NodeOutput channel_bottom_add(int channel, float location_y);
 
   /** The rows of \a channel chained over \a below; \a location_x advances past what was built. */
-  NodeOutput channel_chain_build(int channel, NodeOutput below, float location_y, float &location_x);
+  ChainEnd channel_chain_build(int channel, ChainEnd below, float location_y, float &location_x);
 
   /**
    * Decode, normalize and encode the Normal channel at \a from: a partial factor interpolates the
@@ -229,6 +243,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> effect_opacity_inputs_;
   /** The constant input of a row's map-less channel, keyed by the row and the channel. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_inputs_;
+  /** The alpha of that constant, its own float input, keyed the same way. */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_alpha_inputs_;
   /** A row's base mask opacity and constant inputs, keyed by the row. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_opacity_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_value_inputs_;

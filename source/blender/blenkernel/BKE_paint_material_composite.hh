@@ -247,10 +247,12 @@ struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
  * corrections laid over the row raise by the over model: every channel that shows a painted map
  * except Normal, whose fourth component is the colour chain's own.
  *
- * The CPU composite tracks it per pixel. The generated graph does not yet: the shader ignores the
- * alpha of a colour socket, so the quantity has no reader there until a bake of the graph writes it
- * into a map (the bake commit), which is where the generator's parallel `Content Alpha` chain
- * belongs.
+ * The CPU composite tracks it per pixel, and the generated graph tracks the same quantity as a
+ * scalar chain beside the colour (`Below/Result Content Alpha <channel>` of every row group, and a
+ * Compose Color Alpha at each result). The shader itself ignores the alpha of a colour socket, so
+ * nothing reads the chain until the graph is evaluated into a map -- a bake, or a comparison with
+ * the CPU -- which is exactly what it is kept for: without it the graph's fourth component is the
+ * colour chain's own, which a Mix lerps and an isolating folder's divide drops.
  */
 bool BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel channel);
 

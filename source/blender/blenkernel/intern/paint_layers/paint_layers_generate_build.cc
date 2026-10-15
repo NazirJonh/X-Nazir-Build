@@ -28,6 +28,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_material_composite.hh"
 
 #include "NOD_socket.hh"
 
@@ -214,6 +215,17 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       group_input_default_set(group, *fill, record->value);
       fill_inputs_.lookup_or_add_default(&layer).add(channel, fill);
     }
+    /* The constant's alpha is the content alpha the row lays, which the colour socket cannot hand
+     * over: a scalar of its own, on the channels that track one. */
+    if (BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel))) {
+      SNPRINTF(base, "%s %s Alpha", layer_name, info.ui_name);
+      bNodeTreeInterfaceSocket *fill_alpha = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_FILL_ALPHA, layer.marker, channel);
+      if (fill_alpha != nullptr) {
+        group_input_default_set(group, *fill_alpha, record->value[3]);
+        fill_alpha_inputs_.lookup_or_add_default(&layer).add(channel, fill_alpha);
+      }
+    }
   }
 
   /* A content correction has its own opacity per channel it lays a map in. */
@@ -377,13 +389,12 @@ NodeOutput PaintLayersTreeBuilder::channel_bottom_add(const int channel, const f
   return {bottom_node, bottom_out};
 }
 
-NodeOutput PaintLayersTreeBuilder::channel_chain_build(const int channel,
-                                                       const NodeOutput below,
-                                                       const float location_y,
-                                                       float &location_x)
+ChainEnd PaintLayersTreeBuilder::channel_chain_build(const int channel,
+                                                     const ChainEnd below,
+                                                     const float location_y,
+                                                     float &location_x)
 {
-  return this->list_build(ma_.paint_layers, {below, {}}, channel, location_y, location_x, false)
-      .color;
+  return this->list_build(ma_.paint_layers, below, channel, location_y, location_x, false);
 }
 
 /**
@@ -469,28 +480,35 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
      * safe at zero, so a folder nothing of which covers reads as no colour and no coverage. */
     NodeOutput folder_color;
     NodeOutput folder_coverage;
+    NodeOutput folder_alpha;
+    const bool track_alpha = BKE_paint_material_channel_tracks_content_alpha(
+        eMaterialPaintChannel(channel));
     if (BKE_paint_layers_is_folder(layer)) {
       bNode *p_zero = zero_node_add(tree_, true, location_x, location_y - 140.0f);
       bNode *a_zero = zero_node_add(tree_, false, location_x, location_y - 260.0f);
+      /* The content alpha is accumulated pre-multiplied beside the colour, from zero. */
+      bNode *pa_zero = track_alpha ? zero_node_add(tree_, false, location_x, location_y - 380.0f) :
+                                     nullptr;
       /* A folder that cannot be built leaves no half of it behind in the tree. */
       const auto discard = [&](bNode *extra) {
-        for (bNode *node : {p_zero, a_zero, extra}) {
+        for (bNode *node : {p_zero, a_zero, pa_zero, extra}) {
           if (node != nullptr) {
             bke::node_remove_node(nullptr, tree_, *node, true, false);
           }
         }
       };
-      if (p_zero == nullptr || a_zero == nullptr) {
+      if (p_zero == nullptr || a_zero == nullptr || (track_alpha && pa_zero == nullptr)) {
         discard(nullptr);
         continue;
       }
-      const ChainEnd inner = this->list_build(layer.children,
-                                              {{p_zero, socket_out(*p_zero, "Color")},
-                                               {a_zero, socket_out(*a_zero, "Value")}},
-                                              channel,
-                                              location_y,
-                                              location_x,
-                                              true);
+      ChainEnd inner_start;
+      inner_start.color = {p_zero, socket_out(*p_zero, "Color")};
+      inner_start.coverage = {a_zero, socket_out(*a_zero, "Value")};
+      if (pa_zero != nullptr) {
+        inner_start.alpha = {pa_zero, socket_out(*pa_zero, "Value")};
+      }
+      const ChainEnd inner = this->list_build(
+          layer.children, inner_start, channel, location_y, location_x, true);
       bNode *divide = vector_math_add(
           tree_, NODE_VECTOR_MATH_DIVIDE, location_x, location_y - 140.0f);
       bNodeSocket *divide_a = (divide != nullptr) ? socket_in(*divide, "Vector") : nullptr;
@@ -506,6 +524,26 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
       bke::node_add_link(tree_, *inner.coverage.node, *inner.coverage.socket, *divide, *divide_b);
       folder_color = {divide, divide_out};
       folder_coverage = inner.coverage;
+      /* The straight alpha of what the folder holds: `S_a = P_a / a`, zero where nothing covers. */
+      if (track_alpha && inner.alpha.socket != nullptr) {
+        bNode *alpha_divide = bke::node_add_static_node(nullptr, tree_, SH_NODE_MATH);
+        bNodeSocket *alpha_a = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value") :
+                                                           nullptr;
+        bNodeSocket *alpha_b = (alpha_divide != nullptr) ? socket_in(*alpha_divide, "Value_001") :
+                                                           nullptr;
+        bNodeSocket *alpha_out = (alpha_divide != nullptr) ? socket_out(*alpha_divide, "Value") :
+                                                             nullptr;
+        if (alpha_out != nullptr) {
+          alpha_divide->custom1 = NODE_MATH_DIVIDE;
+          alpha_divide->location[0] = location_x;
+          alpha_divide->location[1] = location_y - 320.0f;
+          bke::node_add_link(
+              tree_, *inner.alpha.node, *inner.alpha.socket, *alpha_divide, *alpha_a);
+          bke::node_add_link(
+              tree_, *inner.coverage.node, *inner.coverage.socket, *alpha_divide, *alpha_b);
+          folder_alpha = {alpha_divide, alpha_out};
+        }
+      }
       location_x += 180.0f;
     }
 
@@ -537,10 +575,20 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
                          *row.instance,
                          *row.folder_coverage);
     }
+    if (row.below_alpha != nullptr && end.alpha.socket != nullptr) {
+      bke::node_add_link(
+          tree_, *end.alpha.node, *end.alpha.socket, *row.instance, *row.below_alpha);
+    }
+    if (row.folder_alpha != nullptr && folder_alpha.socket != nullptr) {
+      bke::node_add_link(
+          tree_, *folder_alpha.node, *folder_alpha.socket, *row.instance, *row.folder_alpha);
+    }
     end.color = {row.instance, row.result};
     end.coverage = (isolated && row.result_coverage != nullptr) ?
                        NodeOutput{row.instance, row.result_coverage} :
                        NodeOutput{};
+    end.alpha = (row.result_alpha != nullptr) ? NodeOutput{row.instance, row.result_alpha} :
+                                                NodeOutput{};
     location_x += 180.0f;
   }
   return end;
@@ -612,9 +660,48 @@ void PaintLayersTreeBuilder::build()
       continue;
     }
     float location_x = 180.0f;
-    NodeOutput end = this->channel_chain_build(channel, bottom, location_y, location_x);
+    ChainEnd start;
+    start.color = bottom;
+    /* The content alpha starts from the channel's bottom alpha, as the CPU composite does. */
+    if (BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel))) {
+      bNode *alpha_bottom = bke::node_add_static_node(nullptr, tree_, SH_NODE_VALUE);
+      bNodeSocket *alpha_out = (alpha_bottom != nullptr) ? socket_out(*alpha_bottom, "Value") :
+                                                          nullptr;
+      if (alpha_out != nullptr) {
+        float bottom_color[4];
+        BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel(channel), bottom_color);
+        if (alpha_out->default_value != nullptr) {
+          static_cast<bNodeSocketValueFloat *>(alpha_out->default_value)->value = bottom_color[3];
+        }
+        alpha_bottom->location[0] = 0.0f;
+        alpha_bottom->location[1] = location_y - 120.0f;
+        start.alpha = {alpha_bottom, alpha_out};
+      }
+    }
+    ChainEnd chain_end = this->channel_chain_build(channel, start, location_y, location_x);
+    NodeOutput end = chain_end.color;
     if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && end.node != bottom.node) {
       end = this->normal_renormalize_add(end, location_x, location_y);
+    }
+    /* The result's fourth component is the tracked content alpha, composed over the colour once:
+     * the colour chain's own alpha was cut by the divides of the isolating folders. Where nothing
+     * is tracked the colour links straight as before. */
+    if (chain_end.alpha.socket != nullptr && end.node != bottom.node) {
+      bNode *compose = bke::node_add_static_node(nullptr, tree_, SH_NODE_COMPOSE_COLOR_ALPHA);
+      bNodeSocket *compose_color = (compose != nullptr) ? socket_in(*compose, "Color") : nullptr;
+      bNodeSocket *compose_alpha = (compose != nullptr) ? socket_in(*compose, "Alpha") : nullptr;
+      bNodeSocket *compose_out = (compose != nullptr) ? socket_out(*compose, "Color") : nullptr;
+      if (compose_color != nullptr && compose_alpha != nullptr && compose_out != nullptr) {
+        compose->location[0] = location_x + 180.0f;
+        compose->location[1] = location_y;
+        bke::node_add_link(tree_, *end.node, *end.socket, *compose, *compose_color);
+        bke::node_add_link(
+            tree_, *chain_end.alpha.node, *chain_end.alpha.socket, *compose, *compose_alpha);
+        end = {compose, compose_out};
+      }
+      else if (compose != nullptr) {
+        bke::node_remove_node(nullptr, tree_, *compose, true, false);
+      }
     }
     bke::node_add_link(tree_, *end.node, *end.socket, *group_output_, *result_socket);
     location_y += 240.0f;

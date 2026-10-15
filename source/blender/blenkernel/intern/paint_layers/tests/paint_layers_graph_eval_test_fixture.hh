@@ -245,6 +245,14 @@ class GraphInterpreter {
         }
         return {value, value, value, value};
       }
+      case SH_NODE_COMPOSE_COLOR_ALPHA: {
+        /* The content alpha composed over the colour: the colour's own alpha is replaced. */
+        const RGBA color = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const RGBA alpha = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Alpha"_ustr));
+        return {color.r, color.g, color.b, alpha.r};
+      }
       case SH_NODE_SEPXYZ: {
         /* The mask's grey is the mean of a map's colour, split into its three components. */
         const RGBA vector = eval_socket(

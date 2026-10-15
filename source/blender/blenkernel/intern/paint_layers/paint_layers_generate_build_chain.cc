@@ -26,6 +26,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_material_composite.hh"
 
 #include "NOD_socket.hh"
 
@@ -396,7 +397,8 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
                                             const MaterialPaintLayer &effect,
                                             const int channel,
                                             NodeOutput &content,
-                                            NodeOutput &coverage)
+                                            NodeOutput &coverage,
+                                            NodeOutput *content_alpha)
 {
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
   Map<int, bNodeTreeInterfaceSocket *> *by_channel = effect_opacity_inputs_.lookup_ptr(&effect);
@@ -451,6 +453,21 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   nodes.append(factor.node);
   factor_node_for_frame = factor.node;
 
+  /* The correction raises the row's content alpha by the over model, `a = a + f * (1 - a)`,
+   * independently of the colour: the Mix below would lerp the alpha component instead. */
+  NodeOutput alpha_joined;
+  if (content_alpha != nullptr && content_alpha->socket != nullptr) {
+    const NodeOutput alpha_one_minus = math_node_add(
+        tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, *content_alpha, 1.0f);
+    const NodeOutput alpha_scaled = math_node_add(
+        tree, grid_, nodes, NODE_MATH_MULTIPLY, factor, alpha_one_minus);
+    alpha_joined = math_node_add(
+        tree, grid_, nodes, NODE_MATH_ADD, *content_alpha, alpha_scaled);
+    if (alpha_joined.node == nullptr) {
+      return discard();
+    }
+  }
+
   const BlendNode blend = this->blend_node_add(
       tree, channel, BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(effect.blend)));
   if (blend.node == nullptr) {
@@ -462,6 +479,9 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     /* The row covers fully, so the correction is a plain blend by its factor. */
     blend_inputs_link(tree, blend, content, color, factor);
     content = {blend.node, blend.result};
+    if (alpha_joined.node != nullptr) {
+      *content_alpha = alpha_joined;
+    }
     frame();
     return true;
   }
@@ -545,6 +565,9 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
 
   content = {lay, lay_out};
   coverage = joined;
+  if (alpha_joined.node != nullptr) {
+    *content_alpha = alpha_joined;
+  }
   frame();
   return true;
 }
@@ -635,6 +658,49 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     }
   }
 
+  /* The content alpha of a channel that tracks one rides next to the colour: what is below, and the
+   * row laid over it. Inside a folder it is pre-multiplied like the colour (`P_a`), and a folder
+   * takes the straightened alpha of what it holds. See #BKE_paint_material_channel_tracks_content_alpha
+   * for what the quantity is for. */
+  const bool track_alpha = BKE_paint_material_channel_tracks_content_alpha(
+      eMaterialPaintChannel(channel));
+  bNodeTreeInterfaceSocket *below_alpha_iface = nullptr;
+  bNodeTreeInterfaceSocket *result_alpha_iface = nullptr;
+  bNodeTreeInterfaceSocket *folder_alpha_iface = nullptr;
+  bNodeSocket *below_alpha = nullptr;
+  bNodeSocket *result_alpha_out = nullptr;
+  bNodeSocket *folder_alpha = nullptr;
+  if (track_alpha) {
+    SNPRINTF(socket_name, "Below Content Alpha %s", info.ui_name);
+    below_alpha_iface = layer_group_add_socket(
+        group, socket_name, "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT);
+    SNPRINTF(socket_name, "Result Content Alpha %s", info.ui_name);
+    result_alpha_iface = layer_group_add_socket(
+        group, socket_name, "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT);
+    if (below_alpha_iface == nullptr || result_alpha_iface == nullptr) {
+      return {};
+    }
+    below_alpha = bke::node_find_socket(
+        *group_input, SOCK_OUT, UString::from_ptr_noinline(below_alpha_iface->identifier));
+    result_alpha_out = bke::node_find_socket(
+        *group.group_output, SOCK_IN, UString::from_ptr_noinline(result_alpha_iface->identifier));
+    if (folder) {
+      SNPRINTF(socket_name, "Folder Content Alpha %s", info.ui_name);
+      folder_alpha_iface = layer_group_add_socket(
+          group, socket_name, "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT);
+      if (folder_alpha_iface == nullptr) {
+        return {};
+      }
+      folder_alpha = bke::node_find_socket(
+          *group_input, SOCK_OUT, UString::from_ptr_noinline(folder_alpha_iface->identifier));
+    }
+    if (below_alpha == nullptr || result_alpha_out == nullptr ||
+        (folder && folder_alpha == nullptr))
+    {
+      return {};
+    }
+  }
+
   /* The row's source: its map, or the constant the row's group takes as an input. */
   bNode *source_node = nullptr;
   bNodeSocket *source = nullptr;
@@ -691,10 +757,10 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
 
   /* The coverage the row's own content has: its map's alpha, so a texel the map leaves transparent
    * shows what is below; zero for an empty base; none for a constant, which covers fully. */
-  NodeOutput coverage;
+  NodeOutput row_coverage;
   if (map_node != nullptr) {
     if (bNodeSocket *map_alpha = socket_out(*map_node, "Alpha")) {
-      coverage = {map_node, map_alpha};
+      row_coverage = {map_node, map_alpha};
     }
   }
   else if (empty_base) {
@@ -707,7 +773,34 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
       static_cast<bNodeSocketValueFloat *>(zero_out->default_value)->value = 0.0f;
     }
     grid_.place(*zero, layout::Column::Source, 1);
-    coverage = {zero, zero_out};
+    row_coverage = {zero, zero_out};
+  }
+
+  /* The row's own content alpha: a folder's straightened one, a map's alpha, the empty base's
+   * zero, or the constant's alpha, which is an input of the group. */
+  NodeOutput content_alpha;
+  if (track_alpha) {
+    if (folder) {
+      content_alpha = {group_input, folder_alpha};
+    }
+    else if (map_node != nullptr) {
+      if (bNodeSocket *map_alpha = socket_out(*map_node, "Alpha")) {
+        content_alpha = {map_node, map_alpha};
+      }
+    }
+    else if (empty_base) {
+      content_alpha = row_coverage;
+    }
+    else if (Map<int, bNodeTreeInterfaceSocket *> *alpha_by_channel = fill_alpha_inputs_.lookup_ptr(
+                 &layer))
+    {
+      if (bNodeTreeInterfaceSocket **alpha_iface = alpha_by_channel->lookup_ptr(channel)) {
+        content_alpha = {group_input, group_input_socket(group, **alpha_iface)};
+      }
+    }
+    if (content_alpha.socket == nullptr) {
+      return {};
+    }
   }
 
   /* Content corrections lay their maps over the colour before the row's own blend, and raise the
@@ -715,7 +808,13 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   if (!folder) {
     NodeOutput content = {source_node, source};
     for (const MaterialPaintLayer &effect : layer.effects) {
-      this->correction_lay(tree, group, effect, channel, content, coverage);
+      this->correction_lay(tree,
+                           group,
+                           effect,
+                           channel,
+                           content,
+                           row_coverage,
+                           track_alpha ? &content_alpha : nullptr);
     }
     source_node = content.node;
     source = content.socket;
@@ -731,14 +830,14 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
       factor = group_input_socket(group, **opacity_iface);
     }
   }
-  if (coverage.socket != nullptr) {
+  if (row_coverage.socket != nullptr) {
     if (factor == nullptr) {
-      factor_node = coverage.node;
-      factor = coverage.socket;
+      factor_node = row_coverage.node;
+      factor = row_coverage.socket;
     }
     else {
       const NodeOutput product = this->multiply_nodes_add(
-          tree, {factor_node, factor}, coverage);
+          tree, {factor_node, factor}, row_coverage);
       if (product.node != nullptr) {
         factor_node = product.node;
         factor = product.socket;
@@ -882,6 +981,70 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     layout::frame_add(tree, "Isolated Blend", blend_nodes);
   }
 
+  /* The content alpha follows the colour by the same model, as a scalar: a Mix row lays its alpha
+   * by the row's factor, every other blend keeps the alpha below, exactly as the CPU's `ramp_blend`
+   * treats the fourth component. Inside a folder it is accumulated pre-multiplied like `P`, with
+   * `S_a = P_a / a` where a blend other than Mix reads the straight alpha below. */
+  if (track_alpha) {
+    const bool mix_alpha = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(layer.blend)) ==
+                           MA_RAMP_BLEND;
+    Vector<bNode *> alpha_nodes;
+    /* `mix(a, b, fac)` as a float Mix node; an empty \a fac covers fully. */
+    const auto alpha_mix = [&](const NodeOutput a,
+                               const NodeOutput b,
+                               const NodeOutput fac) -> NodeOutput {
+      bNode *node = mix_float_node_add(tree);
+      bNodeSocket *a_in = (node != nullptr) ? socket_in(*node, "A_Float") : nullptr;
+      bNodeSocket *b_in = (node != nullptr) ? socket_in(*node, "B_Float") : nullptr;
+      bNodeSocket *fac_in = (node != nullptr) ? socket_in(*node, "Factor_Float") : nullptr;
+      bNodeSocket *out = (node != nullptr) ? socket_out(*node, "Result_Float") : nullptr;
+      if (a_in == nullptr || b_in == nullptr || fac_in == nullptr || out == nullptr ||
+          a.socket == nullptr || b.socket == nullptr)
+      {
+        if (node != nullptr) {
+          bke::node_remove_node(nullptr, tree, *node, true, false);
+        }
+        return {};
+      }
+      grid_.place_extra(*node);
+      bke::node_add_link(tree, *a.node, *a.socket, *node, *a_in);
+      bke::node_add_link(tree, *b.node, *b.socket, *node, *b_in);
+      if (fac.socket != nullptr) {
+        bke::node_add_link(tree, *fac.node, *fac.socket, *node, *fac_in);
+      }
+      else if (fac_in->default_value != nullptr) {
+        static_cast<bNodeSocketValueFloat *>(fac_in->default_value)->value = 1.0f;
+      }
+      alpha_nodes.append(node);
+      return {node, out};
+    };
+    const NodeOutput below_a = {group_input, below_alpha};
+    const NodeOutput row_factor = {factor_node, factor};
+    NodeOutput result_a;
+    if (!isolated) {
+      result_a = mix_alpha ? alpha_mix(below_a, content_alpha, row_factor) : below_a;
+    }
+    else {
+      const NodeOutput below_cov = {group_input, below_coverage};
+      NodeOutput lay_a = content_alpha;
+      if (!mix_alpha) {
+        /* c_eff_a = lerp(c_a, S_a, a): the straight alpha below shows where the row covers. */
+        const NodeOutput straight_a = math_node_add(
+            tree, grid_, alpha_nodes, NODE_MATH_DIVIDE, below_a, below_cov);
+        lay_a = alpha_mix(content_alpha, straight_a, below_cov);
+      }
+      result_a = alpha_mix(below_a, lay_a, row_factor);
+    }
+    if (result_a.socket == nullptr) {
+      return {};
+    }
+    bke::node_add_link(
+        tree, *result_a.node, *result_a.socket, *group.group_output, *result_alpha_out);
+    if (!alpha_nodes.is_empty()) {
+      layout::frame_add(tree, "Content Alpha", alpha_nodes);
+    }
+  }
+
   RowResult result;
   result.valid = true;
   result.instance = group.instance;
@@ -908,6 +1071,22 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
         *group.instance, SOCK_IN, UString::from_ptr_noinline(folder_coverage_iface->identifier));
     if (result.folder_color == nullptr || result.folder_coverage == nullptr) {
       return {};
+    }
+  }
+  if (track_alpha) {
+    result.below_alpha = bke::node_find_socket(
+        *group.instance, SOCK_IN, UString::from_ptr_noinline(below_alpha_iface->identifier));
+    result.result_alpha = bke::node_find_socket(
+        *group.instance, SOCK_OUT, UString::from_ptr_noinline(result_alpha_iface->identifier));
+    if (result.below_alpha == nullptr || result.result_alpha == nullptr) {
+      return {};
+    }
+    if (folder) {
+      result.folder_alpha = bke::node_find_socket(
+          *group.instance, SOCK_IN, UString::from_ptr_noinline(folder_alpha_iface->identifier));
+      if (result.folder_alpha == nullptr) {
+        return {};
+      }
     }
   }
   return result;
@@ -963,6 +1142,19 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
     result.folder_coverage = instance_input("Folder Coverage", "NodeSocketFloat", true);
     if (result.folder_color == nullptr || result.folder_coverage == nullptr) {
       return {};
+    }
+  }
+  if (BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel))) {
+    result.below_alpha = instance_input("Below Content Alpha", "NodeSocketFloat", true);
+    result.result_alpha = instance_input("Result Content Alpha", "NodeSocketFloat", false);
+    if (result.below_alpha == nullptr || result.result_alpha == nullptr) {
+      return {};
+    }
+    if (BKE_paint_layers_is_folder(layer)) {
+      result.folder_alpha = instance_input("Folder Content Alpha", "NodeSocketFloat", true);
+      if (result.folder_alpha == nullptr) {
+        return {};
+      }
     }
   }
   return result;

@@ -74,6 +74,9 @@ inline constexpr const char *TREE_ROOT_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_ro
 inline constexpr const char *ROLE_OPACITY = "opacity";
 /** #INPUT_ROLE_PROP value of the constant of a channel that carries no map. */
 inline constexpr const char *ROLE_FILL = "fill";
+/** #INPUT_ROLE_PROP value of that constant's alpha: the content alpha a map-less row lays, which
+ * no colour socket can hand over on its own. */
+inline constexpr const char *ROLE_FILL_ALPHA = "fill_alpha";
 /** #INPUT_ROLE_PROP value of a row's base mask constant (the marker is the owner row's). */
 inline constexpr const char *ROLE_MASK_VALUE = "mask_value";
 /** #INPUT_ROLE_PROP value of a row's base mask opacity (enabled already folded in). */

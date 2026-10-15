@@ -105,6 +105,18 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_FILL_ALPHA)) {
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer,
+                                                                      eMaterialPaintChannel(channel));
+    if (record == nullptr || socket.default_value == nullptr) {
+      return false;
+    }
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = record->value[3];
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = record->value[3];
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_FILL)) {
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer,
                                                                       eMaterialPaintChannel(channel));

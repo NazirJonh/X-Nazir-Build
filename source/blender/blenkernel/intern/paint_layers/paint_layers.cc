@@ -662,21 +662,48 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
 
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
-                                                    const char *name)
+                                                    const char *name,
+                                                    const eMaterialPaintLayerSource source)
 {
   /* A folder has no colour of its own to correct, and a correction never carries one itself. */
   if (!paint_layer_in_stack(ma, owner) || BKE_paint_layers_is_folder(*owner)) {
     return nullptr;
   }
-  MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : "Correction Paint");
+  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    return nullptr;
+  }
+  const bool fill = source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  MaterialPaintLayer *effect = paint_layer_alloc(
+      ma, name != nullptr ? name : (fill ? "Correction Fill" : "Correction Paint"));
   effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
-  effect->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+  effect->source = source;
   BLI_addtail(&owner->effects, effect);
-  /* Linked first: the channel records are added through the ownership check. They start
-   * transparent, so the correction lays nothing down until a stroke gives it a map. */
-  BKE_paint_layers_default_channels_apply(ma, *effect);
+  /* Linked first: the channel records are added through the ownership check. */
+  if (fill) {
+    /* A flat colour is one value: Base Color alone, so a channel the user never switched on is not
+     * filled with it. Opaque black stands until the caller gives it a colour, as a Fill layer's
+     * default does when its source changes. */
+    if (MaterialPaintLayerChannel *base = BKE_paint_layers_channel_add(
+            ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+    {
+      const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      copy_v4_v4(base->value, black);
+    }
+  }
+  else {
+    /* The records start transparent, so the correction lays nothing down until a stroke gives it
+     * a map. */
+    BKE_paint_layers_default_channels_apply(ma, *effect);
+  }
   BKE_paint_layers_tag_edited(ma);
   return effect;
+}
+
+MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
+                                                    MaterialPaintLayer *owner,
+                                                    const char *name)
+{
+  return BKE_paint_layers_correction_add(ma, owner, name, MA_PAINT_LAYER_SOURCE_IMAGE);
 }
 
 bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect)
@@ -1061,6 +1088,18 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     record.value[1] = 0.5f;
     record.value[2] = 1.0f;
   }
+  /* A Fill correction's other channel starts at the colour it already lays, so switching one on
+   * changes nothing until its own value is edited. Normal keeps the flat tangent above: a Fill lays
+   * nothing there, and a map it grows later starts from that. */
+  if (layer->role == MA_PAINT_LAYER_ROLE_EFFECT && layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+      !ELEM(channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_NORMAL))
+  {
+    if (const MaterialPaintLayerChannel *base = paint_layer_channel_find(
+            *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+    {
+      copy_v4_v4(record.value, base->value);
+    }
+  }
 
   MEM_delete(layer->channels);
   layer->channels = channels;
@@ -1287,7 +1326,9 @@ bool BKE_paint_layers_base_color_active(const MaterialPaintLayer &layer)
 
 bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, const float color[4])
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  /* A Fill correction hangs on a row rather than being one, and its colour lives in the same
+   * record. */
+  if (!paint_layer_in_stack_or_effect(ma, layer)) {
     return false;
   }
   /* A Fill's colour lives in its Base-Color record like every other channel; the record is created

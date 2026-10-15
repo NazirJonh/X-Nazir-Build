@@ -39,6 +39,11 @@ enum class PaintLayerAddKind : int8_t {
    * laid over its colour, painted into like a layer. It never becomes a row of the stack.
    */
   Correction,
+  /**
+   * A flat-colour content correction of the same row: one colour laid over the row's colour at the
+   * correction's own opacity, taking #PaintLayerAddParams::fill_color.
+   */
+  CorrectionFill,
 };
 
 struct PaintLayerAddParams {
@@ -56,7 +61,7 @@ struct PaintLayerAddParams {
    * the highest N in use).
    */
   const char *name = nullptr;
-  /** The initial colour for a Fill; null keeps the transparent default. */
+  /** The initial colour for a Fill or a Fill correction; null keeps the default. */
   const float *fill_color = nullptr;
 };
 

@@ -197,9 +197,10 @@ StackRow paint_correction_row_build(const Material &material,
   row.stable_id = effect.marker;
   row.enabled = (effect.flag & MA_PAINT_LAYER_ENABLED) != 0;
   row.supported = true;
-  row.name = effect.name[0] != '\0' ? effect.name : "Correction Paint";
+  const bool fill = effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  row.name = effect.name[0] != '\0' ? effect.name : (fill ? "Correction Fill" : "Correction Paint");
   row.name_buffer = const_cast<char *>(effect.name);
-  row.icon = ICON_IMAGE_RGB_ALPHA;
+  row.icon = fill ? ICON_GP_DRAW_FILL : ICON_IMAGE_RGB_ALPHA;
   /* A correction reads as a setting of its layer rather than as a member of the stack. */
   row.compact = true;
 
@@ -214,10 +215,24 @@ StackRow paint_correction_row_build(const Material &material,
   row.mode_prop = "blend_type";
   row.mode_inherited = (effect.blend == MA_PAINT_LAYER_BLEND_MIX);
 
-  /* The slot shows the correction's first map, blank or not, and switches the brush to content. */
+  /* The slot shows the correction's first map, blank or not, and switches the brush to content. A
+   * Fill correction is its colour while it has no map: the swatch a Fill layer shows, with the same
+   * rule when the Base Color record is gone or switched off (the correction then lays no colour). */
   StackRowPreview slot;
   slot.section_id = "CHANNELS";
+  const MaterialPaintLayerChannel *base = nullptr;
   for (int c = 0; c < effect.channels_num; c++) {
+    if (effect.channels[c].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      base = &effect.channels[c];
+    }
+  }
+  if (fill && BKE_paint_layers_base_color_active(effect) && base->image == nullptr) {
+    slot.is_color_swatch = true;
+    slot.icon = ICON_GP_DRAW_FILL;
+    BKE_paint_layers_base_color_get(effect, slot.color);
+    slot.label = IFACE_("Fill Color");
+  }
+  for (int c = 0; c < effect.channels_num && !slot.is_color_swatch; c++) {
     const Image *image = effect.channels[c].image;
     if (image == nullptr) {
       continue;
@@ -576,6 +591,7 @@ class PaintLayersStackSource final : public StackSource,
         hash = hash * 1000003u ^ UUID(effect.marker).hash();
         hash ^= uint64_t(effect.flag);
         hash = hash * 1000003u ^ uint64_t(effect.blend);
+        hash ^= uint64_t(effect.source) << 16;
         hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(effect.opacity));
         for (const char *ch = effect.name; *ch != '\0'; ch++) {
           hash = hash * 131u ^ uint64_t(uint8_t(*ch));
@@ -587,6 +603,12 @@ class PaintLayersStackSource final : public StackSource,
           if (image != nullptr) {
             hash ^= uint64_t(image->id.session_uid) * 2654435761u;
             hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
+          }
+          else if (effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+            /* The swatch shows the colour, so an edit of it has to reach the row. */
+            for (const int k : IndexRange(4)) {
+              hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(effect.channels[c].value[k]));
+            }
           }
         }
       }
@@ -782,7 +804,7 @@ class PaintLayersStackSource final : public StackSource,
 
   void add_kinds(Vector<StackAddKindInfo> &r_kinds) const override
   {
-    /* The kinds whose features exist: Paint, Fill and Folder. Material and the corrections are
+    /* The kinds whose features exist: Paint, Fill, Folder and the two corrections. The others are
      * appended here as they land, in the order #row_add dispatches by index. */
     r_kinds.append({"PAINT",
                     N_("Paint Layer"),
@@ -802,6 +824,13 @@ class PaintLayersStackSource final : public StackSource,
                     N_("Correction Paint"),
                     "A map painted over the active layer's colour, below the layer's own blend",
                     ICON_IMAGE_RGB_ALPHA});
+    StackAddKindInfo correction_fill{
+        "CORRECTION_FILL",
+        N_("Correction Fill"),
+        "A flat colour laid over the active layer's colour, below the layer's own blend",
+        ICON_GP_DRAW_FILL};
+    correction_fill.takes_color = true;
+    r_kinds.append(correction_fill);
   }
 
   int row_add(bContext &C,
@@ -811,7 +840,7 @@ class PaintLayersStackSource final : public StackSource,
               const int ordinal,
               const StackAddArgs &args = {}) const override
   {
-    if (kind < 0 || kind > 3 || !this->is_editable(owner)) {
+    if (kind < 0 || kind > 4 || !this->is_editable(owner)) {
       return -1;
     }
     Material &material = layers_owner(owner);
@@ -825,14 +854,17 @@ class PaintLayersStackSource final : public StackSource,
     params.kind = (kind == 1) ? PaintLayerAddKind::Fill :
                   (kind == 2) ? PaintLayerAddKind::Folder :
                   (kind == 3) ? PaintLayerAddKind::Correction :
+                  (kind == 4) ? PaintLayerAddKind::CorrectionFill :
                                 PaintLayerAddKind::Paint;
-    if (anchor != nullptr && params.kind != PaintLayerAddKind::Correction) {
+    const bool is_correction = ELEM(
+        params.kind, PaintLayerAddKind::Correction, PaintLayerAddKind::CorrectionFill);
+    if (anchor != nullptr && !is_correction) {
       /* A correction is not a place a row can be added next to: the row it hangs on is. */
       if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {
         anchor = parent;
       }
     }
-    if (params.kind == PaintLayerAddKind::Correction && anchor == nullptr) {
+    if (is_correction && anchor == nullptr) {
       /* No row was named: the correction goes on the one being worked on. */
       anchor = BKE_paint_layers_active_layer_get(material);
       if (anchor == nullptr) {
@@ -840,7 +872,7 @@ class PaintLayersStackSource final : public StackSource,
         return -1;
       }
     }
-    if (params.kind == PaintLayerAddKind::Correction && BKE_paint_layers_is_folder(*anchor)) {
+    if (is_correction && BKE_paint_layers_is_folder(*anchor)) {
       /* A folder has no colour of its own to correct; saying so beats a button that does nothing. */
       BKE_report(CTX_wm_reports(&C), RPT_WARNING, "A folder takes no correction; select a layer");
       return -1;
@@ -848,7 +880,9 @@ class PaintLayersStackSource final : public StackSource,
     params.anchor = anchor;
     /* An Add onto a folder means filling it: the policy turns this into Into. */
     params.place = PaintLayerPlace::Above;
-    if (params.kind == PaintLayerAddKind::Fill && args.color != nullptr) {
+    if (ELEM(params.kind, PaintLayerAddKind::Fill, PaintLayerAddKind::CorrectionFill) &&
+        args.color != nullptr)
+    {
       params.fill_color = args.color;
     }
     MaterialPaintLayer *created = BKE_paint_layers_add_with_policy(material, params);
@@ -857,7 +891,7 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* A new layer is painted on its content, not on the mask the previous one was edited in. */
     layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
-    if (params.kind == PaintLayerAddKind::Correction) {
+    if (is_correction) {
       /* The correction the user just added is the one they mean to paint into. */
       BKE_paint_layers_active_set(material, created->marker);
       layers_texpaint_slots_refresh(C);

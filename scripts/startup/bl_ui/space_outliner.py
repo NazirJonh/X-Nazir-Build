@@ -63,10 +63,14 @@ class OUTLINER_HT_tool_header(Header):
             props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
             props.type = 'FILL'
             props.label = "Add Fill Layer"
-            # A map painted over the selected layer's colour; it hangs on the layer, not on the stack.
+            # A map painted over the selected layer's colour, or one flat colour laid over it; they
+            # hang on the layer, not on the stack.
             props = row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB_ALPHA')
             props.type = 'CORRECTION'
             props.label = "Add Correction"
+            props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
+            props.type = 'CORRECTION_FILL'
+            props.label = "Add Fill Correction"
 
             # Only the add is here, as a menu of the two starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.

@@ -1847,4 +1847,139 @@ TEST_F(PaintLayersDescription, correction_duplicate_lands_beside_it_with_maps_of
   /* A correction is not a row of the stack, so the stack is as it was. */
   EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 1);
 }
+
+TEST_F(PaintLayersDescription, fill_correction_is_one_opaque_base_color_record)
+{
+  Material &ma = *BKE_material_add(bmain, "FillCorrectionMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      ma, row, nullptr, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_STREQ(effect->name, "Correction Fill");
+
+  /* A flat colour is one value: Base Color alone, opaque black until it is given another. */
+  ASSERT_EQ(effect->channels_num, 1);
+  const MaterialPaintLayerChannel &base = effect->channels[0];
+  EXPECT_EQ(base.channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_EQ(base.state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+  EXPECT_EQ(base.image, nullptr);
+  EXPECT_EQ(base.value[0], 0.0f);
+  EXPECT_EQ(base.value[3], 1.0f);
+
+  /* It lays in the channel it has a record for, and the row it hangs on takes part through it. */
+  EXPECT_TRUE(paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_FALSE(paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  EXPECT_TRUE(paint_layer_effects_lay(ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_TRUE(paint_layer_row_empty_base(ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  /* An Image or a Constant source and nothing else. */
+  EXPECT_EQ(BKE_paint_layers_correction_add(ma, row, "Folder", MA_PAINT_LAYER_SOURCE_STACK), nullptr);
+}
+
+TEST_F(PaintLayersDescription, fill_correction_colour_is_written_through_set_fill_color)
+{
+  Material &ma = *BKE_material_add(bmain, "FillCorrectionColourMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      ma, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(ma, effect, red));
+  float read[4];
+  BKE_paint_layers_base_color_get(*effect, read);
+  EXPECT_EQ(read[0], 1.0f);
+  EXPECT_EQ(read[1], 0.0f);
+  /* Never a row of the stack, so the record is the only place the colour is. */
+  EXPECT_EQ(effect->channels_num, 1);
+  EXPECT_EQ(effect->channels[0].value[0], 1.0f);
+}
+
+TEST_F(PaintLayersDescription, fill_correction_channel_starts_at_the_colour_and_normal_lays_nothing)
+{
+  Material &ma = *BKE_material_add(bmain, "FillCorrectionChannelMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      ma, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  const float color[4] = {0.2f, 0.5f, 0.8f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(ma, effect, color));
+
+  /* Switching a channel on does not change the view until its own value is edited. */
+  const MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      ma, effect, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  EXPECT_EQ(rough->value[0], 0.2f);
+  EXPECT_EQ(rough->value[1], 0.5f);
+  EXPECT_TRUE(paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+
+  /* A flat value is not a tangent normal: the record is kept at the flat tangent and lays nothing. */
+  const MaterialPaintLayerChannel *normal = BKE_paint_layers_channel_add(
+      ma, effect, PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_NE(normal, nullptr);
+  EXPECT_EQ(normal->value[0], 0.5f);
+  EXPECT_EQ(normal->value[2], 1.0f);
+  EXPECT_FALSE(paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_FALSE(paint_layer_effects_lay(ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL));
+}
+
+TEST_F(PaintLayersDescription, fill_correction_lays_the_map_of_a_channel_that_holds_one)
+{
+  Material &ma = *BKE_material_add(bmain, "FillCorrectionMapMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      ma, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(ma, effect, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  EXPECT_FALSE(paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_NORMAL));
+
+  /* A map in a channel is read like a Paint correction's, Normal included; the other channels keep
+   * their flat colour, and the source is still a Fill's. */
+  const float color[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+  Image &image = *BKE_image_add_generated(
+      bmain, 4, 4, "NormalMap", 32, false, IMA_GENTYPE_BLANK, color, false, true, false);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, effect, PAINT_MATERIAL_CHANNEL_NORMAL, &image));
+  EXPECT_TRUE(paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_TRUE(paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+}
+
+TEST_F(PaintLayersDescription, fill_correction_add_policy_numbers_apart_from_paint_corrections)
+{
+  Material &ma = *BKE_material_add(bmain, "FillCorrectionPolicyMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+
+  const float color[4] = {0.9f, 0.4f, 0.1f, 1.0f};
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::CorrectionFill;
+  params.anchor = row;
+  params.fill_color = color;
+  MaterialPaintLayer *first = BKE_paint_layers_add_with_policy(ma, params);
+  MaterialPaintLayer *second = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_STREQ(first->name, "Correction Fill 1");
+  EXPECT_STREQ(second->name, "Correction Fill 2");
+  EXPECT_EQ(first->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(first->channels[0].value[0], 0.9f);
+  EXPECT_EQ(first->channels[0].value[1], 0.4f);
+
+  params.kind = PaintLayerAddKind::Correction;
+  params.fill_color = nullptr;
+  MaterialPaintLayer *paint = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(paint, nullptr);
+  EXPECT_STREQ(paint->name, "Correction Paint 1");
+  EXPECT_EQ(paint->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+
+  /* Aimed at a correction, an Add lands on the row it hangs on. */
+  params.kind = PaintLayerAddKind::CorrectionFill;
+  params.anchor = first;
+  MaterialPaintLayer *third = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(third, nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *third), row);
+  EXPECT_EQ(BLI_listbase_count(&row->effects), 4);
+}
 }  // namespace blender::bke::tests

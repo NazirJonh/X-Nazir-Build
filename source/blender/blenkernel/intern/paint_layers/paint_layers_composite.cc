@@ -169,13 +169,21 @@ static void composite_image_layers_collect(const Material &ma,
     out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
         eMaterialPaintChannel(channel));
     /* The corrections lay over the row's colour, in the order they were added. A correction that
-     * lays no map in this channel is not carried, as the generator builds nothing for it. */
+     * lays nothing in this channel is not carried, as the generator builds nothing for it. */
     for (const MaterialPaintLayer &effect : layer.effects) {
       if (!paint_layer_effect_lays(ma, effect, channel)) {
         continue;
       }
       PaintMaterialCompositeCorrection correction;
-      correction.image = paint_layer_channel_find(effect, channel)->image;
+      const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
+      if (effect_record->image != nullptr) {
+        correction.image = effect_record->image;
+      }
+      else {
+        /* Only a Fill correction lays without a map: its flat colour. */
+        copy_v4_v4(correction.constant_color, effect_record->value);
+        correction.has_constant_color = true;
+      }
       correction.iuser = nullptr;
       correction.blend = layer_channel_blend(effect, channel);
       correction.opacity = BKE_paint_layers_effective_opacity(effect) * pass_through_scale;

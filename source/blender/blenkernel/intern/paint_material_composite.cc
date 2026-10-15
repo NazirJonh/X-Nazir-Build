@@ -821,16 +821,25 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
    * which is the plain blend by `f` where `a` is one, and what the generator builds node by node. */
   Vector<float> correction_storage;
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
-    if (correction.ibuf == nullptr || correction.opacity <= 0.0f) {
+    if ((correction.ibuf == nullptr && !correction.has_constant_color) ||
+        correction.opacity <= 0.0f)
+    {
       continue;
     }
-    correction_storage.resize(count * 4);
-    composite_decode_tile(
-        correction.ibuf, correction.colorspace_name, tile, correction_storage.data());
+    if (correction.ibuf != nullptr) {
+      correction_storage.resize(count * 4);
+      composite_decode_tile(
+          correction.ibuf, correction.colorspace_name, tile, correction_storage.data());
+    }
     for (int64_t i = 0; i < count; i++) {
-      const float *c = correction_storage.data() + i * 4;
+      /* A flat colour covers by its opacity alone: its alpha is content alpha, which a Fill row's
+       * is too, and is no part of the factor. */
+      const float *c = (correction.ibuf != nullptr) ? correction_storage.data() + i * 4 :
+                                                      correction.constant_color;
       float *s = r_color + i * 4;
-      const float f = clamp_f(correction.opacity * c[3], 0.0f, 1.0f);
+      const float f = clamp_f(correction.opacity * (correction.ibuf != nullptr ? c[3] : 1.0f),
+                              0.0f,
+                              1.0f);
       const float a = clamp_f(r_factor[i], 0.0f, 1.0f);
 
       float blended[4] = {s[0], s[1], s[2], s[3]};
@@ -1331,17 +1340,23 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       layer.mask_items.append(buffer);
     }
     for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
-      if (correction.image == nullptr) {
+      if (correction.image == nullptr && !correction.has_constant_color) {
         continue;
       }
       PaintMaterialCompositeCorrectionBuffer buffer;
       buffer.blend = correction.blend;
       buffer.opacity = correction.opacity;
-      buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
-      if (buffer.ibuf == nullptr) {
-        return false;
+      if (correction.image != nullptr) {
+        buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
+        if (buffer.ibuf == nullptr) {
+          return false;
+        }
+        buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
-      buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
+      else {
+        buffer.has_constant_color = true;
+        copy_v4_v4(buffer.constant_color, correction.constant_color);
+      }
       layer.content_corrections.append(buffer);
     }
     static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
@@ -1548,6 +1563,12 @@ uint64_t BKE_paint_material_composite_stack_hash(
                               correction.image != nullptr ? correction.image->id.session_uid : 0,
                               int(correction.blend),
                               correction.opacity);
+      /* A flat colour is not backed by an image, so its value is hashed like a row's. */
+      hash = get_default_hash(hash,
+                              correction.has_constant_color,
+                              correction.constant_color[0],
+                              correction.constant_color[1],
+                              correction.constant_color[2]);
     }
     if (layer.is_folder) {
       /* The children are part of the folder's identity: the stack hash of the folder's own stack,

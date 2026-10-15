@@ -238,6 +238,63 @@ TEST_F(PaintLayersTargetTest, a_correction_is_a_paint_target_with_a_transparent_
   EXPECT_EQ(use.layer, effect);
 }
 
+TEST_F(PaintLayersTargetTest, a_fill_correction_gets_a_map_that_keeps_its_look)
+{
+  MaterialPaintLayer *row = add_active_row("L");
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  /* A translucent colour: a Fill covers by its opacity alone, so its map starts opaque. */
+  const float color[4] = {0.2f, 0.4f, 0.6f, 0.3f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, effect, color));
+  BKE_paint_layers_active_set(*ma, effect->marker);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  EXPECT_EQ(target.layer, effect);
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(image, nullptr);
+
+  /* Still a Fill: the channels it has no map in keep their colour. The map is what it lays now. */
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_EQ(target.channel_record->image, image);
+  EXPECT_TRUE(paint_layer_effect_lays(*ma, *effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  uchar pixel[4];
+  first_byte_pixel(*image, pixel);
+  EXPECT_EQ(pixel[3], 255);
+  /* The colour it laid, not black: the map keeps the look. */
+  EXPECT_GT(pixel[2], pixel[0]);
+  EXPECT_GT(pixel[0], 0);
+  /* The row it hangs on got no map of its own. */
+  EXPECT_EQ(paint_layer_channel_find(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+}
+
+TEST_F(PaintLayersTargetTest, a_fill_correction_normal_map_starts_transparent_and_flat)
+{
+  MaterialPaintLayer *row = add_active_row("L");
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  const float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, effect, color));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  BKE_paint_layers_active_set(*ma, effect->marker);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, target));
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(image, nullptr);
+
+  /* A Fill laid nothing in Normal, so the map starts as a correction's does: no coverage, and the
+   * flat tangent a bilinear edge interpolates to nothing. */
+  uchar pixel[4];
+  first_byte_pixel(*image, pixel);
+  EXPECT_EQ(pixel[3], 0);
+  EXPECT_NEAR(pixel[0], 128, 1);
+  EXPECT_NEAR(pixel[1], 128, 1);
+  EXPECT_EQ(pixel[2], 255);
+}
+
 TEST_F(PaintLayersTargetTest, removing_a_correction_lets_go_of_its_map_and_the_active_marker)
 {
   MaterialPaintLayer *row = add_active_row("L");

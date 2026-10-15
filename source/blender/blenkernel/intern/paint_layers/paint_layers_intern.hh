@@ -18,6 +18,7 @@
 #include "BKE_paint_layers.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_scene_types.h"
 
 namespace blender {
 
@@ -108,9 +109,14 @@ inline bool paint_layer_channel_contributes(const Material &ma,
 }
 
 /**
- * Whether the content correction \a effect lays a map in \a channel: a live record with a map, in a
- * channel the material's set keeps. A correction has no flat value in this tree, so a record
- * without a map lays nothing however its value reads.
+ * Whether the content correction \a effect lays anything in \a channel, in a channel the material's
+ * set keeps.
+ *
+ * A live record with a map lays that map, whatever the correction's source. Without one a Paint
+ * correction (the Image source) lays nothing however its value reads, and a Fill correction (the
+ * Constant source) lays its flat colour -- except in Normal, where a flat value is not a tangent
+ * normal and the Normal Combine would read it as a tilt. The one rule for the generator and the CPU
+ * adapter.
  */
 inline bool paint_layer_effect_lays(const Material &ma,
                                     const MaterialPaintLayer &effect,
@@ -120,7 +126,23 @@ inline bool paint_layer_effect_lays(const Material &ma,
     return false;
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
-  return paint_layer_channel_live(record) && record->image != nullptr;
+  if (!paint_layer_channel_live(record)) {
+    return false;
+  }
+  if (record->image != nullptr) {
+    return true;
+  }
+  return effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+         channel != PAINT_MATERIAL_CHANNEL_NORMAL;
+}
+
+/** The name a correction goes by in generated sockets when it has none of its own. */
+inline const char *paint_layer_effect_label(const MaterialPaintLayer &effect)
+{
+  if (effect.name[0] != '\0') {
+    return effect.name;
+  }
+  return effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT ? "Correction Fill" : "Correction Paint";
 }
 
 /** Whether any content correction of \a layer lays a map in \a channel. */

@@ -62,7 +62,10 @@ std::string BKE_paint_layers_unique_default_name(const Material &ma, const Strin
 MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
                                                      const PaintLayerAddParams &params)
 {
-  if (params.kind == PaintLayerAddKind::Correction) {
+  if (params.kind == PaintLayerAddKind::Correction ||
+      params.kind == PaintLayerAddKind::CorrectionFill)
+  {
+    const bool fill = params.kind == PaintLayerAddKind::CorrectionFill;
     /* An Add aimed at a correction means another one on the row it hangs on. */
     MaterialPaintLayer *owner = params.anchor;
     if (owner != nullptr) {
@@ -75,14 +78,22 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     }
     /* Numbered among the corrections of this one layer only: two layers each have their own
      * "Correction Paint 1", the way the rows of two folders do not share a count. */
+    const char *name_base = fill ? "Correction Fill" : "Correction Paint";
     const std::string name = (params.name != nullptr) ?
                                  std::string(params.name) :
-                                 "Correction Paint " +
+                                 std::string(name_base) + " " +
                                      std::to_string(
-                                         paint_layer_name_number_max(owner->effects,
-                                                                     "Correction Paint") +
+                                         paint_layer_name_number_max(owner->effects, name_base) +
                                          1);
-    return BKE_paint_layers_correction_add(ma, owner, name.c_str());
+    MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+        ma,
+        owner,
+        name.c_str(),
+        fill ? MA_PAINT_LAYER_SOURCE_CONSTANT : MA_PAINT_LAYER_SOURCE_IMAGE);
+    if (effect != nullptr && fill && params.fill_color != nullptr) {
+      BKE_paint_layers_set_fill_color(ma, effect, params.fill_color);
+    }
+    return effect;
   }
   const char *name_base = (params.kind == PaintLayerAddKind::Fill)   ? "Fill" :
                           (params.kind == PaintLayerAddKind::Folder) ? "Folder" :

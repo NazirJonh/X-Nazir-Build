@@ -402,7 +402,11 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
 {
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
   Map<int, bNodeTreeInterfaceSocket *> *by_channel = effect_opacity_inputs_.lookup_ptr(&effect);
-  if (record == nullptr || record->image == nullptr || by_channel == nullptr ||
+  /* A Fill correction with no map in the channel is a flat colour, an input of the group; every
+   * other correction reads its map. */
+  const bool flat = record != nullptr && record->image == nullptr &&
+                    effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  if (record == nullptr || (!flat && record->image == nullptr) || by_channel == nullptr ||
       content.socket == nullptr)
   {
     return false;
@@ -410,17 +414,38 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   bNodeTreeInterfaceSocket **opacity_iface = by_channel->lookup_ptr(channel);
   bNodeSocket *opacity = (opacity_iface != nullptr) ? group_input_socket(group, **opacity_iface) :
                                                       nullptr;
-  bNode *map = this->image_map_node_add(tree, *record->image);
-  bNodeSocket *map_color = (map != nullptr) ? socket_out(*map, "Color") : nullptr;
-  bNodeSocket *map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
-  if (opacity == nullptr || map_color == nullptr || map_alpha == nullptr) {
-    if (map != nullptr) {
-      bke::node_remove_node(nullptr, tree, *map, true, false);
+  bNode *map = nullptr;
+  bNodeSocket *map_color = nullptr;
+  bNodeSocket *map_alpha = nullptr;
+  if (flat) {
+    Map<int, bNodeTreeInterfaceSocket *> *fill_by_channel = fill_inputs_.lookup_ptr(&effect);
+    bNodeTreeInterfaceSocket **fill_iface = (fill_by_channel != nullptr) ?
+                                                fill_by_channel->lookup_ptr(channel) :
+                                                nullptr;
+    if (fill_iface == nullptr || opacity == nullptr) {
+      return false;
     }
-    return false;
+    map_color = group_input_socket(group, **fill_iface);
+    if (map_color == nullptr) {
+      return false;
+    }
   }
-  grid_.place_extra(*map);
-  Vector<bNode *> nodes = {map};
+  else {
+    map = this->image_map_node_add(tree, *record->image);
+    map_color = (map != nullptr) ? socket_out(*map, "Color") : nullptr;
+    map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
+    if (opacity == nullptr || map_color == nullptr || map_alpha == nullptr) {
+      if (map != nullptr) {
+        bke::node_remove_node(nullptr, tree, *map, true, false);
+      }
+      return false;
+    }
+    grid_.place_extra(*map);
+  }
+  Vector<bNode *> nodes;
+  if (map != nullptr) {
+    nodes.append(map);
+  }
   /* Nothing of the correction is linked to the chain until it is complete, so a failure removes
    * what was made and leaves the row as it was. */
   const auto discard = [&]() {
@@ -431,7 +456,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   };
   /* The map is read as stored, like a row's own map: a colour map is un-premultiplied by the node,
    * and a data map follows the same rule a row's does, so the two cannot disagree. */
-  const NodeOutput color = {map, map_color};
+  const NodeOutput color = {flat ? group.group_input : map, map_color};
   const NodeOutput alpha = {map, map_alpha};
 
   /* The factor sits in its own `Opacity x Factor` frame, so it stays out of this correction's. */
@@ -445,13 +470,17 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     }
     layout::frame_add(tree, effect.name, framed);
   };
-  /* The correction's own factor: its opacity times the map's alpha. */
-  const NodeOutput factor = this->multiply_nodes_add(tree, {group.group_input, opacity}, alpha);
-  if (factor.node == nullptr) {
-    return discard();
+  /* The correction's own factor: its opacity times the map's alpha. A flat colour covers by its
+   * opacity alone, as a Fill row does. */
+  NodeOutput factor = {group.group_input, opacity};
+  if (!flat) {
+    factor = this->multiply_nodes_add(tree, {group.group_input, opacity}, alpha);
+    if (factor.node == nullptr) {
+      return discard();
+    }
+    nodes.append(factor.node);
+    factor_node_for_frame = factor.node;
   }
-  nodes.append(factor.node);
-  factor_node_for_frame = factor.node;
 
   /* The correction raises the row's content alpha by the over model, `a = a + f * (1 - a)`,
    * independently of the colour: the Mix below would lerp the alpha component instead. */

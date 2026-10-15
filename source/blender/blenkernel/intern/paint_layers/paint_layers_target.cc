@@ -352,6 +352,23 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
     fill[1] = 0.5f;
     fill[2] = 1.0f;
   }
+  /* A Fill correction's first map in a channel starts as the colour it laid there: opaque, because a
+   * Fill covers by its opacity alone and its alpha was never part of the look. It laid nothing in
+   * Normal, where the map therefore starts transparent. The channels it has no map in keep their
+   * flat colour. */
+  const bool fill_correction = target.layer->role == MA_PAINT_LAYER_ROLE_EFFECT &&
+                               target.layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  if (fill_correction) {
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+      fill[0] = 0.5f;
+      fill[1] = 0.5f;
+      fill[2] = 1.0f;
+      fill[3] = 0.0f;
+    }
+    else {
+      fill[3] = 1.0f;
+    }
+  }
 
   /* `"<layer> <channel>"`, the naming a fresh channel map gets. Never translated. */
   char name[192];
@@ -371,6 +388,7 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   /* The channel took its own user; the one the new image was born with was only ever the first
    * reference's, so it goes, or the map could never become an orphan once its row is removed. */
   id_us_min(&image->id);
+
   /* #BKE_paint_layers_channel_set_image does not reallocate the records, so \a record stays valid. */
   return record->image;
 }

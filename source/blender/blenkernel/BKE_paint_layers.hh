@@ -319,15 +319,28 @@ bool BKE_paint_layers_mask_copy(Main &bmain,
                                 MaterialPaintLayer &target);
 
 /**
- * Add a content correction to \a owner: a #MA_PAINT_LAYER_ROLE_EFFECT row with the Image source,
- * linked on top of \a owner's #MaterialPaintLayer::effects, with the material's channel records
- * (transparent, no map yet -- the first stroke creates one). It lays down nothing until painted,
- * so a fresh correction changes no pixel.
+ * Add a content correction to \a owner: a #MA_PAINT_LAYER_ROLE_EFFECT row linked on top of \a owner's
+ * #MaterialPaintLayer::effects.
  *
- * \param name: the correction's name, or null for "Correction Paint".
+ * A Paint correction (the Image source) takes the material's channel records, transparent and with
+ * no map yet -- the first stroke creates one -- so it lays down nothing until painted. A Fill
+ * correction (the Constant source) is one flat colour: a Base Color record, opaque black until
+ * #BKE_paint_layers_set_fill_color gives it a colour, which it lays at its own opacity over the
+ * row's colour. Another channel is switched on with #BKE_paint_layers_channel_add and starts at that
+ * colour; a channel that holds a map reads the map instead, like a Paint correction's, and a Fill
+ * lays nothing in Normal while it has none, where a flat value is not a normal.
+ *
+ * \param name: the correction's name, or null for "Correction Paint" / "Correction Fill".
+ * \param source: #MA_PAINT_LAYER_SOURCE_IMAGE or #MA_PAINT_LAYER_SOURCE_CONSTANT.
  * \return the new correction, or null when \a owner is not a leaf row of \a ma's stack (a folder has
- * no colour of its own to correct).
+ * no colour of its own to correct) or \a source is neither.
  */
+MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
+                                                    MaterialPaintLayer *owner,
+                                                    const char *name,
+                                                    eMaterialPaintLayerSource source);
+
+/** As above for a Paint correction (the Image source). */
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
                                                     const char *name);

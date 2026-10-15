@@ -152,9 +152,11 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
 
 /**
  * One content correction of a row, as data-blocks: a map laid over the row's colour before the row's
- * own blend, by `opacity * alpha(map)`. A correction with no map in the channel is not carried.
+ * own blend, by `opacity * alpha(map)`; or, with #has_constant_color, a flat colour (a Fill
+ * correction) laid by `opacity` alone, its alpha never part of the factor. A correction with neither
+ * in the channel is not carried.
  */
-struct PaintMaterialCompositeCorrection {
+struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   Image *image = nullptr;
   /** Null selects the default #ImageUser. */
   const ImageUser *iuser = nullptr;
@@ -163,8 +165,8 @@ struct PaintMaterialCompositeCorrection {
   float opacity = 1.0f;
 };
 
-/** A correction as the evaluator reads it. */
-struct PaintMaterialCompositeCorrectionBuffer {
+/** A correction as the evaluator reads it: a buffer, or a flat colour when #ibuf is null. */
+struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   ImBuf *ibuf = nullptr;
   /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
   const char *colorspace_name = nullptr;

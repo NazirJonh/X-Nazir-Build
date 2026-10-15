@@ -66,17 +66,59 @@ TEST_F(OutlinerStackPaintLayersSourceTest, source_is_registered_as_paint_layers)
   EXPECT_EQ(source().type(), SO_STACK_SRC_PAINT_MATERIAL);
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_paint_and_fill)
+TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_corrections)
 {
   Vector<StackAddKindInfo> kinds;
   const StackEditor *editor = source().editor();
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
-  ASSERT_EQ(kinds.size(), 2u);
+  /* The order #StackEditor::row_add dispatches by index. */
+  ASSERT_EQ(kinds.size(), 5u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
   EXPECT_TRUE(kinds[1].takes_color);
+  EXPECT_EQ(kinds[2].identifier, "FOLDER");
+  EXPECT_EQ(kinds[3].identifier, "CORRECTION");
+  EXPECT_FALSE(kinds[3].takes_color);
+  EXPECT_EQ(kinds[4].identifier, "CORRECTION_FILL");
+  EXPECT_TRUE(kinds[4].takes_color);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_fill_correction_row_is_its_colour_swatch)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::CorrectionFill;
+  params.anchor = layer;
+  const float color[4] = {0.9f, 0.4f, 0.1f, 1.0f};
+  params.fill_color = color;
+  MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(effect, nullptr);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 2u);
+  const StackRow &row = rows[1];
+  EXPECT_EQ(row.name, "Correction Fill 1");
+  EXPECT_EQ(row.icon, int(ICON_GP_DRAW_FILL));
+  EXPECT_TRUE(row.compact);
+  ASSERT_EQ(row.preview_slots.size(), 1u);
+  const StackRowPreview &slot = row.preview_slots[0];
+  EXPECT_TRUE(slot.is_color_swatch);
+  EXPECT_EQ(slot.id_uid, 0u);
+  EXPECT_FLOAT_EQ(slot.color[0], 0.9f);
+  EXPECT_FLOAT_EQ(slot.color[1], 0.4f);
+
+  /* A Paint correction keeps the map slot. */
+  params.kind = PaintLayerAddKind::Correction;
+  params.fill_color = nullptr;
+  ASSERT_NE(BKE_paint_layers_add_with_policy(*material, params), nullptr);
+  rows.clear();
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 3u);
+  ASSERT_EQ(rows[2].preview_slots.size(), 1u);
+  EXPECT_FALSE(rows[2].preview_slots[0].is_color_swatch);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, value_column_edits_the_row_opacity)
@@ -302,6 +344,23 @@ TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_the_mask)
   ASSERT_TRUE(BKE_paint_layers_channel_set_value(
       *material, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, dark));
   EXPECT_NE(source().state_hash(ctx, material->id), with_mask);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_a_fill_correction_colour)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::CorrectionFill;
+  params.anchor = layer;
+  MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(effect, nullptr);
+  StackReadContext ctx;
+  const uint64_t before = source().state_hash(ctx, material->id);
+
+  /* The swatch shows the colour, so an edit of it has to reach the rows. */
+  const float color[4] = {0.2f, 0.6f, 0.9f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*material, effect, color));
+  EXPECT_NE(source().state_hash(ctx, material->id), before);
 }
 
 }  // namespace tests

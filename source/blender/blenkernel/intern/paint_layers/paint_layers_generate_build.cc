@@ -228,7 +228,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     }
   }
 
-  /* A content correction has its own opacity per channel it lays a map in. */
+  /* A content correction has its own opacity per channel it lays in, and a Fill correction its
+   * colour while it has no map there: an input like a Fill row's, so editing it is a value and not
+   * a different shape. The colour's alpha is no input: a Fill covers by its opacity alone, so it
+   * never reaches the graph. */
   for (const MaterialPaintLayer &effect : layer.effects) {
     for (const int channel : wired_channels_) {
       if (!paint_layer_effect_lays(ma_, effect, channel)) {
@@ -240,7 +243,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       SNPRINTF(base,
                "%s %s %s Opacity",
                layer_name,
-               effect.name[0] != '\0' ? effect.name : "Correction Paint",
+               paint_layer_effect_label(effect),
                info.ui_name);
       bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
           group, base, "NodeSocketFloat", ROLE_OPACITY, effect.marker, channel);
@@ -250,6 +253,17 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
                                 BKE_paint_layers_effective_opacity(effect) *
                                     forms_.lookup_default(&effect, {}).pass_through_scale);
         effect_opacity_inputs_.lookup_or_add_default(&effect).add(channel, opacity);
+      }
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
+      if (effect.source != MA_PAINT_LAYER_SOURCE_CONSTANT || record->image != nullptr) {
+        continue;
+      }
+      SNPRINTF(base, "%s %s %s", layer_name, paint_layer_effect_label(effect), info.ui_name);
+      bNodeTreeInterfaceSocket *fill = layer_group_value_input(
+          group, base, "NodeSocketColor", ROLE_FILL, effect.marker, channel);
+      if (fill != nullptr) {
+        group_input_default_set(group, *fill, record->value);
+        fill_inputs_.lookup_or_add_default(&effect).add(channel, fill);
       }
     }
   }

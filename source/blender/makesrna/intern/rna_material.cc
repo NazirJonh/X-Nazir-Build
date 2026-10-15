@@ -988,13 +988,21 @@ static void rna_MaterialPaintLayer_effects_begin(CollectionPropertyIterator *ite
 
 static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
                                                              ReportList *reports,
-                                                             const char *name)
+                                                             const char *name,
+                                                             const int source)
 {
+  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "A correction is a painted map (Image) or a flat colour (Constant)");
+    return nullptr;
+  }
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
     /* The policy numbers an empty name among this layer's own corrections. */
     PaintLayerAddParams params;
-    params.kind = PaintLayerAddKind::Correction;
+    params.kind = (source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? PaintLayerAddKind::CorrectionFill :
+                                                               PaintLayerAddKind::Correction;
     params.anchor = layer;
     params.name = (name[0] != '\0') ? name : nullptr;
     if (MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(*ma, params)) {
@@ -1447,7 +1455,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                "rna_MaterialPaintLayer_fill_color_get",
                                "rna_MaterialPaintLayer_fill_color_set",
                                nullptr);
-  RNA_def_property_ui_text(prop, "Fill Color", "Constant color of a Fill layer");
+  RNA_def_property_ui_text(prop, "Fill Color", "Constant color of a Fill layer or Fill correction");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
@@ -1542,7 +1550,9 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
 
   func = RNA_def_function(srna, "effect_add", "rna_MaterialPaintLayer_effect_add");
   RNA_def_function_ui_description(
-      func, "Add a content correction: a map laid over the layer's colour, painted into like a layer");
+      func,
+      "Add a content correction: a map laid over the layer's colour, painted into like a layer, or "
+      "with the Constant source one flat colour (see fill_color) laid at the correction's opacity");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
   RNA_def_string(func,
                  "name",
@@ -1550,6 +1560,13 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                  MAX_NAME,
                  "Name",
                  "Name of the new correction, empty for the unique default");
+  /* Last, and optional: existing callers pass the name alone. */
+  RNA_def_enum(func,
+               "source",
+               rna_enum_material_paint_layer_source_items,
+               MA_PAINT_LAYER_SOURCE_IMAGE,
+               "Source",
+               "Image for a painted map, Constant for a flat colour");
   parm = RNA_def_pointer(func, "effect", "MaterialPaintLayer", "", "The new correction");
   RNA_def_function_return(func, parm);
 

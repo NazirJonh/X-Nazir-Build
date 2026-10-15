@@ -165,9 +165,18 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   for (const MaterialPaintLayer &effect : layer.effects) {
     topology_hash_uid(hash, effect.marker);
     hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.blend)));
+    /* A flat colour and a map are different nodes, so the source is structure. */
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.source)));
     for (const int channel : wired_channels) {
       if (paint_layer_effect_lays(ma, effect, channel)) {
-        topology_hash_string(hash, paint_layer_channel_find(effect, channel)->image->id.name);
+        const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
+        if (record->image != nullptr) {
+          topology_hash_string(hash, record->image->id.name);
+        }
+        else {
+          /* A flat colour: an input, not a node that names anything. */
+          hash = topology_hash_mix(hash, 1);
+        }
       }
       else {
         hash = topology_hash_mix(hash, 0);

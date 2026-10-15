@@ -94,6 +94,24 @@ TEST_F(PaintLayersContentAlphaTest, a_correction_raises_the_alpha_by_the_over_mo
   expect_alpha_matches_cpu(kColor);
 }
 
+TEST_F(PaintLayersContentAlphaTest, a_fill_correction_raises_the_alpha_by_its_opacity)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 30, 160, 220, 100));
+  const RGBA plain = graph_pixel(kColor);
+
+  /* The colour's own alpha is no part of it: a Fill covers by its opacity alone. */
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(effect, nullptr);
+  const float color[4] = {0.9f, 0.2f, 0.1f, 0.25f};
+  ASSERT_TRUE(BKE_paint_layers_set_fill_color(*ma, effect, color));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, effect, 0.5f));
+
+  expect_alpha_matches_cpu(kColor);
+  EXPECT_GT(graph_pixel(kColor).a, plain.a);
+}
+
 TEST_F(PaintLayersContentAlphaTest, a_correction_on_an_unpainted_row_brings_its_alpha_in)
 {
   add_layer("Bottom", add_solid_image("Bottom", 0, 0, 0, 255));

@@ -56,6 +56,7 @@
 #include "BKE_name_matching.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_composite.hh"
@@ -935,6 +936,139 @@ void PAINT_OT_layer_target_mode_set(wmOperatorType *ot)
                           "Mode",
                           "Target to switch to");
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Stack layer copy and paste
+ *
+ * The 3D viewport's Ctrl+C / Ctrl+V while a material paint brush is active act on the stack layer
+ * being worked on, not on the objects: they are the viewport's side of the Outliner's Stack Layers
+ * copy and paste. The clipboard names a row by its marker, so a paste duplicates it through the same
+ * description edits the Outliner uses, and a folder carries what it holds.
+ * \{ */
+
+namespace {
+
+struct StackLayerClipboard {
+  /** #ID.session_uid of the material the row belongs to; 0 when nothing was copied. */
+  uint32_t material_uid = 0;
+  bUUID marker = {};
+  /** The row's mask was copied rather than the row itself. */
+  bool is_mask = false;
+};
+
+StackLayerClipboard stack_layer_clipboard;
+
+}  // namespace
+
+/** A material paint brush is the active one, and its material has a layer being worked on. */
+static bool stack_layer_clipboard_poll(bContext *C)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = (paint != nullptr) ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return false;
+  }
+  return layer_target_mode_set_poll(C);
+}
+
+static bool stack_layer_paste_poll(bContext *C)
+{
+  return stack_layer_clipboard.material_uid != 0 && stack_layer_clipboard_poll(C);
+}
+
+static wmOperatorStatus stack_layer_copy_exec(bContext *C, wmOperator *op)
+{
+  Scene *scene = CTX_data_scene(C);
+  Material *ma = BKE_paint_layers_active_material_get(CTX_data_active_object(C));
+  MaterialPaintLayer *layer = (ma != nullptr) ? BKE_paint_layers_active_layer_get(*ma) : nullptr;
+  if (layer == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint layer");
+    return OPERATOR_CANCELLED;
+  }
+  /* While the mask is what is being painted, the mask is what is copied. A correction has none of
+   * its own, so it is always copied as itself. */
+  const bool mask_target = scene->toolsettings->paint_mode.layer_target_mode ==
+                               PAINT_LAYER_TARGET_MASK &&
+                           layer->role != MA_PAINT_LAYER_ROLE_EFFECT &&
+                           BKE_paint_layers_mask_base(*layer) != nullptr;
+  stack_layer_clipboard.material_uid = ma->id.session_uid;
+  stack_layer_clipboard.marker = layer->marker;
+  stack_layer_clipboard.is_mask = mask_target;
+  BKE_reportf(op->reports, RPT_INFO, "Copied %s", mask_target ? "the mask" : layer->name);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  Object *ob = CTX_data_active_object(C);
+  Material *ma = BKE_paint_layers_active_material_get(ob);
+  MaterialPaintLayer *anchor = (ma != nullptr) ? BKE_paint_layers_active_layer_get(*ma) : nullptr;
+  if (anchor == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint layer");
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *source = (ma->id.session_uid == stack_layer_clipboard.material_uid) ?
+                                   BKE_paint_layers_find(*ma, stack_layer_clipboard.marker) :
+                                   nullptr;
+  if (source == nullptr) {
+    BKE_report(op->reports, RPT_INFO, "The copied layer is not in this material any more");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (stack_layer_clipboard.is_mask) {
+    /* A correction is not a row of the stack and has no mask to replace: paste onto its layer. */
+    MaterialPaintLayer *target = anchor;
+    if (MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(*ma, *anchor)) {
+      target = owner;
+    }
+    if (!BKE_paint_layers_mask_copy(*bmain, *ma, *source, *target)) {
+      BKE_report(op->reports, RPT_INFO, "Could not paste the mask onto this layer");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  else {
+    MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, source);
+    if (copy == nullptr) {
+      BKE_report(op->reports, RPT_INFO, "Could not paste the copied layer");
+      return OPERATOR_CANCELLED;
+    }
+    /* The copy lands above the active layer, as the Outliner's paste puts it; where that cannot be
+     * (a correction onto a folder), it stays beside the one it was copied from. */
+    if (anchor != copy) {
+      BKE_paint_layers_edit_move(*ma, *copy, anchor, PaintLayerPlace::Above);
+    }
+    BKE_paint_layers_active_set(*ma, copy->marker);
+  }
+
+  BKE_texpaint_slots_refresh_object(scene, ob);
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, ma);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_stack_layer_copy(wmOperatorType *ot)
+{
+  ot->name = "Copy Stack Layer";
+  ot->idname = "PAINT_OT_stack_layer_copy";
+  ot->description =
+      "Copy the active stack layer (its mask while the mask is being painted) to the Stack Layers "
+      "clipboard";
+  ot->exec = stack_layer_copy_exec;
+  ot->poll = stack_layer_clipboard_poll;
+}
+
+void PAINT_OT_stack_layer_paste(wmOperatorType *ot)
+{
+  ot->name = "Paste Stack Layer";
+  ot->idname = "PAINT_OT_stack_layer_paste";
+  ot->description = "Paste the copied stack layer above the active layer";
+  ot->exec = stack_layer_paste_exec;
+  ot->poll = stack_layer_paste_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
 
 void PAINT_OT_material_channel_value_invert(wmOperatorType *ot)
 {
@@ -2645,6 +2779,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_layer_target_mode_set);
+  WM_operatortype_append(PAINT_OT_stack_layer_copy);
+  WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);
   WM_operatortype_append(PAINT_OT_material_channel_source_image_set);
   WM_operatortype_append(PAINT_OT_material_paint_channels_assign_images);

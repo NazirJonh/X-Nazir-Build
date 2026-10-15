@@ -1522,7 +1522,13 @@ def km_outliner(params):
          {"properties": [("direction", 'DOWN')]}),
         ("outliner.stack_layer_rename", {"type": 'F2', "value": 'PRESS'}, None),
         ("outliner.stack_layer_duplicate", {"type": 'D', "value": 'PRESS', "shift": True}, None),
-        # Copy/paste.
+        # Copy/paste. A mask is copied instead of its layer while its slot is the one showing, and a
+        # copied mask is pasted instead of a layer until a layer is copied again: each of these polls
+        # false otherwise, so the layer operators below take the keys then. In the Stack Layers
+        # display the data-block ones forward to these, so a wrapper that calls them by name (an
+        # add-on rebinding Ctrl+V) still lands on the stack and never on the objects.
+        ("outliner.stack_layer_mask_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        ("outliner.stack_layer_mask_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.stack_layer_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.stack_layer_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         ("outliner.id_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
@@ -5514,6 +5520,11 @@ def km_sculpt(params):
 
     items.extend([
         # Brush strokes
+        # Stack layer copy/paste. While a material paint brush is active the keys act on the stack
+        # layer being worked on; the operators poll false otherwise, so the viewport's own
+        # object copy/paste keeps the keys for every other brush.
+        ("paint.stack_layer_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.stack_layer_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
         # reads Ctrl itself for the secondary color, so one binding covers both.
         ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},

@@ -19,8 +19,12 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_material.hh"
+
+#include "IMB_imbuf.hh"
+#include "IMB_imbuf_types.hh"
 
 #include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
@@ -363,6 +367,55 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
   return layer;
 }
 
+/**
+ * A copy of the map \a source with its pixels. #BKE_id_copy copies the image's settings but not the
+ * buffer behind it, and a painted map is a buffer that exists nowhere else -- unsaved, generated --
+ * so the bare copy would come back blank and the layer made from it would show nothing.
+ */
+static Image *paint_layer_image_duplicate(Main &bmain, Image &source)
+{
+  Image *copy = id_cast<Image *>(BKE_id_copy(&bmain, &source.id));
+  /* A generated map is of type #IMA_TYPE_UV_TEST, not #IMA_TYPE_IMAGE, so the source alone decides
+   * whether there is a single buffer to carry over. */
+  if (copy == nullptr || !ELEM(source.source, IMA_SRC_FILE, IMA_SRC_GENERATED)) {
+    return copy;
+  }
+
+  void *source_lock = nullptr;
+  ImBuf *source_ibuf = BKE_image_acquire_ibuf(&source, nullptr, &source_lock);
+  if (source_ibuf != nullptr) {
+    /* The copy's own buffer is what its settings generate or load: same size and kind as the
+     * source's, and blank. The pixels go into that buffer rather than replacing it, which keeps
+     * everything the image system derived from the settings (tile, colorspace, gen flags). */
+    void *copy_lock = nullptr;
+    ImBuf *copy_ibuf = BKE_image_acquire_ibuf(copy, nullptr, &copy_lock);
+    if (copy_ibuf != nullptr && copy_ibuf->x == source_ibuf->x && copy_ibuf->y == source_ibuf->y) {
+      const size_t pixel_num = size_t(source_ibuf->x) * size_t(source_ibuf->y);
+      bool copied = false;
+      if (source_ibuf->float_data() != nullptr && copy_ibuf->float_data() != nullptr &&
+          source_ibuf->channels == copy_ibuf->channels)
+      {
+        memcpy(copy_ibuf->float_data_for_write(),
+               source_ibuf->float_data(),
+               sizeof(float) * pixel_num * size_t(copy_ibuf->channels));
+        copied = true;
+      }
+      else if (source_ibuf->byte_data() != nullptr && copy_ibuf->byte_data() != nullptr) {
+        memcpy(copy_ibuf->byte_data_for_write(), source_ibuf->byte_data(), pixel_num * 4);
+        copied = true;
+      }
+      if (copied) {
+        /* Painted pixels exist only in this buffer, so it has to count as unsaved work. */
+        copy_ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
+        BKE_image_mark_dirty(copy, copy_ibuf);
+      }
+    }
+    BKE_image_release_ibuf(copy, copy_ibuf, copy_lock);
+  }
+  BKE_image_release_ibuf(&source, source_ibuf, source_lock);
+  return copy;
+}
+
 /** Give \a dst a copy of \a src's channel records, each map copied into an image of its own. */
 static void paint_layer_channels_duplicate(Main &bmain,
                                            MaterialPaintLayer &dst,
@@ -381,7 +434,7 @@ static void paint_layer_channels_duplicate(Main &bmain,
      * one into a stroke on the other: the copy gets its own. The fresh image carries the one user
      * that this record is; no separate id_us_plus is taken (as #BKE_id_copy returns it). */
     if (dst.channels[i].image != nullptr) {
-      dst.channels[i].image = id_cast<Image *>(BKE_id_copy(&bmain, &dst.channels[i].image->id));
+      dst.channels[i].image = paint_layer_image_duplicate(bmain, *dst.channels[i].image);
     }
   }
 }

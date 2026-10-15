@@ -866,6 +866,9 @@ bool stack_row_remove_poll(bContext *C);
 bool stack_row_clipboard_poll(bContext *C);
 wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_paste_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_row_mask_copy_exec(bContext *C, wmOperator *op);
+bool stack_row_mask_paste_poll(bContext *C);
+wmOperatorStatus stack_row_mask_paste_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_group_add_exec(bContext *C, wmOperator *op);
@@ -991,6 +994,8 @@ void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask_copy(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_mask_paste(wmOperatorType *ot);
 void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot);
 
 void OUTLINER_OT_orphans_purge(wmOperatorType *ot);

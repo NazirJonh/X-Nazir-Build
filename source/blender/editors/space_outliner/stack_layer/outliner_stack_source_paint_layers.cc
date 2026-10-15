@@ -988,6 +988,12 @@ class PaintLayersStackSource final : public StackSource,
     Main *bmain = CTX_data_main(&C);
     const MaterialPaintLayer *source = paint_description_row_for_ordinal(material, source_ordinal);
     MaterialPaintLayer *target = paint_description_row_for_ordinal(material, target_ordinal);
+    /* A correction has no mask of its own; the one worked on is its layer's. */
+    if (target != nullptr) {
+      if (MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(material, *target)) {
+        target = owner;
+      }
+    }
     if (bmain == nullptr || source == nullptr || target == nullptr ||
         !BKE_paint_layers_mask_copy(*bmain, material, *source, *target))
     {

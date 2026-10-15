@@ -254,6 +254,18 @@ class OUTLINER_MT_context_menu(Menu):
                         "outliner.stack_layer_mask", text="Remove Mask", icon='X')
                     props.add = False
                 layout.separator()
+                # Copy and paste act on the active row, whatever it is: a layer, a fill or a
+                # correction. The mask has verbs of its own, listed while its slot is the one showing
+                # (copy) or once a mask has been copied (paste).
+                layout.operator("outliner.stack_layer_copy", text="Copy", icon='COPYDOWN')
+                layout.operator("outliner.stack_layer_paste", text="Paste", icon='PASTEDOWN')
+                if bpy.ops.outliner.stack_layer_mask_copy.poll():
+                    layout.operator(
+                        "outliner.stack_layer_mask_copy", text="Copy Mask", icon='COPYDOWN')
+                if bpy.ops.outliner.stack_layer_mask_paste.poll():
+                    layout.operator(
+                        "outliner.stack_layer_mask_paste", text="Paste Mask", icon='PASTEDOWN')
+                layout.separator()
                 layout.operator(
                     "outliner.stack_layer_group_add", text="New Group", icon='NEWFOLDER')
                 # Only a folder can be unwrapped; the operator's poll answers for the row.

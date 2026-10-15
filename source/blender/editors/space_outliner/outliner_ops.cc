@@ -65,6 +65,8 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_merge_down);
   WM_operatortype_append(OUTLINER_OT_stack_layer_copy);
   WM_operatortype_append(OUTLINER_OT_stack_layer_paste);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_mask_copy);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_mask_paste);
   WM_operatortype_append(OUTLINER_OT_stack_focus_sub_index);
   WM_operatortype_append(OUTLINER_OT_stack_layer_drop);
 

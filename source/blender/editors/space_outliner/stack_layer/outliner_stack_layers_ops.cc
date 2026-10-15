@@ -545,6 +545,35 @@ void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+void OUTLINER_OT_stack_layer_mask_copy(wmOperatorType *ot)
+{
+  ot->name = "Copy Stack Layer Mask";
+  ot->idname = "OUTLINER_OT_stack_layer_mask_copy";
+  ot->description = "Copy the mask of the layer whose mask is showing";
+  ot->exec = stack_row_mask_copy_exec;
+  /* Only while the mask slot is the one showing, so the context menu lists it then and not before,
+   * and Ctrl+C copies the layer itself the rest of the time. */
+  ot->poll = stack_row_mask_section_poll;
+
+  rna_def_stack_row_ordinal(ot, "Layer whose mask to copy; -1 uses the active one");
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_mask_paste(wmOperatorType *ot)
+{
+  ot->name = "Paste Stack Layer Mask";
+  ot->idname = "OUTLINER_OT_stack_layer_mask_paste";
+  ot->description = "Replace the active layer's mask with the copied one";
+  ot->exec = stack_row_mask_paste_exec;
+  /* Only while a mask is on the clipboard: copying a layer empties it, so Ctrl+V pastes whichever
+   * of the two was copied last. */
+  ot->poll = stack_row_mask_paste_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  rna_def_stack_row_ordinal(ot, "Layer to paste the mask onto; -1 uses the active one");
+  rna_def_stack_row_marker(ot);
+}
+
 void OUTLINER_OT_stack_focus_sub_index(wmOperatorType *ot)
 {
   ot->name = "Set Stack";

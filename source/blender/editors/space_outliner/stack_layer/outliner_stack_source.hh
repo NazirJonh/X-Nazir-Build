@@ -669,6 +669,22 @@ class StackGroupingEditor {
   }
 
   /**
+   * Give the row at \a target_ordinal a copy of the mask of the row at \a source_ordinal, replacing
+   * the one it had. The copy is independent: painting one mask leaves the other as it was.
+   *
+   * \return false when the source has no mask, the two are the same row, or the source has no mask
+   * notion at all.
+   */
+  virtual bool row_aux_copy(bContext & /*C*/,
+                            const StackFocus & /*focus*/,
+                            ID & /*owner*/,
+                            int /*source_ordinal*/,
+                            int /*target_ordinal*/) const
+  {
+    return false;
+  }
+
+  /**
    * Merge the row at \a ordinal into the one below it -- below in the compositing sense, the row
    * at \a ordinal - 1 -- so that the pair reads as one row from then on.
    *

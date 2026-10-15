@@ -34,6 +34,8 @@
 #include "BLO_readfile.hh"
 #include "BLO_writefile.hh"
 
+#include "IMB_imbuf_types.hh"
+
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
@@ -1759,6 +1761,71 @@ TEST_F(PaintLayersDescription, correction_moves_within_its_layer_and_joins_anoth
   /* It is never a row of the stack, so a move that names no layer to hold it is refused. */
   EXPECT_FALSE(BKE_paint_layers_edit_move(ma, *first, nullptr, PaintLayerPlace::Above));
   EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 2);
+}
+
+TEST_F(PaintLayersDescription, duplicate_copies_the_painted_pixels_of_a_generated_map)
+{
+  Material &ma = *BKE_material_add(bmain, "PixelCopyMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(ma, "L", nullptr, PaintLayerPlace::Above);
+  const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 4, 4, "PixelCopyMap", 32, false, IMA_GENTYPE_BLANK, clear, false, false, false);
+  ASSERT_NE(map, nullptr);
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(map, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  uchar *pixels = ibuf->byte_data_for_write();
+  ASSERT_NE(pixels, nullptr);
+  pixels[0] = 10;
+  pixels[1] = 120;
+  pixels[2] = 200;
+  pixels[3] = 255;
+  BKE_image_mark_dirty(map, ibuf);
+  BKE_image_release_ibuf(map, ibuf, lock);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, ma, layer);
+  ASSERT_NE(copy, nullptr);
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(*copy,
+                                                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  ASSERT_NE(record->image, nullptr);
+  EXPECT_NE(record->image, map);
+
+  void *copy_lock = nullptr;
+  ImBuf *copied = BKE_image_acquire_ibuf(record->image, nullptr, &copy_lock);
+  ASSERT_NE(copied, nullptr);
+  const uchar *copied_pixels = copied->byte_data();
+  ASSERT_NE(copied_pixels, nullptr);
+  EXPECT_EQ(copied_pixels[0], 10);
+  EXPECT_EQ(copied_pixels[1], 120);
+  EXPECT_EQ(copied_pixels[2], 200);
+  EXPECT_EQ(copied_pixels[3], 255);
+  BKE_image_release_ibuf(record->image, copied, copy_lock);
+}
+
+TEST_F(PaintLayersDescription, mask_copy_replaces_the_target_mask_with_items_of_its_own)
+{
+  Material &ma = *BKE_material_add(bmain, "MaskCopyMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *source_mask = BKE_paint_layers_mask_add(ma, a, 0.25f);
+  ASSERT_NE(source_mask, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, b, 1.0f), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_mask_copy(*bmain, ma, *a, *b));
+  ASSERT_EQ(BLI_listbase_count(&b->mask_stack), 1);
+  const MaterialPaintLayer *copied = BKE_paint_layers_mask_base(*b);
+  ASSERT_NE(copied, nullptr);
+  EXPECT_NE(copied, source_mask);
+  EXPECT_FALSE(BLI_uuid_equal(copied->marker, source_mask->marker));
+  /* The source keeps its own mask, and a row is never its own source. */
+  EXPECT_EQ(BLI_listbase_count(&a->mask_stack), 1);
+  EXPECT_FALSE(BKE_paint_layers_mask_copy(*bmain, ma, *a, *a));
+  /* A row with no mask has nothing to give. */
+  MaterialPaintLayer *c = BKE_paint_layers_add(ma, "C", nullptr, PaintLayerPlace::Above);
+  EXPECT_FALSE(BKE_paint_layers_mask_copy(*bmain, ma, *c, *a));
 }
 
 TEST_F(PaintLayersDescription, correction_duplicate_lands_beside_it_with_maps_of_its_own)

@@ -969,9 +969,47 @@ static int outliner_id_copy_tag(SpaceOutliner *space_outliner,
   return num_ids;
 }
 
+/**
+ * In the Stack Layers display the data-block copy and paste mean the Stack Layers ones: its rows are
+ * not data-blocks. The keys are bound to the stack operators already, but anything that calls
+ * `outliner.id_copy` / `outliner.id_paste` by name -- an add-on wrapping Ctrl+V, a menu -- would
+ * otherwise copy or paste the objects behind the stack, or fail. A copied mask is the first
+ * candidate and a layer the second, as the keymap orders them.
+ */
+static wmOperatorStatus outliner_stack_clipboard_forward(bContext *C, const bool paste)
+{
+  const char *idnames[2] = {
+      paste ? "OUTLINER_OT_stack_layer_mask_paste" : "OUTLINER_OT_stack_layer_mask_copy",
+      paste ? "OUTLINER_OT_stack_layer_paste" : "OUTLINER_OT_stack_layer_copy",
+  };
+  for (const char *idname : idnames) {
+    wmOperatorType *ot = WM_operatortype_find(idname, true);
+    if (ot != nullptr && WM_operator_poll(C, ot)) {
+      /* The caller pushes the undo step; the nested operator must not push a second one. */
+      wmWindowManager *wm = CTX_wm_manager(C);
+      wm->op_undo_depth++;
+      const wmOperatorStatus status = WM_operator_name_call(
+          C, idname, wm::OpCallContext::ExecDefault, nullptr, nullptr);
+      wm->op_undo_depth--;
+      return status;
+    }
+  }
+  return OPERATOR_CANCELLED;
+}
+
+static bool outliner_stack_layers_display(const bContext *C)
+{
+  const SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  return space_outliner != nullptr && space_outliner->outlinevis == SO_STACK_LAYERS;
+}
+
 static wmOperatorStatus outliner_id_copy_exec(bContext *C, wmOperator *op)
 {
   using namespace blender::bke::blendfile;
+
+  if (outliner_stack_layers_display(C)) {
+    return outliner_stack_clipboard_forward(C, false);
+  }
 
   Main *bmain = CTX_data_main(C);
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
@@ -1032,6 +1070,10 @@ void OUTLINER_OT_id_copy(wmOperatorType *ot)
 
 static wmOperatorStatus outliner_id_paste_exec(bContext *C, wmOperator *op)
 {
+  if (outliner_stack_layers_display(C)) {
+    return outliner_stack_clipboard_forward(C, true);
+  }
+
   char filepath[FILE_MAX];
   const short flag = FILE_AUTOSELECT | FILE_ACTIVE_COLLECTION;
 

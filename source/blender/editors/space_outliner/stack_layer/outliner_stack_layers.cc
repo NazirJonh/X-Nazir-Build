@@ -1254,8 +1254,14 @@ bool outliner_stack_row_set_enabled(bContext *C,
  * source to duplicate those rows, so every source keeps ownership of its data and copy semantics. */
 static Vector<StackItemIdentity> stack_layer_clipboard;
 
+/* The row whose mask was copied last. It is a clipboard of its own so a copied mask is never
+ * pasted as a layer, and the two are exclusive: copying either one empties the other, which is
+ * what lets Ctrl+V mean the thing that was copied last. */
+static StackItemIdentity stack_mask_clipboard;
+
 wmOperatorStatus stack_row_copy_exec(bContext *C, wmOperator *op)
 {
+  stack_mask_clipboard = StackItemIdentity();
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   Vector<int> selected;
   stack_selected_ordinals_get(*space_outliner, selected);
@@ -1371,6 +1377,63 @@ bool stack_row_clipboard_poll(bContext *C)
   const SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   return space_outliner != nullptr && space_outliner->outlinevis == SO_STACK_LAYERS &&
          space_outliner->stack_layers_view == SO_SL_VIEW_STACK;
+}
+
+wmOperatorStatus stack_row_mask_copy_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  const StackItemIdentity identity = (ordinal >= 0) ?
+                                         outliner_stack_identity_of(*space_outliner, ordinal) :
+                                         StackItemIdentity();
+  if (!identity.is_valid()) {
+    return OPERATOR_CANCELLED;
+  }
+  stack_layer_clipboard.clear();
+  stack_mask_clipboard = identity;
+  BKE_report(op->reports, RPT_INFO, "Copied the mask");
+  return OPERATOR_FINISHED;
+}
+
+bool stack_row_mask_paste_poll(bContext *C)
+{
+  return stack_mask_clipboard.is_valid() && stack_row_clipboard_poll(C);
+}
+
+wmOperatorStatus stack_row_mask_paste_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  const int target_ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  const int source_ordinal = outliner_stack_identity_resolve(
+      ctx, *space_outliner, stack_mask_clipboard);
+  if (target_ordinal < 0 || source_ordinal < 0) {
+    BKE_report(op->reports, RPT_INFO, "The copied mask is no longer there");
+    return OPERATOR_CANCELLED;
+  }
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int &r_select_ordinal) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        if (grouping == nullptr ||
+            !grouping->row_aux_copy(*C, focus, owner, source_ordinal, target_ordinal))
+        {
+          return false;
+        }
+        r_select_ordinal = target_ordinal;
+        return true;
+      });
+  if (!ok) {
+    BKE_report(op->reports, RPT_INFO, "Could not paste the mask onto this layer");
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
 }
 
 wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op)

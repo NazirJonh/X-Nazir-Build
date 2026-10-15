@@ -57,8 +57,11 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_target.hh"
+#include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 #include "BKE_texture.h"
@@ -80,6 +83,7 @@
 #endif
 
 #include "RNA_access.hh"
+#include "RNA_enum_types.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
@@ -947,6 +951,7 @@ static void new_layered_material_ui(bContext * /*C*/, wmOperator *op)
     row.enabled_set(entry.channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     row.prop(op->ptr, entry.prop_name, UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
+  op->layout->prop(op->ptr, "image_size", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
 /**
@@ -985,6 +990,7 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
    * written before any record is authored, so the base layer takes part in the chosen channels
    * only. BKE forces Base Color back in, so the material keeps its constant whatever was ticked. */
   BKE_paint_layers_channel_set_mask_set(*ma, new_layered_material_channel_mask(op));
+  ma->paint_layers_image_size = int16_t(RNA_enum_get(op->ptr, "image_size"));
   /* A Paint row whose Base Color is the default grey, so a fresh layered material looks like any
    * other new one until something is painted into the row. */
   PaintLayerAddParams add_params;
@@ -993,8 +999,23 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
   const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
   BKE_paint_layers_channel_set_value(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_color);
   BKE_paint_layers_active_set(*ma, base->marker);
+  /* The base layer is paintable in every ticked channel from the start; the material's own size
+   * decides the resolution, the scene's is only the fallback of the call. */
+  const Scene *scene = CTX_data_scene(C);
+  BKE_paint_layers_active_maps_ensure(
+      *bmain,
+      *ma,
+      scene ? scene->toolsettings->paint_mode.new_channel_image_size :
+              int(PAINT_NEW_CHANNEL_IMAGE_SIZE_4K));
 
   new_material_assign(C, *bmain, *ma, ptr, prop, ob);
+
+  /* The base layer is already active, so a brush in a paint mode needs no opt-in button. */
+  if (Paint *paint = BKE_paint_get_active_from_context(C)) {
+    if (BKE_paint_material_brush_auto_ensure(CTX_data_scene(C), paint, ob)) {
+      WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, BKE_paint_brush(paint));
+    }
+  }
 
   WM_event_add_notifier(C, NC_MATERIAL | NA_ADDED, ma);
   return OPERATOR_FINISHED;
@@ -1026,6 +1047,13 @@ void MATERIAL_OT_new_layered(wmOperatorType *ot)
                     entry.ui_name,
                     "Let the new material's stack work with this channel");
   }
+
+  RNA_def_enum(ot->srna,
+               "image_size",
+               rna_enum_material_paint_layers_image_size_items,
+               PAINT_NEW_CHANNEL_IMAGE_SIZE_4K,
+               "Image Size",
+               "Width and height of every map the new material's layers, masks and fills create");
 }
 
 /** \} */

@@ -28,6 +28,7 @@
 namespace blender {
 
 struct Main;
+struct Object;
 struct Paint;
 struct Scene;
 enum class PaintMode : int8_t;
@@ -59,6 +60,16 @@ bool BKE_paint_material_sync_texture3d_conflicts(const Scene *scene, PaintMode p
  * bindings.
  */
 void BKE_paint_material_brush_sync(Scene *scene, Paint *source);
+
+/**
+ * Give \a paint's active brush its per-channel material paint values when \a ob has a layered
+ * material with an active layer, so the user never has to opt in by hand there.
+ *
+ * Only an unset brush is touched; one that already has values keeps them. Does nothing without a
+ * layered material, which keeps the explicit PBR Paint opt-in for every other canvas.
+ * \return true when the brush was set up (the caller should notify #NC_BRUSH).
+ */
+bool BKE_paint_material_brush_auto_ensure(Scene *scene, Paint *paint, Object *ob);
 
 /**
  * Manually copy the brush, palette, cavity curve, visible material channels and unified settings

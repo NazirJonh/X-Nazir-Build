@@ -45,6 +45,14 @@ namespace blender::bke::tests {
 
 class PaintLayersTargetTest : public PaintLayersTestBase {
  public:
+  void SetUp() override
+  {
+    PaintLayersTestBase::SetUp();
+    /* A new material carries 4K; the tests pass their own tiny sizes, which only win while the
+     * material has none of its own. The size tests set it back explicitly. */
+    ma->paint_layers_image_size = 0;
+  }
+
   /** A Paint row on top of \a ma, made the active one. */
   MaterialPaintLayer *add_active_row(const char *name)
   {
@@ -768,6 +776,69 @@ TEST_F(PaintLayersTargetTest, mask_mode_does_not_touch_the_content_maps_of_the_r
   /* Back in Content the row still has no map of its own. */
   ASSERT_TRUE(BKE_paint_layers_target_get(*ob, -1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
   EXPECT_EQ(BKE_paint_layers_target_image(target), nullptr);
+}
+
+TEST_F(PaintLayersTargetTest, the_materials_image_size_wins_over_the_callers)
+{
+  add_active_row("L");
+
+  /* A material with a size of its own overrides the fallback the caller passes. */
+  ma->paint_layers_image_size = 8;
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, target));
+  Image *sized = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(sized, nullptr);
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(sized, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  EXPECT_EQ(ibuf->x, 8);
+  BKE_image_release_ibuf(sized, ibuf, lock);
+
+  /* Zero is what older files carry: the caller's size is used. */
+  ma->paint_layers_image_size = 0;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, target));
+  Image *fallback = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(fallback, nullptr);
+  ibuf = BKE_image_acquire_ibuf(fallback, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  EXPECT_EQ(ibuf->x, 4);
+  BKE_image_release_ibuf(fallback, ibuf, lock);
+}
+
+TEST_F(PaintLayersTargetTest, active_maps_ensure_covers_the_channel_set_and_spares_switched_off)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  const uint16_t set = (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)) |
+                       (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)) |
+                       (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC));
+  BKE_paint_layers_channel_set_mask_set(*ma, set);
+
+  /* Metallic has a record the user switched off: it must stay off and mapless. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_enabled(*ma, layer, PAINT_MATERIAL_CHANNEL_METALLIC, false));
+
+  /* Base Color and Roughness have no record at all; the call adds each with its map. */
+  EXPECT_EQ(BKE_paint_layers_active_maps_ensure(*bmain, *ma, 4), 2);
+  for (const int channel : {int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                            int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)})
+  {
+    PaintLayersTarget target;
+    ASSERT_TRUE(BKE_paint_layers_target_get(*ma, channel, target));
+    EXPECT_NE(BKE_paint_layers_target_image(target), nullptr);
+  }
+  PaintLayersTarget metallic;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, metallic));
+  EXPECT_EQ(BKE_paint_layers_target_image(metallic), nullptr);
+  EXPECT_FALSE(BKE_paint_layers_target_is_live(metallic));
+
+  /* A channel outside the set takes no part. */
+  PaintLayersTarget normal;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, normal));
+  EXPECT_EQ(BKE_paint_layers_target_image(normal), nullptr);
+
+  /* Idempotent: nothing is left to create. */
+  EXPECT_EQ(BKE_paint_layers_active_maps_ensure(*bmain, *ma, 4), 0);
 }
 
 /** \} */

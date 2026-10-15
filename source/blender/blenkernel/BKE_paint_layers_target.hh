@@ -176,6 +176,8 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target);
  * creation plus a description edit, so it runs on the main thread, inside the stroke's undo group;
  * it never opens undo itself.
  *
+ * \param image_size: the fallback width and height, used only when the material has no size of
+ * its own (#Material::paint_layers_image_size is zero).
  * \param new_channel_fill_linear: scene-linear RGBA a record created here starts from, instead of
  * the channel's neutral.
  * \return the map, or null when \a target carries nothing writable: no row, or a record that is
@@ -185,5 +187,16 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
                                                PaintLayersTarget &target,
                                                int image_size,
                                                const float *new_channel_fill_linear = nullptr);
+
+/**
+ * Give the active row a map for every channel of the material's global set that the row takes part
+ * in and has no map for yet, so a fresh layer is paintable in all of them at once instead of
+ * growing one stroke at a time (and the UI never offers to create missing maps for it).
+ *
+ * Same ID-creation rules as #BKE_paint_layers_target_ensure_writable. \a image_size is the fallback
+ * when the material has no size of its own.
+ * \return the number of maps created.
+ */
+int BKE_paint_layers_active_maps_ensure(Main &bmain, Material &ma, int image_size);
 
 }  // namespace blender

@@ -648,8 +648,13 @@ class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
     def poll(cls, context):
         return cls._owner_material(context) is not None
 
-    def draw(self, _context):
-        pass
+    def draw(self, context):
+        owner = self._owner_material(context)
+        if owner is None:
+            return
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(owner, "paint_layers_image_size")
 
 
 class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):

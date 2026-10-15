@@ -86,6 +86,23 @@ static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Sizes a layered material's maps can take. 8K is left out for now: a stack creates one map per
+ * channel per layer, so a size that large is not offered for a whole material. Shared by the
+ * material's RNA and #MATERIAL_OT_new_layered's dialog. */
+const EnumPropertyItem rna_enum_material_paint_layers_image_size_items[] = {
+    {0,
+     "SCENE",
+     0,
+     "Scene Default",
+     "Follow the scene's New Channel Image Size (what files saved before this setting use)"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512 (512 x 512)", "512 x 512"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_1K, "SIZE_1K", 0, "1K (1024 x 1024)", "1024 x 1024"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_2K, "SIZE_2K", 0, "2K (2048 x 2048)", "2048 x 2048"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_4K, "SIZE_4K", 0, "4K (4096 x 4096)", "4096 x 4096"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }
 
 #ifdef RNA_RUNTIME
@@ -124,6 +141,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
 #  include "BKE_paint.hh"
 #  include "BKE_paint_layers.hh"
 #  include "BKE_paint_layers_edit.hh"
+#  include "BKE_paint_layers_target.hh"
 #  include "BKE_report.hh"
 #  include "BKE_scene.hh"
 #  include "BKE_texture.h"
@@ -600,12 +618,14 @@ static MaterialPaintLayer *rna_Material_paint_layers_paste_correction(Material *
 }
 
 static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
+                                                         Main *bmain,
                                                          ReportList *reports,
                                                          const char *name,
                                                          PointerRNA *anchor_ptr,
                                                          int place,
                                                          bool make_active,
-                                                         int source)
+                                                         int source,
+                                                         bool create_maps)
 {
   /* The authoring policy is the shared BKE one (#BKE_paint_layers_add_with_policy): the same
    * default names and channels every other authoring path gets. An empty name means the unique
@@ -640,6 +660,17 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
    * builds a stack unattended and passes make_active=False to leave the cursor alone. */
   if (make_active) {
     BKE_paint_layers_active_set(*ma, layer->marker);
+  }
+  /* Opt in: a script that builds a stack unattended would otherwise allocate every map of every
+   * layer. The maps are made for the active row, so the cursor visits the new row and goes back. */
+  if (create_maps && layer->source == MA_PAINT_LAYER_SOURCE_IMAGE) {
+    const MaterialPaintLayer *previous = BKE_paint_layers_active_layer_get(*ma);
+    const bUUID previous_marker = previous != nullptr ? previous->marker : bUUID{};
+    BKE_paint_layers_active_set(*ma, layer->marker);
+    BKE_paint_layers_active_maps_ensure(*bmain, *ma, PAINT_NEW_CHANNEL_IMAGE_SIZE_4K);
+    if (!make_active) {
+      BKE_paint_layers_active_set(*ma, previous_marker);
+    }
   }
   /* BKE only tags DEG; the editors need the WM notifier too. */
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
@@ -2196,7 +2227,7 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
    * BKE description API rather than writing DNA from RNA. */
   func = RNA_def_function(srna, "new", "rna_Material_paint_layers_new");
   RNA_def_function_ui_description(func, "Add a paint layer relative to an anchor row");
-  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_flag(func, FUNC_USE_MAIN | FUNC_USE_REPORTS);
   RNA_def_string(func,
                  "name",
                  nullptr,
@@ -2222,6 +2253,12 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                MA_PAINT_LAYER_SOURCE_IMAGE,
                "Source",
                "Source of the new layer");
+  RNA_def_boolean(func,
+                  "create_maps",
+                  false,
+                  "Create Maps",
+                  "Create a map for every channel of the material's set now, at the material's "
+                  "image size, instead of on the first stroke");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
   RNA_def_function_return(func, parm);
 
@@ -3170,6 +3207,16 @@ void RNA_def_material(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Layered Material", "The material's stack is a DNA description of its paint layers");
+
+  prop = RNA_def_property(srna, "paint_layers_image_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_image_size");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layers_image_size_items);
+  RNA_def_property_enum_default(prop, PAINT_NEW_CHANNEL_IMAGE_SIZE_4K);
+  RNA_def_property_ui_text(prop,
+                           "Image Size",
+                           "Width and height of the maps created for this material's layers, "
+                           "masks and fills; existing maps keep their size");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
   prop = RNA_def_property(srna, "paint_layers_channels", PROP_ENUM, PROP_NONE);
   RNA_def_property_flag(prop, PROP_ENUM_FLAG);

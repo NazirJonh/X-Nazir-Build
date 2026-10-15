@@ -2455,6 +2455,19 @@ def material_paint_missing_map_channels(ob, brush, paint, paint_mode_settings):
     if writable is None:
         return set()
     has_image_fn = getattr(ob, "principled_paint_channel_has_image", None) if ob else None
+
+    # A layered material grows its own maps with the layer, so the brush's channel list is not what
+    # can be missing there: only the material's channel set, on a row that owns maps at all. In
+    # Mask mode the target is the one mask map, which only Base Color names.
+    material = ob.active_material if ob is not None else None
+    if material is not None and material.is_layered:
+        layer = material.paint_layers.active
+        if layer is None or layer.source != 'IMAGE':
+            return set()
+        writable = writable & set(material.paint_layers_channels)
+        if paint_mode_settings is not None and paint_mode_settings.layer_target_mode == 'MASK':
+            writable = writable & {'BASE_COLOR'}
+
     missing = set()
     for channel_id in writable:
         if channel_id not in _MATERIAL_PAINT_MAP_CHANNELS:

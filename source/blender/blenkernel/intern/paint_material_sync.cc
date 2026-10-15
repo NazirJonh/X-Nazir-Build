@@ -11,6 +11,8 @@
 #define DNA_DEPRECATED_ALLOW
 
 #include "DNA_brush_types.h"
+#include "DNA_material_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BLI_listbase_iterator.hh"
@@ -23,6 +25,8 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 
@@ -161,6 +165,33 @@ static void paint_material_brush_sync_apply(Scene *scene, Paint *source, Paint *
 
   WM_main_add_notifier(NC_BRUSH | NA_SELECTED, src_brush);
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, nullptr);
+}
+
+bool BKE_paint_material_brush_auto_ensure(Scene *scene, Paint *paint, Object *ob)
+{
+  if (scene == nullptr || paint == nullptr || ob == nullptr) {
+    return false;
+  }
+  /* Only the Material canvas shows the PBR Paint channels; the other canvases keep their opt-in. */
+  if (scene->toolsettings->paint_mode.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+    return false;
+  }
+  Brush *brush = BKE_paint_brush(paint);
+  /* A linked asset brush is not skipped: #PAINT_OT_material_paint_brush_ensure writes to it the
+   * same way, and the stock brushes are all assets, so skipping would leave the opt-in button. */
+  if (brush == nullptr || brush->material_paint != nullptr) {
+    return false;
+  }
+  Material *material = BKE_paint_layers_active_material_get(ob);
+  if (material == nullptr || BKE_paint_layers_active_layer_get(*material) == nullptr) {
+    return false;
+  }
+  BKE_brush_material_paint_ensure(brush);
+  /* Same sequence as #PAINT_OT_material_paint_brush_ensure: the seeded white Base Color must follow
+   * the brush's own colour before the paired editor adopts the brush. */
+  BKE_brush_material_paint_base_color_sync_to_channel(paint, brush);
+  BKE_paint_material_brush_sync(scene, paint);
+  return true;
 }
 
 void BKE_paint_material_brush_sync(Scene *scene, Paint *source)

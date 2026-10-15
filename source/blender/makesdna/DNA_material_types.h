@@ -693,7 +693,12 @@ struct Material {
    * adding one never creates them (a record is created lazily).
    */
   uint16_t paint_layers_channels = 0;
-  char _pad_paint_layers[4] = {};
+  /**
+   * Width and height of the maps the stack creates (256..4096). Zero in older files, which then
+   * follow #PaintModeSettings::new_channel_image_size.
+   */
+  int16_t paint_layers_image_size = 4096;
+  char _pad_paint_layers[2] = {};
 };
 
 }  // namespace blender

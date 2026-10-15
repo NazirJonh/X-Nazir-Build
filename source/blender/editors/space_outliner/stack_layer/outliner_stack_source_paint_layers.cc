@@ -35,9 +35,11 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
 
 #include "BLI_assert.h"
@@ -104,6 +106,13 @@ void layers_texpaint_slots_refresh(bContext &C)
   Object *object = CTX_data_active_object(&C);
   if (scene != nullptr && object != nullptr) {
     BKE_texpaint_slots_refresh_object(scene, object);
+  }
+  /* Every change of the active row, added row or mode passes here, so the PBR Paint tab never
+   * waits for a separate opt-in button while a layer is active. */
+  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
+    if (BKE_paint_material_brush_auto_ensure(scene, paint, object)) {
+      WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, BKE_paint_brush(paint));
+    }
   }
 }
 
@@ -1089,6 +1098,11 @@ class PaintLayersStackSource final : public StackSource,
       BKE_paint_layers_active_set(material, created->marker);
       layers_texpaint_slots_refresh(C);
     }
+    else if (params.kind == PaintLayerAddKind::Paint) {
+      /* The target resolves through the active row, and a plain Add leaves the previous one active
+       * until the caller activates the new row, so the maps below would land on the wrong layer. */
+      BKE_paint_layers_active_set(material, created->marker);
+    }
     /* A row with no map makes the first stroke create it and regenerate the graph before it can
      * write, which loses that stroke. The active slot's map is made together with the row, so the
      * first stroke already lands in it; the other channels still get theirs when they are used. */
@@ -1114,6 +1128,16 @@ class PaintLayersStackSource final : public StackSource,
               *CTX_data_main(&C), target, paint_mode.new_channel_image_size);
           layers_texpaint_slots_refresh(C);
         }
+      }
+    }
+    /* A fresh Paint layer owns maps for every channel of the material's set, so no "create missing
+     * maps" step is left to the user. Corrections stay as above: they carry their own maps. */
+    if (params.kind == PaintLayerAddKind::Paint) {
+      const PaintModeSettings &paint_mode = CTX_data_scene(&C)->toolsettings->paint_mode;
+      if (BKE_paint_layers_active_maps_ensure(
+              *CTX_data_main(&C), material, paint_mode.new_channel_image_size) > 0)
+      {
+        layers_texpaint_slots_refresh(C);
       }
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);

@@ -307,8 +307,13 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   if (target.material == nullptr || target.layer == nullptr) {
     return nullptr;
   }
+  /* The material owns the size so that every map of its stack agrees, whatever the caller's
+   * scene setting says now. */
+  const int map_size = target.material->paint_layers_image_size > 0 ?
+                           int(target.material->paint_layers_image_size) :
+                           image_size;
   if (target.mode == PaintLayersTargetMode::Mask) {
-    return paint_layers_mask_ensure_writable(bmain, target, image_size);
+    return paint_layers_mask_ensure_writable(bmain, target, map_size);
   }
   const eMaterialPaintChannel channel = eMaterialPaintChannel(target.channel);
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
@@ -382,7 +387,7 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
                "%s %s",
                target.layer->name[0] != '\0' ? target.layer->name : "Layer",
                info.ui_name);
-  Image *image = paint_layers_map_create(bmain, name, image_size, info.is_color, fill);
+  Image *image = paint_layers_map_create(bmain, name, map_size, info.is_color, fill);
   if (image == nullptr) {
     return nullptr;
   }
@@ -396,6 +401,33 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
 
   /* #BKE_paint_layers_channel_set_image does not reallocate the records, so \a record stays valid. */
   return record->image;
+}
+
+int BKE_paint_layers_active_maps_ensure(Main &bmain, Material &ma, const int image_size)
+{
+  const uint16_t channel_set = BKE_paint_layers_channel_set_mask_get(ma);
+  int created = 0;
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint || (channel_set & (uint16_t(1) << int(info.channel))) == 0) {
+      continue;
+    }
+    PaintLayersTarget target;
+    if (!BKE_paint_layers_target_get(
+            ma, int(info.channel), PaintLayersTargetMode::Content, target) ||
+        BKE_paint_layers_target_image(target) != nullptr)
+    {
+      continue;
+    }
+    /* A switched-off record is the user's choice and stays off; a row with no record at all takes
+     * part in the set, so the call adds it together with its map. */
+    if (target.channel_record != nullptr && !BKE_paint_layers_target_is_live(target)) {
+      continue;
+    }
+    if (BKE_paint_layers_target_ensure_writable(bmain, target, image_size) != nullptr) {
+      created++;
+    }
+  }
+  return created;
 }
 
 }  // namespace blender

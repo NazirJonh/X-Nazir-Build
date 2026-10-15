@@ -468,6 +468,14 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
     if (Paint *synced_paint = BKE_paint_material_sync_on_tool_restore(scene, paint_mode)) {
       toolsystem_main_brush_binding_update_from_active(synced_paint);
     }
+
+    /* Entering a paint mode with a layer already active: the brush gets its material values here,
+     * as no later event would. */
+    ViewLayer *view_layer = WM_window_get_active_view_layer(&win);
+    Object *active_ob = view_layer ? BKE_view_layer_active_object_get(view_layer) : nullptr;
+    if (BKE_paint_material_brush_auto_ensure(scene, paint, active_ob)) {
+      toolsystem_main_brush_binding_update_from_active(paint);
+    }
   }
 }
 

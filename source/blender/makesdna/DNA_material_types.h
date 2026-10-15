@@ -448,6 +448,13 @@ enum eMaterialPaintLayerSource : int8_t {
   MA_PAINT_LAYER_SOURCE_IMAGE = 0,
   /** A flat colour the row lays whatever its channels' alpha; a Fill. */
   MA_PAINT_LAYER_SOURCE_CONSTANT = 1,
+  /**
+   * A folder: the row holds its stack in #MaterialPaintLayer::children and lays their isolated
+   * result over what is below with its own blend, opacity and mask. It owns no channel records and
+   * no maps. Numerically matches the reference's source table: 2 and 3 are reserved for the
+   * Material and Node Group sources.
+   */
+  MA_PAINT_LAYER_SOURCE_STACK = 4,
 };
 
 /** #MaterialPaintLayerChannel::state */
@@ -481,18 +488,20 @@ struct MaterialPaintLayerChannel {
 /**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
- * The list is stored bottom-to-top.
+ * The list is stored bottom-to-top. Folders nest through #children, which holds the same type.
  */
 struct MaterialPaintLayer {
   DNA_DEFINE_CXX_METHODS(MaterialPaintLayer)
 
   struct MaterialPaintLayer *next = nullptr, *prev = nullptr;
+  /** Nested layers of a folder (#MA_PAINT_LAYER_SOURCE_STACK); the same type as the parent list. */
+  ListBaseT<MaterialPaintLayer> children = {nullptr, nullptr};
   char name[/*MAX_NAME*/ 64] = "";
   /** Stable identity of the row; it survives reordering and copying. */
   bUUID marker = {};
   /** #eMaterialPaintLayerBlend. */
   int8_t blend = MA_PAINT_LAYER_BLEND_MIX;
-  /** #eMaterialPaintLayerSource: a painted map (Image) or a flat colour (Constant). */
+  /** #eMaterialPaintLayerSource: a painted map (Image), a flat colour (Constant) or a folder. */
   int8_t source = MA_PAINT_LAYER_SOURCE_IMAGE;
   /** #eMaterialPaintLayerFlag. */
   int16_t flag = MA_PAINT_LAYER_ENABLED;

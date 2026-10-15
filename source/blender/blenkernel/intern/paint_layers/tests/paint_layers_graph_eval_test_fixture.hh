@@ -272,6 +272,15 @@ class GraphInterpreter {
                   vector.b * scale.b + offset.b,
                   1.0f};
         }
+        if (node.custom1 == NODE_VECTOR_MATH_DIVIDE) {
+          /* Per component, zero where the divisor is zero: what an empty folder relies on. */
+          const RGBA divisor = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          return {divisor.r != 0.0f ? vector.r / divisor.r : 0.0f,
+                  divisor.g != 0.0f ? vector.g / divisor.g : 0.0f,
+                  divisor.b != 0.0f ? vector.b / divisor.b : 0.0f,
+                  1.0f};
+        }
         return {vector.r, vector.g, vector.b, 1.0f};
       }
       default:

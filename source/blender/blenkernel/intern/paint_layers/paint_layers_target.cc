@@ -158,28 +158,33 @@ bool BKE_paint_layers_find_image_use(Material &ma,
                                      const Image &image,
                                      PaintLayersImageUse &r_use)
 {
-  for (MaterialPaintLayer &layer : ma.paint_layers) {
-    for (const int i : IndexRange(layer.channels_num)) {
-      if (layer.channels[i].image == &image) {
-        r_use.layer = &layer;
-        r_use.channel = layer.channels[i].channel;
-        r_use.is_mask = false;
-        return true;
-      }
-    }
-    /* A mask item's map: reported as the item, so the caller reads its channels like a row's. */
-    for (MaterialPaintLayer &item : layer.mask_stack) {
-      for (const int i : IndexRange(item.channels_num)) {
-        if (item.channels[i].image == &image) {
-          r_use.layer = &item;
-          r_use.channel = item.channels[i].channel;
-          r_use.is_mask = true;
-          return true;
+  bool found = false;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        for (const int i : IndexRange(layer.channels_num)) {
+          if (layer.channels[i].image == &image) {
+            r_use.layer = &layer;
+            r_use.channel = layer.channels[i].channel;
+            r_use.is_mask = false;
+            found = true;
+            return false;
+          }
         }
-      }
-    }
-  }
-  return false;
+        /* A mask item's map: reported as the item, so the caller reads its channels like a row's. */
+        for (MaterialPaintLayer &item : layer.mask_stack) {
+          for (const int i : IndexRange(item.channels_num)) {
+            if (item.channels[i].image == &image) {
+              r_use.layer = &item;
+              r_use.channel = item.channels[i].channel;
+              r_use.is_mask = true;
+              found = true;
+              return false;
+            }
+          }
+        }
+        return true;
+      });
+  return found;
 }
 
 bool BKE_paint_layers_target_get(

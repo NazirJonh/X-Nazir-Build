@@ -336,12 +336,16 @@ bool BKE_paint_layers_regenerate(Main &bmain,
 
   PaintLayersBuildContext ctx;
   Vector<int> wired_channels = paint_layers_wired_channels(ma);
-  /* The Normal chain needs the shared combine group; create it only when a Normal row exists. */
-  for (const MaterialPaintLayer &layer : ma.paint_layers) {
-    if (leaf_participates(ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL)) {
-      ctx.normal_combine_group = BKE_paint_material_normal_combine_group_ensure(bmain);
-      break;
-    }
+  /* The Normal chain needs the shared combine group; create it only when a Normal row exists,
+   * whatever folder it sits in. */
+  bool normal_row_exists = false;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        normal_row_exists = leaf_participates(ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL);
+        return !normal_row_exists;
+      });
+  if (normal_row_exists) {
+    ctx.normal_combine_group = BKE_paint_material_normal_combine_group_ensure(bmain);
   }
 
   /* A value edit changes no structure, so the root's stored hash still matches its description:

@@ -1373,6 +1373,136 @@ bool stack_row_clipboard_poll(bContext *C)
          space_outliner->stack_layers_view == SO_SL_VIEW_STACK;
 }
 
+wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  int from_ordinal = ordinal;
+  int to_ordinal = RNA_int_get(op->ptr, "to_ordinal");
+  if (to_ordinal < 0) {
+    /* The selection is the run to wrap. One row on its own is a group of one, which is what "put
+     * this in a folder" means when nothing else is picked. */
+    Vector<int> selected;
+    stack_selected_ordinals_get(*space_outliner, selected);
+    if (selected.size() > 1) {
+      from_ordinal = selected.first();
+      to_ordinal = selected.last();
+      if (to_ordinal - from_ordinal + 1 != selected.size()) {
+        BKE_report(op->reports, RPT_ERROR, "Only layers next to each other can be grouped");
+        return OPERATOR_CANCELLED;
+      }
+    }
+    else {
+      to_ordinal = from_ordinal;
+    }
+  }
+  /* Wrapping a run of rows inserts the folder row among them, so everything above it is
+   * renumbered; the folder itself is what the user is left working with. */
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int &r_select_ordinal) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        if (grouping == nullptr) {
+          return false;
+        }
+        r_select_ordinal = grouping->rows_group(*C, focus, owner, from_ordinal, to_ordinal);
+        return r_select_ordinal >= 0;
+      });
+  return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+wmOperatorStatus stack_group_add_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  /* -1 means the top of the stack, which is where a folder goes when nothing is pointed at. */
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  /* An empty folder is inserted into the stack, so every row above it has a new ordinal. */
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int &r_select_ordinal) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        if (grouping == nullptr) {
+          return false;
+        }
+        r_select_ordinal = grouping->group_add(*C, focus, owner, ordinal);
+        return r_select_ordinal >= 0;
+      });
+  return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+wmOperatorStatus stack_row_ungroup_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The folder row is gone and its contents took its place, so there is no row left to hand the
+   * selection to -- but the rows that moved up still have to be stripped of the state the tree
+   * store holds under their new ordinals. */
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int & /*r_select_ordinal*/) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        return grouping != nullptr && grouping->row_ungroup(*C, focus, owner, ordinal) >= 0;
+      });
+  return ok ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+wmOperatorStatus stack_row_merge_down_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The pair reads as one folder row from then on, and that row is what the user works with. */
+  int new_ordinal = -1;
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int &r_select_ordinal) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        if (grouping == nullptr) {
+          return false;
+        }
+        r_select_ordinal = grouping->row_merge_down(*C, focus, owner, ordinal);
+        return r_select_ordinal >= 0;
+      },
+      &new_ordinal);
+  if (!ok) {
+    return OPERATOR_CANCELLED;
+  }
+  outliner_stack_row_activate(C, *space_outliner, new_ordinal);
+  return OPERATOR_FINISHED;
+}
+
 wmOperatorStatus stack_row_duplicate_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);

@@ -11,6 +11,7 @@
 #include "BKE_paint_layers_composite.hh"
 
 #include <cstring>
+#include <iterator>
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
@@ -105,31 +106,47 @@ static bool composite_channel_linear(const Span<PaintMaterialCompositeImageLayer
       image_layers, target, region, nullptr, bottom_color);
 }
 
-bool BKE_paint_layers_composite_image_layers(
-    const Material &ma, const int channel, Vector<PaintMaterialCompositeImageLayer> &r_layers)
+/**
+ * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is
+ * one entry carrying its children, which the evaluator composites in isolation; a folder nothing of
+ * which takes part is left out, as it is on the generator's side.
+ */
+static void composite_image_layers_collect(const Material &ma,
+                                           const ListBaseT<MaterialPaintLayer> &list,
+                                           const int channel,
+                                           Vector<PaintMaterialCompositeImageLayer> &r_layers)
 {
-  r_layers.clear();
-  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
-    return false;
-  }
-  for (const MaterialPaintLayer &layer : ma.paint_layers) {
-    const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-    if (!paint_layer_channel_contributes(ma, layer, record)) {
-      continue;
-    }
+  for (const MaterialPaintLayer &layer : list) {
     PaintMaterialCompositeImageLayer out;
-    if (record->image != nullptr) {
-      out.color_image = record->image;
-      /* The description carries no per-node #ImageUser; the default one is what a plain map uses. */
-      out.color_iuser = nullptr;
-      /* A fresh paint map is transparent where nothing was painted; that texel must show the rows
-       * below rather than cover them with the map's black. */
-      out.color_alpha_coverage = true;
+    if (BKE_paint_layers_is_folder(layer)) {
+      Vector<PaintMaterialCompositeImageLayer> children;
+      composite_image_layers_collect(ma, layer.children, channel, children);
+      if (children.is_empty()) {
+        continue;
+      }
+      out.is_folder = true;
+      out.children.assign(std::make_move_iterator(children.begin()),
+                          std::make_move_iterator(children.end()));
     }
     else {
-      /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
-      copy_v4_v4(out.constant_color, record->value);
-      out.has_constant_color = true;
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+      if (!paint_layer_channel_contributes(ma, layer, record)) {
+        continue;
+      }
+      if (record->image != nullptr) {
+        out.color_image = record->image;
+        /* The description carries no per-node #ImageUser; the default one is what a plain map
+         * uses. */
+        out.color_iuser = nullptr;
+        /* A fresh paint map is transparent where nothing was painted; that texel must show the rows
+         * below rather than cover them with the map's black. */
+        out.color_alpha_coverage = true;
+      }
+      else {
+        /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
+        copy_v4_v4(out.constant_color, record->value);
+        out.has_constant_color = true;
+      }
     }
     out.blend = layer_channel_blend(layer, channel);
     out.opacity = BKE_paint_layers_effective_opacity(layer);
@@ -148,8 +165,18 @@ bool BKE_paint_layers_composite_image_layers(
         out.mask_items.append(item);
       }
     }
-    r_layers.append(out);
+    r_layers.append(std::move(out));
   }
+}
+
+bool BKE_paint_layers_composite_image_layers(
+    const Material &ma, const int channel, Vector<PaintMaterialCompositeImageLayer> &r_layers)
+{
+  r_layers.clear();
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  composite_image_layers_collect(ma, ma.paint_layers, channel, r_layers);
   return !r_layers.is_empty();
 }
 

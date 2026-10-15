@@ -19,6 +19,7 @@
 
 #include <string>
 
+#include "BLI_span.hh"
 #include "BLI_string_ref.hh"
 
 #include "BKE_paint_layers.hh"
@@ -31,6 +32,8 @@ enum class PaintLayerAddKind : int8_t {
   Paint = 0,
   /** A flat-colour Fill layer. */
   Fill,
+  /** An empty folder, made to be filled. */
+  Folder,
 };
 
 struct PaintLayerAddParams {
@@ -38,7 +41,10 @@ struct PaintLayerAddParams {
   PaintLayerAddKind kind = PaintLayerAddKind::Paint;
   /** The row the Add was aimed at, or null for the top of the stack. */
   MaterialPaintLayer *anchor = nullptr;
-  /** Where to put the new row relative to \a anchor. */
+  /**
+   * Where to put the new row relative to \a anchor. An \a anchor that is a folder takes the row
+   * `Into` regardless of an `Above`: an Add onto a folder means filling it.
+   */
   PaintLayerPlace place = PaintLayerPlace::Above;
   /**
    * The name for the new row, or null to derive the unique default (a `"Layer N"` name one past
@@ -65,9 +71,37 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
 std::string BKE_paint_layers_unique_default_name(const Material &ma, StringRef base);
 
 /**
- * Reorder \a from to where \a to sits in the stack: \a from takes the position \a to had.
- * Returns false when \a from and \a to are the same row or either is not part of \a ma.
+ * Reorder \a from to where \a to sits, within their shared list: \a from takes the position \a to
+ * had. Returns false when \a from and \a to are the same row, hang on different lists (a folder's
+ * children and the top level, say) or either is not part of \a ma.
  */
 bool BKE_paint_layers_edit_reorder(Material &ma, MaterialPaintLayer &from, MaterialPaintLayer &to);
+
+/**
+ * Move \a from relative to \a anchor with the Outliner's drop rules: a move `Into` a plain row
+ * groups the two rows into a new folder instead of relocating. \a anchor may be null to move to the
+ * top of the stack. A row never moves into its own subtree.
+ */
+bool BKE_paint_layers_edit_move(Material &ma,
+                                MaterialPaintLayer &from,
+                                MaterialPaintLayer *anchor,
+                                PaintLayerPlace place);
+
+/**
+ * Group \a upper and the row \a lower below it into a new folder, which takes their place. They
+ * must hang on the same list. Returns the folder, or null on refusal.
+ */
+MaterialPaintLayer *BKE_paint_layers_edit_merge_down(Material &ma,
+                                                     MaterialPaintLayer &upper,
+                                                     MaterialPaintLayer &lower);
+
+/** Group \a rows into a new folder. Returns the folder, or null on refusal. */
+MaterialPaintLayer *BKE_paint_layers_edit_group_range(Material &ma,
+                                                      Span<MaterialPaintLayer *> rows);
+
+/**
+ * Add an empty folder above \a anchor (or at the top when null), with its unique default name.
+ */
+MaterialPaintLayer *BKE_paint_layers_edit_group_add(Material &ma, MaterialPaintLayer *anchor);
 
 }  // namespace blender

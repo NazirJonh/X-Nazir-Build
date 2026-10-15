@@ -18,6 +18,7 @@
 #include "BLI_string_ref.hh"
 #include "BLI_vector.hh"
 
+#include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
 
 #include "paint_layers_generate_layout.hh"
@@ -49,7 +50,13 @@ struct LayerGroup {
   bNodeTree *parent_tree = nullptr;
 };
 
-/** One built row of one channel: its instance in the parent and the sockets the parent chains. */
+/**
+ * One built row of one channel: its instance in the parent and the sockets the parent chains.
+ *
+ * A row inside a folder works on the folder's pre-multiplied accumulation, which needs the coverage
+ * accumulated so far next to the colour; a folder row also takes the isolated result of what it
+ * holds. Those sockets are null for a row that has no use for them.
+ */
 struct RowResult {
   bool valid = false;
   bNode *instance = nullptr;
@@ -57,12 +64,27 @@ struct RowResult {
   bNodeSocket *below = nullptr;
   /** The instance socket carrying the row laid over what is below. */
   bNodeSocket *result = nullptr;
+  /** Inside a folder: the coverage accumulated below, and the one with this row laid over it. */
+  bNodeSocket *below_coverage = nullptr;
+  bNodeSocket *result_coverage = nullptr;
+  /** A folder: its contents' straight colour and coverage, the source and factor base of the row. */
+  bNodeSocket *folder_color = nullptr;
+  bNodeSocket *folder_coverage = nullptr;
 };
 
 /** A node and one of its output sockets: what the next stage of a chain reads from. */
 struct NodeOutput {
   bNode *node = nullptr;
   bNodeSocket *socket = nullptr;
+};
+
+/**
+ * What a chain has accumulated so far: its colour and, inside a folder, the coverage. The coverage
+ * is empty on the stack's own chain, which blends straight over an opaque bottom.
+ */
+struct ChainEnd {
+  NodeOutput color;
+  NodeOutput coverage;
 };
 
 /** The blend of one row over what is below: a Normal Combine instance or a Mix node. */
@@ -105,14 +127,38 @@ class PaintLayersTreeBuilder {
    */
   NodeOutput mask_factor_ensure(bNodeTree &tree, LayerGroup &group, const MaterialPaintLayer &layer);
 
-  /** One row of one channel: its group contents, and the instance sockets the root chains. */
-  RowResult build_row(const MaterialPaintLayer &layer, LayerGroup &group, int channel);
+  /**
+   * One row of one channel: its group contents, and the instance sockets the root chains.
+   *
+   * \param isolated: the row hangs inside a folder, so it works on the folder's pre-multiplied
+   * accumulation -- colour `P` and coverage `a` -- instead of blending straight over an opaque
+   * bottom.
+   */
+  RowResult build_row(const MaterialPaintLayer &layer,
+                      LayerGroup &group,
+                      int channel,
+                      bool isolated);
 
   /**
    * The instance sockets of a row whose group was kept unchanged: its nodes and interface already
-   * hold the row, so only the Below/Result contract sockets are looked up again in the new instance.
+   * hold the row, so only the contract sockets are looked up again in the new instance.
    */
-  RowResult row_link_reused(const MaterialPaintLayer &layer, LayerGroup &group, int channel);
+  RowResult row_link_reused(const MaterialPaintLayer &layer,
+                            LayerGroup &group,
+                            int channel,
+                            bool isolated);
+
+  /**
+   * Chain the rows of \a list over \a end for \a channel, recursing into folders. A folder builds
+   * its children over an empty accumulation and then lays the straightened result over what is
+   * below with its own blend, opacity and mask. \a location_x advances past what was built.
+   */
+  ChainEnd list_build(const ListBaseT<MaterialPaintLayer> &list,
+                      ChainEnd end,
+                      int channel,
+                      float location_y,
+                      float &location_x,
+                      bool isolated);
 
   /**
    * The blend node of a row in \a channel: a Normal Combine instance for Normal when the shared

@@ -1323,4 +1323,159 @@ TEST_F(PaintLayersDescription, rna_mask_value_is_the_constant_of_the_mask_item)
 
 /** \} */
 
+TEST_F(PaintLayersDescription, group_folds_rows_into_a_folder_at_the_lowest_position)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *c = BKE_paint_layers_add(ma, "C", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *members[2] = {b, c};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_is_folder(*folder));
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 2);
+  EXPECT_EQ(ma.paint_layers.first, a);
+  EXPECT_EQ(ma.paint_layers.last, folder);
+  EXPECT_EQ(BLI_listbase_count(&folder->children), 2);
+  EXPECT_EQ(BKE_paint_layers_parent(ma, *b), folder);
+  EXPECT_EQ(BKE_paint_layers_find(ma, c->marker), c);
+}
+
+TEST_F(PaintLayersDescription, group_keeps_list_order_whatever_order_the_members_are_named_in)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  /* Named top first and with a repeat: the folder still holds A below B, each once. */
+  MaterialPaintLayer *members[3] = {b, a, b};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 3));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_EQ(BLI_listbase_count(&folder->children), 2);
+  EXPECT_EQ(folder->children.first, a);
+  EXPECT_EQ(folder->children.last, b);
+}
+
+TEST_F(PaintLayersDescription, reorder_and_move_inside_a_folder_touch_only_its_children)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  MaterialPaintLayer *low = BKE_paint_layers_add(ma, "Low", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *c = BKE_paint_layers_add(ma, "C", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *high = BKE_paint_layers_add(ma, "High", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *members[3] = {a, b, c};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 3));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_EQ(folder->children.first, a);
+  ASSERT_EQ(folder->children.last, c);
+
+  /* A reorder to the bottom of the folder. */
+  ASSERT_TRUE(BKE_paint_layers_reorder(ma, c, 0));
+  EXPECT_EQ(folder->children.first, c);
+  EXPECT_EQ(static_cast<MaterialPaintLayer *>(folder->children.first)->next, a);
+  EXPECT_EQ(folder->children.last, b);
+
+  /* A move next to a sibling, both directions. */
+  ASSERT_TRUE(BKE_paint_layers_move(ma, c, b, PaintLayerPlace::Above));
+  EXPECT_EQ(folder->children.first, a);
+  EXPECT_EQ(folder->children.last, c);
+  ASSERT_TRUE(BKE_paint_layers_move(ma, c, a, PaintLayerPlace::Below));
+  EXPECT_EQ(folder->children.first, c);
+  EXPECT_EQ(folder->children.last, b);
+
+  /* The folder keeps its members and its place; the root list is as it was. */
+  EXPECT_EQ(BLI_listbase_count(&folder->children), 3);
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 3);
+  EXPECT_EQ(ma.paint_layers.first, low);
+  EXPECT_EQ(static_cast<MaterialPaintLayer *>(ma.paint_layers.first)->next, folder);
+  EXPECT_EQ(ma.paint_layers.last, high);
+  EXPECT_EQ(BKE_paint_layers_parent(ma, *c), folder);
+}
+
+TEST_F(PaintLayersDescription, group_refuses_rows_of_different_lists)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *pair[1] = {b};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(pair, 1));
+  MaterialPaintLayer *mixed[2] = {a, b};
+  EXPECT_EQ(BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(mixed, 2)), nullptr);
+  EXPECT_NE(folder, nullptr);
+}
+
+TEST_F(PaintLayersDescription, ungroup_lifts_children_in_place_and_keeps_markers)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *c = BKE_paint_layers_add(ma, "C", nullptr, PaintLayerPlace::Above);
+  const bUUID b_marker = b->marker;
+  MaterialPaintLayer *members[1] = {b};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_TRUE(BKE_paint_layers_ungroup(ma, folder));
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 3);
+  EXPECT_EQ(ma.paint_layers.first, a);
+  EXPECT_EQ(ma.paint_layers.last, c);
+  EXPECT_EQ(BKE_paint_layers_find(ma, b_marker), b);
+  EXPECT_EQ(BKE_paint_layers_parent(ma, *b), nullptr);
+}
+
+TEST_F(PaintLayersDescription, move_into_a_folder_and_never_into_its_own_subtree)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *members[1] = {b};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 1));
+  EXPECT_TRUE(BKE_paint_layers_move(ma, a, folder, PaintLayerPlace::Into));
+  EXPECT_EQ(BKE_paint_layers_parent(ma, *a), folder);
+  /* A plain row is no place to move into, and a folder is no place inside itself. */
+  EXPECT_FALSE(BKE_paint_layers_move(ma, folder, a, PaintLayerPlace::Above));
+  EXPECT_FALSE(BKE_paint_layers_move(ma, b, a, PaintLayerPlace::Into));
+}
+
+TEST_F(PaintLayersDescription, folder_refuses_channel_records_and_source_change)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Folder;
+  MaterialPaintLayer *folder = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(folder, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_is_folder(*folder));
+  EXPECT_EQ(folder->channels_num, 0);
+  EXPECT_EQ(BKE_paint_layers_channel_add(ma, folder, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  EXPECT_FALSE(BKE_paint_layers_set_source(ma, folder, MA_PAINT_LAYER_SOURCE_IMAGE));
+}
+
+TEST_F(PaintLayersDescription, add_onto_a_folder_goes_inside_it)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  PaintLayerAddParams folder_params;
+  folder_params.kind = PaintLayerAddKind::Folder;
+  MaterialPaintLayer *folder = BKE_paint_layers_add_with_policy(ma, folder_params);
+  PaintLayerAddParams params;
+  params.anchor = folder;
+  MaterialPaintLayer *child = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(child, nullptr);
+  EXPECT_EQ(BKE_paint_layers_parent(ma, *child), folder);
+}
+
+TEST_F(PaintLayersDescription, remove_and_duplicate_take_the_whole_branch)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *members[1] = {a};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 1));
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, ma, folder);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_is_folder(*copy));
+  ASSERT_EQ(BLI_listbase_count(&copy->children), 1);
+  const MaterialPaintLayer *child_copy = static_cast<MaterialPaintLayer *>(copy->children.first);
+  EXPECT_FALSE(BLI_uuid_equal(child_copy->marker, a->marker));
+  BKE_paint_layers_active_set(ma, child_copy->marker);
+  EXPECT_TRUE(BKE_paint_layers_remove(ma, copy));
+  EXPECT_TRUE(BLI_uuid_is_nil(BKE_paint_layers_active_get(ma)));
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 1);
+}
 }  // namespace blender::bke::tests

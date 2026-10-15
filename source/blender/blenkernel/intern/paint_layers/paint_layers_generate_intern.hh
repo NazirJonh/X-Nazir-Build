@@ -147,6 +147,19 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, Span<int> wired_cha
 bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, int channel);
 
 /**
+ * Whether \a layer takes part in \a channel as a row of the chain: a leaf through its own record
+ * (#leaf_participates), a folder through any row it holds. A folder owns no channel records, so its
+ * participation is the union of its children's; an emptied folder takes part in nothing.
+ */
+bool row_participates(const Material &ma, const MaterialPaintLayer &layer, int channel);
+
+/**
+ * Whether \a layer hangs inside a folder. Such a row is built in the isolated (pre-multiplied)
+ * form, which is a different group, so this is part of its topology.
+ */
+bool layer_in_folder(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
  * The channels \a ma wires at all, in channel order: a channel nothing participates in gets no
  * output, so the material keeps whatever the user had on that Principled input.
  */

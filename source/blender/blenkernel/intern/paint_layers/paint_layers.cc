@@ -22,6 +22,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_material.hh"
 
+#include "BLI_function_ref.hh"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_base.h"
@@ -29,6 +30,7 @@
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
+#include "BLI_vector.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -66,10 +68,116 @@ bool BKE_paint_layers_is_layered(const Material &ma)
   return (ma.paint_layers_flag & MA_PAINT_LAYERED) != 0;
 }
 
-/** Whether \a layer is a row of \a ma's stack. */
+using PaintLayerList = ListBaseT<MaterialPaintLayer>;
+
+bool BKE_paint_layers_is_folder(const MaterialPaintLayer &layer)
+{
+  return layer.source == MA_PAINT_LAYER_SOURCE_STACK;
+}
+
+bool BKE_paint_layers_has_children(const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_is_folder(layer) && !BLI_listbase_is_empty(&layer.children);
+}
+
+/**
+ * The list of \a list's subtree that directly holds \a layer: \a list itself or the children of a
+ * folder under it, at any depth. Only a folder's children are read -- a leaf row that somehow
+ * carries some is not walked, the way no other reader walks it.
+ */
+static const PaintLayerList *paint_layer_owner_list_find(const PaintLayerList &list,
+                                                         const MaterialPaintLayer *layer)
+{
+  for (const MaterialPaintLayer &row : list) {
+    if (&row == layer) {
+      return &list;
+    }
+    if (BKE_paint_layers_is_folder(row)) {
+      if (const PaintLayerList *found = paint_layer_owner_list_find(row.children, layer)) {
+        return found;
+      }
+    }
+  }
+  return nullptr;
+}
+
+ListBaseT<MaterialPaintLayer> *BKE_paint_layers_owner_list(Material &ma,
+                                                           const MaterialPaintLayer &layer)
+{
+  return const_cast<PaintLayerList *>(paint_layer_owner_list_find(ma.paint_layers, &layer));
+}
+
+/** Whether \a layer is a row of \a ma's stack, at any depth. */
 static bool paint_layer_in_stack(const Material &ma, const MaterialPaintLayer *layer)
 {
-  return layer != nullptr && BLI_findindex(&ma.paint_layers, layer) != -1;
+  return layer != nullptr && paint_layer_owner_list_find(ma.paint_layers, layer) != nullptr;
+}
+
+static bool paint_layers_foreach_list(
+    const PaintLayerList &list,
+    const MaterialPaintLayer *parent,
+    FunctionRef<bool(const MaterialPaintLayer &, const MaterialPaintLayer *)> fn)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    if (!fn(layer, parent)) {
+      return false;
+    }
+    if (BKE_paint_layers_is_folder(layer) &&
+        !paint_layers_foreach_list(layer.children, &layer, fn))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+void BKE_paint_layers_foreach(
+    const Material &ma,
+    FunctionRef<bool(const MaterialPaintLayer &layer, const MaterialPaintLayer *parent)> fn)
+{
+  paint_layers_foreach_list(ma.paint_layers, nullptr, fn);
+}
+
+void BKE_paint_layers_foreach(
+    Material &ma, FunctionRef<bool(MaterialPaintLayer &layer, MaterialPaintLayer *parent)> fn)
+{
+  paint_layers_foreach_list(
+      ma.paint_layers,
+      nullptr,
+      [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *parent) -> bool {
+        return fn(const_cast<MaterialPaintLayer &>(layer),
+                  const_cast<MaterialPaintLayer *>(parent));
+      });
+}
+
+MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer)
+{
+  const MaterialPaintLayer *parent = nullptr;
+  BKE_paint_layers_foreach(
+      static_cast<const Material &>(ma),
+      [&](const MaterialPaintLayer &row, const MaterialPaintLayer *row_parent) -> bool {
+        if (&row == &layer) {
+          parent = row_parent;
+          return false;
+        }
+        return true;
+      });
+  return const_cast<MaterialPaintLayer *>(parent);
+}
+
+bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUUID &marker)
+{
+  if (BLI_uuid_equal(root.marker, marker)) {
+    return true;
+  }
+  if (BKE_paint_layers_is_folder(root)) {
+    for (const MaterialPaintLayer &child : root.children) {
+      if (BKE_paint_layers_subtree_contains(child, marker)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -82,15 +190,13 @@ static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *laye
   if (layer == nullptr) {
     return false;
   }
-  if (BLI_findindex(&ma.paint_layers, layer) != -1) {
-    return true;
-  }
-  for (const MaterialPaintLayer &row : ma.paint_layers) {
-    if (BLI_findindex(&row.mask_stack, layer) != -1) {
-      return true;
-    }
-  }
-  return false;
+  bool owned = false;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        owned = &row == layer || BLI_findindex(&row.mask_stack, layer) != -1;
+        return !owned;
+      });
+  return owned;
 }
 
 /**
@@ -109,8 +215,24 @@ static MaterialPaintLayerChannel *paint_layer_channel_in_stack(const Material &m
 }
 
 /**
+ * Whether \a anchor can take a row by \a place: it is a row of \a ma's stack, and Into names a
+ * folder. Nothing here promotes a plain row to a folder -- its maps would be ignored and the
+ * painted result would silently disappear -- so a UI that drops "into" a plain row groups instead.
+ */
+static bool paint_layer_anchor_valid(const Material &ma,
+                                     const MaterialPaintLayer *anchor,
+                                     const PaintLayerPlace place)
+{
+  if (!paint_layer_in_stack(ma, anchor)) {
+    return false;
+  }
+  return place != PaintLayerPlace::Into || BKE_paint_layers_is_folder(*anchor);
+}
+
+/**
  * Link the unlinked or detached \a layer into \a ma's stack: appended on top for a null \a anchor,
- * otherwise next to \a anchor by \a place. \a anchor must already be validated.
+ * otherwise next to \a anchor by \a place, or inside it for Into. \a anchor must already be
+ * validated (#paint_layer_anchor_valid).
  */
 static void paint_layer_link(Material &ma,
                              MaterialPaintLayer *layer,
@@ -119,16 +241,22 @@ static void paint_layer_link(Material &ma,
 {
   if (anchor == nullptr) {
     BLI_addtail(&ma.paint_layers, layer);
+    return;
   }
-  else if (place == PaintLayerPlace::Above) {
-    BLI_insertlinkafter(&ma.paint_layers, anchor, layer);
+  if (place == PaintLayerPlace::Into) {
+    BLI_addtail(&anchor->children, layer);
+    return;
+  }
+  PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *anchor);
+  if (place == PaintLayerPlace::Above) {
+    BLI_insertlinkafter(owner, anchor, layer);
   }
   else {
-    BLI_insertlinkbefore(&ma.paint_layers, anchor, layer);
+    BLI_insertlinkbefore(owner, anchor, layer);
   }
 }
 
-/** A fresh marker no row of \a ma's stack carries yet. */
+/** A fresh marker no row of \a ma's stack, nor any item of a row's mask, carries yet. */
 static bUUID paint_layer_unique_marker(const Material &ma)
 {
   bUUID marker;
@@ -136,21 +264,14 @@ static bUUID paint_layer_unique_marker(const Material &ma)
   do {
     marker = BLI_uuid_generate_random();
     in_use = false;
-    for (const MaterialPaintLayer &layer : ma.paint_layers) {
-      if (BLI_uuid_equal(layer.marker, marker)) {
-        in_use = true;
-        break;
-      }
-      for (const MaterialPaintLayer &item : layer.mask_stack) {
-        if (BLI_uuid_equal(item.marker, marker)) {
-          in_use = true;
-          break;
-        }
-      }
-      if (in_use) {
-        break;
-      }
-    }
+    BKE_paint_layers_foreach(
+        ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+          in_use = BLI_uuid_equal(layer.marker, marker);
+          for (const MaterialPaintLayer &item : layer.mask_stack) {
+            in_use |= BLI_uuid_equal(item.marker, marker);
+          }
+          return !in_use;
+        });
   } while (in_use);
   return marker;
 }
@@ -180,7 +301,7 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
   BKE_paint_layers_channels_materialize(ma);
 
   /* Every place validates its anchor: a row may never be linked under a foreign material. */
-  if (anchor != nullptr && !paint_layer_in_stack(ma, anchor)) {
+  if (anchor != nullptr && !paint_layer_anchor_valid(ma, anchor, place)) {
     return nullptr;
   }
 
@@ -215,6 +336,43 @@ static void paint_layer_channels_duplicate(Main &bmain,
   }
 }
 
+/**
+ * Fill the linked \a dst with a copy of \a src's own state, its mask and, for a folder, its
+ * children, each row with a marker of its own. \a dst is linked into \a ma before this runs, so
+ * every marker handed out here is unique against it and against the rows copied before.
+ */
+static void paint_layer_branch_duplicate(Main &bmain,
+                                         Material &ma,
+                                         MaterialPaintLayer &dst,
+                                         const MaterialPaintLayer &src)
+{
+  dst.flag = src.flag;
+  dst.opacity = src.opacity;
+  dst.blend = src.blend;
+  dst.source = src.source;
+  paint_layer_channels_duplicate(bmain, dst, src);
+
+  /* The mask goes with its row, with a map of its own for the same reason as the channel maps. */
+  for (const MaterialPaintLayer &item : src.mask_stack) {
+    MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
+    item_copy->role = item.role;
+    item_copy->source = item.source;
+    item_copy->blend = item.blend;
+    item_copy->flag = item.flag;
+    item_copy->opacity = item.opacity;
+    paint_layer_channels_duplicate(bmain, *item_copy, item);
+    BLI_addtail(&dst.mask_stack, item_copy);
+  }
+
+  if (BKE_paint_layers_is_folder(src)) {
+    for (const MaterialPaintLayer &child : src.children) {
+      MaterialPaintLayer *child_copy = paint_layer_alloc(ma, child.name);
+      BLI_addtail(&dst.children, child_copy);
+      paint_layer_branch_duplicate(bmain, ma, *child_copy, child);
+    }
+  }
+}
+
 MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
                                                Material &ma,
                                                MaterialPaintLayer *layer)
@@ -224,23 +382,9 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
   }
 
   MaterialPaintLayer *copy = paint_layer_alloc(ma, layer->name);
-  copy->flag = layer->flag;
-  copy->opacity = layer->opacity;
-  paint_layer_channels_duplicate(bmain, *copy, *layer);
-  BLI_insertlinkafter(&ma.paint_layers, layer, copy);
-
-  /* The mask goes with its row, with a map of its own for the same reason as the channel maps. The
-   * copy is linked first so that the items' markers are unique against it. */
-  for (const MaterialPaintLayer &item : layer->mask_stack) {
-    MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
-    item_copy->role = item.role;
-    item_copy->source = item.source;
-    item_copy->blend = item.blend;
-    item_copy->flag = item.flag;
-    item_copy->opacity = item.opacity;
-    paint_layer_channels_duplicate(bmain, *item_copy, item);
-    BLI_addtail(&copy->mask_stack, item_copy);
-  }
+  PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *layer);
+  BLI_insertlinkafter(owner, layer, copy);
+  paint_layer_branch_duplicate(bmain, ma, *copy, *layer);
 
   BKE_paint_layers_tag_edited(ma);
   return copy;
@@ -288,11 +432,13 @@ uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
     /* Not authored: the union of the build default and every record any row already carries, so a
      * stack's own channels are never dropped from the set. */
     mask = PAINT_LAYERS_DEFAULT_CHANNEL_SET;
-    for (const MaterialPaintLayer &layer : ma.paint_layers) {
-      for (const int i : IndexRange(layer.channels_num)) {
-        mask |= uint16_t(uint16_t(1) << int(layer.channels[i].channel));
-      }
-    }
+    BKE_paint_layers_foreach(
+        ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+          for (const int i : IndexRange(layer.channels_num)) {
+            mask |= uint16_t(uint16_t(1) << int(layer.channels[i].channel));
+          }
+          return true;
+        });
   }
   /* Base Color is the material's constant and can never leave the set. */
   mask |= uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR;
@@ -369,6 +515,9 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
   for (MaterialPaintLayer &item : layer.mask_stack) {
     paint_layer_release_users(item);
   }
+  for (MaterialPaintLayer &child : layer.children) {
+    paint_layer_release_users(child);
+  }
 }
 
 bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
@@ -377,14 +526,15 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
     return false;
   }
 
+  /* The cursor is cleared when it names the row or anything freed with it. */
   if (!BLI_uuid_is_nil(ma.active_layer_marker) &&
-      BLI_uuid_equal(layer->marker, ma.active_layer_marker))
+      BKE_paint_layers_subtree_contains(*layer, ma.active_layer_marker))
   {
     ma.active_layer_marker = {};
   }
 
   paint_layer_release_users(*layer);
-  BLI_remlink(&ma.paint_layers, layer);
+  BLI_remlink(BKE_paint_layers_owner_list(ma, *layer), layer);
   BKE_material_paint_layer_free(layer);
 
   BKE_paint_layers_tag_edited(ma);
@@ -467,12 +617,15 @@ bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer)
 
 MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 {
-  for (MaterialPaintLayer &layer : ma.paint_layers) {
-    if (BLI_uuid_equal(layer.marker, marker)) {
-      return &layer;
-    }
-  }
-  return nullptr;
+  MaterialPaintLayer *found = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        if (BLI_uuid_equal(layer.marker, marker)) {
+          found = &layer;
+        }
+        return found == nullptr;
+      });
+  return found;
 }
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
@@ -502,11 +655,16 @@ bool BKE_paint_layers_move(Material &ma,
   if (!paint_layer_in_stack(ma, layer) || anchor == layer) {
     return false;
   }
-  if (anchor != nullptr && !paint_layer_in_stack(ma, anchor)) {
-    return false;
+  if (anchor != nullptr) {
+    /* A row moved into its own subtree would walk itself to reach itself. */
+    if (!paint_layer_anchor_valid(ma, anchor, place) ||
+        BKE_paint_layers_subtree_contains(*layer, anchor->marker))
+    {
+      return false;
+    }
   }
 
-  BLI_remlink(&ma.paint_layers, layer);
+  BLI_remlink(BKE_paint_layers_owner_list(ma, *layer), layer);
   paint_layer_link(ma, layer, anchor, place);
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -517,20 +675,105 @@ bool BKE_paint_layers_reorder(Material &ma, MaterialPaintLayer *layer, int index
   if (!paint_layer_in_stack(ma, layer)) {
     return false;
   }
-  const int count = BLI_listbase_count(&ma.paint_layers);
+  PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *layer);
+  const int count = BLI_listbase_count(owner);
   index = clamp_i(index, 0, count - 1);
 
-  BLI_remlink(&ma.paint_layers, layer);
-  /* The stack is bottom-to-top, so index 0 is the first link of the list. */
+  BLI_remlink(owner, layer);
+  /* The list is bottom-to-top, so index 0 is the first link of it. */
   if (index == count - 1) {
-    BLI_addtail(&ma.paint_layers, layer);
+    BLI_addtail(owner, layer);
   }
   else if (index == 0) {
-    BLI_addhead(&ma.paint_layers, layer);
+    BLI_addhead(owner, layer);
   }
   else {
-    BLI_insertlinkbefore(&ma.paint_layers, BLI_findlink(&ma.paint_layers, index), layer);
+    BLI_insertlinkbefore(owner, BLI_findlink(owner, index), layer);
   }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+MaterialPaintLayer *BKE_paint_layers_group(Material &ma, const Span<MaterialPaintLayer *> layers)
+{
+  if (layers.is_empty()) {
+    return nullptr;
+  }
+  PaintLayerList *owner = nullptr;
+  for (MaterialPaintLayer *layer : layers) {
+    if (layer == nullptr) {
+      return nullptr;
+    }
+    PaintLayerList *layer_owner = BKE_paint_layers_owner_list(ma, *layer);
+    if (layer_owner == nullptr || (owner != nullptr && owner != layer_owner)) {
+      return nullptr;
+    }
+    owner = layer_owner;
+  }
+
+  /* The members are taken in the order of the list, not of \a layers, so their relative order
+   * survives the fold whatever order the caller named them in, and a row named twice moves once. */
+  Vector<MaterialPaintLayer *> members;
+  for (MaterialPaintLayer &row : *owner) {
+    if (layers.contains(&row)) {
+      members.append(&row);
+    }
+  }
+
+  /* The folder takes the position of its lowest member: the fold replaces the run the members came
+   * from, so the rows that were below it stay below and the ones above stay above. The index counts
+   * the surviving rows below that slot, because the members are removed first. */
+  const int insert_index = BLI_findindex(owner, members.first());
+
+  MaterialPaintLayer *folder = paint_layer_alloc(ma, "Folder");
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  for (MaterialPaintLayer *layer : members) {
+    BLI_remlink(owner, layer);
+    BLI_addtail(&folder->children, layer);
+  }
+  if (insert_index >= BLI_listbase_count(owner)) {
+    BLI_addtail(owner, folder);
+  }
+  else {
+    BLI_insertlinkbefore(owner, BLI_findlink(owner, insert_index), folder);
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return folder;
+}
+
+bool BKE_paint_layers_ungroup(Material &ma, MaterialPaintLayer *folder)
+{
+  if (folder == nullptr) {
+    return false;
+  }
+  PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *folder);
+  if (owner == nullptr || !BKE_paint_layers_is_folder(*folder)) {
+    return false;
+  }
+
+  /* Only the folder itself disappears: a row that lifts out keeps its marker, so an active cursor
+   * naming one stays valid. */
+  if (!BLI_uuid_is_nil(ma.active_layer_marker) &&
+      BLI_uuid_equal(ma.active_layer_marker, folder->marker))
+  {
+    ma.active_layer_marker = {};
+  }
+
+  /* The folder's own mask goes with it, and its maps lose that user. */
+  for (MaterialPaintLayer &item : folder->mask_stack) {
+    paint_layer_release_users(item);
+  }
+
+  /* The children lift into the folder's slot in their own order. */
+  PaintLayerList lifted = folder->children;
+  folder->children = {nullptr, nullptr};
+  for (MaterialPaintLayer &child : lifted.items_mutable()) {
+    BLI_remlink(&lifted, &child);
+    BLI_insertlinkbefore(owner, folder, &child);
+  }
+  BLI_remlink(owner, folder);
+  BKE_material_paint_layer_free(folder);
+
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -582,6 +825,10 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
                                                         const eMaterialPaintChannel channel)
 {
   if (!paint_layer_owned(ma, layer)) {
+    return nullptr;
+  }
+  /* A folder carries no maps of its own: it takes part in a channel through its children. */
+  if (BKE_paint_layers_is_folder(*layer)) {
     return nullptr;
   }
   if (MaterialPaintLayerChannel *existing = paint_layer_channel_find(*layer, channel)) {
@@ -767,6 +1014,10 @@ bool BKE_paint_layers_set_source(Material &ma,
     return false;
   }
   if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+    return false;
+  }
+  /* Turning a folder into a layer would orphan what it holds, and ungrouping is the one way out. */
+  if (BKE_paint_layers_is_folder(*layer)) {
     return false;
   }
   if (layer->source == source) {

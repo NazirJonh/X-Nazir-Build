@@ -339,16 +339,34 @@ void blend_inputs_link(bNodeTree &tree,
   }
 }
 
+/** A Mix node in float mode: `mix(A, B, factor)`, the coverage fold of an isolated row. */
+static bNode *mix_float_node_add(bNodeTree &tree)
+{
+  bNode *mix = bke::node_add_static_node(nullptr, tree, SH_NODE_MIX);
+  if (mix == nullptr) {
+    return nullptr;
+  }
+  NodeShaderMix *storage = static_cast<NodeShaderMix *>(mix->storage);
+  storage->data_type = SOCK_FLOAT;
+  storage->factor_mode = NODE_MIX_MODE_UNIFORM;
+  storage->clamp_factor = true;
+  storage->clamp_result = false;
+  return mix;
+}
+
 RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
                                             LayerGroup &group,
-                                            const int channel)
+                                            const int channel,
+                                            const bool isolated)
 {
   bNodeTree &tree = *group.tree;
   bNode *group_input = group.group_input;
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
       eMaterialPaintChannel(channel));
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-  if (record == nullptr) {
+  /* A folder owns no record: its source is the isolated result of what it holds. */
+  const bool folder = BKE_paint_layers_is_folder(layer);
+  if (record == nullptr && !folder) {
     return {};
   }
 
@@ -371,12 +389,64 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     return {};
   }
 
+  /* Inside a folder the contract carries the coverage next to the colour. */
+  bNodeTreeInterfaceSocket *below_coverage_iface = nullptr;
+  bNodeTreeInterfaceSocket *result_coverage_iface = nullptr;
+  bNodeSocket *below_coverage = nullptr;
+  bNodeSocket *result_coverage_out = nullptr;
+  if (isolated) {
+    SNPRINTF(socket_name, "Below Coverage %s", info.ui_name);
+    below_coverage_iface = layer_group_add_socket(
+        group, socket_name, "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT);
+    SNPRINTF(socket_name, "Result Coverage %s", info.ui_name);
+    result_coverage_iface = layer_group_add_socket(
+        group, socket_name, "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT);
+    if (below_coverage_iface == nullptr || result_coverage_iface == nullptr) {
+      return {};
+    }
+    below_coverage = bke::node_find_socket(
+        *group_input, SOCK_OUT, UString::from_ptr_noinline(below_coverage_iface->identifier));
+    result_coverage_out = bke::node_find_socket(
+        *group.group_output, SOCK_IN, UString::from_ptr_noinline(result_coverage_iface->identifier));
+    if (below_coverage == nullptr || result_coverage_out == nullptr) {
+      return {};
+    }
+  }
+
+  /* A folder takes the straightened result of its contents and the coverage they accumulated. */
+  bNodeTreeInterfaceSocket *folder_color_iface = nullptr;
+  bNodeTreeInterfaceSocket *folder_coverage_iface = nullptr;
+  bNodeSocket *folder_color = nullptr;
+  bNodeSocket *folder_coverage = nullptr;
+  if (folder) {
+    SNPRINTF(socket_name, "Folder Color %s", info.ui_name);
+    folder_color_iface = layer_group_add_socket(
+        group, socket_name, "NodeSocketColor", NODE_INTERFACE_SOCKET_INPUT);
+    SNPRINTF(socket_name, "Folder Coverage %s", info.ui_name);
+    folder_coverage_iface = layer_group_add_socket(
+        group, socket_name, "NodeSocketFloat", NODE_INTERFACE_SOCKET_INPUT);
+    if (folder_color_iface == nullptr || folder_coverage_iface == nullptr) {
+      return {};
+    }
+    folder_color = bke::node_find_socket(
+        *group_input, SOCK_OUT, UString::from_ptr_noinline(folder_color_iface->identifier));
+    folder_coverage = bke::node_find_socket(
+        *group_input, SOCK_OUT, UString::from_ptr_noinline(folder_coverage_iface->identifier));
+    if (folder_color == nullptr || folder_coverage == nullptr) {
+      return {};
+    }
+  }
+
   /* The row's source: its map, or the constant the row's group takes as an input. */
   bNode *source_node = nullptr;
   bNodeSocket *source = nullptr;
   bNode *map_node = nullptr;
   Vector<bNode *> source_nodes;
-  if (record->image != nullptr) {
+  if (folder) {
+    source_node = group_input;
+    source = folder_color;
+  }
+  else if (record->image != nullptr) {
     bNode *map = this->image_map_node_add(tree, *record->image);
     if (map == nullptr) {
       return {};
@@ -432,6 +502,23 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     }
   }
 
+  /* A folder covers by the coverage its contents accumulated: where nothing of them reaches, the
+   * folder shows what is below however opaque its own factor is. */
+  if (folder) {
+    if (factor == nullptr) {
+      factor_node = group_input;
+      factor = folder_coverage;
+    }
+    else {
+      const NodeOutput product = this->multiply_nodes_add(
+          tree, {factor_node, factor}, {group_input, folder_coverage});
+      if (product.node != nullptr) {
+        factor_node = product.node;
+        factor = product.socket;
+      }
+    }
+  }
+
   /* The row's mask lays its own factor over the row's, the same for every channel. */
   const NodeOutput mask = this->mask_factor_ensure(tree, group, layer);
   if (mask.node != nullptr) {
@@ -455,16 +542,100 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   if (blend.node == nullptr) {
     return {};
   }
-  blend_inputs_link(tree,
-                    blend,
-                    {group_input, below},
-                    {source_node, source},
-                    {factor_node, factor});
-  bke::node_add_link(tree, *blend.node, *blend.result, *group.group_output, *result_out);
-  {
+  if (!isolated) {
+    blend_inputs_link(tree,
+                      blend,
+                      {group_input, below},
+                      {source_node, source},
+                      {factor_node, factor});
+    bke::node_add_link(tree, *blend.node, *blend.result, *group.group_output, *result_out);
     Vector<bNode *> blend_nodes;
     blend_nodes.append(blend.node);
     layout::frame_add(tree, "Blend", blend_nodes);
+  }
+  else {
+    /* Inside a folder `below` is the pre-multiplied accumulation `P` and `below_coverage` its
+     * coverage `a`. With `S = P / a` the straight colour so far and `f` this row's factor:
+     *   c_eff = lerp(c, blend(S, c), a)   (where nothing is below yet the row is its own colour)
+     *   P'    = lerp(P, c_eff, f)
+     *   a'    = lerp(a, 1, f)
+     * which is what the CPU's isolated accumulation computes row by row. */
+    bNode *divide = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+    bNode *c_eff = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+    bNode *premul = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+    bNode *coverage = mix_float_node_add(tree);
+    if (divide == nullptr || c_eff == nullptr || premul == nullptr || coverage == nullptr) {
+      return {};
+    }
+    divide->custom1 = NODE_VECTOR_MATH_DIVIDE;
+    grid_.place(*divide, layout::Column::Output, 7);
+    grid_.place(*c_eff, layout::Column::Output, 8);
+    grid_.place(*premul, layout::Column::Output, 9);
+    grid_.place(*coverage, layout::Column::Output, 10);
+
+    bNodeSocket *divide_a = socket_in(*divide, "Vector");
+    bNodeSocket *divide_b = socket_in(*divide, "Vector_001");
+    bNodeSocket *divide_out = socket_out(*divide, "Vector");
+    bNodeSocket *eff_a = socket_in(*c_eff, "A_Color");
+    bNodeSocket *eff_b = socket_in(*c_eff, "B_Color");
+    bNodeSocket *eff_fac = socket_in(*c_eff, "Factor_Float");
+    bNodeSocket *eff_out = socket_out(*c_eff, "Result_Color");
+    bNodeSocket *premul_a = socket_in(*premul, "A_Color");
+    bNodeSocket *premul_b = socket_in(*premul, "B_Color");
+    bNodeSocket *premul_fac = socket_in(*premul, "Factor_Float");
+    bNodeSocket *premul_out = socket_out(*premul, "Result_Color");
+    bNodeSocket *cover_a = socket_in(*coverage, "A_Float");
+    bNodeSocket *cover_b = socket_in(*coverage, "B_Float");
+    bNodeSocket *cover_fac = socket_in(*coverage, "Factor_Float");
+    bNodeSocket *cover_out = socket_out(*coverage, "Result_Float");
+    const std::array<const bNodeSocket *, 16> sockets = {divide_a,
+                                                         divide_b,
+                                                         divide_out,
+                                                         eff_a,
+                                                         eff_b,
+                                                         eff_fac,
+                                                         eff_out,
+                                                         premul_a,
+                                                         premul_b,
+                                                         premul_fac,
+                                                         premul_out,
+                                                         cover_a,
+                                                         cover_b,
+                                                         cover_fac,
+                                                         cover_out,
+                                                         below_coverage};
+    if (std::find(sockets.begin(), sockets.end(), nullptr) != sockets.end()) {
+      return {};
+    }
+
+    bke::node_add_link(tree, *group_input, *below, *divide, *divide_a);
+    bke::node_add_link(tree, *group_input, *below_coverage, *divide, *divide_b);
+    /* The row blends over the straightened accumulation at full factor; the factor is applied
+     * after, to the whole colour. */
+    blend_inputs_link(tree, blend, {divide, divide_out}, {source_node, source}, {});
+    bke::node_add_link(tree, *source_node, *source, *c_eff, *eff_a);
+    bke::node_add_link(tree, *blend.node, *blend.result, *c_eff, *eff_b);
+    bke::node_add_link(tree, *group_input, *below_coverage, *c_eff, *eff_fac);
+
+    bke::node_add_link(tree, *group_input, *below, *premul, *premul_a);
+    bke::node_add_link(tree, *c_eff, *eff_out, *premul, *premul_b);
+    bke::node_add_link(tree, *group_input, *below_coverage, *coverage, *cover_a);
+    static_cast<bNodeSocketValueFloat *>(cover_b->default_value)->value = 1.0f;
+    if (factor != nullptr) {
+      bke::node_add_link(tree, *factor_node, *factor, *premul, *premul_fac);
+      bke::node_add_link(tree, *factor_node, *factor, *coverage, *cover_fac);
+    }
+    else {
+      /* No factor at all: the row covers fully. */
+      static_cast<bNodeSocketValueFloat *>(premul_fac->default_value)->value = 1.0f;
+      static_cast<bNodeSocketValueFloat *>(cover_fac->default_value)->value = 1.0f;
+    }
+    bke::node_add_link(tree, *premul, *premul_out, *group.group_output, *result_out);
+    bke::node_add_link(
+        tree, *coverage, *cover_out, *group.group_output, *result_coverage_out);
+
+    Vector<bNode *> blend_nodes = {blend.node, divide, c_eff, premul, coverage};
+    layout::frame_add(tree, "Isolated Blend", blend_nodes);
   }
 
   RowResult result;
@@ -477,12 +648,31 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   if (result.below == nullptr || result.result == nullptr) {
     return {};
   }
+  if (isolated) {
+    result.below_coverage = bke::node_find_socket(
+        *group.instance, SOCK_IN, UString::from_ptr_noinline(below_coverage_iface->identifier));
+    result.result_coverage = bke::node_find_socket(
+        *group.instance, SOCK_OUT, UString::from_ptr_noinline(result_coverage_iface->identifier));
+    if (result.below_coverage == nullptr || result.result_coverage == nullptr) {
+      return {};
+    }
+  }
+  if (folder) {
+    result.folder_color = bke::node_find_socket(
+        *group.instance, SOCK_IN, UString::from_ptr_noinline(folder_color_iface->identifier));
+    result.folder_coverage = bke::node_find_socket(
+        *group.instance, SOCK_IN, UString::from_ptr_noinline(folder_coverage_iface->identifier));
+    if (result.folder_color == nullptr || result.folder_coverage == nullptr) {
+      return {};
+    }
+  }
   return result;
 }
 
-RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer & /*layer*/,
+RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &layer,
                                                   LayerGroup &group,
-                                                  const int channel)
+                                                  const int channel,
+                                                  const bool isolated)
 {
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
       eMaterialPaintChannel(channel));
@@ -505,6 +695,31 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer & /*l
       *group.instance, SOCK_OUT, UString::from_ptr_noinline(result_iface->identifier));
   if (result.below == nullptr || result.result == nullptr) {
     return {};
+  }
+  /* The same extra sockets build_row adds, found by the names it gives them. */
+  const auto instance_input = [&](const char *prefix, const StringRef type, const bool input)
+      -> bNodeSocket * {
+    SNPRINTF(socket_name, "%s %s", prefix, info.ui_name);
+    bNodeTreeInterfaceSocket *iface = layer_group_socket_find(group, socket_name, type, input);
+    if (iface == nullptr) {
+      return nullptr;
+    }
+    return bke::node_find_socket(
+        *group.instance, input ? SOCK_IN : SOCK_OUT, UString::from_ptr_noinline(iface->identifier));
+  };
+  if (isolated) {
+    result.below_coverage = instance_input("Below Coverage", "NodeSocketFloat", true);
+    result.result_coverage = instance_input("Result Coverage", "NodeSocketFloat", false);
+    if (result.below_coverage == nullptr || result.result_coverage == nullptr) {
+      return {};
+    }
+  }
+  if (BKE_paint_layers_is_folder(layer)) {
+    result.folder_color = instance_input("Folder Color", "NodeSocketColor", true);
+    result.folder_coverage = instance_input("Folder Coverage", "NodeSocketFloat", true);
+    if (result.folder_color == nullptr || result.folder_coverage == nullptr) {
+      return {};
+    }
   }
   return result;
 }

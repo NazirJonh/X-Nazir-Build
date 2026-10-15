@@ -57,6 +57,12 @@ static void rna_def_stack_row_marker(wmOperatorType *ot)
                  "position, which is only the row's at the time of the call");
 }
 
+/** The `ordinal` property of a row operator; \a description says what -1 means for it. */
+static void rna_def_stack_row_ordinal(wmOperatorType *ot, const char *description)
+{
+  RNA_def_int(ot->srna, "ordinal", -1, -1, SHRT_MAX, "Ordinal", description, -1, SHRT_MAX);
+}
+
 void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot)
 {
   ot->name = "Focus Stack";
@@ -429,6 +435,94 @@ void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot)
               "Layer to copy; -1 uses the active one",
               -1,
               SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_group(wmOperatorType *ot)
+{
+  ot->name = "Group Stack Layers";
+  ot->idname = "OUTLINER_OT_stack_layer_group";
+  ot->description =
+      "Put a run of layers into a folder, composited on its own and laid over the rest as one "
+      "layer";
+  ot->exec = stack_rows_group_exec;
+  ot->poll = stack_row_add_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  rna_def_stack_row_ordinal(ot, "Bottom layer of the run; -1 uses the active one");
+  RNA_def_int(ot->srna,
+              "to_ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Top",
+              "Top layer of the run; -1 groups the bottom layer on its own",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot)
+{
+  ot->name = "Add Layer Group";
+  ot->idname = "OUTLINER_OT_stack_layer_group_add";
+  ot->description = "Add an empty folder above the active layer, to put layers into";
+  ot->exec = stack_group_add_exec;
+  ot->poll = stack_row_add_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  rna_def_stack_row_ordinal(ot, "Layer to sit above; -1 uses the active row");
+  rna_def_stack_row_marker(ot);
+}
+
+/**
+ * Whether the row an ungroup would land on is a folder.
+ *
+ * Only a folder can be unwrapped, and the context menu leans on this poll to show the entry only
+ * where it applies. The poll cannot read the operator's marker, so it answers for what the
+ * operator will do without one: the selection if there is one, the active row otherwise. The exec
+ * still takes a marker, and the grouping editor refuses an ungroup for anything that is not a
+ * folder.
+ */
+static bool stack_row_ungroup_poll(bContext *C)
+{
+  if (!stack_row_add_poll(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  Vector<int> selected;
+  stack_selected_ordinals_get(*space_outliner, selected);
+  const int ordinal = !selected.is_empty() ? selected.first() :
+                                             outliner_stack_active_ordinal_get(
+                                                 outliner_stack_read_context(*C), *space_outliner);
+  const StackRow *row = (ordinal < 0) ? nullptr : outliner_stack_row_find(*space_outliner, ordinal);
+  return row != nullptr && row->can_hold_children;
+}
+
+void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot)
+{
+  ot->name = "Ungroup Stack Layers";
+  ot->idname = "OUTLINER_OT_stack_layer_ungroup";
+  ot->description = "Put the layers of a folder back into the stack around it";
+  ot->exec = stack_row_ungroup_exec;
+  ot->poll = stack_row_ungroup_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  rna_def_stack_row_ordinal(ot, "Folder to unwrap; -1 uses the active row");
+  rna_def_stack_row_marker(ot);
+}
+
+void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot)
+{
+  ot->name = "Merge Layer Down";
+  ot->idname = "OUTLINER_OT_stack_layer_merge_down";
+  ot->description =
+      "Collapse a layer and the one below it into one folder that composites just the same";
+  ot->exec = stack_row_merge_down_exec;
+  ot->poll = stack_row_add_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  rna_def_stack_row_ordinal(ot, "Layer to merge into the one below it; -1 uses the active one");
   rna_def_stack_row_marker(ot);
 }
 

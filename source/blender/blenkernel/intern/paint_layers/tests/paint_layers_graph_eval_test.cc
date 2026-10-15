@@ -9,6 +9,8 @@
  * #BKE_paint_layers_composite_image_layers evaluated at the same pixel.
  */
 
+#include <cmath>
+
 #include "paint_layers_graph_eval_test_fixture.hh"
 
 namespace blender::bke::tests {
@@ -190,4 +192,97 @@ TEST_F(PaintLayersGraphEvalTest, fill_layer_lays_its_colour)
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 }
 
+TEST_F(PaintLayersGraphEvalTest, folder_of_two_rows_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *first = add_layer("First", add_solid_image("First", 30, 160, 220, 255));
+  MaterialPaintLayer *second = add_layer("Second", add_solid_image("Second", 240, 20, 90, 255));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, second, 0.5f));
+  MaterialPaintLayer *members[2] = {first, second};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.7f));
+  ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, folder, MA_PAINT_LAYER_BLEND_MULTIPLY));
+
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalTest, folder_with_translucent_maps_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *first = add_layer("First", add_solid_image("First", 30, 160, 220, 128));
+  MaterialPaintLayer *second = add_layer("Second", add_solid_image("Second", 240, 20, 90, 100));
+  MaterialPaintLayer *members[2] = {first, second};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2)), nullptr);
+
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalTest, reorder_inside_a_folder_reaches_the_graph)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *first = add_layer("First", add_solid_image("First", 30, 160, 220, 255));
+  MaterialPaintLayer *second = add_layer("Second", add_solid_image("Second", 240, 20, 90, 255));
+  MaterialPaintLayer *members[2] = {first, second};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2)), nullptr);
+
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  expect_graph_matches_cpu(channel);
+  const RGBA before = graph_pixel(channel);
+
+  /* The folder's rows are the same set in another order, so only the order is structure here: a
+   * root hash that ignores it keeps the old chain and the graph keeps showing the old result. */
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, second, 0));
+  expect_graph_matches_cpu(channel);
+  const RGBA after = graph_pixel(channel);
+  EXPECT_GT(std::abs(before.r - after.r) + std::abs(before.g - after.g) +
+                std::abs(before.b - after.b),
+            0.1f);
+}
+
+TEST_F(PaintLayersGraphEvalTest, nested_folder_order_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *base = add_layer("Base", add_solid_image("Base", 10, 200, 40, 255));
+  MaterialPaintLayer *inner_low = add_layer("InnerLow",
+                                            add_solid_image("InnerLow", 30, 160, 220, 255));
+  MaterialPaintLayer *inner_high = add_layer("InnerHigh",
+                                             add_solid_image("InnerHigh", 240, 20, 90, 255));
+  MaterialPaintLayer *over = add_layer("Over", add_solid_image("Over", 250, 250, 20, 128));
+
+  /* B = [Base, A = [InnerLow, InnerHigh], Over]: A sits below the row that overlaps it. */
+  MaterialPaintLayer *inner_members[2] = {inner_low, inner_high};
+  MaterialPaintLayer *inner = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(inner_members, 2));
+  ASSERT_NE(inner, nullptr);
+  MaterialPaintLayer *outer_members[3] = {base, inner, over};
+  MaterialPaintLayer *outer = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(outer_members, 3));
+  ASSERT_NE(outer, nullptr);
+
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  expect_graph_matches_cpu(channel);
+  const RGBA initial = graph_pixel(channel);
+
+  /* Inside the inner folder. */
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, inner_high, 0));
+  expect_graph_matches_cpu(channel);
+
+  /* The inner folder moves below Base, still inside the outer one. */
+  ASSERT_TRUE(BKE_paint_layers_move(*ma, inner, base, PaintLayerPlace::Below));
+  expect_graph_matches_cpu(channel);
+  const RGBA moved = graph_pixel(channel);
+  EXPECT_GT(std::abs(initial.r - moved.r) + std::abs(initial.g - moved.g) +
+                std::abs(initial.b - moved.b),
+            0.1f);
+
+  /* Back above Base: the original structure gives the original pixel again. */
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, inner_low, 0));
+  ASSERT_TRUE(BKE_paint_layers_move(*ma, inner, base, PaintLayerPlace::Above));
+  const RGBA restored = graph_pixel(channel);
+  EXPECT_NEAR(restored.r, initial.r, 2e-3f);
+  EXPECT_NEAR(restored.g, initial.g, 2e-3f);
+  EXPECT_NEAR(restored.b, initial.b, 2e-3f);
+  expect_graph_matches_cpu(channel);
+}
 }  // namespace blender::bke::tests

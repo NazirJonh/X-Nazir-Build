@@ -27,6 +27,7 @@
  */
 
 #include <cstdint>
+#include <vector>
 
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -129,6 +130,12 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   /** How much of the mask applies; 0 ignores the mask entirely. */
   float mask_influence = 1.0f;
   bool enabled = true;
+  /**
+   * A folder: it has no map or constant of its own, only its children composited in isolation over
+   * nothing. The folder then lays that straight colour over the rows below with its own blend,
+   * opacity and mask, scaled by the coverage the children accumulated.
+   */
+  bool is_folder = false;
 };
 
 /**
@@ -163,6 +170,11 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   const ImageUser *mask_iuser = nullptr;
   /** The row's mask items, bottom to top; each multiplies the factor. */
   Vector<PaintMaterialCompositeMaskItem> mask_items;
+  /**
+   * A folder's own stack, bottom to top. A std::vector rather than a #Vector: the element type is
+   * the one being defined here, and #Vector needs its size.
+   */
+  std::vector<PaintMaterialCompositeImageLayer> children;
 };
 
 /** A mask item as the evaluator reads it: a buffer, or a constant when #ibuf is null. */
@@ -188,6 +200,8 @@ struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
   const char *mask_colorspace_name = nullptr;
   /** The row's mask items, bottom to top. */
   Vector<PaintMaterialCompositeMaskBuffer> mask_items;
+  /** A folder's own stack, bottom to top; see #PaintMaterialCompositeImageLayer::children. */
+  std::vector<PaintMaterialCompositeLayer> children;
 };
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */

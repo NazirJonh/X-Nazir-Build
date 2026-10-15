@@ -116,6 +116,10 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     BKE_material_paint_layer_free(&item);
   }
   layer->mask_stack = {nullptr, nullptr};
+  for (MaterialPaintLayer &child : layer->children.items_mutable()) {
+    BKE_material_paint_layer_free(&child);
+  }
+  layer->children = {nullptr, nullptr};
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
   MEM_delete(layer);
@@ -140,10 +144,15 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
     dst->channels = static_cast<MaterialPaintLayerChannel *>(MEM_dupalloc(src.channels));
     dst->channels_num = src.channels_num;
   }
-  /* The duplicate above copied the list head: the items are owned sub-data, so each gets its own. */
+  /* The duplicate above copied the list heads: the items and children are owned sub-data, so each
+   * gets its own. */
   dst->mask_stack = {nullptr, nullptr};
   for (const MaterialPaintLayer &item : src.mask_stack) {
     BLI_addtail(&dst->mask_stack, material_paint_layer_copy(item));
+  }
+  dst->children = {nullptr, nullptr};
+  for (const MaterialPaintLayer &child : src.children) {
+    BLI_addtail(&dst->children, material_paint_layer_copy(child));
   }
   return dst;
 }
@@ -156,9 +165,12 @@ static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryFo
   for (MaterialPaintLayer &item : layer->mask_stack) {
     material_paint_layer_foreach_id(&item, data);
   }
+  for (MaterialPaintLayer &child : layer->children) {
+    material_paint_layer_foreach_id(&child, data);
+  }
 }
 
-/** Write \a layer's channel records and, recursively, the items of its mask stack. */
+/** Write \a layer's channel records and, recursively, its mask stack and its children. */
 static void material_paint_layer_blend_write(BlendWriter *writer, const MaterialPaintLayer &layer)
 {
   if (layer.channels != nullptr && layer.channels_num > 0) {
@@ -167,6 +179,10 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   writer->write_struct_list(&layer.mask_stack);
   for (const MaterialPaintLayer &item : layer.mask_stack) {
     material_paint_layer_blend_write(writer, item);
+  }
+  writer->write_struct_list(&layer.children);
+  for (const MaterialPaintLayer &child : layer.children) {
+    material_paint_layer_blend_write(writer, child);
   }
 }
 
@@ -191,6 +207,10 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
   BLO_read_struct_list(reader, MaterialPaintLayer, &layer.mask_stack);
   for (MaterialPaintLayer &item : layer.mask_stack) {
     material_paint_layer_blend_read(reader, item);
+  }
+  BLO_read_struct_list(reader, MaterialPaintLayer, &layer.children);
+  for (MaterialPaintLayer &child : layer.children) {
+    material_paint_layer_blend_read(reader, child);
   }
 }
 

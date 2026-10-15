@@ -69,6 +69,11 @@ class OUTLINER_HT_tool_header(Header):
             row = layout.row(align=True)
             row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
 
+            # An empty folder to put layers into; layers join one by dropping them onto it.
+            layout.separator()
+            row = layout.row(align=True)
+            row.operator("outliner.stack_layer_group_add", text="", icon='NEWFOLDER')
+
         if space.show_stack_layer_move_buttons:
             layout.separator()
             row = layout.row(align=True)
@@ -244,6 +249,12 @@ class OUTLINER_MT_context_menu(Menu):
                     props = layout.operator(
                         "outliner.stack_layer_mask", text="Remove Mask", icon='X')
                     props.add = False
+                layout.separator()
+                layout.operator(
+                    "outliner.stack_layer_group_add", text="New Group", icon='NEWFOLDER')
+                # Only a folder can be unwrapped; the operator's poll answers for the row.
+                if bpy.ops.outliner.stack_layer_ungroup.poll():
+                    layout.operator("outliner.stack_layer_ungroup", text="Ungroup")
                 layout.separator()
             layout.menu("OUTLINER_MT_context_menu_view")
             layout.separator()

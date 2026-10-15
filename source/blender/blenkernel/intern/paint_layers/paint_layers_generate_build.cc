@@ -181,7 +181,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
 {
   const char *layer_name = layer.name[0] != '\0' ? layer.name : "Layer";
   for (const int channel : wired_channels_) {
-    if (!leaf_participates(ma_, layer, channel)) {
+    if (!row_participates(ma_, layer, channel)) {
       continue;
     }
     const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
@@ -350,28 +350,8 @@ NodeOutput PaintLayersTreeBuilder::channel_chain_build(const int channel,
                                                        const float location_y,
                                                        float &location_x)
 {
-  NodeOutput end = below;
-  for (const MaterialPaintLayer &layer : ma_.paint_layers) {
-    if (!leaf_participates(ma_, layer, channel)) {
-      continue;
-    }
-    LayerGroup *group = layer_group_ensure(layer, location_x, location_y);
-    if (group == nullptr) {
-      continue;
-    }
-    /* A group the factory kept already holds the row: only its instance is re-linked, so its nodes
-     * are never rebuilt and a value-only pass touches nothing. */
-    const bool reused = ctx_.layer_unchanged && ctx_.layer_unchanged(layer);
-    const RowResult row = reused ? row_link_reused(layer, *group, channel) :
-                                   build_row(layer, *group, channel);
-    if (!row.valid) {
-      continue;
-    }
-    bke::node_add_link(tree_, *end.node, *end.socket, *row.instance, *row.below);
-    end = {row.instance, row.result};
-    location_x += 180.0f;
-  }
-  return end;
+  return this->list_build(ma_.paint_layers, {below, {}}, channel, location_y, location_x, false)
+      .color;
 }
 
 /**
@@ -403,6 +383,125 @@ static bNode *vector_math_add(bNodeTree &tree,
     }
   }
   return node;
+}
+
+/**
+ * A constant node holding zero: an RGB node (\a is_color) or a Value node. Null when it cannot be
+ * made.
+ */
+static bNode *zero_node_add(bNodeTree &tree, const bool is_color, const float x, const float y)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, is_color ? SH_NODE_RGB : SH_NODE_VALUE);
+  bNodeSocket *out = (node != nullptr) ? socket_out(*node, is_color ? "Color" : "Value") : nullptr;
+  if (out == nullptr) {
+    return nullptr;
+  }
+  if (out->default_value != nullptr) {
+    if (is_color) {
+      zero_v4(static_cast<bNodeSocketValueRGBA *>(out->default_value)->value);
+    }
+    else {
+      static_cast<bNodeSocketValueFloat *>(out->default_value)->value = 0.0f;
+    }
+  }
+  node->location[0] = x;
+  node->location[1] = y;
+  return node;
+}
+
+ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> &list,
+                                            ChainEnd end,
+                                            const int channel,
+                                            const float location_y,
+                                            float &location_x,
+                                            const bool isolated)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    if (!row_participates(ma_, layer, channel)) {
+      continue;
+    }
+
+    /* A folder composites what it holds in isolation: the children are chained first, over nothing
+     * (pre-multiplied colour `P` and coverage `a`, both zero), and the folder row then lays the
+     * straightened result `S = P / a` over what is below by its own factor times `a`. The divide is
+     * safe at zero, so a folder nothing of which covers reads as no colour and no coverage. */
+    NodeOutput folder_color;
+    NodeOutput folder_coverage;
+    if (BKE_paint_layers_is_folder(layer)) {
+      bNode *p_zero = zero_node_add(tree_, true, location_x, location_y - 140.0f);
+      bNode *a_zero = zero_node_add(tree_, false, location_x, location_y - 260.0f);
+      /* A folder that cannot be built leaves no half of it behind in the tree. */
+      const auto discard = [&](bNode *extra) {
+        for (bNode *node : {p_zero, a_zero, extra}) {
+          if (node != nullptr) {
+            bke::node_remove_node(nullptr, tree_, *node, true, false);
+          }
+        }
+      };
+      if (p_zero == nullptr || a_zero == nullptr) {
+        discard(nullptr);
+        continue;
+      }
+      const ChainEnd inner = this->list_build(layer.children,
+                                              {{p_zero, socket_out(*p_zero, "Color")},
+                                               {a_zero, socket_out(*a_zero, "Value")}},
+                                              channel,
+                                              location_y,
+                                              location_x,
+                                              true);
+      bNode *divide = vector_math_add(
+          tree_, NODE_VECTOR_MATH_DIVIDE, location_x, location_y - 140.0f);
+      bNodeSocket *divide_a = (divide != nullptr) ? socket_in(*divide, "Vector") : nullptr;
+      bNodeSocket *divide_b = (divide != nullptr) ? socket_in(*divide, "Vector_001") : nullptr;
+      bNodeSocket *divide_out = (divide != nullptr) ? socket_out(*divide, "Vector") : nullptr;
+      if (divide_out == nullptr || inner.color.socket == nullptr ||
+          inner.coverage.socket == nullptr)
+      {
+        discard(divide);
+        continue;
+      }
+      bke::node_add_link(tree_, *inner.color.node, *inner.color.socket, *divide, *divide_a);
+      bke::node_add_link(tree_, *inner.coverage.node, *inner.coverage.socket, *divide, *divide_b);
+      folder_color = {divide, divide_out};
+      folder_coverage = inner.coverage;
+      location_x += 180.0f;
+    }
+
+    LayerGroup *group = layer_group_ensure(layer, location_x, location_y);
+    if (group == nullptr) {
+      continue;
+    }
+    /* A group the factory kept already holds the row: only its instance is re-linked, so its nodes
+     * are never rebuilt and a value-only pass touches nothing. */
+    const bool reused = ctx_.layer_unchanged && ctx_.layer_unchanged(layer);
+    const RowResult row = reused ? row_link_reused(layer, *group, channel, isolated) :
+                                   build_row(layer, *group, channel, isolated);
+    if (!row.valid) {
+      continue;
+    }
+    bke::node_add_link(tree_, *end.color.node, *end.color.socket, *row.instance, *row.below);
+    if (isolated && row.below_coverage != nullptr && end.coverage.socket != nullptr) {
+      bke::node_add_link(
+          tree_, *end.coverage.node, *end.coverage.socket, *row.instance, *row.below_coverage);
+    }
+    if (folder_color.socket != nullptr && row.folder_color != nullptr &&
+        row.folder_coverage != nullptr)
+    {
+      bke::node_add_link(
+          tree_, *folder_color.node, *folder_color.socket, *row.instance, *row.folder_color);
+      bke::node_add_link(tree_,
+                         *folder_coverage.node,
+                         *folder_coverage.socket,
+                         *row.instance,
+                         *row.folder_coverage);
+    }
+    end.color = {row.instance, row.result};
+    end.coverage = (isolated && row.result_coverage != nullptr) ?
+                       NodeOutput{row.instance, row.result_coverage} :
+                       NodeOutput{};
+    location_x += 180.0f;
+  }
+  return end;
 }
 
 NodeOutput PaintLayersTreeBuilder::normal_renormalize_add(const NodeOutput from,

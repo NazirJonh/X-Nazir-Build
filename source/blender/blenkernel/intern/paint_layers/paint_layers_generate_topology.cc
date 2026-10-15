@@ -42,7 +42,10 @@ namespace blender::bke::paint_layers {
 
 uint64_t topology_hash_mix(const uint64_t hash, const uint64_t value)
 {
-  return get_default_hash(hash, value);
+  /* Why not #get_default_hash(hash, value): that XORs its arguments, so the fold would be
+   * commutative and reordering rows would leave the root hash -- and the generated chain -- as it
+   * was. */
+  return hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2));
 }
 
 void topology_hash_string(uint64_t &hash, const char *text)
@@ -136,9 +139,11 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
   topology_hash_string(hash, layer.name);
+  /* A row inside a folder is built in the isolated form, with sockets of its own. */
+  hash = topology_hash_mix(hash, layer_in_folder(ma, layer) ? 1 : 0);
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
-    hash = topology_hash_mix(hash, leaf_participates(ma, layer, channel) ? 1 : 0);
+    hash = topology_hash_mix(hash, row_participates(ma, layer, channel) ? 1 : 0);
     /* A map and a flat value are different nodes (an Image Texture against a value input), and the
      * texture node names its image: assigning, swapping or removing a map is structure, even when
      * the channel took part before and after. */
@@ -179,20 +184,25 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, const Span<int> wir
   /* The rows in order, each with its own topology: adding, removing or reordering a row moves this,
    * a value edit does not. A row that takes part in no wired channel builds no group and is left
    * out, so a change to it cannot make the root rebuild for nothing. */
-  for (const MaterialPaintLayer &layer : ma.paint_layers) {
-    bool participates = false;
-    for (const int channel : wired_channels) {
-      if (leaf_participates(ma, layer, channel)) {
-        participates = true;
-        break;
-      }
-    }
-    if (!participates) {
-      continue;
-    }
-    topology_hash_uid(hash, layer.marker);
-    hash = topology_hash_mix(hash, paint_layers_layer_topology_hash(ma, layer, wired_channels));
-  }
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *parent) -> bool {
+        bool participates = false;
+        for (const int channel : wired_channels) {
+          if (row_participates(ma, layer, channel)) {
+            participates = true;
+            break;
+          }
+        }
+        if (!participates) {
+          return true;
+        }
+        /* The parent is part of the shape: moving a row into or out of a folder rewires the chain
+         * even when the order of the rows does not change. */
+        topology_hash_uid(hash, layer.marker);
+        topology_hash_uid(hash, parent != nullptr ? parent->marker : bUUID{});
+        hash = topology_hash_mix(hash, paint_layers_layer_topology_hash(ma, layer, wired_channels));
+        return true;
+      });
   return hash;
 }
 

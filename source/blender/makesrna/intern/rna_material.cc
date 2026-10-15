@@ -523,7 +523,13 @@ static void rna_Material_paint_layers_active_set(PointerRNA *ptr,
  */
 static bool rna_paint_layer_in_stack(const Material &ma, const MaterialPaintLayer *layer)
 {
-  return BLI_findindex(&ma.paint_layers, layer) != -1;
+  bool found = false;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        found = &row == layer;
+        return !found;
+      });
+  return found;
 }
 
 static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
@@ -538,9 +544,17 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
    * default names and channels every other authoring path gets. An empty name means the unique
    * default. */
   PaintLayerAddParams params;
-  params.kind = (eMaterialPaintLayerSource(source) == MA_PAINT_LAYER_SOURCE_CONSTANT) ?
-                    PaintLayerAddKind::Fill :
-                    PaintLayerAddKind::Paint;
+  switch (eMaterialPaintLayerSource(source)) {
+    case MA_PAINT_LAYER_SOURCE_CONSTANT:
+      params.kind = PaintLayerAddKind::Fill;
+      break;
+    case MA_PAINT_LAYER_SOURCE_STACK:
+      params.kind = PaintLayerAddKind::Folder;
+      break;
+    default:
+      params.kind = PaintLayerAddKind::Paint;
+      break;
+  }
   params.name = (name[0] != '\0') ? name : nullptr;
   /* An unset optional pointer reaches the callback as null, not as a null #PointerRNA. */
   params.anchor = (anchor_ptr != nullptr) ? static_cast<MaterialPaintLayer *>(anchor_ptr->data) :
@@ -620,6 +634,74 @@ static void rna_Material_paint_layers_reorder(Material *ma,
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
+/**
+ * RNA carries no list arguments, so a group is named by its members pairwise: the first row plus an
+ * optional second. Larger selections are grouped by the Outliner's operator, which calls the BKE
+ * API directly with the full span.
+ */
+static MaterialPaintLayer *rna_Material_paint_layers_group(Material *ma,
+                                                           ReportList *reports,
+                                                           PointerRNA *layer_ptr,
+                                                           PointerRNA *with_ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(layer_ptr->data);
+  MaterialPaintLayer *with = (with_ptr != nullptr) ?
+                                 static_cast<MaterialPaintLayer *>(with_ptr->data) :
+                                 nullptr;
+  if (!rna_paint_layer_in_stack(*ma, layer) ||
+      (with != nullptr && !rna_paint_layer_in_stack(*ma, with)))
+  {
+    BKE_report(reports, RPT_ERROR, "The paint layers are not part of this material");
+    return nullptr;
+  }
+  MaterialPaintLayer *members[2] = {layer, with};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(members, (with != nullptr) ? 2 : 1));
+  if (folder == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Cannot group paint layers of different lists");
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  return folder;
+}
+
+static void rna_Material_paint_layers_ungroup(Material *ma,
+                                              ReportList *reports,
+                                              PointerRNA *folder_ptr)
+{
+  MaterialPaintLayer *folder = static_cast<MaterialPaintLayer *>(folder_ptr->data);
+  if (!rna_paint_layer_in_stack(*ma, folder) || !BKE_paint_layers_ungroup(*ma, folder)) {
+    BKE_report(reports, RPT_ERROR, "Cannot ungroup this paint layer");
+    return;
+  }
+  folder_ptr->invalidate();
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+}
+
+static MaterialPaintLayer *rna_Material_paint_layers_merge_down(Material *ma,
+                                                                ReportList *reports,
+                                                                PointerRNA *upper_ptr,
+                                                                PointerRNA *lower_ptr)
+{
+  MaterialPaintLayer *upper = static_cast<MaterialPaintLayer *>(upper_ptr->data);
+  MaterialPaintLayer *lower = static_cast<MaterialPaintLayer *>(lower_ptr->data);
+  if (!rna_paint_layer_in_stack(*ma, upper) || !rna_paint_layer_in_stack(*ma, lower)) {
+    BKE_report(reports, RPT_ERROR, "Merged rows must belong to this material");
+    return nullptr;
+  }
+  MaterialPaintLayer *folder = BKE_paint_layers_edit_merge_down(*ma, *upper, *lower);
+  if (folder == nullptr) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "Cannot merge paint layer '%s' down into '%s'",
+                upper->name,
+                lower->name);
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  return folder;
+}
+
 static bool rna_Material_is_layered_get(PointerRNA *ptr)
 {
   return BKE_paint_layers_is_layered(*id_cast<Material *>(ptr->owner_id));
@@ -650,16 +732,16 @@ static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *l
   if (ma == nullptr) {
     return nullptr;
   }
-  if (BKE_paint_layers_find(*ma, layer->marker) == layer) {
-    return ma;
-  }
-  /* A mask item is not a row of the stack: it is judged by address in its owner row's list. */
-  for (const MaterialPaintLayer &row : ma->paint_layers) {
-    if (BLI_findindex(&row.mask_stack, layer) != -1) {
-      return ma;
-    }
-  }
-  return nullptr;
+  /* A row of the stack at any depth, or an item of one row's mask: judged by address, so a stale
+   * pointer is never dereferenced. */
+  bool owned = false;
+  BKE_paint_layers_foreach(
+      static_cast<const Material &>(*ma),
+      [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        owned = &row == layer || BLI_findindex(&row.mask_stack, layer) != -1;
+        return !owned;
+      });
+  return owned ? ma : nullptr;
 }
 
 static void rna_MaterialPaintLayer_name_set(PointerRNA *ptr, const char *value)
@@ -752,21 +834,45 @@ static int rna_MaterialPaintLayer_marker_length(PointerRNA * /*ptr*/)
   return UUID_STRING_SIZE - 1;
 }
 
+/**
+ * The path of \a layer below \a prefix, searching \a list and every folder under it: a row is
+ * `<prefix>[i]`, a folder's rows `<prefix>[i].children[j]` and a mask item
+ * `<row path>.mask_items[k]`.
+ */
+static bool rna_paint_layer_path_find(const ListBaseT<MaterialPaintLayer> &list,
+                                      const MaterialPaintLayer *layer,
+                                      const std::string &prefix,
+                                      std::string &r_path)
+{
+  int index = 0;
+  for (const MaterialPaintLayer &row : list) {
+    const std::string row_path = fmt::format("{}[{}]", prefix, index);
+    if (&row == layer) {
+      r_path = row_path;
+      return true;
+    }
+    const int item_index = BLI_findindex(&row.mask_stack, layer);
+    if (item_index != -1) {
+      r_path = fmt::format("{}.mask_items[{}]", row_path, item_index);
+      return true;
+    }
+    if (BKE_paint_layers_is_folder(row) &&
+        rna_paint_layer_path_find(row.children, layer, row_path + ".children", r_path))
+    {
+      return true;
+    }
+    index++;
+  }
+  return false;
+}
+
 static std::optional<std::string> rna_MaterialPaintLayer_path(const PointerRNA *ptr)
 {
   const Material *ma = reinterpret_cast<const Material *>(ptr->owner_id);
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
-  const int index = BLI_findindex(&ma->paint_layers, layer);
-  if (index != -1) {
-    return fmt::format("paint_layers[{}]", index);
-  }
-  int row_index = 0;
-  for (const MaterialPaintLayer &row : ma->paint_layers) {
-    const int item_index = BLI_findindex(&row.mask_stack, layer);
-    if (item_index != -1) {
-      return fmt::format("paint_layers[{}].mask_items[{}]", row_index, item_index);
-    }
-    row_index++;
+  std::string path;
+  if (rna_paint_layer_path_find(ma->paint_layers, layer, "paint_layers", path)) {
+    return path;
   }
   return std::nullopt;
 }
@@ -868,6 +974,19 @@ static void rna_MaterialPaintLayer_mask_items_begin(CollectionPropertyIterator *
   rna_iterator_listbase_begin(iter, ptr, &layer->mask_stack, nullptr);
 }
 
+static void rna_MaterialPaintLayer_children_begin(CollectionPropertyIterator *iter,
+                                                  PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &layer->children, nullptr);
+}
+
+static int rna_MaterialPaintLayer_children_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BLI_listbase_count(&layer->children);
+}
+
 static MaterialPaintLayer *rna_MaterialPaintLayer_mask_add(PointerRNA ptr,
                                                            ReportList *reports,
                                                            const float value)
@@ -913,17 +1032,22 @@ static int rna_MaterialPaintLayer_channels_length(PointerRNA *ptr)
 static MaterialPaintLayer *rna_paint_layer_by_channel(Material &ma,
                                                       const MaterialPaintLayerChannel *channel)
 {
-  for (MaterialPaintLayer &layer : ma.paint_layers) {
-    if (channel >= layer.channels && channel < layer.channels + layer.channels_num) {
-      return &layer;
-    }
-    for (MaterialPaintLayer &item : layer.mask_stack) {
-      if (channel >= item.channels && channel < item.channels + item.channels_num) {
-        return &item;
-      }
-    }
-  }
-  return nullptr;
+  MaterialPaintLayer *found = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        if (channel >= layer.channels && channel < layer.channels + layer.channels_num) {
+          found = &layer;
+          return false;
+        }
+        for (MaterialPaintLayer &item : layer.mask_stack) {
+          if (channel >= item.channels && channel < item.channels + item.channels_num) {
+            found = &item;
+            return false;
+          }
+        }
+        return true;
+      });
+  return found;
 }
 
 /** The owning material of a channel pointer, or null when it is not in its stack. */
@@ -947,25 +1071,30 @@ static std::optional<std::string> rna_MaterialPaintLayerChannel_path(const Point
   if (ma == nullptr) {
     return std::nullopt;
   }
-  int layer_index = 0;
-  for (const MaterialPaintLayer &layer : ma->paint_layers) {
-    if (record >= layer.channels && record < layer.channels + layer.channels_num) {
-      return fmt::format(
-          "paint_layers[{}].channels[{}]", layer_index, int(record - layer.channels));
-    }
-    int item_index = 0;
-    for (const MaterialPaintLayer &item : layer.mask_stack) {
-      if (record >= item.channels && record < item.channels + item.channels_num) {
-        return fmt::format("paint_layers[{}].mask_items[{}].channels[{}]",
-                           layer_index,
-                           item_index,
-                           int(record - item.channels));
-      }
-      item_index++;
-    }
-    layer_index++;
+  /* The row (or mask item) that holds the record, then the record's index in it. */
+  const MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(
+      static_cast<const Material &>(*ma),
+      [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (record >= layer.channels && record < layer.channels + layer.channels_num) {
+          owner = &layer;
+          return false;
+        }
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          if (record >= item.channels && record < item.channels + item.channels_num) {
+            owner = &item;
+            return false;
+          }
+        }
+        return true;
+      });
+  std::string path;
+  if (owner == nullptr ||
+      !rna_paint_layer_path_find(ma->paint_layers, owner, "paint_layers", path))
+  {
+    return std::nullopt;
   }
-  return std::nullopt;
+  return fmt::format("{}.channels[{}]", path, int(record - owner->channels));
 }
 
 static int rna_MaterialPaintLayerChannel_channel_get(PointerRNA *ptr)
@@ -1182,6 +1311,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_channel_state_items[
 static const EnumPropertyItem rna_enum_material_paint_layer_place_items[] = {
     {0, "ABOVE", 0, "Above", "Directly above the anchor"},
     {1, "BELOW", 0, "Below", "Directly below the anchor"},
+    {2, "INTO", 0, "Into", "Inside the anchor folder, on top of what it holds"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1210,10 +1340,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
-/** What a row paints with: a painted map, or a flat Fill colour. */
+/** What a row paints with: a painted map, a flat Fill colour, or the layers a folder holds. */
 static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
     {MA_PAINT_LAYER_SOURCE_CONSTANT, "CONSTANT", 0, "Constant", "A flat colour"},
+    {MA_PAINT_LAYER_SOURCE_STACK, "STACK", 0, "Stack", "A nested stack of layers (a folder)"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1294,6 +1425,20 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                     nullptr,
                                     nullptr);
   RNA_def_property_ui_text(prop, "Channels", "Per-channel maps and values of the layer");
+
+  prop = RNA_def_property(srna, "children", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_children_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    "rna_MaterialPaintLayer_children_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Children", "Nested rows of this folder layer, bottom to top");
 
   prop = RNA_def_property(srna, "mask_items", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayer");
@@ -1543,6 +1688,41 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
   RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
   RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
   RNA_def_int(func, "index", 0, 0, INT_MAX, "Index", "Position, bottom to top", 0, INT_MAX);
+
+  func = RNA_def_function(srna, "group", "rna_Material_paint_layers_group");
+  RNA_def_function_ui_description(func, "Fold paint layers into a new folder layer");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "Paint Layer", "A layer to group");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(
+      func, "with_layer", "MaterialPaintLayer", "", "A second layer to group, or none");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "", "The new folder");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "ungroup", "rna_Material_paint_layers_ungroup");
+  RNA_def_function_ui_description(func, "Lift the rows of a folder and free the folder");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "Paint Layer", "The folder");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+
+  func = RNA_def_function(srna, "merge_down", "rna_Material_paint_layers_merge_down");
+  RNA_def_function_ui_description(
+      func, "Group two neighbouring paint layers into a new folder, which takes their place");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_pointer(
+      func, "upper", "MaterialPaintLayer", "Paint Layer", "The upper of the two layers");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(
+      func, "lower", "MaterialPaintLayer", "Paint Layer", "The lower of the two layers");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_pointer(func, "folder", "MaterialPaintLayer", "", "The new folder");
+  RNA_def_function_return(func, parm);
 
   prop = RNA_def_property(srna, "active", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayer");

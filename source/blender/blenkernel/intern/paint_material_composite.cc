@@ -48,6 +48,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include <cstring>
+#include <iterator>
 #include <memory>
 
 #include "paint_material_cache_common.hh"
@@ -758,15 +759,24 @@ static void blend_row_linear(float dst[4],
  *
  * The coverage is the mask times the layer's own content coverage: a map's alpha for a painted
  * channel map, or full. A mask is decoded like any map, in one tile call.
+ *
+ * A folder has no map: \a folder_color is the straight colour of its contents and \a folder_coverage
+ * the coverage they accumulated, which stand in for the map and for its alpha.
  */
 static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                                    const rcti &tile,
+                                   const float *folder_color,
+                                   const float *folder_coverage,
                                    float *r_color,
                                    float *r_factor)
 {
   const int64_t count = int64_t(BLI_rcti_size_x(&tile)) * BLI_rcti_size_y(&tile);
 
-  if (layer.color_ibuf != nullptr) {
+  if (layer.is_folder) {
+    BLI_assert(folder_color != nullptr && folder_coverage != nullptr);
+    memcpy(r_color, folder_color, size_t(count) * 4 * sizeof(float));
+  }
+  else if (layer.color_ibuf != nullptr) {
     composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
   }
   else {
@@ -797,7 +807,11 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
      * both cover by the map's alpha; a transparent texel shows what is below. */
     const bool own_alpha = (layer.color_alpha_coverage && layer.color_ibuf != nullptr) ||
                            (mask == nullptr && layer.mask_from_alpha);
-    const float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
+    float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
+    if (layer.is_folder) {
+      /* A folder covers by what its contents covered, not by the alpha of the colour it reads. */
+      content = clamp_f(folder_coverage[i], 0.0f, 1.0f);
+    }
     r_factor[i] = mask_value * content;
   }
 
@@ -839,39 +853,154 @@ static bool composite_layer_has_content(const LayerT &layer, const bool has_map)
   return has_map || layer.has_constant_color;
 }
 
+static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folder,
+                                        const rcti &tile,
+                                        float *r_straight,
+                                        float *r_coverage);
+
+/**
+ * Render \a layer to tile-sized buffers: its straight colour and the coverage it blends by, before
+ * its own opacity. A folder is rendered through its isolated contents.
+ */
+static void composite_layer_apply(const PaintMaterialCompositeLayer &layer,
+                                  const rcti &tile,
+                                  float *r_color,
+                                  float *r_factor)
+{
+  if (!layer.is_folder) {
+    composite_layer_render(layer, tile, nullptr, nullptr, r_color, r_factor);
+    return;
+  }
+  const int64_t count = int64_t(BLI_rcti_size_x(&tile)) * BLI_rcti_size_y(&tile);
+  Vector<float> sub_color(count * 4);
+  Vector<float> sub_coverage(count);
+  composite_folder_accumulate(layer, tile, sub_color.data(), sub_coverage.data());
+  composite_layer_render(
+      layer, tile, sub_color.data(), sub_coverage.data(), r_color, r_factor);
+}
+
+/**
+ * Accumulate a folder's contents in isolation: the pre-multiplied colour `P` and the coverage `a`
+ * start at zero, and each child lays itself over them. With `S = P / a` the straight colour so far
+ * and `f` the child's factor:
+ *   c_eff = lerp(c, blend(S, c), a)   (where nothing is below yet a child is its own colour)
+ *   P'    = lerp(P, c_eff, f)
+ *   a'    = a + f * (1 - a)
+ * The result is `S` and `a`, which the folder row then reads like a map and its alpha. The
+ * generator builds the same nodes per row, so the two cannot disagree.
+ */
+static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folder,
+                                        const rcti &tile,
+                                        float *r_straight,
+                                        float *r_coverage)
+{
+  const int64_t count = int64_t(BLI_rcti_size_x(&tile)) * BLI_rcti_size_y(&tile);
+
+  Vector<float> premul(count * 4, 0.0f);
+  Vector<float> coverage(count, 0.0f);
+  Vector<float> child_color(count * 4);
+  Vector<float> child_factor(count);
+
+  for (const PaintMaterialCompositeLayer &child : folder.children) {
+    if (!child.enabled) {
+      continue;
+    }
+    composite_layer_apply(child, tile, child_color.data(), child_factor.data());
+
+    for (int64_t i = 0; i < count; i++) {
+      const float f = clamp_f(child.opacity * child_factor[i], 0.0f, 1.0f);
+      const float a = coverage[i];
+      float straight[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      if (a > 0.0f) {
+        for (const int k : IndexRange(4)) {
+          straight[k] = premul[i * 4 + k] / a;
+        }
+      }
+      /* The row's blend at full factor, then the mix towards its own colour by what is there. */
+      float blended[4] = {straight[0], straight[1], straight[2], straight[3]};
+      blend_row_linear(blended, child_color.data() + i * 4, child.blend, 1.0f);
+      const float *c = child_color.data() + i * 4;
+      for (const int k : IndexRange(4)) {
+        const float c_eff = c[k] + (blended[k] - c[k]) * a;
+        premul[i * 4 + k] = premul[i * 4 + k] * (1.0f - f) + c_eff * f;
+      }
+      coverage[i] = a + f * (1.0f - a);
+    }
+  }
+
+  for (int64_t i = 0; i < count; i++) {
+    const float a = coverage[i];
+    if (a > 0.0f) {
+      for (const int k : IndexRange(4)) {
+        r_straight[i * 4 + k] = premul[i * 4 + k] / a;
+      }
+    }
+    else {
+      zero_v4(r_straight + i * 4);
+    }
+    r_coverage[i] = a;
+  }
+}
+
+static bool composite_layers_validate_linear(Span<PaintMaterialCompositeLayer> layers,
+                                             int width,
+                                             int height);
+
+/** Whether the buffers of \a layer -- and, for a folder, of everything it holds -- are usable. */
+static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &layer,
+                                            const int width,
+                                            const int height)
+{
+  if (layer.is_folder) {
+    /* A folder carries no buffers of its own; its contents are what has to be usable. Validated in
+     * place: a stack built from copies would deep-copy every nested layer per call. */
+    return composite_layers_validate_linear(
+        Span<PaintMaterialCompositeLayer>(layer.children.data(), int64_t(layer.children.size())),
+        width,
+        height);
+  }
+  if (layer.color_ibuf != nullptr) {
+    if (!composite_ibuf_is_rgba(layer.color_ibuf, width, height)) {
+      return false;
+    }
+  }
+  else if (!composite_layer_has_content(layer, false)) {
+    return false;
+  }
+  if (layer.mask_ibuf != nullptr && !composite_mask_ibuf_is_valid(layer.mask_ibuf, width, height)) {
+    return false;
+  }
+  for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
+    if (item.ibuf != nullptr && !composite_mask_ibuf_is_valid(item.ibuf, width, height)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool composite_layers_validate_linear(const Span<PaintMaterialCompositeLayer> layers,
+                                             const int width,
+                                             const int height)
+{
+  bool any_enabled = false;
+  for (const PaintMaterialCompositeLayer &layer : layers) {
+    if (!layer.enabled) {
+      continue;
+    }
+    if (!composite_layer_validate_linear(layer, width, height)) {
+      return false;
+    }
+    any_enabled = true;
+  }
+  return any_enabled;
+}
+
 static bool composite_stack_validate_linear(const PaintMaterialCompositeStack &stack)
 {
   if (stack.width <= 0 || stack.height <= 0 || stack.layers.is_empty()) {
     return false;
   }
-  bool any_enabled = false;
-  for (const PaintMaterialCompositeLayer &layer : stack.layers) {
-    if (!layer.enabled) {
-      continue;
-    }
-    if (layer.color_ibuf != nullptr) {
-      if (!composite_ibuf_is_rgba(layer.color_ibuf, stack.width, stack.height)) {
-        return false;
-      }
-    }
-    else if (!composite_layer_has_content(layer, false)) {
-      return false;
-    }
-    if (layer.mask_ibuf != nullptr &&
-        !composite_mask_ibuf_is_valid(layer.mask_ibuf, stack.width, stack.height))
-    {
-      return false;
-    }
-    for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
-      if (item.ibuf != nullptr &&
-          !composite_mask_ibuf_is_valid(item.ibuf, stack.width, stack.height))
-      {
-        return false;
-      }
-    }
-    any_enabled = true;
-  }
-  return any_enabled;
+  return composite_layers_validate_linear(stack.layers, stack.width, stack.height);
 }
 
 /** One 256x256 tile: the scratch a layer is decoded and mixed in, never a full-size copy. */
@@ -973,7 +1102,7 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
         if (!layer.enabled || layer.opacity <= 0.0f) {
           continue;
         }
-        composite_layer_render(layer, tile, color_storage.data(), factor_storage.data());
+        composite_layer_apply(layer, tile, color_storage.data(), factor_storage.data());
         for (int64_t i = 0; i < count; i++) {
           blend_row_linear(tile_dst + i * 4,
                            color_storage.data() + i * 4,
@@ -1080,25 +1209,38 @@ static void composite_images_release(Span<CompositeImageLock> locks)
 }
 
 /**
- * Acquire the buffers of \a image_layers into \a r_stack for the linear evaluator, which takes float
- * buffers and constant layers.
+ * Acquire the buffers of \a image_layers into \a r_layers for the linear evaluator, which takes
+ * float buffers and constant layers. A folder is acquired through its children, and left out when
+ * nothing it holds paints.
  */
-static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> image_layers,
-                                         Vector<CompositeImageLock> &r_locks,
-                                         PaintMaterialCompositeStack &r_stack)
+static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> image_layers,
+                                     Vector<CompositeImageLock> &r_locks,
+                                     Vector<PaintMaterialCompositeLayer> &r_layers)
 {
-  if (!BKE_paint_material_composite_stack_dimensions(image_layers, r_stack.width, r_stack.height))
-  {
-    return false;
-  }
   for (const PaintMaterialCompositeImageLayer &image_layer : image_layers) {
     if (!image_layer.enabled) {
       continue;
     }
-    if (!composite_layer_has_content(image_layer, image_layer.color_image != nullptr)) {
+    PaintMaterialCompositeLayer layer;
+    if (image_layer.is_folder) {
+      Vector<PaintMaterialCompositeLayer> children;
+      if (!composite_layers_acquire(
+              Span<PaintMaterialCompositeImageLayer>(image_layer.children.data(),
+                                                     int64_t(image_layer.children.size())),
+              r_locks,
+              children))
+      {
+        return false;
+      }
+      if (children.is_empty()) {
+        continue;
+      }
+      layer.children.assign(std::make_move_iterator(children.begin()),
+                            std::make_move_iterator(children.end()));
+    }
+    else if (!composite_layer_has_content(image_layer, image_layer.color_image != nullptr)) {
       continue;
     }
-    PaintMaterialCompositeLayer layer;
     if (image_layer.color_image != nullptr) {
       layer.color_ibuf = composite_image_acquire(
           image_layer.color_image, image_layer.color_iuser, r_locks);
@@ -1131,7 +1273,21 @@ static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> 
       layer.mask_items.append(buffer);
     }
     static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
-    r_stack.layers.append(layer);
+    r_layers.append(std::move(layer));
+  }
+  return true;
+}
+
+static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> image_layers,
+                                         Vector<CompositeImageLock> &r_locks,
+                                         PaintMaterialCompositeStack &r_stack)
+{
+  if (!BKE_paint_material_composite_stack_dimensions(image_layers, r_stack.width, r_stack.height))
+  {
+    return false;
+  }
+  if (!composite_layers_acquire(image_layers, r_locks, r_stack.layers)) {
+    return false;
   }
   return !r_stack.layers.is_empty();
 }
@@ -1218,7 +1374,23 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
     *r_byte_colorspace = nullptr;
   }
   for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
-    if (!layer.enabled || layer.color_image == nullptr) {
+    if (!layer.enabled) {
+      continue;
+    }
+    if (layer.is_folder) {
+      /* A folder is as big as what it holds: the lowest map in it decides, at the folder's place. */
+      if (composite_stack_bottom_layer_info(
+              Span<PaintMaterialCompositeImageLayer>(layer.children.data(),
+                                                     int64_t(layer.children.size())),
+              r_width,
+              r_height,
+              r_byte_colorspace))
+      {
+        return true;
+      }
+      continue;
+    }
+    if (layer.color_image == nullptr) {
       continue;
     }
     Vector<CompositeImageLock> locks;
@@ -1271,7 +1443,15 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.constant_color[1],
                             layer.constant_color[2],
                             layer.constant_color[3]);
-    hash = get_default_hash(hash, layer.color_alpha_coverage);
+    hash = get_default_hash(hash, layer.color_alpha_coverage, layer.is_folder);
+    if (layer.is_folder) {
+      /* The children are part of the folder's identity: the stack hash of the folder's own stack,
+       * folded in as one value. */
+      hash = get_default_hash(hash,
+                              BKE_paint_material_composite_stack_hash(
+                                  Span<PaintMaterialCompositeImageLayer>(
+                                      layer.children.data(), int64_t(layer.children.size()))));
+    }
     /* A mask item changes the factor: its map (by session uid, like the layer's), its constant and
      * its opacity all have to move the hash, or an edit would keep serving the cached composite. */
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
@@ -1413,6 +1593,15 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     r_images.append(layer.mask_image);
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       r_images.append(item.image);
+    }
+    if (layer.is_folder) {
+      /* The images a folder holds are read through it, so a stroke deep inside still reaches the
+       * cache. */
+      Vector<Image *> nested;
+      composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>(
+                                        layer.children.data(), int64_t(layer.children.size())),
+                                    nested);
+      r_images.extend(nested);
     }
   }
 }

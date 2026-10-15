@@ -26,6 +26,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "paint_layers_intern.hh"
@@ -208,15 +209,47 @@ bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, cons
   return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel));
 }
 
+bool row_participates(const Material &ma, const MaterialPaintLayer &layer, const int channel)
+{
+  if (!BKE_paint_layers_is_folder(layer)) {
+    return leaf_participates(ma, layer, channel);
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (row_participates(ma, child, channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool layer_in_folder(const Material &ma, const MaterialPaintLayer &layer)
+{
+  bool nested = false;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer *parent) -> bool {
+        if (&row == &layer) {
+          nested = parent != nullptr;
+          return false;
+        }
+        return true;
+      });
+  return nested;
+}
+
 Vector<int> paint_layers_wired_channels(const Material &ma)
 {
   Vector<int> wired;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
-    for (const MaterialPaintLayer &layer : ma.paint_layers) {
-      if (leaf_participates(ma, layer, int(info.channel))) {
-        wired.append(int(info.channel));
-        break;
-      }
+    /* A folder owns no records, so a channel is wired exactly when some leaf, at any depth, takes
+     * part in it. */
+    bool wires = false;
+    BKE_paint_layers_foreach(
+        ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+          wires = leaf_participates(ma, layer, int(info.channel));
+          return !wires;
+        });
+    if (wires) {
+      wired.append(int(info.channel));
     }
   }
   return wired;

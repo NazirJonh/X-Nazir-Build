@@ -136,9 +136,11 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
    * A tag-only layer with no wired channel is picked up by the fallback scan below. */
   Vector<bUUID> layer_ids;
   if (layered) {
-    for (const MaterialPaintLayer &row : material.paint_layers) {
-      layer_ids.append(row.marker);
-    }
+    BKE_paint_layers_foreach(
+        material, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+          layer_ids.append(row.marker);
+          return true;
+        });
   }
   for (int ch = 0; ch < PAINT_MATERIAL_CHANNEL_NUM && !layered; ch++) {
     if ((visible_material_channels & (1 << ch)) == 0) {
@@ -190,20 +192,23 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
     std::array<Image *, PAINT_MATERIAL_CHANNEL_NUM + 1> maps;
     maps.fill(nullptr);
     if (layered) {
-      for (const MaterialPaintLayer &row : material.paint_layers) {
-        if (!BLI_uuid_equal(row.marker, layer_id)) {
-          continue;
-        }
-        for (int i = 0; i < row.channels_num; i++) {
-          const MaterialPaintLayerChannel &record = row.channels[i];
-          /* A switched-off record keeps its map in the file but is not a paint target. */
-          if (record.state == MA_PAINT_LAYER_CHANNEL_ENABLED && record.channel >= 0 &&
-              record.channel < PAINT_MATERIAL_CHANNEL_NUM)
-          {
-            maps[record.channel] = record.image;
-          }
-        }
-      }
+      BKE_paint_layers_foreach(
+          material,
+          [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+            if (!BLI_uuid_equal(row.marker, layer_id)) {
+              return true;
+            }
+            for (int i = 0; i < row.channels_num; i++) {
+              const MaterialPaintLayerChannel &record = row.channels[i];
+              /* A switched-off record keeps its map in the file but is not a paint target. */
+              if (record.state == MA_PAINT_LAYER_CHANNEL_ENABLED && record.channel >= 0 &&
+                  record.channel < PAINT_MATERIAL_CHANNEL_NUM)
+              {
+                maps[record.channel] = record.image;
+              }
+            }
+            return false;
+          });
     }
     else {
       BKE_paint_material_layer_maps_get(bmain, material, layer_id, maps);

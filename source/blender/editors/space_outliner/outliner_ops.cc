@@ -59,6 +59,10 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_remove);
   WM_operatortype_append(OUTLINER_OT_stack_layer_rename);
   WM_operatortype_append(OUTLINER_OT_stack_layer_duplicate);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_group);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_group_add);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_ungroup);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_merge_down);
   WM_operatortype_append(OUTLINER_OT_stack_layer_copy);
   WM_operatortype_append(OUTLINER_OT_stack_layer_paste);
   WM_operatortype_append(OUTLINER_OT_stack_focus_sub_index);

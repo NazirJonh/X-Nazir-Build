@@ -21,6 +21,10 @@
 
 #include <cstdint>
 
+#include "BLI_function_ref.hh"
+#include "BLI_span.hh"
+
+#include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
 
 namespace blender {
@@ -59,32 +63,105 @@ void BKE_paint_layers_tag_value_edited(Material &ma);
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Folders
+ * \{ */
+
+/**
+ * Whether \a layer is a folder: a row that holds its stack in #MaterialPaintLayer::children and lays
+ * their isolated result over what is below.
+ *
+ * The one test for folder-ness everywhere -- the generator, the CPU composite, the channel rules and
+ * the UI -- so a row can never be a folder on one side and a leaf on another. It reads
+ * #MaterialPaintLayer::source (#MA_PAINT_LAYER_SOURCE_STACK), never a non-empty children list: an
+ * emptied folder stays a folder.
+ */
+bool BKE_paint_layers_is_folder(const MaterialPaintLayer &layer);
+
+/** Whether the folder \a layer holds any row (an emptied folder reports false). */
+bool BKE_paint_layers_has_children(const MaterialPaintLayer &layer);
+
+/**
+ * Visit every row of \a ma's stack, depth first: a row, then -- for a folder -- the rows it holds,
+ * each with its parent folder (null at the top level). This is the one order the Outliner numbers
+ * rows by and every nested walk of the description uses.
+ *
+ * Mask items are not rows of the stack and are not visited. Return false from \a fn to stop.
+ */
+void BKE_paint_layers_foreach(
+    const Material &ma,
+    FunctionRef<bool(const MaterialPaintLayer &layer, const MaterialPaintLayer *parent)> fn);
+void BKE_paint_layers_foreach(
+    Material &ma, FunctionRef<bool(MaterialPaintLayer &layer, MaterialPaintLayer *parent)> fn);
+
+/**
+ * The list of \a ma's stack that directly holds \a layer -- the top-level list or a folder's
+ * children, at any depth -- or null when \a layer is not part of the stack.
+ */
+ListBaseT<MaterialPaintLayer> *BKE_paint_layers_owner_list(Material &ma,
+                                                           const MaterialPaintLayer &layer);
+
+/** The folder that holds \a layer, or null when it hangs on the top level (or is not in \a ma). */
+MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer);
+
+/** Whether \a marker names \a root itself or any row nested under it. */
+bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUUID &marker);
+
+/**
+ * Fold \a layers into a new folder row, which takes the position of the lowest member. The rows
+ * keep their markers, their order and their own subtrees.
+ *
+ * \return the folder, or null when \a layers is empty or its rows do not all hang on one and the
+ * same list of \a ma's stack (grouping across nesting levels is refused).
+ */
+MaterialPaintLayer *BKE_paint_layers_group(Material &ma, Span<MaterialPaintLayer *> layers);
+
+/**
+ * Lift the rows held by \a folder into the list that owns it, at its position and in their order,
+ * and free the folder itself. The rows keep their markers and subtrees.
+ *
+ * \return false when \a folder is null, not part of \a ma, or not a folder.
+ */
+bool BKE_paint_layers_ungroup(Material &ma, MaterialPaintLayer *folder);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Description edits
  * \{ */
 
 /**
  * Where #BKE_paint_layers_add puts the new row relative to its anchor.
  *
- * Mirrors the `place` names the RNA uses (`'ABOVE'` and `'BELOW'`).
+ * Mirrors the `place` names the RNA uses (`'ABOVE'`, `'BELOW'` and `'INTO'`).
  */
 enum class PaintLayerPlace : int8_t {
   /** Directly above the anchor. */
   Above = 0,
   /** Directly below the anchor. */
   Below,
+  /**
+   * Inside the anchor, which has to be a folder: on top of what it holds. A place of its own rather
+   * than "above the folder's top row", because an empty folder has no row to name -- and an empty
+   * folder is exactly what a folder is when it is made to be filled.
+   */
+  Into,
 };
 
 /**
  * Add a Paint row to \a ma.
  *
  * With a null \a anchor the row is appended on top of the stack; otherwise it is placed relative
- * to \a anchor by \a place. The row is given a fresh #bUUID marker unique within \a ma, and the
+ * to \a anchor by \a place, in the list that holds the anchor. #PaintLayerPlace::Into requires the
+ * anchor to be a folder (#BKE_paint_layers_is_folder): the row goes on top of what it holds. Nothing
+ * here turns a plain row into a folder, so a caller that wants "into a plain row" groups instead
+ * (#BKE_paint_layers_group). The row is given a fresh #bUUID marker unique within \a ma, and the
  * usual defaults: enabled, full opacity, no channels (see #BKE_paint_layers_default_channels_apply).
  *
  * Sets #MA_PAINT_LAYERED on \a ma -- a material that owns a description is a layered material --
  * and marks the material's derived state stale; see the file comment.
  *
- * \return the new row, or null when \a anchor is non-null but is not part of \a ma's stack.
+ * \return the new row, or null when \a anchor is non-null but is not part of \a ma's stack, or
+ * when \a place is Into and \a anchor is not a folder.
  */
 MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
                                          const char *name,
@@ -92,11 +169,12 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
                                          PaintLayerPlace place);
 
 /**
- * Deep-copy \a layer into a new row placed directly above it.
+ * Deep-copy the branch of \a layer into a new row placed directly above it, in the list that holds
+ * it.
  *
- * The copy gets a fresh #bUUID marker unique within \a ma, a copy of the row's own state (flag,
- * opacity, name) and its channel records, and -- never the shared map -- a copy of each image a
- * channel references. The row is linked into \a ma's stack by the caller's insertion.
+ * Every row of the branch -- a folder's children included -- gets a fresh #bUUID marker unique
+ * within \a ma, a copy of the row's own state (flag, opacity, name) and its channel records, and --
+ * never the shared map -- a copy of each image a channel references.
  *
  * \return the copy, or null when \a layer is null or not part of \a ma.
  */
@@ -173,11 +251,11 @@ uint16_t BKE_paint_layers_default_channel_set();
 void BKE_paint_layers_channels_materialize(Material &ma);
 
 /**
- * Remove \a layer from \a ma, freeing it.
+ * Remove \a layer from \a ma, freeing it and, for a folder, everything it holds.
  *
- * When the active marker names the removed row, the active marker is cleared: a marker that
- * resolves to nothing is worse than no selection, and silently moving the selection to a neighbour
- * would hide that the row the user was working on is gone.
+ * When the active marker names the removed row or a row nested under it, the active marker is
+ * cleared: a marker that resolves to nothing is worse than no selection, and silently moving the
+ * selection to a neighbour would hide that the row the user was working on is gone.
  *
  * \return false when \a layer is null or not part of \a ma.
  */
@@ -218,8 +296,8 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *
 bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer);
 
 /**
- * Find the row of \a ma whose marker is \a marker, never by position, so a row keeps resolving
- * after a reorder.
+ * Find the row of \a ma whose marker is \a marker, at any depth and never by position, so a row
+ * keeps resolving after a reorder.
  *
  * \return the row, or null when no row carries \a marker.
  */
@@ -241,11 +319,11 @@ MaterialPaintLayer *BKE_paint_layers_active_layer_get(Material &ma);
  * Move \a layer relative to \a anchor in \a ma's stack.
  *
  * Same placement rules as #BKE_paint_layers_add: a null anchor appends the row on top of the stack,
- * Above and Below are siblings of the anchor. Markers are untouched, so the active marker keeps
- * resolving.
+ * Above and Below are siblings of the anchor, Into appends inside the anchor, which has to be a
+ * folder. Markers are untouched, so the active marker keeps resolving.
  *
- * \return false when \a layer or \a anchor is not part of \a ma, or when \a anchor is \a layer
- * itself.
+ * \return false when \a layer or \a anchor is not part of \a ma, when \a anchor is \a layer itself
+ * or nested under it (a row never moves into its own subtree), or when Into names a plain row.
  */
 bool BKE_paint_layers_move(Material &ma,
                            MaterialPaintLayer *layer,
@@ -253,7 +331,8 @@ bool BKE_paint_layers_move(Material &ma,
                            PaintLayerPlace place);
 
 /**
- * Move \a layer to \a index in the stack, bottom to top. The index is clamped to the list.
+ * Move \a layer to \a index among its siblings, bottom to top: its position in the list that holds
+ * it, never its parent. The index is clamped to that list.
  *
  * \return false when \a layer is null or not part of \a ma.
  */

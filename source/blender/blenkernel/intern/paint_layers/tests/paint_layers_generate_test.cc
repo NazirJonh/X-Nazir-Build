@@ -779,6 +779,57 @@ TEST_F(PaintLayersGenerateTest, reorder_rebuilds_the_root)
   EXPECT_EQ(count_type(*root, SH_NODE_TEX_IMAGE), maps_before);
 }
 
+TEST_F(PaintLayersGenerateTest, reorder_inside_a_folder_rebuilds_the_root)
+{
+  MaterialPaintLayer *first = add_paint_layer("First", add_image("First"));
+  MaterialPaintLayer *second = add_paint_layer("Second", add_image("Second"));
+  MaterialPaintLayer *third = add_paint_layer("Third", add_image("Third"));
+  MaterialPaintLayer *members[3] = {first, second, third};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 3)), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  ASSERT_TRUE(tree_sentinel_set(*root));
+
+  /* Same rows, same parent, another order: the root hash is where that has to show, or the chain is
+   * kept as it was and the generated graph disagrees with the description. */
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, third, 0));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(ma->paint_layers_tree, root);
+  EXPECT_FALSE(tree_sentinel_get(*root));
+
+  ASSERT_TRUE(tree_sentinel_set(*root));
+  ASSERT_TRUE(BKE_paint_layers_move(*ma, third, second, PaintLayerPlace::Above));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_FALSE(tree_sentinel_get(*root));
+}
+
+TEST_F(PaintLayersGenerateTest, root_hash_depends_on_row_order)
+{
+  MaterialPaintLayer *first = add_paint_layer("First", add_image("First"));
+  MaterialPaintLayer *second = add_paint_layer("Second", add_image("Second"));
+  MaterialPaintLayer *third = add_paint_layer("Third", add_image("Third"));
+  const Vector<int> wired = paint_layers::paint_layers_wired_channels(*ma);
+  const uint64_t flat = paint_layers::paint_layers_root_topology_hash(*ma, wired);
+
+  /* A reorder at the root. */
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, third, 0));
+  const uint64_t reordered = paint_layers::paint_layers_root_topology_hash(*ma, wired);
+  EXPECT_NE(reordered, flat);
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, third, 2));
+  EXPECT_EQ(paint_layers::paint_layers_root_topology_hash(*ma, wired), flat);
+
+  /* A reorder inside a folder, with the folder's parent and members unchanged. */
+  MaterialPaintLayer *members[3] = {first, second, third};
+  ASSERT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 3)), nullptr);
+  const uint64_t grouped = paint_layers::paint_layers_root_topology_hash(*ma, wired);
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, first, 2));
+  const uint64_t inner_reordered = paint_layers::paint_layers_root_topology_hash(*ma, wired);
+  EXPECT_NE(inner_reordered, grouped);
+  ASSERT_TRUE(BKE_paint_layers_reorder(*ma, first, 0));
+  EXPECT_EQ(paint_layers::paint_layers_root_topology_hash(*ma, wired), grouped);
+}
+
 TEST_F(PaintLayersGenerateTest, set_source_rebuilds_the_row)
 {
   MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));

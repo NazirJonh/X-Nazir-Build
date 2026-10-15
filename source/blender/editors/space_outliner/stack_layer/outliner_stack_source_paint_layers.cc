@@ -13,6 +13,7 @@
  * description can be edited with or without an Outliner in the context.
  */
 
+#include <algorithm>
 #include <functional>
 #include <string>
 
@@ -40,6 +41,7 @@
 
 #include "BLI_assert.h"
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
@@ -133,7 +135,8 @@ void layers_mask_edit_end_if_active(bContext &C,
   {
     return;
   }
-  if (BLI_uuid_equal(material.active_layer_marker, layer.marker)) {
+  /* The row, or a folder it holds the edited row in: removing the folder takes the mask along. */
+  if (BKE_paint_layers_subtree_contains(layer, material.active_layer_marker)) {
     layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
   }
 }
@@ -176,35 +179,44 @@ StackRowPreview paint_mask_slot_build(const MaterialPaintLayer &item)
 
 }  // namespace
 
-void paint_stack_rows_from_description(const Material &material,
-                                       const int channel,
-                                       Vector<StackRow> &r_rows)
-{
-  /* The value/mode columns address the selected channel; until the per (row, channel) settings
-   * exist they fall back to the row's own opacity, so the channel is not read here yet. */
-  static_cast<void>(channel);
+namespace {
 
-  int ordinal = 0;
-  for (const MaterialPaintLayer &layer : material.paint_layers) {
-    if (ordinal > STACK_ROW_ORDINAL_MAX) {
-      StackRow overflow_row;
-      overflow_row.ordinal = STACK_ROW_ORDINAL_MAX + 1;
-      overflow_row.supported = false;
-      overflow_row.unsupported_reason = "Stack is too large to display";
-      overflow_row.icon = ICON_IMAGE_RGB;
-      r_rows.append(std::move(overflow_row));
-      break;
+/**
+ * Append the rows of \a list, and recursively of every folder in it, depth first. A folder's row
+ * is appended after what it holds: the tree is built walking the rows from the last one down, and a
+ * child is only hung off a folder already made. The ordinals keep the walk order -- rows are looked
+ * up by ordinal, never by position -- which is the one #BKE_paint_layers_foreach defines.
+ */
+void paint_stack_rows_append(const Material &material,
+                             const ListBaseT<MaterialPaintLayer> &list,
+                             const int depth,
+                             const int parent_ordinal,
+                             int &ordinal,
+                             bool &overflow,
+                             Vector<StackRow> &r_rows)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    if (overflow) {
+      return;
     }
+    if (ordinal > STACK_ROW_ORDINAL_MAX) {
+      overflow = true;
+      return;
+    }
+    const bool folder = BKE_paint_layers_is_folder(layer);
     StackRow row;
     row.ordinal = int16_t(ordinal++);
-    row.depth = 0;
-    row.parent_ordinal = -1;
+    row.depth = depth;
+    row.parent_ordinal = int16_t(parent_ordinal);
     row.stable_id = layer.marker;
+    row.can_hold_children = folder;
+    row.has_children = BKE_paint_layers_has_children(layer);
     row.enabled = (layer.flag & MA_PAINT_LAYER_ENABLED) != 0;
     row.supported = true;
-    row.name = layer.name[0] != '\0' ? layer.name : "Layer";
+    row.name = layer.name[0] != '\0' ? layer.name : (folder ? "Folder" : "Layer");
     row.name_buffer = const_cast<char *>(layer.name);
-    row.icon = (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? ICON_GP_DRAW_FILL :
+    row.icon = folder                                         ? ICON_FILE_FOLDER :
+               (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? ICON_GP_DRAW_FILL :
                                                                   ICON_IMAGE_RGB;
 
     /* The value column edits the row's opacity; a value left at its default reads as inherited
@@ -223,7 +235,15 @@ void paint_stack_rows_from_description(const Material &material,
     row.mode_prop = "blend_type";
     row.mode_inherited = (layer.blend == MA_PAINT_LAYER_BLEND_MIX);
 
-    if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+    if (folder) {
+      /* A folder is what it holds: it has no map, so no channel slot. Its content section is the
+       * one the brush switches back to from the mask. */
+      StackContentSection content;
+      content.identifier = "CHANNELS";
+      content.name = IFACE_("Content");
+      row.content_sections.append(std::move(content));
+    }
+    else if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
       /* A Fill is its colour: one swatch with the bucket drawn over it, and no channel-texture
        * placeholder. With the Base Color record removed or switched off the row lays no colour, so
        * no swatch is drawn. */
@@ -254,16 +274,28 @@ void paint_stack_rows_from_description(const Material &material,
       row.preview_slots.append(std::move(channels_slot));
     }
 
-    /* The channel maps are the layer's internals rather than rows of their own; the section stays
-     * so the brush can switch to the content and later rows can attach to it. */
-    StackContentSection channels;
-    channels.identifier = "CHANNELS";
-    channels.name = IFACE_("Channel Textures");
-    row.content_sections.append(std::move(channels));
+    if (!folder) {
+      /* The channel maps are the layer's internals rather than rows of their own; the section
+       * stays so the brush can switch to the content and later rows can attach to it. */
+      StackContentSection channels;
+      channels.identifier = "CHANNELS";
+      channels.name = IFACE_("Channel Textures");
+      row.content_sections.append(std::move(channels));
+    }
 
     /* The mask: a slot of its own, whose click switches the brush to it, and the section that slot
      * reveals. Its switch rides on the row, so a switched-off mask is kept and listed. */
     if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
+      if (folder) {
+        /* The slot that switches back to the content, ahead of the mask's. The folder icon stays
+         * in front of it, as it does for a folder with no mask. */
+        StackRowPreview content_slot;
+        content_slot.section_id = "CHANNELS";
+        content_slot.icon = ICON_BRUSHES_ALL;
+        content_slot.keeps_row_icon = true;
+        content_slot.label = IFACE_("Content");
+        row.preview_slots.append(std::move(content_slot));
+      }
       row.preview_slots.append(paint_mask_slot_build(*mask));
       row.aux_enabled = (mask->flag & MA_PAINT_LAYER_ENABLED) != 0;
       StackContentSection mask_section;
@@ -272,7 +304,35 @@ void paint_stack_rows_from_description(const Material &material,
       row.content_sections.append(std::move(mask_section));
     }
 
+    const int row_ordinal = row.ordinal;
+    if (folder) {
+      paint_stack_rows_append(
+          material, layer.children, depth + 1, row_ordinal, ordinal, overflow, r_rows);
+    }
     r_rows.append(std::move(row));
+  }
+}
+
+}  // namespace
+
+void paint_stack_rows_from_description(const Material &material,
+                                       const int channel,
+                                       Vector<StackRow> &r_rows)
+{
+  /* The value/mode columns address the selected channel; until the per (row, channel) settings
+   * exist they fall back to the row's own opacity, so the channel is not read here yet. */
+  static_cast<void>(channel);
+
+  int ordinal = 0;
+  bool overflow = false;
+  paint_stack_rows_append(material, material.paint_layers, 0, -1, ordinal, overflow, r_rows);
+  if (overflow) {
+    StackRow overflow_row;
+    overflow_row.ordinal = STACK_ROW_ORDINAL_MAX + 1;
+    overflow_row.supported = false;
+    overflow_row.unsupported_reason = "Stack is too large to display";
+    overflow_row.icon = ICON_IMAGE_RGB;
+    r_rows.append(std::move(overflow_row));
   }
 }
 
@@ -281,14 +341,19 @@ MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, const 
   if (ordinal < 0) {
     return nullptr;
   }
+  /* The ordinal is the row's place in the depth-first walk the row builder numbers by. */
   int index = 0;
-  for (MaterialPaintLayer &layer : material.paint_layers) {
-    if (index == ordinal) {
-      return &layer;
-    }
-    index++;
-  }
-  return nullptr;
+  MaterialPaintLayer *found = nullptr;
+  BKE_paint_layers_foreach(
+      material, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        if (index == ordinal) {
+          found = &layer;
+          return false;
+        }
+        index++;
+        return true;
+      });
+  return found;
 }
 
 int paint_layers_ordinal_of(const Material &material, const MaterialPaintLayer *target)
@@ -297,13 +362,17 @@ int paint_layers_ordinal_of(const Material &material, const MaterialPaintLayer *
     return -1;
   }
   int index = 0;
-  for (const MaterialPaintLayer &layer : material.paint_layers) {
-    if (&layer == target) {
-      return index;
-    }
-    index++;
-  }
-  return -1;
+  int found = -1;
+  BKE_paint_layers_foreach(
+      material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (&layer == target) {
+          found = index;
+          return false;
+        }
+        index++;
+        return true;
+      });
+  return found;
 }
 
 bool paint_layers_edit_rename(Material &material, const int ordinal, const char *name)
@@ -372,7 +441,11 @@ class PaintLayersStackSource final : public StackSource,
     /* The header's channel cursor changes which pair the columns address, so the rows rebuild
      * when it moves. */
     hash = hash * 1000003u ^ uint64_t(paint_stack_selected_channel(ctx));
-    for (const MaterialPaintLayer &layer : material.paint_layers) {
+    BKE_paint_layers_foreach(
+        material,
+        [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *parent) -> bool {
+      /* The nesting is part of the rows: moving a row into a folder changes no marker. */
+      hash = hash * 1000003u ^ (parent != nullptr ? UUID(parent->marker).hash() : 0);
       hash = hash * 1000003u ^ UUID(layer.marker).hash();
       hash ^= uint64_t(layer.flag);
       /* Mixed, not shifted into the flag bits: `flag` is 16 bits wide and would overlap. */
@@ -406,7 +479,8 @@ class PaintLayersStackSource final : public StackSource,
           hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
         }
       }
-    }
+      return true;
+    });
     return hash;
   }
 
@@ -597,8 +671,8 @@ class PaintLayersStackSource final : public StackSource,
 
   void add_kinds(Vector<StackAddKindInfo> &r_kinds) const override
   {
-    /* The kinds whose features exist: Paint and Fill. Material and the corrections are appended
-     * here as they land, in the order #row_add dispatches by index. */
+    /* The kinds whose features exist: Paint, Fill and Folder. Material and the corrections are
+     * appended here as they land, in the order #row_add dispatches by index. */
     r_kinds.append({"PAINT",
                     N_("Paint Layer"),
                     "A layer that shows nothing until it is painted on",
@@ -609,6 +683,10 @@ class PaintLayersStackSource final : public StackSource,
                           ICON_GP_DRAW_FILL};
     fill.takes_color = true;
     r_kinds.append(fill);
+    r_kinds.append({"FOLDER",
+                    N_("Folder"),
+                    "A group holding other layers, composited on its own",
+                    ICON_FILE_FOLDER});
   }
 
   int row_add(bContext &C,
@@ -618,7 +696,7 @@ class PaintLayersStackSource final : public StackSource,
               const int ordinal,
               const StackAddArgs &args = {}) const override
   {
-    if ((kind != 0 && kind != 1) || !this->is_editable(owner)) {
+    if (kind < 0 || kind > 2 || !this->is_editable(owner)) {
       return -1;
     }
     Material &material = layers_owner(owner);
@@ -629,8 +707,11 @@ class PaintLayersStackSource final : public StackSource,
       return -1;
     }
     PaintLayerAddParams params;
-    params.kind = (kind == 1) ? PaintLayerAddKind::Fill : PaintLayerAddKind::Paint;
+    params.kind = (kind == 1) ? PaintLayerAddKind::Fill :
+                  (kind == 2) ? PaintLayerAddKind::Folder :
+                                PaintLayerAddKind::Paint;
     params.anchor = anchor;
+    /* An Add onto a folder means filling it: the policy turns this into Into. */
     params.place = PaintLayerPlace::Above;
     if (params.kind == PaintLayerAddKind::Fill && args.color != nullptr) {
       params.fill_color = args.color;
@@ -663,11 +744,43 @@ class PaintLayersStackSource final : public StackSource,
     return true;
   }
 
+  bool row_move(bContext &C,
+                const StackFocus & /*focus*/,
+                ID &owner,
+                const int from_ordinal,
+                const int anchor_ordinal,
+                const StackMovePlace place,
+                int *r_ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *from = paint_description_row_for_ordinal(material, from_ordinal);
+    MaterialPaintLayer *anchor = paint_description_row_for_ordinal(material, anchor_ordinal);
+    if (from == nullptr || anchor == nullptr) {
+      return false;
+    }
+    const PaintLayerPlace layer_place = (place == StackMovePlace::Below) ? PaintLayerPlace::Below :
+                                        (place == StackMovePlace::Into) ? PaintLayerPlace::Into :
+                                                                          PaintLayerPlace::Above;
+    if (!BKE_paint_layers_edit_move(material, *from, anchor, layer_place)) {
+      if (place == StackMovePlace::Into) {
+        /* The drop did nothing; without a word it reads as a dead drag. */
+        BKE_report(CTX_wm_reports(&C), RPT_INFO, "Only layers of the same list can be grouped");
+      }
+      return false;
+    }
+    /* The ordinals past the move changed; the caller keeps the moved row selected by its new one. */
+    if (r_ordinal != nullptr) {
+      *r_ordinal = paint_layers_ordinal_of(material, from);
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
   /* ---------------------------------------------------------------- */
   /** \name StackGroupingEditor
    *
-   * Only the mask half exists: folders, merging and colour tags arrive with their features, so
-   * their verbs keep the defaults that refuse.
+   * The mask half and the folder verbs; colour tags arrive with their feature, so their verb keeps
+   * the default that refuses.
    * \{ */
 
   const StackGroupingEditor *grouping() const override
@@ -714,6 +827,107 @@ class PaintLayersStackSource final : public StackSource,
     layers_target_mode_set(C, PAINT_LAYER_TARGET_MASK);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
+  }
+
+  int row_merge_down(bContext &C,
+                     const StackFocus & /*focus*/,
+                     ID &owner,
+                     const int ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *upper = paint_description_row_for_ordinal(material, ordinal);
+    /* The row below in the compositing sense is the previous one of the same list, not the previous
+     * ordinal: that one can be the last row of a folder that sits below. */
+    MaterialPaintLayer *lower = (upper != nullptr) ? upper->prev : nullptr;
+    if (upper == nullptr || lower == nullptr) {
+      return -1;
+    }
+    MaterialPaintLayer *folder = BKE_paint_layers_edit_merge_down(material, *upper, *lower);
+    if (folder == nullptr) {
+      BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Cannot merge this layer down");
+      return -1;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return paint_layers_ordinal_of(material, folder);
+  }
+
+  int rows_group(bContext &C,
+                 const StackFocus & /*focus*/,
+                 ID &owner,
+                 const int from_ordinal,
+                 const int to_ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    const int low = std::min(from_ordinal, to_ordinal);
+    const int high = std::max(from_ordinal, to_ordinal);
+    if (low < 0) {
+      return -1;
+    }
+    /* The run is by ordinal, which numbers a folder before what it holds: a folder inside the run
+     * carries its children along, so they are not listed again. */
+    Vector<MaterialPaintLayer *> rows;
+    for (int ordinal = low; ordinal <= high; ordinal++) {
+      MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+      if (layer == nullptr) {
+        return -1;
+      }
+      /* Any ancestor already listed carries the row, not only its direct parent: a folder nested two
+       * deep has its grandchildren in the run too. */
+      const bool carried = std::any_of(
+          rows.begin(), rows.end(), [&](const MaterialPaintLayer *root) {
+            return root != layer && BKE_paint_layers_subtree_contains(*root, layer->marker);
+          });
+      if (carried) {
+        continue;
+      }
+      rows.append(layer);
+    }
+    MaterialPaintLayer *folder = BKE_paint_layers_edit_group_range(material, rows);
+    if (folder == nullptr) {
+      BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Only layers of one list can be grouped");
+      return -1;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return paint_layers_ordinal_of(material, folder);
+  }
+
+  int row_ungroup(bContext &C,
+                  const StackFocus & /*focus*/,
+                  ID &owner,
+                  const int ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *folder = paint_description_row_for_ordinal(material, ordinal);
+    if (folder == nullptr || !BKE_paint_layers_is_folder(*folder)) {
+      return -1;
+    }
+    const int child_num = BLI_listbase_count(&folder->children);
+    layers_mask_edit_end_if_active(C, material, *folder);
+    if (!BKE_paint_layers_ungroup(material, folder)) {
+      return -1;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return child_num;
+  }
+
+  int group_add(bContext &C,
+                const StackFocus & /*focus*/,
+                ID &owner,
+                const int ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *anchor = (ordinal < 0) ?
+                                     nullptr :
+                                     paint_description_row_for_ordinal(material, ordinal);
+    if (ordinal >= 0 && anchor == nullptr) {
+      return -1;
+    }
+    MaterialPaintLayer *folder = BKE_paint_layers_edit_group_add(material, anchor);
+    if (folder == nullptr) {
+      return -1;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return paint_layers_ordinal_of(material, folder);
   }
 
   bool row_aux_toggle(bContext &C,
@@ -787,35 +1001,6 @@ class PaintLayersStackSource final : public StackSource,
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return copy;
-  }
-
-  bool row_move(bContext &C,
-                const StackFocus & /*focus*/,
-                ID &owner,
-                const int from_ordinal,
-                const int anchor_ordinal,
-                const StackMovePlace place,
-                int *r_ordinal) const override
-  {
-    Material &material = layers_owner(owner);
-    MaterialPaintLayer *from = paint_description_row_for_ordinal(material, from_ordinal);
-    MaterialPaintLayer *anchor = (anchor_ordinal < 0) ?
-                                     nullptr :
-                                     paint_description_row_for_ordinal(material, anchor_ordinal);
-    if (from == nullptr || (anchor_ordinal >= 0 && anchor == nullptr)) {
-      return false;
-    }
-    /* Folders do not exist yet, so a drop "into" a row lands beside it as "above". */
-    const PaintLayerPlace layer_place = (place == StackMovePlace::Below) ? PaintLayerPlace::Below :
-                                                                           PaintLayerPlace::Above;
-    if (!BKE_paint_layers_move(material, from, anchor, layer_place)) {
-      return false;
-    }
-    if (r_ordinal != nullptr) {
-      *r_ordinal = paint_layers_ordinal_of(material, from);
-    }
-    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
-    return true;
   }
 
   /** \} */

@@ -848,6 +848,7 @@ if(WITH_GTESTS)
     intern/node_socket_value_iter_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc
+    intern/paint_layers/tests/paint_layers_graph_eval_corrections_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_formulas_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_passthrough_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_test.cc

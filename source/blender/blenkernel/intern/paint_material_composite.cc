@@ -795,6 +795,68 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     mask = mask_storage.data();
   }
 
+  /* The content coverage: what the row's own content covers, before the mask. A layer whose factor
+   * is its own alpha, with no mask map to say otherwise, and a painted map both cover by the map's
+   * alpha; a transparent texel shows what is below. */
+  for (int64_t i = 0; i < count; i++) {
+    const bool own_alpha = (layer.color_alpha_coverage && layer.color_ibuf != nullptr) ||
+                           (mask == nullptr && layer.mask_from_alpha);
+    float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
+    if (layer.is_folder) {
+      /* A folder covers by what its contents covered, not by the alpha of the colour it reads. */
+      content = clamp_f(folder_coverage[i], 0.0f, 1.0f);
+    }
+    else if (layer.empty_base) {
+      /* An unpainted row kept for its corrections covers nothing until they bring coverage in. */
+      content = 0.0f;
+    }
+    r_factor[i] = content;
+  }
+
+  /* The content corrections adjust the colour the row paints with, and the coverage it lays with.
+   * With `a` the coverage so far and `f = opacity * alpha(map)`:
+   *   c_eff = lerp(c, blend(S, c), a)   (where the row covers nothing, the correction is its colour)
+   *   a'    = a + f * (1 - a)
+   *   S'    = lerp(S, c_eff, f / a')
+   * which is the plain blend by `f` where `a` is one, and what the generator builds node by node. */
+  Vector<float> correction_storage;
+  for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+    if (correction.ibuf == nullptr || correction.opacity <= 0.0f) {
+      continue;
+    }
+    correction_storage.resize(count * 4);
+    composite_decode_tile(
+        correction.ibuf, correction.colorspace_name, tile, correction_storage.data());
+    for (int64_t i = 0; i < count; i++) {
+      const float *c = correction_storage.data() + i * 4;
+      float *s = r_color + i * 4;
+      const float f = clamp_f(correction.opacity * c[3], 0.0f, 1.0f);
+      const float a = clamp_f(r_factor[i], 0.0f, 1.0f);
+
+      float blended[4] = {s[0], s[1], s[2], s[3]};
+      if (correction.blend == CompositeBlend::NormalCombine) {
+        /* Where the row has no content its colour is the map's empty black, which decodes to a
+         * tangent of `(-1, -1, -1)`: the flat normal stands in by the coverage, as in the graph. */
+        blended[0] = 0.5f + (s[0] - 0.5f) * a;
+        blended[1] = 0.5f + (s[1] - 0.5f) * a;
+        blended[2] = 1.0f + (s[2] - 1.0f) * a;
+      }
+      blend_row_linear(blended, c, correction.blend, 1.0f);
+
+      const float a_new = a + f * (1.0f - a);
+      const float weight = (a_new > 0.0f) ? f / a_new : 0.0f;
+      for (const int k : IndexRange(3)) {
+        const float c_eff = c[k] + (blended[k] - c[k]) * a;
+        s[k] += (c_eff - s[k]) * weight;
+      }
+      /* The fourth component follows the over model on its own where it is a content alpha. */
+      const float alpha = clamp_f(s[3], 0.0f, 1.0f);
+      s[3] = layer.tracks_content_alpha ? alpha + f * (1.0f - alpha) : a_new;
+      r_factor[i] = a_new;
+    }
+  }
+
+  /* The mask clips the layer, corrections included. */
   for (int64_t i = 0; i < count; i++) {
     float mask_value = 1.0f;
     if (mask != nullptr) {
@@ -803,16 +865,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       mask_value = (1.0f - layer.mask_influence) +
                    layer.mask_influence * clamp_f(value, 0.0f, 1.0f);
     }
-    /* A layer whose factor is its own alpha, with no mask map to say otherwise, and a painted map
-     * both cover by the map's alpha; a transparent texel shows what is below. */
-    const bool own_alpha = (layer.color_alpha_coverage && layer.color_ibuf != nullptr) ||
-                           (mask == nullptr && layer.mask_from_alpha);
-    float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
-    if (layer.is_folder) {
-      /* A folder covers by what its contents covered, not by the alpha of the colour it reads. */
-      content = clamp_f(folder_coverage[i], 0.0f, 1.0f);
-    }
-    r_factor[i] = mask_value * content;
+    r_factor[i] *= mask_value;
   }
 
   /* The mask stack lays its coverage over the factor, item by item: `F = mix(F, F * C, A * op)`,
@@ -972,6 +1025,11 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
   }
   for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
     if (item.ibuf != nullptr && !composite_mask_ibuf_is_valid(item.ibuf, width, height)) {
+      return false;
+    }
+  }
+  for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+    if (correction.ibuf != nullptr && !composite_ibuf_is_rgba(correction.ibuf, width, height)) {
       return false;
     }
   }
@@ -1272,6 +1330,20 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       }
       layer.mask_items.append(buffer);
     }
+    for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
+      if (correction.image == nullptr) {
+        continue;
+      }
+      PaintMaterialCompositeCorrectionBuffer buffer;
+      buffer.blend = correction.blend;
+      buffer.opacity = correction.opacity;
+      buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
+      if (buffer.ibuf == nullptr) {
+        return false;
+      }
+      buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
+      layer.content_corrections.append(buffer);
+    }
     static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
     r_layers.append(std::move(layer));
   }
@@ -1390,11 +1462,23 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
       }
       continue;
     }
-    if (layer.color_image == nullptr) {
+    /* A row kept only for its corrections is as big as the first map it has. */
+    Image *size_image = layer.color_image;
+    const ImageUser *size_iuser = layer.color_iuser;
+    if (size_image == nullptr) {
+      for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+        if (correction.image != nullptr) {
+          size_image = correction.image;
+          size_iuser = correction.iuser;
+          break;
+        }
+      }
+    }
+    if (size_image == nullptr) {
       continue;
     }
     Vector<CompositeImageLock> locks;
-    const ImBuf *ibuf = composite_image_acquire(layer.color_image, layer.color_iuser, locks);
+    const ImBuf *ibuf = composite_image_acquire(size_image, size_iuser, locks);
     if (ibuf != nullptr) {
       r_width = ibuf->x;
       r_height = ibuf->y;
@@ -1406,6 +1490,17 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
     return r_width > 0 && r_height > 0;
   }
   return false;
+}
+
+bool BKE_paint_material_channel_tracks_content_alpha(const eMaterialPaintChannel channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return false;
+  }
+  return BKE_paint_material_channel_info(channel).supports_image_paint;
 }
 
 bool BKE_paint_material_composite_stack_dimensions(
@@ -1444,6 +1539,16 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.constant_color[2],
                             layer.constant_color[3]);
     hash = get_default_hash(hash, layer.color_alpha_coverage, layer.is_folder);
+    hash = get_default_hash(hash, layer.empty_base, layer.tracks_content_alpha);
+    /* A correction changes the colour and the coverage: its map (by session uid), its blend and its
+     * opacity all have to move the hash, or an edit would keep serving the cached composite. */
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      hash *= 0x100000001b3ULL;
+      hash = get_default_hash(hash,
+                              correction.image != nullptr ? correction.image->id.session_uid : 0,
+                              int(correction.blend),
+                              correction.opacity);
+    }
     if (layer.is_folder) {
       /* The children are part of the folder's identity: the stack hash of the folder's own stack,
        * folded in as one value. */
@@ -1593,6 +1698,9 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     r_images.append(layer.mask_image);
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       r_images.append(item.image);
+    }
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      r_images.append(correction.image);
     }
     if (layer.is_folder) {
       /* The images a folder holds are read through it, so a stroke deep inside still reaches the

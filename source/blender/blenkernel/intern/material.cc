@@ -116,6 +116,10 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     BKE_material_paint_layer_free(&item);
   }
   layer->mask_stack = {nullptr, nullptr};
+  for (MaterialPaintLayer &effect : layer->effects.items_mutable()) {
+    BKE_material_paint_layer_free(&effect);
+  }
+  layer->effects = {nullptr, nullptr};
   for (MaterialPaintLayer &child : layer->children.items_mutable()) {
     BKE_material_paint_layer_free(&child);
   }
@@ -150,6 +154,10 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
   for (const MaterialPaintLayer &item : src.mask_stack) {
     BLI_addtail(&dst->mask_stack, material_paint_layer_copy(item));
   }
+  dst->effects = {nullptr, nullptr};
+  for (const MaterialPaintLayer &effect : src.effects) {
+    BLI_addtail(&dst->effects, material_paint_layer_copy(effect));
+  }
   dst->children = {nullptr, nullptr};
   for (const MaterialPaintLayer &child : src.children) {
     BLI_addtail(&dst->children, material_paint_layer_copy(child));
@@ -165,6 +173,9 @@ static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryFo
   for (MaterialPaintLayer &item : layer->mask_stack) {
     material_paint_layer_foreach_id(&item, data);
   }
+  for (MaterialPaintLayer &effect : layer->effects) {
+    material_paint_layer_foreach_id(&effect, data);
+  }
   for (MaterialPaintLayer &child : layer->children) {
     material_paint_layer_foreach_id(&child, data);
   }
@@ -179,6 +190,10 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   writer->write_struct_list(&layer.mask_stack);
   for (const MaterialPaintLayer &item : layer.mask_stack) {
     material_paint_layer_blend_write(writer, item);
+  }
+  writer->write_struct_list(&layer.effects);
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    material_paint_layer_blend_write(writer, effect);
   }
   writer->write_struct_list(&layer.children);
   for (const MaterialPaintLayer &child : layer.children) {
@@ -207,6 +222,10 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
   BLO_read_struct_list(reader, MaterialPaintLayer, &layer.mask_stack);
   for (MaterialPaintLayer &item : layer.mask_stack) {
     material_paint_layer_blend_read(reader, item);
+  }
+  BLO_read_struct_list(reader, MaterialPaintLayer, &layer.effects);
+  for (MaterialPaintLayer &effect : layer.effects) {
+    material_paint_layer_blend_read(reader, effect);
   }
   BLO_read_struct_list(reader, MaterialPaintLayer, &layer.children);
   for (MaterialPaintLayer &child : layer.children) {

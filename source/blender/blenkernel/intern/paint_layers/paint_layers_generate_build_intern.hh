@@ -141,6 +141,19 @@ class PaintLayersTreeBuilder {
                       bool isolated);
 
   /**
+   * Lay the content correction \a effect over \a content, the straight colour the row has so far in
+   * \a channel, building its nodes into \a group's tree. \a coverage is the coverage the row's own
+   * content has, or empty while it covers fully; both move on to the result. False (and nothing
+   * built) when the correction lays no map in \a channel.
+   */
+  bool correction_lay(bNodeTree &tree,
+                      LayerGroup &group,
+                      const MaterialPaintLayer &effect,
+                      int channel,
+                      NodeOutput &content,
+                      NodeOutput &coverage);
+
+  /**
    * The instance sockets of a row whose group was kept unchanged: its nodes and interface already
    * hold the row, so only the contract sockets are looked up again in the new instance.
    */
@@ -212,6 +225,8 @@ class PaintLayersTreeBuilder {
 
   /** A row's opacity input per channel, keyed by the row. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> opacity_inputs_;
+  /** A content correction's opacity input per channel, keyed by the correction. */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> effect_opacity_inputs_;
   /** The constant input of a row's map-less channel, keyed by the row and the channel. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_inputs_;
   /** A row's base mask opacity and constant inputs, keyed by the row. */

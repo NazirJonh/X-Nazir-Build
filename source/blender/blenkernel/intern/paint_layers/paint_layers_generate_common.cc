@@ -206,7 +206,7 @@ void interface_name_unique(const bNodeTreeInterface &interface,
 
 bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, const int channel)
 {
-  return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel));
+  return paint_layer_row_participates(ma, layer, channel);
 }
 
 bool row_participates(const Material &ma, const MaterialPaintLayer &layer, const int channel)
@@ -228,6 +228,10 @@ static void form_map_add(const ListBaseT<MaterialPaintLayer> &list,
 {
   for (const MaterialPaintLayer &row : list) {
     r_forms.add(&row, form);
+    /* A correction is built into its row's group and scaled like it. */
+    for (const MaterialPaintLayer &effect : row.effects) {
+      r_forms.add(&effect, form);
+    }
     if (!BKE_paint_layers_is_folder(row)) {
       continue;
     }

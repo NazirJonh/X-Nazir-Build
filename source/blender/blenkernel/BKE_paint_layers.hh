@@ -307,6 +307,44 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma, MaterialPaintLayer *
 bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer);
 
 /**
+ * Give \a target a copy of \a source's mask, replacing the one it had. Every item of the copy has a
+ * marker and maps of its own, so painting one mask never changes the other.
+ *
+ * \return false when \a source has no mask, the two are the same row, or \a target is not a row of
+ * \a ma's stack.
+ */
+bool BKE_paint_layers_mask_copy(Main &bmain,
+                                Material &ma,
+                                const MaterialPaintLayer &source,
+                                MaterialPaintLayer &target);
+
+/**
+ * Add a content correction to \a owner: a #MA_PAINT_LAYER_ROLE_EFFECT row with the Image source,
+ * linked on top of \a owner's #MaterialPaintLayer::effects, with the material's channel records
+ * (transparent, no map yet -- the first stroke creates one). It lays down nothing until painted,
+ * so a fresh correction changes no pixel.
+ *
+ * \param name: the correction's name, or null for "Correction Paint".
+ * \return the new correction, or null when \a owner is not a leaf row of \a ma's stack (a folder has
+ * no colour of its own to correct).
+ */
+MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
+                                                    MaterialPaintLayer *owner,
+                                                    const char *name);
+
+/**
+ * Remove the content correction \a effect from its owner, letting go of its maps. The active
+ * marker is cleared when it names the correction.
+ *
+ * \return false when \a effect is null or not a correction of a row of \a ma.
+ */
+bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect);
+
+/** The row that holds \a effect in its #MaterialPaintLayer::effects, or null when it is not a
+ * correction of a row of \a ma. */
+MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect);
+
+/**
  * Find the row of \a ma whose marker is \a marker, at any depth and never by position, so a row
  * keeps resolving after a reorder.
  *

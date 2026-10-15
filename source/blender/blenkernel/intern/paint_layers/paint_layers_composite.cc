@@ -139,10 +139,16 @@ static void composite_image_layers_collect(const Material &ma,
     }
     else {
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-      if (!paint_layer_channel_contributes(ma, layer, record)) {
+      if (!paint_layer_row_participates(ma, layer, channel)) {
         continue;
       }
-      if (record->image != nullptr) {
+      if (paint_layer_row_empty_base(ma, layer, channel)) {
+        /* Only its corrections lay here: its own constant covers nothing, so the row starts from
+         * zero coverage and the corrections bring it in. */
+        out.has_constant_color = true;
+        out.empty_base = true;
+      }
+      else if (record->image != nullptr) {
         out.color_image = record->image;
         /* The description carries no per-node #ImageUser; the default one is what a plain map
          * uses. */
@@ -160,6 +166,21 @@ static void composite_image_layers_collect(const Material &ma,
     out.blend = layer_channel_blend(layer, channel);
     out.opacity = BKE_paint_layers_effective_opacity(layer) * pass_through_scale;
     out.enabled = true;
+    out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+        eMaterialPaintChannel(channel));
+    /* The corrections lay over the row's colour, in the order they were added. A correction that
+     * lays no map in this channel is not carried, as the generator builds nothing for it. */
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      if (!paint_layer_effect_lays(ma, effect, channel)) {
+        continue;
+      }
+      PaintMaterialCompositeCorrection correction;
+      correction.image = paint_layer_channel_find(effect, channel)->image;
+      correction.iuser = nullptr;
+      correction.blend = layer_channel_blend(effect, channel);
+      correction.opacity = BKE_paint_layers_effective_opacity(effect) * pass_through_scale;
+      out.content_corrections.append(correction);
+    }
     /* The mask is one for all channels of the row, so the same item reaches every channel's
      * stack, exactly as the generator reads the one set of mask inputs in every channel chain. */
     if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {

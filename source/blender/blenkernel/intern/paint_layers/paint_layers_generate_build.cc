@@ -199,7 +199,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     }
 
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-    if (record == nullptr || record->image != nullptr) {
+    /* An empty base builds a flat zero instead of its record's value, so it has no fill input. */
+    if (record == nullptr || record->image != nullptr ||
+        paint_layer_row_empty_base(ma_, layer, channel))
+    {
       continue;
     }
     /* A channel with no map: its flat value is an input of the row, so a change to it is a value
@@ -210,6 +213,32 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     if (fill != nullptr) {
       group_input_default_set(group, *fill, record->value);
       fill_inputs_.lookup_or_add_default(&layer).add(channel, fill);
+    }
+  }
+
+  /* A content correction has its own opacity per channel it lays a map in. */
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    for (const int channel : wired_channels_) {
+      if (!paint_layer_effect_lays(ma_, effect, channel)) {
+        continue;
+      }
+      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+          eMaterialPaintChannel(channel));
+      char base[200];
+      SNPRINTF(base,
+               "%s %s %s Opacity",
+               layer_name,
+               effect.name[0] != '\0' ? effect.name : "Correction Paint",
+               info.ui_name);
+      bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_OPACITY, effect.marker, channel);
+      if (opacity != nullptr) {
+        group_input_default_set(group,
+                                *opacity,
+                                BKE_paint_layers_effective_opacity(effect) *
+                                    forms_.lookup_default(&effect, {}).pass_through_scale);
+        effect_opacity_inputs_.lookup_or_add_default(&effect).add(channel, opacity);
+      }
     }
   }
 

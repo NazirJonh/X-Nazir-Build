@@ -23,6 +23,7 @@
 #include "BKE_paint_layers_target.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_span.hh"
 #include "BLI_uuid.h"
@@ -206,6 +207,54 @@ TEST_F(PaintLayersTargetTest, ensure_creates_channel_and_neutral_map)
   /* A second call returns the same map, minting nothing new. */
   EXPECT_EQ(BKE_paint_layers_target_ensure_writable(*bmain, target, 4), image);
   EXPECT_EQ(layer->channels_num, 1);
+}
+
+TEST_F(PaintLayersTargetTest, a_correction_is_a_paint_target_with_a_transparent_first_map)
+{
+  MaterialPaintLayer *row = add_active_row("L");
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  BKE_paint_layers_active_set(*ma, effect->marker);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  EXPECT_EQ(target.layer, effect);
+  ASSERT_NE(target.channel_record, nullptr);
+
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(image, nullptr);
+  EXPECT_EQ(target.channel_record->image, image);
+  EXPECT_STREQ(image->id.name + 2, "Corr Base Color");
+  /* The correction lays nothing until painted: its map starts transparent, not as the opaque
+   * neutral a fresh layer's channel takes. */
+  uchar pixel[4];
+  first_byte_pixel(*image, pixel);
+  EXPECT_EQ(pixel[3], 0);
+  /* The row it hangs on got no map of its own. */
+  EXPECT_EQ(paint_layer_channel_find(*row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+
+  PaintLayersImageUse use;
+  ASSERT_TRUE(BKE_paint_layers_find_image_use(*ma, *image, use));
+  EXPECT_EQ(use.layer, effect);
+}
+
+TEST_F(PaintLayersTargetTest, removing_a_correction_lets_go_of_its_map_and_the_active_marker)
+{
+  MaterialPaintLayer *row = add_active_row("L");
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  BKE_paint_layers_active_set(*ma, effect->marker);
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  Image *image = BKE_paint_layers_target_ensure_writable(*bmain, target, 4);
+  ASSERT_NE(image, nullptr);
+  /* The record is the map's only user (see the first-stroke tests above). */
+  EXPECT_EQ(image->id.us, 1);
+
+  ASSERT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
+  EXPECT_EQ(image->id.us, 0);
+  EXPECT_TRUE(BLI_uuid_is_nil(BKE_paint_layers_active_get(*ma)));
+  EXPECT_TRUE(BLI_listbase_is_empty(&row->effects));
 }
 
 TEST_F(PaintLayersTargetTest, ensure_normal_neutral_is_flat)

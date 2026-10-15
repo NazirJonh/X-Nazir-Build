@@ -170,6 +170,19 @@ bool BKE_paint_layers_find_image_use(Material &ma,
             return false;
           }
         }
+        /* A correction's map: reported as the correction, so the caller reads its channels like a
+         * row's. */
+        for (MaterialPaintLayer &effect : layer.effects) {
+          for (const int i : IndexRange(effect.channels_num)) {
+            if (effect.channels[i].image == &image) {
+              r_use.layer = &effect;
+              r_use.channel = effect.channels[i].channel;
+              r_use.is_mask = false;
+              found = true;
+              return false;
+            }
+          }
+        }
         /* A mask item's map: reported as the item, so the caller reads its channels like a row's. */
         for (MaterialPaintLayer &item : layer.mask_stack) {
           for (const int i : IndexRange(item.channels_num)) {

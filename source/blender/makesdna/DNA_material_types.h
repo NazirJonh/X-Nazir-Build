@@ -407,12 +407,16 @@ enum eMaterialPaintLayerFlag : int16_t {
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
 /**
- * #MaterialPaintLayer::role. Numerically matches the reference's role table: 1 is reserved for the
- * effect role, which arrives with corrections.
+ * #MaterialPaintLayer::role. Numerically matches the reference's role table.
  */
 enum eMaterialPaintLayerRole : int8_t {
   /** A row of the stack. */
   MA_PAINT_LAYER_ROLE_LAYER = 0,
+  /**
+   * A content correction of an owner row's #MaterialPaintLayer::effects: a map laid over the owner's
+   * colour in each channel it carries, below the owner's own blend.
+   */
+  MA_PAINT_LAYER_ROLE_EFFECT = 1,
   /** An item of an owner row's #MaterialPaintLayer::mask_stack: coverage laid over its factor. */
   MA_PAINT_LAYER_ROLE_MASK_ITEM = 2,
 };
@@ -518,6 +522,12 @@ struct MaterialPaintLayer {
    * is one, is the first.
    */
   ListBaseT<MaterialPaintLayer> mask_stack = {nullptr, nullptr};
+  /**
+   * The content corrections of this row, bottom to top: each lays its own maps over the row's
+   * colour before the row's blend. Owned by the row like #mask_stack; every item is a
+   * #MA_PAINT_LAYER_ROLE_EFFECT row with no children, mask or corrections of its own.
+   */
+  ListBaseT<MaterialPaintLayer> effects = {nullptr, nullptr};
 };
 
 struct Material {

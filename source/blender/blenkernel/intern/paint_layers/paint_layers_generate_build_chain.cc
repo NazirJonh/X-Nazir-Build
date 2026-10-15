@@ -15,6 +15,7 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
 
@@ -354,6 +355,200 @@ static bNode *mix_float_node_add(bNodeTree &tree)
   return mix;
 }
 
+/**
+ * A Math node of \a operation over \a a and \a b: a null socket of \a a reads \a a_default instead.
+ * Empty when the node cannot be made, in which case nothing is left behind.
+ */
+static NodeOutput math_node_add(bNodeTree &tree,
+                                layout::LayoutGrid &grid,
+                                Vector<bNode *> &r_nodes,
+                                const int operation,
+                                const NodeOutput a,
+                                const NodeOutput b,
+                                const float a_default = 0.0f)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  if (node == nullptr) {
+    return {};
+  }
+  bNodeSocket *a_in = socket_in(*node, "Value");
+  bNodeSocket *b_in = socket_in(*node, "Value_001");
+  bNodeSocket *out = socket_out(*node, "Value");
+  if (a_in == nullptr || b_in == nullptr || out == nullptr || b.socket == nullptr) {
+    bke::node_remove_node(nullptr, tree, *node, true, false);
+    return {};
+  }
+  node->custom1 = operation;
+  grid.place_extra(*node);
+  if (a.socket != nullptr) {
+    bke::node_add_link(tree, *a.node, *a.socket, *node, *a_in);
+  }
+  else if (a_in->default_value != nullptr) {
+    static_cast<bNodeSocketValueFloat *>(a_in->default_value)->value = a_default;
+  }
+  bke::node_add_link(tree, *b.node, *b.socket, *node, *b_in);
+  r_nodes.append(node);
+  return {node, out};
+}
+
+bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
+                                            LayerGroup &group,
+                                            const MaterialPaintLayer &effect,
+                                            const int channel,
+                                            NodeOutput &content,
+                                            NodeOutput &coverage)
+{
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
+  Map<int, bNodeTreeInterfaceSocket *> *by_channel = effect_opacity_inputs_.lookup_ptr(&effect);
+  if (record == nullptr || record->image == nullptr || by_channel == nullptr ||
+      content.socket == nullptr)
+  {
+    return false;
+  }
+  bNodeTreeInterfaceSocket **opacity_iface = by_channel->lookup_ptr(channel);
+  bNodeSocket *opacity = (opacity_iface != nullptr) ? group_input_socket(group, **opacity_iface) :
+                                                      nullptr;
+  bNode *map = this->image_map_node_add(tree, *record->image);
+  bNodeSocket *map_color = (map != nullptr) ? socket_out(*map, "Color") : nullptr;
+  bNodeSocket *map_alpha = (map != nullptr) ? socket_out(*map, "Alpha") : nullptr;
+  if (opacity == nullptr || map_color == nullptr || map_alpha == nullptr) {
+    if (map != nullptr) {
+      bke::node_remove_node(nullptr, tree, *map, true, false);
+    }
+    return false;
+  }
+  grid_.place_extra(*map);
+  Vector<bNode *> nodes = {map};
+  /* Nothing of the correction is linked to the chain until it is complete, so a failure removes
+   * what was made and leaves the row as it was. */
+  const auto discard = [&]() {
+    for (bNode *node : nodes) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+    return false;
+  };
+  /* The map is read as stored, like a row's own map: a colour map is un-premultiplied by the node,
+   * and a data map follows the same rule a row's does, so the two cannot disagree. */
+  const NodeOutput color = {map, map_color};
+  const NodeOutput alpha = {map, map_alpha};
+
+  /* The factor sits in its own `Opacity x Factor` frame, so it stays out of this correction's. */
+  bNode *factor_node_for_frame = nullptr;
+  const auto frame = [&]() {
+    Vector<bNode *> framed;
+    for (bNode *node : nodes) {
+      if (node != factor_node_for_frame) {
+        framed.append(node);
+      }
+    }
+    layout::frame_add(tree, effect.name, framed);
+  };
+  /* The correction's own factor: its opacity times the map's alpha. */
+  const NodeOutput factor = this->multiply_nodes_add(tree, {group.group_input, opacity}, alpha);
+  if (factor.node == nullptr) {
+    return discard();
+  }
+  nodes.append(factor.node);
+  factor_node_for_frame = factor.node;
+
+  const BlendNode blend = this->blend_node_add(
+      tree, channel, BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(effect.blend)));
+  if (blend.node == nullptr) {
+    return discard();
+  }
+  nodes.append(blend.node);
+
+  if (coverage.socket == nullptr) {
+    /* The row covers fully, so the correction is a plain blend by its factor. */
+    blend_inputs_link(tree, blend, content, color, factor);
+    content = {blend.node, blend.result};
+    frame();
+    return true;
+  }
+
+  /* The row has coverage `a` of its own, which may be partial or zero. A texel it does not cover
+   * has no colour of its own, so the correction takes over there instead of mixing with the empty
+   * (black) one:
+   *   c_eff = lerp(c, blend(S, c), a)
+   *   a'    = a + f * (1 - a)
+   *   S'    = lerp(S, c_eff, f / a')
+   * which is what the CPU composite computes per pixel, and equals the plain blend by f where
+   * `a` is one. */
+  NodeOutput below = content;
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    /* The Normal Combine decodes its first input as a tangent normal, and where the row has no
+     * content its colour is the map's empty black, which decodes to `(-1, -1, -1)`: the flat normal
+     * stands in by the coverage, as in the CPU. */
+    bNode *flat = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+    if (flat != nullptr) {
+      nodes.append(flat);
+    }
+    bNodeSocket *flat_a = (flat != nullptr) ? socket_in(*flat, "A_Color") : nullptr;
+    bNodeSocket *flat_b = (flat != nullptr) ? socket_in(*flat, "B_Color") : nullptr;
+    bNodeSocket *flat_fac = (flat != nullptr) ? socket_in(*flat, "Factor_Float") : nullptr;
+    bNodeSocket *flat_out = (flat != nullptr) ? socket_out(*flat, "Result_Color") : nullptr;
+    if (flat_a == nullptr || flat_b == nullptr || flat_fac == nullptr || flat_out == nullptr ||
+        flat_a->default_value == nullptr)
+    {
+      return discard();
+    }
+    grid_.place_extra(*flat);
+    const float flat_normal[4] = {0.5f, 0.5f, 1.0f, 1.0f};
+    copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(flat_a->default_value)->value, flat_normal);
+    bke::node_add_link(tree, *content.node, *content.socket, *flat, *flat_b);
+    bke::node_add_link(tree, *coverage.node, *coverage.socket, *flat, *flat_fac);
+    below = {flat, flat_out};
+  }
+  /* The blend at full weight; the weight is applied once, below, over the coverage. */
+  blend_inputs_link(tree, blend, below, color, {});
+
+  bNode *c_eff = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+  bNode *lay = mix_node_add(tree, MA_RAMP_BLEND, 0.0f, 0.0f);
+  for (bNode *node : {c_eff, lay}) {
+    if (node != nullptr) {
+      nodes.append(node);
+      grid_.place_extra(*node);
+    }
+  }
+  bNodeSocket *eff_a = (c_eff != nullptr) ? socket_in(*c_eff, "A_Color") : nullptr;
+  bNodeSocket *eff_b = (c_eff != nullptr) ? socket_in(*c_eff, "B_Color") : nullptr;
+  bNodeSocket *eff_fac = (c_eff != nullptr) ? socket_in(*c_eff, "Factor_Float") : nullptr;
+  bNodeSocket *eff_out = (c_eff != nullptr) ? socket_out(*c_eff, "Result_Color") : nullptr;
+  bNodeSocket *lay_a = (lay != nullptr) ? socket_in(*lay, "A_Color") : nullptr;
+  bNodeSocket *lay_b = (lay != nullptr) ? socket_in(*lay, "B_Color") : nullptr;
+  bNodeSocket *lay_fac = (lay != nullptr) ? socket_in(*lay, "Factor_Float") : nullptr;
+  bNodeSocket *lay_out = (lay != nullptr) ? socket_out(*lay, "Result_Color") : nullptr;
+  if (eff_a == nullptr || eff_b == nullptr || eff_fac == nullptr || eff_out == nullptr ||
+      lay_a == nullptr || lay_b == nullptr || lay_fac == nullptr || lay_out == nullptr)
+  {
+    return discard();
+  }
+  bke::node_add_link(tree, *color.node, *color.socket, *c_eff, *eff_a);
+  bke::node_add_link(tree, *blend.node, *blend.result, *c_eff, *eff_b);
+  bke::node_add_link(tree, *coverage.node, *coverage.socket, *c_eff, *eff_fac);
+
+  /* `a' = a + f * (1 - a)`, then the weight of the correction in the colour, `f / a'`. */
+  const NodeOutput one_minus = math_node_add(
+      tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, coverage, 1.0f);
+  const NodeOutput scaled = math_node_add(
+      tree, grid_, nodes, NODE_MATH_MULTIPLY, factor, one_minus);
+  const NodeOutput joined = math_node_add(tree, grid_, nodes, NODE_MATH_ADD, coverage, scaled);
+  const NodeOutput weight = math_node_add(tree, grid_, nodes, NODE_MATH_DIVIDE, factor, joined);
+  if (one_minus.node == nullptr || scaled.node == nullptr || joined.node == nullptr ||
+      weight.node == nullptr)
+  {
+    return discard();
+  }
+  bke::node_add_link(tree, *content.node, *content.socket, *lay, *lay_a);
+  bke::node_add_link(tree, *c_eff, *eff_out, *lay, *lay_b);
+  bke::node_add_link(tree, *weight.node, *weight.socket, *lay, *lay_fac);
+
+  content = {lay, lay_out};
+  coverage = joined;
+  frame();
+  return true;
+}
+
 RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
                                             LayerGroup &group,
                                             const int channel,
@@ -366,7 +561,10 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
   /* A folder owns no record: its source is the isolated result of what it holds. */
   const bool folder = BKE_paint_layers_is_folder(layer);
-  if (record == nullptr && !folder) {
+  /* A Paint row with no map and no value alpha takes part only for the corrections laid over it:
+   * its own content covers nothing. */
+  const bool empty_base = !folder && paint_layer_row_empty_base(ma_, layer, channel);
+  if (record == nullptr && !folder && !empty_base) {
     return {};
   }
 
@@ -446,6 +644,21 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     source_node = group_input;
     source = folder_color;
   }
+  else if (empty_base) {
+    /* An empty base: the corrections replace the colour wherever they cover, so its own is a flat
+     * zero. */
+    bNode *zero = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
+    bNodeSocket *zero_out = (zero != nullptr) ? socket_out(*zero, "Color") : nullptr;
+    if (zero_out == nullptr) {
+      return {};
+    }
+    if (zero_out->default_value != nullptr) {
+      zero_v4(static_cast<bNodeSocketValueRGBA *>(zero_out->default_value)->value);
+    }
+    grid_.place(*zero, layout::Column::Source, 0);
+    source_node = zero;
+    source = zero_out;
+  }
   else if (record->image != nullptr) {
     bNode *map = this->image_map_node_add(tree, *record->image);
     if (map == nullptr) {
@@ -476,8 +689,40 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     layout::frame_add(tree, "Source", source_nodes);
   }
 
-  /* The factor is the row's opacity times the map's own alpha: a texel the map leaves transparent
-   * shows what is below. A constant covers by its opacity alone. */
+  /* The coverage the row's own content has: its map's alpha, so a texel the map leaves transparent
+   * shows what is below; zero for an empty base; none for a constant, which covers fully. */
+  NodeOutput coverage;
+  if (map_node != nullptr) {
+    if (bNodeSocket *map_alpha = socket_out(*map_node, "Alpha")) {
+      coverage = {map_node, map_alpha};
+    }
+  }
+  else if (empty_base) {
+    bNode *zero = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+    bNodeSocket *zero_out = (zero != nullptr) ? socket_out(*zero, "Value") : nullptr;
+    if (zero_out == nullptr) {
+      return {};
+    }
+    if (zero_out->default_value != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(zero_out->default_value)->value = 0.0f;
+    }
+    grid_.place(*zero, layout::Column::Source, 1);
+    coverage = {zero, zero_out};
+  }
+
+  /* Content corrections lay their maps over the colour before the row's own blend, and raise the
+   * coverage the row lays with. Only a leaf has any (a folder takes them in a later change). */
+  if (!folder) {
+    NodeOutput content = {source_node, source};
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      this->correction_lay(tree, group, effect, channel, content, coverage);
+    }
+    source_node = content.node;
+    source = content.socket;
+  }
+
+  /* The factor is the row's opacity times its content coverage. A constant covers by its opacity
+   * alone. */
   bNode *factor_node = nullptr;
   bNodeSocket *factor = nullptr;
   if (Map<int, bNodeTreeInterfaceSocket *> *by_channel = opacity_inputs_.lookup_ptr(&layer)) {
@@ -486,15 +731,14 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
       factor = group_input_socket(group, **opacity_iface);
     }
   }
-  if (map_node != nullptr) {
-    bNodeSocket *map_alpha = socket_out(*map_node, "Alpha");
+  if (coverage.socket != nullptr) {
     if (factor == nullptr) {
-      factor_node = map_node;
-      factor = map_alpha;
+      factor_node = coverage.node;
+      factor = coverage.socket;
     }
-    else if (map_alpha != nullptr) {
+    else {
       const NodeOutput product = this->multiply_nodes_add(
-          tree, {factor_node, factor}, {map_node, map_alpha});
+          tree, {factor_node, factor}, coverage);
       if (product.node != nullptr) {
         factor_node = product.node;
         factor = product.socket;

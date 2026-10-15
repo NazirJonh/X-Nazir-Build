@@ -34,6 +34,11 @@ enum class PaintLayerAddKind : int8_t {
   Fill,
   /** An empty folder, made to be filled. */
   Folder,
+  /**
+   * A content correction of the anchor row (or of the row an anchor correction hangs on): a map
+   * laid over its colour, painted into like a layer. It never becomes a row of the stack.
+   */
+  Correction,
 };
 
 struct PaintLayerAddParams {

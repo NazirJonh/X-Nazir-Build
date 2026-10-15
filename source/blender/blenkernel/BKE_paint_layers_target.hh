@@ -43,7 +43,8 @@ struct PaintModeSettings;
  * `channels` holds it, so a map used by two materials stays with the one that was searched.
  */
 struct PaintLayersImageUse {
-  /** The row, or the mask item (see #is_mask), whose `channels` carries the image. */
+  /** The row, its content correction, or the mask item (see #is_mask), whose `channels` carries the
+   * image. */
   MaterialPaintLayer *layer = nullptr;
   /** The #eMaterialPaintChannel the image drives. */
   int channel = -1;

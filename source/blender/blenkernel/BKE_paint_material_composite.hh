@@ -136,6 +136,40 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    * opacity and mask, scaled by the coverage the children accumulated.
    */
   bool is_folder = false;
+  /**
+   * An unpainted Paint row kept alive only for the corrections laid over it: its constant covers
+   * nothing, so the corrections bring coverage in instead of the row filling everything with black.
+   */
+  bool empty_base = false;
+  /**
+   * Whether the row's fourth component is its content alpha, raised by each correction by the over
+   * model (`a = a + f * (1 - a)`), rather than the coverage it blends by. The Normal channel keeps
+   * the colour's own, and the generated graph tracks the same quantity (see
+   * #BKE_paint_material_channel_tracks_content_alpha).
+   */
+  bool tracks_content_alpha = false;
+};
+
+/**
+ * One content correction of a row, as data-blocks: a map laid over the row's colour before the row's
+ * own blend, by `opacity * alpha(map)`. A correction with no map in the channel is not carried.
+ */
+struct PaintMaterialCompositeCorrection {
+  Image *image = nullptr;
+  /** Null selects the default #ImageUser. */
+  const ImageUser *iuser = nullptr;
+  CompositeBlend blend = CompositeBlend::Mix;
+  /** The correction's effective opacity (enabled folded in). */
+  float opacity = 1.0f;
+};
+
+/** A correction as the evaluator reads it. */
+struct PaintMaterialCompositeCorrectionBuffer {
+  ImBuf *ibuf = nullptr;
+  /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
+  const char *colorspace_name = nullptr;
+  CompositeBlend blend = CompositeBlend::Mix;
+  float opacity = 1.0f;
 };
 
 /**
@@ -170,6 +204,8 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   const ImageUser *mask_iuser = nullptr;
   /** The row's mask items, bottom to top; each multiplies the factor. */
   Vector<PaintMaterialCompositeMaskItem> mask_items;
+  /** The corrections blended onto the row's colour, bottom to top. */
+  Vector<PaintMaterialCompositeCorrection> content_corrections;
   /**
    * A folder's own stack, bottom to top. A std::vector rather than a #Vector: the element type is
    * the one being defined here, and #Vector needs its size.
@@ -200,9 +236,23 @@ struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
   const char *mask_colorspace_name = nullptr;
   /** The row's mask items, bottom to top. */
   Vector<PaintMaterialCompositeMaskBuffer> mask_items;
+  /** The corrections blended onto the row's colour, bottom to top. */
+  Vector<PaintMaterialCompositeCorrectionBuffer> content_corrections;
   /** A folder's own stack, bottom to top; see #PaintMaterialCompositeImageLayer::children. */
   std::vector<PaintMaterialCompositeLayer> children;
 };
+
+/**
+ * Whether the fourth component of a row's colour in \a channel is its content alpha, which the
+ * corrections laid over the row raise by the over model: every channel that shows a painted map
+ * except Normal, whose fourth component is the colour chain's own.
+ *
+ * The CPU composite tracks it per pixel. The generated graph does not yet: the shader ignores the
+ * alpha of a colour socket, so the quantity has no reader there until a bake of the graph writes it
+ * into a map (the bake commit), which is where the generator's parallel `Content Alpha` chain
+ * belongs.
+ */
+bool BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel channel);
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */
 struct PaintMaterialCompositeStack {

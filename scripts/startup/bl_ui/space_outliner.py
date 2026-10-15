@@ -53,9 +53,9 @@ class OUTLINER_HT_tool_header(Header):
         layout.separator_spacer()
 
         if space.stack_source == 'PAINT_MATERIAL':
-            # The Add verb is built from the source's own kinds; the paint stack offers Paint and
-            # Fill, so a quick-access button each stands in for the menu (the source's kind list is
-            # not exposed through RNA yet, so the two buttons are written out here).
+            # The Add verb is built from the source's own kinds; the paint stack offers Paint, Fill
+            # and a Correction, so a quick-access button each stands in for the menu (the source's
+            # kind list is not exposed through RNA yet, so the buttons are written out here).
             row = layout.row(align=True)
             props = row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB')
             props.type = 'PAINT'
@@ -63,6 +63,10 @@ class OUTLINER_HT_tool_header(Header):
             props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
             props.type = 'FILL'
             props.label = "Add Fill Layer"
+            # A map painted over the selected layer's colour; it hangs on the layer, not on the stack.
+            props = row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB_ALPHA')
+            props.type = 'CORRECTION'
+            props.label = "Add Correction"
 
             # Only the add is here, as a menu of the two starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.

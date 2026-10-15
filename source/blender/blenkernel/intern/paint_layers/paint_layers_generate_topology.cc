@@ -159,6 +159,23 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
       hash = topology_hash_mix(hash, 0);
     }
   }
+  /* A content correction is nodes of its own (a map, a Mix and a coverage fold) in each channel it
+   * lays a map in, so which ones do, and which map, is structure; its opacity is an input. Its
+   * marker names those inputs, so a removed and re-added correction is a different shape. */
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    topology_hash_uid(hash, effect.marker);
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.blend)));
+    for (const int channel : wired_channels) {
+      if (paint_layer_effect_lays(ma, effect, channel)) {
+        topology_hash_string(hash, paint_layer_channel_find(effect, channel)->image->id.name);
+      }
+      else {
+        hash = topology_hash_mix(hash, 0);
+      }
+      /* A row kept only for its corrections starts from zero coverage instead of its constant. */
+      hash = topology_hash_mix(hash, paint_layer_row_empty_base(ma, layer, channel) ? 1 : 0);
+    }
+  }
   /* A mask is nodes (an Image Texture and its grey chain against a value input), so its presence
    * and whether it has a map are structure; its constant, opacity and enabled flag are inputs. */
   if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {

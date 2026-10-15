@@ -41,6 +41,8 @@ static int paint_layer_name_number_max(const ListBaseT<MaterialPaintLayer> &list
       }
     }
     highest = std::max(highest, paint_layer_name_number_max(layer.children, base));
+    /* A correction is numbered among the names too, so its default name stays unique. */
+    highest = std::max(highest, paint_layer_name_number_max(layer.effects, base));
   }
   return highest;
 }
@@ -60,6 +62,28 @@ std::string BKE_paint_layers_unique_default_name(const Material &ma, const Strin
 MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
                                                      const PaintLayerAddParams &params)
 {
+  if (params.kind == PaintLayerAddKind::Correction) {
+    /* An Add aimed at a correction means another one on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+    }
+    if (owner == nullptr) {
+      return nullptr;
+    }
+    /* Numbered among the corrections of this one layer only: two layers each have their own
+     * "Correction Paint 1", the way the rows of two folders do not share a count. */
+    const std::string name = (params.name != nullptr) ?
+                                 std::string(params.name) :
+                                 "Correction Paint " +
+                                     std::to_string(
+                                         paint_layer_name_number_max(owner->effects,
+                                                                     "Correction Paint") +
+                                         1);
+    return BKE_paint_layers_correction_add(ma, owner, name.c_str());
+  }
   const char *name_base = (params.kind == PaintLayerAddKind::Fill)   ? "Fill" :
                           (params.kind == PaintLayerAddKind::Folder) ? "Folder" :
                                                                        "Layer";
@@ -104,8 +128,46 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
 bool BKE_paint_layers_edit_move(Material &ma,
                                 MaterialPaintLayer &from,
                                 MaterialPaintLayer *anchor,
-                                const PaintLayerPlace place)
+                                PaintLayerPlace place)
 {
+  MaterialPaintLayer *from_owner = BKE_paint_layers_correction_owner(ma, from);
+  MaterialPaintLayer *anchor_owner = (anchor != nullptr) ?
+                                         BKE_paint_layers_correction_owner(ma, *anchor) :
+                                         nullptr;
+  if (from_owner != nullptr) {
+    /* A correction is never a row of the stack: it lands beside another correction, in that one's
+     * layer, or joins a layer it is dropped on (a paste aimed at the active layer). */
+    if (anchor == nullptr || anchor == &from) {
+      return false;
+    }
+    if (anchor_owner != nullptr) {
+      BLI_remlink(&from_owner->effects, &from);
+      if (place == PaintLayerPlace::Below) {
+        BLI_insertlinkbefore(&anchor_owner->effects, anchor, &from);
+      }
+      else {
+        BLI_insertlinkafter(&anchor_owner->effects, anchor, &from);
+      }
+    }
+    else {
+      if (BKE_paint_layers_owner_list(ma, *anchor) == nullptr ||
+          BKE_paint_layers_is_folder(*anchor))
+      {
+        return false;
+      }
+      BLI_remlink(&from_owner->effects, &from);
+      BLI_addtail(&anchor->effects, &from);
+    }
+    BKE_paint_layers_tag_edited(ma);
+    return true;
+  }
+  if (anchor_owner != nullptr) {
+    /* A row aimed at a correction goes beside the layer that holds it, never inside it. */
+    anchor = anchor_owner;
+    if (place == PaintLayerPlace::Into) {
+      place = PaintLayerPlace::Above;
+    }
+  }
   if (place == PaintLayerPlace::Into && anchor != nullptr &&
       !BKE_paint_layers_is_folder(*anchor))
   {

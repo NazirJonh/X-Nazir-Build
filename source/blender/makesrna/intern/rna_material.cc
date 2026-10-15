@@ -732,13 +732,14 @@ static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *l
   if (ma == nullptr) {
     return nullptr;
   }
-  /* A row of the stack at any depth, or an item of one row's mask: judged by address, so a stale
-   * pointer is never dereferenced. */
+  /* A row of the stack at any depth, an item of one row's mask or one of its corrections: judged by
+   * address, so a stale pointer is never dereferenced. */
   bool owned = false;
   BKE_paint_layers_foreach(
       static_cast<const Material &>(*ma),
       [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
-        owned = &row == layer || BLI_findindex(&row.mask_stack, layer) != -1;
+        owned = &row == layer || BLI_findindex(&row.mask_stack, layer) != -1 ||
+                BLI_findindex(&row.effects, layer) != -1;
         return !owned;
       });
   return owned ? ma : nullptr;
@@ -837,7 +838,7 @@ static int rna_MaterialPaintLayer_marker_length(PointerRNA * /*ptr*/)
 /**
  * The path of \a layer below \a prefix, searching \a list and every folder under it: a row is
  * `<prefix>[i]`, a folder's rows `<prefix>[i].children[j]` and a mask item
- * `<row path>.mask_items[k]`.
+ * `<row path>.mask_items[k]`, a content correction `<row path>.effects[k]`.
  */
 static bool rna_paint_layer_path_find(const ListBaseT<MaterialPaintLayer> &list,
                                       const MaterialPaintLayer *layer,
@@ -854,6 +855,11 @@ static bool rna_paint_layer_path_find(const ListBaseT<MaterialPaintLayer> &list,
     const int item_index = BLI_findindex(&row.mask_stack, layer);
     if (item_index != -1) {
       r_path = fmt::format("{}.mask_items[{}]", row_path, item_index);
+      return true;
+    }
+    const int effect_index = BLI_findindex(&row.effects, layer);
+    if (effect_index != -1) {
+      r_path = fmt::format("{}.effects[{}]", row_path, effect_index);
       return true;
     }
     if (BKE_paint_layers_is_folder(row) &&
@@ -974,6 +980,31 @@ static void rna_MaterialPaintLayer_mask_items_begin(CollectionPropertyIterator *
   rna_iterator_listbase_begin(iter, ptr, &layer->mask_stack, nullptr);
 }
 
+static void rna_MaterialPaintLayer_effects_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &layer->effects, nullptr);
+}
+
+static MaterialPaintLayer *rna_MaterialPaintLayer_effect_add(PointerRNA ptr,
+                                                             ReportList *reports,
+                                                             const char *name)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    /* The policy numbers an empty name among this layer's own corrections. */
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::Correction;
+    params.anchor = layer;
+    params.name = (name[0] != '\0') ? name : nullptr;
+    if (MaterialPaintLayer *effect = BKE_paint_layers_add_with_policy(*ma, params)) {
+      return effect;
+    }
+  }
+  BKE_report(reports, RPT_ERROR, "Only a layer of the stack that is not a folder takes a correction");
+  return nullptr;
+}
+
 static void rna_MaterialPaintLayer_children_begin(CollectionPropertyIterator *iter,
                                                   PointerRNA *ptr)
 {
@@ -1045,6 +1076,12 @@ static MaterialPaintLayer *rna_paint_layer_by_channel(Material &ma,
             return false;
           }
         }
+        for (MaterialPaintLayer &effect : layer.effects) {
+          if (channel >= effect.channels && channel < effect.channels + effect.channels_num) {
+            found = &effect;
+            return false;
+          }
+        }
         return true;
       });
   return found;
@@ -1083,6 +1120,12 @@ static std::optional<std::string> rna_MaterialPaintLayerChannel_path(const Point
         for (const MaterialPaintLayer &item : layer.mask_stack) {
           if (record >= item.channels && record < item.channels + item.channels_num) {
             owner = &item;
+            return false;
+          }
+        }
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          if (record >= effect.channels && record < effect.channels + effect.channels_num) {
+            owner = &effect;
             return false;
           }
         }
@@ -1456,6 +1499,22 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "Mask Items", "The coverage items laid over the layer, bottom to top; the first is the "
                           "base mask");
 
+  prop = RNA_def_property(srna, "effects", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayer");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_effects_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Corrections",
+                           "The content corrections laid over the layer's colour, bottom to top");
+
   prop = RNA_def_property(srna, "is_mask_base", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_PAINT_LAYER_MASK_BASE);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
@@ -1479,6 +1538,19 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
   parm = RNA_def_float(func, "value", 1.0f, 0.0f, 1.0f, "Value", "Constant coverage", 0.0f, 1.0f);
   parm = RNA_def_pointer(func, "item", "MaterialPaintLayer", "", "The new mask item");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "effect_add", "rna_MaterialPaintLayer_effect_add");
+  RNA_def_function_ui_description(
+      func, "Add a content correction: a map laid over the layer's colour, painted into like a layer");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  RNA_def_string(func,
+                 "name",
+                 nullptr,
+                 MAX_NAME,
+                 "Name",
+                 "Name of the new correction, empty for the unique default");
+  parm = RNA_def_pointer(func, "effect", "MaterialPaintLayer", "", "The new correction");
   RNA_def_function_return(func, parm);
 
   func = RNA_def_function(srna, "mask_remove", "rna_MaterialPaintLayer_mask_remove");

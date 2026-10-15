@@ -188,6 +188,11 @@ bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUU
   if (BLI_uuid_equal(root.marker, marker)) {
     return true;
   }
+  for (const MaterialPaintLayer &effect : root.effects) {
+    if (BLI_uuid_equal(effect.marker, marker)) {
+      return true;
+    }
+  }
   if (BKE_paint_layers_is_folder(root)) {
     for (const MaterialPaintLayer &child : root.children) {
       if (BKE_paint_layers_subtree_contains(child, marker)) {
@@ -199,9 +204,9 @@ bool BKE_paint_layers_subtree_contains(const MaterialPaintLayer &root, const bUU
 }
 
 /**
- * Whether \a layer is a row of \a ma's stack or an item of one row's mask stack: the rows the
- * channel, enabled and opacity edits may touch. Structural edits (move, duplicate, source, blend)
- * stay on #paint_layer_in_stack.
+ * Whether \a layer is a row of \a ma's stack, an item of one row's mask stack or one of its content
+ * corrections: the rows the channel, enabled and opacity edits may touch. Structural edits (move,
+ * duplicate, source) stay on #paint_layer_in_stack.
  */
 static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *layer)
 {
@@ -211,10 +216,34 @@ static bool paint_layer_owned(const Material &ma, const MaterialPaintLayer *laye
   bool owned = false;
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
-        owned = &row == layer || BLI_findindex(&row.mask_stack, layer) != -1;
+        owned = &row == layer || BLI_findindex(&row.mask_stack, layer) != -1 ||
+                BLI_findindex(&row.effects, layer) != -1;
         return !owned;
       });
   return owned;
+}
+
+MaterialPaintLayer *BKE_paint_layers_correction_owner(Material &ma, const MaterialPaintLayer &effect)
+{
+  if (effect.role != MA_PAINT_LAYER_ROLE_EFFECT) {
+    return nullptr;
+  }
+  MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+        if (BLI_findindex(&row.effects, &effect) != -1) {
+          owner = &row;
+        }
+        return owner == nullptr;
+      });
+  return owner;
+}
+
+/** Whether \a layer is a row of \a ma's stack or one of a row's content corrections. */
+static bool paint_layer_in_stack_or_effect(Material &ma, const MaterialPaintLayer *layer)
+{
+  return paint_layer_in_stack(ma, layer) ||
+         (layer != nullptr && BKE_paint_layers_correction_owner(ma, *layer) != nullptr);
 }
 
 /**
@@ -288,6 +317,9 @@ static bUUID paint_layer_unique_marker(const Material &ma)
           for (const MaterialPaintLayer &item : layer.mask_stack) {
             in_use |= BLI_uuid_equal(item.marker, marker);
           }
+          for (const MaterialPaintLayer &effect : layer.effects) {
+            in_use |= BLI_uuid_equal(effect.marker, marker);
+          }
           return !in_use;
         });
   } while (in_use);
@@ -355,6 +387,24 @@ static void paint_layer_channels_duplicate(Main &bmain,
 }
 
 /**
+ * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
+ * for the same reason as the channel maps.
+ */
+static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
+                                                      Material &ma,
+                                                      const MaterialPaintLayer &item)
+{
+  MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
+  item_copy->role = item.role;
+  item_copy->source = item.source;
+  item_copy->blend = item.blend;
+  item_copy->flag = item.flag;
+  item_copy->opacity = item.opacity;
+  paint_layer_channels_duplicate(bmain, *item_copy, item);
+  return item_copy;
+}
+
+/**
  * Fill the linked \a dst with a copy of \a src's own state, its mask and, for a folder, its
  * children, each row with a marker of its own. \a dst is linked into \a ma before this runs, so
  * every marker handed out here is unique against it and against the rows copied before.
@@ -370,16 +420,17 @@ static void paint_layer_branch_duplicate(Main &bmain,
   dst.source = src.source;
   paint_layer_channels_duplicate(bmain, dst, src);
 
-  /* The mask goes with its row, with a map of its own for the same reason as the channel maps. */
+  /* The mask and the corrections go with their row, with maps of their own for the same reason as
+   * the channel maps. */
+  const auto item_duplicate = [&](const MaterialPaintLayer &item,
+                                  ListBaseT<MaterialPaintLayer> &r_list) {
+    BLI_addtail(&r_list, paint_layer_item_duplicate(bmain, ma, item));
+  };
   for (const MaterialPaintLayer &item : src.mask_stack) {
-    MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
-    item_copy->role = item.role;
-    item_copy->source = item.source;
-    item_copy->blend = item.blend;
-    item_copy->flag = item.flag;
-    item_copy->opacity = item.opacity;
-    paint_layer_channels_duplicate(bmain, *item_copy, item);
-    BLI_addtail(&dst.mask_stack, item_copy);
+    item_duplicate(item, dst.mask_stack);
+  }
+  for (const MaterialPaintLayer &effect : src.effects) {
+    item_duplicate(effect, dst.effects);
   }
 
   if (BKE_paint_layers_is_folder(src)) {
@@ -395,13 +446,23 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
                                                Material &ma,
                                                MaterialPaintLayer *layer)
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  /* A correction is copied beside itself in its layer's list, with maps of its own. */
+  MaterialPaintLayer *effect_owner = (layer != nullptr) ?
+                                         BKE_paint_layers_correction_owner(ma, *layer) :
+                                         nullptr;
+  if (effect_owner == nullptr && !paint_layer_in_stack(ma, layer)) {
     return nullptr;
   }
 
   MaterialPaintLayer *copy = paint_layer_alloc(ma, layer->name);
-  PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *layer);
-  BLI_insertlinkafter(owner, layer, copy);
+  copy->role = layer->role;
+  if (effect_owner != nullptr) {
+    BLI_insertlinkafter(&effect_owner->effects, layer, copy);
+  }
+  else {
+    PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *layer);
+    BLI_insertlinkafter(owner, layer, copy);
+  }
   paint_layer_branch_duplicate(bmain, ma, *copy, *layer);
 
   BKE_paint_layers_tag_edited(ma);
@@ -454,6 +515,11 @@ uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
         ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
           for (const int i : IndexRange(layer.channels_num)) {
             mask |= uint16_t(uint16_t(1) << int(layer.channels[i].channel));
+          }
+          for (const MaterialPaintLayer &effect : layer.effects) {
+            for (const int i : IndexRange(effect.channels_num)) {
+              mask |= uint16_t(uint16_t(1) << int(effect.channels[i].channel));
+            }
           }
           return true;
         });
@@ -533,9 +599,52 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
   for (MaterialPaintLayer &item : layer.mask_stack) {
     paint_layer_release_users(item);
   }
+  for (MaterialPaintLayer &effect : layer.effects) {
+    paint_layer_release_users(effect);
+  }
   for (MaterialPaintLayer &child : layer.children) {
     paint_layer_release_users(child);
   }
+}
+
+MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
+                                                    MaterialPaintLayer *owner,
+                                                    const char *name)
+{
+  /* A folder has no colour of its own to correct, and a correction never carries one itself. */
+  if (!paint_layer_in_stack(ma, owner) || BKE_paint_layers_is_folder(*owner)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : "Correction Paint");
+  effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  effect->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+  BLI_addtail(&owner->effects, effect);
+  /* Linked first: the channel records are added through the ownership check. They start
+   * transparent, so the correction lays nothing down until a stroke gives it a map. */
+  BKE_paint_layers_default_channels_apply(ma, *effect);
+  BKE_paint_layers_tag_edited(ma);
+  return effect;
+}
+
+bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect)
+{
+  if (effect == nullptr) {
+    return false;
+  }
+  MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(ma, *effect);
+  if (owner == nullptr) {
+    return false;
+  }
+  if (!BLI_uuid_is_nil(ma.active_layer_marker) &&
+      BLI_uuid_equal(ma.active_layer_marker, effect->marker))
+  {
+    ma.active_layer_marker = {};
+  }
+  paint_layer_release_users(*effect);
+  BLI_remlink(&owner->effects, effect);
+  BKE_material_paint_layer_free(effect);
+  BKE_paint_layers_tag_edited(ma);
+  return true;
 }
 
 bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
@@ -633,6 +742,26 @@ bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer)
   return true;
 }
 
+bool BKE_paint_layers_mask_copy(Main &bmain,
+                                Material &ma,
+                                const MaterialPaintLayer &source,
+                                MaterialPaintLayer &target)
+{
+  if (&source == &target || source.mask_stack.first == nullptr ||
+      !paint_layer_in_stack(ma, &target))
+  {
+    return false;
+  }
+  /* A row has one mask, so the copy replaces whatever the target had. The source's items are read
+   * after that, which is safe because the two rows are different. */
+  BKE_paint_layers_mask_remove(ma, &target);
+  for (const MaterialPaintLayer &item : source.mask_stack) {
+    BLI_addtail(&target.mask_stack, paint_layer_item_duplicate(bmain, ma, item));
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 {
   MaterialPaintLayer *found = nullptr;
@@ -640,6 +769,12 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
       ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
         if (BLI_uuid_equal(layer.marker, marker)) {
           found = &layer;
+        }
+        /* A content correction is addressed by its own marker, like a row. */
+        for (MaterialPaintLayer &effect : layer.effects) {
+          if (found == nullptr && BLI_uuid_equal(effect.marker, marker)) {
+            found = &effect;
+          }
         }
         return found == nullptr;
       });
@@ -777,9 +912,12 @@ bool BKE_paint_layers_ungroup(Material &ma, MaterialPaintLayer *folder)
     ma.active_layer_marker = {};
   }
 
-  /* The folder's own mask goes with it, and its maps lose that user. */
+  /* The folder's own mask and corrections go with it, and their maps lose that user. */
   for (MaterialPaintLayer &item : folder->mask_stack) {
     paint_layer_release_users(item);
+  }
+  for (MaterialPaintLayer &effect : folder->effects) {
+    paint_layer_release_users(effect);
   }
 
   /* The children lift into the folder's slot in their own order. */
@@ -959,7 +1097,7 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, const
 
 bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char *name)
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  if (!paint_layer_in_stack_or_effect(ma, layer)) {
     return false;
   }
   STRNCPY(layer->name, name != nullptr ? name : "");
@@ -1018,7 +1156,7 @@ bool BKE_paint_layers_set_blend(Material &ma,
                                 MaterialPaintLayer *layer,
                                 const eMaterialPaintLayerBlend blend)
 {
-  if (!paint_layer_in_stack(ma, layer)) {
+  if (!paint_layer_in_stack_or_effect(ma, layer)) {
     return false;
   }
   /* The Normal channel forces the combine operation by itself, and no other channel can express

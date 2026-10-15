@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <functional>
 #include <string>
+#include <type_traits>
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
@@ -181,6 +182,59 @@ StackRowPreview paint_mask_slot_build(const MaterialPaintLayer &item)
 
 namespace {
 
+/** The row of one content correction, hung off the row \a owner_ordinal names. */
+StackRow paint_correction_row_build(const Material &material,
+                                    const MaterialPaintLayer &effect,
+                                    const int depth,
+                                    const int owner_ordinal,
+                                    const int ordinal)
+{
+  StackRow row;
+  row.ordinal = int16_t(ordinal);
+  row.depth = depth;
+  row.parent_ordinal = int16_t(owner_ordinal);
+  row.parent_section_id = "CHANNELS";
+  row.stable_id = effect.marker;
+  row.enabled = (effect.flag & MA_PAINT_LAYER_ENABLED) != 0;
+  row.supported = true;
+  row.name = effect.name[0] != '\0' ? effect.name : "Correction Paint";
+  row.name_buffer = const_cast<char *>(effect.name);
+  row.icon = ICON_IMAGE_RGB_ALPHA;
+  /* A correction reads as a setting of its layer rather than as a member of the stack. */
+  row.compact = true;
+
+  PointerRNA effect_ptr = RNA_pointer_create_discrete(
+      &const_cast<Material &>(material).id,
+      RNA_struct_find("MaterialPaintLayer"),
+      const_cast<MaterialPaintLayer *>(&effect));
+  row.value_ptr = effect_ptr;
+  row.value_prop = "opacity";
+  row.value_inherited = (effect.opacity == 1.0f);
+  row.mode_ptr = effect_ptr;
+  row.mode_prop = "blend_type";
+  row.mode_inherited = (effect.blend == MA_PAINT_LAYER_BLEND_MIX);
+
+  /* The slot shows the correction's first map, blank or not, and switches the brush to content. */
+  StackRowPreview slot;
+  slot.section_id = "CHANNELS";
+  for (int c = 0; c < effect.channels_num; c++) {
+    const Image *image = effect.channels[c].image;
+    if (image == nullptr) {
+      continue;
+    }
+    slot.id_uid = image->id.session_uid;
+    slot.id_type = ID_IM;
+    slot.is_blank = paint_image_is_blank(*image);
+    break;
+  }
+  row.preview_slots.append(std::move(slot));
+  StackContentSection channels;
+  channels.identifier = "CHANNELS";
+  channels.name = IFACE_("Channel Textures");
+  row.content_sections.append(std::move(channels));
+  return row;
+}
+
 /**
  * Append the rows of \a list, and recursively of every folder in it, depth first. A folder's row
  * is appended after what it holds: the tree is built walking the rows from the last one down, and a
@@ -305,6 +359,15 @@ void paint_stack_rows_append(const Material &material,
     }
 
     const int row_ordinal = row.ordinal;
+    /* The corrections are dense settings of their layer: rows attached to its content section,
+     * numbered right after it (see #paint_rows_walk). */
+    for (const MaterialPaintLayer &effect : layer.effects) {
+      if (ordinal > STACK_ROW_ORDINAL_MAX) {
+        overflow = true;
+        return;
+      }
+      r_rows.append(paint_correction_row_build(material, effect, depth + 1, row_ordinal, ordinal++));
+    }
     if (folder) {
       paint_stack_rows_append(
           material, layer.children, depth + 1, row_ordinal, ordinal, overflow, r_rows);
@@ -336,6 +399,37 @@ void paint_stack_rows_from_description(const Material &material,
   }
 }
 
+namespace {
+
+/**
+ * Visit every row the Outliner lists in the order it numbers them: a row, then its corrections,
+ * then what a folder holds. #paint_stack_rows_append hands out the ordinals in this same order, so
+ * the two cannot disagree about which row an ordinal names. Stops when \a fn returns false.
+ *
+ * \a ListT is the list of rows or its const form, so a caller that needs to edit the row it finds
+ * walks the mutable list instead of casting the constness away afterwards.
+ */
+template<typename ListT, typename Fn> bool paint_rows_walk(ListT &list, const Fn &fn)
+{
+  using RowT = std::remove_reference_t<decltype(*list.begin())>;
+  for (RowT &layer : list) {
+    if (!fn(layer)) {
+      return false;
+    }
+    for (RowT &effect : layer.effects) {
+      if (!fn(effect)) {
+        return false;
+      }
+    }
+    if (BKE_paint_layers_is_folder(layer) && !paint_rows_walk(layer.children, fn)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, const int ordinal)
 {
   if (ordinal < 0) {
@@ -344,15 +438,14 @@ MaterialPaintLayer *paint_description_row_for_ordinal(Material &material, const 
   /* The ordinal is the row's place in the depth-first walk the row builder numbers by. */
   int index = 0;
   MaterialPaintLayer *found = nullptr;
-  BKE_paint_layers_foreach(
-      material, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
-        if (index == ordinal) {
-          found = &layer;
-          return false;
-        }
-        index++;
-        return true;
-      });
+  paint_rows_walk(material.paint_layers, [&](MaterialPaintLayer &layer) -> bool {
+    if (index == ordinal) {
+      found = &layer;
+      return false;
+    }
+    index++;
+    return true;
+  });
   return found;
 }
 
@@ -363,15 +456,14 @@ int paint_layers_ordinal_of(const Material &material, const MaterialPaintLayer *
   }
   int index = 0;
   int found = -1;
-  BKE_paint_layers_foreach(
-      material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
-        if (&layer == target) {
-          found = index;
-          return false;
-        }
-        index++;
-        return true;
-      });
+  paint_rows_walk(material.paint_layers, [&](const MaterialPaintLayer &layer) -> bool {
+    if (&layer == target) {
+      found = index;
+      return false;
+    }
+    index++;
+    return true;
+  });
   return found;
 }
 
@@ -477,6 +569,25 @@ class PaintLayersStackSource final : public StackSource,
           /* A blank generated map is drawn as a placeholder; the first stroke that touches it
            * flips this, so the rows (and their previews) must rebuild. */
           hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
+        }
+      }
+      /* The corrections are rows of their own: what their rows show has to reach the tree too. */
+      for (const MaterialPaintLayer &effect : layer.effects) {
+        hash = hash * 1000003u ^ UUID(effect.marker).hash();
+        hash ^= uint64_t(effect.flag);
+        hash = hash * 1000003u ^ uint64_t(effect.blend);
+        hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(effect.opacity));
+        for (const char *ch = effect.name; *ch != '\0'; ch++) {
+          hash = hash * 131u ^ uint64_t(uint8_t(*ch));
+        }
+        for (int c = 0; c < effect.channels_num; c++) {
+          const Image *image = effect.channels[c].image;
+          hash ^= uint64_t(effect.channels[c].channel) << 32;
+          hash ^= uint64_t(effect.channels[c].state) << 40;
+          if (image != nullptr) {
+            hash ^= uint64_t(image->id.session_uid) * 2654435761u;
+            hash = hash * 1000003u ^ uint64_t(paint_image_is_blank(*image) ? 1 : 0);
+          }
         }
       }
       return true;
@@ -687,6 +798,10 @@ class PaintLayersStackSource final : public StackSource,
                     N_("Folder"),
                     "A group holding other layers, composited on its own",
                     ICON_FILE_FOLDER});
+    r_kinds.append({"CORRECTION",
+                    N_("Correction Paint"),
+                    "A map painted over the active layer's colour, below the layer's own blend",
+                    ICON_IMAGE_RGB_ALPHA});
   }
 
   int row_add(bContext &C,
@@ -696,7 +811,7 @@ class PaintLayersStackSource final : public StackSource,
               const int ordinal,
               const StackAddArgs &args = {}) const override
   {
-    if (kind < 0 || kind > 2 || !this->is_editable(owner)) {
+    if (kind < 0 || kind > 3 || !this->is_editable(owner)) {
       return -1;
     }
     Material &material = layers_owner(owner);
@@ -709,7 +824,27 @@ class PaintLayersStackSource final : public StackSource,
     PaintLayerAddParams params;
     params.kind = (kind == 1) ? PaintLayerAddKind::Fill :
                   (kind == 2) ? PaintLayerAddKind::Folder :
+                  (kind == 3) ? PaintLayerAddKind::Correction :
                                 PaintLayerAddKind::Paint;
+    if (anchor != nullptr && params.kind != PaintLayerAddKind::Correction) {
+      /* A correction is not a place a row can be added next to: the row it hangs on is. */
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {
+        anchor = parent;
+      }
+    }
+    if (params.kind == PaintLayerAddKind::Correction && anchor == nullptr) {
+      /* No row was named: the correction goes on the one being worked on. */
+      anchor = BKE_paint_layers_active_layer_get(material);
+      if (anchor == nullptr) {
+        BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Select a layer to add a correction to");
+        return -1;
+      }
+    }
+    if (params.kind == PaintLayerAddKind::Correction && BKE_paint_layers_is_folder(*anchor)) {
+      /* A folder has no colour of its own to correct; saying so beats a button that does nothing. */
+      BKE_report(CTX_wm_reports(&C), RPT_WARNING, "A folder takes no correction; select a layer");
+      return -1;
+    }
     params.anchor = anchor;
     /* An Add onto a folder means filling it: the policy turns this into Into. */
     params.place = PaintLayerPlace::Above;
@@ -722,6 +857,11 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* A new layer is painted on its content, not on the mask the previous one was edited in. */
     layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+    if (params.kind == PaintLayerAddKind::Correction) {
+      /* The correction the user just added is the one they mean to paint into. */
+      BKE_paint_layers_active_set(material, created->marker);
+      layers_texpaint_slots_refresh(C);
+    }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, created);
   }
@@ -735,6 +875,15 @@ class PaintLayersStackSource final : public StackSource,
     MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
     if (layer == nullptr) {
       return false;
+    }
+    /* A correction is not a row of the stack: it leaves through its own call. */
+    if (BKE_paint_layers_correction_owner(material, *layer) != nullptr) {
+      if (!BKE_paint_layers_correction_remove(material, layer)) {
+        return false;
+      }
+      layers_texpaint_slots_refresh(C);
+      WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+      return true;
     }
     layers_mask_edit_end_if_active(C, material, *layer);
     if (!BKE_paint_layers_remove(material, layer)) {
@@ -829,6 +978,26 @@ class PaintLayersStackSource final : public StackSource,
     return true;
   }
 
+  bool row_aux_copy(bContext &C,
+                    const StackFocus & /*focus*/,
+                    ID &owner,
+                    const int source_ordinal,
+                    const int target_ordinal) const override
+  {
+    Material &material = layers_owner(owner);
+    Main *bmain = CTX_data_main(&C);
+    const MaterialPaintLayer *source = paint_description_row_for_ordinal(material, source_ordinal);
+    MaterialPaintLayer *target = paint_description_row_for_ordinal(material, target_ordinal);
+    if (bmain == nullptr || source == nullptr || target == nullptr ||
+        !BKE_paint_layers_mask_copy(*bmain, material, *source, *target))
+    {
+      return false;
+    }
+    layers_texpaint_slots_refresh(C);
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
   int row_merge_down(bContext &C,
                      const StackFocus & /*focus*/,
                      ID &owner,
@@ -870,6 +1039,10 @@ class PaintLayersStackSource final : public StackSource,
       MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
       if (layer == nullptr) {
         return -1;
+      }
+      /* A correction goes with the row it hangs on. */
+      if (BKE_paint_layers_correction_owner(material, *layer) != nullptr) {
+        continue;
       }
       /* Any ancestor already listed carries the row, not only its direct parent: a folder nested two
        * deep has its grandchildren in the run too. */

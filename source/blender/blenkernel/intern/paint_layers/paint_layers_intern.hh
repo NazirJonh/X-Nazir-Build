@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
 
 #include "BKE_paint_layers.hh"
@@ -104,6 +105,62 @@ inline bool paint_layer_channel_contributes(const Material &ma,
     return paint_layer_channel_live(record);
   }
   return paint_layer_channel_contributes(record);
+}
+
+/**
+ * Whether the content correction \a effect lays a map in \a channel: a live record with a map, in a
+ * channel the material's set keeps. A correction has no flat value in this tree, so a record
+ * without a map lays nothing however its value reads.
+ */
+inline bool paint_layer_effect_lays(const Material &ma,
+                                    const MaterialPaintLayer &effect,
+                                    const int channel)
+{
+  if (paint_layer_channel_filtered(ma, channel)) {
+    return false;
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
+  return paint_layer_channel_live(record) && record->image != nullptr;
+}
+
+/** Whether any content correction of \a layer lays a map in \a channel. */
+inline bool paint_layer_effects_lay(const Material &ma,
+                                    const MaterialPaintLayer &layer,
+                                    const int channel)
+{
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_effect_lays(ma, effect, channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a leaf row takes part in \a channel: through its own record, or only through the
+ * corrections laid over it (an unpainted Paint row kept alive for them, #paint_layer_row_empty_base).
+ * The generator's participation test and the CPU adapter both call this one predicate.
+ */
+inline bool paint_layer_row_participates(const Material &ma,
+                                         const MaterialPaintLayer &layer,
+                                         const int channel)
+{
+  return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) ||
+         paint_layer_effects_lay(ma, layer, channel);
+}
+
+/**
+ * Whether a row is only there for its corrections in \a channel: it carries no map and no flat
+ * value with alpha (or its record is switched off), so on its own it would cover nothing. Its
+ * coverage then starts at zero and the corrections bring it in, instead of the row filling the
+ * channel with its empty (black) constant.
+ */
+inline bool paint_layer_row_empty_base(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const int channel)
+{
+  return !paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) &&
+         paint_layer_effects_lay(ma, layer, channel);
 }
 
 /**

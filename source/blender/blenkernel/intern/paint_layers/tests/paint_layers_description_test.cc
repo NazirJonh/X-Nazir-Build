@@ -24,6 +24,7 @@
 #include "RNA_prototypes.hh"
 
 #include "BLI_fileops.h"
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
@@ -1476,6 +1477,307 @@ TEST_F(PaintLayersDescription, remove_and_duplicate_take_the_whole_branch)
   BKE_paint_layers_active_set(ma, child_copy->marker);
   EXPECT_TRUE(BKE_paint_layers_remove(ma, copy));
   EXPECT_TRUE(BLI_uuid_is_nil(BKE_paint_layers_active_get(ma)));
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 1);
+}
+
+TEST_F(PaintLayersDescription, correction_hangs_on_its_row_and_is_not_a_row_of_the_stack)
+{
+  Material &ma = *BKE_material_add(bmain, "CorrectionMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_IMAGE);
+  EXPECT_STREQ(effect->name, "Corr");
+  EXPECT_EQ(BLI_listbase_count(&row->effects), 1);
+  /* Corrections are not rows: the stack, its walk and the ordering never see them. */
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 1);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *effect), row);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *row), nullptr);
+  EXPECT_EQ(BKE_paint_layers_find(ma, effect->marker), effect);
+  EXPECT_FALSE(BLI_uuid_equal(effect->marker, row->marker));
+
+  /* The material's channels, transparent and without a map: nothing is laid until it is painted. */
+  ASSERT_GT(effect->channels_num, 0);
+  for (const int i : IndexRange(effect->channels_num)) {
+    EXPECT_EQ(effect->channels[i].state, MA_PAINT_LAYER_CHANNEL_ENABLED);
+    EXPECT_EQ(effect->channels[i].image, nullptr);
+    EXPECT_EQ(effect->channels[i].value[3], 0.0f);
+  }
+  EXPECT_FALSE(paint_layer_effects_lay(ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+}
+
+TEST_F(PaintLayersDescription, correction_refuses_a_folder_and_a_correction_as_owner)
+{
+  Material &ma = *BKE_material_add(bmain, "CorrectionRefuseMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *members[1] = {a};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(ma, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add(ma, folder, "Corr"), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add(ma, nullptr, "Corr"), nullptr);
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, a, "Corr");
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add(ma, effect, "Nested"), nullptr);
+  /* A correction is not removed as a row, and a row not as a correction. */
+  EXPECT_FALSE(BKE_paint_layers_remove(ma, effect));
+  EXPECT_FALSE(BKE_paint_layers_correction_remove(ma, a));
+}
+
+TEST_F(PaintLayersDescription, correction_edits_go_through_the_same_setters_as_a_row)
+{
+  Material &ma = *BKE_material_add(bmain, "CorrectionEditMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(ma, effect, 0.4f));
+  EXPECT_FLOAT_EQ(effect->opacity, 0.4f);
+  EXPECT_TRUE(BKE_paint_layers_set_enabled(ma, effect, false));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_effective_opacity(*effect), 0.0f);
+  EXPECT_TRUE(BKE_paint_layers_set_blend(ma, effect, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  EXPECT_EQ(effect->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
+  EXPECT_TRUE(BKE_paint_layers_rename(ma, effect, "Renamed"));
+  EXPECT_STREQ(effect->name, "Renamed");
+  /* A correction is never moved, grouped or turned into another source through the row's calls. */
+  EXPECT_FALSE(BKE_paint_layers_move(ma, effect, nullptr, PaintLayerPlace::Above));
+  EXPECT_FALSE(BKE_paint_layers_set_source(ma, effect, MA_PAINT_LAYER_SOURCE_CONSTANT));
+}
+
+TEST_F(PaintLayersDescription, correction_remove_lets_go_of_its_map_and_the_active_marker)
+{
+  Material &ma = *BKE_material_add(bmain, "CorrectionRemoveMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CorrectionRemoveMap"));
+  const int users_before = map->id.us;
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  EXPECT_EQ(map->id.us, users_before + 1);
+  BKE_paint_layers_active_set(ma, effect->marker);
+
+  ASSERT_TRUE(BKE_paint_layers_correction_remove(ma, effect));
+  EXPECT_EQ(map->id.us, users_before);
+  EXPECT_TRUE(BLI_uuid_is_nil(BKE_paint_layers_active_get(ma)));
+  EXPECT_TRUE(BLI_listbase_is_empty(&row->effects));
+
+  /* Removing the row takes its corrections along, and lets go of their maps too. */
+  MaterialPaintLayer *second = BKE_paint_layers_correction_add(ma, row, "Second");
+  ASSERT_NE(second, nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(ma, second, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  EXPECT_EQ(map->id.us, users_before + 1);
+  ASSERT_TRUE(BKE_paint_layers_remove(ma, row));
+  EXPECT_EQ(map->id.us, users_before);
+}
+
+TEST_F(PaintLayersDescription, correction_is_deep_copied_with_material_and_duplicate)
+{
+  Material *ma = BKE_material_add(bmain, "CorrectionCopyMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, effect, 0.3f));
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CorrectionCopyMap"));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  /* A material copy owns its own correction and record array; the map stays the shared block. */
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  MaterialPaintLayer *copy_row = paint_layers_first(*copy);
+  ASSERT_NE(copy_row, nullptr);
+  ASSERT_EQ(BLI_listbase_count(&copy_row->effects), 1);
+  const MaterialPaintLayer *copy_effect = static_cast<MaterialPaintLayer *>(
+      copy_row->effects.first);
+  EXPECT_NE(copy_effect, effect);
+  EXPECT_NE(copy_effect->channels, effect->channels);
+  EXPECT_TRUE(BLI_uuid_equal(copy_effect->marker, effect->marker));
+  EXPECT_EQ(copy_effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  const MaterialPaintLayerChannel *copy_record = paint_layer_channel_find(
+      *copy_effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(copy_record, nullptr);
+  EXPECT_EQ(copy_record->image, map);
+  BKE_id_free(bmain, copy);
+
+  /* Duplicating a row gives the copy corrections of its own, with maps of their own. */
+  MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, row);
+  ASSERT_NE(duplicate, nullptr);
+  ASSERT_EQ(BLI_listbase_count(&duplicate->effects), 1);
+  const MaterialPaintLayer *duplicate_effect = static_cast<MaterialPaintLayer *>(
+      duplicate->effects.first);
+  EXPECT_NE(duplicate_effect, effect);
+  EXPECT_FALSE(BLI_uuid_equal(duplicate_effect->marker, effect->marker));
+  EXPECT_EQ(duplicate_effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_FLOAT_EQ(duplicate_effect->opacity, 0.3f);
+  const MaterialPaintLayerChannel *duplicate_record = paint_layer_channel_find(
+      *duplicate_effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(duplicate_record, nullptr);
+  ASSERT_NE(duplicate_record->image, nullptr);
+  EXPECT_NE(duplicate_record->image, map);
+}
+
+TEST_F(PaintLayersDescription, correction_foreach_id_walks_its_map)
+{
+  Material *ma = BKE_material_add(bmain, "CorrectionWalkMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CorrectionWalkMap"));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+
+  Vector<ID *> visited;
+  auto collector = [](LibraryIDLinkCallbackData *data) -> int {
+    if (*data->id_pointer != nullptr) {
+      static_cast<Vector<ID *> *>(data->user_data)->append(*data->id_pointer);
+    }
+    return IDWALK_RET_NOP;
+  };
+  BKE_library_foreach_ID_link(bmain, &ma->id, collector, &visited, IDWALK_READONLY);
+  EXPECT_TRUE(visited.contains(&map->id));
+}
+
+TEST_F(PaintLayersDescription, correction_blend_round_trip_keeps_it_and_its_map)
+{
+  Material *ma = BKE_material_add(bmain, "CorrectionRoundTripMat");
+  id_us_plus(&ma->id);
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  const bUUID effect_marker = effect->marker;
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CorrectionRoundTripMap"));
+  id_us_plus(&map->id);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, effect, 0.5f));
+
+  char filepath[FILE_MAX];
+  BLI_path_join(
+      filepath, sizeof(filepath), BKE_tempdir_session(), "paint_layers_correction_round_trip.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+  Material *reloaded = nullptr;
+  for (Material &candidate : bfd->main->materials) {
+    if (STREQ(candidate.id.name + 2, "CorrectionRoundTripMat")) {
+      reloaded = &candidate;
+      break;
+    }
+  }
+  ASSERT_NE(reloaded, nullptr);
+  MaterialPaintLayer *reloaded_row = paint_layers_first(*reloaded);
+  ASSERT_NE(reloaded_row, nullptr);
+  ASSERT_EQ(BLI_listbase_count(&reloaded_row->effects), 1);
+  const MaterialPaintLayer *reloaded_effect = static_cast<MaterialPaintLayer *>(
+      reloaded_row->effects.first);
+  EXPECT_TRUE(BLI_uuid_equal(reloaded_effect->marker, effect_marker));
+  EXPECT_EQ(reloaded_effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_FLOAT_EQ(reloaded_effect->opacity, 0.5f);
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+      *reloaded_effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(record, nullptr);
+  /* The map is remapped on read, not left as a stale address. */
+  ASSERT_NE(record->image, nullptr);
+  EXPECT_STREQ(record->image->id.name + 2, "CorrectionRoundTripMap");
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
+TEST_F(PaintLayersDescription, rna_effects_expose_the_correction_and_add_one)
+{
+  Material *ma = BKE_material_add(bmain, "RnaCorrectionMat");
+  PointerRNA ma_ptr = RNA_id_pointer_create(&ma->id);
+  PointerRNA coll_ptr = paint_layers_collection_ptr(ma_ptr);
+  MaterialPaintLayer *layer = rna_paint_layers_new(coll_ptr, "L");
+  ASSERT_NE(layer, nullptr);
+  PointerRNA layer_ptr = RNA_pointer_create_with_parent(coll_ptr, RNA_MaterialPaintLayer, layer);
+
+  PropertyRNA *effects = RNA_struct_find_property(&layer_ptr, "effects");
+  ASSERT_NE(effects, nullptr);
+  EXPECT_EQ(RNA_property_collection_length(&layer_ptr, effects), 0);
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, layer, "Corr");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_EQ(RNA_property_collection_length(&layer_ptr, effects), 1);
+
+  CollectionPropertyIterator iter;
+  RNA_property_collection_begin(&layer_ptr, effects, &iter);
+  ASSERT_TRUE(iter.valid);
+  EXPECT_EQ(iter.ptr.data, effect);
+  RNA_property_collection_end(&iter);
+}
+
+TEST_F(PaintLayersDescription, correction_default_names_are_numbered_within_their_layer)
+{
+  Material &ma = *BKE_material_add(bmain, "CorrectionNameMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Correction;
+
+  params.anchor = a;
+  MaterialPaintLayer *a_first = BKE_paint_layers_add_with_policy(ma, params);
+  MaterialPaintLayer *a_second = BKE_paint_layers_add_with_policy(ma, params);
+  params.anchor = b;
+  MaterialPaintLayer *b_first = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(a_first, nullptr);
+  ASSERT_NE(a_second, nullptr);
+  ASSERT_NE(b_first, nullptr);
+  EXPECT_STREQ(a_first->name, "Correction Paint 1");
+  EXPECT_STREQ(a_second->name, "Correction Paint 2");
+  /* The count belongs to the layer: the other one starts over. */
+  EXPECT_STREQ(b_first->name, "Correction Paint 1");
+}
+
+TEST_F(PaintLayersDescription, correction_moves_within_its_layer_and_joins_another)
+{
+  Material &ma = *BKE_material_add(bmain, "CorrectionMoveMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *b = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *first = BKE_paint_layers_correction_add(ma, a, "First");
+  MaterialPaintLayer *second = BKE_paint_layers_correction_add(ma, a, "Second");
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  /* Above the later one puts it last: the list is bottom to top, as the layers' is. */
+  ASSERT_TRUE(BKE_paint_layers_edit_move(ma, *first, second, PaintLayerPlace::Above));
+  EXPECT_EQ(a->effects.first, second);
+  EXPECT_EQ(a->effects.last, first);
+
+  /* Dropped on another layer, it joins that layer's corrections and leaves this one's. */
+  ASSERT_TRUE(BKE_paint_layers_edit_move(ma, *first, b, PaintLayerPlace::Above));
+  EXPECT_EQ(BLI_listbase_count(&a->effects), 1);
+  EXPECT_EQ(b->effects.first, first);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *first), b);
+
+  /* It is never a row of the stack, so a move that names no layer to hold it is refused. */
+  EXPECT_FALSE(BKE_paint_layers_edit_move(ma, *first, nullptr, PaintLayerPlace::Above));
+  EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 2);
+}
+
+TEST_F(PaintLayersDescription, correction_duplicate_lands_beside_it_with_maps_of_its_own)
+{
+  Material &ma = *BKE_material_add(bmain, "CorrectionDupMat");
+  MaterialPaintLayer *a = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, a, "Corr");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(ma, effect, 0.4f));
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, ma, effect);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(copy->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(copy->opacity, 0.4f);
+  EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *copy), a);
+  EXPECT_EQ(BLI_listbase_count(&a->effects), 2);
+  EXPECT_EQ(a->effects.last, copy);
+  EXPECT_FALSE(BLI_uuid_equal(copy->marker, effect->marker));
+  /* A correction is not a row of the stack, so the stack is as it was. */
   EXPECT_EQ(BLI_listbase_count(&ma.paint_layers), 1);
 }
 }  // namespace blender::bke::tests

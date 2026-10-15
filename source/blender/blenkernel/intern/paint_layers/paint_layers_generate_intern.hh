@@ -69,7 +69,8 @@ inline constexpr const char *TREE_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_topolog
 inline constexpr const char *TREE_ROOT_TOPOLOGY_LOW_PROP = "pbr_paint_layers_root_topology";
 inline constexpr const char *TREE_ROOT_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_root_topology_hi";
 
-/** #INPUT_ROLE_PROP value of a layer's opacity (enabled already folded in). */
+/** #INPUT_ROLE_PROP value of a layer's opacity (enabled already folded in). A content correction's
+ * opacity input carries the same role with the correction's own marker. */
 inline constexpr const char *ROLE_OPACITY = "opacity";
 /** #INPUT_ROLE_PROP value of the constant of a channel that carries no map. */
 inline constexpr const char *ROLE_FILL = "fill";
@@ -163,7 +164,8 @@ uint64_t paint_layers_root_topology_hash(const Material &ma, Span<int> wired_cha
 
 /**
  * Whether \a layer takes part in \a channel: it carries a live record that has a map, or a flat value
- * with some coverage. One predicate for the build and the CPU composite
+ * with some coverage, or a content correction lays a map there. One predicate for the build and the
+ * CPU composite
  * (#BKE_paint_layers_composite_image_layers), so a row cannot take part on one side and drop out on
  * the other.
  */

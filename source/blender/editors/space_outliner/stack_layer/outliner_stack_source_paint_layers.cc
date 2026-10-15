@@ -203,6 +203,30 @@ void paint_issue_slots_append(const Span<PaintLayersIssue> issues,
   }
 }
 
+/**
+/**
+ * Point the value column at the per-channel opacity of \a layer for \a channel, so the header's
+ * channel cursor edits that channel alone. Every row has one, a folder and a correction included,
+ * whether or not it has a record for the channel.
+ */
+void paint_row_value_target_set(StackRow &row,
+                                const Material &material,
+                                const MaterialPaintLayer &layer,
+                                const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return;
+  }
+  const MaterialPaintLayerChannelSettings &settings = layer.channel_settings[channel];
+  row.value_ptr = RNA_pointer_create_discrete(
+      &const_cast<Material &>(material).id,
+      RNA_struct_find("MaterialPaintLayerChannelSettings"),
+      const_cast<MaterialPaintLayerChannelSettings *>(&settings));
+  row.value_prop = "opacity";
+  row.value_inherited = (settings.opacity == 1.0f);
+}
+
+
 /** The row of one content correction, hung off the row \a owner_ordinal names. */
 StackRow paint_correction_row_build(const Material &material,
                                     const MaterialPaintLayer &effect,
@@ -210,7 +234,8 @@ StackRow paint_correction_row_build(const Material &material,
                                     const Span<PaintLayersIssue> issues,
                                     const int depth,
                                     const int owner_ordinal,
-                                    const int ordinal)
+                                    const int ordinal,
+                                    const int channel)
 {
   StackRow row;
   row.ordinal = int16_t(ordinal);
@@ -223,7 +248,7 @@ StackRow paint_correction_row_build(const Material &material,
   const bool fill = effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
   row.name = effect.name[0] != '\0' ? effect.name : (fill ? "Correction Fill" : "Correction Paint");
   row.name_buffer = const_cast<char *>(effect.name);
-  row.icon = fill ? ICON_GP_DRAW_FILL : ICON_IMAGE_RGB_ALPHA;
+  row.icon = fill ? ICON_GP_DRAW_FILL : ICON_BRUSH_DATA;
   /* A correction reads as a setting of its layer rather than as a member of the stack. */
   row.compact = true;
 
@@ -234,6 +259,7 @@ StackRow paint_correction_row_build(const Material &material,
   row.value_ptr = effect_ptr;
   row.value_prop = "opacity";
   row.value_inherited = (effect.opacity == 1.0f);
+  paint_row_value_target_set(row, material, effect, channel);
   row.mode_ptr = effect_ptr;
   row.mode_prop = "blend_type";
   row.mode_inherited = (effect.blend == MA_PAINT_LAYER_BLEND_MIX);
@@ -346,6 +372,7 @@ void paint_stack_rows_append(const Material &material,
                              const Span<PaintLayersIssue> issues,
                              const int depth,
                              const int parent_ordinal,
+                             const int channel,
                              int &ordinal,
                              bool &overflow,
                              Vector<StackRow> &r_rows)
@@ -383,6 +410,7 @@ void paint_stack_rows_append(const Material &material,
     row.value_ptr = layer_ptr;
     row.value_prop = "opacity";
     row.value_inherited = (layer.opacity == 1.0f);
+    paint_row_value_target_set(row, material, layer, channel);
 
     /* The mode column edits how the row blends over what is below it; Mix is the inherited
      * default, so the control dims until the user picks another mode. */
@@ -470,7 +498,7 @@ void paint_stack_rows_append(const Material &material,
         return;
       }
       r_rows.append(paint_correction_row_build(
-          material, effect, layer.marker, issues, depth + 1, row_ordinal, ordinal++));
+          material, effect, layer.marker, issues, depth + 1, row_ordinal, ordinal++, channel));
     }
     /* The mask's corrections follow, numbered the same way: the base is the mask's own slot. */
     for (const MaterialPaintLayer &item : layer.mask_stack) {
@@ -485,7 +513,7 @@ void paint_stack_rows_append(const Material &material,
     }
     if (folder) {
       paint_stack_rows_append(
-          material, layer.children, issues, depth + 1, row_ordinal, ordinal, overflow, r_rows);
+          material, layer.children, issues, depth + 1, row_ordinal, channel, ordinal, overflow, r_rows);
     }
     r_rows.append(std::move(row));
   }
@@ -497,9 +525,6 @@ void paint_stack_rows_from_description(const Material &material,
                                        const int channel,
                                        Vector<StackRow> &r_rows)
 {
-  /* The value/mode columns address the selected channel; until the per (row, channel) settings
-   * exist they fall back to the row's own opacity, so the channel is not read here yet. */
-  static_cast<void>(channel);
 
   int ordinal = 0;
   bool overflow = false;
@@ -507,7 +532,7 @@ void paint_stack_rows_from_description(const Material &material,
   Vector<PaintLayersIssue> issues;
   BKE_paint_layers_issues_get(material, issues);
   paint_stack_rows_append(
-      material, material.paint_layers, issues, 0, -1, ordinal, overflow, r_rows);
+      material, material.paint_layers, issues, 0, -1, channel, ordinal, overflow, r_rows);
   if (overflow) {
     StackRow overflow_row;
     overflow_row.ordinal = STACK_ROW_ORDINAL_MAX + 1;
@@ -672,6 +697,9 @@ class PaintLayersStackSource final : public StackSource,
       hash ^= uint64_t(layer.source) << 16;
       /* The swatch and the columns show these, so a change to them has to reach the rows. */
       hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(layer.opacity));
+      for (const MaterialPaintLayerChannelSettings &settings : layer.channel_settings) {
+        hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(settings.opacity));
+      }
       for (const char *ch = layer.name; *ch != '\0'; ch++) {
         hash = hash * 131u ^ uint64_t(uint8_t(*ch));
       }
@@ -727,6 +755,9 @@ class PaintLayersStackSource final : public StackSource,
         hash = hash * 1000003u ^ uint64_t(effect.blend);
         hash ^= uint64_t(effect.source) << 16;
         hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(effect.opacity));
+        for (const MaterialPaintLayerChannelSettings &settings : effect.channel_settings) {
+          hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(settings.opacity));
+        }
         for (const char *ch = effect.name; *ch != '\0'; ch++) {
           hash = hash * 131u ^ uint64_t(uint8_t(*ch));
         }
@@ -957,26 +988,34 @@ class PaintLayersStackSource final : public StackSource,
                     N_("Folder"),
                     "A group holding other layers, composited on its own",
                     ICON_FILE_FOLDER});
-    r_kinds.append({"CORRECTION",
-                    N_("Correction Paint"),
-                    "A map painted over the active layer's colour, below the layer's own blend",
-                    ICON_IMAGE_RGB_ALPHA});
+    StackAddKindInfo correction{
+        "CORRECTION",
+        N_("Correction Paint"),
+        "A map painted over the active layer's colour, below the layer's own blend",
+        ICON_BRUSH_DATA};
+    correction.is_effect = true;
+    r_kinds.append(correction);
     StackAddKindInfo correction_fill{
         "CORRECTION_FILL",
         N_("Correction Fill"),
         "A flat colour laid over the active layer's colour, below the layer's own blend",
         ICON_GP_DRAW_FILL};
     correction_fill.takes_color = true;
+    correction_fill.is_effect = true;
     r_kinds.append(correction_fill);
-    r_kinds.append({"MASK_CORRECTION",
-                    N_("Mask Paint Correction"),
-                    "A grey map painted over the active layer's mask, in Mask mode",
-                    ICON_MOD_MASK});
+    StackAddKindInfo mask_correction{
+        "MASK_CORRECTION",
+        N_("Mask Paint Correction"),
+        "A grey map painted over the active layer's mask, in Mask mode",
+        ICON_MOD_MASK};
+    mask_correction.is_effect = true;
+    r_kinds.append(mask_correction);
     StackAddKindInfo mask_correction_fill{"MASK_CORRECTION_FILL",
                                           N_("Mask Fill Correction"),
                                           "A flat grey laid over the active layer's mask",
                                           ICON_GP_DRAW_FILL};
     mask_correction_fill.takes_color = true;
+    mask_correction_fill.is_effect = true;
     r_kinds.append(mask_correction_fill);
   }
 
@@ -1049,6 +1088,33 @@ class PaintLayersStackSource final : public StackSource,
       /* The correction the user just added is the one they mean to paint into. */
       BKE_paint_layers_active_set(material, created->marker);
       layers_texpaint_slots_refresh(C);
+    }
+    /* A row with no map makes the first stroke create it and regenerate the graph before it can
+     * write, which loses that stroke. The active slot's map is made together with the row, so the
+     * first stroke already lands in it; the other channels still get theirs when they are used. */
+    if (ELEM(params.kind,
+             PaintLayerAddKind::Paint,
+             PaintLayerAddKind::Correction,
+             PaintLayerAddKind::MaskCorrection))
+    {
+      if (BKE_paint_layers_active_layer_get(material) != nullptr) {
+        const Scene *scene = CTX_data_scene(&C);
+        const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+        const int slot_channel = BKE_paint_layers_texpaint_slot_channel(material.paint_active_slot);
+        PaintLayersTarget target;
+        if (BKE_paint_layers_target_get(
+                material,
+                is_mask_correction || slot_channel < 0 ? int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
+                                                         slot_channel,
+                BKE_paint_layers_target_mode(&paint_mode),
+                target) &&
+            BKE_paint_layers_target_image(target) == nullptr)
+        {
+          BKE_paint_layers_target_ensure_writable(
+              *CTX_data_main(&C), target, paint_mode.new_channel_image_size);
+          layers_texpaint_slots_refresh(C);
+        }
+      }
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, created);

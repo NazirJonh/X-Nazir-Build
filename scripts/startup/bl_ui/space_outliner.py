@@ -57,25 +57,27 @@ class OUTLINER_HT_tool_header(Header):
             # and a Correction, so a quick-access button each stands in for the menu (the source's
             # kind list is not exposed through RNA yet, so the buttons are written out here).
             row = layout.row(align=True)
-            props = row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB')
+            props = row.operator("outliner.stack_layer_add", text="", icon='SCULPTMODE_HLT')
             props.type = 'PAINT'
             props.label = "Add Paint Layer"
             props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
             props.type = 'FILL'
             props.label = "Add Fill Layer"
-            # A map painted over the selected layer's colour, or one flat colour laid over it; they
-            # hang on the layer, not on the stack.
-            props = row.operator("outliner.stack_layer_add", text="", icon='IMAGE_RGB_ALPHA')
-            props.type = 'CORRECTION'
-            props.label = "Add Correction"
-            props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
-            props.type = 'CORRECTION_FILL'
-            props.label = "Add Fill Correction"
+            # Corrections hang on the selected layer or on its mask; one menu holds them all.
+            row = layout.row(align=True)
+            # An enum menu button: it opens a real menu of the correction kinds and shows the
+            # dropdown arrow, unlike a popover, whose entries are panel buttons.
+            row.operator_menu_enum("outliner.stack_layer_effect_add", "type", text="",
+                                   icon='SHADERFX')
 
             # Only the add is here, as a menu of the two starting masks; switching a mask off and
             # taking it away live in the row's context menu, while its slot is the one showing.
             row = layout.row(align=True)
-            row.menu("OUTLINER_MT_stack_layer_mask_add", text="", icon='MOD_MASK')
+            # An enum menu button, like the Effects one, so it shows the dropdown arrow. `add` is
+            # set explicitly: Remove Mask stores `add = False` as the operator's last-used value.
+            props = row.operator_menu_enum("outliner.stack_layer_mask", "initial_color", text="",
+                                           icon='MOD_MASK')
+            props.add = True
 
             # An empty folder to put layers into; layers join one by dropping them onto it.
             layout.separator()
@@ -106,15 +108,37 @@ class OUTLINER_MT_stack_layer_mask_add(Menu):
             props = layout.operator("outliner.stack_layer_mask", text=text, icon='MOD_MASK')
             props.add = True
             props.initial_color = color
-        # Corrections laid over the layer's mask (made white first when there is none): a grey map
-        # painted in Mask mode, or one flat grey. They are Add kinds of the Stack Layers source.
-        layout.separator()
-        layout.operator(
-            "outliner.stack_layer_add", text="Add Paint Mask Correction", icon='MOD_MASK',
-        ).type = 'MASK_CORRECTION'
-        layout.operator(
-            "outliner.stack_layer_add", text="Add Fill Mask Correction", icon='GP_DRAW_FILL',
-        ).type = 'MASK_CORRECTION_FILL'
+
+
+def _draw_stack_layer_effect_entries(layout):
+    # A map painted over the selected layer's colour, or one flat colour laid over it; they hang on
+    # the layer, not on the stack.
+    props = layout.operator("outliner.stack_layer_add", text="Add Correction Paint",
+                            icon='BRUSH_DATA')
+    props.type = 'CORRECTION'
+    props.label = "Add Correction Paint"
+    props = layout.operator("outliner.stack_layer_add", text="Add Fill Correction",
+                            icon='GP_DRAW_FILL')
+    props.type = 'CORRECTION_FILL'
+    props.label = "Add Fill Correction"
+    # Corrections laid over the layer's mask (made white first when there is none): a grey map
+    # painted in Mask mode, or one flat grey.
+    layout.separator()
+    layout.operator(
+        "outliner.stack_layer_add", text="Add Paint Mask Correction", icon='MOD_MASK',
+    ).type = 'MASK_CORRECTION'
+    layout.operator(
+        "outliner.stack_layer_add", text="Add Fill Mask Correction", icon='GP_DRAW_FILL',
+    ).type = 'MASK_CORRECTION_FILL'
+
+
+class OUTLINER_MT_stack_layer_effect_add(Menu):
+    bl_label = "Add Correction"
+
+    def draw(self, _context):
+        _draw_stack_layer_effect_entries(self.layout)
+
+
 
 
 class OUTLINER_HT_header(Header):
@@ -151,6 +175,9 @@ class OUTLINER_HT_header(Header):
             row = layout.row(align=True)
             row.prop(space, "filter_text", icon='VIEWZOOM', text="")
         elif display_mode == 'STACK_LAYERS' and space.stack_layers_view == 'STACK':
+            # The material whose stack is shown, before Pin; the fixed width keeps the header
+            # stable whatever the name is.
+            layout.template_enum_menu(space, "stack_focus_sub_index", width=6.0, wrap=False)
             layout.prop(
                 space, "use_stack_layer_pin", text="",
                 icon='PINNED' if space.use_stack_layer_pin else 'UNPINNED',
@@ -258,6 +285,7 @@ class OUTLINER_MT_context_menu(Menu):
             if (space.stack_layers_view == 'STACK' and
                     space.stack_source == 'PAINT_MATERIAL'):
                 layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
+                layout.menu("OUTLINER_MT_stack_layer_effect_add", icon='SHADERFX')
                 # Switching the mask off and taking it away act on the mask being worked on: the
                 # toggle's poll answers whether the row's mask slot is the one showing.
                 if bpy.ops.outliner.stack_layer_mask_toggle.poll():
@@ -639,7 +667,6 @@ class OUTLINER_PT_stack_layers_filter(Panel):
         col = layout.column(heading="Rows", align=True)
         col.prop(space, "show_stack_items", text="Contents")
         col.prop(space, "use_stack_layer_big_rows", text="Large")
-        col.prop(space, "use_stack_layer_pair_sub_rows", text="Pair Sub-Rows")
         col.prop(space, "show_stack_layer_move_buttons", text="Move Buttons")
 
         layout.prop(space, "use_stack_layer_pin")
@@ -764,6 +791,7 @@ classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
     OUTLINER_MT_stack_layer_mask_add,
+    OUTLINER_MT_stack_layer_effect_add,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,

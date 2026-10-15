@@ -194,7 +194,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     if (opacity != nullptr) {
       group_input_default_set(group,
                               *opacity,
-                              BKE_paint_layers_effective_opacity(layer) *
+                              BKE_paint_layers_channel_opacity_effective(layer, channel) *
                                   forms_.lookup_default(&layer, {}).pass_through_scale);
       opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
     }
@@ -250,7 +250,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       if (opacity != nullptr) {
         group_input_default_set(group,
                                 *opacity,
-                                BKE_paint_layers_effective_opacity(effect) *
+                                BKE_paint_layers_channel_opacity_effective(effect, channel) *
                                     forms_.lookup_default(&effect, {}).pass_through_scale);
         effect_opacity_inputs_.lookup_or_add_default(&effect).add(channel, opacity);
       }

@@ -1021,7 +1021,6 @@ bool stack_tree_has_tse_active(const SpaceOutliner &space_outliner)
 struct StackBandsDraw {
   const ARegion *region;
   const SpaceOutliner *space_outliner;
-  bool pair_sub_rows;
   uint pos;
   const float *col_alternate;
   const float *col_divider;
@@ -1063,55 +1062,12 @@ static bool stack_row_is_attached(const SpaceOutliner &space_outliner, const Tre
 }
 
 /**
- * Draw the sub-rows of \a te as pairs: [1+2], [3+4], ...; for an odd count the first row is kept
- * on its own: [1], [2+3], [4+5], ... . Returns false when \a te holds no sub-row, so the caller
- * walks it the regular way.
- */
-static bool stack_bands_paired_sub_rows(StackBandsDraw &draw,
-                                        const TreeElement &te,
-                                        const int startx)
-{
-  int sub_row_count = 0;
-  for (const TreeElement &child : te.subtree) {
-    sub_row_count += TREESTORE(&child)->type == TSE_STACK_ITEM;
-  }
-  if (sub_row_count == 0) {
-    return false;
-  }
-
-  const int sub_row_x = startx + UI_UNIT_X;
-  const int first_stripe_index = draw.stripe_index;
-  int sub_row_index = 0;
-  for (const TreeElement &child : te.subtree) {
-    if (TREESTORE(&child)->type != TSE_STACK_ITEM) {
-      continue;
-    }
-    const int group = (sub_row_count & 1) ?
-                          (sub_row_index == 0 ? 0 : 1 + (sub_row_index - 1) / 2) :
-                          sub_row_index / 2;
-    const int height = outliner_tree_element_height(*draw.space_outliner, child);
-    const int y = draw.start_y + UI_UNIT_Y - height;
-    if (((first_stripe_index + group) & 1) != 0) {
-      stack_band_fill(draw, y, height);
-    }
-    if (sub_row_index != 0) {
-      stack_band_rule(draw, float(sub_row_x), float(y + height) - U.pixelsize);
-    }
-    sub_row_index++;
-    draw.start_y -= height;
-  }
-  draw.stripe_index = first_stripe_index + (sub_row_count + 1) / 2;
-  return true;
-}
-
-/**
  * Draw alternating Stack Layers backgrounds and the rule between a row's sub-rows, from the
  * actual row geometry.
  *
  * The regular Outliner background uses a fixed one-unit pitch. That cuts a two-unit row in half,
  * so Stack Layers alternates after complete tree elements instead. Sub-rows are one unit high and
- * are therefore handled naturally. In pair mode, the sub-rows a #StackRow pairs (see
- * #StackRow::pairs_sub_rows) are grouped, see #stack_bands_paired_sub_rows.
+ * are therefore handled naturally.
  */
 static void stack_bands_recursive(StackBandsDraw &draw,
                                   const ListBaseT<TreeElement> &lb,
@@ -1167,16 +1123,6 @@ static void stack_bands_recursive(StackBandsDraw &draw,
       continue;
     }
 
-    const StackRow *row = (tselem->type == TSE_STACK_LAYER) ?
-                              outliner_stack_row_find(space_outliner, tselem->nr) :
-                              nullptr;
-    if (row != nullptr && draw.pair_sub_rows && row->pairs_sub_rows &&
-        stack_bands_paired_sub_rows(draw, te, startx))
-    {
-      draw_run_end_rule();
-      continue;
-    }
-
     stack_bands_recursive(draw, te.subtree, row_startx + UI_UNIT_X);
     draw_run_end_rule();
   }
@@ -1218,7 +1164,6 @@ void outliner_draw_stack_row_bands(const ARegion *region,
   StackBandsDraw draw{};
   draw.region = region;
   draw.space_outliner = space_outliner;
-  draw.pair_sub_rows = (space_outliner->stack_layers_flag & SO_SL_PAIR_SUB_ROWS) != 0;
   draw.pos = pos;
   draw.col_alternate = col_alternate;
   draw.col_divider = col_divider;

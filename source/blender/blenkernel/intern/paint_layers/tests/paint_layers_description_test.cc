@@ -108,6 +108,38 @@ TEST_F(PaintLayersDescription, fresh_material_has_no_layers)
   EXPECT_FALSE(BKE_paint_layers_is_layered(*ma));
 }
 
+TEST_F(PaintLayersDescription, channel_opacity_multiplies_the_rows_own_for_every_row_kind)
+{
+  Material *ma = BKE_material_add(bmain, "ChannelOpacityMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+  layer->opacity = 0.5f;
+  MaterialPaintLayer *folder = paint_layer_add(*ma, "Folder");
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+
+  /* No override reads as the row's own opacity. */
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_opacity_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), 0.5f);
+
+  EXPECT_TRUE(BKE_paint_layers_channel_opacity_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0.5f));
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_opacity_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), 0.25f);
+  /* The row's own opacity and the other channels are untouched. */
+  EXPECT_FLOAT_EQ(layer->opacity, 0.5f);
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_opacity_effective(*layer, PAINT_MATERIAL_CHANNEL_METALLIC), 0.5f);
+
+  /* A folder holds no channel records and takes the override the same way. */
+  EXPECT_TRUE(BKE_paint_layers_channel_opacity_set(
+      *ma, *folder, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 0.4f));
+  EXPECT_FLOAT_EQ(
+      BKE_paint_layers_channel_opacity_effective(*folder, PAINT_MATERIAL_CHANNEL_ROUGHNESS), 0.4f);
+  EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
+
+  EXPECT_FALSE(BKE_paint_layers_channel_opacity_set(*ma, *layer, PAINT_MATERIAL_CHANNEL_NUM, 0.5f));
+}
+
 TEST_F(PaintLayersDescription, blend_round_trip_keeps_layers)
 {
   Material *ma = BKE_material_add(bmain, "RoundTripMat");

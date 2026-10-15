@@ -481,8 +481,16 @@ static wmOperatorStatus stack_layer_drop_invoke(bContext *C,
                                                                          active_ordinal_before) :
                                               StackItemIdentity();
 
-  const Vector<StackItemIdentity> rows_to_move = stack_drop_rows_to_move(
+  Vector<StackItemIdentity> rows_to_move = stack_drop_rows_to_move(
       ctx, *space_outliner, drop_data->drag_rows);
+  /* Ordinals count from the bottom of the stack, and each row after the first is put below the one
+   * before it. The block is therefore walked from its top row down, or it lands reversed. */
+  std::stable_sort(rows_to_move.begin(),
+                   rows_to_move.end(),
+                   [&](const StackItemIdentity &a, const StackItemIdentity &b) {
+    return outliner_stack_identity_resolve(ctx, *space_outliner, a) >
+           outliner_stack_identity_resolve(ctx, *space_outliner, b);
+  });
 
   /* Move all dragged rows, preserving their relative order. The first row goes where the drop
    * asked, and every row after it goes right below the one moved before it: moving each against

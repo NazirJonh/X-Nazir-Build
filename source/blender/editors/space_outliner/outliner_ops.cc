@@ -56,6 +56,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_mask_toggle);
   WM_operatortype_append(OUTLINER_OT_stack_layer_move);
   WM_operatortype_append(OUTLINER_OT_stack_layer_add);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_effect_add);
   WM_operatortype_append(OUTLINER_OT_stack_layer_remove);
   WM_operatortype_append(OUTLINER_OT_stack_layer_rename);
   WM_operatortype_append(OUTLINER_OT_stack_layer_duplicate);

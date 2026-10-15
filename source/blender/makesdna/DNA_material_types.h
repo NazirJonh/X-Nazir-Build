@@ -502,6 +502,23 @@ struct MaterialPaintLayerChannel {
 };
 
 /**
+ * The overrides of one (row, channel) pair, kept in #MaterialPaintLayer::channel_settings.
+ *
+ * A fixed array on the row rather than a field of the sparse #MaterialPaintLayerChannel record: the
+ * value exists for every pair, record or not, which gives it one stable RNA path that survives a
+ * record being created, and works for a folder that holds no records.
+ */
+struct MaterialPaintLayerChannelSettings {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerChannelSettings)
+
+  /** Reserved for a per-channel #eMaterialPaintLayerBlend override, -1 to inherit; not read yet. */
+  int8_t blend = -1;
+  char _pad[3] = {};
+  /** Multiplied by the row's opacity; 1.0 when the channel has no override. */
+  float opacity = 1.0f;
+};
+
+/**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
  * The list is stored bottom-to-top. Folders nest through #children, which holds the same type.
@@ -540,6 +557,13 @@ struct MaterialPaintLayer {
    * #MA_PAINT_LAYER_ROLE_EFFECT row with no children, mask or corrections of its own.
    */
   ListBaseT<MaterialPaintLayer> effects = {nullptr, nullptr};
+  /**
+   * Per (row, channel) overrides, indexed by #eMaterialPaintChannel. A fixed array so every pair has
+   * a value and an RNA path whether or not the row has a #channels record for it; a folder, which
+   * holds no records, uses it too. The literal length is #PAINT_MATERIAL_CHANNEL_NUM, which
+   * `paint_layers.cc` static_asserts.
+   */
+  MaterialPaintLayerChannelSettings channel_settings[10] = {};
 };
 
 struct Material {

@@ -2324,14 +2324,16 @@ static void outliner_buttons(const bContext *C,
     len = MAX_ID_NAME - 2;
   }
 
-  spx = te->xs + 1.8f * UI_UNIT_X;
+  /* A Stack Layers row indents its name by the hierarchy and the preview, which `te->xs` lacks. */
+  const bool stack_row = (tselem->type == TSE_STACK_LAYER);
+  spx = stack_row ? te->name_xs : int(te->xs + 1.8f * UI_UNIT_X);
   dx = region->v2d.cur.xmax - (spx + restrict_column_width + 0.2f * UI_UNIT_X);
 
   bt = uiDefBut(block,
                 ui::ButtonType::Text,
                 "",
                 spx,
-                te->ys,
+                stack_row ? te->name_ys : te->ys,
                 dx,
                 UI_UNIT_Y - 1,
                 (void *)te->name,
@@ -3834,6 +3836,8 @@ static void outliner_draw_tree_element(ui::Block *block,
     GPU_blend(GPU_BLEND_NONE);
 
     /* Name. */
+    te->name_xs = startx + offsx;
+    te->name_ys = *starty;
     if ((tselem->flag & TSE_TEXTBUT) == 0) {
       if (ELEM(tselem->type, TSE_RNA_PROPERTY, TSE_RNA_ARRAY_ELEM)) {
         ui::theme::get_color_blend_3ubv(TH_BACK, TH_TEXT, 0.75f, text_color);

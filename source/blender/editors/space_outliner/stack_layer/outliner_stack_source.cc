@@ -54,7 +54,7 @@ Span<const StackSource *> stack_sources_get()
 
 int StackSource::focus_button_icon() const
 {
-  return ICON_RENDERLAYERS;
+  return ICON_BRUSH_DATA;
 }
 
 int StackSource::empty_preview_icon() const

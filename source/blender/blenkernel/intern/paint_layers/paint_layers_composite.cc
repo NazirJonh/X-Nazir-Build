@@ -166,7 +166,7 @@ static void composite_image_layers_collect(const Material &ma,
       }
     }
     out.blend = layer_channel_blend(layer, channel);
-    out.opacity = BKE_paint_layers_effective_opacity(layer) * pass_through_scale;
+    out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
     out.enabled = true;
     out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
         eMaterialPaintChannel(channel));
@@ -188,7 +188,8 @@ static void composite_image_layers_collect(const Material &ma,
       }
       correction.iuser = nullptr;
       correction.blend = layer_channel_blend(effect, channel);
-      correction.opacity = BKE_paint_layers_effective_opacity(effect) * pass_through_scale;
+      correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                           pass_through_scale;
       out.content_corrections.append(correction);
     }
     /* The mask is one for all channels of the row, so the same item reaches every channel's

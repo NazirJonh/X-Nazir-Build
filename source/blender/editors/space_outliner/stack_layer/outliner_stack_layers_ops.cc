@@ -299,6 +299,18 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot)
+{
+  /* The same operation as the Add, with the same properties and body; only the offered kinds
+   * differ, so the header's Effects dropdown can list the corrections as a plain enum menu. */
+  OUTLINER_OT_stack_layer_add(ot);
+  ot->name = "Add Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_effect_add";
+  ot->description = "Add a correction to the active layer or its mask";
+  PropertyRNA *prop = RNA_struct_type_find_property(ot->srna, "type");
+  RNA_def_enum_funcs(prop, stack_effect_type_itemf);
+}
+
 /**
  * The Stack Layers header carries the add and the remove of a mask as two icon buttons of this one
  * operator, so what each does is read from `add` rather than from the shared definition.

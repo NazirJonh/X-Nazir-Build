@@ -277,15 +277,13 @@ enum eSpaceOutliner_StackLayersFlag : short {
    * while the columns keep the toggles of every row aligned however deeply they are nested.
    */
   SO_SL_VISIBILITY_RIGHT = (1 << 6),
-  /** Group a row's sub-rows into alternating pairs instead of alternating every sub-row. */
-  SO_SL_PAIR_SUB_ROWS = (1 << 7),
   /**
    * Show the buttons that reorder the active row (move up/down) in the Stack header.
    *
    * Off by default: reordering is destructive enough to keep those buttons out of the way until
    * the user asks for them, unlike the Add and Remove verbs the header always carries.
    */
-  SO_SL_SHOW_MOVE_BUTTONS = (1 << 8),
+  SO_SL_SHOW_MOVE_BUTTONS = (1 << 7),
 };
 ENUM_OPERATORS(eSpaceOutliner_StackLayersFlag)
 

@@ -630,63 +630,29 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             return
 
         layout.prop(layer, "opacity", text="Opacity")
-        layout.separator()
-        draw_material_layer_channels(layout, context, owner, layer)
-
-
-class LAYER_MATERIAL_PT_mask(LayerMaterialButtonsPanel, Panel):
-    """The mask of the active layer: a coverage factor over the layer. Its constant until a stroke
-    in Mask mode gives it a map; the layer shows where the mask reads one and hides where it
-    reads zero."""
-
-    bl_idname = "LAYER_MATERIAL_PT_mask"
-    bl_label = "Mask"
-    bl_parent_id = "LAYER_MATERIAL_PT_layers"
-
-    @classmethod
-    def poll(cls, context):
-        owner, layer = cls._active_layer(context)
-        # A mask item shown in the Layer panel has its controls there; this one is the base mask's
-        # while the layer itself is being edited.
-        return (owner is not None and layer is not None and
-                cls._shown_mask_item(context, owner, layer) is None)
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        _owner, layer = self._active_layer(context)
-        if layer is None:
-            return
-
-        if not len(layer.mask_items):
-            layout.operator("material.paint_layer_mask_add", text="Add Mask", icon='MOD_MASK')
-            return
-
-        item = layer.mask_items[0]
-        editing = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
-
-        row = layout.row(align=True)
-        row.operator("material.paint_layer_mask_toggle", text="Enabled", depress=item.enabled,
-                     icon='HIDE_OFF' if item.enabled else 'HIDE_ON')
-        sub = row.row(align=True)
-        sub.enabled = item.enabled
-        props = sub.operator("paint.layer_target_mode_set", text="Edit Mask", depress=editing,
-                             icon='BRUSH_DATA')
-        props.mode = 'CONTENT' if editing else 'MASK'
-
-        col = layout.column()
-        col.enabled = item.enabled
-        record = item.channels[0] if len(item.channels) else None
-        if record is not None and record.image is not None:
-            col.template_ID(record, "image")
-        else:
-            col.prop(item, "mask_value", text="Value", slider=True)
-        col.prop(item, "opacity", text="Opacity")
-
-        layout.operator("material.paint_layer_mask_remove", text="Remove Mask", icon='X')
+        # A folder holds what its rows hold, so it has no channel records to add: its per-channel
+        # opacity is edited in the Outliner stack, and this tab keeps the overall one.
+        if layer.source != 'STACK':
+            layout.separator()
+            draw_material_layer_channels(layout, context, owner, layer)
 
 
 class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
+    """The settings of the layered material as a whole; its sections are sub-panels."""
+
+    bl_idname = "LAYER_MATERIAL_PT_channels"
+    bl_label = "Layer Material Settings"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
+
+    def draw(self, _context):
+        pass
+
+
+class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):
     """The owner material's global paint channel set: which channels the stack works with.
 
     A channel removed here leaves each row's record and map untouched; the rows simply stop showing
@@ -694,8 +660,9 @@ class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
     set chosen in the New Layered Material dialog.
     """
 
-    bl_idname = "LAYER_MATERIAL_PT_channels"
-    bl_label = "Channels"
+    bl_idname = "LAYER_MATERIAL_PT_active_channel"
+    bl_label = "Active Channel"
+    bl_parent_id = "LAYER_MATERIAL_PT_channels"
 
     @classmethod
     def poll(cls, context):
@@ -705,28 +672,6 @@ class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
         layout = self.layout
         layout.use_property_split = False
         draw_material_channel_set(layout, self._owner_material(context))
-
-
-class MATERIAL_PT_paint_layers_channels(MaterialButtonsPanel, Panel):
-    """The material's global paint channel set, in the Material tab.
-
-    A channel removed here leaves each row's record and map untouched; the rows simply stop showing
-    it. Base Color is the material's constant and is always in the set.
-    """
-
-    bl_idname = "MATERIAL_PT_paint_layers_channels"
-    bl_label = "Paint Layers Channels"
-    COMPAT_ENGINES = {'BLENDER_EEVEE', 'CYCLES'}
-
-    @classmethod
-    def poll(cls, context):
-        mat = context.material
-        return mat is not None and mat.is_layered and not mat.grease_pencil
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = False
-        draw_material_channel_set(layout, context.material)
 
 
 classes = (
@@ -752,10 +697,9 @@ classes = (
     BRUSH_MATERIAL_PT_settings_surface,
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
-    MATERIAL_PT_paint_layers_channels,
     LAYER_MATERIAL_PT_layers,
-    LAYER_MATERIAL_PT_mask,
     LAYER_MATERIAL_PT_channels,
+    LAYER_MATERIAL_PT_active_channel,
 )
 
 

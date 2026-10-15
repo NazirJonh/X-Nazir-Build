@@ -10,8 +10,20 @@ import bpy
 from bpy.types import Operator
 
 
+def _context_material(context):
+    """The material the operators act on.
+
+    `context.material` only exists in the Properties editor's material contexts; from the
+    Outliner or a viewport the owner is the active object's active material slot."""
+    material = getattr(context, "material", None)
+    if material is None:
+        ob = getattr(context, "object", None)
+        material = ob.active_material if ob is not None else None
+    return material
+
+
 def _paint_layers_active_layer(context):
-    mat = context.material
+    mat = _context_material(context)
     if mat is None or not mat.is_layered:
         return None
     return mat.paint_layers.active
@@ -34,14 +46,15 @@ class _PaintLayerOperator(Operator):
 
     def _layer(self, context):
         if self.marker:
-            layer = context.material.paint_layers.find(self.marker)
+            mat = _context_material(context)
+            layer = mat.paint_layers.find(self.marker) if mat is not None else None
             if layer is not None:
                 return layer
         return _paint_layers_active_layer(context)
 
     @classmethod
     def poll(cls, context):
-        mat = context.material
+        mat = _context_material(context)
         return mat is not None and mat.is_layered
 
 
@@ -81,7 +94,7 @@ def _paint_layer_addable_channel_items(context):
     add. Falls back to the full list when no layered material/layer is in context, so the menu is
     never empty-by-accident in a scripted call.
     """
-    mat = context.material
+    mat = _context_material(context)
     layer = mat.paint_layers.active if (mat is not None and mat.is_layered) else None
     if layer is None:
         return _paint_channel_enum_items()
@@ -171,7 +184,7 @@ def _leave_mask_target(context, layer):
 
     Only the active layer's mask is the one a stroke is aimed at, so another layer's mask going away
     leaves the mode alone, as the Outliner's seam does."""
-    material = context.material
+    material = _context_material(context)
     if material is None or material.paint_layers.active is None:
         return
     if material.paint_layers.active.marker != layer.marker:

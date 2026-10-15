@@ -1006,6 +1006,8 @@ static MaterialPaintLayerChannel *rna_MaterialPaintLayer_channel_add(PointerRNA 
     MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
         *ma, layer, eMaterialPaintChannel(channel));
     if (record != nullptr) {
+      DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
       return record;
     }
   }
@@ -1020,6 +1022,8 @@ static void rna_MaterialPaintLayer_channel_remove(PointerRNA ptr,
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
     if (BKE_paint_layers_channel_remove(*ma, layer, eMaterialPaintChannel(channel))) {
+      DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
       return;
     }
   }
@@ -1036,6 +1040,9 @@ static void rna_MaterialPaintLayer_channel_set_enabled(PointerRNA ptr,
     if (BKE_paint_layers_channel_set_enabled(
             *ma, layer, eMaterialPaintChannel(channel), enabled))
     {
+      /* The toggle must redraw the viewport and the panels at once, like the other mutators. */
+      DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
       return;
     }
   }
@@ -1554,6 +1561,89 @@ static void rna_MaterialPaintLayerChannel_invert_set(PointerRNA *ptr, bool value
 }
 
 /**
+ * The row whose #MaterialPaintLayer::channel_settings holds \a settings, or null when it is not in
+ * \a ma's stack. A row's mask items and corrections are searched too: their settings are addressed
+ * like any row's.
+ */
+static MaterialPaintLayer *rna_paint_layer_by_settings(
+    Material &ma, const MaterialPaintLayerChannelSettings *settings)
+{
+  const auto holds = [&](const MaterialPaintLayer &row) {
+    return settings >= row.channel_settings &&
+           settings < row.channel_settings + PAINT_MATERIAL_CHANNEL_NUM;
+  };
+  MaterialPaintLayer *found = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+        if (holds(layer)) {
+          found = &layer;
+          return false;
+        }
+        for (MaterialPaintLayer &item : layer.mask_stack) {
+          if (holds(item)) {
+            found = &item;
+            return false;
+          }
+        }
+        for (MaterialPaintLayer &effect : layer.effects) {
+          if (holds(effect)) {
+            found = &effect;
+            return false;
+          }
+        }
+        return true;
+      });
+  return found;
+}
+
+static int rna_MaterialPaintLayerChannelSettings_channel_get(PointerRNA *ptr)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (ma != nullptr) {
+    if (const MaterialPaintLayer *row = rna_paint_layer_by_settings(*ma, settings)) {
+      return int(settings - row->channel_settings);
+    }
+  }
+  return 0;
+}
+
+static float rna_MaterialPaintLayerChannelSettings_opacity_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  return settings->opacity * 100.0f;
+}
+
+static void rna_MaterialPaintLayerChannelSettings_opacity_set(PointerRNA *ptr, float value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr) {
+    return;
+  }
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (MaterialPaintLayer *row = rna_paint_layer_by_settings(*ma, settings)) {
+    BKE_paint_layers_channel_opacity_set(
+        *ma, *row, int(settings - row->channel_settings), value / 100.0f);
+  }
+}
+
+static void rna_MaterialPaintLayer_channel_settings_begin(CollectionPropertyIterator *iter,
+                                                          PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           layer->channel_settings,
+                           sizeof(MaterialPaintLayerChannelSettings),
+                           PAINT_MATERIAL_CHANNEL_NUM,
+                           false,
+                           nullptr);
+}
+
+/**
  * A scalar channel's value as the grayscale colour of its gradient ramp, so the shared channel
  * widget draws the same swatch for a layer as for a brush. Colour channels (Base Color, Normal,
  * Emission) read black and ignore writes, as the widget never sends them here.
@@ -1778,6 +1868,20 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                     nullptr);
   RNA_def_property_ui_text(prop, "Channels", "Per-channel maps and values of the layer");
 
+  prop = RNA_def_property(srna, "channel_settings", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerChannelSettings");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_channel_settings_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop, "Channel Settings", "Per-channel opacity of the row, one entry per paint channel");
+
   prop = RNA_def_property(srna, "children", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayer");
   RNA_def_property_collection_funcs(prop,
@@ -1960,6 +2064,33 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                       "The channel to switch");
   RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
   RNA_def_boolean(func, "enabled", true, "Enabled", "Whether the channel takes part");
+}
+
+/** The overrides of one (row, channel) pair; every row has one per channel, records or not. */
+static void rna_def_material_paint_layer_channel_settings(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerChannelSettings", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintLayerChannelSettings");
+  RNA_def_struct_ui_text(srna,
+                         "Paint Layer Channel Settings",
+                         "The opacity a paint layer row is laid with in one paint channel");
+
+  PropertyRNA *prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(
+      prop, "rna_MaterialPaintLayerChannelSettings_channel_get", nullptr, nullptr);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Channel", "The paint channel these settings are for");
+
+  prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_PERCENTAGE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannelSettings_opacity_get",
+                               "rna_MaterialPaintLayerChannelSettings_opacity_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_text(
+      prop, "Opacity", "Opacity of the row in this channel, applied over the row's own");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 }
 
 static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
@@ -3098,6 +3229,7 @@ void RNA_def_material(BlenderRNA *brna)
   rna_def_material_paint_layer_issue(brna);
   rna_def_material_paint_layer(brna);
   rna_def_material_paint_layer_channel(brna);
+  rna_def_material_paint_layer_channel_settings(brna);
 
   RNA_api_material(srna);
 }

@@ -535,6 +535,21 @@ bool BKE_paint_layers_channel_set_invert(Material &ma,
                                          eMaterialPaintChannel channel,
                                          bool invert);
 
+/**
+ * Set the per-channel opacity multiplier of \a layer's \a channel, applied over the row's own
+ * opacity. Any row may carry one, a folder or a correction included, whether or not it has a
+ * record for the channel.
+ *
+ * Value-only: the generated tree's per (row, channel) opacity input is brought current through
+ * #BKE_paint_layers_values_sync, so the edit never rebuilds the topology.
+ *
+ * \return false when \a layer is not part of \a ma or \a channel is out of range.
+ */
+bool BKE_paint_layers_channel_opacity_set(Material &ma,
+                                          MaterialPaintLayer &layer,
+                                          int channel,
+                                          float opacity);
+
 /** Set the opacity of \a layer. */
 bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, float opacity);
 
@@ -641,6 +656,12 @@ bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, co
  * The one reader of "how much does this row show", for every evaluator of the description.
  */
 float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer);
+
+/**
+ * #BKE_paint_layers_effective_opacity scaled by  channel's own opacity; the row's alone when it
+ * has no record for  channel. What every evaluator uses for a channel's stack.
+ */
+float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer, int channel);
 
 /**
  * The value \a channel's stack starts from, before any row is laid over it: the shader-space RGBA

@@ -106,7 +106,16 @@ bool BKE_paint_layers_folder_is_pass_through(const MaterialPaintLayer &folder)
    * the same only for the Mix blend at full weight. Opacity below one breaks it for two or more
    * children, because scaling the whole isolated result is not scaling each child's own factor.
    * The raw opacity is read on purpose: the enabled flag must not change the mode. */
-  return folder.blend == MA_PAINT_LAYER_BLEND_MIX && folder.opacity == 1.0f;
+  if (folder.blend != MA_PAINT_LAYER_BLEND_MIX || folder.opacity != 1.0f) {
+    return false;
+  }
+  /* A channel's own opacity scales the isolated result of that channel for the same reason. */
+  for (const MaterialPaintLayerChannelSettings &settings : folder.channel_settings) {
+    if (settings.opacity != 1.0f) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -484,6 +493,7 @@ static void paint_layer_branch_duplicate(Main &bmain,
   dst.opacity = src.opacity;
   dst.blend = src.blend;
   dst.source = src.source;
+  memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
   paint_layer_channels_duplicate(bmain, dst, src);
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as
@@ -1357,6 +1367,33 @@ bool BKE_paint_layers_channel_set_invert(Material &ma,
   return true;
 }
 
+static_assert(sizeof(MaterialPaintLayer::channel_settings) /
+                      sizeof(MaterialPaintLayerChannelSettings) ==
+                  PAINT_MATERIAL_CHANNEL_NUM,
+              "MaterialPaintLayer::channel_settings is indexed by channel; the literal size must "
+              "match");
+
+bool BKE_paint_layers_channel_opacity_set(Material &ma,
+                                          MaterialPaintLayer &layer,
+                                          const int channel,
+                                          const float opacity)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM || !paint_layer_owned(ma, &layer)) {
+    return false;
+  }
+  const bool was_pass_through = BKE_paint_layers_folder_is_pass_through(layer);
+  layer.channel_settings[channel].opacity = clamp_f(opacity, 0.0f, 1.0f);
+  /* An input of the row's group like the row's own opacity, so no new graph shape -- unless it
+   * moves a folder across the Pass Through boundary, which changes which nodes exist. */
+  if (BKE_paint_layers_folder_is_pass_through(layer) != was_pass_through) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  else {
+    BKE_paint_layers_tag_value_edited(ma);
+  }
+  return true;
+}
+
 bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, const float opacity)
 {
   if (!paint_layer_owned(ma, layer)) {
@@ -1603,6 +1640,15 @@ float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer)
     return 0.0f;
   }
   return layer.opacity;
+}
+
+float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer, const int channel)
+{
+  const float row_opacity = BKE_paint_layers_effective_opacity(layer);
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return row_opacity;
+  }
+  return row_opacity * layer.channel_settings[channel].opacity;
 }
 
 void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, float r_color[4])

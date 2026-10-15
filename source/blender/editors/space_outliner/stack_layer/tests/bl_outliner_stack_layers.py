@@ -165,7 +165,6 @@ class StackLayersOutlinerTest(unittest.TestCase):
             "show_stack_layer_blend",
             "show_stack_items",
             "use_stack_layer_big_rows",
-            "use_stack_layer_pair_sub_rows",
             "use_stack_layer_visibility_left",
             "use_stack_layer_pin",
             "stack_source",

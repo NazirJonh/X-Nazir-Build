@@ -33,6 +33,7 @@
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -889,6 +890,10 @@ static void texture_paint_prepare_layered_maps(bContext *C,
   if (created > 0) {
     ED_undo_push(C, RPT_("Add Layer Maps"));
     pop.undo_group_open = true;
+    /* The new map has no image node yet. Regenerating here, before the stroke captures the
+     * evaluated material, keeps the first dab from landing on a graph that lacks its target. */
+    BKE_paint_layers_regenerate_tagged(*bmain);
+    CTX_data_ensure_evaluated_depsgraph(C);
   }
   else {
     ED_undo_group_end(C);

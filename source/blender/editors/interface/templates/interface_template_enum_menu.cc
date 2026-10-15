@@ -87,6 +87,18 @@ void template_enum_menu(Layout *layout,
                                0,
                                0,
                                std::nullopt);
+  /* A header button is not rebuilt by a popup, so the current item's icon (a data-block preview,
+   * say) has to be put on it here. */
+  EnumPropertyItem item;
+  if (RNA_property_enum_item_from_value(static_cast<bContext *>(block->evil_C),
+                                        ptr,
+                                        prop,
+                                        RNA_property_enum_get(ptr, prop),
+                                        &item) &&
+      item.icon != ICON_NONE)
+  {
+    but->icon = item.icon;
+  }
   if (!wrap) {
     button_func_menu_step_set(but, enum_menu_step_clamped);
   }

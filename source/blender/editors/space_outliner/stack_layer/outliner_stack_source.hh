@@ -234,13 +234,6 @@ struct StackRow {
    */
   bool supported = true;
   const char *unsupported_reason = nullptr;
-  /**
-   * Whether this row's sub-rows take the pair striping (#SO_SL_PAIR_SUB_ROWS), when the user
-   * turns it on. Which sub-rows read as a pair is the source's call -- they are not the same
-   * thing on every stack -- so the draw asks the row instead of guessing from the row's shape.
-   */
-  bool pairs_sub_rows = false;
-
   std::string name;
   /**
    * Where a rename types, or null when the row cannot be renamed.
@@ -369,6 +362,11 @@ struct StackAddKindInfo {
    * the plain Add button, which has nothing to hand over.
    */
   short source_id_type = 0;
+  /**
+   * A correction laid over another row rather than a row of the stack. The Effects menu lists
+   * only these, so every correction is added from one place.
+   */
+  bool is_effect = false;
 };
 
 /**

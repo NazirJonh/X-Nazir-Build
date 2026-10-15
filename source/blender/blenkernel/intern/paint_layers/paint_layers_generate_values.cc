@@ -73,7 +73,7 @@ bool values_sync_socket(Material &ma,
     if (socket.default_value == nullptr) {
       return false;
     }
-    const float value = BKE_paint_layers_effective_opacity(*layer) *
+    const float value = BKE_paint_layers_channel_opacity_effective(*layer, channel) *
                         forms.lookup_default(layer, {}).pass_through_scale;
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
     if (iface.socket_data != nullptr) {

@@ -27,6 +27,7 @@
 #include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_icons.hh"
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -1729,6 +1730,14 @@ static const EnumPropertyItem *stack_sub_index_itemf_impl(bContext *C,
                       selections[index].preview_id->name + 2 :
                       IFACE_("Empty Slot");
       item.description = "";
+      /* The material's own preview, which the menu draws beside its name. */
+      item.icon = ICON_MATERIAL;
+      if (ID *preview_id = selections[index].preview_id) {
+        if (const int icon_id = BKE_icon_id_ensure(preview_id)) {
+          ui::icon_render_id(C, nullptr, preview_id, ICON_SIZE_ICON, true);
+          item.icon = icon_id;
+        }
+      }
       RNA_enum_item_add(&items, &items_num, &item);
     }
   }
@@ -2014,10 +2023,9 @@ bool stack_add_poll(bContext *C)
  * Outliner knowing it: the item's value is the kind's place in that list, which is what
  * #StackEditor::row_add reads back, and the identifier is the stable name scripts see.
  */
-const EnumPropertyItem *stack_add_type_itemf(bContext *C,
-                                             PointerRNA * /*ptr*/,
-                                             PropertyRNA * /*prop*/,
-                                             bool *r_free)
+static const EnumPropertyItem *stack_add_kinds_itemf(bContext *C,
+                                                     const bool effects_only,
+                                                     bool *r_free)
 {
   EnumPropertyItem *items = nullptr;
   int items_num = 0;
@@ -2033,6 +2041,11 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
       editor->add_kinds(kinds);
     }
     for (const int64_t index : kinds.index_range()) {
+      if (effects_only && !kinds[index].is_effect) {
+        continue;
+      }
+      /* The value stays the kind's place in the full list, which is what #StackEditor::row_add
+       * reads back, so a filtered list leaves gaps. */
       EnumPropertyItem item = {};
       item.value = int(index);
       item.identifier = stack_enum_string_intern(kinds[index].identifier);
@@ -2045,6 +2058,22 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
   RNA_enum_item_end(&items, &items_num);
   *r_free = true;
   return items;
+}
+
+const EnumPropertyItem *stack_add_type_itemf(bContext *C,
+                                             PointerRNA * /*ptr*/,
+                                             PropertyRNA * /*prop*/,
+                                             bool *r_free)
+{
+  return stack_add_kinds_itemf(C, false, r_free);
+}
+
+const EnumPropertyItem *stack_effect_type_itemf(bContext *C,
+                                                PointerRNA * /*ptr*/,
+                                                PropertyRNA * /*prop*/,
+                                                bool *r_free)
+{
+  return stack_add_kinds_itemf(C, true, r_free);
 }
 
 /** The same question every mutating stack operator asks: is there a stack here to remove from,

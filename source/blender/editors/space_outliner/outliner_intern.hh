@@ -230,6 +230,8 @@ struct TreeElement {
 
   ListBaseT<TreeElement> subtree;
   int xs, ys;                /* Do selection. */
+  /** Where a Stack Layers row draws its name; the rename box sits there, past the preview. */
+  int name_xs = 0, name_ys = 0;
   TreeStoreElem *store_elem; /* Element in tree store. */
   TreeElementFlag flag;      /* Flag for non-saved stuff. */
   short index;               /* Index for data arrays. */
@@ -857,6 +859,11 @@ const EnumPropertyItem *stack_add_type_itemf(bContext *C,
                                              PointerRNA * /*ptr*/,
                                              PropertyRNA * /*prop*/,
                                              bool *r_free);
+/** As #stack_add_type_itemf, listing only the corrections: what the Effects menu offers. */
+const EnumPropertyItem *stack_effect_type_itemf(bContext *C,
+                                                PointerRNA * /*ptr*/,
+                                                PropertyRNA * /*prop*/,
+                                                bool *r_free);
 wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent *event);
 bool stack_row_add_poll(bContext *C);
@@ -985,6 +992,7 @@ void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_effect_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_remove(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_rename(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_duplicate(wmOperatorType *ot);

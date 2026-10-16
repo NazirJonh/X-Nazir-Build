@@ -2534,13 +2534,9 @@ static const EnumPropertyItem *rna_SpaceImageEditor_display_channels_itemf(bCont
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
   EnumPropertyItem *item = nullptr;
-  ImBuf *ibuf;
-  void *lock;
   int totitem = 0;
 
-  ibuf = ED_space_image_acquire_buffer(sima, &lock, 0, false);
-  int mask = ED_space_image_get_display_channel_mask(ibuf);
-  ED_space_image_release_buffer(sima, ibuf, lock);
+  const int mask = ED_space_image_display_channel_mask(sima);
 
   if (mask & SI_USE_ALPHA) {
     RNA_enum_items_add_value(&item, &totitem, display_channels_items, SI_USE_ALPHA);
@@ -2872,12 +2868,7 @@ static bool rna_SpaceImageEditor_is_material_paint_canvas_get(PointerRNA *ptr)
 static int rna_SpaceImageEditor_display_channels_get(PointerRNA *ptr)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
-  ImBuf *ibuf;
-  void *lock;
-
-  ibuf = ED_space_image_acquire_buffer(sima, &lock, 0, false);
-  int mask = ED_space_image_get_display_channel_mask(ibuf);
-  ED_space_image_release_buffer(sima, ibuf, lock);
+  const int mask = ED_space_image_display_channel_mask(sima);
 
   return sima->flag & mask;
 }

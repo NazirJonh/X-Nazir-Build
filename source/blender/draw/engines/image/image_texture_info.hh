@@ -114,8 +114,10 @@ struct TextureInfo : NonCopyable {
     }
 
     if (should_be_created) {
-      texture.ensure_2d(
-          gpu::TextureFormat::SFLOAT_16_16_16_16, texture_size, GPU_TEXTURE_USAGE_SHADER_READ);
+      /* Written as well as sampled: the GPU Combined preview shades straight into it. */
+      texture.ensure_2d(gpu::TextureFormat::SFLOAT_16_16_16_16,
+                        texture_size,
+                        GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE);
     }
     need_full_update |= should_be_created;
   }

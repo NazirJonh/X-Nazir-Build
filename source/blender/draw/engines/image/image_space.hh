@@ -18,6 +18,10 @@ struct Image;
 struct ImageUser;
 struct Main;
 
+namespace gpu {
+class Texture;
+}
+
 namespace image_engine {
 
 struct ShaderParameters;
@@ -109,6 +113,27 @@ class AbstractSpaceAccessor {
 
   /** Release a buffer from #acquire_display_override_buffer. */
   virtual void release_display_override_buffer(ImBuf * /*image_buffer*/) {}
+
+  /**
+   * Whether the display override is to be evaluated on the GPU straight into the
+   * drawing mode's textures. Cheap by contract, like #has_display_override.
+   */
+  virtual bool has_gpu_display_override() const
+  {
+    return false;
+  }
+
+  /**
+   * Evaluate the display override into \a texture. \a texel_to_uv maps a texel of the
+   * texture to the image UV. False means the space could not and the caller must use
+   * #acquire_display_override_buffer instead.
+   */
+  virtual bool update_gpu_display_override(Main * /*bmain*/,
+                                           gpu::Texture * /*texture*/,
+                                           const float3x3 & /*texel_to_uv*/)
+  {
+    return false;
+  }
 
   /**
    * The canvas extent the image occupies, in image pixels, or zero when the space cannot say.

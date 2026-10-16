@@ -548,6 +548,7 @@ set(SRC
   BKE_paint_material_combined.hh
   BKE_paint_material_composite.hh
   BKE_paint_material_resolve.hh
+  BKE_paint_perf_debug.hh
   BKE_paint_vector.hh
   BKE_particle.h
   BKE_path_templates.hh

@@ -18,6 +18,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLI_hash.hh"
@@ -51,6 +52,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <iterator>
@@ -1410,6 +1412,8 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
   if (src == nullptr || ref_width <= 0 || ref_height <= 0 || src->x <= 0 || src->y <= 0) {
     return nullptr;
   }
+  bke::paint_perf::ScopedTimer perf_timer("composite_resample_mapped");
+  perf_timer.note("src=%dx%d -> %dx%d wrap=%d", src->x, src->y, ref_width, ref_height, mapping.wrap);
   const bool src_is_float = src->byte_buffer.data == nullptr && src->float_buffer.data != nullptr;
   if (!src_is_float && src->byte_buffer.data == nullptr) {
     return nullptr;
@@ -1428,6 +1432,19 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
   const ColorSpace *colorspace = src_is_float ? src->float_buffer.colorspace :
                                                 src->byte_buffer.colorspace;
   const bool decode = BKE_paint_material_composite_colorspace_is_converted(colorspace);
+  /* A byte sRGB map is decoded by a table: the colour-management call per tap costs about as much
+   * as everything else a tap does together, and a 4K map has 67 million of them. Any other
+   * converted space keeps the call. */
+  static const std::array<float, 256> srgb_byte_to_linear = []() {
+    std::array<float, 256> table;
+    for (const int i : IndexRange(256)) {
+      table[i] = srgb_to_linearrgb(float(i) * (1.0f / 255.0f));
+    }
+    return table;
+  }();
+  const bool decode_by_table = decode && !src_is_float && colorspace != nullptr &&
+                               IMB_colormanagement_space_name_is_srgb(
+                                   IMB_colormanagement_colorspace_get_name(colorspace));
   /* One helper, shared by RNA and the CPU: zeroes read back as one. */
   const float scale_x = BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]);
   const float scale_y = BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]);
@@ -1442,9 +1459,16 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
   auto tap_straight = [&](const int tx, const int ty, float r_tap[4]) {
     if (!src_is_float) {
       const uchar *pixel = src->byte_data() + (int64_t(ty) * src->x + tx) * 4;
-      r_tap[0] = float(pixel[0]) / 255.0f;
-      r_tap[1] = float(pixel[1]) / 255.0f;
-      r_tap[2] = float(pixel[2]) / 255.0f;
+      if (decode_by_table) {
+        r_tap[0] = srgb_byte_to_linear[pixel[0]];
+        r_tap[1] = srgb_byte_to_linear[pixel[1]];
+        r_tap[2] = srgb_byte_to_linear[pixel[2]];
+      }
+      else {
+        r_tap[0] = float(pixel[0]) / 255.0f;
+        r_tap[1] = float(pixel[1]) / 255.0f;
+        r_tap[2] = float(pixel[2]) / 255.0f;
+      }
       r_tap[3] = float(pixel[3]) / 255.0f;
     }
     else {
@@ -1460,7 +1484,7 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
         r_tap[2] *= inv;
       }
     }
-    if (decode) {
+    if (decode && !decode_by_table) {
       IMB_colormanagement_colorspace_to_scene_linear_v4(r_tap, false, colorspace);
     }
     r_tap[0] *= r_tap[3];
@@ -2096,6 +2120,7 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     PaintMaterialCompositeEvalStats *r_stats,
     rcti *r_changed_region)
 {
+  bke::paint_perf::ScopedTimer perf_timer("composite_cache_ensure");
   if (r_changed_region != nullptr) {
     /* Initialized before any early return, so that "nothing was recomputed" is never confused with
      * "the caller forgot to look". */
@@ -2157,6 +2182,17 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
 
   const bool rebuild_all = size_changed || entry.stack_hash != stack_hash || entry.dirty_full;
   const bool rebuild_region = !rebuild_all && !BLI_rcti_is_empty(&entry.dirty_region);
+  perf_timer.note("channel=%d %dx%d layers=%d rebuild=%s (size=%d hash=%d dirty_full=%d) region=%dx%d",
+                  channel,
+                  width,
+                  height,
+                  int(image_layers.size()),
+                  rebuild_all ? "ALL" : (rebuild_region ? "region" : "none"),
+                  int(size_changed),
+                  int(entry.stack_hash != stack_hash),
+                  int(entry.dirty_full),
+                  BLI_rcti_size_x(&entry.dirty_region),
+                  BLI_rcti_size_y(&entry.dirty_region));
   if (rebuild_all) {
     /* Only with the stack: the bottom layer decides the colorspace, and a region refresh cannot
      * have changed which layer that is. Non-Color layers -- Roughness, Metallic, a normal map --
@@ -2177,12 +2213,14 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     if (has_bottom) {
       BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel(channel), bottom_color);
     }
-    if (!BKE_paint_material_composite_eval_images(image_layers,
-                                                  entry.ibuf.get(),
-                                                  region,
-                                                  r_stats,
-                                                  has_bottom ? bottom_color : nullptr))
+    bool eval_ok;
     {
+      bke::paint_perf::ScopedTimer perf_eval("composite_eval_images");
+      eval_ok = BKE_paint_material_composite_eval_images(
+          image_layers, entry.ibuf.get(), region, r_stats, has_bottom ? bottom_color : nullptr);
+      perf_eval.note("channel=%d region=%s", channel, region != nullptr ? "partial" : "full");
+    }
+    if (!eval_ok) {
       g_cache.entries.remove(key);
       return nullptr;
     }

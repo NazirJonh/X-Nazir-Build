@@ -29,6 +29,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
@@ -36,6 +37,7 @@
 
 #include "DNA_material_types.h"
 
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
@@ -477,6 +479,57 @@ bool ED_space_image_has_composite(const SpaceImage *sima)
   return sima != nullptr && (sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 && sima->image != nullptr;
 }
 
+bool ED_space_image_has_gpu_combined(const SpaceImage *sima)
+{
+  return ed::material_combined::combined_preview_gpu_enabled() && ED_space_image_has_composite(sima) &&
+         ed::material_combined::combined_preview_gpu_pass_supported(sima->material_paint_pass);
+}
+
+ImBuf *ED_space_image_gpu_combined_stand_in()
+{
+  /* Made like the Combined cache's own buffers, so everything read from it agrees with them. Kept
+   * for the life of the process; a texel is not worth a lifetime to manage. */
+  static ImBuf *stand_in = []() -> ImBuf * {
+    ImBuf *ibuf = IMB_allocImBuf(1, 1, ImBufFlags::FloatData);
+    if (ibuf != nullptr) {
+      ibuf->channels = 4;
+      IMB_colormanagement_assign_float_colorspace(
+          ibuf, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+    }
+    return ibuf;
+  }();
+  if (stand_in != nullptr) {
+    IMB_refImBuf(stand_in);
+  }
+  return stand_in;
+}
+
+bool ED_space_image_update_gpu_combined(Main *bmain,
+                                        SpaceImage *sima,
+                                        gpu::Texture *texture,
+                                        const float3x3 &texel_to_uv)
+{
+  if (bmain == nullptr || !ED_space_image_has_gpu_combined(sima)) {
+    return false;
+  }
+  const Material *ma = space_image_composite_material_find(*bmain, *sima->image);
+  if (ma == nullptr) {
+    return false;
+  }
+  CombinedPreviewLighting lighting = BKE_paint_material_combined_lighting_default();
+  BKE_paint_material_combined_lighting_rotate_z(lighting, sima->material_paint_light_rot_z);
+  if (!ed::material_combined::combined_preview_gpu_update(
+          *ma, lighting, sima->material_paint_pass, texture, texel_to_uv))
+  {
+    return false;
+  }
+  if (sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED) {
+    ed::material_combined::combined_preview_gpu_verify(
+        *bmain, *ma, lighting, texture, texel_to_uv);
+  }
+  return true;
+}
+
 ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
                                                SpaceImage *sima,
                                                uint64_t *r_revision,
@@ -491,7 +544,15 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   if (!ED_space_image_has_composite(sima) || bmain == nullptr) {
     return nullptr;
   }
-  Material *ma = space_image_composite_material_find(*bmain, *sima->image);
+  static int64_t perf_call_count = 0;
+  bke::paint_perf::ScopedTimer perf_total("acquire_composite_buffer");
+  perf_total.note("call=%lld pass=%d", long long(++perf_call_count), sima->material_paint_pass);
+  Material *ma = nullptr;
+  {
+    bke::paint_perf::ScopedTimer perf_find("composite_material_find");
+    ma = space_image_composite_material_find(*bmain, *sima->image);
+    perf_find.note("%s", ma != nullptr ? "found" : "none");
+  }
   if (ma == nullptr) {
     return nullptr;
   }
@@ -511,6 +572,17 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
     }
     ImBuf *combined = ed::material_combined::combined_preview_ensure(
         *bmain, *ma, lighting, request, r_revision, r_changed_region);
+    if (r_changed_region != nullptr) {
+      perf_total.note("call=%lld combined armed=%d clip=%dx%d changed=%dx%d out=%dx%d",
+                      long long(perf_call_count),
+                      int(request.max_output.x > 0),
+                      BLI_rcti_size_x(&request.clip),
+                      BLI_rcti_size_y(&request.clip),
+                      BLI_rcti_size_x(r_changed_region),
+                      BLI_rcti_size_y(r_changed_region),
+                      combined != nullptr ? combined->x : 0,
+                      combined != nullptr ? combined->y : 0);
+    }
     if (combined == nullptr) {
       /* Nothing resolved: the plain canvas image is shown, exactly as a channel pass that is not a
        * layer stack already behaves. Whatever canvas was remembered belongs to a preview that no
@@ -652,6 +724,20 @@ int ED_space_image_get_display_channel_mask(ImBuf *ibuf)
   return result;
 }
 
+int ED_space_image_display_channel_mask(SpaceImage *sima)
+{
+  if (ED_space_image_has_gpu_combined(sima) ||
+      (ED_space_image_has_composite(sima) && sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED))
+  {
+    return SI_USE_ALPHA | SI_SHOW_ALPHA | SI_SHOW_R | SI_SHOW_G | SI_SHOW_B;
+  }
+  void *lock;
+  ImBuf *ibuf = ED_space_image_acquire_buffer(sima, &lock, 0, false);
+  const int mask = ED_space_image_get_display_channel_mask(ibuf);
+  ED_space_image_release_buffer(sima, ibuf, lock);
+  return mask;
+}
+
 bool ED_space_image_has_buffer(SpaceImage *sima)
 {
   ImBuf *ibuf;
@@ -683,6 +769,15 @@ void ED_space_image_get_size(SpaceImage *sima, int *r_width, int *r_height)
    * Narrowed to the Combined pass because a channel pass is served by a different cache -- the
    * composite one -- and a stale Combined entry left over from an earlier pass would answer for
    * it. */
+  if (ED_space_image_has_gpu_combined(sima) && sima->image != nullptr &&
+      sima->material_paint_pass != PAINT_LAYER_PASS_COMBINED)
+  {
+    /* A channel pass the GPU draws has no buffer to measure: shading one to read two integers is the
+     * cost this exists to avoid, and the canvas is the size of the layer's own map. */
+    BKE_image_get_size(sima->image, &sima->iuser, r_width, r_height);
+    return;
+  }
+
   if (ED_space_image_has_composite(sima) && sima->image != nullptr &&
       sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED)
   {

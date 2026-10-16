@@ -11,7 +11,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <memory>
+
+#include "MEM_guardedalloc.h"
 
 #include "BKE_image.hh"
 #include "BKE_node.hh"
@@ -19,14 +24,20 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
 #include "BLI_math_base.h"
+#include "BLI_math_color.h"
+#include "BLI_math_matrix.hh"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_memory_utils.hh"
 #include "BLI_rect.h"
 #include "BLI_vector.hh"
 
@@ -35,6 +46,12 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
+
+#include "GPU_compute.hh"
+#include "GPU_shader.hh"
+#include "GPU_state.hh"
+#include "GPU_texture.hh"
+#include "GPU_texture_pool.hh"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
@@ -307,6 +324,7 @@ ImBuf *combined_preview_ensure(Main &bmain,
   if (r_changed_region != nullptr) {
     BLI_rcti_init(r_changed_region, 0, 0, 0, 0);
   }
+  bke::paint_perf::ScopedTimer perf_total("combined_preview_ensure");
   GatherScope scope;
 
   /* A layered material answers from its description alone, and every channel it lacks rows for
@@ -336,14 +354,22 @@ ImBuf *combined_preview_ensure(Main &bmain,
    * nothing at all. */
   std::array<Vector<PaintMaterialCompositeImageLayer>, combined_shading_channels.size()> stacks;
   std::array<bool, combined_shading_channels.size()> has_stack;
-  for (const int i : IndexRange(int64_t(combined_shading_channels.size()))) {
-    /* A layered material is read from its description: its generated tree is not a Mix chain the
-     * graph walk could follow. */
-    has_stack[i] = BKE_paint_layers_is_layered(ma) ?
-                       BKE_paint_layers_composite_image_layers(
-                           ma, combined_shading_channels[i], stacks[i]) :
-                       BKE_paint_material_composite_stack_from_material(
-                           bmain, ma, combined_shading_channels[i], stacks[i]);
+  {
+    bke::paint_perf::ScopedTimer perf_stacks("gather.stacks");
+    int stacks_found = 0;
+    for (const int i : IndexRange(int64_t(combined_shading_channels.size()))) {
+      /* A layered material is read from its description: its generated tree is not a Mix chain
+       * the graph walk could follow. */
+      has_stack[i] = BKE_paint_layers_is_layered(ma) ?
+                         BKE_paint_layers_composite_image_layers(
+                             ma, combined_shading_channels[i], stacks[i]) :
+                         BKE_paint_material_composite_stack_from_material(
+                             bmain, ma, combined_shading_channels[i], stacks[i]);
+      stacks_found += has_stack[i] ? 1 : 0;
+    }
+    perf_stacks.note("channels with a stack=%d of %d",
+                     stacks_found,
+                     int(combined_shading_channels.size()));
   }
 
   /* The canonical size is the first channel that resolves to a layer stack or to a direct image,
@@ -468,8 +494,14 @@ ImBuf *combined_preview_ensure(Main &bmain,
       rcti channel_changed;
       ImBuf *composite = nullptr;
       {
+        bke::paint_perf::ScopedTimer perf_channel("gather.channel_composite");
         composite = BKE_paint_material_composite_cache_ensure(
             ma, channel, layers, stack_hash, nullptr, nullptr, &channel_changed);
+        perf_channel.note("channel=%d layers=%d changed=%dx%d",
+                          int(channel),
+                          int(layers.size()),
+                          BLI_rcti_size_x(&channel_changed),
+                          BLI_rcti_size_y(&channel_changed));
       }
       if (composite != nullptr && composite->x == width && composite->y == height) {
         /* Referenced, not merely pointed at: the next channel's `cache_ensure` may evict this very
@@ -547,6 +579,16 @@ ImBuf *combined_preview_ensure(Main &bmain,
 
     inputs_hash = get_default_hash(
         inputs_hash, int(channel), int(source), source_detail, input.constant, int(input.is_srgb));
+    if (bke::paint_perf::min_ms() == 0.0) {
+      /* Only at threshold zero: a source or detail that differs between two frames is what turns a
+       * cache hit into a full reshade. */
+      printf("[PBR-PERF]   input channel=%d source=%d detail=%llu srgb=%d hash=%llu\n",
+             int(channel),
+             int(source),
+             static_cast<unsigned long long>(source_detail),
+             int(input.is_srgb),
+             static_cast<unsigned long long>(inputs_hash));
+    }
 
   }
 
@@ -581,8 +623,18 @@ ImBuf *combined_preview_ensure(Main &bmain,
    * consumer turning the rectangle into UV divides by the dimensions of the buffer it is reading
    * -- and handing it canvas texels would be wrong by exactly the octave. */
   CombinedEvalStats stats;
+  bke::paint_perf::ScopedTimer perf_shade("gather.combined_cache_ensure");
   ImBuf *result = BKE_paint_material_combined_cache_ensure(
       ma, inputs, lighting, cache_request, r_revision, r_changed_region, &stats);
+  perf_shade.note("canvas=%dx%d out=%dx%d eval=%.3f ms pixels=%lld dep_images=%d",
+                  width,
+                  height,
+                  output_width,
+                  output_height,
+                  stats.elapsed_seconds * 1000.0,
+                  long long(stats.pixels_processed),
+                  int(dependency_images.size()));
+  perf_total.note("canvas=%dx%d out=%dx%d", width, height, output_width, output_height);
   /* The output resolution, not the canvas: it is what the numbers have to be read against. */
   if (r_stats != nullptr) {
     *r_stats = stats;
@@ -613,6 +665,1078 @@ void combined_preview_bake_ensure(const bContext &C, Material &ma)
     return;
   }
   material_bake::material_source_bake_ensure(C, ma, combined_bake_resolution);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Combined Preview
+ *
+ * The Combined preview of a layered material evaluated by compute shaders straight into
+ * the Image Editor's display texture. Mirrors `composite_layer_render` and
+ * `BKE_paint_material_combined_eval` for the rows it can lay; anything else is refused up front so
+ * the caller falls back to the CPU path instead of drawing something different.
+ * \{ */
+
+/** Mirrors the flags of `image_engine_combined_layer_comp.glsl`. */
+static constexpr int gpu_layer_init = 1;
+static constexpr int gpu_layer_has_map = 2;
+static constexpr int gpu_layer_alpha_coverage = 4;
+static constexpr int gpu_layer_premultiplied = 8;
+static constexpr int gpu_layer_mapped = 32;
+static constexpr int gpu_layer_repeat_u = 64;
+static constexpr int gpu_layer_repeat_v = 128;
+static constexpr int gpu_layer_tangent_normal = 256;
+static constexpr int gpu_layer_has_mask = 2048;
+static constexpr int gpu_layer_row_store = 4096;
+static constexpr int gpu_layer_row_use = 8192;
+static constexpr int gpu_layer_empty_base = 16384;
+static constexpr int gpu_layer_tracks_alpha = 32768;
+static constexpr int gpu_layer_adjustment = 65536;
+/* The steps of the folder pass, and how many folders may nest. */
+static constexpr int gpu_folder_init = 0;
+static constexpr int gpu_folder_blend = 1;
+static constexpr int gpu_folder_resolve = 2;
+static constexpr int gpu_folder_levels_max = 4;
+/* The mask pass shares the layer pass's map flags; these are its own. */
+static constexpr int gpu_mask_invert = 512;
+static constexpr int gpu_mask_from_alpha = 1024;
+/* The steps of the mask pass. */
+static constexpr int gpu_mask_init = 0;
+static constexpr int gpu_mask_item = 1;
+static constexpr int gpu_mask_map = 2;
+
+bool combined_preview_gpu_enabled()
+{
+  /* On unless `BLENDER_PBR_GPU_COMBINED=0`: a way to compare with, or fall back to, the CPU path. */
+  static const bool enabled = []() {
+    const char *env = std::getenv("BLENDER_PBR_GPU_COMBINED");
+    return env == nullptr || std::atoi(env) != 0;
+  }();
+  return enabled;
+}
+
+/**
+ * Report why the GPU path refused, once per change of reason rather than once per frame, and
+ * return false for the caller to hand on. Printed through the perf log, so it follows
+ * `BLENDER_PBR_PERF`.
+ */
+static const char *gpu_last_reason = nullptr;
+
+/* The developer check of combined_preview_gpu_verify: whether the frame being shaded is one it will
+ * compare, and the channel accumulators kept for it so a difference can be traced to a channel. Off
+ * unless BLENDER_PBR_GPU_VERIFY=1: it shades the whole canvas on the CPU. */
+static bool gpu_verify_due = false;
+static std::array<Vector<float>, int(combined_shading_channels.size())> gpu_verify_channels;
+
+static bool gpu_verify_enabled()
+{
+  static const bool enabled = []() {
+    const char *env = std::getenv("BLENDER_PBR_GPU_VERIFY");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return enabled;
+}
+
+static bool gpu_refuse(const char *reason)
+{
+  if (bke::paint_perf::enabled() && reason != gpu_last_reason) {
+    printf("[PBR-PERF] gpu_combined refused: %s\n", reason);
+    fflush(stdout);
+  }
+  gpu_last_reason = reason;
+  return false;
+}
+
+/** Report, once after a refusal or at the first frame, that the GPU path is shading the preview. */
+static void gpu_report_active()
+{
+  static const char *active = "active";
+  if (bke::paint_perf::enabled() && gpu_last_reason != active) {
+    printf("[PBR-PERF] gpu_combined active\n");
+    fflush(stdout);
+  }
+  gpu_last_reason = active;
+}
+
+/**
+ * Why the GPU path cannot lay \a layer the way the CPU composite does, or null when it can.
+ */
+static const char *gpu_layer_unsupported_reason(const PaintMaterialCompositeImageLayer &layer)
+{
+  if (!layer.enabled || layer.opacity <= 0.0f) {
+    /* The composite skips it as well. */
+    return nullptr;
+  }
+  for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+    if (child.adjustment_filter != 0) {
+      return "an adjustment row is inside a folder";
+    }
+    if (const char *reason = gpu_layer_unsupported_reason(child)) {
+      return reason;
+    }
+  }
+  if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&
+      !layer.has_constant_color)
+  {
+    return "a row has neither a map nor a flat colour";
+  }
+  return nullptr;
+}
+
+/**
+ * The GPU texture of \a image read through \a image_user (null selects the default), and whether it
+ * stores premultiplied colour, which is exactly when the CPU decode straightens the same buffer.
+ * Null when the image has no GPU texture.
+ */
+static gpu::Texture *gpu_map_texture(Image *image,
+                                     const ImageUser *image_user,
+                                     bool &r_premultiplied)
+{
+  ImageUser iuser;
+  if (image_user != nullptr) {
+    iuser = *image_user;
+  }
+  else {
+    BKE_imageuser_default(&iuser);
+  }
+  gpu::Texture *texture = BKE_image_get_gpu_texture(image, &iuser);
+  if (texture == nullptr) {
+    return nullptr;
+  }
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, nullptr);
+  r_premultiplied = BKE_image_has_gpu_texture_premultiplied_alpha(image, ibuf);
+  BKE_image_release_ibuf(image, ibuf, nullptr);
+  return texture;
+}
+
+/**
+ * Turn a row's UV \a mapping into the flags and values the shaders read, when it applies. The same
+ * values the CPU resample reads, the scale through the shared normalization.
+ */
+static void gpu_mapping_setup(const PaintMaterialCompositeMapping &mapping,
+                              int &r_flags,
+                              float2 &r_offset,
+                              float2 &r_scale,
+                              float2 &r_rotation)
+{
+  if (!mapping.enabled) {
+    return;
+  }
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(mapping.wrap, repeat_u, repeat_v);
+  r_flags |= gpu_layer_mapped;
+  if (repeat_u) {
+    r_flags |= gpu_layer_repeat_u;
+  }
+  if (repeat_v) {
+    r_flags |= gpu_layer_repeat_v;
+  }
+  if (mapping.tangent_normal) {
+    r_flags |= gpu_layer_tangent_normal;
+  }
+  r_offset = float2(mapping.offset[0], mapping.offset[1]);
+  r_scale = float2(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
+                   BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]));
+  r_rotation = float2(std::cos(mapping.rotation), std::sin(mapping.rotation));
+}
+
+bool combined_preview_gpu_pass_supported(const int pass)
+{
+  return pass == PAINT_LAYER_PASS_COMBINED ||
+         std::find(combined_shading_channels.begin(),
+                   combined_shading_channels.end(),
+                   eMaterialPaintChannel(pass)) != combined_shading_channels.end();
+}
+
+bool combined_preview_gpu_update(const Material &ma,
+                                 const CombinedPreviewLighting &lighting,
+                                 const int pass,
+                                 gpu::Texture *output,
+                                 const float3x3 &texel_to_uv)
+{
+  if (output == nullptr) {
+    return gpu_refuse("no display texture");
+  }
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return gpu_refuse("the material is not a layered stack");
+  }
+  if ((GPU_texture_usage(output) & GPU_TEXTURE_USAGE_SHADER_WRITE) == 0) {
+    return gpu_refuse("the display texture has no SHADER_WRITE usage");
+  }
+  if (!combined_preview_gpu_pass_supported(pass)) {
+    return gpu_refuse("the pass has no channel the GPU path lays");
+  }
+  bke::paint_perf::ScopedTimer perf_total("gpu_combined.total");
+  /* A CPU shading of the whole canvas per check, so only every so often; of the Combined pass only,
+   * the one the CPU preview can be compared with. */
+  static int verify_calls = 0;
+  gpu_verify_due = pass == PAINT_LAYER_PASS_COMBINED && gpu_verify_enabled() &&
+                   (verify_calls++ % 120) == 0;
+  /* The channel a channel pass shows, or -1 for the Combined preview, which lays them all. */
+  int wanted_channel = -1;
+  if (pass != PAINT_LAYER_PASS_COMBINED) {
+    wanted_channel = int(std::find(combined_shading_channels.begin(),
+                                   combined_shading_channels.end(),
+                                   eMaterialPaintChannel(pass)) -
+                         combined_shading_channels.begin());
+  }
+
+  constexpr int channels_num = int(combined_shading_channels.size());
+  std::array<Vector<PaintMaterialCompositeImageLayer>, channels_num> stacks;
+  std::array<bool, channels_num> has_stack;
+  for (const int i : IndexRange(channels_num)) {
+    if (wanted_channel >= 0 && i != wanted_channel) {
+      has_stack[i] = false;
+      continue;
+    }
+    has_stack[i] = BKE_paint_layers_composite_image_layers(ma, combined_shading_channels[i], stacks[i]);
+    if (!has_stack[i]) {
+      continue;
+    }
+    for (const PaintMaterialCompositeImageLayer &layer : stacks[i]) {
+      if (const char *reason = gpu_layer_unsupported_reason(layer)) {
+        return gpu_refuse(reason);
+      }
+    }
+  }
+
+  /* Created once, successful or not: a shader that fails to compile would otherwise be compiled
+   * and logged again on every frame. */
+  static gpu::Shader *layer_shader = nullptr;
+  static gpu::Shader *mask_shader = nullptr;
+  static gpu::Shader *correction_shader = nullptr;
+  static gpu::Shader *folder_shader = nullptr;
+  static gpu::Shader *display_shader = nullptr;
+  static gpu::Shader *shade_shader = nullptr;
+  static bool shaders_created = false;
+  if (!shaders_created) {
+    shaders_created = true;
+    layer_shader = GPU_shader_create_from_info_name("image_engine_combined_layer");
+    mask_shader = GPU_shader_create_from_info_name("image_engine_combined_mask");
+    correction_shader = GPU_shader_create_from_info_name("image_engine_combined_correction");
+    folder_shader = GPU_shader_create_from_info_name("image_engine_combined_folder");
+    display_shader = GPU_shader_create_from_info_name("image_engine_combined_display");
+    shade_shader = GPU_shader_create_from_info_name("image_engine_combined_shade");
+  }
+  if (layer_shader == nullptr || mask_shader == nullptr || correction_shader == nullptr ||
+      folder_shader == nullptr || display_shader == nullptr || shade_shader == nullptr)
+  {
+    return gpu_refuse("a compute shader failed to compile");
+  }
+
+  const int2 size(GPU_texture_width(output), GPU_texture_height(output));
+  const int2 groups = math::divide_ceil(size, int2(16));
+
+  gpu::TexturePool &pool = gpu::TexturePool::get();
+  /* Host read as well: the developer check reads the accumulators back. */
+  const eGPUTextureUsage accum_usage = GPU_TEXTURE_USAGE_SHADER_READ |
+                                       GPU_TEXTURE_USAGE_SHADER_WRITE |
+                                       GPU_TEXTURE_USAGE_HOST_READ;
+  std::array<gpu::Texture *, channels_num> accum;
+  accum.fill(nullptr);
+  gpu::Texture *dummy = pool.acquire_texture_2d(
+      int2(1), 1, gpu::TextureFormat::SFLOAT_16_16_16_16, GPU_TEXTURE_USAGE_SHADER_READ, "combined_dummy");
+  /* One factor, rebuilt for every row that has a mask. */
+  gpu::Texture *mask_accum = nullptr;
+  /* The colour and coverage of a row while its corrections are laid over it. */
+  gpu::Texture *row_color = nullptr;
+  gpu::Texture *row_factor = nullptr;
+  /* The pre-multiplied colour and coverage of the folders being laid, one pair per nesting level,
+   * made when a folder first needs them. */
+  std::array<gpu::Texture *, gpu_folder_levels_max> folder_premul;
+  std::array<gpu::Texture *, gpu_folder_levels_max> folder_cover;
+  folder_premul.fill(nullptr);
+  folder_cover.fill(nullptr);
+  BLI_SCOPED_DEFER([&]() {
+    for (gpu::Texture *texture : accum) {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+    if (mask_accum != nullptr) {
+      pool.release_texture(mask_accum);
+    }
+    if (row_color != nullptr) {
+      pool.release_texture(row_color);
+    }
+    if (row_factor != nullptr) {
+      pool.release_texture(row_factor);
+    }
+    for (gpu::Texture *texture : folder_premul) {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+    for (gpu::Texture *texture : folder_cover) {
+      if (texture != nullptr) {
+        pool.release_texture(texture);
+      }
+    }
+    if (dummy != nullptr) {
+      pool.release_texture(dummy);
+    }
+  });
+  mask_accum = pool.acquire_texture_2d(
+      size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_mask");
+  row_color = pool.acquire_texture_2d(
+      size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_row_color");
+  row_factor = pool.acquire_texture_2d(
+      size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_row_factor");
+  if (mask_accum == nullptr || row_color == nullptr || row_factor == nullptr) {
+    return gpu_refuse("a row or mask texture could not be allocated");
+  }
+  for (gpu::Texture *&texture : accum) {
+    texture = pool.acquire_texture_2d(
+        size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_accum");
+    if (texture == nullptr) {
+      return gpu_refuse("an accumulator texture could not be allocated");
+    }
+  }
+  if (dummy == nullptr) {
+    return gpu_refuse("the placeholder texture could not be allocated");
+  }
+
+  /* An affine 2D map as the mat4 the push constants take: GLSL multiplies columns, so the
+   * translation sits in the fourth one. */
+  float4x4 texel_to_uv_4x4 = float4x4::identity();
+  texel_to_uv_4x4[0] = float4(texel_to_uv[0].x, texel_to_uv[0].y, 0.0f, 0.0f);
+  texel_to_uv_4x4[1] = float4(texel_to_uv[1].x, texel_to_uv[1].y, 0.0f, 0.0f);
+  texel_to_uv_4x4[3] = float4(texel_to_uv[2].x, texel_to_uv[2].y, 0.0f, 1.0f);
+
+  int dispatches = 0;
+  /* The mip level to read a map at: the texels it has per screen pixel, as a power of two. */
+  const auto map_lod = [&](gpu::Texture *map, const int flags, const float2 &mapping_scale) {
+    if (map == nullptr || (flags & gpu_layer_alpha_coverage) != 0) {
+      /* A painted map stores straight colour with black where it is transparent, and its mip
+       * levels average that black in: a stroke edge seen from afar would come out several times
+       * darker than the CPU composite reads it. The base level has no such bleed. */
+      return 0.0f;
+    }
+    const float2 map_size(GPU_texture_width(map), GPU_texture_height(map));
+    float texels_per_pixel = std::max(
+        math::length(float2(texel_to_uv[0].x, texel_to_uv[0].y) * map_size),
+        math::length(float2(texel_to_uv[1].x, texel_to_uv[1].y) * map_size));
+    if ((flags & gpu_layer_mapped) != 0) {
+      /* A scaled mapping reads the map denser or sparser than the canvas does. */
+      texels_per_pixel *= std::max(std::abs(mapping_scale.x), std::abs(mapping_scale.y));
+    }
+    return std::max(0.0f, std::log2(std::max(texels_per_pixel, 1e-6f)));
+  };
+
+  const auto lay = [&](const int channel_index,
+                       gpu::Texture *map,
+                       const int flags,
+                       const float4 &layer_color,
+                       const float4 &init_color,
+                       const float opacity,
+                       const float2 &mapping_offset = float2(0.0f),
+                       const float2 &mapping_scale = float2(1.0f),
+                       const float2 &mapping_rotation = float2(1.0f, 0.0f),
+                       const int blend = int(CompositeBlend::Mix),
+                       gpu::Texture *mask = nullptr,
+                       const int filter_kind = 0,
+                       const float *filter_params = nullptr) {
+    gpu::Texture *sampled = map != nullptr ? map : dummy;
+    gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
+    const float lod = map_lod(map, flags, mapping_scale);
+    GPU_shader_bind(layer_shader);
+    GPU_shader_uniform_mat4(layer_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(layer_shader, "texture_size", &size.x);
+    GPU_shader_uniform_4fv(layer_shader, "layer_color", &layer_color.x);
+    GPU_shader_uniform_4fv(layer_shader, "init_color", &init_color.x);
+    GPU_shader_uniform_2fv(layer_shader, "mapping_offset", &mapping_offset.x);
+    GPU_shader_uniform_2fv(layer_shader, "mapping_scale", &mapping_scale.x);
+    GPU_shader_uniform_2fv(layer_shader, "mapping_rotation", &mapping_rotation.x);
+    GPU_shader_uniform_1f(layer_shader, "opacity", opacity);
+    GPU_shader_uniform_1f(layer_shader, "lod", lod);
+    GPU_shader_uniform_1i(layer_shader, "flags", flags);
+    GPU_shader_uniform_1i(layer_shader, "blend", blend);
+    GPU_shader_uniform_1i(layer_shader, "filter_kind", filter_kind);
+    const float4 adjustment_0 = filter_params != nullptr ?
+                                    float4(filter_params[0], filter_params[1], filter_params[2], filter_params[3]) :
+                                    float4(0.0f);
+    const float4 adjustment_1 = filter_params != nullptr ?
+                                    float4(filter_params[4], filter_params[5], filter_params[6], filter_params[7]) :
+                                    float4(0.0f);
+    GPU_shader_uniform_4fv(layer_shader, "filter_params_0", &adjustment_0.x);
+    GPU_shader_uniform_4fv(layer_shader, "filter_params_1", &adjustment_1.x);
+
+    /* The previous pass wrote this accumulator through an image. */
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(layer_shader, "layer_tx"));
+    GPU_texture_bind(mask_sampled, GPU_shader_get_sampler_binding(layer_shader, "mask_tx"));
+    GPU_texture_image_bind(accum[channel_index],
+                           GPU_shader_get_sampler_binding(layer_shader, "accum_img"));
+    GPU_texture_image_bind(row_color, GPU_shader_get_sampler_binding(layer_shader, "row_color_img"));
+    GPU_texture_image_bind(row_factor,
+                           GPU_shader_get_sampler_binding(layer_shader, "row_factor_img"));
+    GPU_compute_dispatch(layer_shader, uint(groups.x), uint(groups.y), 1);
+    GPU_texture_image_unbind(row_factor);
+    GPU_texture_image_unbind(row_color);
+    GPU_texture_image_unbind(accum[channel_index]);
+    GPU_texture_unbind(mask_sampled);
+    GPU_texture_unbind(sampled);
+    dispatches++;
+  };
+
+  /* One step of a row's mask factor, into the mask accumulator. */
+  const auto mask_step = [&](const int mode,
+                             gpu::Texture *map,
+                             const int flags,
+                             const float constant_gray,
+                             const float opacity,
+                             const float influence,
+                             const int blend,
+                             const int filter,
+                             const float *filter_params,
+                             const PaintMaterialCompositeMapping *mapping) {
+    gpu::Texture *sampled = map != nullptr ? map : dummy;
+    int step_flags = flags;
+    float2 mapping_offset(0.0f);
+    float2 mapping_scale(1.0f);
+    float2 mapping_rotation(1.0f, 0.0f);
+    if (mapping != nullptr && map != nullptr) {
+      gpu_mapping_setup(*mapping, step_flags, mapping_offset, mapping_scale, mapping_rotation);
+    }
+    float4 params_0(0.0f);
+    float4 params_1(0.0f);
+    if (filter_params != nullptr) {
+      params_0 = float4(filter_params[0], filter_params[1], filter_params[2], filter_params[3]);
+      params_1 = float4(filter_params[4], filter_params[5], filter_params[6], filter_params[7]);
+    }
+    /* A mask map is painted like a layer's: its base level, for the same reason. */
+    const float lod = 0.0f;
+    GPU_shader_bind(mask_shader);
+    GPU_shader_uniform_mat4(mask_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(mask_shader, "texture_size", &size.x);
+    GPU_shader_uniform_2fv(mask_shader, "mapping_offset", &mapping_offset.x);
+    GPU_shader_uniform_2fv(mask_shader, "mapping_scale", &mapping_scale.x);
+    GPU_shader_uniform_2fv(mask_shader, "mapping_rotation", &mapping_rotation.x);
+    GPU_shader_uniform_4fv(mask_shader, "filter_params_0", &params_0.x);
+    GPU_shader_uniform_4fv(mask_shader, "filter_params_1", &params_1.x);
+    GPU_shader_uniform_1f(mask_shader, "constant_gray", constant_gray);
+    GPU_shader_uniform_1f(mask_shader, "opacity", opacity);
+    GPU_shader_uniform_1f(mask_shader, "influence", influence);
+    GPU_shader_uniform_1f(mask_shader, "lod", lod);
+    GPU_shader_uniform_1i(mask_shader, "flags", step_flags);
+    GPU_shader_uniform_1i(mask_shader, "mode", mode);
+    GPU_shader_uniform_1i(mask_shader, "blend", blend);
+    GPU_shader_uniform_1i(mask_shader, "filter_kind", filter);
+
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(mask_shader, "mask_tx"));
+    GPU_texture_image_bind(mask_accum, GPU_shader_get_sampler_binding(mask_shader, "mask_img"));
+    GPU_compute_dispatch(mask_shader, uint(groups.x), uint(groups.y), 1);
+    GPU_texture_image_unbind(mask_accum);
+    GPU_texture_unbind(sampled);
+    dispatches++;
+  };
+
+  /* One correction laid over the row's colour and coverage. False when its map has no GPU texture. */
+  const auto correction_step = [&](const PaintMaterialCompositeCorrection &correction,
+                                   const bool tracks_alpha) {
+    gpu::Texture *map = nullptr;
+    int step_flags = tracks_alpha ? gpu_layer_tracks_alpha : 0;
+    if (correction.filter == 0 && correction.image != nullptr) {
+      bool premultiplied = false;
+      map = gpu_map_texture(correction.image, correction.iuser, premultiplied);
+      if (map == nullptr) {
+        return false;
+      }
+      step_flags |= gpu_layer_has_map | (premultiplied ? gpu_layer_premultiplied : 0);
+    }
+    float2 mapping_offset(0.0f);
+    float2 mapping_scale(1.0f);
+    float2 mapping_rotation(1.0f, 0.0f);
+    if (map != nullptr) {
+      gpu_mapping_setup(correction.mapping, step_flags, mapping_offset, mapping_scale, mapping_rotation);
+    }
+    gpu::Texture *sampled = map != nullptr ? map : dummy;
+    const float4 constant_color(correction.constant_color);
+    const float4 params_0(correction.filter_params[0],
+                          correction.filter_params[1],
+                          correction.filter_params[2],
+                          correction.filter_params[3]);
+    const float4 params_1(correction.filter_params[4],
+                          correction.filter_params[5],
+                          correction.filter_params[6],
+                          correction.filter_params[7]);
+    /* A correction map is painted like a layer's: its base level, for the same reason. */
+    const float lod = 0.0f;
+    GPU_shader_bind(correction_shader);
+    GPU_shader_uniform_mat4(correction_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(correction_shader, "texture_size", &size.x);
+    GPU_shader_uniform_4fv(correction_shader, "constant_color", &constant_color.x);
+    GPU_shader_uniform_2fv(correction_shader, "mapping_offset", &mapping_offset.x);
+    GPU_shader_uniform_2fv(correction_shader, "mapping_scale", &mapping_scale.x);
+    GPU_shader_uniform_2fv(correction_shader, "mapping_rotation", &mapping_rotation.x);
+    GPU_shader_uniform_4fv(correction_shader, "filter_params_0", &params_0.x);
+    GPU_shader_uniform_4fv(correction_shader, "filter_params_1", &params_1.x);
+    GPU_shader_uniform_1f(correction_shader, "opacity", correction.opacity);
+    GPU_shader_uniform_1f(correction_shader, "lod", lod);
+    GPU_shader_uniform_1i(correction_shader, "flags", step_flags);
+    GPU_shader_uniform_1i(correction_shader, "blend", int(correction.blend));
+    GPU_shader_uniform_1i(correction_shader, "filter_kind", int(correction.filter));
+
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(correction_shader, "correction_tx"));
+    GPU_texture_image_bind(row_color,
+                           GPU_shader_get_sampler_binding(correction_shader, "row_color_img"));
+    GPU_texture_image_bind(row_factor,
+                           GPU_shader_get_sampler_binding(correction_shader, "row_factor_img"));
+    GPU_compute_dispatch(correction_shader, uint(groups.x), uint(groups.y), 1);
+    GPU_texture_image_unbind(row_factor);
+    GPU_texture_image_unbind(row_color);
+    GPU_texture_unbind(sampled);
+    dispatches++;
+    return true;
+  };
+  /* One step of a folder: seed its accumulators, lay a child over them, or resolve them into the
+   * row textures as the folder's own row. */
+  const auto folder_step = [&](const int mode,
+                               const int level,
+                               const int flags,
+                               const float opacity,
+                               const int blend,
+                               gpu::Texture *mask) {
+    gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
+    GPU_shader_bind(folder_shader);
+    GPU_shader_uniform_mat4(folder_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(folder_shader, "texture_size", &size.x);
+    GPU_shader_uniform_1f(folder_shader, "opacity", opacity);
+    GPU_shader_uniform_1i(folder_shader, "flags", flags);
+    GPU_shader_uniform_1i(folder_shader, "blend", blend);
+    GPU_shader_uniform_1i(folder_shader, "mode", mode);
+
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    GPU_texture_bind(mask_sampled, GPU_shader_get_sampler_binding(folder_shader, "mask_tx"));
+    GPU_texture_image_bind(row_color, GPU_shader_get_sampler_binding(folder_shader, "row_color_img"));
+    GPU_texture_image_bind(row_factor,
+                           GPU_shader_get_sampler_binding(folder_shader, "row_factor_img"));
+    GPU_texture_image_bind(folder_premul[level],
+                           GPU_shader_get_sampler_binding(folder_shader, "premul_img"));
+    GPU_texture_image_bind(folder_cover[level],
+                           GPU_shader_get_sampler_binding(folder_shader, "cover_img"));
+    GPU_compute_dispatch(folder_shader, uint(groups.x), uint(groups.y), 1);
+    GPU_texture_image_unbind(folder_cover[level]);
+    GPU_texture_image_unbind(folder_premul[level]);
+    GPU_texture_image_unbind(row_factor);
+    GPU_texture_image_unbind(row_color);
+    GPU_texture_unbind(mask_sampled);
+    dispatches++;
+  };
+
+  /* The accumulators of the folders at nesting \a level, made when first needed. */
+  const auto folder_levels_ensure = [&](const int level) {
+    if (level < 0 || level >= gpu_folder_levels_max) {
+      return false;
+    }
+    if (folder_premul[level] == nullptr) {
+      folder_premul[level] = pool.acquire_texture_2d(
+          size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_folder_premul");
+    }
+    if (folder_cover[level] == nullptr) {
+      folder_cover[level] = pool.acquire_texture_2d(
+          size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_folder_cover");
+    }
+    return folder_premul[level] != nullptr && folder_cover[level] != nullptr;
+  };
+
+  /* Build the mask factor of \a layer in the mask accumulator: seeded with one, each item laid over
+   * it, then the row's own mask map. False when a mask map has no GPU texture. */
+  const auto mask_build = [&](const PaintMaterialCompositeImageLayer &layer, bool &r_has_mask) {
+    r_has_mask = layer.mask_image != nullptr;
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      r_has_mask |= item.opacity > 0.0f;
+    }
+    if (!r_has_mask) {
+      return true;
+    }
+    mask_step(gpu_mask_init, nullptr, 0, 1.0f, 1.0f, 1.0f, int(CompositeBlend::Mix), 0, nullptr, nullptr);
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      if (item.opacity <= 0.0f) {
+        continue;
+      }
+      int item_flags = item.invert ? gpu_mask_invert : 0;
+      gpu::Texture *item_map = nullptr;
+      if (item.filter == 0 && item.image != nullptr) {
+        bool premultiplied = false;
+        item_map = gpu_map_texture(item.image, item.iuser, premultiplied);
+        if (item_map == nullptr) {
+          return gpu_refuse("a mask map has no GPU texture");
+        }
+        item_flags |= gpu_layer_has_map | (premultiplied ? gpu_layer_premultiplied : 0);
+      }
+      mask_step(gpu_mask_item,
+                item_map,
+                item_flags,
+                item.constant_gray,
+                item.opacity,
+                1.0f,
+                int(item.blend),
+                int(item.filter),
+                item.filter_params,
+                &item.mapping);
+    }
+    if (layer.mask_image != nullptr) {
+      bool premultiplied = false;
+      gpu::Texture *mask_map = gpu_map_texture(layer.mask_image, layer.mask_iuser, premultiplied);
+      if (mask_map == nullptr) {
+        return gpu_refuse("a row's mask map has no GPU texture");
+      }
+      int map_flags = gpu_layer_has_map | (premultiplied ? gpu_layer_premultiplied : 0);
+      if (layer.mask_from_alpha) {
+        map_flags |= gpu_mask_from_alpha;
+      }
+      mask_step(gpu_mask_map,
+                mask_map,
+                map_flags,
+                1.0f,
+                1.0f,
+                layer.mask_influence,
+                int(CompositeBlend::Mix),
+                0,
+                nullptr,
+                nullptr);
+    }
+    return true;
+  };
+
+  /* Lay \a layer on channel \a i. \a level is -1 for a row of the stack, which blends onto the
+   * channel's accumulator, and the nesting level of the folder holding it otherwise, whose
+   * accumulators the row then goes into. A folder lays its children into accumulators of its own
+   * first and then goes on as a row that reads them back like a map. Returns false when the GPU
+   * path has to give up, with the reason already reported. */
+  std::function<bool(const PaintMaterialCompositeImageLayer &, int, int)> row_emit;
+  row_emit = [&](const PaintMaterialCompositeImageLayer &layer, const int i, const int level) {
+    if (!layer.enabled || layer.opacity <= 0.0f) {
+      /* The composite skips it as well. */
+      return true;
+    }
+    const bool in_folder = level >= 0;
+
+    /* The corrections that change anything. */
+    bool has_corrections = false;
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      if (correction.opacity <= 0.0f) {
+        continue;
+      }
+      has_corrections |= correction.filter != 0 || correction.image != nullptr ||
+                         correction.has_constant_color;
+    }
+
+    /* Where the row's colour and coverage are decided: the row textures for a folder, for a row in
+     * a folder (its parent reads them there) and for a row with corrections; the map itself
+     * otherwise. */
+    bool row_in_textures = layer.is_folder || in_folder || has_corrections;
+    int flags = 0;
+    gpu::Texture *map = nullptr;
+    float4 layer_color(layer.constant_color);
+    float2 mapping_offset(0.0f);
+    float2 mapping_scale(1.0f);
+    float2 mapping_rotation(1.0f, 0.0f);
+    bool has_mask = false;
+
+    if (layer.is_folder) {
+      const int own_level = level + 1;
+      if (!folder_levels_ensure(own_level)) {
+        return gpu_refuse("folders are nested too deep for the GPU path");
+      }
+      folder_step(gpu_folder_init, own_level, 0, 1.0f, int(CompositeBlend::Mix), nullptr);
+      for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+        if (!row_emit(child, i, own_level)) {
+          return false;
+        }
+      }
+      /* After the children: the mask accumulator is theirs until they are laid. */
+      if (!mask_build(layer, has_mask)) {
+        return false;
+      }
+      folder_step(gpu_folder_resolve, own_level, 0, 1.0f, int(CompositeBlend::Mix), nullptr);
+    }
+    else {
+      if (!mask_build(layer, has_mask)) {
+        return false;
+      }
+      /* A row covers by its own alpha when it says so and no mask map takes the alpha's place. */
+      const bool own_alpha = layer.mask_image == nullptr && layer.mask_from_alpha;
+      if (layer.color_image != nullptr) {
+        bool premultiplied = false;
+        map = gpu_map_texture(layer.color_image, layer.color_iuser, premultiplied);
+        if (map == nullptr) {
+          return gpu_refuse("a layer map has no GPU texture");
+        }
+        flags |= gpu_layer_has_map;
+        if (premultiplied) {
+          flags |= gpu_layer_premultiplied;
+        }
+        if (layer.color_alpha_coverage || own_alpha) {
+          flags |= gpu_layer_alpha_coverage;
+        }
+      }
+      else if (own_alpha) {
+        /* A flat colour covers by its own alpha when the row says so. */
+        flags |= gpu_layer_alpha_coverage;
+      }
+      if (layer.empty_base) {
+        flags |= gpu_layer_empty_base;
+      }
+      if (layer.adjustment_filter != 0) {
+        flags |= gpu_layer_adjustment;
+      }
+      if (map != nullptr) {
+        gpu_mapping_setup(layer.mapping, flags, mapping_offset, mapping_scale, mapping_rotation);
+      }
+      if (row_in_textures) {
+        lay(i,
+            map,
+            flags | gpu_layer_row_store,
+            layer_color,
+            float4(0.0f),
+            1.0f,
+            mapping_offset,
+            mapping_scale,
+            mapping_rotation,
+            int(CompositeBlend::Mix),
+            nullptr,
+            int(layer.adjustment_filter),
+            layer.adjustment_params);
+      }
+    }
+
+    if (row_in_textures) {
+      for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+        if (correction.opacity <= 0.0f) {
+          continue;
+        }
+        if (correction.filter == 0 && correction.image == nullptr && !correction.has_constant_color) {
+          continue;
+        }
+        if (!correction_step(correction, layer.tracks_content_alpha)) {
+          return gpu_refuse("a correction map has no GPU texture");
+        }
+      }
+    }
+
+    const int mask_flags = has_mask ? gpu_layer_has_mask : 0;
+    if (in_folder) {
+      folder_step(gpu_folder_blend,
+                  level,
+                  mask_flags,
+                  layer.opacity,
+                  int(layer.blend),
+                  has_mask ? mask_accum : nullptr);
+      return true;
+    }
+    lay(i,
+        row_in_textures ? nullptr : map,
+        (row_in_textures ? gpu_layer_row_use : flags) | mask_flags,
+        layer_color,
+        float4(0.0f),
+        layer.opacity,
+        mapping_offset,
+        mapping_scale,
+        mapping_rotation,
+        int(layer.blend),
+        has_mask ? mask_accum : nullptr,
+        int(layer.adjustment_filter),
+        layer.adjustment_params);
+    return true;
+  };
+
+  for (const int i : IndexRange(channels_num)) {
+    if (wanted_channel >= 0 && i != wanted_channel) {
+      continue;
+    }
+    const eMaterialPaintChannel channel = combined_shading_channels[i];
+    float4 init_color = BKE_paint_material_combined_default_value(channel);
+    if (has_stack[i]) {
+      BKE_paint_layers_channel_bottom_color(channel, &init_color.x);
+    }
+    /* Seeds the accumulator: with no opacity the layer below changes nothing. */
+    lay(i, nullptr, gpu_layer_init, float4(0.0f), init_color, 0.0f);
+    if (!has_stack[i]) {
+      continue;
+    }
+    for (const PaintMaterialCompositeImageLayer &layer : stacks[i]) {
+      if (!row_emit(layer, i, -1)) {
+        return false;
+      }
+    }
+  }
+
+  if (wanted_channel >= 0) {
+    /* A channel pass shows the channel's accumulator as it is: the lighting is the Combined
+     * preview's. */
+    GPU_shader_bind(display_shader);
+    GPU_shader_uniform_mat4(display_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
+    GPU_shader_uniform_2iv(display_shader, "texture_size", &size.x);
+    GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    GPU_texture_bind(accum[wanted_channel],
+                     GPU_shader_get_sampler_binding(display_shader, "channel_tx"));
+    GPU_texture_image_bind(output, GPU_shader_get_sampler_binding(display_shader, "output_img"));
+    GPU_compute_dispatch(display_shader, uint(groups.x), uint(groups.y), 1);
+    GPU_texture_image_unbind(output);
+    GPU_texture_unbind(accum[wanted_channel]);
+    dispatches++;
+    GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    if (bke::paint_perf::enabled()) {
+      GPU_finish();
+    }
+    perf_total.note("pass=%d texture=%dx%d dispatches=%d", pass, size.x, size.y, dispatches);
+    gpu_report_active();
+    return true;
+  }
+
+  if (gpu_verify_due) {
+    for (const int i : IndexRange(channels_num)) {
+      float *pixels = static_cast<float *>(GPU_texture_read(accum[i], GPU_DATA_FLOAT, 0));
+      if (pixels == nullptr) {
+        gpu_verify_channels[i].clear();
+        continue;
+      }
+      gpu_verify_channels[i].resize(int64_t(size.x) * size.y * 4);
+      memcpy(gpu_verify_channels[i].data(),
+             pixels,
+             size_t(gpu_verify_channels[i].size()) * sizeof(float));
+      MEM_delete(pixels);
+    }
+  }
+
+  /* The lighting pass. Lights that cannot change a pixel are dropped, as on the CPU. */
+  /* One light per column: the shader declares matrices because it has no push constant array. The
+   * columns past `lights_num` are never read. */
+  float4x4 light_direction = float4x4::identity();
+  float4x4 light_diffuse = float4x4::identity();
+  float4x4 light_specular = float4x4::identity();
+  int lights_num = 0;
+  for (const int i : IndexRange(std::clamp(lighting.lights_num, 0, int(lighting.lights.size())))) {
+    const CombinedPreviewLight &light = lighting.lights[i];
+    if (math::is_zero(light.diffuse_color) && math::is_zero(light.specular_color)) {
+      continue;
+    }
+    light_direction[lights_num] = float4(light.direction, 0.0f);
+    light_diffuse[lights_num] = float4(light.diffuse_color, 0.0f);
+    light_specular[lights_num] = float4(light.specular_color, light.wrap);
+    lights_num++;
+  }
+  const float4 ambient_color(lighting.ambient_color, 0.0f);
+  const int normal_index = int(
+      std::find(combined_shading_channels.begin(),
+                combined_shading_channels.end(),
+                PAINT_MATERIAL_CHANNEL_NORMAL) -
+      combined_shading_channels.begin());
+  static const char *sampler_names[channels_num] = {"base_tx",
+                                                    "metallic_tx",
+                                                    "roughness_tx",
+                                                    "specular_tx",
+                                                    "normal_tx",
+                                                    "ao_tx",
+                                                    "alpha_tx",
+                                                    "emission_tx"};
+  GPU_shader_bind(shade_shader);
+  GPU_shader_uniform_mat4(shade_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
+  GPU_shader_uniform_2iv(shade_shader, "texture_size", &size.x);
+  GPU_shader_uniform_mat4(shade_shader, "light_direction", light_direction.ptr());
+  GPU_shader_uniform_mat4(shade_shader, "light_diffuse", light_diffuse.ptr());
+  GPU_shader_uniform_mat4(shade_shader, "light_specular", light_specular.ptr());
+  GPU_shader_uniform_4fv(shade_shader, "ambient_color", &ambient_color.x);
+  GPU_shader_uniform_1i(shade_shader, "lights_num", lights_num);
+  GPU_shader_uniform_1i(shade_shader, "normal_is_encoded", has_stack[normal_index] ? 1 : 0);
+  GPU_shader_uniform_1f(shade_shader, "exposure", lighting.exposure);
+  GPU_shader_uniform_1f(shade_shader, "ao_influence", lighting.ao_influence);
+  GPU_shader_uniform_1f(shade_shader, "emission_strength", combined_emission_strength(ma));
+
+  GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
+  GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+  for (const int i : IndexRange(channels_num)) {
+    GPU_texture_bind(accum[i], GPU_shader_get_sampler_binding(shade_shader, sampler_names[i]));
+  }
+  GPU_texture_image_bind(output, GPU_shader_get_sampler_binding(shade_shader, "output_img"));
+  GPU_compute_dispatch(shade_shader, uint(groups.x), uint(groups.y), 1);
+  GPU_texture_image_unbind(output);
+  for (const int i : IndexRange(channels_num)) {
+    GPU_texture_unbind(accum[i]);
+  }
+  dispatches++;
+  /* The image engine samples the result next. */
+  GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+
+  if (bke::paint_perf::enabled()) {
+    /* Without a wait the timer would read only the time it took to record the commands. */
+    GPU_finish();
+  }
+  perf_total.note("texture=%dx%d dispatches=%d", size.x, size.y, dispatches);
+  gpu_report_active();
+  return true;
+}
+
+void combined_preview_gpu_verify(Main &bmain,
+                                 const Material &ma,
+                                 const CombinedPreviewLighting &lighting,
+                                 gpu::Texture *output,
+                                 const float3x3 &texel_to_uv)
+{
+  /* Decided by the update that just shaded this frame, which also kept the channel accumulators. */
+  if (!gpu_verify_due || output == nullptr) {
+    return;
+  }
+  gpu_verify_due = false;
+
+  const int2 size(GPU_texture_width(output), GPU_texture_height(output));
+  Vector<float> gpu_pixels(int64_t(size.x) * size.y * 4);
+  GPU_texture_read(output, GPU_DATA_FLOAT, 0, gpu_pixels.data());
+
+  const ImBuf *cpu = combined_preview_ensure(bmain, ma, lighting);
+  if (cpu == nullptr || cpu->float_data() == nullptr || cpu->x <= 0 || cpu->y <= 0) {
+    printf("[PBR-PERF] gpu_verify: the CPU preview produced nothing to compare with\n");
+    return;
+  }
+
+  /* Compared as block means. The CPU reads 8-bit composites at the nearest texel and the GPU the
+   * maps with bilinear filtering at the base level, so in a detailed map -- a normal map above all
+   * -- two single pixels can differ a lot without either being wrong. Averaged over a block both
+   * sides measure the same thing, and what remains is a difference in the result. Relative above
+   * one, where a highlight's absolute error means little. */
+  constexpr int block = 8;
+  int64_t blocks = 0;
+  int64_t bad = 0;
+  double sum = 0.0;
+  float worst = 0.0f;
+  float2 worst_uv(0.0f);
+  int2 worst_texel(0);
+  float3 worst_gpu(0.0f);
+  float3 worst_cpu(0.0f);
+  for (int by = 0; by + block <= size.y; by += block) {
+    for (int bx = 0; bx + block <= size.x; bx += block) {
+      float3 gpu_sum(0.0f);
+      float3 cpu_sum(0.0f);
+      int inside = 0;
+      for (int y = by; y < by + block; y++) {
+        for (int x = bx; x < bx + block; x++) {
+          const float2 uv = math::transform_point(texel_to_uv, float2(x + 0.5f, y + 0.5f));
+          if (uv.x < 0.0f || uv.y < 0.0f || uv.x >= 1.0f || uv.y >= 1.0f) {
+            continue;
+          }
+          const float *g = &gpu_pixels[(int64_t(y) * size.x + x) * 4];
+          const float *c = cpu->float_data() + (int64_t(int(uv.y * cpu->y)) * cpu->x +
+                                                int(uv.x * cpu->x)) * 4;
+          gpu_sum += float3(g[0], g[1], g[2]);
+          cpu_sum += float3(c[0], c[1], c[2]);
+          inside++;
+        }
+      }
+      /* A block cut by the canvas edge is left out: its mean mixes transparent texels in. */
+      if (inside != block * block) {
+        continue;
+      }
+      const float3 gpu_mean = gpu_sum / float(inside);
+      const float3 cpu_mean = cpu_sum / float(inside);
+      float diff = 0.0f;
+      for (const int k : IndexRange(3)) {
+        diff = std::max(diff,
+                        std::abs(gpu_mean[k] - cpu_mean[k]) /
+                            std::max(1.0f, std::max(gpu_mean[k], cpu_mean[k])));
+      }
+      blocks++;
+      sum += diff;
+      if (diff > 0.05f) {
+        bad++;
+      }
+      if (diff > worst) {
+        worst = diff;
+        worst_texel = int2(bx + block / 2, by + block / 2);
+        worst_uv = math::transform_point(
+            texel_to_uv, float2(float(worst_texel.x) + 0.5f, float(worst_texel.y) + 0.5f));
+        worst_gpu = gpu_mean;
+        worst_cpu = cpu_mean;
+      }
+    }
+  }
+  if (blocks == 0) {
+    return;
+  }
+  printf(
+      "[PBR-PERF] gpu_verify: blocks=%lld (%dx%d) mean=%.4f max=%.4f over 0.05=%.2f%% worst at "
+      "uv=(%.3f, %.3f) gpu=(%.3f, %.3f, %.3f) cpu=(%.3f, %.3f, %.3f)\n",
+      long long(blocks),
+      block,
+      block,
+      sum / double(blocks),
+      worst,
+      100.0 * double(bad) / double(blocks),
+      worst_uv.x,
+      worst_uv.y,
+      worst_gpu.x,
+      worst_gpu.y,
+      worst_gpu.z,
+      worst_cpu.x,
+      worst_cpu.y,
+      worst_cpu.z);  /* Where the difference comes from: each channel at the centre of the worst block, the accumulator the GPU laid
+   * against the CPU composite of the same channel. A channel that reads alike on both sides and a
+   * pixel that still differs points at the lighting; one that differs points at its stack. */
+  for (const int i : IndexRange(int(combined_shading_channels.size()))) {
+    const eMaterialPaintChannel channel = combined_shading_channels[i];
+    float4 gpu_value(0.0f);
+    if (!gpu_verify_channels[i].is_empty()) {
+      const float *p = &gpu_verify_channels[i][(int64_t(worst_texel.y) * size.x + worst_texel.x) *
+                                               4];
+      gpu_value = float4(p[0], p[1], p[2], p[3]);
+    }
+    bool cpu_known = false;
+    float4 cpu_value(0.0f);
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    if (BKE_paint_layers_composite_image_layers(ma, channel, layers)) {
+      const ImBuf *composite = BKE_paint_material_composite_cache_ensure(
+          ma,
+          channel,
+          layers,
+          BKE_paint_material_composite_stack_hash(layers),
+          nullptr,
+          nullptr,
+          nullptr);
+      if (composite != nullptr && composite->byte_data() != nullptr && composite->x > 0) {
+        const uchar *p = composite->byte_data() +
+                         (int64_t(int(worst_uv.y * composite->y)) * composite->x +
+                          int(worst_uv.x * composite->x)) *
+                             4;
+        cpu_value = float4(float(p[0]), float(p[1]), float(p[2]), float(p[3])) * (1.0f / 255.0f);
+        if (combined_channel_is_color(channel) && combined_ibuf_is_srgb(*composite)) {
+          cpu_value.x = srgb_to_linearrgb(cpu_value.x);
+          cpu_value.y = srgb_to_linearrgb(cpu_value.y);
+          cpu_value.z = srgb_to_linearrgb(cpu_value.z);
+        }
+        cpu_known = true;
+      }
+    }
+    if (cpu_known) {
+      printf("[PBR-PERF]   channel %d: gpu=(%.3f, %.3f, %.3f, %.3f) cpu=(%.3f, %.3f, %.3f, %.3f)\n",
+             int(channel),
+             gpu_value.x,
+             gpu_value.y,
+             gpu_value.z,
+             gpu_value.w,
+             cpu_value.x,
+             cpu_value.y,
+             cpu_value.z,
+             cpu_value.w);
+    }
+    else {
+      printf("[PBR-PERF]   channel %d: gpu=(%.3f, %.3f, %.3f, %.3f) cpu=no stack\n",
+             int(channel),
+             gpu_value.x,
+             gpu_value.y,
+             gpu_value.z,
+             gpu_value.w);
+    }
+  }  fflush(stdout);
 }
 
 /** \} */

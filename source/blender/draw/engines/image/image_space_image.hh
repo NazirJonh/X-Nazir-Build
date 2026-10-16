@@ -35,6 +35,14 @@ class SpaceImageAccessor : public AbstractSpaceAccessor {
 
   ImBuf *acquire_image_buffer(blender::Image * /*image*/, void **lock) override
   {
+    if (ED_space_image_has_gpu_combined(sima)) {
+      /* The engine reads the buffer only for its properties, and the GPU path draws the pixels:
+       * the real one is a full CPU shading of the preview. */
+      if (ImBuf *stand_in = ED_space_image_gpu_combined_stand_in()) {
+        *lock = nullptr;
+        return stand_in;
+      }
+    }
     return ED_space_image_acquire_buffer(sima, lock, 0, false);
   }
 
@@ -58,6 +66,18 @@ class SpaceImageAccessor : public AbstractSpaceAccessor {
   void release_display_override_buffer(ImBuf *image_buffer) override
   {
     ED_space_image_release_buffer(sima, image_buffer, nullptr);
+  }
+
+  bool has_gpu_display_override() const override
+  {
+    return ED_space_image_has_gpu_combined(sima);
+  }
+
+  bool update_gpu_display_override(Main *bmain,
+                                   gpu::Texture *texture,
+                                   const float3x3 &texel_to_uv) override
+  {
+    return ED_space_image_update_gpu_combined(bmain, sima, texture, texel_to_uv);
   }
 
   int2 get_canvas_size() const override

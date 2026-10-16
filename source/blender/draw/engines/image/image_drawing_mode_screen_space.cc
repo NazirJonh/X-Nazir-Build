@@ -2,6 +2,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+#include <limits>
+
 #include "draw_view_data.hh"
 
 #include "image_drawing_mode_screen_space.hh"
@@ -12,6 +14,7 @@
 
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
+#include "BKE_paint_perf_debug.hh"
 
 namespace blender::image_engine {
 
@@ -430,15 +433,56 @@ void ScreenSpaceDrawingMode::image_sync(blender::Image *image, ImageUser *iuser)
    * #State.has_display_override. The distinction matters: the space being *set* to show a
    * composite is not the same as one having been produced -- a material that is not a layer stack
    * falls back to the image, and the paths below must then treat it as an ordinary image again. */
+  /* The Combined preview of a layered material shaded on the GPU straight into the
+   * textures. Done for every texture or not at all: when the space refuses, the CPU path below
+   * takes over and fills them all as before. */
+  bool gpu_override_done = false;
+  if (instance_.space().has_gpu_display_override() && !state.flags.do_tile_drawing) {
+    bke::paint_perf::ScopedTimer perf_gpu("draw.gpu_override");
+    method.ensure_gpu_textures_allocation();
+    gpu_override_done = !state.texture_infos.is_empty();
+    const float2 region_size = float2(instance_.region->winx, instance_.region->winy);
+    for (TextureInfo &info : state.texture_infos) {
+      const float3x3 texel_to_screen_uv = math::from_scale<float3x3, 2>(1.0f / region_size) *
+                                          math::from_location<float3x3>(
+                                              float2(info.clipping_bounds.xmin,
+                                                     info.clipping_bounds.ymin));
+      if (!instance_.space().update_gpu_display_override(
+              instance_.main(), info.texture, state.ss_to_texture * texel_to_screen_uv))
+      {
+        gpu_override_done = false;
+        break;
+      }
+    }
+    perf_gpu.note("done=%d textures=%d", int(gpu_override_done), int(state.texture_infos.size()));
+  }
+  if (gpu_override_done) {
+    /* Not a revision any CPU override can have, so the next frame that falls back to the CPU path,
+     * or to the image itself, re-uploads everything instead of trusting these pixels. */
+    state.display_override_revision = std::numeric_limits<uint64_t>::max();
+    state.has_display_override = false;
+    BLI_rcti_init(&state.display_override_changed_region, 0, 0, 0, 0);
+    state.update_batches();
+    if (!state.flags.do_tile_drawing) {
+      add_depth_shgroups(image, iuser);
+    }
+    add_shgroups();
+    return;
+  }
+
   uint64_t override_revision = 0;
   rcti override_changed_region;
   BLI_rcti_init(&override_changed_region, 0, 0, 0, 0);
-  ImBuf *override_buffer = instance_.space().has_display_override() ?
-                               instance_.space().acquire_display_override_buffer(
-                                   instance_.main(),
-                                   &override_revision,
-                                   &override_changed_region) :
-                               nullptr;
+  ImBuf *override_buffer = nullptr;
+  if (instance_.space().has_display_override()) {
+    bke::paint_perf::ScopedTimer perf_acquire("draw.acquire_override");
+    override_buffer = instance_.space().acquire_display_override_buffer(
+        instance_.main(), &override_revision, &override_changed_region);
+    perf_acquire.note("revision=%llu changed=%dx%d",
+                      static_cast<unsigned long long>(override_revision),
+                      BLI_rcti_size_x(&override_changed_region),
+                      BLI_rcti_size_y(&override_changed_region));
+  }
   state.has_display_override = override_buffer != nullptr;
   /* Held until the textures have been filled from it, rather than released here and acquired again
    * per dirty texture slot: an acquisition is a full gather, and the pixels it produces are the
@@ -473,6 +517,11 @@ void ScreenSpaceDrawingMode::image_sync(blender::Image *image, ImageUser *iuser)
   {
     /* Stage (d) of the Combined preview budget: a float RGBA canvas is four times the bytes of an
      * ordinary one, so the upload is worth measuring apart from the shading that produced it. */
+    bke::paint_perf::ScopedTimer perf_upload("draw.update_textures");
+    perf_upload.note("override=%d partial=%dx%d",
+                     int(override_buffer != nullptr),
+                     BLI_rcti_size_x(&state.display_override_changed_region),
+                     BLI_rcti_size_y(&state.display_override_changed_region));
     method.ensure_gpu_textures_allocation();
     update_textures(image, iuser, override_buffer);
   }

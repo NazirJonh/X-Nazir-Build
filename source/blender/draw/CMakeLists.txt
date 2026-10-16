@@ -756,6 +756,7 @@ set(GLSL_SRC
   engines/overlay/overlay_shader_shared.hh
 
   engines/image/shaders/image_engine_color_frag.glsl
+  engines/image/shaders/image_engine_combined.bsl.hh
   engines/image/shaders/image_engine_color_vert.glsl
   engines/image/shaders/image_engine_depth_frag.glsl
   engines/image/shaders/image_engine_depth_vert.glsl

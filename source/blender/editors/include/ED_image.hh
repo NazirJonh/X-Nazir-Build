@@ -11,9 +11,14 @@
 #include "DNA_listBase.h"
 #include "DNA_space_types.h"
 
+#include "BLI_math_matrix_types.hh"
 #include "BLI_string_ref.hh"
 
 namespace blender {
+
+namespace gpu {
+class Texture;
+}
 
 struct ARegion;
 struct ImBuf;
@@ -108,6 +113,28 @@ ImBuf *ED_space_image_acquire_buffer(SpaceImage *sima,
  */
 bool ED_space_image_has_composite(const SpaceImage *sima);
 /**
+ * Whether the Combined preview of \a sima is to be evaluated on the GPU straight into
+ * the display texture (see #ED_space_image_update_gpu_combined). Cheap by contract, like
+ * #ED_space_image_has_composite.
+ */
+bool ED_space_image_has_gpu_combined(const SpaceImage *sima);
+/**
+ * A one-texel float RGBA buffer standing in for the Combined preview where a caller
+ * wants only the properties of the buffer (channels, colour space, alpha handling) and the GPU path
+ * is about to draw the pixels. Carries a reference of its own, released like any acquired buffer.
+ * Producing the real one just to read those properties is a full CPU shading.
+ */
+ImBuf *ED_space_image_gpu_combined_stand_in();
+/**
+ * Evaluate the Combined preview into \a texture. \a texel_to_uv maps a texel of the
+ * texture to the image's UV. False when the material is not one the GPU path lays; the caller then
+ * uses #ED_space_image_acquire_composite_buffer.
+ */
+bool ED_space_image_update_gpu_combined(Main *bmain,
+                                        SpaceImage *sima,
+                                        gpu::Texture *texture,
+                                        const float3x3 &texel_to_uv);
+/**
  * The composited layer stack to display instead of the space's own image, or null.
  *
  * Non-null only while the space is in composite mode and its material's channel really is a layer
@@ -157,6 +184,12 @@ void ED_space_image_composite_material_memo_clear();
  * Get the #SpaceImage flag that is valid for the given ibuf.
  */
 int ED_space_image_get_display_channel_mask(ImBuf *ibuf);
+/**
+ * Like #ED_space_image_get_display_channel_mask, for what \a sima shows, without acquiring a buffer
+ * when the answer is known: the Combined preview is always float RGBA, and producing it just to
+ * learn that is the cost of a header redraw.
+ */
+int ED_space_image_display_channel_mask(SpaceImage *sima);
 void ED_space_image_release_buffer(SpaceImage *sima, ImBuf *ibuf, void *lock);
 bool ED_space_image_has_buffer(SpaceImage *sima);
 

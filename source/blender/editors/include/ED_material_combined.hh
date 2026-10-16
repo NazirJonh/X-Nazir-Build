@@ -19,11 +19,16 @@
 
 #include "BKE_paint_material_combined.hh"
 
+#include "BLI_math_matrix_types.hh"
+
 namespace blender {
 struct ImBuf;
 struct Main;
 struct Material;
 struct bContext;
+namespace gpu {
+class Texture;
+}
 }  // namespace blender
 
 namespace blender::ed::material_combined {
@@ -86,5 +91,50 @@ ImBuf *combined_preview_ensure(Main &bmain,
  * Called from the Image Editor's redraw path, next to the acquire. Never blocks.
  */
 void combined_preview_bake_ensure(const bContext &C, Material &ma);
+
+/**
+ * Whether the GPU Combined path is switched on. On by default; the environment variable
+ * `BLENDER_PBR_GPU_COMBINED=0` turns it off. Refusals and activation are reported through the
+ * perf log (`BLENDER_PBR_PERF`).
+ */
+bool combined_preview_gpu_enabled();
+
+/**
+ * Shade the Combined preview of the layered material \a ma straight into \a output on
+ * the GPU, one compute dispatch per row of every channel stack plus one for the lighting.
+ *
+ * \param pass: the Combined preview (#PAINT_LAYER_PASS_COMBINED) or the channel pass to show.
+ * \param output: a display texture created with `GPU_TEXTURE_USAGE_SHADER_WRITE`; it is filled at
+ *                its own resolution.
+ * \param texel_to_uv: maps an \a output texel (plus the half-texel centre) to the canvas UV in
+ *                     [0, 1]; a texel that lands outside the canvas is written transparent.
+ * \return false, with \a output untouched or partly written, when the material or one of its rows
+ *         is something the GPU path does not lay (an adjustment inside a folder, folders nested
+ *         deeper than the accumulators it keeps), when a layer map has no GPU texture, or when
+ *         there is no GPU context. The caller then falls back to the CPU preview.
+ */
+bool combined_preview_gpu_update(const Material &ma,
+                                 const CombinedPreviewLighting &lighting,
+                                 int pass,
+                                 gpu::Texture *output,
+                                 const float3x3 &texel_to_uv);
+
+/**
+ * Whether the GPU path lays \a pass: the Combined preview, or the channel pass of one of
+ * the channels it shades. The Mask pass is not one.
+ */
+bool combined_preview_gpu_pass_supported(int pass);
+
+/**
+ * Compare \a output, just shaded by #combined_preview_gpu_update, with the CPU preview
+ * of the same material and print the difference through the perf log. Off unless the environment
+ * variable `BLENDER_PBR_GPU_VERIFY` is 1. It runs the CPU shading only every 120th call: it is a
+ * check for a developer, not a mode.
+ */
+void combined_preview_gpu_verify(Main &bmain,
+                                 const Material &ma,
+                                 const CombinedPreviewLighting &lighting,
+                                 gpu::Texture *output,
+                                 const float3x3 &texel_to_uv);
 
 }  // namespace blender::ed::material_combined

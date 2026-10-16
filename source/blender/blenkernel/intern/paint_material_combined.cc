@@ -7,6 +7,7 @@
  */
 
 #include "BKE_paint_material_combined.hh"
+#include "BKE_paint_perf_debug.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -666,6 +667,7 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
   if (!combined_inputs_are_usable(inputs)) {
     return nullptr;
   }
+  bke::paint_perf::ScopedTimer perf_timer("combined_cache_ensure");
 
   const uint32_t key = ma.id.session_uid;
   CombinedCacheEntry &entry = g_cache.entries.lookup_or_add_default(key);
@@ -766,6 +768,20 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
       }
     }
   }
+
+  perf_timer.note("out=%dx%d rebuild=%s (size=%d inputs_hash=%d lighting=%d dirty_full=%d) shade=%dx%d "
+                  "clip=%dx%d",
+                  out_width,
+                  out_height,
+                  rebuild_all ? "ALL" : "partial/none",
+                  int(size_changed),
+                  int(entry.inputs_hash != request.inputs_hash),
+                  int(entry.lighting_hash != lighting_hash),
+                  int(entry.dirty_full),
+                  BLI_rcti_size_x(&to_shade),
+                  BLI_rcti_size_y(&to_shade),
+                  BLI_rcti_size_x(&request.clip),
+                  BLI_rcti_size_y(&request.clip));
 
   if (!BLI_rcti_is_empty(&to_shade)) {
     if (!BKE_paint_material_combined_eval(inputs, lighting, entry.ibuf.get(), &to_shade, r_stats))

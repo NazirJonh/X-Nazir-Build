@@ -16,6 +16,7 @@
 #include <cstring>
 
 #include "paint_layers_intern.hh"
+#include "paint_layers_kind.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -1689,12 +1690,15 @@ void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
 {
   Set<Image *> seen;
   const auto add_channels = [&](const MaterialPaintLayer &row) {
-    for (const int i : IndexRange(row.channels_num)) {
-      Image *image = row.channels[i].image;
-      if (image != nullptr && seen.add(image)) {
+    paint_layer_dependencies(row, [&](const PaintLayerDependency &dep) {
+      if (dep.kind != PaintLayerDependencyKind::ImageMap || *dep.slot == nullptr) {
+        return;
+      }
+      Image *image = reinterpret_cast<Image *>(*dep.slot);
+      if (seen.add(image)) {
         r_images.append(image);
       }
-    }
+    });
   };
   for (const Material &ma : bmain.materials) {
     if (!BKE_paint_layers_is_layered(ma)) {

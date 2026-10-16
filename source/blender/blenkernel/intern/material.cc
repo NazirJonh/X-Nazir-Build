@@ -78,6 +78,8 @@
 #include "BKE_scene.hh"
 #include "BKE_vfont.hh"
 
+#include "paint_layers/paint_layers_kind.hh"
+
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
@@ -167,8 +169,15 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
 
 static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryForeachIDData *data)
 {
-  for (int i = 0; i < layer->channels_num; i++) {
-    BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, layer->channels[i].image, IDWALK_CB_USER);
+  /* The macros return from the enclosing function to honor an iteration stop, which a lambda would
+   * swallow, so the stop is checked by hand here and once more after the walk. */
+  paint_layer_dependencies(*layer, [&](PaintLayerDependency &dep) {
+    if (!BKE_lib_query_foreachid_iter_stop(data)) {
+      BKE_lib_query_foreachid_process(data, dep.slot, paint_layer_dependency_foreach_flag(dep));
+    }
+  });
+  if (BKE_lib_query_foreachid_iter_stop(data)) {
+    return;
   }
   for (MaterialPaintLayer &item : layer->mask_stack) {
     material_paint_layer_foreach_id(&item, data);

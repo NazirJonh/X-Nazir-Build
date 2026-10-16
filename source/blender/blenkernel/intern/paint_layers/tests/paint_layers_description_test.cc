@@ -19,6 +19,7 @@
 #include "BKE_report.hh"
 
 #include "../paint_layers_intern.hh"
+#include "../paint_layers_kind.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
@@ -231,6 +232,61 @@ TEST_F(PaintLayersDescription, foreach_id_walks_channel_images)
 
   EXPECT_TRUE(visited.contains(&image->id));
   EXPECT_TRUE(visited.contains(&other_image->id));
+}
+
+TEST_F(PaintLayersDescription, dependencies_list_each_channel_map_with_its_channel)
+{
+  Material *ma = BKE_material_add(bmain, "DepsMat");
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+  Image *image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "DepsImage"));
+  paint_layer_channel_add(*layer, *image);
+
+  Vector<PaintLayerDependency> found;
+  paint_layer_dependencies(*layer,
+                           [&](const PaintLayerDependency &dep) { found.append(dep); });
+  ASSERT_EQ(found.size(), 1);
+  EXPECT_EQ(found[0].kind, PaintLayerDependencyKind::ImageMap);
+  EXPECT_EQ(found[0].channel, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_EQ(*found[0].slot, &image->id);
+  /* The slot is the row's own pointer, so a write through it is what the copy remap relies on. */
+  EXPECT_EQ(found[0].slot, reinterpret_cast<ID **>(&layer->channels[0].image));
+
+  MaterialPaintLayer *bare = paint_layer_add(*ma, "Bare");
+  int bare_num = 0;
+  paint_layer_dependencies(*bare, [&](const PaintLayerDependency & /*dep*/) { bare_num++; });
+  EXPECT_EQ(bare_num, 0);
+}
+
+TEST_F(PaintLayersDescription, maps_collect_reads_nested_rows_once)
+{
+  Material *ma = BKE_material_add(bmain, "CollectMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *folder = paint_layer_add(*ma, "Folder");
+  Image *shared = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CollectShared"));
+  Image *item_image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CollectItem"));
+
+  MaterialPaintLayer *child = MEM_new<MaterialPaintLayer>(__func__);
+  child->marker = BLI_uuid_generate_random();
+  BLI_addtail(&folder->children, child);
+  paint_layer_channel_add(*child, *shared);
+
+  MaterialPaintLayer *item = MEM_new<MaterialPaintLayer>(__func__);
+  item->marker = BLI_uuid_generate_random();
+  item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  BLI_addtail(&child->mask_stack, item);
+  paint_layer_channel_add(*item, *item_image);
+
+  MaterialPaintLayer *effect = MEM_new<MaterialPaintLayer>(__func__);
+  effect->marker = BLI_uuid_generate_random();
+  effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  BLI_addtail(&child->effects, effect);
+  paint_layer_channel_add(*effect, *shared);
+
+  Vector<Image *> images;
+  BKE_paint_layers_maps_collect(*bmain, images);
+  ASSERT_EQ(images.size(), 2);
+  EXPECT_TRUE(images.contains(shared));
+  EXPECT_TRUE(images.contains(item_image));
 }
 
 TEST_F(PaintLayersDescription, copy_keeps_layers)

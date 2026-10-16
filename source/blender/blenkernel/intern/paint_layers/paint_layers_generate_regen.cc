@@ -49,6 +49,7 @@
 #include "paint_layers_generate_intern.hh"
 #include "paint_layers_generate_layout.hh"
 #include "paint_layers_intern.hh"
+#include "paint_layers_kind.hh"
 
 namespace blender {
 using namespace bke::paint_layers;
@@ -481,16 +482,18 @@ static bool copy_owns_generated_tree(const Main *bmain, const int copy_flag)
 static void maps_copy(Main &bmain, ListBaseT<MaterialPaintLayer> &rows, Map<Image *, Image *> &clones)
 {
   for (MaterialPaintLayer &row : rows) {
-    for (int i = 0; i < row.channels_num; i++) {
-      Image *&image = row.channels[i].image;
-      if (image == nullptr || !ID_IS_EDITABLE(&image->id)) {
-        continue;
+    paint_layer_dependencies(row, [&](PaintLayerDependency &dep) {
+      if (dep.kind != PaintLayerDependencyKind::ImageMap || *dep.slot == nullptr ||
+          !ID_IS_EDITABLE(*dep.slot))
+      {
+        return;
       }
+      Image *&image = reinterpret_cast<Image *&>(*dep.slot);
       Image *clone = clones.lookup_default(image, nullptr);
       if (clone == nullptr) {
         clone = id_cast<Image *>(BKE_id_copy(&bmain, &image->id));
         if (clone == nullptr) {
-          continue;
+          return;
         }
         /* Like the tree copy below: #BKE_id_copy hands back a reference of its own, and the generic
          * copy pass adds the single reference the channel owns. */
@@ -498,7 +501,7 @@ static void maps_copy(Main &bmain, ListBaseT<MaterialPaintLayer> &rows, Map<Imag
         clones.add(image, clone);
       }
       image = clone;
-    }
+    });
     maps_copy(bmain, row.mask_stack, clones);
     maps_copy(bmain, row.effects, clones);
     maps_copy(bmain, row.children, clones);

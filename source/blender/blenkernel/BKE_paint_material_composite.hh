@@ -148,6 +148,14 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    * #BKE_paint_material_channel_tracks_content_alpha).
    */
   bool tracks_content_alpha = false;
+  /**
+   * An adjustment (#eMaterialPaintLayerFilter, or 0 for none): the row has no colour of its own, its
+   * colour is this filter applied to the stack below it, and it is laid over that stack by the
+   * row's own blend, opacity and mask. Never inside a folder.
+   */
+  int16_t adjustment_filter = 0;
+  /** The adjustment's parameters in its kind's schema order. */
+  float adjustment_params[8] = {};
 };
 
 /**
@@ -157,6 +165,13 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
  * in the channel is not carried.
  */
 struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
+  /**
+   * A filter (#eMaterialPaintLayerFilter) instead of a map or a flat colour: the correction
+   * changes the colour below it by `opacity` and lays no coverage. 0 for a laid correction.
+   */
+  int16_t filter = 0;
+  /** The filter's parameters in its kind's schema order. */
+  float filter_params[8] = {};
   Image *image = nullptr;
   /** Null selects the default #ImageUser. */
   const ImageUser *iuser = nullptr;
@@ -167,6 +182,9 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
 
 /** A correction as the evaluator reads it: a buffer, or a flat colour when #ibuf is null. */
 struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
+  /** See #PaintMaterialCompositeCorrection::filter. */
+  int16_t filter = 0;
+  float filter_params[8] = {};
   ImBuf *ibuf = nullptr;
   /** Colorspace name of #ibuf's own buffer, or null for scene linear. */
   const char *colorspace_name = nullptr;
@@ -198,6 +216,12 @@ struct PaintMaterialCompositeMaskItem {
   CompositeBlend blend = CompositeBlend::Multiply;
   /** Reads the grey #C as `1 - C`, the alpha untouched; a mask correction's choice. */
   bool invert = false;
+  /**
+   * A filter (#eMaterialPaintLayerFilter) instead of a map or a grey: the item changes the factor
+   * so far, `M = lerp(M, f(M), opacity)`. 0 for a laid item.
+   */
+  int16_t filter = 0;
+  float filter_params[8] = {};
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
@@ -231,6 +255,9 @@ struct PaintMaterialCompositeMaskBuffer {
   float opacity = 1.0f;
   CompositeBlend blend = CompositeBlend::Multiply;
   bool invert = false;
+  /** See #PaintMaterialCompositeMaskItem::filter. */
+  int16_t filter = 0;
+  float filter_params[8] = {};
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */

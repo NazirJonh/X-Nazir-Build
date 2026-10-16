@@ -38,6 +38,7 @@ struct MaterialPaintLayerChannel;
 struct ReportList;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
+enum eMaterialPaintLayerFilter : int16_t;
 enum eMaterialPaintLayerSource : int8_t;
 
 /* -------------------------------------------------------------------- */
@@ -597,6 +598,28 @@ void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_co
  * channel the row no longer paints with.
  */
 bool BKE_paint_layers_base_color_active(const MaterialPaintLayer &layer);
+
+/**
+ * Add a filter correction to \a owner (a layer or a folder): it changes the colour the row has
+ * built so far in every channel the row takes part in, apart from Normal, and owns no map.
+ * \return The new correction, or null when \a owner is not in the stack or \a filter is unknown.
+ */
+MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
+                                                MaterialPaintLayer *owner,
+                                                eMaterialPaintLayerFilter filter,
+                                                const char *name = nullptr);
+
+/**
+ * Add a filter to the mask of \a layer, over the items already there: it changes the coverage built
+ * so far (`M = lerp(M, f(M), opacity)`), owns no map or grey, and works in no channel. The row needs
+ * a base mask first, as for any mask correction.
+ * \return The new item, or null when \a layer has no base mask, is not in the stack, or \a filter is
+ * unknown.
+ */
+MaterialPaintLayer *BKE_paint_layers_mask_filter_add(Material &ma,
+                                                     MaterialPaintLayer *layer,
+                                                     eMaterialPaintLayerFilter filter,
+                                                     const char *name = nullptr);
 
 /** Why a row of a layered material behaves differently than its settings suggest. */
 enum class PaintLayersIssueCode : int8_t {

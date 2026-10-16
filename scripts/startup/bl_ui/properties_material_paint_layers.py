@@ -256,6 +256,10 @@ def draw_material_layer_channels(layout, context, material, layer):
     the set is never shown, even when the row still holds its record and map.
     """
     channel_ids = material_layer_visible_channels(material)
+    is_filter = layer.source == 'FILTER'
+    if is_filter:
+        # A tangent normal is not a colour a filter may change.
+        channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']
     if not channel_ids:
         layout.label(text="No channels", icon='INFO')
         return
@@ -279,6 +283,10 @@ def draw_material_layer_channels(layout, context, material, layer):
         op.marker = layer.marker
         op.channel = channel_id
         op.enable = not enabled
+
+    if is_filter:
+        # The switches are the whole choice: a filter has no map or value per channel.
+        return
 
     if material_layer_weight_record_count(
             material, layer) >= _MATERIAL_PAINT_LAYER_HEAVY_CHANNEL_COUNT:

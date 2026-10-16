@@ -73,7 +73,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 7u);
+  ASSERT_EQ(kinds.size(), 16u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -87,6 +87,24 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_FALSE(kinds[5].takes_color);
   EXPECT_EQ(kinds[6].identifier, "MASK_CORRECTION_FILL");
   EXPECT_TRUE(kinds[6].takes_color);
+  EXPECT_EQ(kinds[7].identifier, "FILTER_INVERT");
+  EXPECT_FALSE(kinds[7].takes_color);
+  EXPECT_TRUE(kinds[7].is_effect);
+  EXPECT_EQ(kinds[8].identifier, "FILTER_LEVELS");
+  EXPECT_TRUE(kinds[8].is_effect);
+  EXPECT_EQ(kinds[9].identifier, "FILTER_HSL");
+  EXPECT_TRUE(kinds[9].is_effect);
+  /* The same filters again as rows of the stack, in the same order. */
+  EXPECT_EQ(kinds[10].identifier, "ADJUSTMENT_INVERT");
+  EXPECT_FALSE(kinds[10].is_effect);
+  EXPECT_EQ(kinds[11].identifier, "ADJUSTMENT_LEVELS");
+  EXPECT_EQ(kinds[12].identifier, "ADJUSTMENT_HSL");
+  EXPECT_FALSE(kinds[12].is_effect);
+  /* And as corrections of the mask, in no channel. */
+  EXPECT_EQ(kinds[13].identifier, "MASK_FILTER_INVERT");
+  EXPECT_TRUE(kinds[13].is_effect);
+  EXPECT_EQ(kinds[15].identifier, "MASK_FILTER_HSL");
+  EXPECT_FALSE(kinds[15].takes_color);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, mask_corrections_are_rows_under_the_mask_section)

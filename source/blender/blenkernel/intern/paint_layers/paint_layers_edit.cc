@@ -14,6 +14,9 @@
 #include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_scene_types.h"
+
+#include "paint_layers_kind.hh"
 
 namespace blender {
 
@@ -95,6 +98,105 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
       BKE_paint_layers_set_fill_color(ma, effect, params.fill_color);
     }
     return effect;
+  }
+  if (params.kind == PaintLayerAddKind::Filter) {
+    /* Like a correction, an Add aimed at one means another on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+    }
+    if (owner == nullptr) {
+      return nullptr;
+    }
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                           params.filter);
+    if (kind == nullptr) {
+      return nullptr;
+    }
+    const std::string name = (params.name != nullptr) ?
+                                 std::string(params.name) :
+                                 std::string(kind->name) + " " +
+                                     std::to_string(
+                                         paint_layer_name_number_max(owner->effects, kind->name) +
+                                         1);
+    return BKE_paint_layers_filter_add(
+        ma, owner, eMaterialPaintLayerFilter(params.filter), name.c_str());
+  }
+  if (params.kind == PaintLayerAddKind::Adjustment) {
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                           params.filter);
+    if (kind == nullptr || (kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER)) == 0)
+    {
+      return nullptr;
+    }
+    PaintLayerPlace place = params.place;
+    if (params.anchor != nullptr && BKE_paint_layers_is_folder(*params.anchor) &&
+        place == PaintLayerPlace::Above)
+    {
+      place = PaintLayerPlace::Into;
+    }
+    /* A filter of the colour cannot read an isolating folder's pre-multiplied, partly covered
+     * accumulation, so only Pass Through folders (and the top of the stack) take one. */
+    const MaterialPaintLayer *parent = nullptr;
+    if (params.anchor != nullptr) {
+      parent = (place == PaintLayerPlace::Into) ? params.anchor :
+                                                  BKE_paint_layers_parent(ma, *params.anchor);
+    }
+    for (; parent != nullptr; parent = BKE_paint_layers_parent(ma, *parent)) {
+      if (!BKE_paint_layers_folder_is_pass_through(*parent)) {
+        return nullptr;
+      }
+    }
+    const std::string name = (params.name != nullptr) ?
+                                 std::string(params.name) :
+                                 BKE_paint_layers_unique_default_name(ma, kind->name);
+    MaterialPaintLayer *created = BKE_paint_layers_add(ma, name.c_str(), params.anchor, place);
+    if (created == nullptr) {
+      return nullptr;
+    }
+    created->source = MA_PAINT_LAYER_SOURCE_FILTER;
+    created->kind_subtype = params.filter;
+    paint_layer_kind_params_init(*created);
+    /* The channels a filter works in are records like a layer's, without a map; it starts in Base
+     * Color. */
+    BKE_paint_layers_channel_add(ma, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    /* The kind decides which nodes the row builds, so the add's own tag was too early. */
+    BKE_paint_layers_tag_edited(ma);
+    return created;
+  }
+  if (params.kind == PaintLayerAddKind::MaskFilter) {
+    /* Aimed at a correction or a mask item, an Add means one more on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+      else if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, *owner)) {
+        owner = item_parent;
+      }
+    }
+    const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER,
+                                                           params.filter);
+    if (owner == nullptr || kind == nullptr) {
+      return nullptr;
+    }
+    /* Like any mask correction, it lays over the base mask: made first, white, so it changes
+     * nothing until the filter does. */
+    if (BKE_paint_layers_mask_base(*owner) == nullptr &&
+        BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr)
+    {
+      return nullptr;
+    }
+    const std::string name = (params.name != nullptr) ?
+                                 std::string(params.name) :
+                                 std::string(kind->name) + " " +
+                                     std::to_string(
+                                         paint_layer_name_number_max(owner->mask_stack, kind->name) +
+                                         1);
+    return BKE_paint_layers_mask_filter_add(
+        ma, owner, eMaterialPaintLayerFilter(params.filter), name.c_str());
   }
   if (params.kind == PaintLayerAddKind::MaskCorrection ||
       params.kind == PaintLayerAddKind::MaskCorrectionFill)

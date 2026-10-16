@@ -38,6 +38,7 @@
 
 #include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
+#include "paint_layers_kind.hh"
 
 namespace blender {
 using namespace bke::paint_layers;
@@ -75,6 +76,22 @@ bool values_sync_socket(Material &ma,
     }
     const float value = BKE_paint_layers_channel_opacity_effective(*layer, channel) *
                         forms.lookup_default(layer, {}).pass_through_scale;
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_PARAM)) {
+    /* The position names the parameter in the row's kind schema; a row whose kind lost it (a
+     * hand-edited tree) cannot be trusted, so the caller rebuilds. */
+    const PaintLayerKindInfo *kind = paint_layer_kind_of(*layer);
+    const int index = prop_int_get(iface.properties, INPUT_PARAM_PROP, -1);
+    if (kind == nullptr || index < 0 || index >= kind->params_num || socket.default_value == nullptr)
+    {
+      return false;
+    }
+    const float value = paint_layer_kind_param_get(*layer, index);
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
     if (iface.socket_data != nullptr) {
       static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;

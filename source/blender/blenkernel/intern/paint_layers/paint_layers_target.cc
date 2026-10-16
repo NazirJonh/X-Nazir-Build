@@ -131,6 +131,11 @@ bool BKE_paint_layers_target_get(Material &ma,
   r_target.channel = channel;
   r_target.mode = mode;
   if (mode == PaintLayersTargetMode::Content) {
+    /* A filter's records only say which channels it works in: there is no map to write into, and
+     * a stroke must not make one. The mask of its row is still paintable. */
+    if (paint_layer_effect_is_filter(*layer)) {
+      return false;
+    }
     r_target.channel_record = paint_layer_channel_find(*layer, channel);
     return true;
   }

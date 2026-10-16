@@ -138,6 +138,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* Source and blend decide the nodes; the enabled flag and every value are inputs, so they are
    * deliberately absent. */
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
+  /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
+  hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
   topology_hash_string(hash, layer.name);
   /* A row inside an isolating folder is built in the isolated form, with sockets of its own. */
@@ -167,7 +169,10 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.blend)));
     /* A flat colour and a map are different nodes, so the source is structure. */
     hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.source)));
+    /* Which filter it is decides its nodes; its parameters are inputs. */
+    hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
     for (const int channel : wired_channels) {
+      hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
       if (paint_layer_effect_lays(ma, effect, channel)) {
         const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
         if (record->image != nullptr) {
@@ -211,6 +216,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
       continue;
     }
     topology_hash_uid(hash, item.marker);
+    /* A filter item is nodes of its own, and which filter decides them. */
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(item.source)));
+    hash = topology_hash_mix(hash, uint64_t(uint16_t(item.kind_subtype)));
     hash = topology_hash_mix(hash, uint64_t(uint8_t(item.blend)));
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);

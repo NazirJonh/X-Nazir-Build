@@ -42,6 +42,7 @@
 #include "paint_layers_generate_intern.hh"
 #include "paint_layers_generate_layout.hh"
 #include "paint_layers_intern.hh"
+#include "paint_layers_kind.hh"
 
 namespace blender {
 namespace bke::paint_layers {
@@ -232,9 +233,39 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
    * colour while it has no map there: an input like a Fill row's, so editing it is a value and not
    * a different shape. The colour's alpha is no input: a Fill covers by its opacity alone, so it
    * never reaches the graph. */
-  for (const MaterialPaintLayer &effect : layer.effects) {
+  /* A filter's parameters are inputs of the group, one set for all the channels it acts in: they
+   * are values, so editing one is not a different shape of graph. */
+  const auto filter_params_create = [&](const MaterialPaintLayer &filter, const bool mask_item) {
+    const PaintLayerKindInfo *kind = paint_layer_kind_of(filter);
+    if (!paint_layer_effect_is_filter(filter) || kind == nullptr || kind->params_num == 0) {
+      return;
+    }
+    /* A filter in the mask works on its one coverage, in no channel. */
+    bool acts = mask_item;
     for (const int channel : wired_channels_) {
-      if (!paint_layer_effect_lays(ma_, effect, channel)) {
+      acts |= paint_layer_effect_filters(ma_, filter, channel);
+    }
+    for (int i = 0; acts && i < kind->params_num; i++) {
+      char base[200];
+      SNPRINTF(base, "%s %s %s", layer_name, paint_layer_effect_label(filter), kind->params[i].label);
+      bNodeTreeInterfaceSocket *param = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_PARAM, filter.marker, -1);
+      if (param != nullptr) {
+        prop_int_set(param->properties, INPUT_PARAM_PROP, i);
+        group_input_default_set(group, *param, paint_layer_kind_param_get(filter, i));
+      }
+      /* Kept even when null, so the builder sees the set is incomplete and builds nothing. */
+      effect_param_inputs_.lookup_or_add_default(&filter).append(param);
+    }
+  };
+  if (paint_layer_row_is_adjustment(layer)) {
+    filter_params_create(layer, false);
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    filter_params_create(effect, false);
+    for (const int channel : wired_channels_) {
+      const bool filters = paint_layer_effect_filters(ma_, effect, channel);
+      if (!filters && !paint_layer_effect_lays(ma_, effect, channel)) {
         continue;
       }
       const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
@@ -253,6 +284,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
                                 BKE_paint_layers_channel_opacity_effective(effect, channel) *
                                     forms_.lookup_default(&effect, {}).pass_through_scale);
         effect_opacity_inputs_.lookup_or_add_default(&effect).add(channel, opacity);
+      }
+      if (filters) {
+        /* A filter has no colour of its own: its opacity is its only input. */
+        continue;
       }
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
       if (effect.source != MA_PAINT_LAYER_SOURCE_CONSTANT || record->image != nullptr) {
@@ -309,6 +344,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       group_input_default_set(group, *opacity, BKE_paint_layers_effective_opacity(item));
       mask_opacity_inputs_.add(&item, opacity);
     }
+    filter_params_create(item, true);
     if (record != nullptr && record->image == nullptr) {
       SNPRINTF(base, "%s %s", layer_name, item_name);
       bNodeTreeInterfaceSocket *value = layer_group_value_input(

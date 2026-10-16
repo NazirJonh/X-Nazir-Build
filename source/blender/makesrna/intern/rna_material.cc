@@ -131,6 +131,7 @@ const EnumPropertyItem rna_enum_material_paint_layers_image_size_items[] = {
 #  include "BKE_context.hh"
 #  include "BKE_editmesh.hh"
 #  include "BKE_gpencil_legacy.h"
+#  include "BKE_idprop.hh"
 #  include "BKE_grease_pencil.hh"
 #  include "BKE_lib_id.hh"
 #  include "BKE_main.hh"
@@ -1235,6 +1236,139 @@ static void rna_MaterialPaintLayer_mask_items_begin(CollectionPropertyIterator *
   rna_iterator_listbase_begin(iter, ptr, &layer->mask_stack, nullptr);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Kind parameters
+ *
+ * A kind's parameters are the float properties of the row's system properties, each carrying its
+ * range, default and label as UI data. The collection lists them in schema order and the struct
+ * reads and writes them through that data, so no kind is named here.
+ * \{ */
+
+static void rna_MaterialPaintLayer_kind_params_begin(CollectionPropertyIterator *iter,
+                                                     PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  const IDProperty *group = layer->system_properties;
+  if (group == nullptr || group->type != IDP_GROUP) {
+    rna_iterator_listbase_begin(iter, ptr, nullptr, nullptr);
+    return;
+  }
+  rna_iterator_listbase_begin(iter, ptr, &layer->system_properties->data.group, nullptr);
+}
+
+static void rna_MaterialPaintLayerKindParam_name_get(PointerRNA *ptr, char *value)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  strcpy(value, prop->name);
+}
+
+static int rna_MaterialPaintLayerKindParam_name_length(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  return int(strlen(prop->name));
+}
+
+/** The UI data of a float property, or null when it has none. */
+static const IDPropertyUIDataFloat *rna_kind_param_ui_data(const IDProperty *prop)
+{
+  if (prop->type != IDP_FLOAT || prop->ui_data == nullptr) {
+    return nullptr;
+  }
+  return reinterpret_cast<const IDPropertyUIDataFloat *>(prop->ui_data);
+}
+
+static void rna_MaterialPaintLayerKindParam_label_get(PointerRNA *ptr, char *value)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
+  const char *label = (ui_data != nullptr && ui_data->base.description != nullptr) ?
+                          ui_data->base.description :
+                          prop->name;
+  strcpy(value, label);
+}
+
+static int rna_MaterialPaintLayerKindParam_label_length(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
+  const char *label = (ui_data != nullptr && ui_data->base.description != nullptr) ?
+                          ui_data->base.description :
+                          prop->name;
+  return int(strlen(label));
+}
+
+static float rna_MaterialPaintLayerKindParam_value_get(PointerRNA *ptr)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  return (prop->type == IDP_FLOAT) ? IDP_float_get(prop) : 0.0f;
+}
+
+static void rna_MaterialPaintLayerKindParam_value_set(PointerRNA *ptr, const float value)
+{
+  IDProperty *prop = static_cast<IDProperty *>(ptr->data);
+  if (prop->type != IDP_FLOAT) {
+    return;
+  }
+  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
+  const float low = (ui_data != nullptr) ? float(ui_data->min) : -FLT_MAX;
+  const float high = (ui_data != nullptr) ? float(ui_data->max) : FLT_MAX;
+  IDP_float_set(prop, std::clamp(value, low, high));
+  /* The parameter is an input of the row's group: a value edit, never a different graph. */
+  if (Material *ma = reinterpret_cast<Material *>(ptr->owner_id)) {
+    BKE_paint_layers_tag_value_edited(*ma);
+  }
+}
+
+static void rna_MaterialPaintLayerKindParam_value_range(PointerRNA *ptr,
+                                                        float *min,
+                                                        float *max,
+                                                        float *softmin,
+                                                        float *softmax)
+{
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  const IDPropertyUIDataFloat *ui_data = rna_kind_param_ui_data(prop);
+  if (ui_data == nullptr) {
+    return;
+  }
+  *min = *softmin = float(ui_data->min);
+  *max = *softmax = float(ui_data->max);
+}
+
+/**
+ * The path of a kind parameter: its row's path and the parameter's name. The row is the one whose
+ * system properties hold the property, found by address, as the property carries no back pointer.
+ */
+static std::optional<std::string> rna_MaterialPaintLayerKindParam_path(const PointerRNA *ptr)
+{
+  const Material *ma = reinterpret_cast<const Material *>(ptr->owner_id);
+  const IDProperty *prop = static_cast<const IDProperty *>(ptr->data);
+  const MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(
+      *ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        const auto holds = [&](const MaterialPaintLayer &row) {
+          return row.system_properties != nullptr && row.system_properties->type == IDP_GROUP &&
+                 BLI_findindex(&row.system_properties->data.group, prop) != -1;
+        };
+        if (holds(layer)) {
+          owner = &layer;
+        }
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          if (holds(effect)) {
+            owner = &effect;
+          }
+        }
+        return owner == nullptr;
+      });
+  std::string row_path;
+  if (owner == nullptr || !rna_paint_layer_path_find(ma->paint_layers, owner, "paint_layers", row_path))
+  {
+    return std::nullopt;
+  }
+  return fmt::format("{}.kind_params[\"{}\"]", row_path, prop->name);
+}
+
+/** \} */
+
 static void rna_MaterialPaintLayer_effects_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
@@ -1754,6 +1888,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
     {MA_PAINT_LAYER_SOURCE_CONSTANT, "CONSTANT", 0, "Constant", "A flat colour"},
     {MA_PAINT_LAYER_SOURCE_STACK, "STACK", 0, "Stack", "A nested stack of layers (a folder)"},
+    {MA_PAINT_LAYER_SOURCE_FILTER, "FILTER", 0, "Filter", "A change to the colour below it"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -1827,6 +1962,39 @@ static void rna_def_material_paint_layer_issue(BlenderRNA *brna)
                                 nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Text", "Human-readable description of the issue");
+}
+
+static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerKindParam", nullptr);
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintLayerKindParam_path");
+  RNA_def_struct_ui_text(
+      srna, "Paint Layer Parameter", "One float parameter of a paint layer's kind, e.g. a filter's");
+
+  PropertyRNA *prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerKindParam_name_get",
+                                "rna_MaterialPaintLayerKindParam_name_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Name", "Identifier of the parameter within its kind");
+  RNA_def_struct_name_property(srna, prop);
+
+  prop = RNA_def_property(srna, "label", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayerKindParam_label_get",
+                                "rna_MaterialPaintLayerKindParam_label_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Label", "Name the parameter is shown with");
+
+  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerKindParam_value_get",
+                               "rna_MaterialPaintLayerKindParam_value_set",
+                               "rna_MaterialPaintLayerKindParam_value_range");
+  RNA_def_property_ui_text(prop, "Value", "Value of the parameter, within its range");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 }
 
 static void rna_def_material_paint_layer(BlenderRNA *brna)
@@ -1953,6 +2121,21 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Issues", "Description problems on this layer that the stack silently ignores");
+
+  prop = RNA_def_property(srna, "kind_params", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerKindParam");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_kind_params_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Kind Parameters", "The parameters of the row's kind, such as a filter's, in order");
 
   prop = RNA_def_property(srna, "mask_items", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_struct_type(prop, "MaterialPaintLayer");
@@ -3286,6 +3469,7 @@ void RNA_def_material(BlenderRNA *brna)
   rna_def_material_greasepencil(brna);
   rna_def_material_lineart(brna);
   rna_def_material_paint_layer_issue(brna);
+  rna_def_material_paint_layer_kind_param(brna);
   rna_def_material_paint_layer(brna);
   rna_def_material_paint_layer_channel(brna);
   rna_def_material_paint_layer_channel_settings(brna);

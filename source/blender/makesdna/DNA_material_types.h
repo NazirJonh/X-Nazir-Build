@@ -459,6 +459,19 @@ enum eMaterialPaintLayerSource : int8_t {
    * Material and Node Group sources.
    */
   MA_PAINT_LAYER_SOURCE_STACK = 4,
+  /**
+   * A filter: no colour of its own, it changes the colour it reads. The member is
+   * #MaterialPaintLayer::kind_subtype (#eMaterialPaintLayerFilter). Only as a correction for now.
+   * 5 is reserved for the Mesh Map source, 7 for the generators.
+   */
+  MA_PAINT_LAYER_SOURCE_FILTER = 6,
+};
+
+/** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_FILTER row. */
+enum eMaterialPaintLayerFilter : int16_t {
+  MA_PAINT_LAYER_FILTER_INVERT = 1,
+  MA_PAINT_LAYER_FILTER_LEVELS = 2,
+  MA_PAINT_LAYER_FILTER_HSL = 3,
 };
 
 /** #MaterialPaintLayerChannel::state */

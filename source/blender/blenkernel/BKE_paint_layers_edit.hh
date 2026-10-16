@@ -52,6 +52,22 @@ enum class PaintLayerAddKind : int8_t {
   MaskCorrection,
   /** A flat-grey mask correction of the same row, taking #PaintLayerAddParams::fill_color. */
   MaskCorrectionFill,
+  /**
+   * A filter correction of the anchor row (or of the row an anchor correction hangs on): it changes
+   * the colour the row has so far and owns no map. Which one is #PaintLayerAddParams::filter.
+   */
+  Filter,
+  /**
+   * A filter as a row of the stack: it changes the stack below it, laid by the row's own opacity,
+   * blend and mask. Which one is #PaintLayerAddParams::filter. Refused inside an isolating folder.
+   */
+  Adjustment,
+  /**
+   * A filter in the mask of the anchor row (or of the row an anchor correction or mask correction
+   * hangs on): it changes the mask's coverage, in no channel. Which one is
+   * #PaintLayerAddParams::filter. The base mask is made first, white, when the row has none.
+   */
+  MaskFilter,
 };
 
 struct PaintLayerAddParams {
@@ -71,6 +87,8 @@ struct PaintLayerAddParams {
   const char *name = nullptr;
   /** The initial colour for a Fill, a Fill correction or a Fill mask correction; null keeps the default. */
   const float *fill_color = nullptr;
+  /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
+  int16_t filter = 0;
 };
 
 /**

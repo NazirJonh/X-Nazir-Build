@@ -10,6 +10,7 @@
 
 #include "BKE_paint_layers_composite.hh"
 
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 
@@ -26,6 +27,7 @@
 #include "BKE_report.hh"
 
 #include "paint_layers_intern.hh"
+#include "paint_layers_kind.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
@@ -115,7 +117,8 @@ static void composite_image_layers_collect(const Material &ma,
                                            const ListBaseT<MaterialPaintLayer> &list,
                                            const int channel,
                                            const float pass_through_scale,
-                                           Vector<PaintMaterialCompositeImageLayer> &r_layers)
+                                           Vector<PaintMaterialCompositeImageLayer> &r_layers,
+                                           const bool isolating = false)
 {
   for (const MaterialPaintLayer &layer : list) {
     /* A Pass Through folder is flattened into this list, the way the generator expands it in the
@@ -123,13 +126,14 @@ static void composite_image_layers_collect(const Material &ma,
      * on their opacity, accumulated on the way down (the same rule as #paint_layers_form_map). */
     if (BKE_paint_layers_folder_is_pass_through(layer)) {
       const float scale = (layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? pass_through_scale : 0.0f;
-      composite_image_layers_collect(ma, layer.children, channel, scale, r_layers);
+      composite_image_layers_collect(ma, layer.children, channel, scale, r_layers, isolating);
       continue;
     }
     PaintMaterialCompositeImageLayer out;
     if (BKE_paint_layers_is_folder(layer)) {
       Vector<PaintMaterialCompositeImageLayer> children;
-      composite_image_layers_collect(ma, layer.children, channel, pass_through_scale, children);
+      composite_image_layers_collect(
+          ma, layer.children, channel, pass_through_scale, children, true);
       /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
        * here is not: the correction brings the coverage in over nothing. */
       if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
@@ -138,6 +142,20 @@ static void composite_image_layers_collect(const Material &ma,
       out.is_folder = true;
       out.children.assign(std::make_move_iterator(children.begin()),
                           std::make_move_iterator(children.end()));
+    }
+    else if (paint_layer_row_is_adjustment(layer)) {
+      /* The filter of the stack below. Inside an isolating folder the generator leaves it out, as
+       * the accumulation there is partly covered and pre-multiplied. */
+      if (isolating || !paint_layer_adjustment_acts(ma, layer, channel)) {
+        continue;
+      }
+      out.adjustment_filter = layer.kind_subtype;
+      if (const PaintLayerKindInfo *kind = paint_layer_kind_of(layer)) {
+        for (const int i : IndexRange(std::min(kind->params_num, int(std::size(out.adjustment_params)))))
+        {
+          out.adjustment_params[i] = paint_layer_kind_param_get(layer, i);
+        }
+      }
     }
     else {
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
@@ -173,6 +191,20 @@ static void composite_image_layers_collect(const Material &ma,
     /* The corrections lay over the row's colour, in the order they were added. A correction that
      * lays nothing in this channel is not carried, as the generator builds nothing for it. */
     for (const MaterialPaintLayer &effect : layer.effects) {
+      if (paint_layer_effect_filters(ma, effect, channel)) {
+        PaintMaterialCompositeCorrection filter;
+        filter.filter = effect.kind_subtype;
+        if (const PaintLayerKindInfo *kind = paint_layer_kind_of(effect)) {
+          for (const int i : IndexRange(std::min(kind->params_num, int(std::size(filter.filter_params)))))
+          {
+            filter.filter_params[i] = paint_layer_kind_param_get(effect, i);
+          }
+        }
+        filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                         pass_through_scale;
+        out.content_corrections.append(filter);
+        continue;
+      }
       if (!paint_layer_effect_lays(ma, effect, channel)) {
         continue;
       }
@@ -198,6 +230,20 @@ static void composite_image_layers_collect(const Material &ma,
      * nothing yet is not carried, as the generator builds nothing for it. */
     if (BKE_paint_layers_mask_base(layer) != nullptr) {
       for (const MaterialPaintLayer &mask : layer.mask_stack) {
+        if (paint_layer_effect_is_filter(mask)) {
+          /* A filter changes the coverage so far; it owns no map or grey and no record. */
+          PaintMaterialCompositeMaskItem filter;
+          filter.opacity = BKE_paint_layers_effective_opacity(mask);
+          filter.filter = mask.kind_subtype;
+          if (const PaintLayerKindInfo *kind = paint_layer_kind_of(mask)) {
+            for (const int i : IndexRange(std::min(kind->params_num, int(std::size(filter.filter_params)))))
+            {
+              filter.filter_params[i] = paint_layer_kind_param_get(mask, i);
+            }
+          }
+          out.mask_items.append(filter);
+          continue;
+        }
         const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
             mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
         if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {

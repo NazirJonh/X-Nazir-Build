@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <cmath>
+
 #include "BLI_function_ref.hh"
 
 #include "DNA_ID.h"
@@ -91,6 +93,19 @@ inline constexpr uint8_t paint_layer_role_bit(const int role)
   return uint8_t(1u << role);
 }
 
+/**
+ * One float parameter of a kind. The schema lives with the kind; the value lives in the row's
+ * #MaterialPaintLayer::system_properties under #name, and reads as #default_value while unset, so
+ * a row never has to carry parameters it did not change.
+ */
+struct PaintLayerKindParam {
+  const char *name;
+  const char *label;
+  float default_value;
+  float min;
+  float max;
+};
+
 struct PaintLayerKindInfo {
   /** Registry key: #MaterialPaintLayer::source and #MaterialPaintLayer::kind_subtype. */
   int8_t source;
@@ -99,7 +114,71 @@ struct PaintLayerKindInfo {
   PaintLayerKindCategory category;
   /** The roles the kind may take, from #paint_layer_role_bit. */
   uint8_t allowed_roles;
+  /** The kind's parameters in a fixed order, or null for a kind with none. */
+  const PaintLayerKindParam *params = nullptr;
+  int params_num = 0;
 };
+
+/** The positions of the Levels filter's parameters in its schema. */
+enum PaintLayerLevelsParam : int {
+  PAINT_LAYER_LEVELS_IN_BLACK = 0,
+  PAINT_LAYER_LEVELS_IN_WHITE = 1,
+  PAINT_LAYER_LEVELS_GAMMA = 2,
+  PAINT_LAYER_LEVELS_OUT_BLACK = 3,
+  PAINT_LAYER_LEVELS_OUT_WHITE = 4,
+  PAINT_LAYER_LEVELS_PARAM_NUM = 5,
+};
+
+/** The positions of the HSL filter's parameters in its schema. */
+enum PaintLayerHslParam : int {
+  PAINT_LAYER_HSL_HUE = 0,
+  PAINT_LAYER_HSL_SATURATION = 1,
+  PAINT_LAYER_HSL_VALUE = 2,
+  PAINT_LAYER_HSL_PARAM_NUM = 3,
+};
+
+/**
+ * The HSL filter applied to \a rgb in place, at full strength: the Hue/Saturation/Value node's
+ * function (hue shifted by `hue - 0.5` turns, saturation clamped to one, value scaled, result not
+ * below zero), so the CPU composite and the generated node agree.
+ */
+void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARAM_NUM]);
+
+/** The Levels of a filter value: the same function for every consumer that applies it on the CPU. */
+inline float paint_layer_levels_apply(const float value, const float params[PAINT_LAYER_LEVELS_PARAM_NUM])
+{
+  /* A zero span or gamma reads as zero, which is what the Math Divide node gives the graph. */
+  const float span = params[PAINT_LAYER_LEVELS_IN_WHITE] - params[PAINT_LAYER_LEVELS_IN_BLACK];
+  const float k = (span != 0.0f) ? 1.0f / span : 0.0f;
+  const float m = -(params[PAINT_LAYER_LEVELS_IN_BLACK] * k);
+  const float inv_gamma = (params[PAINT_LAYER_LEVELS_GAMMA] != 0.0f) ?
+                              1.0f / params[PAINT_LAYER_LEVELS_GAMMA] :
+                              0.0f;
+  float t = value * k + m;
+  t = (t < 0.0f) ? 0.0f : ((t > 1.0f) ? 1.0f : t);
+  /* The Gamma node leaves a non-positive value as it is. */
+  if (t > 0.0f) {
+    t = powf(t, inv_gamma);
+  }
+  return t * (params[PAINT_LAYER_LEVELS_OUT_WHITE] - params[PAINT_LAYER_LEVELS_OUT_BLACK]) +
+         params[PAINT_LAYER_LEVELS_OUT_BLACK];
+}
+
+/**
+ * The value of the parameter \a index of \a row's kind: the stored one, or the schema's default.
+ * A row whose kind has no such parameter reads 0. The storage is the row's system properties, which
+ * only this and #paint_layer_kind_param_set touch.
+ */
+float paint_layer_kind_param_get(const MaterialPaintLayer &row, int index);
+
+/**
+ * Store every parameter of \a row's kind at its default, with the schema's range and label as UI
+ * data, so the UI can list them before any has been edited. Parameters already stored are kept.
+ */
+void paint_layer_kind_params_init(MaterialPaintLayer &row);
+
+/** Store the parameter \a index, clamped to the schema's range. False for an unknown index. */
+bool paint_layer_kind_param_set(MaterialPaintLayer &row, int index, float value);
 
 /** The kind of \a row, or null when the file names one this build does not know. */
 const PaintLayerKindInfo *paint_layer_kind_find(int8_t source, int16_t subtype);

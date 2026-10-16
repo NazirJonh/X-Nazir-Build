@@ -38,6 +38,8 @@
 
 #include "BLT_translation.hh"
 
+#include "paint_layers/paint_layers_kind.hh"
+
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_tree_interface_types.h"
@@ -766,6 +768,32 @@ static void blend_row_linear(float dst[4],
  * A folder has no map: \a folder_color is the straight colour of its contents and \a folder_coverage
  * the coverage they accumulated, which stand in for the map and for its alpha.
  */
+/**
+ * The result of filter \a filter on \a rgb at full strength, written back into it. The one place the
+ * CPU knows the filters, for a correction (which then mixes it in by its opacity) and for an
+ * adjustment (whose row lays it by its own factor). An unknown filter leaves the colour alone.
+ */
+static void composite_filter_color(const int16_t filter, const float *params, float rgb[3])
+{
+  switch (filter) {
+    case MA_PAINT_LAYER_FILTER_INVERT:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = fabsf(rgb[k] - 1.0f);
+      }
+      break;
+    case MA_PAINT_LAYER_FILTER_HSL:
+      paint_layer_hsl_apply(rgb, params);
+      break;
+    case MA_PAINT_LAYER_FILTER_LEVELS:
+      for (const int k : IndexRange(3)) {
+        rgb[k] = paint_layer_levels_apply(rgb[k], params);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
 static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                                    const rcti &tile,
                                    const float *folder_color,
@@ -778,6 +806,9 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
   if (layer.is_folder) {
     BLI_assert(folder_color != nullptr && folder_coverage != nullptr);
     memcpy(r_color, folder_color, size_t(count) * 4 * sizeof(float));
+  }
+  else if (layer.adjustment_filter != 0) {
+    /* The colour is the filtered stack below, which only the caller holds: it filled r_color. */
   }
   else if (layer.color_ibuf != nullptr) {
     composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
@@ -824,6 +855,23 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
    * which is the plain blend by `f` where `a` is one, and what the generator builds node by node. */
   Vector<float> correction_storage;
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
+    if (correction.filter != 0) {
+      /* A filter changes the colour and leaves the coverage and the content alpha as they are:
+       * `c = lerp(c, f(c), opacity)`, the Mix the generator builds. */
+      const float weight = clamp_f(correction.opacity, 0.0f, 1.0f);
+      if (weight <= 0.0f) {
+        continue;
+      }
+      for (int64_t i = 0; i < count; i++) {
+        float *s = r_color + i * 4;
+        float filtered[3] = {s[0], s[1], s[2]};
+        composite_filter_color(correction.filter, correction.filter_params, filtered);
+        for (const int k : IndexRange(3)) {
+          s[k] += (filtered[k] - s[k]) * weight;
+        }
+      }
+      continue;
+    }
     if ((correction.ibuf == nullptr && !correction.has_constant_color) ||
         correction.opacity <= 0.0f)
     {
@@ -894,6 +942,16 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         continue;
       }
       const float opacity = clamp_f(item.opacity, 0.0f, 1.0f);
+      if (item.filter != 0) {
+        /* A filter works on the factor so far as a grey, `M = lerp(M, f(M), opacity)`; its function
+         * is the one a correction applies to a colour. */
+        for (int64_t i = 0; i < count; i++) {
+          float grey[3] = {mask_factor[i], mask_factor[i], mask_factor[i]};
+          composite_filter_color(item.filter, item.filter_params, grey);
+          mask_factor[i] += (grey[0] - mask_factor[i]) * opacity;
+        }
+        continue;
+      }
       if (item.ibuf != nullptr) {
         item_storage.resize(count * 4);
         composite_decode_tile(item.ibuf, item.colorspace_name, tile, item_storage.data());
@@ -931,7 +989,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
 template<typename LayerT>
 static bool composite_layer_has_content(const LayerT &layer, const bool has_map)
 {
-  return has_map || layer.has_constant_color;
+  return has_map || layer.has_constant_color || layer.adjustment_filter != 0;
 }
 
 static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folder,
@@ -1203,6 +1261,15 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
         if (!layer.enabled || layer.opacity <= 0.0f) {
           continue;
         }
+        if (layer.adjustment_filter != 0) {
+          /* The adjustment's colour is the stack so far, filtered; its row then lays it as any
+           * other, by its blend, opacity and mask. */
+          for (int64_t i = 0; i < count; i++) {
+            float *c = color_storage.data() + i * 4;
+            copy_v4_v4(c, tile_dst + i * 4);
+            composite_filter_color(layer.adjustment_filter, layer.adjustment_params, c);
+          }
+        }
         composite_layer_apply(layer, tile, color_storage.data(), factor_storage.data());
         for (int64_t i = 0; i < count; i++) {
           blend_row_linear(tile_dst + i * 4,
@@ -1367,6 +1434,10 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.opacity = item.opacity;
       buffer.blend = item.blend;
       buffer.invert = item.invert;
+      buffer.filter = item.filter;
+      std::copy(std::begin(item.filter_params),
+                std::end(item.filter_params),
+                std::begin(buffer.filter_params));
       if (item.image != nullptr) {
         buffer.ibuf = composite_image_acquire(item.image, item.iuser, r_locks);
         if (buffer.ibuf == nullptr) {
@@ -1377,10 +1448,14 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       layer.mask_items.append(buffer);
     }
     for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
-      if (correction.image == nullptr && !correction.has_constant_color) {
+      if (correction.image == nullptr && !correction.has_constant_color && correction.filter == 0) {
         continue;
       }
       PaintMaterialCompositeCorrectionBuffer buffer;
+      buffer.filter = correction.filter;
+      std::copy(std::begin(correction.filter_params),
+                std::end(correction.filter_params),
+                std::begin(buffer.filter_params));
       buffer.blend = correction.blend;
       buffer.opacity = correction.opacity;
       if (correction.image != nullptr) {
@@ -1592,6 +1667,11 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.constant_color[3]);
     hash = get_default_hash(hash, layer.color_alpha_coverage, layer.is_folder);
     hash = get_default_hash(hash, layer.empty_base, layer.tracks_content_alpha);
+    /* An adjustment is its filter and what it was told. */
+    hash = get_default_hash(hash, int(layer.adjustment_filter));
+    for (const float param : layer.adjustment_params) {
+      hash = get_default_hash(hash, param);
+    }
     /* A correction changes the colour and the coverage: its map (by session uid), its blend and its
      * opacity all have to move the hash, or an edit would keep serving the cached composite. */
     for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
@@ -1600,6 +1680,11 @@ uint64_t BKE_paint_material_composite_stack_hash(
                               correction.image != nullptr ? correction.image->id.session_uid : 0,
                               int(correction.blend),
                               correction.opacity);
+      /* Which filter it is, or none, and what it was told. */
+      hash = get_default_hash(hash, int(correction.filter));
+      for (const float param : correction.filter_params) {
+        hash = get_default_hash(hash, param);
+      }
       /* A flat colour is not backed by an image, so its value is hashed like a row's. */
       hash = get_default_hash(hash,
                               correction.has_constant_color,
@@ -1622,6 +1707,10 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash = get_default_hash(
           hash, item.image != nullptr ? item.image->id.session_uid : 0, item.opacity);
       hash = get_default_hash(hash, item.constant_gray, int(item.blend), item.invert);
+      hash = get_default_hash(hash, int(item.filter));
+      for (const float param : item.filter_params) {
+        hash = get_default_hash(hash, param);
+      }
     }
   }
   return hash;

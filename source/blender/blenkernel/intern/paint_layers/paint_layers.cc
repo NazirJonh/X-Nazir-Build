@@ -743,6 +743,28 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   return BKE_paint_layers_correction_add(ma, owner, name, MA_PAINT_LAYER_SOURCE_IMAGE);
 }
 
+MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
+                                                MaterialPaintLayer *owner,
+                                                const eMaterialPaintLayerFilter filter,
+                                                const char *name)
+{
+  const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+  if (kind == nullptr || !paint_layer_in_stack(ma, owner)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : kind->name);
+  effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  effect->source = MA_PAINT_LAYER_SOURCE_FILTER;
+  effect->kind_subtype = filter;
+  paint_layer_kind_params_init(*effect);
+  BLI_addtail(&owner->effects, effect);
+  /* Linked first, as the record is added through the ownership check. Base Color is the channel a
+   * filter starts out working in; the others are switched on like a layer's. */
+  BKE_paint_layers_channel_add(ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  BKE_paint_layers_tag_edited(ma);
+  return effect;
+}
+
 bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect)
 {
   if (effect == nullptr) {
@@ -894,6 +916,30 @@ MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
   }
   /* A Paint item starts transparent: with no map it lays nothing, and its first map starts empty,
    * so a fresh item changes no pixel. */
+  BLI_addtail(&layer->mask_stack, item);
+
+  BKE_paint_layers_tag_edited(ma);
+  return item;
+}
+
+MaterialPaintLayer *BKE_paint_layers_mask_filter_add(Material &ma,
+                                                     MaterialPaintLayer *layer,
+                                                     const eMaterialPaintLayerFilter filter,
+                                                     const char *name)
+{
+  const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
+  if (kind == nullptr || !paint_layer_in_stack(ma, layer) ||
+      BKE_paint_layers_mask_base(*layer) == nullptr ||
+      (kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)) == 0)
+  {
+    return nullptr;
+  }
+  MaterialPaintLayer *item = paint_layer_alloc(ma, name != nullptr ? name : kind->name);
+  item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  item->source = MA_PAINT_LAYER_SOURCE_FILTER;
+  item->kind_subtype = filter;
+  item->flag = MA_PAINT_LAYER_ENABLED;
+  paint_layer_kind_params_init(*item);
   BLI_addtail(&layer->mask_stack, item);
 
   BKE_paint_layers_tag_edited(ma);
@@ -1584,8 +1630,33 @@ bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, co
       ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, color);
 }
 
+/**
+ * Report the adjustments of \a list that sit in an isolating folder: its accumulation is
+ * pre-multiplied and partly covered, which a filter of the colour cannot read, so the generator and
+ * the CPU composite both leave the row out.
+ */
+static void paint_layers_isolated_adjustments_report(const ListBaseT<MaterialPaintLayer> &list,
+                                                     const bool isolating,
+                                                     Vector<PaintLayersIssue> &r_issues)
+{
+  for (const MaterialPaintLayer &row : list) {
+    if (isolating && paint_layer_row_is_adjustment(row)) {
+      PaintLayersIssue issue;
+      issue.layer = row.marker;
+      issue.code = PaintLayersIssueCode::KindNotAllowed;
+      issue.text = TIP_("An adjustment needs a Pass Through folder or the top of the stack");
+      r_issues.append(issue);
+    }
+    if (BKE_paint_layers_is_folder(row)) {
+      paint_layers_isolated_adjustments_report(
+          row.children, isolating || !BKE_paint_layers_folder_is_pass_through(row), r_issues);
+    }
+  }
+}
+
 void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r_issues)
 {
+  paint_layers_isolated_adjustments_report(ma.paint_layers, false, r_issues);
   const bool normal_in_set = !paint_layer_channel_filtered(ma, PAINT_MATERIAL_CHANNEL_NORMAL);
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {

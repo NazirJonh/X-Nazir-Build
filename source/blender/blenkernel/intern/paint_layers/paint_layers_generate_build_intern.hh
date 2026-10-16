@@ -168,6 +168,18 @@ class PaintLayersTreeBuilder {
                       NodeOutput *content_alpha);
 
   /**
+   * Apply the filter correction \a effect to \a content, the straight colour the row has so far in
+   * \a channel, building its nodes into \a group's tree. False (and nothing built) when the filter
+   * does not act in \a channel.
+   */
+  bool filter_lay(bNodeTree &tree,
+                  LayerGroup &group,
+                  const MaterialPaintLayer &effect,
+                  int channel,
+                  NodeOutput &content,
+                  bool full_strength = false);
+
+  /**
    * The instance sockets of a row whose group was kept unchanged: its nodes and interface already
    * hold the row, so only the contract sockets are looked up again in the new instance.
    */
@@ -241,6 +253,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> opacity_inputs_;
   /** A content correction's opacity input per channel, keyed by the correction. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> effect_opacity_inputs_;
+  /** A filter correction's parameter inputs in its kind's schema order, keyed by the correction. */
+  Map<const MaterialPaintLayer *, Vector<bNodeTreeInterfaceSocket *>> effect_param_inputs_;
   /** The constant input of a row's map-less channel, keyed by the row and the channel. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_inputs_;
   /** The alpha of that constant, its own float input, keyed the same way. */

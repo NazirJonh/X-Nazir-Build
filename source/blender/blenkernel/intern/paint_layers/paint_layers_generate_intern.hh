@@ -77,6 +77,11 @@ inline constexpr const char *ROLE_FILL = "fill";
 /** #INPUT_ROLE_PROP value of that constant's alpha: the content alpha a map-less row lays, which
  * no colour socket can hand over on its own. */
 inline constexpr const char *ROLE_FILL_ALPHA = "fill_alpha";
+/** #INPUT_ROLE_PROP value of a parameter of a kind (the marker is the row's own); the parameter is
+ * named by #INPUT_PARAM_PROP. */
+inline constexpr const char *ROLE_PARAM = "param";
+/** On a #ROLE_PARAM input: the position of the parameter in its kind's schema. */
+inline constexpr const char *INPUT_PARAM_PROP = "pbr_paint_layers_param";
 /** #INPUT_ROLE_PROP value of a row's base mask constant (the marker is the owner row's). */
 inline constexpr const char *ROLE_MASK_VALUE = "mask_value";
 /** #INPUT_ROLE_PROP value of a row's base mask opacity (enabled already folded in). */

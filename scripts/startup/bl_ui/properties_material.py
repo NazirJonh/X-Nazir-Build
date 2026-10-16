@@ -626,10 +626,27 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         item = self._shown_mask_item(context, owner, layer)
         if item is not None:
             layout.label(text=item.name, icon='MOD_MASK')
+            if item.source == 'FILTER':
+                # A filter in the mask changes its one coverage: opacity and the kind's parameters,
+                # and no channels to choose.
+                layout.prop(item, "opacity", text="Opacity")
+                layout.separator()
+                for param in item.kind_params:
+                    layout.prop(param, "value", text=param.label, slider=True)
+                return
             draw_material_mask_item(layout, context, item)
             return
 
         layout.prop(layer, "opacity", text="Opacity")
+        # A filter has no map or channel records: what it is told is the parameters of its kind.
+        if layer.source == 'FILTER':
+            layout.separator()
+            for param in layer.kind_params:
+                layout.prop(param, "value", text=param.label, slider=True)
+            # The channels it works in, switched like a layer's; Base Color is on to start with.
+            layout.separator()
+            draw_material_layer_channels(layout, context, owner, layer)
+            return
         # A folder holds what its rows hold, so it has no channel records to add: its per-channel
         # opacity is edited in the Outliner stack, and this tab keeps the overall one.
         if layer.source != 'STACK':

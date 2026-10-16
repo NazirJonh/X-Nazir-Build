@@ -136,6 +136,50 @@ inline bool paint_layer_effect_lays(const Material &ma,
          channel != PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 
+/**
+ * Whether the correction \a effect is a filter: it changes the colour the row has so far instead of
+ * laying a map or a flat colour over it. A filter lays no coverage, so it is deliberately not part
+ * of #paint_layer_effect_lays: it never makes a row take part in a channel or keeps an empty row
+ * alive.
+ */
+inline bool paint_layer_effect_is_filter(const MaterialPaintLayer &effect)
+{
+  return effect.source == MA_PAINT_LAYER_SOURCE_FILTER;
+}
+
+/**
+ * Whether the filter \a effect (a correction or an adjustment) changes the colour in \a channel.
+ * The channels a filter works in are the live records of its row, the same switches a layer has:
+ * the record carries no map, only the choice. A tangent normal is not a colour a per-channel
+ * function may touch, so Normal is left alone whatever the record says. The one rule for the
+ * generator, the CPU adapter and the topology hash.
+ */
+inline bool paint_layer_effect_filters(const Material &ma,
+                                       const MaterialPaintLayer &effect,
+                                       const int channel)
+{
+  return paint_layer_effect_is_filter(effect) && !paint_layer_channel_filtered(ma, channel) &&
+         channel != PAINT_MATERIAL_CHANNEL_NORMAL &&
+         paint_layer_channel_live(paint_layer_channel_find(effect, channel));
+}
+
+/**
+ * Whether \a row is an adjustment: a filter that is a row of the stack and works on the stack below
+ * it, with the row's own opacity, blend and mask, instead of on a row's colour.
+ */
+inline bool paint_layer_row_is_adjustment(const MaterialPaintLayer &row)
+{
+  return row.source == MA_PAINT_LAYER_SOURCE_FILTER && row.role == MA_PAINT_LAYER_ROLE_LAYER;
+}
+
+/** Whether the adjustment \a row changes the stack in \a channel; the rule of a filter. */
+inline bool paint_layer_adjustment_acts(const Material &ma,
+                                        const MaterialPaintLayer &row,
+                                        const int channel)
+{
+  return paint_layer_row_is_adjustment(row) && paint_layer_effect_filters(ma, row, channel);
+}
+
 /** The name a correction goes by in generated sockets when it has none of its own. */
 inline const char *paint_layer_effect_label(const MaterialPaintLayer &effect)
 {
@@ -168,7 +212,8 @@ inline bool paint_layer_row_participates(const Material &ma,
                                          const int channel)
 {
   return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) ||
-         paint_layer_effects_lay(ma, layer, channel);
+         paint_layer_effects_lay(ma, layer, channel) ||
+         paint_layer_adjustment_acts(ma, layer, channel);
 }
 
 /**
@@ -196,6 +241,11 @@ inline bool paint_layer_row_empty_base(const Material &ma,
 inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
 {
   if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+    return true;
+  }
+  /* A filter item changes the coverage built so far: it has no map or grey of its own and so no
+   * record, and what it changes is the opacity's business. */
+  if (item.source == MA_PAINT_LAYER_SOURCE_FILTER) {
     return true;
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(

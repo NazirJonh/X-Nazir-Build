@@ -34,7 +34,10 @@
 #include "BKE_paint_material_composite.hh"
 
 #include "BLI_index_range.hh"
+#include <algorithm>
+
 #include "BLI_math_base.h"
+#include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_ustring.hh"
@@ -289,7 +292,48 @@ class GraphInterpreter {
                   divisor.b != 0.0f ? vector.b / divisor.b : 0.0f,
                   1.0f};
         }
+        if (ELEM(node.custom1, NODE_VECTOR_MATH_MINIMUM, NODE_VECTOR_MATH_MAXIMUM)) {
+          const RGBA other = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          const bool smaller = node.custom1 == NODE_VECTOR_MATH_MINIMUM;
+          return {smaller ? std::min(vector.r, other.r) : std::max(vector.r, other.r),
+                  smaller ? std::min(vector.g, other.g) : std::max(vector.g, other.g),
+                  smaller ? std::min(vector.b, other.b) : std::max(vector.b, other.b),
+                  1.0f};
+        }
         return {vector.r, vector.g, vector.b, 1.0f};
+      }
+      case SH_NODE_HUE_SAT: {
+        /* The node's own function, written out here so the CPU filter is not its own witness. */
+        const RGBA color = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const float hue = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Hue"_ustr)).r;
+        const float saturation =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Saturation"_ustr)).r;
+        const float value =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Value"_ustr)).r;
+        const float fac = clamp_f(
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Fac"_ustr)).r, 0.0f, 1.0f);
+        const float in[3] = {color.r, color.g, color.b};
+        float hsv[3];
+        rgb_to_hsv_v(in, hsv);
+        const float turned = hsv[0] + hue + 0.5f;
+        hsv[0] = turned - floorf(turned);
+        hsv[1] = clamp_f(hsv[1] * saturation, 0.0f, 1.0f);
+        hsv[2] *= value;
+        float rgb[3];
+        hsv_to_rgb_v(hsv, rgb);
+        auto mixed = [&](const int i) { return in[i] + (std::max(rgb[i], 0.0f) - in[i]) * fac; };
+        return {mixed(0), mixed(1), mixed(2), color.a};
+      }
+      case SH_NODE_GAMMA: {
+        /* A positive component is raised to the exponent, any other is left as it is. */
+        const RGBA color = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Color"_ustr));
+        const float gamma =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Gamma"_ustr)).r;
+        const auto raise = [&](const float value) {
+          return value > 0.0f ? powf(value, gamma) : value;
+        };
+        return {raise(color.r), raise(color.g), raise(color.b), color.a};
       }
       default:
         return {};

@@ -305,6 +305,40 @@ TEST_F(PaintLayersDescription, kind_registry_describes_the_built_in_kinds)
   EXPECT_EQ(paint_layer_kind_of(*row), nullptr);
 }
 
+TEST_F(PaintLayersDescription, add_policy_makes_a_filter_correction_on_the_row_it_hangs_on)
+{
+  Material &ma = *BKE_material_add(bmain, "FilterAddMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Filter;
+  params.anchor = row;
+  params.filter = MA_PAINT_LAYER_FILTER_INVERT;
+  MaterialPaintLayer *first = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(first->source, MA_PAINT_LAYER_SOURCE_FILTER);
+  EXPECT_EQ(first->kind_subtype, MA_PAINT_LAYER_FILTER_INVERT);
+  EXPECT_STREQ(first->name, "Invert 1");
+  EXPECT_EQ(BLI_listbase_count(&row->effects), 1);
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*first));
+
+  /* An Add aimed at the filter means another one on the same row. */
+  params.anchor = first;
+  MaterialPaintLayer *second = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(second, nullptr);
+  EXPECT_STREQ(second->name, "Invert 2");
+  EXPECT_EQ(BLI_listbase_count(&row->effects), 2);
+
+  /* A filter this build does not know adds nothing. */
+  params.filter = 99;
+  EXPECT_EQ(BKE_paint_layers_add_with_policy(ma, params), nullptr);
+  Vector<PaintLayersIssue> issues;
+  BKE_paint_layers_issues_get(ma, issues);
+  EXPECT_TRUE(issues.is_empty());
+}
+
 TEST_F(PaintLayersDescription, maps_collect_reads_nested_rows_once)
 {
   Material *ma = BKE_material_add(bmain, "CollectMat");
@@ -811,6 +845,39 @@ static std::string rna_paint_layer_marker(PointerRNA &layer_ptr)
 {
   PropertyRNA *prop = RNA_struct_find_property(&layer_ptr, "marker");
   return RNA_property_string_get(&layer_ptr, prop);
+}
+
+TEST_F(PaintLayersDescription, rna_lists_the_parameters_of_a_filter_and_clamps_an_edit)
+{
+  Material *ma = BKE_material_add(bmain, "RnaParamMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "A", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *levels = BKE_paint_layers_filter_add(
+      *ma, row, MA_PAINT_LAYER_FILTER_LEVELS);
+  ASSERT_NE(levels, nullptr);
+
+  PointerRNA layer_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, levels);
+  PropertyRNA *params = RNA_struct_find_property(&layer_ptr, "kind_params");
+  ASSERT_NE(params, nullptr);
+  /* Listed before any edit, with the schema's range as the UI data. */
+  EXPECT_EQ(RNA_property_collection_length(&layer_ptr, params), 5);
+
+  PointerRNA gamma_ptr;
+  ASSERT_TRUE(RNA_property_collection_lookup_string(&layer_ptr, params, "gamma", &gamma_ptr));
+  PropertyRNA *value = RNA_struct_find_property(&gamma_ptr, "value");
+  PropertyRNA *label = RNA_struct_find_property(&gamma_ptr, "label");
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(RNA_property_string_get(&gamma_ptr, label), "Gamma");
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&gamma_ptr, value), 1.0f);
+
+  RNA_property_float_set(&gamma_ptr, value, 50.0f);
+  EXPECT_FLOAT_EQ(RNA_property_float_get(&gamma_ptr, value), 10.0f);
+  EXPECT_FLOAT_EQ(paint_layer_kind_param_get(*levels, PAINT_LAYER_LEVELS_GAMMA), 10.0f);
+
+  /* A row with no parameters lists none. */
+  PointerRNA row_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, row);
+  EXPECT_EQ(RNA_property_collection_length(&row_ptr, RNA_struct_find_property(&row_ptr, "kind_params")),
+            0);
 }
 
 TEST_F(PaintLayersDescription, rna_paint_layers_collection_is_registered)

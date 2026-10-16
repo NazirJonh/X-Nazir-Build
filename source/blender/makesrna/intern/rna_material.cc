@@ -131,6 +131,17 @@ const EnumPropertyItem rna_enum_material_paint_layers_image_size_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_items[] = {
+    {MA_PAINT_COMPOSITE_GPU,
+     "GPU",
+     0,
+     "GPU",
+     "Shade the Image Editor preview with compute shaders (falls back to the CPU for rows they "
+     "cannot lay)"},
+    {MA_PAINT_COMPOSITE_CPU, "CPU", 0, "CPU", "Shade the Image Editor preview on the CPU"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }
 
 #ifdef RNA_RUNTIME
@@ -3658,6 +3669,14 @@ void RNA_def_material(BlenderRNA *brna)
                            "Image Size",
                            "Width and height of the maps created for this material's layers, "
                            "masks and fills; existing maps keep their size");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "paint_layers_composite_device", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_composite_device");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layers_composite_device_items);
+  RNA_def_property_ui_text(prop,
+                           "Image Editor Composite",
+                           "What shades the Combined and channel previews in the Image Editor");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
   prop = RNA_def_property(srna, "paint_layers_channels", PROP_ENUM, PROP_NONE);

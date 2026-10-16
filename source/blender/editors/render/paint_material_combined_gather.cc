@@ -678,7 +678,7 @@ void combined_preview_bake_ensure(const bContext &C, Material &ma)
  * the caller falls back to the CPU path instead of drawing something different.
  * \{ */
 
-/** Mirrors the flags of `image_engine_combined_layer_comp.glsl`. */
+/** Mirrors the flags of `image_engine_combined.bsl.hh`. */
 static constexpr int gpu_layer_init = 1;
 static constexpr int gpu_layer_has_map = 2;
 static constexpr int gpu_layer_alpha_coverage = 4;
@@ -706,14 +706,17 @@ static constexpr int gpu_mask_init = 0;
 static constexpr int gpu_mask_item = 1;
 static constexpr int gpu_mask_map = 2;
 
-bool combined_preview_gpu_enabled()
+bool combined_preview_gpu_enabled(const Material *ma)
 {
-  /* On unless `BLENDER_PBR_GPU_COMBINED=0`: a way to compare with, or fall back to, the CPU path. */
-  static const bool enabled = []() {
+  if (ma == nullptr || ma->paint_layers_composite_device != MA_PAINT_COMPOSITE_GPU) {
+    return false;
+  }
+  /* `BLENDER_PBR_GPU_COMBINED=0` forces the CPU path for every material, a developer comparison. */
+  static const bool env_allows = []() {
     const char *env = std::getenv("BLENDER_PBR_GPU_COMBINED");
     return env == nullptr || std::atoi(env) != 0;
   }();
-  return enabled;
+  return env_allows;
 }
 
 /**
@@ -724,8 +727,9 @@ bool combined_preview_gpu_enabled()
 static const char *gpu_last_reason = nullptr;
 
 /* The developer check of combined_preview_gpu_verify: whether the frame being shaded is one it will
- * compare, and the channel accumulators kept for it so a difference can be traced to a channel. Off
- * unless BLENDER_PBR_GPU_VERIFY=1: it shades the whole canvas on the CPU. */
+ * compare, and the channel accumulators kept for it so a difference can be traced to a channel.
+ * TEMPORARY: on unless BLENDER_PBR_GPU_VERIFY=0, for a parity test session; it shades the whole
+ * canvas on the CPU. Restore to opt-in (`env != nullptr && atoi(env) != 0`) afterwards. */
 static bool gpu_verify_due = false;
 static std::array<Vector<float>, int(combined_shading_channels.size())> gpu_verify_channels;
 
@@ -733,7 +737,7 @@ static bool gpu_verify_enabled()
 {
   static const bool enabled = []() {
     const char *env = std::getenv("BLENDER_PBR_GPU_VERIFY");
-    return env != nullptr && std::atoi(env) != 0;
+    return env == nullptr || std::atoi(env) != 0;
   }();
   return enabled;
 }
@@ -786,8 +790,10 @@ static const char *gpu_layer_unsupported_reason(const PaintMaterialCompositeImag
 
 /**
  * The GPU texture of \a image read through \a image_user (null selects the default), and whether it
- * stores premultiplied colour, which is exactly when the CPU decode straightens the same buffer.
- * Null when the image has no GPU texture.
+ * stores premultiplied colour, by the rule the texture upload used. The upload premultiplies a byte
+ * buffer (assumed straight) and straightens a float one (assumed premultiplied) exactly when it
+ * stores premultiplied, so dividing by alpha gives the straight colour `composite_decode_tile`
+ * decodes. Null when the image has no GPU texture.
  */
 static gpu::Texture *gpu_map_texture(Image *image,
                                      const ImageUser *image_user,
@@ -840,6 +846,29 @@ static void gpu_mapping_setup(const PaintMaterialCompositeMapping &mapping,
   r_scale = float2(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
                    BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]));
   r_rotation = float2(std::cos(mapping.rotation), std::sin(mapping.rotation));
+}
+
+/* Plain pointers rather than #gpu::StaticShader: that frees from a static destructor, after the GPU
+ * context is gone. The image engine frees these while its context is still current. */
+static struct {
+  gpu::Shader *layer = nullptr;
+  gpu::Shader *mask = nullptr;
+  gpu::Shader *correction = nullptr;
+  gpu::Shader *folder = nullptr;
+  gpu::Shader *display = nullptr;
+  gpu::Shader *shade = nullptr;
+  bool created = false;
+} gpu_shaders;
+
+void combined_preview_gpu_free()
+{
+  GPU_SHADER_FREE_SAFE(gpu_shaders.layer);
+  GPU_SHADER_FREE_SAFE(gpu_shaders.mask);
+  GPU_SHADER_FREE_SAFE(gpu_shaders.correction);
+  GPU_SHADER_FREE_SAFE(gpu_shaders.folder);
+  GPU_SHADER_FREE_SAFE(gpu_shaders.display);
+  GPU_SHADER_FREE_SAFE(gpu_shaders.shade);
+  gpu_shaders.created = false;
 }
 
 bool combined_preview_gpu_pass_supported(const int pass)
@@ -904,22 +933,21 @@ bool combined_preview_gpu_update(const Material &ma,
 
   /* Created once, successful or not: a shader that fails to compile would otherwise be compiled
    * and logged again on every frame. */
-  static gpu::Shader *layer_shader = nullptr;
-  static gpu::Shader *mask_shader = nullptr;
-  static gpu::Shader *correction_shader = nullptr;
-  static gpu::Shader *folder_shader = nullptr;
-  static gpu::Shader *display_shader = nullptr;
-  static gpu::Shader *shade_shader = nullptr;
-  static bool shaders_created = false;
-  if (!shaders_created) {
-    shaders_created = true;
-    layer_shader = GPU_shader_create_from_info_name("image_engine_combined_layer");
-    mask_shader = GPU_shader_create_from_info_name("image_engine_combined_mask");
-    correction_shader = GPU_shader_create_from_info_name("image_engine_combined_correction");
-    folder_shader = GPU_shader_create_from_info_name("image_engine_combined_folder");
-    display_shader = GPU_shader_create_from_info_name("image_engine_combined_display");
-    shade_shader = GPU_shader_create_from_info_name("image_engine_combined_shade");
+  if (!gpu_shaders.created) {
+    gpu_shaders.created = true;
+    gpu_shaders.layer = GPU_shader_create_from_info_name("image_engine_combined_layer");
+    gpu_shaders.mask = GPU_shader_create_from_info_name("image_engine_combined_mask");
+    gpu_shaders.correction = GPU_shader_create_from_info_name("image_engine_combined_correction");
+    gpu_shaders.folder = GPU_shader_create_from_info_name("image_engine_combined_folder");
+    gpu_shaders.display = GPU_shader_create_from_info_name("image_engine_combined_display");
+    gpu_shaders.shade = GPU_shader_create_from_info_name("image_engine_combined_shade");
   }
+  gpu::Shader *layer_shader = gpu_shaders.layer;
+  gpu::Shader *mask_shader = gpu_shaders.mask;
+  gpu::Shader *correction_shader = gpu_shaders.correction;
+  gpu::Shader *folder_shader = gpu_shaders.folder;
+  gpu::Shader *display_shader = gpu_shaders.display;
+  gpu::Shader *shade_shader = gpu_shaders.shade;
   if (layer_shader == nullptr || mask_shader == nullptr || correction_shader == nullptr ||
       folder_shader == nullptr || display_shader == nullptr || shade_shader == nullptr)
   {

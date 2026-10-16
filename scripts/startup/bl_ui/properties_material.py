@@ -720,6 +720,27 @@ class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
         layout.prop(owner, "paint_layers_image_size")
 
 
+class LAYER_MATERIAL_PT_advanced(LayerMaterialButtonsPanel, Panel):
+    """Settings that change how the stack is computed rather than what it contains."""
+
+    bl_idname = "LAYER_MATERIAL_PT_advanced"
+    bl_label = "Advanced"
+    bl_parent_id = "LAYER_MATERIAL_PT_channels"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return cls._owner_material(context) is not None
+
+    def draw(self, context):
+        owner = self._owner_material(context)
+        if owner is None:
+            return
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(owner, "paint_layers_composite_device")
+
+
 class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):
     """The owner material's global paint channel set: which channels the stack works with.
 
@@ -768,6 +789,7 @@ classes = (
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_mapping,
     LAYER_MATERIAL_PT_channels,
+    LAYER_MATERIAL_PT_advanced,
     LAYER_MATERIAL_PT_active_channel,
 )
 

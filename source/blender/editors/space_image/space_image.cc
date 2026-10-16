@@ -1111,7 +1111,11 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
 
   /* Draw Meta data of the image isn't added to the DrawManager as it is
    * used in other areas as well. */
-  if (sima->overlay.flag & SI_OVERLAY_SHOW_OVERLAYS && sima->flag & SI_DRAW_METADATA) {
+  /* Not for a preview the GPU draws: acquiring its buffer would shade the whole preview on the CPU
+   * on every redraw just to read metadata. */
+  if (sima->overlay.flag & SI_OVERLAY_SHOW_OVERLAYS && sima->flag & SI_DRAW_METADATA &&
+      !ED_space_image_has_gpu_combined(sima))
+  {
     void *lock;
     /* #ED_space_image_get_zoom temporarily locks the image, so this needs to be done before
      * the image is locked when calling #ED_space_image_acquire_buffer. */

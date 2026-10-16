@@ -101,6 +101,12 @@ enum eMaterialPaintLayersFlag : short {
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
 
+/** #Material::paint_layers_composite_device: what shades the Image Editor's 2D preview. */
+enum eMaterialPaintCompositeDevice : char {
+  MA_PAINT_COMPOSITE_GPU = 0,
+  MA_PAINT_COMPOSITE_CPU = 1,
+};
+
 /* ramps */
 enum eMaterial_RampBlend : int {
   MA_RAMP_BLEND = 0,
@@ -785,7 +791,9 @@ struct Material {
    * follow #PaintModeSettings::new_channel_image_size.
    */
   int16_t paint_layers_image_size = 4096;
-  char _pad_paint_layers[2] = {};
+  /** #eMaterialPaintCompositeDevice. Zero is the GPU so that files saved before it read as GPU. */
+  char paint_layers_composite_device = 0;
+  char _pad_paint_layers[1] = {};
 };
 
 }  // namespace blender

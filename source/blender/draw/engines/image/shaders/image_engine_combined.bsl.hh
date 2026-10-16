@@ -229,7 +229,11 @@ float3 normal_combine(float3 base_encoded, float3 detail_encoded)
 {
   float3 base = base_encoded * 2.0f - 1.0f;
   float3 detail = detail_encoded * 2.0f - 1.0f;
-  float3 combined = normalize(float3(base.x + detail.x, base.y + detail.y, base.z * detail.z));
+  float3 combined = float3(base.x + detail.x, base.y + detail.y, base.z * detail.z);
+  /* A zero vector stays zero, as `math::normalize` has it; GLSL would make it NaN. */
+  if (dot(combined, combined) > 0.0f) {
+    combined = normalize(combined);
+  }
   return combined * 0.5f + 0.5f;
 }
 
@@ -788,7 +792,10 @@ void display_comp([[resource_table]] DisplayResources &srt,
     imageStore(srt.output_img, texel, float4(0.0f));
     return;
   }
-  imageStore(srt.output_img, texel, texelFetch(srt.channel_tx, texel, 0));
+  /* Clamped like the byte composite the CPU shows. */
+  imageStore(srt.output_img,
+             texel,
+             clamp(texelFetch(srt.channel_tx, texel, 0), float4(0.0f), float4(1.0f)));
 }
 
 /** \} */
@@ -854,15 +861,17 @@ void shade_comp([[resource_table]] ShadeResources &srt,
     return;
   }
 
-  float4 base = texelFetch(srt.base_tx, texel, 0);
+  /* The CPU shades the byte composite of each channel, so a stack that overshoots (Add, Subtract)
+   * is already clamped to [0, 1] there; the accumulators here are not. */
+  float4 base = clamp(texelFetch(srt.base_tx, texel, 0), float4(0.0f), float4(1.0f));
   float metallic = clamp(texelFetch(srt.metallic_tx, texel, 0).x, 0.0f, 1.0f);
   float roughness = clamp(texelFetch(srt.roughness_tx, texel, 0).x, 0.0f, 1.0f);
-  float specular = texelFetch(srt.specular_tx, texel, 0).x;
-  float ao_map = texelFetch(srt.ao_tx, texel, 0).x;
-  float alpha = texelFetch(srt.alpha_tx, texel, 0).x;
-  float4 emission = texelFetch(srt.emission_tx, texel, 0);
+  float specular = clamp(texelFetch(srt.specular_tx, texel, 0).x, 0.0f, 1.0f);
+  float ao_map = clamp(texelFetch(srt.ao_tx, texel, 0).x, 0.0f, 1.0f);
+  float alpha = clamp(texelFetch(srt.alpha_tx, texel, 0).x, 0.0f, 1.0f);
+  float4 emission = clamp(texelFetch(srt.emission_tx, texel, 0), float4(0.0f), float4(1.0f));
 
-  float4 encoded = texelFetch(srt.normal_tx, texel, 0);
+  float4 encoded = clamp(texelFetch(srt.normal_tx, texel, 0), float4(0.0f), float4(1.0f));
   float3 normal = (srt.normal_is_encoded != 0) ? encoded.xyz * 2.0f - 1.0f : encoded.xyz;
   normal = (dot(normal, normal) > 0.0f) ? normalize(normal) : float3(0.0f, 0.0f, 1.0f);
 

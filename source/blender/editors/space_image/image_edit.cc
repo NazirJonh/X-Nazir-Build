@@ -481,8 +481,16 @@ bool ED_space_image_has_composite(const SpaceImage *sima)
 
 bool ED_space_image_has_gpu_combined(const SpaceImage *sima)
 {
-  return ed::material_combined::combined_preview_gpu_enabled() && ED_space_image_has_composite(sima) &&
-         ed::material_combined::combined_preview_gpu_pass_supported(sima->material_paint_pass);
+  if (!ED_space_image_has_composite(sima) ||
+      !ed::material_combined::combined_preview_gpu_pass_supported(sima->material_paint_pass))
+  {
+    return false;
+  }
+  /* #G_MAIN for the same reason as in #ED_space_image_acquire_buffer; the lookup is memoized. The
+   * stand-in buffer stands for a layered stack only, so any other material takes the CPU path. */
+  const Material *ma = ED_space_image_composite_material_get(G_MAIN, sima->image);
+  return ma != nullptr && BKE_paint_layers_is_layered(*ma) &&
+         ed::material_combined::combined_preview_gpu_enabled(ma);
 }
 
 ImBuf *ED_space_image_gpu_combined_stand_in()

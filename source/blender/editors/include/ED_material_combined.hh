@@ -93,11 +93,16 @@ ImBuf *combined_preview_ensure(Main &bmain,
 void combined_preview_bake_ensure(const bContext &C, Material &ma);
 
 /**
- * Whether the GPU Combined path is switched on. On by default; the environment variable
- * `BLENDER_PBR_GPU_COMBINED=0` turns it off. Refusals and activation are reported through the
- * perf log (`BLENDER_PBR_PERF`).
+ * Whether the Image Editor preview of \a ma is to be shaded on the GPU: the material's
+ * #Material::paint_layers_composite_device (the GPU unless set otherwise). The environment variable
+ * `BLENDER_PBR_GPU_COMBINED=0` is kept as a developer override that forces the CPU for every
+ * material, to compare against the GPU without touching files. Refusals and activation are reported
+ * through the perf log (`BLENDER_PBR_PERF`).
  */
-bool combined_preview_gpu_enabled();
+bool combined_preview_gpu_enabled(const Material *ma);
+
+/** Free the compute shaders of the GPU path. Needs the GPU context current; called at draw exit. */
+void combined_preview_gpu_free();
 
 /**
  * Shade the Combined preview of the layered material \a ma straight into \a output on

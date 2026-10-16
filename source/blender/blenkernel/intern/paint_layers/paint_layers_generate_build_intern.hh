@@ -99,6 +99,39 @@ struct ChainEnd {
   NodeOutput alpha;
 };
 
+/**
+ * What a kind emits as the source of a row in one channel: the straight colour, the coverage that
+ * colour has of its own, and the content alpha of a channel that tracks one. A null socket is a
+ * part the kind has not got: no coverage means it covers fully, no alpha that the channel tracks
+ * none. A null colour is a failure, and nothing was left behind.
+ */
+struct KindEmitResult {
+  NodeOutput color;
+  NodeOutput coverage;
+  NodeOutput content_alpha;
+};
+
+/** What a row's group offers its kind to build its source from. */
+struct RowEmitContext {
+  bNodeTree &tree;
+  LayerGroup &group;
+  const MaterialPaintLayer &layer;
+  int channel;
+  /** The row is a folder, an adjustment, or a Paint row kept only for its corrections. */
+  bool folder;
+  bool adjustment;
+  bool empty_base;
+  /** The channel tracks a content alpha, so the group has the sockets below. */
+  bool track_alpha;
+  /** The row's record in the channel; null for a folder and an adjustment. */
+  const MaterialPaintLayerChannel *record;
+  /** The group input sockets of what is below, and of a folder's contents. */
+  bNodeSocket *below;
+  bNodeSocket *below_alpha;
+  bNodeSocket *folder_color;
+  bNodeSocket *folder_alpha;
+};
+
 /** The blend of one row over what is below: a Normal Combine instance or a Mix node. */
 struct BlendNode {
   bNode *node = nullptr;
@@ -178,6 +211,13 @@ class PaintLayersTreeBuilder {
                   int channel,
                   NodeOutput &content,
                   bool full_strength = false);
+
+  /**
+   * The source of the row \a ctx names, built into its group: the one place the generator tells
+   * the kinds of a row apart. A kind added later is a branch here and nowhere else in the row's
+   * build.
+   */
+  KindEmitResult row_source_emit(const RowEmitContext &ctx);
 
   /**
    * The instance sockets of a row whose group was kept unchanged: its nodes and interface already

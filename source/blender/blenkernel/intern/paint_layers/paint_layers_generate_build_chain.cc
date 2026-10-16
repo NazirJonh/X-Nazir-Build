@@ -983,6 +983,105 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   return true;
 }
 
+KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx)
+{
+  bNodeTree &tree = ctx.tree;
+  LayerGroup &group = ctx.group;
+  bNode *group_input = group.group_input;
+  KindEmitResult out;
+
+  if (ctx.folder) {
+    /* The straightened result of what the folder holds. */
+    out.color = {group_input, ctx.folder_color};
+    out.content_alpha = {group_input, ctx.folder_alpha};
+  }
+  else if (ctx.adjustment) {
+    /* The filter at full strength over what is below; the row's factor and blend lay it. A filter
+     * changes the colour and nothing else: the alpha it lays is the one below. */
+    NodeOutput filtered = {group_input, ctx.below};
+    if (!this->filter_lay(tree, group, ctx.layer, ctx.channel, filtered, true)) {
+      return {};
+    }
+    out.color = filtered;
+    out.content_alpha = {group_input, ctx.below_alpha};
+  }
+  else if (ctx.empty_base) {
+    /* An empty base: the corrections replace the colour wherever they cover, so its own is a flat
+     * zero with a coverage of zero. */
+    bNode *zero = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
+    bNodeSocket *zero_out = (zero != nullptr) ? socket_out(*zero, "Color") : nullptr;
+    if (zero_out == nullptr) {
+      return {};
+    }
+    if (zero_out->default_value != nullptr) {
+      zero_v4(static_cast<bNodeSocketValueRGBA *>(zero_out->default_value)->value);
+    }
+    grid_.place(*zero, layout::Column::Source, 0);
+    out.color = {zero, zero_out};
+
+    bNode *no_coverage = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+    bNodeSocket *no_coverage_out = (no_coverage != nullptr) ? socket_out(*no_coverage, "Value") :
+                                                              nullptr;
+    if (no_coverage_out == nullptr) {
+      return {};
+    }
+    if (no_coverage_out->default_value != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(no_coverage_out->default_value)->value = 0.0f;
+    }
+    grid_.place(*no_coverage, layout::Column::Source, 1);
+    out.coverage = {no_coverage, no_coverage_out};
+    out.content_alpha = out.coverage;
+  }
+  else if (ctx.record != nullptr && ctx.record->image != nullptr) {
+    /* A map covers by its own alpha, so a texel it leaves transparent shows what is below. */
+    bNode *map = this->image_map_node_add(tree, *ctx.record->image);
+    if (map == nullptr) {
+      return {};
+    }
+    /* Why grid: the row source opens the Source column at the origin. */
+    grid_.place(*map, layout::Column::Source, 0);
+    Vector<bNode *> source_nodes;
+    source_nodes.append(map);
+    layout::frame_add(tree, "Source", source_nodes);
+    out.color = {map, socket_out(*map, "Color")};
+    if (bNodeSocket *map_alpha = socket_out(*map, "Alpha")) {
+      out.coverage = {map, map_alpha};
+      out.content_alpha = out.coverage;
+    }
+  }
+  else {
+    /* The constant the row's group takes as an input; it covers fully, and its alpha is an input
+     * of its own. */
+    bNodeTreeInterfaceSocket *const *fill_iface = nullptr;
+    if (Map<int, bNodeTreeInterfaceSocket *> *by_channel = fill_inputs_.lookup_ptr(&ctx.layer)) {
+      fill_iface = by_channel->lookup_ptr(ctx.channel);
+    }
+    if (fill_iface == nullptr) {
+      return {};
+    }
+    out.color = {group_input, group_input_socket(group, **fill_iface)};
+    if (Map<int, bNodeTreeInterfaceSocket *> *alpha_by_channel = fill_alpha_inputs_.lookup_ptr(
+            &ctx.layer))
+    {
+      if (bNodeTreeInterfaceSocket **alpha_iface = alpha_by_channel->lookup_ptr(ctx.channel)) {
+        out.content_alpha = {group_input, group_input_socket(group, **alpha_iface)};
+      }
+    }
+  }
+
+  if (out.color.socket == nullptr) {
+    return {};
+  }
+  /* A channel that tracks a content alpha needs the kind to have one; the rest has none. */
+  if (!ctx.track_alpha) {
+    out.content_alpha = {};
+  }
+  else if (out.content_alpha.socket == nullptr) {
+    return {};
+  }
+  return out;
+}
+
 RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
                                             LayerGroup &group,
                                             const int channel,
@@ -1119,120 +1218,29 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     }
   }
 
-  /* The row's source: its map, or the constant the row's group takes as an input. */
-  bNode *source_node = nullptr;
-  bNodeSocket *source = nullptr;
-  bNode *map_node = nullptr;
-  Vector<bNode *> source_nodes;
-  if (folder) {
-    source_node = group_input;
-    source = folder_color;
-  }
-  else if (adjustment) {
-    /* The filter at full strength over what is below; the row's factor and blend lay it. */
-    NodeOutput filtered = {group_input, below};
-    if (!this->filter_lay(tree, group, layer, channel, filtered, true)) {
-      return {};
-    }
-    source_node = filtered.node;
-    source = filtered.socket;
-  }
-  else if (empty_base) {
-    /* An empty base: the corrections replace the colour wherever they cover, so its own is a flat
-     * zero. */
-    bNode *zero = bke::node_add_static_node(nullptr, tree, SH_NODE_RGB);
-    bNodeSocket *zero_out = (zero != nullptr) ? socket_out(*zero, "Color") : nullptr;
-    if (zero_out == nullptr) {
-      return {};
-    }
-    if (zero_out->default_value != nullptr) {
-      zero_v4(static_cast<bNodeSocketValueRGBA *>(zero_out->default_value)->value);
-    }
-    grid_.place(*zero, layout::Column::Source, 0);
-    source_node = zero;
-    source = zero_out;
-  }
-  else if (record->image != nullptr) {
-    bNode *map = this->image_map_node_add(tree, *record->image);
-    if (map == nullptr) {
-      return {};
-    }
-    /* Why grid: the row source opens the Source column at the origin. */
-    grid_.place(*map, layout::Column::Source, 0);
-    source_nodes.append(map);
-    source_node = map;
-    source = socket_out(*map, "Color");
-    map_node = map;
-  }
-  else {
-    bNodeTreeInterfaceSocket *const *fill_iface = nullptr;
-    if (Map<int, bNodeTreeInterfaceSocket *> *by_channel = fill_inputs_.lookup_ptr(&layer)) {
-      fill_iface = by_channel->lookup_ptr(channel);
-    }
-    if (fill_iface == nullptr) {
-      return {};
-    }
-    source_node = group_input;
-    source = group_input_socket(group, **fill_iface);
-  }
-  if (source_node == nullptr || source == nullptr) {
+  /* What the row's own kind lays: its colour, the coverage that colour has and, in a channel that
+   * tracks one, its content alpha. The one place that tells the kinds apart for a row. */
+  RowEmitContext emit_context{tree,
+                              group,
+                              layer,
+                              channel,
+                              folder,
+                              adjustment,
+                              empty_base,
+                              track_alpha,
+                              record,
+                              below,
+                              below_alpha,
+                              folder_color,
+                              folder_alpha};
+  const KindEmitResult emitted = this->row_source_emit(emit_context);
+  if (emitted.color.socket == nullptr) {
     return {};
   }
-  if (!source_nodes.is_empty()) {
-    layout::frame_add(tree, "Source", source_nodes);
-  }
-
-  /* The coverage the row's own content has: its map's alpha, so a texel the map leaves transparent
-   * shows what is below; zero for an empty base; none for a constant, which covers fully. */
-  NodeOutput row_coverage;
-  if (map_node != nullptr) {
-    if (bNodeSocket *map_alpha = socket_out(*map_node, "Alpha")) {
-      row_coverage = {map_node, map_alpha};
-    }
-  }
-  else if (empty_base) {
-    bNode *zero = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
-    bNodeSocket *zero_out = (zero != nullptr) ? socket_out(*zero, "Value") : nullptr;
-    if (zero_out == nullptr) {
-      return {};
-    }
-    if (zero_out->default_value != nullptr) {
-      static_cast<bNodeSocketValueFloat *>(zero_out->default_value)->value = 0.0f;
-    }
-    grid_.place(*zero, layout::Column::Source, 1);
-    row_coverage = {zero, zero_out};
-  }
-
-  /* The row's own content alpha: a folder's straightened one, a map's alpha, the empty base's
-   * zero, or the constant's alpha, which is an input of the group. */
-  NodeOutput content_alpha;
-  if (track_alpha) {
-    if (folder) {
-      content_alpha = {group_input, folder_alpha};
-    }
-    else if (adjustment) {
-      /* A filter changes the colour and nothing else: the alpha it lays is the one below. */
-      content_alpha = {group_input, below_alpha};
-    }
-    else if (map_node != nullptr) {
-      if (bNodeSocket *map_alpha = socket_out(*map_node, "Alpha")) {
-        content_alpha = {map_node, map_alpha};
-      }
-    }
-    else if (empty_base) {
-      content_alpha = row_coverage;
-    }
-    else if (Map<int, bNodeTreeInterfaceSocket *> *alpha_by_channel = fill_alpha_inputs_.lookup_ptr(
-                 &layer))
-    {
-      if (bNodeTreeInterfaceSocket **alpha_iface = alpha_by_channel->lookup_ptr(channel)) {
-        content_alpha = {group_input, group_input_socket(group, **alpha_iface)};
-      }
-    }
-    if (content_alpha.socket == nullptr) {
-      return {};
-    }
-  }
+  bNode *source_node = emitted.color.node;
+  bNodeSocket *source = emitted.color.socket;
+  NodeOutput row_coverage = emitted.coverage;
+  NodeOutput content_alpha = emitted.content_alpha;
 
   /* Content corrections lay their maps over the colour before the row's own blend, and raise the
    * coverage the row lays with. A folder's colour is the straightened result of what it holds and

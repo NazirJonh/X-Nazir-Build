@@ -108,6 +108,63 @@ static bool composite_channel_linear(const Span<PaintMaterialCompositeImageLayer
       image_layers, target, region, nullptr, bottom_color);
 }
 
+/** The parameters of \a row's kind in the schema order the evaluator reads them in. */
+template<size_t N> static void composite_filter_params(const MaterialPaintLayer &row, float (&r_params)[N])
+{
+  if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
+    for (const int i : IndexRange(std::min(kind->params_num, int(N)))) {
+      r_params[i] = paint_layer_kind_param_get(row, i);
+    }
+  }
+}
+
+/**
+ * Describe the source of the row \a layer (not a folder) in \a channel to the evaluator: the
+ * counterpart of the generator's #PaintLayersTreeBuilder::row_source_emit, which builds the same
+ * thing as nodes. False when the row takes no part, which the generator leaves out as well.
+ */
+static bool composite_row_source_describe(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          const int channel,
+                                          const bool isolating,
+                                          PaintMaterialCompositeImageLayer &out)
+{
+  if (paint_layer_row_is_adjustment(layer)) {
+    /* The filter of the stack below. Inside an isolating folder the generator leaves it out, as
+     * the accumulation there is partly covered and pre-multiplied. */
+    if (isolating || !paint_layer_adjustment_acts(ma, layer, channel)) {
+      return false;
+    }
+    out.adjustment_filter = layer.kind_subtype;
+    composite_filter_params(layer, out.adjustment_params);
+    return true;
+  }
+  if (!paint_layer_row_participates(ma, layer, channel)) {
+    return false;
+  }
+  if (paint_layer_row_empty_base(ma, layer, channel)) {
+    /* Only its corrections lay here: its own constant covers nothing, so the row starts from zero
+     * coverage and the corrections bring it in. */
+    out.has_constant_color = true;
+    out.empty_base = true;
+    return true;
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+  if (record->image != nullptr) {
+    out.color_image = record->image;
+    /* The description carries no per-node #ImageUser; the default one is what a plain map uses. */
+    out.color_iuser = nullptr;
+    /* A fresh paint map is transparent where nothing was painted; that texel must show the rows
+     * below rather than cover them with the map's black. */
+    out.color_alpha_coverage = true;
+    return true;
+  }
+  /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
+  copy_v4_v4(out.constant_color, record->value);
+  out.has_constant_color = true;
+  return true;
+}
+
 /**
  * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is
  * one entry carrying its children, which the evaluator composites in isolation; a folder nothing of
@@ -143,45 +200,8 @@ static void composite_image_layers_collect(const Material &ma,
       out.children.assign(std::make_move_iterator(children.begin()),
                           std::make_move_iterator(children.end()));
     }
-    else if (paint_layer_row_is_adjustment(layer)) {
-      /* The filter of the stack below. Inside an isolating folder the generator leaves it out, as
-       * the accumulation there is partly covered and pre-multiplied. */
-      if (isolating || !paint_layer_adjustment_acts(ma, layer, channel)) {
-        continue;
-      }
-      out.adjustment_filter = layer.kind_subtype;
-      if (const PaintLayerKindInfo *kind = paint_layer_kind_of(layer)) {
-        for (const int i : IndexRange(std::min(kind->params_num, int(std::size(out.adjustment_params)))))
-        {
-          out.adjustment_params[i] = paint_layer_kind_param_get(layer, i);
-        }
-      }
-    }
-    else {
-      const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-      if (!paint_layer_row_participates(ma, layer, channel)) {
-        continue;
-      }
-      if (paint_layer_row_empty_base(ma, layer, channel)) {
-        /* Only its corrections lay here: its own constant covers nothing, so the row starts from
-         * zero coverage and the corrections bring it in. */
-        out.has_constant_color = true;
-        out.empty_base = true;
-      }
-      else if (record->image != nullptr) {
-        out.color_image = record->image;
-        /* The description carries no per-node #ImageUser; the default one is what a plain map
-         * uses. */
-        out.color_iuser = nullptr;
-        /* A fresh paint map is transparent where nothing was painted; that texel must show the rows
-         * below rather than cover them with the map's black. */
-        out.color_alpha_coverage = true;
-      }
-      else {
-        /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
-        copy_v4_v4(out.constant_color, record->value);
-        out.has_constant_color = true;
-      }
+    else if (!composite_row_source_describe(ma, layer, channel, isolating, out)) {
+      continue;
     }
     out.blend = layer_channel_blend(layer, channel);
     out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
@@ -194,12 +214,7 @@ static void composite_image_layers_collect(const Material &ma,
       if (paint_layer_effect_filters(ma, effect, channel)) {
         PaintMaterialCompositeCorrection filter;
         filter.filter = effect.kind_subtype;
-        if (const PaintLayerKindInfo *kind = paint_layer_kind_of(effect)) {
-          for (const int i : IndexRange(std::min(kind->params_num, int(std::size(filter.filter_params)))))
-          {
-            filter.filter_params[i] = paint_layer_kind_param_get(effect, i);
-          }
-        }
+        composite_filter_params(effect, filter.filter_params);
         filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                          pass_through_scale;
         out.content_corrections.append(filter);
@@ -235,12 +250,7 @@ static void composite_image_layers_collect(const Material &ma,
           PaintMaterialCompositeMaskItem filter;
           filter.opacity = BKE_paint_layers_effective_opacity(mask);
           filter.filter = mask.kind_subtype;
-          if (const PaintLayerKindInfo *kind = paint_layer_kind_of(mask)) {
-            for (const int i : IndexRange(std::min(kind->params_num, int(std::size(filter.filter_params)))))
-            {
-              filter.filter_params[i] = paint_layer_kind_param_get(mask, i);
-            }
-          }
+          composite_filter_params(mask, filter.filter_params);
           out.mask_items.append(filter);
           continue;
         }

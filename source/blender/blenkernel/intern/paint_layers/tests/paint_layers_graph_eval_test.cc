@@ -10,6 +10,7 @@
  */
 
 #include <cmath>
+#include <cstring>
 
 #include "paint_layers_graph_eval_test_fixture.hh"
 
@@ -394,4 +395,156 @@ TEST_F(PaintLayersGraphEvalTest, nested_folder_order_matches_the_cpu)
   EXPECT_NEAR(restored.b, initial.b, 2e-3f);
   expect_graph_matches_cpu(channel);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name UV mapping
+ *
+ * A Fill's own map read through its Mapping node: the generated graph (a Texture Coordinate, a
+ * Mapping fed by the row's inputs, the Image Texture's Vector) against the CPU resample, for a set
+ * of offset / scale / rotation values that includes a mirror and a zoom.
+ * \{ */
+
+class PaintLayersMappingEvalTest : public PaintLayersGraphEvalTest {
+ public:
+  struct Case {
+    float offset[2];
+    float scale[2];
+    float rotation;
+  };
+
+  /** The values the cases walk through; each is an edit of values only. */
+  static Span<Case> cases()
+  {
+    static const Case all[] = {
+        {{0.0f, 0.0f}, {1.0f, 1.0f}, 0.0f},
+        {{0.1f, 0.2f}, {2.0f, 2.0f}, 0.0f},
+        {{0.0f, 0.0f}, {1.0f, 1.0f}, 0.7f},
+        {{0.3f, -0.15f}, {2.0f, 1.5f}, 1.2f},
+        {{0.0f, 0.0f}, {-1.0f, 1.0f}, 0.0f},
+        {{0.25f, 0.0f}, {0.5f, -2.0f}, 2.4f},
+    };
+    return all;
+  }
+
+  /** A 2x2 byte map of four distinct colours. */
+  Image *add_quad_image(const char *name)
+  {
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, 2, 2, name, 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    const uchar texels[4][4] = {
+        {220, 40, 30, 255}, {30, 200, 60, 255}, {40, 60, 230, 255}, {200, 170, 90, 255}};
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int i : IndexRange(4)) {
+      memcpy(pixels + i * 4, texels[i], 4);
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** A Fill row on top of the stack whose \a channel record is backed by \a image. */
+  MaterialPaintLayer *add_fill(const char *name,
+                               Image *image,
+                               const eMaterialPaintChannel channel =
+                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR)
+  {
+    MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, name, nullptr, PaintLayerPlace::Above);
+    EXPECT_NE(layer, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+    EXPECT_NE(BKE_paint_layers_channel_add(*ma, layer, channel), nullptr);
+    EXPECT_TRUE(BKE_paint_layers_channel_set_image(*ma, layer, channel, image));
+    return layer;
+  }
+
+  void case_apply(MaterialPaintLayer &row, const Case &test)
+  {
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, &row, test.offset));
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, &row, false));
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, &row, test.scale));
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, &row, test.rotation));
+  }
+};
+
+TEST_F(PaintLayersMappingEvalTest, a_mapped_fill_layer_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 10, 20, 30, 255));
+  MaterialPaintLayer *fill = add_fill("Fill", add_quad_image("Quad"));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  for (const Case &test : cases()) {
+    SCOPED_TRACE(::testing::Message() << "rotation=" << test.rotation);
+    case_apply(*fill, test);
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
+}
+
+TEST_F(PaintLayersMappingEvalTest, a_mapped_fill_correction_matches_the_cpu)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 90, 120, 30, 255));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, "C", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(
+                *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_quad_image("Quad")));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.7f));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  for (const Case &test : cases()) {
+    SCOPED_TRACE(::testing::Message() << "rotation=" << test.rotation);
+    case_apply(*correction, test);
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
+}
+
+TEST_F(PaintLayersMappingEvalTest, a_mapped_fill_mask_item_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 40, 40, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 60, 220, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_quad_image("MaskQuad")));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, item, true));
+  for (const Case &test : cases()) {
+    SCOPED_TRACE(::testing::Message() << "rotation=" << test.rotation);
+    case_apply(*item, test);
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
+}
+
+TEST_F(PaintLayersMappingEvalTest, a_mapped_fill_normal_follows_rotation_and_mirror_like_the_cpu)
+{
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  Image *flat = add_solid_image("Flat", 128, 128, 255, 255);
+  Image *detail = add_solid_image("Detail", 204, 128, 230, 255);
+  make_image_data(flat);
+  make_image_data(detail);
+  add_layer("Bottom", flat, channel);
+  MaterialPaintLayer *fill = add_fill("MappedNormal", detail, channel);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  for (const Case &test : cases()) {
+    SCOPED_TRACE(::testing::Message() << "rotation=" << test.rotation << " scale=" << test.scale[0]
+                                      << "," << test.scale[1]);
+    case_apply(*fill, test);
+    expect_graph_matches_cpu(channel, 5e-3f);
+  }
+}
+
+TEST_F(PaintLayersMappingEvalTest, an_unmapped_row_still_reads_the_pixel_directly)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 10, 20, 30, 255));
+  /* Support without the toggle: no Mapping, and both sides read the map where it is. */
+  MaterialPaintLayer *fill = add_fill("Fill", add_solid_image("Solid", 200, 100, 50, 255));
+  EXPECT_FALSE(BKE_paint_layers_mapping_applies(*ma, *fill));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

@@ -86,6 +86,13 @@ inline constexpr const char *INPUT_PARAM_PROP = "pbr_paint_layers_param";
 inline constexpr const char *ROLE_MASK_VALUE = "mask_value";
 /** #INPUT_ROLE_PROP value of a row's base mask opacity (enabled already folded in). */
 inline constexpr const char *ROLE_MASK_OPACITY = "mask_opacity";
+/** #INPUT_ROLE_PROP value of a row's UV mapping offset (a Vector input holding offset, 0). The
+ * marker is the row's own, whether a layer, a correction or a mask item. */
+inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";
+/** #INPUT_ROLE_PROP value of a row's UV mapping scale (a Vector input holding scale, 1). */
+inline constexpr const char *ROLE_MAPPING_SCALE = "mapping_scale";
+/** #INPUT_ROLE_PROP value of a row's UV mapping rotation (a Vector input holding 0, 0, angle). */
+inline constexpr const char *ROLE_MAPPING_ROTATION = "mapping_rotation";
 
 bNode *instance_find(const Material &ma, const bUUID &owner_uid);
 bNode *material_output_find(Material &ma);

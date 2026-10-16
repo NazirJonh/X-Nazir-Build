@@ -654,6 +654,51 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             draw_material_layer_channels(layout, context, owner, layer)
 
 
+class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
+    """UV mapping of the maps the shown row reads: a layer, a correction or a mask item.
+
+    Shown only while the row reads a repeatable map (RNA ``mapping_supported``, the one BKE
+    predicate the graph and the CPU share): a Fill with a map. The rotation turns the map lookup
+    around Z; the tangent-space vectors of a Normal map are rotated (and flipped by the scale sign)
+    to follow it.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_mapping"
+    bl_label = "Mapping"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def _shown_row(cls, context):
+        """The row the Layer tab edits: the shown mask item, or else the active row."""
+        owner, layer = cls._active_layer(context)
+        if owner is None or layer is None:
+            return None
+        item = cls._shown_mask_item(context, owner, layer)
+        return item if item is not None else layer
+
+    @classmethod
+    def poll(cls, context):
+        row = cls._shown_row(context)
+        return row is not None and row.mapping_supported
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        row = self._shown_row(context)
+        if row is None:
+            return
+
+        layout.prop(row, "mapping_enabled", text="Enabled")
+        col = layout.column()
+        col.enabled = row.mapping_enabled
+        col.prop(row, "mapping_offset", text="Offset")
+        sub = col.row(align=True)
+        sub.prop(row, "mapping_scale", text="Scale")
+        sub.prop(row, "mapping_scale_lock", text="", icon_only=True)
+        col.prop(row, "mapping_rotation", text="Rotation")
+
+
 class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
     """The settings of the layered material as a whole; its sections are sub-panels."""
 
@@ -720,6 +765,7 @@ classes = (
     BRUSH_MATERIAL_PT_viewport,
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
+    LAYER_MATERIAL_PT_mapping,
     LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_active_channel,
 )

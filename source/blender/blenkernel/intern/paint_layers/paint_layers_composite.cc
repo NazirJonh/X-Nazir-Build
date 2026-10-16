@@ -108,6 +108,25 @@ static bool composite_channel_linear(const Span<PaintMaterialCompositeImageLayer
       image_layers, target, region, nullptr, bottom_color);
 }
 
+/**
+ * Describe \a row's UV mapping to the evaluator for the map it reads in \a channel. A mapping that
+ * does not apply is left disabled, so the evaluator reads the map as it is.
+ */
+static void composite_mapping_describe(const Material &ma,
+                                       const MaterialPaintLayer &row,
+                                       const int channel,
+                                       PaintMaterialCompositeMapping &out)
+{
+  if (!BKE_paint_layers_mapping_applies(ma, row)) {
+    return;
+  }
+  out.enabled = true;
+  copy_v2_v2(out.offset, row.mapping.offset);
+  copy_v2_v2(out.scale, row.mapping.scale);
+  out.rotation = row.mapping.rotation;
+  out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+}
+
 /** The parameters of \a row's kind in the schema order the evaluator reads them in. */
 template<size_t N> static void composite_filter_params(const MaterialPaintLayer &row, float (&r_params)[N])
 {
@@ -157,6 +176,7 @@ static bool composite_row_source_describe(const Material &ma,
     /* A fresh paint map is transparent where nothing was painted; that texel must show the rows
      * below rather than cover them with the map's black. */
     out.color_alpha_coverage = true;
+    composite_mapping_describe(ma, layer, channel, out.mapping);
     return true;
   }
   /* A channel with no map: a flat value (it has some alpha, or the row would not take part). */
@@ -227,6 +247,7 @@ static void composite_image_layers_collect(const Material &ma,
       const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
       if (effect_record->image != nullptr) {
         correction.image = effect_record->image;
+        composite_mapping_describe(ma, effect, channel, correction.mapping);
       }
       else {
         /* Only a Fill correction lays without a map: its flat colour. */
@@ -267,6 +288,9 @@ static void composite_image_layers_collect(const Material &ma,
         item.blend = CompositeBlend(
             BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
         item.invert = paint_layer_mask_item_inverted(mask);
+        if (item.image != nullptr) {
+          composite_mapping_describe(ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, item.mapping);
+        }
         out.mask_items.append(item);
       }
     }

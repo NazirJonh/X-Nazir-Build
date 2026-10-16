@@ -12,8 +12,10 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include <array>
 #include <utility>
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
@@ -179,9 +181,258 @@ void group_input_default_set(const LayerGroup &group,
       });
 }
 
+void group_input_vector_default_set(const LayerGroup &group,
+                                    bNodeTreeInterfaceSocket &iface,
+                                    const float value[3])
+{
+  group_input_default_write<bNodeSocketValueVector>(
+      group, iface, [&](bNodeSocketValueVector &socket_value) {
+        copy_v3_v3(socket_value.value, value);
+      });
+}
+
+void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
+                                                   const MaterialPaintLayer &row,
+                                                   const char *label)
+{
+  /* The one predicate the topology hash builds by, so the interface and the hash agree. */
+  if (!BKE_paint_layers_mapping_applies(ma_, row)) {
+    return;
+  }
+  struct MappingInput {
+    const char *suffix;
+    const char *role;
+    float value[3];
+    Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &store;
+  };
+  /* The Mapping node reads three Vectors: the offset in x, y; the scale in x, y; the angle in z. */
+  const MappingInput inputs[3] = {
+      {"Offset",
+       ROLE_MAPPING_OFFSET,
+       {row.mapping.offset[0], row.mapping.offset[1], 0.0f},
+       mapping_offset_inputs_},
+      {"Scale",
+       ROLE_MAPPING_SCALE,
+       {BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[0]),
+        BKE_paint_layers_mapping_scale_normalize(row.mapping.scale[1]),
+        1.0f},
+       mapping_scale_inputs_},
+      {"Rotation",
+       ROLE_MAPPING_ROTATION,
+       {0.0f, 0.0f, row.mapping.rotation},
+       mapping_rotation_inputs_},
+  };
+  for (const MappingInput &input : inputs) {
+    char base[200];
+    SNPRINTF(base, "%s Mapping %s", label, input.suffix);
+    bNodeTreeInterfaceSocket *socket = layer_group_value_input(
+        group, base, "NodeSocketVector", input.role, row.marker, -1);
+    if (socket != nullptr) {
+      group_input_vector_default_set(group, *socket, input.value);
+      input.store.add(&row, socket);
+    }
+  }
+}
+
+bNode *PaintLayersTreeBuilder::uv_coordinate_ensure(bNodeTree &tree)
+{
+  /* One source per tree: every Mapping of the group reads the same `UV` output. */
+  for (bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_TEX_COORD) {
+      return &node;
+    }
+  }
+  bNode *coord = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_COORD);
+  if (coord != nullptr) {
+    grid_.place_extra(*coord);
+  }
+  return coord;
+}
+
+bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
+                                           LayerGroup &group,
+                                           const MaterialPaintLayer &row,
+                                           bNode &map,
+                                           Vector<bNode *> &r_nodes)
+{
+  if (!BKE_paint_layers_mapping_applies(ma_, row)) {
+    return false;
+  }
+  bNodeSocket *vector = socket_in(map, "Vector");
+  if (vector == nullptr) {
+    return false;
+  }
+  bNode *mapping = nullptr;
+  if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
+    mapping = *found;
+  }
+  else {
+    bNode *coord = this->uv_coordinate_ensure(tree);
+    bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
+    mapping = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
+    bNodeSocket *mapping_vector = (mapping != nullptr) ? socket_in(*mapping, "Vector") : nullptr;
+    if (uv == nullptr || mapping_vector == nullptr || socket_out(*mapping, "Vector") == nullptr) {
+      if (mapping != nullptr) {
+        bke::node_remove_node(nullptr, tree, *mapping, true, false);
+      }
+      return false;
+    }
+    /* Point: `R * (uv * scale) + offset`, the same transform the CPU resample applies. */
+    mapping->custom1 = NODE_MAPPING_TYPE_POINT;
+    grid_.place_extra(*mapping);
+    bke::node_add_link(tree, *coord, *uv, *mapping, *mapping_vector);
+    /* The values ride the row group's inputs; an input missing here leaves the socket at its
+     * identity default instead. */
+    const auto link_value = [&](Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &inputs,
+                                const char *socket_name) {
+      bNodeTreeInterfaceSocket **iface = inputs.lookup_ptr(&row);
+      bNodeSocket *source = (iface != nullptr && *iface != nullptr) ?
+                                this->group_input_socket(group, **iface) :
+                                nullptr;
+      bNodeSocket *target = socket_in(*mapping, socket_name);
+      if (source != nullptr && target != nullptr) {
+        bke::node_add_link(tree, *group.group_input, *source, *mapping, *target);
+      }
+    };
+    link_value(mapping_offset_inputs_, "Location");
+    link_value(mapping_rotation_inputs_, "Rotation");
+    link_value(mapping_scale_inputs_, "Scale");
+    mapping_nodes_.add(&row, mapping);
+    r_nodes.append(mapping);
+  }
+  bNodeSocket *mapping_out = socket_out(*mapping, "Vector");
+  if (mapping_out == nullptr) {
+    return false;
+  }
+  if (NodeTexImage *storage = static_cast<NodeTexImage *>(map.storage)) {
+    storage->extension = SHD_IMAGE_EXTENSION_REPEAT;
+  }
+  bke::node_add_link(tree, *mapping, *mapping_out, map, *vector);
+  return true;
+}
+
+void PaintLayersTreeBuilder::nodes_discard(bNodeTree &tree, Span<bNode *> nodes)
+{
+  /* A removed Mapping must not stay in the lookup, or a retry of the row would link to freed
+   * memory. */
+  Vector<const MaterialPaintLayer *> stale;
+  for (const auto item : mapping_nodes_.items()) {
+    if (nodes.contains(item.value)) {
+      stale.append(item.key);
+    }
+  }
+  for (const MaterialPaintLayer *row : stale) {
+    mapping_nodes_.remove(row);
+  }
+  for (bNode *node : nodes) {
+    bke::node_remove_node(nullptr, tree, *node, true, false);
+  }
+}
+
+NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
+                                                    const MaterialPaintLayer &row,
+                                                    const NodeOutput color,
+                                                    Vector<bNode *> *r_nodes)
+{
+  bNode **found = mapping_nodes_.lookup_ptr(&row);
+  if (found == nullptr || *found == nullptr || color.node == nullptr || color.socket == nullptr) {
+    return color;
+  }
+  bNode &mapping = **found;
+  /* Rotation and Scale come from the very sockets feeding the row's Mapping. Links are read from
+   * the tree because `bNodeSocket::link` can be stale. */
+  const bNodeSocket *mapping_rotation = socket_in(mapping, "Rotation");
+  const bNodeSocket *mapping_scale = socket_in(mapping, "Scale");
+  NodeOutput rotation;
+  NodeOutput scale;
+  for (bNodeLink &link : tree.links) {
+    if (link.tosock == mapping_rotation) {
+      rotation = {link.fromnode, link.fromsock};
+    }
+    else if (link.tosock == mapping_scale) {
+      scale = {link.fromnode, link.fromsock};
+    }
+  }
+
+  bNode *decode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNode *sign = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNode *remap = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
+  bNode *encode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  const std::array<bNode *, 4> created = {decode, sign, remap, encode};
+  const auto discard = [&]() {
+    for (bNode *node : created) {
+      if (node != nullptr) {
+        bke::node_remove_node(nullptr, tree, *node, true, false);
+      }
+    }
+    return color;
+  };
+  if (decode == nullptr || sign == nullptr || remap == nullptr || encode == nullptr) {
+    return discard();
+  }
+  decode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
+  encode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
+  sign->custom1 = NODE_VECTOR_MATH_SIGN;
+  /* The Texture type is `(R^-1 * v) / scale`: with the scale reduced to its sign the division is a
+   * flip, so this is `S * R^T * v`, the transform a covariant normal needs when the UVs go through
+   * `R * S`. The scale's magnitude and the offset do not affect a direction. */
+  remap->custom1 = NODE_MAPPING_TYPE_TEXTURE;
+  const auto set_madd = [](bNode &node, const float multiplier, const float addend) {
+    const char *names[2] = {"Vector_001", "Vector_002"};
+    const float values[2] = {multiplier, addend};
+    for (const int i : IndexRange(2)) {
+      bNodeSocket *socket = socket_in(node, names[i]);
+      if (socket != nullptr && socket->default_value != nullptr) {
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(socket->default_value)->value, values[i]);
+      }
+    }
+  };
+  set_madd(*decode, 2.0f, -1.0f);
+  set_madd(*encode, 0.5f, 0.5f);
+
+  bNodeSocket *decode_in = socket_in(*decode, "Vector");
+  bNodeSocket *decode_out = socket_out(*decode, "Vector");
+  bNodeSocket *sign_in = socket_in(*sign, "Vector");
+  bNodeSocket *sign_out = socket_out(*sign, "Vector");
+  bNodeSocket *remap_in = socket_in(*remap, "Vector");
+  bNodeSocket *remap_rotation = socket_in(*remap, "Rotation");
+  bNodeSocket *remap_scale = socket_in(*remap, "Scale");
+  bNodeSocket *remap_out = socket_out(*remap, "Vector");
+  bNodeSocket *encode_in = socket_in(*encode, "Vector");
+  bNodeSocket *encode_out = socket_out(*encode, "Vector");
+  if (decode_in == nullptr || decode_out == nullptr || sign_in == nullptr || sign_out == nullptr ||
+      remap_in == nullptr || remap_rotation == nullptr || remap_scale == nullptr ||
+      remap_out == nullptr || encode_in == nullptr || encode_out == nullptr)
+  {
+    return discard();
+  }
+  for (bNode *node : created) {
+    grid_.place_extra(*node);
+    if (r_nodes != nullptr) {
+      r_nodes->append(node);
+    }
+  }
+  if (rotation.node != nullptr && rotation.socket != nullptr) {
+    bke::node_add_link(tree, *rotation.node, *rotation.socket, *remap, *remap_rotation);
+  }
+  if (scale.node != nullptr && scale.socket != nullptr) {
+    bke::node_add_link(tree, *scale.node, *scale.socket, *sign, *sign_in);
+  }
+  else if (sign_in->default_value != nullptr) {
+    /* An unlinked scale is the Mapping's identity default. */
+    copy_v3_fl(static_cast<bNodeSocketValueVector *>(sign_in->default_value)->value, 1.0f);
+  }
+  bke::node_add_link(tree, *color.node, *color.socket, *decode, *decode_in);
+  bke::node_add_link(tree, *decode, *decode_out, *remap, *remap_in);
+  bke::node_add_link(tree, *sign, *sign_out, *remap, *remap_scale);
+  bke::node_add_link(tree, *remap, *remap_out, *encode, *encode_in);
+  return {encode, encode_out};
+}
+
 void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer)
 {
   const char *layer_name = layer.name[0] != '\0' ? layer.name : "Layer";
+  this->mapping_inputs_create(group, layer, layer_name);
   for (const int channel : wired_channels_) {
     if (!row_participates(ma_, layer, channel)) {
       continue;
@@ -263,6 +514,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
   }
   for (const MaterialPaintLayer &effect : layer.effects) {
     filter_params_create(effect, false);
+    char effect_label[224];
+    SNPRINTF(effect_label, "%s %s", layer_name, paint_layer_effect_label(effect));
+    this->mapping_inputs_create(group, effect, effect_label);
     for (const int channel : wired_channels_) {
       const bool filters = paint_layer_effect_filters(ma_, effect, channel);
       if (!filters && !paint_layer_effect_lays(ma_, effect, channel)) {
@@ -308,6 +562,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
   /* The base mask is one for every channel of the row, so its inputs exist once per group. */
   if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
     char base[200];
+    SNPRINTF(base, "%s Mask", layer_name);
+    this->mapping_inputs_create(group, *mask, base);
     SNPRINTF(base, "%s Mask Opacity", layer_name);
     bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
         group, base, "NodeSocketFloat", ROLE_MASK_OPACITY, layer.marker, -1);
@@ -347,6 +603,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       mask_opacity_inputs_.add(&item, opacity);
     }
     filter_params_create(item, true);
+    SNPRINTF(base, "%s %s", layer_name, item_name);
+    this->mapping_inputs_create(group, item, base);
     if (record != nullptr && record->image == nullptr) {
       SNPRINTF(base, "%s %s", layer_name, item_name);
       bNodeTreeInterfaceSocket *value = layer_group_value_input(

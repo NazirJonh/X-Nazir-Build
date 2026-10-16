@@ -8,9 +8,10 @@
  * Cross-check that the generated node tree expresses the same formulas as the CPU composite.
  *
  * This is *not* the "render == CPU" test: a tiny interpreter evaluates the generated group at one
- * pixel for the narrow set of nodes the generator emits -- Image Texture, Mix (through the same
- * #ramp_blend the CPU uses), Math, Vector Math, Value, RGB, group input/output and the Normal
- * Combine group -- and the result is compared with #BKE_paint_layers_composite_image_layers
+ * pixel for the narrow set of nodes the generator emits -- Image Texture (read at the pixel, or
+ * through a Mapping), Texture Coordinate, Mapping, Mix (through the same #ramp_blend the CPU uses),
+ * Math, Vector Math, Value, RGB, group input/output and the Normal Combine group -- and the result
+ * is compared with #BKE_paint_layers_composite_image_layers
  * evaluated at the same pixel.
  *
  * What it catches is a mis-wired socket in the generator: the generator's own tests only assert the
@@ -160,6 +161,71 @@ class GraphInterpreter {
     return out;
   }
 
+  /**
+   * The Image Texture read bilinearly at `(u, v)` with Repeat edges and the texel-centre
+   * convention, the way the node samples a mapped coordinate: the taps are decoded to scene
+   * linear and filtered premultiplied, and the colour is straightened again on the way out.
+   */
+  RGBA sample_image_at(Image *image, float u, float v, const char *output) const
+  {
+    RGBA out;
+    if (image == nullptr) {
+      return out;
+    }
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
+    if (ibuf == nullptr || ibuf->byte_buffer.data == nullptr) {
+      BKE_image_release_ibuf(image, ibuf, lock);
+      return out;
+    }
+    u -= floorf(u);
+    v -= floorf(v);
+    const float su = u * float(ibuf->x) - 0.5f;
+    const float sv = v * float(ibuf->y) - 0.5f;
+    const int x0 = int(floorf(su));
+    const int y0 = int(floorf(sv));
+    const float fx = su - float(x0);
+    const float fy = sv - float(y0);
+    const auto wrap = [](const int i, const int n) { return ((i % n) + n) % n; };
+    float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (const int dy : {0, 1}) {
+      for (const int dx : {0, 1}) {
+        const int tx = wrap(x0 + dx, ibuf->x);
+        const int ty = wrap(y0 + dy, ibuf->y);
+        const uchar *p = ibuf->byte_data() + (int64_t(ty) * ibuf->x + tx) * 4;
+        float tap[4] = {float(p[0]) / 255.0f,
+                        float(p[1]) / 255.0f,
+                        float(p[2]) / 255.0f,
+                        float(p[3]) / 255.0f};
+        if (ibuf->byte_buffer.colorspace != nullptr) {
+          IMB_colormanagement_colorspace_to_scene_linear_v4(
+              tap, false, ibuf->byte_buffer.colorspace);
+        }
+        const float weight = (dx != 0 ? fx : 1.0f - fx) * (dy != 0 ? fy : 1.0f - fy);
+        for (const int k : IndexRange(3)) {
+          sum[k] += tap[k] * tap[3] * weight;
+        }
+        sum[3] += tap[3] * weight;
+      }
+    }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    if (STREQ(output, "Alpha")) {
+      out.r = out.g = out.b = out.a = sum[3];
+      return out;
+    }
+    const float inv = sum[3] > 0.0f ? 1.0f / sum[3] : 0.0f;
+    out.r = sum[0] * inv;
+    out.g = sum[1] * inv;
+    out.b = sum[2] * inv;
+    out.a = sum[3];
+    return out;
+  }
+
+  /** The reference grid is 4x4, the size of the fixture's solid images. */
+  static constexpr float kGridSize = 4.0f;
+
   RGBA eval_socket(const bNodeSocket &socket) const
   {
     const Span<const bNodeLink *> links = socket.directly_linked_links();
@@ -187,8 +253,46 @@ class GraphInterpreter {
     }
     bNode &mutable_node = const_cast<bNode &>(node);
     switch (node.type_legacy) {
-      case SH_NODE_TEX_IMAGE:
+      case SH_NODE_TEX_IMAGE: {
+        const bNodeSocket *vector = bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr);
+        if (vector != nullptr && !vector->directly_linked_links().is_empty()) {
+          const RGBA uv = eval_socket(*vector);
+          return sample_image_at(id_cast<Image *>(node.id), uv.r, uv.g, out_identifier);
+        }
         return sample_image(id_cast<Image *>(node.id), out_identifier);
+      }
+      case SH_NODE_TEX_COORD:
+        /* The reference texel's centre in UV space. */
+        return {(float(x) + 0.5f) / kGridSize, (float(y) + 0.5f) / kGridSize, 0.0f, 1.0f};
+      case SH_NODE_MAPPING: {
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const RGBA location = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Location"_ustr));
+        const RGBA rotation = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Rotation"_ustr));
+        const RGBA scale = eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Scale"_ustr));
+        const float cos_z = cosf(rotation.b);
+        const float sin_z = sinf(rotation.b);
+        if (node.custom1 == NODE_MAPPING_TYPE_TEXTURE) {
+          /* `(R^-1 * (v - location)) / scale`. */
+          const float vx = vector.r - location.r;
+          const float vy = vector.g - location.g;
+          const float rx = cos_z * vx + sin_z * vy;
+          const float ry = -sin_z * vx + cos_z * vy;
+          return {scale.r != 0.0f ? rx / scale.r : 0.0f,
+                  scale.g != 0.0f ? ry / scale.g : 0.0f,
+                  scale.b != 0.0f ? (vector.b - location.b) / scale.b : 0.0f,
+                  1.0f};
+        }
+        /* Point: `R * (v * scale) + location`, scale first. */
+        const float sx = vector.r * scale.r;
+        const float sy = vector.g * scale.g;
+        return {cos_z * sx - sin_z * sy + location.r,
+                sin_z * sx + cos_z * sy + location.g,
+                vector.b * scale.b + location.b,
+                1.0f};
+      }
       case SH_NODE_RGB:
       case SH_NODE_VALUE:
         if (const bNodeSocket *out = bke::node_find_socket(
@@ -272,6 +376,12 @@ class GraphInterpreter {
           float normalized[3] = {vector.r, vector.g, vector.b};
           normalize_v3(normalized);
           return {normalized[0], normalized[1], normalized[2], 1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_SIGN) {
+          const auto sign = [](const float value) {
+            return value > 0.0f ? 1.0f : (value < 0.0f ? -1.0f : 0.0f);
+          };
+          return {sign(vector.r), sign(vector.g), sign(vector.b), 1.0f};
         }
         if (node.custom1 == NODE_VECTOR_MATH_MULTIPLY_ADD) {
           const RGBA scale = eval_socket(

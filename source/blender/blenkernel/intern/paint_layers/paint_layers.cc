@@ -1418,6 +1418,10 @@ bool BKE_paint_layers_channel_set_invert(Material &ma,
   return true;
 }
 
+/* The mapping sits between pointer members of #MaterialPaintLayer: a size that is not a multiple of
+ * 8 would leave the row's DNA with a hole. */
+static_assert(sizeof(MaterialPaintLayerMapping) == 32, "MaterialPaintLayerMapping must be 32 bytes");
+
 static_assert(sizeof(MaterialPaintLayer::channel_settings) /
                       sizeof(MaterialPaintLayerChannelSettings) ==
                   PAINT_MATERIAL_CHANNEL_NUM,
@@ -1471,6 +1475,156 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, const
   SET_FLAG_FROM_TEST(layer->flag, enabled, MA_PAINT_LAYER_ENABLED);
   /* The enabled flag is folded into the row's opacity input (see BKE_paint_layers_effective_opacity),
    * so switching a row off is a value, not a different shape of graph. */
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+float BKE_paint_layers_mapping_scale_normalize(const float scale)
+{
+  /* Old files read back as zeroes; a zero axis would collapse UVs, so it means one. */
+  if (scale == 0.0f) {
+    return 1.0f;
+  }
+  if (fabsf(scale) < PAINT_LAYER_MAPPING_SCALE_MIN) {
+    return copysignf(PAINT_LAYER_MAPPING_SCALE_MIN, scale);
+  }
+  return scale;
+}
+
+bool BKE_paint_layers_fill_reads_map(const Material &ma,
+                                     const MaterialPaintLayer &row,
+                                     const int channel)
+{
+  /* A Fill is never painted, but its channels may hold their own image, which is then a texture
+   * source for that channel only; the other channels keep the constant. */
+  if (!ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
+      !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE) ||
+      paint_layer_channel_filtered(ma, channel))
+  {
+    return false;
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(row, channel);
+  return paint_layer_channel_live(record) && record->image != nullptr;
+}
+
+bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer)
+{
+  /* Only a Fill's own map repeats under the remap: a painted map is written by strokes at the raw
+   * UV, and a filter owns no map to move. */
+  if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
+    return false;
+  }
+  if (layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    /* A mask is scalar over its owner; its map lives in the Base Color record of the item itself,
+     * which the global channel set never filters. */
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    return paint_layer_channel_live(record) && record->image != nullptr;
+  }
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (BKE_paint_layers_fill_reads_map(ma, layer, channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer)
+{
+  return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_ENABLED) != 0;
+}
+
+bool BKE_paint_layers_mapping_applies(const Material &ma, const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_mapping_enabled_get(layer) &&
+         BKE_paint_layers_mapping_supported(ma, layer);
+}
+
+bool BKE_paint_layers_mapping_set_enabled(Material &ma,
+                                          MaterialPaintLayer *layer,
+                                          const bool enabled)
+{
+  if (!paint_layer_owned(ma, layer) || (enabled && !BKE_paint_layers_mapping_supported(ma, *layer)))
+  {
+    return false;
+  }
+  const bool changed = BKE_paint_layers_mapping_enabled_get(*layer) != enabled;
+  SET_FLAG_FROM_TEST(layer->mapping.flag, enabled, MA_PAINT_LAYER_MAPPING_ENABLED);
+  if (changed) {
+    /* The row gains or loses its remap, which is a different shape of stack. */
+    BKE_paint_layers_tag_edited(ma);
+  }
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_offset(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         const float offset[2])
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  copy_v2_v2(layer->mapping.offset, offset);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_scale(Material &ma,
+                                        MaterialPaintLayer *layer,
+                                        const float scale[2])
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  /* Normalize through the one helper every consumer shares, so zeroes from old files and tiny
+   * values behave the same everywhere. */
+  float next[2] = {BKE_paint_layers_mapping_scale_normalize(scale[0]),
+                   BKE_paint_layers_mapping_scale_normalize(scale[1])};
+  if (BKE_paint_layers_mapping_scale_lock_get(*layer)) {
+    /* The caller hands over both axes, so the edited one is the one that moved from the stored
+     * value; when both moved (a multi-drag) the first axis leads. */
+    const float stored_x = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+    const float lead = (next[0] != stored_x) ? next[0] : next[1];
+    next[0] = lead;
+    next[1] = lead;
+  }
+  copy_v2_v2(layer->mapping.scale, next);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mapping_scale_lock_get(const MaterialPaintLayer &layer)
+{
+  return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED) == 0;
+}
+
+bool BKE_paint_layers_mapping_set_scale_lock(Material &ma,
+                                             MaterialPaintLayer *layer,
+                                             const bool locked)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  SET_FLAG_FROM_TEST(layer->mapping.flag, !locked, MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED);
+  if (locked) {
+    /* Locking joins the axes at the first one, so what the row shows stays where the user left
+     * the X value. A value-only change like any other scale edit. */
+    const float joined = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+    layer->mapping.scale[0] = joined;
+    layer->mapping.scale[1] = joined;
+    BKE_paint_layers_tag_value_edited(ma);
+  }
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_rotation(Material &ma,
+                                           MaterialPaintLayer *layer,
+                                           const float rotation)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  layer->mapping.rotation = rotation;
   BKE_paint_layers_tag_value_edited(ma);
   return true;
 }

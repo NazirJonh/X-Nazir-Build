@@ -23,6 +23,7 @@
 #include "BLI_uuid.h"
 
 #include <array>
+#include <cstring>
 #include <utility>
 
 #include "DNA_image_types.h"
@@ -1489,6 +1490,53 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
     return image;
   }
 
+  /** A 2x2 Non-Color byte map: \a c00 bottom left, \a c10 bottom right, \a c01 top left, \a c11 top
+   * right. */
+  Image *add_quad_image(const char *name,
+                        const uchar c00[4],
+                        const uchar c10[4],
+                        const uchar c01[4],
+                        const uchar c11[4])
+  {
+    Image *image = add_solid_image(name, 2, 0, 0, 0, 255, true);
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    memcpy(pixels + 0, c00, 4);
+    memcpy(pixels + 4, c10, 4);
+    memcpy(pixels + 8, c01, 4);
+    memcpy(pixels + 12, c11, 4);
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /** A Fill row, over the rows already there, whose \a channel record is backed by \a image. */
+  MaterialPaintLayer *add_fill_layer(
+      const char *name,
+      Image *image,
+      const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR)
+  {
+    MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, name, nullptr, PaintLayerPlace::Above);
+    EXPECT_NE(layer, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_source(*ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT));
+    EXPECT_NE(BKE_paint_layers_channel_add(*ma, layer, channel), nullptr);
+    EXPECT_TRUE(BKE_paint_layers_channel_set_image(*ma, layer, channel, image));
+    return layer;
+  }
+
+  /** A Fill correction of \a owner whose Base Color record is backed by \a image. */
+  MaterialPaintLayer *add_fill_correction(MaterialPaintLayer *owner, Image *image)
+  {
+    MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+        *ma, owner, "C", MA_PAINT_LAYER_SOURCE_CONSTANT);
+    EXPECT_NE(correction, nullptr);
+    EXPECT_NE(BKE_paint_layers_channel_add(*ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+              nullptr);
+    EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+        *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image));
+    return correction;
+  }
+
   /** A row whose \a channel record is backed by \a image. */
   MaterialPaintLayer *add_paint_layer(
       const char *name,
@@ -1979,6 +2027,367 @@ TEST_F(PaintLayersCompositeTest, stack_hash_follows_the_order_of_the_rows)
   ASSERT_TRUE(BKE_paint_layers_reorder(*ma, b, 0));
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
   EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), before);
+}
+
+/* UV mapping: a Fill's own map is resampled through the row's transform before it is composited. */
+
+TEST_F(PaintLayersCompositeTest, mapping_formula_matches_the_shader_node)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom",
+                                               add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  const uchar red[4] = {255, 0, 0, 255};
+  const uchar green[4] = {0, 255, 0, 255};
+  const uchar blue[4] = {0, 0, 255, 255};
+  const uchar white[4] = {255, 255, 255, 255};
+  MaterialPaintLayer *correction = add_fill_correction(
+      bottom, add_quad_image("Map", red, green, blue, white));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+
+  /* Scale two reads each quadrant exactly: bottom-left red, bottom-right green, top-left blue,
+   * top-right white. The doubled pattern also tiles: x = 2 reads like x = 0 (Repeat). */
+  const float scale2[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, scale2));
+  auto at = [&](const int x, const int y) {
+    return linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, x, y);
+  };
+  std::array<float, 4> p = at(0, 0);
+  EXPECT_NEAR(p[0], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[1], 0.0f, 1e-4f);
+  EXPECT_NEAR(p[2], 0.0f, 1e-4f);
+  p = at(1, 0);
+  EXPECT_NEAR(p[1], 1.0f, 1e-4f);
+  p = at(0, 1);
+  EXPECT_NEAR(p[2], 1.0f, 1e-4f);
+  p = at(1, 1);
+  EXPECT_NEAR(p[0], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[1], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[2], 1.0f, 1e-4f);
+  p = at(2, 0);
+  EXPECT_NEAR(p[0], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[1], 0.0f, 1e-4f);
+  p = at(0, 2);
+  EXPECT_NEAR(p[0], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[1], 0.0f, 1e-4f);
+
+  /* Offset (0.5, 0.5) at unit scale bilinearly mixes the four corners 1:3:3:9. */
+  const float one[2] = {1.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, one));
+  const float half[2] = {0.5f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, correction, half));
+  p = at(0, 0);
+  EXPECT_NEAR(p[0], 0.625f, 1e-3f);
+  EXPECT_NEAR(p[1], 0.75f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.75f, 1e-3f);
+
+  /* Rotation 90 degrees, counter-clockwise like the shader: (0.125, 0.125) reads (0.875, 0.125)
+   * wrapped, mixing white/blue/green/red 3:1:9:3 over 16. */
+  const float zero[2] = {0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, correction, zero));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, correction, 1.57079632679f));
+  p = at(0, 0);
+  EXPECT_NEAR(p[0], 0.375f, 1e-3f);
+  EXPECT_NEAR(p[1], 0.75f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.25f, 1e-3f);
+
+  /* Scale 0.5 zooms in. Pixel (0,0): uv = (0.125, 0.125) -> 0.0625 -> su = 0.0625 * 2 - 0.5 =
+   * -0.375, so x0 = -1 (wraps to texel 1) with a = 0.625, the same on y. The weights are
+   * red 0.625^2 = 0.390625, green 0.234375, blue 0.234375, white 0.140625, so
+   * R = red + white = 0.53125, G = green + white = 0.375, B = blue + white = 0.375. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, correction, 0.0f));
+  const float half_scale[2] = {0.5f, 0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, half_scale));
+  p = at(0, 0);
+  EXPECT_NEAR(p[0], 0.53125f, 1e-3f);
+  EXPECT_NEAR(p[1], 0.375f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.375f, 1e-3f);
+
+  /* Scale -1 mirrors. Pixel (0,0): uv = -0.125 wraps to 0.875 -> su = 1.75 - 0.5 = 1.25, so x0 = 1
+   * with a = 0.25 and the second tap wraps to texel 0, the same on y. The weights are white
+   * 0.75^2 = 0.5625, blue 0.1875 (x0 wrapped, y1), green 0.1875 (x1, y0), red 0.0625, so
+   * R = 0.625, G = 0.75, B = 0.75. */
+  const float mirror[2] = {-1.0f, -1.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, mirror));
+  p = at(0, 0);
+  EXPECT_NEAR(p[0], 0.625f, 1e-3f);
+  EXPECT_NEAR(p[1], 0.75f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.75f, 1e-3f);
+
+  /* Order: scale (2, 1), then rotate 90 degrees, then offset (0.25, 0). Pixel (0,0): uv =
+   * (0.125, 0.125) -> scaled (0.25, 0.125) -> rotated (-0.125, 0.25) -> offset (0.125, 0.25).
+   * su = 0.125 * 2 - 0.5 = -0.25 -> x0 = -1 (texel 1) with a = 0.75; sv = 0.25 * 2 - 0.5 = 0, so
+   * only the row y = 0 is read: 0.25 * green + 0.75 * red = (0.75, 0.25, 0). Rotating before
+   * scaling, or offsetting before rotating, lands on different texels. */
+  const float aniso[2] = {2.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, correction, false));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, aniso));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, correction, 1.57079632679f));
+  const float side[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, correction, side));
+  p = at(0, 0);
+  EXPECT_NEAR(p[0], 0.75f, 1e-3f);
+  EXPECT_NEAR(p[1], 0.25f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.0f, 1e-3f);
+}
+
+/** The mapping reaches a Fill layer's own map, not only a correction's. */
+TEST_F(PaintLayersCompositeTest, mapping_remaps_the_map_of_a_fill_layer)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 0, 0, 0, 255));
+  const uchar red[4] = {255, 0, 0, 255};
+  const uchar green[4] = {0, 255, 0, 255};
+  const uchar blue[4] = {0, 0, 255, 255};
+  const uchar white[4] = {255, 255, 255, 255};
+  MaterialPaintLayer *fill = add_fill_layer("Fill", add_quad_image("Map", red, green, blue, white));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const float scale2[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale2));
+
+  std::array<float, 4> p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 1, 0);
+  EXPECT_NEAR(p[0], 0.0f, 1e-4f);
+  EXPECT_NEAR(p[1], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[2], 0.0f, 1e-4f);
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 1);
+  EXPECT_NEAR(p[2], 1.0f, 1e-4f);
+
+  /* Switched off, the row reads its map as it is: the 2x2 map is of another size than the stack,
+   * which the evaluator refuses, so only the mapped one composites at all. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, false));
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_FALSE(layers.is_empty());
+  EXPECT_FALSE(layers.last().mapping.enabled);
+}
+
+/** A mapped Fill mask is resampled before the grey is reduced, so the coverage follows the map. */
+TEST_F(PaintLayersCompositeTest, mapping_remaps_the_map_of_a_fill_mask_item)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 4, 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 1.0f);
+  ASSERT_NE(item, nullptr);
+  const uchar white[4] = {255, 255, 255, 255};
+  const uchar black[4] = {0, 0, 0, 255};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma,
+      item,
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      add_quad_image("MaskMap", white, black, black, black)));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, item, true));
+  const float scale2[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, item, scale2));
+
+  /* Where the mapped mask is white the top row shows, where it is black the bottom does. */
+  std::array<float, 4> p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0);
+  EXPECT_NEAR(p[0], 0.0f, 1e-3f);
+  EXPECT_NEAR(p[2], 1.0f, 1e-3f);
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 1, 0);
+  EXPECT_NEAR(p[0], 1.0f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.0f, 1e-3f);
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 2, 0);
+  EXPECT_NEAR(p[2], 1.0f, 1e-3f) << "the doubled mask also tiles";
+}
+
+/** Identity values read exactly the unmapped pixels. */
+TEST_F(PaintLayersCompositeTest, identity_mapping_reads_unchanged_pixels)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom",
+                                               add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  /* Same size as the reference grid: an unmapped map of another size is rejected by the
+   * evaluator, so only an equal-size map can be compared with and without the mapping. */
+  Image *map = add_solid_image("Map", 4, 0, 0, 0, 255, true);
+  {
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(map, nullptr, &lock);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int i : IndexRange(16)) {
+      pixels[i * 4 + 0] = uchar(i * 16);
+      pixels[i * 4 + 1] = uchar(255 - i * 16);
+      pixels[i * 4 + 2] = uchar((i * 37) % 256);
+      pixels[i * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(map, ibuf, lock);
+  }
+  MaterialPaintLayer *correction = add_fill_correction(bottom, map);
+
+  std::array<std::array<float, 4>, 16> before;
+  for (const int i : IndexRange(16)) {
+    before[i] = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, i % 4, i / 4);
+  }
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  for (const int i : IndexRange(16)) {
+    const std::array<float, 4> after = linear_pixel(
+        PAINT_MATERIAL_CHANNEL_BASE_COLOR, i % 4, i / 4);
+    for (const int k : IndexRange(4)) {
+      EXPECT_NEAR(after[k], before[i][k], 1e-4f) << i << " " << k;
+    }
+  }
+}
+
+/** The stack hash follows the normalized mapping values of a row, a correction and a mask item. */
+TEST_F(PaintLayersCompositeTest, mapping_values_move_the_stack_hash)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom",
+                                               add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  const uchar red[4] = {255, 0, 0, 255};
+  const uchar green[4] = {0, 255, 0, 255};
+  const uchar blue[4] = {0, 0, 255, 255};
+  const uchar white[4] = {255, 255, 255, 255};
+  MaterialPaintLayer *correction = add_fill_correction(
+      bottom, add_quad_image("Map", red, green, blue, white));
+  auto stack_hash = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+
+  const uint64_t hash_plain = stack_hash();
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  const uint64_t hash_mapped = stack_hash();
+  EXPECT_NE(hash_mapped, hash_plain);
+
+  /* A slider move invalidates the cache: offset, rotation and scale each move the hash. */
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, correction, offset));
+  const uint64_t hash_offset = stack_hash();
+  EXPECT_NE(hash_offset, hash_mapped);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, correction, 0.5f));
+  const uint64_t hash_rotated = stack_hash();
+  EXPECT_NE(hash_rotated, hash_offset);
+  const float two_scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, two_scale));
+  EXPECT_NE(stack_hash(), hash_rotated);
+
+  /* A zero scale (an old file's value) hashes like one: the setter normalizes, so build the
+   * description directly to reach the hash's own normalization. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_FALSE(layers.is_empty());
+  ASSERT_EQ(layers[0].content_corrections.size(), 1);
+  PaintMaterialCompositeMapping &mapping = layers[0].content_corrections[0].mapping;
+  ASSERT_TRUE(mapping.enabled);
+  mapping.scale[0] = 1.0f;
+  mapping.scale[1] = 1.0f;
+  const uint64_t hash_one = BKE_paint_material_composite_stack_hash(layers);
+  mapping.scale[0] = 0.0f;
+  mapping.scale[1] = 0.0f;
+  EXPECT_EQ(BKE_paint_material_composite_stack_hash(layers), hash_one);
+  mapping.scale[0] = 2.0f;
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), hash_one);
+}
+
+/** The stack hash reaches into a folder: a child's mapping offset moves it. */
+TEST_F(PaintLayersCompositeTest, stack_hash_follows_a_folder_childs_mapping)
+{
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Folder;
+  MaterialPaintLayer *folder = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(folder, nullptr);
+  MaterialPaintLayer *child = BKE_paint_layers_add(
+      *ma, "Child", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, child, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, child, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma,
+      child,
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      add_solid_image("ChildMap", 4, 255, 0, 0, 255)));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, child, true));
+  auto stack_hash = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    EXPECT_FALSE(layers.is_empty());
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+  const uint64_t hash_before = stack_hash();
+  const float offset[2] = {0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, child, offset));
+  EXPECT_NE(stack_hash(), hash_before);
+}
+
+/** A mapped Normal map rotates and mirrors its tangent-space vectors with the pattern. */
+TEST_F(PaintLayersCompositeTest, mapped_normal_map_rotates_and_mirrors_its_vectors)
+{
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  add_paint_layer("Bottom", add_solid_image("Flat", 4, 128, 128, 255, 255, true), channel);
+  MaterialPaintLayer *fill = add_fill_layer(
+      "MappedNormal", add_solid_image("Detail", 4, 204, 128, 230, 255, true), channel);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+
+  const float detail[3] = {204.0f / 255.0f * 2.0f - 1.0f,
+                           128.0f / 255.0f * 2.0f - 1.0f,
+                           230.0f / 255.0f * 2.0f - 1.0f};
+  struct Case {
+    float rotation;
+    float scale[2];
+  };
+  const Case cases[] = {
+      {0.0f, {1.0f, 1.0f}},
+      {1.57079632679f, {1.0f, 1.0f}},
+      {3.14159265359f, {1.0f, 1.0f}},
+      {0.0f, {-1.0f, 1.0f}},
+      {0.0f, {1.0f, -1.0f}},
+      {1.57079632679f, {-2.0f, 1.0f}},
+      {0.7f, {1.0f, -0.5f}},
+  };
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
+  for (const Case &test : cases) {
+    SCOPED_TRACE(::testing::Message() << "rotation=" << test.rotation << " scale=" << test.scale[0]
+                                      << "," << test.scale[1]);
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, test.rotation));
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, test.scale));
+    const float cos_rot = cosf(test.rotation);
+    const float sin_rot = sinf(test.rotation);
+    float expected[3] = {(test.scale[0] < 0.0f ? -1.0f : 1.0f) *
+                             (cos_rot * detail[0] + sin_rot * detail[1]),
+                         (test.scale[1] < 0.0f ? -1.0f : 1.0f) *
+                             (-sin_rot * detail[0] + cos_rot * detail[1]),
+                         detail[2]};
+    normalize_v3(expected);
+    const std::array<float, 4> got = linear_pixel(channel, 1, 2);
+    EXPECT_NEAR(got[0], expected[0] * 0.5f + 0.5f, 0.01f);
+    EXPECT_NEAR(got[1], expected[1] * 0.5f + 0.5f, 0.01f);
+    EXPECT_NEAR(got[2], expected[2] * 0.5f + 0.5f, 0.01f);
+  }
+}
+
+/** The tangent-normal flag follows the Normal channel of a mapped row only, and moves the hash. */
+TEST_F(PaintLayersCompositeTest, tangent_normal_flag_is_only_set_for_a_mapped_normal_channel)
+{
+  MaterialPaintLayer *fill = add_fill_layer(
+      "Mapped",
+      add_solid_image("FlagMap", 4, 128, 128, 255, 255, true),
+      PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma,
+      fill,
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      add_solid_image("FlagColor", 4, 128, 128, 255, 255, true)));
+  auto flag_for = [&](const eMaterialPaintChannel channel) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+    EXPECT_FALSE(layers.is_empty());
+    return layers.is_empty() ? false : layers[0].mapping.tangent_normal;
+  };
+  EXPECT_FALSE(flag_for(PAINT_MATERIAL_CHANNEL_NORMAL));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  EXPECT_TRUE(flag_for(PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_FALSE(flag_for(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_NORMAL, layers));
+  ASSERT_FALSE(layers.is_empty());
+  const uint64_t with_flag = BKE_paint_material_composite_stack_hash(layers);
+  layers[0].mapping.tangent_normal = false;
+  EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), with_flag);
 }
 
 /** \} */

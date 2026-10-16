@@ -60,6 +60,13 @@ const EnumPropertyItem rna_enum_ramp_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The mapping projection. Only UV exists so far; the enum is stored from the start so a second
+ * space never renumbers files. */
+static const EnumPropertyItem rna_enum_material_paint_layer_mapping_space_items[] = {
+    {MA_PAINT_LAYER_MAPPING_SPACE_UV, "UV", 0, "UV", "Project with the stack UV map"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /** How a row blends over what is below it. The internal Normal Combine is not offered: the Normal
  * channel forces it, and #BKE_paint_layers_set_blend refuses it. Shared by the definition and the
  * item callback of a mask correction, which drops the modes that read hue. */
@@ -883,6 +890,124 @@ static void rna_MaterialPaintLayer_enabled_set(PointerRNA *ptr, bool value)
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     BKE_paint_layers_set_enabled(*ma, layer, value);
+  }
+}
+
+/**
+ * Whether the row may carry UV mapping: it is a Fill that reads a repeatable map. The one
+ * predicate UI, RNA and the CPU share; the panel shows the Mapping block only while this is true.
+ */
+static bool rna_MaterialPaintLayer_mapping_supported_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  return ma != nullptr && BKE_paint_layers_mapping_supported(*ma, *layer);
+}
+
+static bool rna_MaterialPaintLayer_mapping_applies_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  return ma != nullptr && BKE_paint_layers_mapping_applies(*ma, *layer);
+}
+
+static bool rna_MaterialPaintLayer_mapping_scale_lock_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_mapping_scale_lock_get(*layer);
+}
+
+static void rna_MaterialPaintLayer_mapping_scale_lock_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_scale_lock(*ma, layer, value);
+  }
+}
+
+static bool rna_MaterialPaintLayer_mapping_enabled_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_mapping_enabled_get(*layer);
+}
+
+static void rna_MaterialPaintLayer_mapping_enabled_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    /* Refused while the row reads no repeatable map; the editable callback explains why. */
+    BKE_paint_layers_mapping_set_enabled(*ma, layer, value);
+  }
+}
+
+static int rna_MaterialPaintLayer_mapping_enabled_editable(const PointerRNA *ptr,
+                                                           const char **r_info)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  PointerRNA ptr_mutable = *ptr;
+  Material *ma = rna_paint_layer_material(&ptr_mutable, layer);
+  if (ma == nullptr) {
+    return 0;
+  }
+  /* An enabled mapping stays switchable off even after its map is gone. */
+  if (BKE_paint_layers_mapping_enabled_get(*layer) ||
+      BKE_paint_layers_mapping_supported(*ma, *layer))
+  {
+    return PROP_EDITABLE;
+  }
+  if (r_info != nullptr) {
+    *r_info = N_("Row reads no repeatable map; assign an image to a Fill first");
+  }
+  return 0;
+}
+
+static int rna_MaterialPaintLayer_mapping_space_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->mapping.space;
+}
+
+static void rna_MaterialPaintLayer_mapping_offset_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  copy_v2_v2(value, layer->mapping.offset);
+}
+
+static void rna_MaterialPaintLayer_mapping_offset_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_offset(*ma, layer, value);
+  }
+}
+
+static void rna_MaterialPaintLayer_mapping_scale_get(PointerRNA *ptr, float *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  /* Old files read back as zeroes; show the normalized value every consumer uses. */
+  value[0] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+  value[1] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[1]);
+}
+
+static void rna_MaterialPaintLayer_mapping_scale_set(PointerRNA *ptr, const float *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_scale(*ma, layer, value);
+  }
+}
+
+static float rna_MaterialPaintLayer_mapping_rotation_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer->mapping.rotation;
+}
+
+static void rna_MaterialPaintLayer_mapping_rotation_set(PointerRNA *ptr, float value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_rotation(*ma, layer, value);
   }
 }
 
@@ -2064,6 +2189,82 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(
       prop, "rna_MaterialPaintLayer_enabled_get", "rna_MaterialPaintLayer_enabled_set");
   RNA_def_property_ui_text(prop, "Enabled", "Whether the layer takes part in the stack");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Read-only: the one predicate UI, RNA and the CPU share. The panel shows the Mapping block only
+   * while this is true, instead of inspecting channel records itself. */
+  prop = RNA_def_property(srna, "mapping_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_mapping_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Mapping Supported", "Whether the row reads a repeatable map it can remap");
+
+  /* Read-only: whether the mapping is applied right now (enabled and supported). */
+  prop = RNA_def_property(srna, "mapping_applies", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_mapping_applies_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Mapping Applies", "Whether the enabled mapping actually reaches what the row shows");
+
+  prop = RNA_def_property(srna, "mapping_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_enabled_get",
+                                 "rna_MaterialPaintLayer_mapping_enabled_set");
+  RNA_def_property_editable_func(prop, "rna_MaterialPaintLayer_mapping_enabled_editable");
+  RNA_def_property_ui_text(prop, "Mapping Enabled", "Remap the row's maps in UV space");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mapping_scale_lock", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_mapping_scale_lock_get",
+                                 "rna_MaterialPaintLayer_mapping_scale_lock_set");
+  RNA_def_property_ui_text(prop, "Lock Scale", "Edit both scale axes together, keeping them equal");
+  RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Stored from the start; not editable while UV is the only space. */
+  prop = RNA_def_property(srna, "mapping_space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_mapping_space_items);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayer_mapping_space_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Mapping Space", "Projection the row's mapping works in");
+
+  prop = RNA_def_property(srna, "mapping_offset", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mapping_offset_get",
+                               "rna_MaterialPaintLayer_mapping_offset_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Mapping Offset", "Translation of the row's maps in UV space");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mapping_scale", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_array(prop, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mapping_scale_get",
+                               "rna_MaterialPaintLayer_mapping_scale_set",
+                               nullptr);
+  /* A negative axis mirrors the map; the shared helper keeps the sign and only lifts a magnitude
+   * below #PAINT_LAYER_MAPPING_SCALE_MIN (a zero reads back as one). */
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  {
+    /* UI default 1,1; DNA zeroes still read back as one through the shared helper. */
+    static const float mapping_scale_default[2] = {1.0f, 1.0f};
+    RNA_def_property_float_array_default(prop, mapping_scale_default);
+  }
+  RNA_def_property_ui_text(prop, "Mapping Scale", "Scale of the row's maps in UV space");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Rotation changes where the row's maps are read; a Normal map's vectors follow it. */
+  prop = RNA_def_property(srna, "mapping_rotation", PROP_FLOAT, PROP_ANGLE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_mapping_rotation_get",
+                               "rna_MaterialPaintLayer_mapping_rotation_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Mapping Rotation",
+                           "Rotation of the row's maps around Z in UV space; the vectors of a "
+                           "Normal map are rotated with it");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "channels", PROP_COLLECTION, PROP_NONE);

@@ -980,4 +980,154 @@ TEST_F(PaintLayersGenerateTest, channel_out_of_the_set_is_not_wired)
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name UV mapping
+ * \{ */
+
+/** A Fill row whose Base Color is backed by a map. */
+static MaterialPaintLayer *mapping_fill_add(PaintLayersGenerateTest &test, const char *name)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(*test.ma, name, nullptr, PaintLayerPlace::Above);
+  EXPECT_TRUE(BKE_paint_layers_set_source(*test.ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  test.add_channel(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, test.add_image(name));
+  return fill;
+}
+
+/** The nodes of \a tree that feed the `Vector` input of an Image Texture, by type. */
+static Vector<int> image_vector_sources(const bNodeTree &tree)
+{
+  Vector<int> types;
+  for (const bNodeLink &link : tree.links) {
+    if (link.tonode->type_legacy == SH_NODE_TEX_IMAGE && STREQ(link.tosock->identifier, "Vector")) {
+      types.append(link.fromnode->type_legacy);
+    }
+  }
+  return types;
+}
+
+TEST_F(PaintLayersGenerateTest, mapping_builds_one_node_fed_by_one_coordinate_source)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  /* A second map in another channel of the same row shares the one Mapping. */
+  add_channel(*fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("FillRough"));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_COORD), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 2);
+  const Vector<int> sources = image_vector_sources(*group);
+  ASSERT_EQ(sources.size(), 2);
+  EXPECT_EQ(sources[0], SH_NODE_MAPPING);
+  EXPECT_EQ(sources[1], SH_NODE_MAPPING);
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Mapping Offset", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Mapping Scale", false));
+  EXPECT_TRUE(interface_has_socket(*group, "Fill Mapping Rotation", false));
+}
+
+TEST_F(PaintLayersGenerateTest, an_unmapped_row_builds_no_mapping_and_no_coordinate)
+{
+  mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_COORD), 0);
+  EXPECT_TRUE(image_vector_sources(*group).is_empty()) << "the map keeps the implicit UV";
+  EXPECT_FALSE(interface_has_socket(*group, "Fill Mapping Offset", false));
+
+  /* Paint rows never map: strokes address the raw UV. */
+  MaterialPaintLayer *painted = add_paint_layer("Painted", add_image("Painted"));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(*ma, painted, true));
+}
+
+TEST_F(PaintLayersGenerateTest, toggling_the_mapping_changes_the_shape_and_dragging_does_not)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const uint64_t plain = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const uint64_t mapped = paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
+  EXPECT_NE(mapped, plain);
+
+  /* Offset, scale and rotation are inputs: a drag moves no hash and keeps the nodes. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  const int mapping_nodes = count_type(*group, SH_NODE_MAPPING);
+  EXPECT_EQ(mapping_nodes, 1);
+  const float offset[2] = {0.25f, 0.5f};
+  const float scale[2] = {2.0f, 3.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, 0.5f));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms), mapped);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "a value edit syncs the inputs and leaves the nodes";
+  EXPECT_EQ(count_type(*layer_tree_find(*bmain, "Fill"), SH_NODE_MAPPING), mapping_nodes);
+
+  /* The inputs carry the new values. */
+  group = layer_tree_find(*bmain, "Fill");
+  const bNodeTreeInterfaceSocket *offset_socket = interface_input_find(*group,
+                                                                       "Fill Mapping Offset");
+  ASSERT_NE(offset_socket, nullptr);
+  bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
+  ASSERT_NE(instance, nullptr);
+  const bNodeSocket *instance_offset = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(offset_socket->identifier));
+  ASSERT_NE(instance_offset, nullptr);
+  const float *value = static_cast<const bNodeSocketValueVector *>(
+                           instance_offset->default_value)->value;
+  EXPECT_FLOAT_EQ(value[0], 0.25f);
+  EXPECT_FLOAT_EQ(value[1], 0.5f);
+
+  /* Switching it off again takes the nodes and the inputs away. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, false));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms), plain);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  group = layer_tree_find(*bmain, "Fill");
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 0);
+  EXPECT_FALSE(interface_has_socket(*group, "Fill Mapping Offset", false));
+}
+
+TEST_F(PaintLayersGenerateTest, a_mapped_correction_and_mask_item_build_their_own_mapping)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, "Corr", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(correction, nullptr);
+  add_channel(*correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("CorrMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Item", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("ItemMap")));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, item, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  /* Two rows map, so two Mapping nodes; they read the group's one coordinate source. */
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 2);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_COORD), 1);
+  EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 3);
+  int mapped = 0;
+  for (const int source : image_vector_sources(*group)) {
+    mapped += source == SH_NODE_MAPPING ? 1 : 0;
+  }
+  EXPECT_EQ(mapped, 2) << "the row's own Paint map keeps the implicit UV";
+}
+
+/** \} */
 }  // namespace blender::bke::tests

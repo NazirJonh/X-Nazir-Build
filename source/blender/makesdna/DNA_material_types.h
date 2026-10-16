@@ -531,6 +531,47 @@ struct MaterialPaintLayerChannelSettings {
   float opacity = 1.0f;
 };
 
+/** #MaterialPaintLayerMapping::space */
+enum eMaterialPaintLayerMappingSpace : int16_t {
+  MA_PAINT_LAYER_MAPPING_SPACE_UV = 0,
+};
+
+/** #MaterialPaintLayerMapping::flag */
+enum eMaterialPaintLayerMappingFlag : int16_t {
+  MA_PAINT_LAYER_MAPPING_ENABLED = 1 << 0,
+  /**
+   * The scale axes move independently. Stored inverted so that zeroed (new) rows start with the
+   * axes locked together: editing one sets the other to the same value.
+   */
+  MA_PAINT_LAYER_MAPPING_SCALE_UNLOCKED = 1 << 1,
+};
+ENUM_OPERATORS(eMaterialPaintLayerMappingFlag)
+
+/**
+ * UV mapping of one paint layer row, stored by value.
+ *
+ * Zeroes mean "disabled": old files read back as disabled, and a zero scale axis reads back as one
+ * (see `BKE_paint_layers_mapping_scale_normalize`).
+ */
+struct MaterialPaintLayerMapping {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerMapping)
+
+  /** Translation in UV space. */
+  float offset[2] = {};
+  /** Scale in UV space; 0 reads back as 1. */
+  float scale[2] = {1.0f, 1.0f};
+  /** Rotation around Z, in radians. */
+  float rotation = 0.0f;
+  /** #eMaterialPaintLayerMappingSpace. */
+  int16_t space = MA_PAINT_LAYER_MAPPING_SPACE_UV;
+  /** #eMaterialPaintLayerMappingFlag. */
+  int16_t flag = 0;
+  /* Pads the struct to 32 bytes: it is embedded in #MaterialPaintLayer between pointer members, so
+   * its size must stay a multiple of 8. The room also keeps the next mapping option from changing
+   * the size. */
+  char _pad[8] = {};
+};
+
 /**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
@@ -575,6 +616,12 @@ struct MaterialPaintLayer {
    * #MA_PAINT_LAYER_ROLE_EFFECT row with no children, mask or corrections of its own.
    */
   ListBaseT<MaterialPaintLayer> effects = {nullptr, nullptr};
+  /**
+   * UV mapping of this row's own maps. Stored by value, so a flat copy carries it. Zeroes read back
+   * as disabled; a zero scale axis reads back as one. General to the row, not a parameter of its
+   * kind: only a kind that lays a map of its own (a Fill) can use it.
+   */
+  MaterialPaintLayerMapping mapping = {};
   /**
    * The parameters of the row's kind, defined by the kind's schema rather than by this struct, so a
    * new kind adds no field here. Owned by the row; null while the kind has set none.

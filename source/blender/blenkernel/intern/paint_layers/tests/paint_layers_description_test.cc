@@ -2603,4 +2603,213 @@ TEST_F(PaintLayersDescription, fill_correction_add_policy_numbers_apart_from_pai
   EXPECT_EQ(BKE_paint_layers_correction_owner(ma, *third), row);
   EXPECT_EQ(BLI_listbase_count(&row->effects), 4);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Row UV mapping
+ * \{ */
+
+/** A Fill row whose Base Color record carries a map, the one shape that supports a mapping. */
+static MaterialPaintLayer *mapping_fill_with_map(Main &bmain, Material &ma, const char *name)
+{
+  MaterialPaintLayer *fill = BKE_paint_layers_add(ma, name, nullptr, PaintLayerPlace::Above);
+  EXPECT_TRUE(BKE_paint_layers_set_source(ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  Image *map = static_cast<Image *>(BKE_id_new(&bmain, ID_IM, name));
+  EXPECT_TRUE(
+      BKE_paint_layers_channel_set_image(ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  return fill;
+}
+
+TEST_F(PaintLayersDescription, mapping_is_supported_only_by_a_fill_that_reads_a_map)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingSupportMat");
+
+  /* A Fill with only its flat colour has no map to remap. */
+  MaterialPaintLayer *bare = BKE_paint_layers_add(ma, "Bare", nullptr, PaintLayerPlace::Above);
+  ASSERT_TRUE(BKE_paint_layers_set_source(ma, bare, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *bare));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(ma, bare, true));
+  EXPECT_FALSE(BKE_paint_layers_mapping_enabled_get(*bare));
+
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+  EXPECT_TRUE(BKE_paint_layers_fill_reads_map(ma, *fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_FALSE(BKE_paint_layers_fill_reads_map(ma, *fill, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(ma, *fill));
+  EXPECT_FALSE(BKE_paint_layers_mapping_applies(ma, *fill)) << "supported is not enabled";
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, true));
+  EXPECT_TRUE(BKE_paint_layers_mapping_applies(ma, *fill));
+
+  /* A painted map is written by strokes at the raw UV: a Paint row never remaps. */
+  MaterialPaintLayer *paint = BKE_paint_layers_add(ma, "Paint", nullptr, PaintLayerPlace::Above);
+  Image *paint_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "PaintMap"));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, paint_map));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *paint));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(ma, paint, true));
+
+  /* A folder and a filter lay no map of their own. */
+  PaintLayerAddParams folder_params;
+  folder_params.kind = PaintLayerAddKind::Folder;
+  MaterialPaintLayer *folder = BKE_paint_layers_add_with_policy(ma, folder_params);
+  ASSERT_NE(folder, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *folder));
+  MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+      ma, fill, MA_PAINT_LAYER_FILTER_INVERT);
+  ASSERT_NE(filter, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *filter));
+
+  /* Taking the map away switches the mapping off for the readers, and the toggle can still be
+   * cleared. */
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr));
+  EXPECT_FALSE(BKE_paint_layers_mapping_applies(ma, *fill));
+  EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(*fill));
+  EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, false));
+}
+
+TEST_F(PaintLayersDescription, mapping_is_supported_by_a_fill_correction_and_a_fill_mask)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingItemsMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "Row", nullptr, PaintLayerPlace::Above);
+
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      ma, row, "C", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(correction, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *correction));
+  ASSERT_NE(BKE_paint_layers_channel_add(ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  Image *map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CorrectionMap"));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, map));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(ma, *correction));
+  EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, correction, true));
+
+  ASSERT_NE(BKE_paint_layers_mask_add(ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *mask_fill = BKE_paint_layers_mask_item_add(
+      ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 0.5f);
+  ASSERT_NE(mask_fill, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *mask_fill));
+  Image *mask_map = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "MaskMap"));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, mask_fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_map));
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(ma, *mask_fill));
+  EXPECT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, mask_fill, true));
+
+  /* A painted mask is written by strokes at the raw UV. */
+  MaterialPaintLayer *mask_paint = BKE_paint_layers_mask_item_add(
+      ma, row, MA_PAINT_LAYER_SOURCE_IMAGE, "P");
+  ASSERT_NE(mask_paint, nullptr);
+  Image *painted = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "PaintedMask"));
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      ma, mask_paint, PAINT_MATERIAL_CHANNEL_BASE_COLOR, painted));
+  EXPECT_FALSE(BKE_paint_layers_mapping_supported(ma, *mask_paint));
+}
+
+TEST_F(PaintLayersDescription, mapping_enable_is_structural_and_values_are_normalized)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingValuesMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+
+  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(ma, fill, true));
+  EXPECT_NE(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "the row gains a remap, which changes the shape of the stack";
+
+  /* A zero axis reads back as one, a tiny one is lifted to the minimum and keeps its sign. */
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(0.0f), 1.0f);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(1e-6f), PAINT_LAYER_MAPPING_SCALE_MIN);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(-1e-6f),
+                  -PAINT_LAYER_MAPPING_SCALE_MIN);
+  EXPECT_FLOAT_EQ(BKE_paint_layers_mapping_scale_normalize(-2.0f), -2.0f);
+
+  const float zero_scale[2] = {0.0f, -3.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, false));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, zero_scale));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], 1.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], -3.0f);
+
+  const float offset[2] = {0.25f, -0.5f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(ma, fill, offset));
+  EXPECT_FLOAT_EQ(fill->mapping.offset[0], 0.25f);
+  EXPECT_FLOAT_EQ(fill->mapping.offset[1], -0.5f);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(ma, fill, 0.5f));
+  EXPECT_FLOAT_EQ(fill->mapping.rotation, 0.5f);
+
+  /* A row of another material is refused. */
+  Material &other = *BKE_material_add(bmain, "MappingOtherMat");
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_offset(other, fill, offset));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_enabled(other, fill, false));
+}
+
+TEST_F(PaintLayersDescription, mapping_scale_lock_moves_both_axes_together)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingLockMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+
+  /* A new row starts locked: the axes follow each other. */
+  EXPECT_TRUE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, false));
+
+  const float apart[2] = {2.0f, 5.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, apart));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 5.0f);
+
+  /* Locking joins the axes at X at once. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, true));
+  EXPECT_TRUE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], 2.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 2.0f);
+
+  /* The axis that moved from the stored value leads. */
+  const float y_moved[2] = {2.0f, 4.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, y_moved));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], 4.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 4.0f);
+  const float x_moved[2] = {3.0f, 4.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, x_moved));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[0], 3.0f);
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 3.0f);
+
+  /* Unlocking keeps the values and lets the axes part again. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(ma, fill, false));
+  EXPECT_FALSE(BKE_paint_layers_mapping_scale_lock_get(*fill));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(ma, fill, apart));
+  EXPECT_FLOAT_EQ(fill->mapping.scale[1], 5.0f);
+}
+
+TEST_F(PaintLayersDescription, mapping_block_copies_with_the_row)
+{
+  Material *ma = BKE_material_add(bmain, "MappingCopyMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, *ma, "Mapped");
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const float offset[2] = {0.25f, 0.5f};
+  const float scale[2] = {2.0f, 3.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, fill, offset));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, fill, false));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_rotation(*ma, fill, 0.75f));
+
+  auto expect_mapping = [](const MaterialPaintLayer &layer) {
+    EXPECT_TRUE(BKE_paint_layers_mapping_enabled_get(layer));
+    EXPECT_FLOAT_EQ(layer.mapping.offset[0], 0.25f);
+    EXPECT_FLOAT_EQ(layer.mapping.offset[1], 0.5f);
+    EXPECT_FLOAT_EQ(layer.mapping.scale[0], 2.0f);
+    EXPECT_FLOAT_EQ(layer.mapping.scale[1], 3.0f);
+    EXPECT_FLOAT_EQ(layer.mapping.rotation, 0.75f);
+  };
+
+  /* The block is stored by value, so a material copy and a row duplicate carry it. */
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  const MaterialPaintLayer *copy_layer = paint_layers_first(*copy);
+  ASSERT_NE(copy_layer, nullptr);
+  expect_mapping(*copy_layer);
+  BKE_id_free(bmain, copy);
+
+  MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, fill);
+  ASSERT_NE(duplicate, nullptr);
+  expect_mapping(*duplicate);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

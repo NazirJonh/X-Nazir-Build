@@ -106,6 +106,25 @@ struct PaintMaterialCompositeConstant {
 };
 
 /**
+ * The UV mapping of a row's own map (a Fill layer, correction or mask): when #enabled, the map is
+ * read through `uv' = R * (uv * scale) + offset` with Repeat edges, the transform the Mapping node
+ * of the generated graph applies. Copied from the description when the stack is derived; the
+ * resample happens while the buffers are acquired, so the evaluator reads the remapped buffer and
+ * never sees these.
+ */
+struct PaintMaterialCompositeMapping {
+  bool enabled = false;
+  float offset[2] = {};
+  float scale[2] = {1.0f, 1.0f};
+  float rotation = 0.0f;
+  /**
+   * The mapped map holds tangent-space normals (Normal channel): the resample also rotates and
+   * flips the vectors, so the lighting follows the pattern.
+   */
+  bool tangent_normal = false;
+};
+
+/**
  * What an image layer and its buffer twin share verbatim. The stack builders copy it as one value
  * (`static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer`), so a field added here
  * can never be forgotten in one of the copies. Only plain values belong here, never pointers.
@@ -156,6 +175,11 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   int16_t adjustment_filter = 0;
   /** The adjustment's parameters in its kind's schema order. */
   float adjustment_params[8] = {};
+  /**
+   * The row's UV mapping, applied to its own map while the buffers are acquired. Shared by the
+   * image layer and its buffer twin like the rest, though only the image layer's is read.
+   */
+  PaintMaterialCompositeMapping mapping;
 };
 
 /**
@@ -178,6 +202,8 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   CompositeBlend blend = CompositeBlend::Mix;
   /** The correction's effective opacity (enabled folded in). */
   float opacity = 1.0f;
+  /** The correction's UV mapping, applied to its map while the buffers are acquired. */
+  PaintMaterialCompositeMapping mapping;
 };
 
 /** A correction as the evaluator reads it: a buffer, or a flat colour when #ibuf is null. */
@@ -222,6 +248,8 @@ struct PaintMaterialCompositeMaskItem {
    */
   int16_t filter = 0;
   float filter_params[8] = {};
+  /** The item's UV mapping, applied to its map while the buffers are acquired. */
+  PaintMaterialCompositeMapping mapping;
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */

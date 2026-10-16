@@ -193,11 +193,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
 
   /* Every node this function adds, so that a failure part way leaves nothing half built behind. */
   Vector<bNode *> nodes;
-  const auto discard = [&]() {
-    for (bNode *node : nodes) {
-      bke::node_remove_node(nullptr, tree, *node, true, false);
-    }
-  };
+  const auto discard = [&]() { this->nodes_discard(tree, nodes); };
 
   /* The grey of the item and, for a map, its own alpha: the CPU composite reads the mean of the
    * stored RGB and the texel's alpha, so a texel the mask has not been painted on (transparent)
@@ -211,6 +207,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     }
     nodes.append(map);
     grid_.place(*map, layout::Column::Mask, 0);
+    this->mapping_apply(tree, group, *mask, *map, nodes);
     bNodeSocket *map_color = socket_out(*map, "Color");
     bNodeSocket *map_alpha = socket_out(*map, "Alpha");
     if (map_color == nullptr || map_alpha == nullptr) {
@@ -316,6 +313,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       }
       nodes.append(item_map);
       grid_.place(*item_map, layout::Column::Mask, row++);
+      this->mapping_apply(tree, group, item, *item_map, nodes);
       bNodeSocket *item_color = socket_out(*item_map, "Color");
       bNodeSocket *item_map_alpha = socket_out(*item_map, "Alpha");
       if (item_color == nullptr || item_map_alpha == nullptr) {
@@ -828,17 +826,21 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   if (map != nullptr) {
     nodes.append(map);
   }
+  /* A Fill correction's own map reads through the correction's Mapping while it applies. */
+  const bool mapped = map != nullptr && this->mapping_apply(tree, group, effect, *map, nodes);
   /* Nothing of the correction is linked to the chain until it is complete, so a failure removes
    * what was made and leaves the row as it was. */
   const auto discard = [&]() {
-    for (bNode *node : nodes) {
-      bke::node_remove_node(nullptr, tree, *node, true, false);
-    }
+    this->nodes_discard(tree, nodes);
     return false;
   };
   /* The map is read as stored, like a row's own map: a colour map is un-premultiplied by the node,
    * and a data map follows the same rule a row's does, so the two cannot disagree. */
-  const NodeOutput color = {flat ? group.group_input : map, map_color};
+  NodeOutput color = {flat ? group.group_input : map, map_color};
+  if (mapped && channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    /* The Mapping moved only the read point; the tangent-space vectors follow it. */
+    color = this->normal_remap_add(tree, effect, color, &nodes);
+  }
   const NodeOutput alpha = {map, map_alpha};
 
   /* The factor sits in its own `Opacity x Factor` frame, so it stays out of this correction's. */
@@ -1042,8 +1044,14 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     grid_.place(*map, layout::Column::Source, 0);
     Vector<bNode *> source_nodes;
     source_nodes.append(map);
-    layout::frame_add(tree, "Source", source_nodes);
     out.color = {map, socket_out(*map, "Color")};
+    if (this->mapping_apply(tree, group, ctx.layer, *map, source_nodes) &&
+        ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr)
+    {
+      /* The Mapping moved only the read point; the tangent-space vectors follow it. */
+      out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
+    }
+    layout::frame_add(tree, "Source", source_nodes);
     if (bNodeSocket *map_alpha = socket_out(*map, "Alpha")) {
       out.coverage = {map, map_alpha};
       out.content_alpha = out.coverage;

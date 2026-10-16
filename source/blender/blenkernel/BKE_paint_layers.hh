@@ -558,6 +558,85 @@ bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, float
 /** Set whether \a layer takes part in the stack. */
 bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled);
 
+/* -------------------------------------------------------------------- */
+/** \name Row UV mapping (a Fill layer, Fill correction or Fill mask)
+ * \{ */
+
+/** Lower bound of the mapping scale magnitude; a zero axis reads back as one. */
+constexpr float PAINT_LAYER_MAPPING_SCALE_MIN = 1e-3f;
+
+/**
+ * Normalized mapping scale of one axis: zero reads back as one, the magnitude never drops below
+ * #PAINT_LAYER_MAPPING_SCALE_MIN. The one helper RNA, value sync and the CPU compositor share, so
+ * an old file's zeroes cannot disagree between them.
+ */
+float BKE_paint_layers_mapping_scale_normalize(float scale);
+
+/**
+ * Whether a Fill row reads a user-assigned map in \a channel instead of its constant: a Layer or a
+ * correction of a kind that lays a flat value, whose live channel record carries an image. The CPU
+ * composite and the mapping predicates all ask this, so they cannot disagree about it.
+ */
+bool BKE_paint_layers_fill_reads_map(const Material &ma,
+                                     const MaterialPaintLayer &row,
+                                     int channel);
+
+/**
+ * Whether \a layer may carry UV mapping: it is of a kind that lays a flat value (a Fill) and reads
+ * a map, in at least one channel (Layer, correction) or through its mask image (mask item). A map
+ * written by strokes (Paint) is addressed at the raw UV and never supports it; neither does a
+ * filter, which owns no map. The one predicate UI, RNA and the CPU share.
+ */
+bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer's mapping is applied right now: enabled and supported. The values never move
+ * this answer; a slider drag must not rebuild anything.
+ */
+bool BKE_paint_layers_mapping_applies(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Whether \a layer's mapping is enabled. */
+bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer);
+
+/**
+ * Set whether \a layer's mapping is enabled. Refused when #BKE_paint_layers_mapping_supported
+ * reports false. Structural: the row gains or loses its remap.
+ */
+bool BKE_paint_layers_mapping_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled);
+
+/** Set the mapping offset of \a layer. Value-only. */
+bool BKE_paint_layers_mapping_set_offset(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         const float offset[2]);
+
+/**
+ * Set the mapping scale of \a layer. Value-only, normalized through
+ * #BKE_paint_layers_mapping_scale_normalize.
+ */
+bool BKE_paint_layers_mapping_set_scale(Material &ma,
+                                        MaterialPaintLayer *layer,
+                                        const float scale[2]);
+
+/** Whether the scale axes of \a layer move together (the Lock toggle). */
+bool BKE_paint_layers_mapping_scale_lock_get(const MaterialPaintLayer &layer);
+
+/**
+ * Lock or unlock the scale axes of \a layer. While locked, #BKE_paint_layers_mapping_set_scale
+ * gives both axes the value of the one that changed; locking joins them at the X value at once.
+ * Value-only.
+ */
+bool BKE_paint_layers_mapping_set_scale_lock(Material &ma, MaterialPaintLayer *layer, bool locked);
+
+/**
+ * Set the mapping rotation of \a layer, in radians around Z. Value-only.
+ *
+ * The rotation changes where the row's maps are read. A Normal map's tangent-space vectors are
+ * rotated by it too (and flipped by the sign of the scale), so the lighting follows the pattern.
+ */
+bool BKE_paint_layers_mapping_set_rotation(Material &ma, MaterialPaintLayer *layer, float rotation);
+
+/** \} */
+
 /** Rename \a layer. */
 bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char *name);
 

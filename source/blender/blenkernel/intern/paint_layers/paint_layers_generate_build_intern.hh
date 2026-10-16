@@ -262,6 +262,48 @@ class PaintLayersTreeBuilder {
    */
   NodeOutput rgb_mean_nodes_add(bNodeTree &tree, NodeOutput color, Vector<bNode *> &r_nodes);
 
+  /**
+   * The three UV mapping inputs of \a row (offset, scale, rotation), named after \a label, in
+   * \a group's interface. Made only while the row's mapping applies, so toggling it changes the
+   * interface once; a slider move syncs the values in place and never rebuilds.
+   */
+  void mapping_inputs_create(LayerGroup &group, const MaterialPaintLayer &row, const char *label);
+
+  /**
+   * Read \a map through the Mapping node of \a row: a `Point` Mapping fed by the object's UV and by
+   * the row's mapping inputs, built on first use and shared by every map of the row. Tiling needs
+   * Repeat, which is set on \a map. False, and \a map untouched, while the row's mapping does not
+   * apply. A Mapping made by this call is appended to \a r_nodes, so it joins the caller's frame
+   * and is removed with it when the caller rolls back.
+   */
+  bool mapping_apply(bNodeTree &tree,
+                     LayerGroup &group,
+                     const MaterialPaintLayer &row,
+                     bNode &map,
+                     Vector<bNode *> &r_nodes);
+
+  /**
+   * Remove \a nodes from \a tree, forgetting any row Mapping among them. A Mapping made by an
+   * earlier caller is not in \a nodes and stays.
+   */
+  void nodes_discard(bNodeTree &tree, Span<bNode *> nodes);
+
+  /** The Texture Coordinate node of \a tree whose `UV` output feeds a Mapping, made once. */
+  bNode *uv_coordinate_ensure(bNodeTree &tree);
+
+  /**
+   * Re-orient a tangent-space Normal map that \a row reads through its Mapping: returns the
+   * socket to use in place of \a color. The Mapping moved only the read point, so the encoded
+   * vectors are decoded, rotated back by the same Rotation and flipped by the sign of the same
+   * Scale, and encoded again. \a color unchanged when the row builds no Mapping. The values ride
+   * the Mapping's own inputs, so editing them never recompiles the shader. The nodes made are
+   * appended to \a r_nodes when given.
+   */
+  NodeOutput normal_remap_add(bNodeTree &tree,
+                              const MaterialPaintLayer &row,
+                              NodeOutput color,
+                              Vector<bNode *> *r_nodes = nullptr);
+
   /** The interface and the group output node; false when the output node cannot be created. */
   bool result_interface_create();
 
@@ -302,6 +344,12 @@ class PaintLayersTreeBuilder {
   /** A row's base mask opacity and constant inputs, keyed by the row. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_opacity_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_value_inputs_;
+  /** A row's UV mapping value inputs, keyed by the row that owns the Mapping. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_offset_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_scale_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
+  /** The Mapping node built for a row, so every channel and map of it shares the one node. */
+  Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */
   Map<const MaterialPaintLayer *, NodeOutput> mask_factors_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;
@@ -352,6 +400,10 @@ void group_input_default_set(const LayerGroup &group, bNodeTreeInterfaceSocket &
 void group_input_default_set(const LayerGroup &group,
                              bNodeTreeInterfaceSocket &iface,
                              const float value[4]);
+/** As above for a Vector input; a name of its own, as `float[3]` and `float[4]` are one pointer. */
+void group_input_vector_default_set(const LayerGroup &group,
+                                    bNodeTreeInterfaceSocket &iface,
+                                    const float value[3]);
 
 /** Add a value input to \a group's interface, tagged with its role, layer and channel. */
 bNodeTreeInterfaceSocket *layer_group_value_input(LayerGroup &group,

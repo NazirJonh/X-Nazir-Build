@@ -125,6 +125,33 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_MAPPING_OFFSET) || STREQ(role, ROLE_MAPPING_SCALE) ||
+      STREQ(role, ROLE_MAPPING_ROTATION))
+  {
+    /* The Mapping's three Vector inputs; the marker names the row that owns the mapping. The scale
+     * goes through the helper the CPU shares, so an old file's zero axis reads as one on both. */
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    float value[3] = {0.0f, 0.0f, 0.0f};
+    if (STREQ(role, ROLE_MAPPING_OFFSET)) {
+      value[0] = layer->mapping.offset[0];
+      value[1] = layer->mapping.offset[1];
+    }
+    else if (STREQ(role, ROLE_MAPPING_SCALE)) {
+      value[0] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[0]);
+      value[1] = BKE_paint_layers_mapping_scale_normalize(layer->mapping.scale[1]);
+      value[2] = 1.0f;
+    }
+    else {
+      value[2] = layer->mapping.rotation;
+    }
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_FILL_ALPHA)) {
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer,
                                                                       eMaterialPaintChannel(channel));

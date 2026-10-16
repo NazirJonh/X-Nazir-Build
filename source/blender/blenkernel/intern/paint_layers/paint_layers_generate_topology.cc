@@ -142,6 +142,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
   topology_hash_string(hash, layer.name);
+  /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
+   * applies is structure. The same answer builds the interface, so the two cannot disagree. */
+  hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, layer) ? 1 : 0);
   /* A row inside an isolating folder is built in the isolated form, with sockets of its own. */
   hash = topology_hash_mix(hash, forms.lookup_default(&layer, {}).in_isolating_folder ? 1 : 0);
   /* A Pass Through folder builds no group, an isolating one does: the mode is structure, although
@@ -171,6 +174,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.source)));
     /* Which filter it is decides its nodes; its parameters are inputs. */
     hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
+    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, effect) ? 1 : 0);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
       if (paint_layer_effect_lays(ma, effect, channel)) {
@@ -196,6 +200,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, 1);
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
+    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, *mask) ? 1 : 0);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (record != nullptr && record->image != nullptr) {
@@ -222,6 +227,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, uint64_t(uint8_t(item.blend)));
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
+    hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, item) ? 1 : 0);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (!paint_layer_mask_item_lays(item) || record == nullptr) {

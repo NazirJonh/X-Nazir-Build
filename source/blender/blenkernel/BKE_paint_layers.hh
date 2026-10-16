@@ -617,6 +617,12 @@ enum class PaintLayersIssueCode : int8_t {
    * so the stray nesting is ignored; this catches a malformed file or an edit made around the API.
    */
   NonFolderHasChildren = 2,
+  /**
+   * A row whose kind this build does not know, or that sits in a role its kind does not allow (a
+   * folder as a correction). Such a row is skipped; this catches a file written by a build with
+   * more kinds, or an edit made around the API.
+   */
+  KindNotAllowed = 3,
 };
 
 /** One entry #BKE_paint_layers_issues_get reports. */

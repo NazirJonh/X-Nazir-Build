@@ -1589,6 +1589,27 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
   const bool normal_in_set = !paint_layer_channel_filtered(ma, PAINT_MATERIAL_CHANNEL_NORMAL);
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        const auto check_kind = [&](const MaterialPaintLayer &row, const bool is_owned) {
+          if (paint_layer_kind_role_allowed(row)) {
+            return;
+          }
+          PaintLayersIssue issue;
+          issue.layer = layer.marker;
+          if (is_owned) {
+            issue.correction = row.marker;
+          }
+          issue.code = PaintLayersIssueCode::KindNotAllowed;
+          issue.text = TIP_("This row's kind is unknown or not allowed in its role; it is ignored");
+          r_issues.append(issue);
+        };
+        check_kind(layer, false);
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          check_kind(effect, true);
+        }
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          check_kind(item, true);
+        }
+
         const bool folder = BKE_paint_layers_is_folder(layer);
         if (folder) {
           for (const int i : IndexRange(layer.channels_num)) {

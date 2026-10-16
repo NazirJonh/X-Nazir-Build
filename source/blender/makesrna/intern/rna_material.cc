@@ -1774,6 +1774,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_issue_code_items[] =
      0,
      "Non-Folder Has Children",
      "Only a folder takes part through its children; the stray nesting is ignored"},
+    {3,
+     "KIND_NOT_ALLOWED",
+     0,
+     "Kind Not Allowed",
+     "The row's kind is unknown to this build or not allowed in the row's role"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

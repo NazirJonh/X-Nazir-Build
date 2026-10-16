@@ -1780,6 +1780,35 @@ TEST_F(PaintLayersDescription, issues_report_a_folder_with_a_map_and_a_row_with_
   EXPECT_TRUE(children);
 }
 
+TEST_F(PaintLayersDescription, issues_report_a_kind_that_is_unknown_or_not_allowed_in_its_role)
+{
+  Material &ma = *BKE_material_add(bmain, "IssueKindMat");
+  MaterialPaintLayer *row = BKE_paint_layers_add(ma, "A", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(ma, row, "Corr");
+  ASSERT_NE(effect, nullptr);
+  MaterialPaintLayer *other = BKE_paint_layers_add(ma, "B", nullptr, PaintLayerPlace::Above);
+
+  Vector<PaintLayersIssue> issues;
+  BKE_paint_layers_issues_get(ma, issues);
+  EXPECT_TRUE(issues.is_empty());
+
+  /* A folder as a correction, and a kind a newer build wrote: both are skipped and both say so. */
+  effect->source = MA_PAINT_LAYER_SOURCE_STACK;
+  other->source = 2;
+  BKE_paint_layers_issues_get(ma, issues);
+  ASSERT_EQ(issues.size(), 2);
+  bool correction = false;
+  bool unknown = false;
+  for (const PaintLayersIssue &issue : issues) {
+    EXPECT_EQ(issue.code, PaintLayersIssueCode::KindNotAllowed);
+    correction |= BLI_uuid_equal(issue.layer, row->marker) &&
+                  BLI_uuid_equal(issue.correction, effect->marker);
+    unknown |= BLI_uuid_equal(issue.layer, other->marker) && BLI_uuid_is_nil(issue.correction);
+  }
+  EXPECT_TRUE(correction);
+  EXPECT_TRUE(unknown);
+}
+
 TEST_F(PaintLayersDescription, correction_paste_lands_a_copy_with_maps_and_settings_of_its_own)
 {
   Material &ma = *BKE_material_add(bmain, "PasteCorrectionMat");

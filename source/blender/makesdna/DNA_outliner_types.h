@@ -101,8 +101,10 @@ enum eTreeStoreElemType : short {
   TSE_ACTION_SLOT = 50,
   TSE_SHAPE_KEY_BLOCK = 51,
   TSE_SHAPE_KEY_BASE = 52,
-  TSE_STACK_LAYER = 53,
-  TSE_STACK_ITEM = 54,
+  /* Fork-only values are kept far from upstream's range to avoid collisions with values
+   * upstream Blender allocates later, since these are stored in .blend files. */
+  TSE_STACK_LAYER = 100,
+  TSE_STACK_ITEM = 101,
 };
 
 /** Check whether given #TreeStoreElem should have a real ID in #TreeStoreElem.id member. */

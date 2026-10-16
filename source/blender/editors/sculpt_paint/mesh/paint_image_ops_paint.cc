@@ -817,7 +817,7 @@ static void gradient_draw_line(bContext * /*C*/,
  * the Sculpt Mode canvas does.
  */
 static void texture_paint_prepare_layered_maps(bContext *C,
-                                               PaintOperation &pop,
+                                               PaintOperation & /*pop*/,
                                                Object *ob,
                                                const bool is_projection)
 {

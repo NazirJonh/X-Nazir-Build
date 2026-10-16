@@ -245,7 +245,9 @@ enum eSpaceOutliner_Mode : short {
   SO_ID_ORPHANS = 14,
   SO_VIEW_LAYER = 15,
   SO_OVERRIDES_LIBRARY = 16,
-  SO_STACK_LAYERS = 17,
+  /* Fork-only value is kept far from upstream's range to avoid collisions with values
+   * upstream Blender allocates later, since this is stored in .blend files. */
+  SO_STACK_LAYERS = 100,
 };
 
 /** #SpaceOutliner.stack_layers_view */

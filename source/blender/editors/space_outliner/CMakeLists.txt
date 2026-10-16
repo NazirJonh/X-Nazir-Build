@@ -29,8 +29,12 @@ set(SRC
   outliner_utils.cc
   space_outliner.cc
   stack_layer/outliner_stack_draw.cc
+  stack_layer/outliner_stack_add.cc
+  stack_layer/outliner_stack_clipboard.cc
+  stack_layer/outliner_stack_focus.cc
   stack_layer/outliner_stack_layers.cc
   stack_layer/outliner_stack_layers_ops.cc
+  stack_layer/outliner_stack_ui_state.cc
   stack_layer/outliner_stack_dragdrop.cc
   stack_layer/outliner_stack_source.cc
   stack_layer/outliner_stack_source_paint_layers.cc
@@ -93,6 +97,7 @@ set(SRC
 
   outliner_intern.hh
   stack_layer/outliner_stack_drag.hh
+  stack_layer/outliner_stack_layers_intern.hh
   tree/common.hh
   tree/tree_display.hh
   tree/tree_element.hh

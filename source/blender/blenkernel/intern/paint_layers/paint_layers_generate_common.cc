@@ -558,7 +558,9 @@ void wire_instance_to_material(Material &ma,
         /* The Height link just made dirtied the cache that this read goes through. */
         ma.nodetree->ensure_topology_cache();
         const Span<bNodeLink *> normal_links = principled_normal->directly_linked_links();
-        if (normal_links.size() == 1) {
+        /* On a regenerate the Principled Normal is already fed by this Bump: its Normal input must
+         * keep the user's chain, linking it to its own output would form a cycle. */
+        if (normal_links.size() == 1 && normal_links[0]->fromnode != bump) {
           input_link_restore(ma,
                              *bump_normal_in,
                              *normal_links[0]->fromnode,

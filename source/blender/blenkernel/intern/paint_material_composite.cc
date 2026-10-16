@@ -47,6 +47,7 @@
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -1719,10 +1720,19 @@ static void composite_entry_reset(CompositeCacheEntry &entry)
   entry.partial_update_users.clear();
 }
 
-static void composite_cache_enforce_budget(const CompositeCacheKey &keep)
+/**
+ * The floor is #COMPOSITE_CACHE_BUDGET_BYTES. Above it, the budget grows to hold one composite per
+ * channel at the size being gathered: a larger material's whole set would otherwise evict itself on
+ * every redraw, since the gather needs all of its channels resident at once.
+ */
+static void composite_cache_enforce_budget(const CompositeCacheKey &keep,
+                                           const int width,
+                                           const int height)
 {
+  const int64_t one_set_bytes = int64_t(width) * height * 4 * PAINT_MATERIAL_CHANNEL_NUM;
+  const int64_t budget_bytes = std::max(COMPOSITE_CACHE_BUDGET_BYTES, one_set_bytes);
   bke::paint_material_cache::enforce_budget(
-      g_cache.entries, keep, COMPOSITE_CACHE_BUDGET_BYTES, composite_entry_size_in_bytes);
+      g_cache.entries, keep, budget_bytes, composite_entry_size_in_bytes);
 }
 
 /** Every image the stack reads, in the order the layers are composited. */
@@ -1872,7 +1882,7 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
   if (r_revision != nullptr) {
     *r_revision = entry.revision;
   }
-  composite_cache_enforce_budget(key);
+  composite_cache_enforce_budget(key, width, height);
   return entry.ibuf.get();
 }
 

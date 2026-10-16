@@ -883,6 +883,29 @@ TEST_F(PaintLayersGenerateTest, repeated_regenerate_does_not_grow_the_group)
   }
 }
 
+TEST_F(PaintLayersGenerateTest, height_regenerate_does_not_link_bump_to_itself)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Paint", add_image("Paint"));
+  add_channel(*layer, PAINT_MATERIAL_CHANNEL_HEIGHT, add_image("Height"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  /* The second pass finds the Principled Normal already fed by our Bump: it must not be relinked. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNode *bump = nullptr;
+  for (bNode &node : ma->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_BUMP) {
+      bump = &node;
+    }
+  }
+  ASSERT_NE(bump, nullptr);
+  bNodeSocket *bump_normal = bke::node_find_socket(*bump, SOCK_IN, "Normal");
+  ASSERT_NE(bump_normal, nullptr);
+  ma->nodetree->ensure_topology_cache();
+  for (bNodeLink *link : bump_normal->directly_linked_links()) {
+    EXPECT_NE(link->fromnode, bump);
+  }
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

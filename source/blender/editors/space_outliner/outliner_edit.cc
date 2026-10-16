@@ -356,7 +356,11 @@ static void do_item_rename(ARegion *region,
            TSE_SCENE_OBJECTS_BASE,
            TSE_GENERIC_LABEL,
            TSE_GPENCIL_EFFECT_BASE,
-           TSE_SHAPE_KEY_BASE))
+           TSE_SHAPE_KEY_BASE,
+           /* Stack rows rename through #OUTLINER_OT_stack_layer_rename: their `te->name` is a
+            * copy of the row name, so an in-row text field would write into a too-small buffer. */
+           TSE_STACK_LAYER,
+           TSE_STACK_ITEM))
   {
     BKE_report(reports, RPT_INFO, "Not an editable name");
   }

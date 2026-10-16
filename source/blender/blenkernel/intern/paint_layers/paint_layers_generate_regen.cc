@@ -26,6 +26,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
+#include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
@@ -325,6 +326,11 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     report_out();
     return false;
   }
+  /* A linked or override material is not editable here: its trees are owned by another file. */
+  if (!ID_IS_EDITABLE(&ma.id) || ID_IS_OVERRIDE_LIBRARY(&ma.id)) {
+    report_out();
+    return false;
+  }
   if (BLI_uuid_is_nil(ma.paint_layers_owner_uid)) {
     ma.paint_layers_owner_uid = BLI_uuid_generate_random();
   }
@@ -364,8 +370,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                          kept_instance->id == &tree->id;
 
   bool relations_changed = report.replaced_foreign_tree;
-  if (keep_root) {
-    BKE_paint_layers_values_sync(ma);
+  /* A failed sync means a value input has no socket on its instance (a hand-edited tree): the kept
+   * root cannot be trusted, so the full rebuild below takes over. */
+  const bool kept = keep_root && BKE_paint_layers_values_sync(ma);
+  if (kept) {
     regenerate_tags(bmain, ma, *tree, false);
   }
   else {
@@ -439,7 +447,9 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain)
    * and rebuilding it from a copy would rewrite the original's tree. */
   const int no_regen_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
   for (Material &ma : bmain.materials) {
-    if ((ma.id.tag & no_regen_tags) != 0 || !BKE_paint_layers_is_layered(ma)) {
+    if ((ma.id.tag & no_regen_tags) != 0 || !BKE_paint_layers_is_layered(ma) ||
+        !ID_IS_EDITABLE(&ma.id) || ID_IS_OVERRIDE_LIBRARY(&ma.id))
+    {
       continue;
     }
     const bool needs_regen = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0 ||
@@ -523,12 +533,17 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
 /** \name Undo
  * \{ */
 
-/** The layered materials of \a bmain that own a generated tree (have an owner uid). */
+/**
+ * The editable layered materials of \a bmain that own a generated tree (have an owner uid). A
+ * linked or override material is skipped: undo must never rewrite the trees of another file.
+ */
 static Vector<Material *> layered_materials_with_owner(Main &bmain)
 {
   Vector<Material *> materials;
   for (Material &ma : bmain.materials) {
-    if (BKE_paint_layers_is_layered(ma) && !BLI_uuid_is_nil(ma.paint_layers_owner_uid)) {
+    if (BKE_paint_layers_is_layered(ma) && !BLI_uuid_is_nil(ma.paint_layers_owner_uid) &&
+        ID_IS_EDITABLE(&ma.id) && !ID_IS_OVERRIDE_LIBRARY(&ma.id))
+    {
       materials.append(&ma);
     }
   }

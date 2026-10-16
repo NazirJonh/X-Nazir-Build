@@ -74,15 +74,27 @@ const ed::outliner::StackRow *outliner_stack_row_resolve(const SpaceOutliner &sp
                                                          const bUUID &row_id,
                                                          int ordinal_hint);
 
-bool stack_row_activate_poll(bContext *C)
+/**
+ * Whether the operator runs in the Stack Layers display. The View Layer and other display modes
+ * share the Outliner's keys (X, Shift+D), so a stack operator must refuse outside it or it takes
+ * those keys from the data-block operators.
+ */
+static bool stack_mode_poll(bContext *C)
 {
   if (!ED_operator_outliner_active(C)) {
     return false;
   }
-  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+  const SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  return space_outliner != nullptr && space_outliner->runtime != nullptr &&
+         space_outliner->outlinevis == SO_STACK_LAYERS;
+}
+
+bool stack_row_activate_poll(bContext *C)
+{
+  if (!stack_mode_poll(C)) {
     return false;
   }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
   const StackReadContext ctx = outliner_stack_read_context(*C);
   const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
   return owner != nullptr && stack_source_for_space(*space_outliner)->is_editable(*owner);
@@ -283,7 +295,9 @@ bool stack_mutate(bContext &C,
 }
 
 /**
- * The ordinal of the row the operator's \a marker names, or -1.
+ * The ordinal of the row the operator's \a marker names, -1 when it was given none, or
+ * #STACK_MARKER_UNRESOLVED when it names a row that is gone: falling back to the selection then
+ * would act on a row the caller never asked for.
  *
  * A marker is the row's identity -- #StackRow::stable_id, as an earlier call of the mode handed it
  * out. A script that re-addresses a row by its marker gets the same row after an edit moved it,
@@ -291,6 +305,8 @@ bool stack_mutate(bContext &C,
  * marker; the position properties stay for UI buttons, which speak for the row on screen at the
  * moment of the call.
  */
+static constexpr int STACK_MARKER_UNRESOLVED = -2;
+
 static int stack_operator_marker_ordinal_get(bContext &C,
                                              SpaceOutliner &space_outliner,
                                              wmOperator &op)
@@ -302,16 +318,16 @@ static int stack_operator_marker_ordinal_get(bContext &C,
   }
   bUUID marker;
   if (!BLI_uuid_parse_string(&marker, marker_str)) {
-    return -1;
+    return STACK_MARKER_UNRESOLVED;
   }
   const StackReadContext ctx = outliner_stack_read_context(C);
   ID *owner = outliner_stack_owner_get(ctx, space_outliner);
   if (owner == nullptr) {
-    return -1;
+    return STACK_MARKER_UNRESOLVED;
   }
   outliner_stack_rows_ensure(ctx, space_outliner, *owner);
   const StackRow *row = outliner_stack_row_resolve(space_outliner, marker, -1);
-  return (row != nullptr) ? row->ordinal : -1;
+  return (row != nullptr) ? row->ordinal : STACK_MARKER_UNRESOLVED;
 }
 
 /**
@@ -349,6 +365,10 @@ wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op)
    * selection with its first row, and a move of one row is not a move of the selection. */
   Vector<int> ordinals_to_move;
   int ordinal = stack_operator_marker_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal == STACK_MARKER_UNRESOLVED) {
+    BKE_report(op->reports, RPT_ERROR, "The marker names no row in this stack");
+    return OPERATOR_CANCELLED;
+  }
   if (ordinal < 0) {
     ordinal = RNA_int_get(op->ptr, "ordinal");
   }
@@ -478,13 +498,10 @@ wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
 
 bool stack_row_mask_poll(bContext *C)
 {
-  if (!ED_operator_outliner_active(C)) {
+  if (!stack_mode_poll(C)) {
     return false;
   }
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
-    return false;
-  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
   return owner != nullptr && stack_source_for_space(*space_outliner)->can_edit(*owner);
@@ -550,13 +567,10 @@ wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op)
 
 bool stack_row_visibility_toggle_poll(bContext *C)
 {
-  if (!ED_operator_outliner_active(C)) {
+  if (!stack_mode_poll(C)) {
     return false;
   }
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
-    return false;
-  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
   return owner != nullptr && stack_source_for_space(*space_outliner)->can_edit(*owner);
@@ -564,12 +578,11 @@ bool stack_row_visibility_toggle_poll(bContext *C)
 
 bool stack_row_reorder_poll(bContext *C)
 {
-  if (!ED_operator_outliner_active(C)) {
+  if (!stack_mode_poll(C)) {
     return false;
   }
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  return space_outliner != nullptr && space_outliner->runtime != nullptr &&
-         outliner_stack_can_reorder(*C, *space_outliner);
+  return outliner_stack_can_reorder(*C, *space_outliner);
 }
 
 StackReadContext outliner_stack_read_context(const bContext &C)
@@ -922,6 +935,10 @@ int outliner_stack_identity_resolve(const StackReadContext &ctx,
 int stack_operator_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op)
 {
   const int marker_ordinal = stack_operator_marker_ordinal_get(C, space_outliner, op);
+  if (marker_ordinal == STACK_MARKER_UNRESOLVED) {
+    /* Not the selection: the caller named a row, and it is gone. */
+    return -1;
+  }
   if (marker_ordinal >= 0) {
     return marker_ordinal;
   }
@@ -1776,12 +1793,11 @@ wmOperatorStatus stack_sub_index_set_exec(bContext *C, wmOperator *op)
 
 bool stack_sub_index_set_poll(bContext *C)
 {
-  if (!ED_operator_outliner_active(C)) {
+  if (!stack_mode_poll(C)) {
     return false;
   }
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  return space_outliner != nullptr && space_outliner->runtime != nullptr &&
-         outliner_stack_focus_object_get(outliner_stack_read_context(*C),
+  return outliner_stack_focus_object_get(outliner_stack_read_context(*C),
                                          space_outliner->runtime->stack_focus) != nullptr;
 }
 
@@ -1987,13 +2003,10 @@ void stack_row_add_ui(bContext *C, wmOperator *op)
 
 bool stack_row_add_poll(bContext *C)
 {
-  if (!ED_operator_outliner_active(C)) {
+  if (!stack_mode_poll(C)) {
     return false;
   }
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
-    return false;
-  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
   return owner != nullptr && stack_source_for_space(*space_outliner)->can_edit(*owner);
@@ -2080,13 +2093,10 @@ const EnumPropertyItem *stack_effect_type_itemf(bContext *C,
  * and does its source take edits at all. */
 bool stack_row_remove_poll(bContext *C)
 {
-  if (!ED_operator_outliner_active(C)) {
+  if (!stack_mode_poll(C)) {
     return false;
   }
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
-    return false;
-  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
   const StackSource *source = stack_source_for_space(*space_outliner);
@@ -2099,6 +2109,10 @@ wmOperatorStatus stack_row_remove_exec(bContext *C, wmOperator *op)
   /* A marker names the row by identity and wins over the position; without one, the position the
    * operator was given addresses the single row, and -1 falls through to the selection. */
   int ordinal = stack_operator_marker_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal == STACK_MARKER_UNRESOLVED) {
+    BKE_report(op->reports, RPT_ERROR, "The marker names no row in this stack");
+    return OPERATOR_CANCELLED;
+  }
   if (ordinal < 0) {
     ordinal = RNA_int_get(op->ptr, "ordinal");
   }

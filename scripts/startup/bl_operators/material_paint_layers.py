@@ -47,9 +47,9 @@ class _PaintLayerOperator(Operator):
     def _layer(self, context):
         if self.marker:
             mat = _context_material(context)
-            layer = mat.paint_layers.find(self.marker) if mat is not None else None
-            if layer is not None:
-                return layer
+            # A marker that names no row must not fall back to the active layer: the caller asked
+            # for a specific row, and acting on another one would edit the wrong layer.
+            return mat.paint_layers.find(self.marker) if mat is not None else None
         return _paint_layers_active_layer(context)
 
     @classmethod

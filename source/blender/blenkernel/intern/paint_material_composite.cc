@@ -30,6 +30,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_rect.h"
 #include "BLI_string.h"
+#include "BLI_enumerable_thread_specific.hh"
 #include "BLI_task.hh"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
@@ -48,6 +49,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -1149,13 +1151,27 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
   }
 
   const double start_time = BLI_time_now_seconds();
-  int layers_evaluated = 0;
-  Vector<float> tile_storage;
-  Vector<float> color_storage;
-  Vector<float> factor_storage;
+  struct TileScratch {
+    Vector<float> tile_storage;
+    Vector<float> color_storage;
+    Vector<float> factor_storage;
+  };
+  threading::EnumerableThreadSpecific<TileScratch> scratch_per_thread;
+  std::atomic<int> layers_evaluated = 0;
 
-  for (int tile_y = area.ymin; tile_y < area.ymax; tile_y += COMPOSITE_TILE_SIZE) {
-    for (int tile_x = area.xmin; tile_x < area.xmax; tile_x += COMPOSITE_TILE_SIZE) {
+  /* Tiles share nothing: each reads the layers' buffers and writes its own part of the target, so
+   * they run in parallel. One tile is already enough work to be a task of its own. */
+  const int tiles_x = (int(area_width) + COMPOSITE_TILE_SIZE - 1) / COMPOSITE_TILE_SIZE;
+  const int tiles_y = (int(area_height) + COMPOSITE_TILE_SIZE - 1) / COMPOSITE_TILE_SIZE;
+  threading::parallel_for(IndexRange(int64_t(tiles_x) * tiles_y), 1, [&](const IndexRange range) {
+    TileScratch &scratch = scratch_per_thread.local();
+    Vector<float> &tile_storage = scratch.tile_storage;
+    Vector<float> &color_storage = scratch.color_storage;
+    Vector<float> &factor_storage = scratch.factor_storage;
+
+    for (const int64_t tile_index : range) {
+      const int tile_x = area.xmin + int(tile_index % tiles_x) * COMPOSITE_TILE_SIZE;
+      const int tile_y = area.ymin + int(tile_index / tiles_x) * COMPOSITE_TILE_SIZE;
       rcti tile;
       BLI_rcti_init(&tile,
                     tile_x,
@@ -1181,6 +1197,7 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
         }
       }
 
+      int tile_layers_evaluated = 0;
       for (const PaintMaterialCompositeLayer &layer : stack.layers) {
         /* A layer that blends by nothing leaves the tile as it is; do not decode its buffers. */
         if (!layer.enabled || layer.opacity <= 0.0f) {
@@ -1193,8 +1210,9 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
                            layer.blend,
                            layer.opacity * factor_storage[i]);
         }
-        layers_evaluated++;
+        tile_layers_evaluated++;
       }
+      layers_evaluated += tile_layers_evaluated;
 
       /* Copy the tile back into the caller's buffer; only the region is ever touched. */
       for (int row = 0; row < th; row++) {
@@ -1204,11 +1222,11 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
         memcpy(dst_row, tile_dst + int64_t(row) * tw * 4, size_t(tw) * 4 * sizeof(float));
       }
     }
-  }
+  });
 
   if (r_stats != nullptr) {
     r_stats->elapsed_seconds = BLI_time_now_seconds() - start_time;
-    r_stats->layers_evaluated = layers_evaluated;
+    r_stats->layers_evaluated = layers_evaluated.load();
     r_stats->pixels_processed = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
   }
   return true;

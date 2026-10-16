@@ -681,6 +681,13 @@ void BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel channel, float 
 void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images);
 
 /**
+ * Whether #BKE_paint_layers_pack_maps takes care of \a image on a file write: an editable
+ * generated map, or one that is already packed. Any other map (an external file the user assigned)
+ * keeps its pixels in that file and has to go through the usual save prompt.
+ */
+bool BKE_paint_layers_map_is_packed_on_save(const Image &image);
+
+/**
  * Pack the maps of every layered material of \a bmain, so a written file reopens with its pixels.
  *
  * A map is a generated image: its pixels exist only in the buffer, and the file keeps nothing but

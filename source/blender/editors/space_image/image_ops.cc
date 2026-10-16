@@ -2773,9 +2773,9 @@ int ED_image_save_all_modified_info(const Main *bmain, ReportList *reports)
 
   int num_saveable_images = 0;
 
-  /* A layered material's maps are packed by every file write (#BKE_paint_layers_pack_maps), so
-   * they are never offered here: declining the prompt must not be able to leave the graph with
-   * empty maps. */
+  /* A layered material's maps that every file write packs (#BKE_paint_layers_pack_maps) are never
+   * offered here: declining the prompt must not be able to leave the graph with empty maps. A map
+   * backed by an external file is not packed, so it stays in the prompt like any other image. */
   Vector<Image *> paint_layer_maps;
   BKE_paint_layers_maps_collect(*bmain, paint_layer_maps);
 
@@ -2784,7 +2784,7 @@ int ED_image_save_all_modified_info(const Main *bmain, ReportList *reports)
   {
     bool is_format_writable;
 
-    if (paint_layer_maps.contains(ima)) {
+    if (paint_layer_maps.contains(ima) && BKE_paint_layers_map_is_packed_on_save(*ima)) {
       continue;
     }
 

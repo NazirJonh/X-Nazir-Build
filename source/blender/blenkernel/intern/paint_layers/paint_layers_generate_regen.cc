@@ -473,6 +473,38 @@ static bool copy_owns_generated_tree(const Main *bmain, const int copy_flag)
   return bmain != nullptr && (copy_flag & view_flags) == 0;
 }
 
+/**
+ * Give \a rows (and everything they hold) their own copy of every editable map, so painting on a
+ * duplicated material never reaches the original. \a clones keeps one copy per source image: two
+ * rows that shared a map still share it, inside the duplicate.
+ */
+static void maps_copy(Main &bmain, ListBaseT<MaterialPaintLayer> &rows, Map<Image *, Image *> &clones)
+{
+  for (MaterialPaintLayer &row : rows) {
+    for (int i = 0; i < row.channels_num; i++) {
+      Image *&image = row.channels[i].image;
+      if (image == nullptr || !ID_IS_EDITABLE(&image->id)) {
+        continue;
+      }
+      Image *clone = clones.lookup_default(image, nullptr);
+      if (clone == nullptr) {
+        clone = id_cast<Image *>(BKE_id_copy(&bmain, &image->id));
+        if (clone == nullptr) {
+          continue;
+        }
+        /* Like the tree copy below: #BKE_id_copy hands back a reference of its own, and the generic
+         * copy pass adds the single reference the channel owns. */
+        id_us_min(&clone->id);
+        clones.add(image, clone);
+      }
+      image = clone;
+    }
+    maps_copy(bmain, row.mask_stack, clones);
+    maps_copy(bmain, row.effects, clones);
+    maps_copy(bmain, row.children, clones);
+  }
+}
+
 void BKE_paint_layers_generate_copy_data(Main *bmain,
                                          Material &ma_dst,
                                          const Material &ma_src,
@@ -489,6 +521,16 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
   if (!BLI_uuid_is_nil(ma_src.paint_layers_owner_uid)) {
     ma_dst.paint_layers_owner_uid = BLI_uuid_generate_random();
   }
+
+  /* The maps are pixels the material paints into, so a duplicate that kept the source's images
+   * would change the original on its first stroke. The copied generated groups still name the
+   * source's images; the regeneration this tags rewires them to the copies. */
+  if (bmain != nullptr && ma_dst.paint_layers.first != nullptr) {
+    Map<Image *, Image *> clones;
+    maps_copy(*bmain, ma_dst.paint_layers, clones);
+    ma_dst.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  }
+
   if (ma_src.paint_layers_tree == nullptr) {
     ma_dst.paint_layers_tree = nullptr;
     return;

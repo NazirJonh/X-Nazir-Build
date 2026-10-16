@@ -1714,6 +1714,12 @@ void BKE_paint_layers_maps_collect(const Main &bmain, Vector<Image *> &r_images)
   }
 }
 
+bool BKE_paint_layers_map_is_packed_on_save(const Image &image)
+{
+  return ID_IS_EDITABLE(&image.id) &&
+         (image.source == IMA_SRC_GENERATED || BKE_image_has_packedfile(&image));
+}
+
 int BKE_paint_layers_pack_maps(const Main &bmain, const bool for_autosave, ReportList *reports)
 {
   Vector<Image *> images;

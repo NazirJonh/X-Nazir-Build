@@ -2862,6 +2862,13 @@ static bool rna_SpaceImageEditor_is_material_paint_combined_get(PointerRNA *ptr)
          sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED;
 }
 
+static bool rna_SpaceImageEditor_is_material_paint_canvas_get(PointerRNA *ptr)
+{
+  const SpaceImage *sima = static_cast<const SpaceImage *>(ptr->data);
+  /* G_MAIN like the setters above: a getter has no context. The lookup is memoized per image. */
+  return sima->image != nullptr && ED_space_image_composite_material_get(G_MAIN, sima->image);
+}
+
 static int rna_SpaceImageEditor_display_channels_get(PointerRNA *ptr)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
@@ -7739,6 +7746,16 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Show Combined Preview",
                            "The Combined preview is the pass currently shown in this editor");
+
+  /* A layered material's maps carry no #Image::paint_layer_id, so the UI cannot tell them from
+   * any other image by that; the material lookup the composite uses answers instead. */
+  prop = RNA_def_property(srna, "is_material_paint_canvas", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_is_material_paint_canvas_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Is Material Paint Canvas",
+                           "The shown image is a map of a material's paint layers");
 
   prop = RNA_def_property(srna, "material_paint_light_rotation", PROP_FLOAT, PROP_ANGLE);
   RNA_def_property_float_sdna(prop, nullptr, "material_paint_light_rot_z");

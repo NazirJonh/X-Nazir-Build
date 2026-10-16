@@ -56,6 +56,7 @@
 #include "BKE_name_matching.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
@@ -2051,13 +2052,21 @@ static bool material_canvas_cycle_poll(bContext *C)
     return false;
   }
   const Scene *scene = CTX_data_scene(C);
-  if (scene == nullptr ||
-      scene->toolsettings->imapaint.mode != IMAGEPAINT_MODE_MATERIAL)
-  {
+  if (scene == nullptr) {
     return false;
   }
   const Object *ob = CTX_data_active_object(C);
-  return ob != nullptr && ob->actcol > 0;
+  if (ob == nullptr || ob->actcol <= 0) {
+    return false;
+  }
+  /* The Texture Paint setting is not the only way into material painting: Sculpt mode paints the
+   * material through its own canvas source, and an Image Editor already showing a map of a
+   * material (a layered one included) is a material canvas whatever either says. */
+  const ToolSettings &tool_settings = *scene->toolsettings;
+  return tool_settings.imapaint.mode == IMAGEPAINT_MODE_MATERIAL ||
+         tool_settings.paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL ||
+         (sima->image != nullptr &&
+          ED_space_image_composite_material_get(CTX_data_main(C), sima->image) != nullptr);
 }
 
 static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
@@ -2085,9 +2094,26 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
     const Span<int> passes = BKE_paint_material_display_passes();
     const int current = int(passes.first_index_try(sima->material_paint_pass));
     const int count = int(passes.size());
-    const int next = (current < 0) ? (reverse ? count - 1 : 0) :
-                                     (current + (reverse ? -1 : 1) + count) % count;
-    sima->material_paint_pass = passes[next];
+    /* A channel with no layer stack would only show the plain canvas image under its name, so the
+     * step passes over it. Combined always resolves. */
+    Vector<PaintMaterialCompositeImageLayer> probe;
+    const auto pass_shows_composite = [&](const int pass) {
+      if (pass == PAINT_LAYER_PASS_COMBINED) {
+        return true;
+      }
+      return BKE_paint_layers_is_layered(*ma) ?
+                 BKE_paint_layers_composite_image_layers(*ma, pass, probe) :
+                 BKE_paint_material_composite_stack_from_material(*bmain, *ma, pass, probe);
+    };
+    int next = current;
+    for (int step = 0; step < count; step++) {
+      next = (next < 0) ? (reverse ? count - 1 : 0) :
+                          (next + (reverse ? -1 : 1) + count) % count;
+      if (pass_shows_composite(passes[next])) {
+        sima->material_paint_pass = passes[next];
+        break;
+      }
+    }
     WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
     return OPERATOR_FINISHED;
   }

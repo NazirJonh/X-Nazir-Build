@@ -309,7 +309,13 @@ ImBuf *combined_preview_ensure(Main &bmain,
   }
   GatherScope scope;
 
-  const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&ma);
+  /* A layered material answers from its description alone, and every channel it lacks rows for
+   * keeps the neutral default below. Its generated tree is not a source material: resolving it
+   * would read the layer group as a procedural graph, bake it, and let the bake stand in for rows
+   * the stack already describes. */
+  const MaterialSourceResolve resolve = BKE_paint_layers_is_layered(ma) ?
+                                            MaterialSourceResolve{} :
+                                            BKE_paint_material_source_resolve(&ma);
 
   bool any_baked = false;
   for (const eMaterialPaintChannel channel : combined_shading_channels) {
@@ -590,6 +596,10 @@ void combined_preview_bake_ensure(const bContext &C, Material &ma)
    * paint cursor and from RNA updates, neither of which fires for a user who merely opened the
    * Combined preview. Without this the procedural channels of such a material would show their
    * defaults for as long as the editor stays open. */
+  if (BKE_paint_layers_is_layered(ma)) {
+    /* Nothing to bake: see #combined_preview_ensure. */
+    return;
+  }
   const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(&ma);
   bool needs_bake = false;
   for (const eMaterialPaintChannel channel : combined_shading_channels) {

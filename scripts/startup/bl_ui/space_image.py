@@ -1052,7 +1052,7 @@ class IMAGE_HT_header(Header):
             # painting drives the canvas shown here.
             ob = context.image_paint_object or context.active_object
             mat = ob.active_material if ob else None
-            if is_paint_layer_map(sima.image):
+            if is_paint_layer_map(sima.image) or sima.is_material_paint_canvas:
                 # A PBR paint layer map: the engine owns its name and lifetime, so New, Open and
                 # rename do not apply. Only the name field is replaced -- by the channel selector,
                 # the one choice that still means something here, and being an enum it brings

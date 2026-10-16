@@ -96,8 +96,39 @@ static void space_image_paint_canvas_follow(SpaceImage *sima, Image *ima)
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
 
+static Material *space_image_composite_material_find(Main &bmain, const Image &image);
+
+/**
+ * Open a paint-mode editor on the Combined preview when it is automatically pointed at a map of a
+ * layered material, so painting a layer stack shows the stack and not one layer's raw map.
+ *
+ * Only a first pointing counts: when the editor already showed a map of a material, it is the
+ * user's to keep, whichever pass or layer map they chose there. The composite flag is likewise
+ * left alone, since any pass already set is such a choice.
+ */
+static void space_image_default_combined(Main &bmain,
+                                         SpaceImage &sima,
+                                         const Image *previous,
+                                         const Image *ima)
+{
+  if (sima.mode != SI_MODE_PAINT || ima == nullptr || (sima.flag & SI_PAINT_COMPOSITE_MODE) != 0) {
+    return;
+  }
+  if (previous != nullptr && space_image_composite_material_find(bmain, *previous) != nullptr) {
+    return;
+  }
+  const Material *ma = space_image_composite_material_find(bmain, *ima);
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+    return;
+  }
+  sima.material_paint_pass = PAINT_LAYER_PASS_COMBINED;
+  sima.flag |= SI_PAINT_COMPOSITE_MODE;
+}
+
 void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automatic)
 {
+  const Image *previous_image = sima->image;
+
   /* Automatically pin image when manually assigned, otherwise it follows object. */
   if (!automatic && sima->image != ima && sima->mode == SI_MODE_UV) {
     sima->pin = true;
@@ -126,6 +157,10 @@ void ED_space_image_set(Main *bmain, SpaceImage *sima, Image *ima, bool automati
     if (sima->mode == SI_MODE_PAINT) {
       sima->mode = SI_MODE_VIEW;
     }
+  }
+
+  if (automatic && bmain != nullptr) {
+    space_image_default_combined(*bmain, *sima, previous_image, sima->image);
   }
 
   if (sima->image) {

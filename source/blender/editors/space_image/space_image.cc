@@ -1255,12 +1255,12 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
       /* The Combined preview is shaded from the material, and a source-material bake reports its
        * completion with nothing but a generic #NC_MATERIAL on a timer
        * (`render_material_bake.cc`, #WM_jobs_timer). Without this, a bake that lands while the
-       * preview is open is not shown until something else happens to redraw the region. Narrow to
-       * the Combined pass on purpose: every other pass is byte-composited from images and hears
-       * about its own edits through #NC_IMAGE. */
-      if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0 &&
-          sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED)
-      {
+       * preview is open is not shown until something else happens to redraw the region. Every
+       * composite pass listens as well: a layered material's stack edits (opacity, blend, mapping,
+       * enabling a row) change the composite without touching an image, so they report only
+       * #NC_MATERIAL. The composite cache is hash-gated, so a redraw that finds nothing new is
+       * cheap. */
+      if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0) {
         ED_region_tag_redraw(region);
         break;
       }

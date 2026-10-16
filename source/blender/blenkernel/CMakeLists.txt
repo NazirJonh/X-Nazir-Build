@@ -263,6 +263,7 @@ set(SRC
   intern/paint_brush_group_override.cc
   intern/paint_canvas.cc
   intern/paint_layers/paint_layers.cc
+  intern/paint_layers/paint_layers_kind.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_edit.cc
   intern/paint_layers/paint_layers_generate_build.cc

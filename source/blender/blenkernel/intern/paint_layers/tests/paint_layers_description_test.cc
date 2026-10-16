@@ -273,6 +273,38 @@ TEST_F(PaintLayersDescription, dependencies_list_each_channel_map_with_its_chann
   EXPECT_EQ(bare_num, 0);
 }
 
+TEST_F(PaintLayersDescription, kind_registry_describes_the_built_in_kinds)
+{
+  Material *ma = BKE_material_add(bmain, "KindMat");
+  MaterialPaintLayer *row = paint_layer_add(*ma, "Row");
+
+  const PaintLayerKindInfo *image = paint_layer_kind_of(*row);
+  ASSERT_NE(image, nullptr);
+  EXPECT_EQ(image->category, PaintLayerKindCategory::Source);
+  row->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*row));
+
+  row->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  ASSERT_NE(paint_layer_kind_of(*row), nullptr);
+  EXPECT_EQ(paint_layer_kind_of(*row)->category, PaintLayerKindCategory::Source);
+
+  /* A folder is a layer only: its children have no place in a correction or a mask. */
+  row->source = MA_PAINT_LAYER_SOURCE_STACK;
+  ASSERT_NE(paint_layer_kind_of(*row), nullptr);
+  EXPECT_EQ(paint_layer_kind_of(*row)->category, PaintLayerKindCategory::Container);
+  EXPECT_FALSE(paint_layer_kind_role_allowed(*row));
+  row->role = MA_PAINT_LAYER_ROLE_LAYER;
+  EXPECT_TRUE(paint_layer_kind_role_allowed(*row));
+
+  /* A source or subtype this build does not know is reported as unknown, never as a built-in. */
+  row->source = 2;
+  EXPECT_EQ(paint_layer_kind_of(*row), nullptr);
+  EXPECT_FALSE(paint_layer_kind_role_allowed(*row));
+  row->source = MA_PAINT_LAYER_SOURCE_IMAGE;
+  row->kind_subtype = 99;
+  EXPECT_EQ(paint_layer_kind_of(*row), nullptr);
+}
+
 TEST_F(PaintLayersDescription, maps_collect_reads_nested_rows_once)
 {
   Material *ma = BKE_material_add(bmain, "CollectMat");

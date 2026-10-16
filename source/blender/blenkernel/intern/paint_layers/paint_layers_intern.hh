@@ -17,6 +17,8 @@
 
 #include "BKE_paint_layers.hh"
 
+#include "paint_layers_kind.hh"
+
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
@@ -102,7 +104,7 @@ inline bool paint_layer_channel_contributes(const Material &ma,
   if (record == nullptr || paint_layer_channel_filtered(ma, record->channel)) {
     return false;
   }
-  if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
     return paint_layer_channel_live(record);
   }
   return paint_layer_channel_contributes(record);
@@ -132,7 +134,7 @@ inline bool paint_layer_effect_lays(const Material &ma,
   if (record->image != nullptr) {
     return true;
   }
-  return effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+  return paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE) &&
          channel != PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 
@@ -144,7 +146,7 @@ inline bool paint_layer_effect_lays(const Material &ma,
  */
 inline bool paint_layer_effect_is_filter(const MaterialPaintLayer &effect)
 {
-  return effect.source == MA_PAINT_LAYER_SOURCE_FILTER;
+  return paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_ACTS_ON_BELOW);
 }
 
 /**
@@ -169,7 +171,7 @@ inline bool paint_layer_effect_filters(const Material &ma,
  */
 inline bool paint_layer_row_is_adjustment(const MaterialPaintLayer &row)
 {
-  return row.source == MA_PAINT_LAYER_SOURCE_FILTER && row.role == MA_PAINT_LAYER_ROLE_LAYER;
+  return paint_layer_effect_is_filter(row) && row.role == MA_PAINT_LAYER_ROLE_LAYER;
 }
 
 /** Whether the adjustment \a row changes the stack in \a channel; the rule of a filter. */
@@ -245,13 +247,13 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
   }
   /* A filter item changes the coverage built so far: it has no map or grey of its own and so no
    * record, and what it changes is the opacity's business. */
-  if (item.source == MA_PAINT_LAYER_SOURCE_FILTER) {
+  if (paint_layer_effect_is_filter(item)) {
     return true;
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(
       item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   return paint_layer_channel_live(record) &&
-         (record->image != nullptr || item.source == MA_PAINT_LAYER_SOURCE_CONSTANT);
+         (record->image != nullptr || paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_FLAT_VALUE));
 }
 
 /**

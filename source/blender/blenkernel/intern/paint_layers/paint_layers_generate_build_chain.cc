@@ -787,7 +787,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   /* A Fill correction with no map in the channel is a flat colour, an input of the group; every
    * other correction reads its map. */
   const bool flat = record != nullptr && record->image == nullptr &&
-                    effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+                    paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE);
   if (record == nullptr || (!flat && record->image == nullptr) || by_channel == nullptr ||
       content.socket == nullptr)
   {

@@ -106,6 +106,21 @@ struct PaintLayerKindParam {
   float max;
 };
 
+/** What a kind is, as far as the rules shared by the generator and the CPU stack care. */
+enum PaintLayerKindFlag : uint8_t {
+  /**
+   * The kind lays the value it stores while it has no map (a Fill): a live record alone makes it
+   * take part, as a correction it lays its flat colour, as a mask item its flat grey.
+   */
+  PAINT_LAYER_KIND_FLAT_VALUE = 1 << 0,
+  /**
+   * The kind changes the colour it reads instead of laying one of its own (a filter): as a
+   * correction it works on its row's colour, as a layer on the stack below it, as a mask item on
+   * the coverage so far. It owns no map and takes part through its channel records only.
+   */
+  PAINT_LAYER_KIND_ACTS_ON_BELOW = 1 << 1,
+};
+
 struct PaintLayerKindInfo {
   /** Registry key: #MaterialPaintLayer::source and #MaterialPaintLayer::kind_subtype. */
   int8_t source;
@@ -117,6 +132,8 @@ struct PaintLayerKindInfo {
   /** The kind's parameters in a fixed order, or null for a kind with none. */
   const PaintLayerKindParam *params = nullptr;
   int params_num = 0;
+  /** #PaintLayerKindFlag bits. */
+  uint8_t flags = 0;
 };
 
 /** The positions of the Levels filter's parameters in its schema. */
@@ -190,6 +207,13 @@ inline const PaintLayerKindInfo *paint_layer_kind_of(const MaterialPaintLayer &r
 
 /** Whether \a row's kind may take the role the row has; false for an unknown kind. */
 bool paint_layer_kind_role_allowed(const MaterialPaintLayer &row);
+
+/** Whether \a row's kind has \a flag; an unknown kind has none. */
+inline bool paint_layer_kind_has_flag(const MaterialPaintLayer &row, const PaintLayerKindFlag flag)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  return info != nullptr && (info->flags & flag) != 0;
+}
 
 /** \} */
 

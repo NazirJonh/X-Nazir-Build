@@ -290,7 +290,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
         continue;
       }
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
-      if (effect.source != MA_PAINT_LAYER_SOURCE_CONSTANT || record->image != nullptr) {
+      if (!paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE) ||
+          record->image != nullptr)
+      {
         continue;
       }
       SNPRINTF(base, "%s %s %s", layer_name, paint_layer_effect_label(effect), info.ui_name);

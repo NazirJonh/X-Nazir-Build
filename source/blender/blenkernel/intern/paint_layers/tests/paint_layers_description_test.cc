@@ -305,6 +305,31 @@ TEST_F(PaintLayersDescription, kind_registry_describes_the_built_in_kinds)
   EXPECT_EQ(paint_layer_kind_of(*row), nullptr);
 }
 
+TEST_F(PaintLayersDescription, kind_flags_say_what_a_kind_lays_and_what_it_changes)
+{
+  Material *ma = BKE_material_add(bmain, "KindFlagMat");
+  MaterialPaintLayer *row = paint_layer_add(*ma, "Row");
+
+  EXPECT_FALSE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_FLAT_VALUE));
+  row->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  EXPECT_TRUE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_FLAT_VALUE));
+  EXPECT_FALSE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+
+  row->source = MA_PAINT_LAYER_SOURCE_FILTER;
+  for (const int16_t filter : {MA_PAINT_LAYER_FILTER_INVERT,
+                               MA_PAINT_LAYER_FILTER_LEVELS,
+                               MA_PAINT_LAYER_FILTER_HSL})
+  {
+    row->kind_subtype = filter;
+    EXPECT_TRUE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+    EXPECT_FALSE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_FLAT_VALUE));
+  }
+
+  /* A kind this build does not know has no flags: it neither lays a value nor changes a colour. */
+  row->kind_subtype = 99;
+  EXPECT_FALSE(paint_layer_kind_has_flag(*row, PAINT_LAYER_KIND_ACTS_ON_BELOW));
+}
+
 TEST_F(PaintLayersDescription, add_policy_makes_a_filter_correction_on_the_row_it_hangs_on)
 {
   Material &ma = *BKE_material_add(bmain, "FilterAddMat");

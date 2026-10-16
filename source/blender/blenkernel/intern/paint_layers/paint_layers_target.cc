@@ -374,7 +374,8 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
    * Normal, where the map therefore starts transparent. The channels it has no map in keep their
    * flat colour. */
   const bool fill_correction = target.layer->role == MA_PAINT_LAYER_ROLE_EFFECT &&
-                               target.layer->source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+                               paint_layer_kind_has_flag(*target.layer,
+                                                         PAINT_LAYER_KIND_FLAT_VALUE);
   if (fill_correction) {
     if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
       fill[0] = 0.5f;

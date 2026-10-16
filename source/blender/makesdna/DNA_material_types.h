@@ -543,7 +543,12 @@ struct MaterialPaintLayer {
   int channels_num = 0;
   /** #eMaterialPaintLayerRole. */
   int8_t role = MA_PAINT_LAYER_ROLE_LAYER;
-  char _pad1[3] = {};
+  char _pad1[1] = {};
+  /**
+   * The member of the family #source names (a filter's kind, a generator's kind); 0 for the
+   * families that have no members. Together with #source it is the key of the row's kind.
+   */
+  int16_t kind_subtype = 0;
   /**
    * The coverage items of this row, bottom to top: they lay a factor over the row's own, so the row
    * is partly or wholly hidden. Owned by the row (freed, copied and written with it); every item
@@ -557,6 +562,11 @@ struct MaterialPaintLayer {
    * #MA_PAINT_LAYER_ROLE_EFFECT row with no children, mask or corrections of its own.
    */
   ListBaseT<MaterialPaintLayer> effects = {nullptr, nullptr};
+  /**
+   * The parameters of the row's kind, defined by the kind's schema rather than by this struct, so a
+   * new kind adds no field here. Owned by the row; null while the kind has set none.
+   */
+  struct IDProperty *system_properties = nullptr;
   /**
    * Per (row, channel) overrides, indexed by #eMaterialPaintChannel. A fixed array so every pair has
    * a value and an RNA path whether or not the row has a #channels record for it; a folder, which

@@ -55,6 +55,7 @@
 #include "BKE_editmesh.hh"
 #include "BKE_grease_pencil.hh"
 #include "BKE_icons.hh"
+#include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
@@ -128,6 +129,12 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
   layer->children = {nullptr, nullptr};
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
+  /* The ID users of the parameters are released by the generic free pass through
+   * #material_paint_layer_foreach_id, like the channel maps. */
+  if (layer->system_properties != nullptr) {
+    IDP_FreeProperty_ex(layer->system_properties, false);
+    layer->system_properties = nullptr;
+  }
   MEM_delete(layer);
 }
 
@@ -144,6 +151,11 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
   MaterialPaintLayer *dst = static_cast<MaterialPaintLayer *>(MEM_dupalloc(&src));
   dst->next = nullptr;
   dst->prev = nullptr;
+  /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
+  if (src.system_properties != nullptr) {
+    dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
+                                                 LIB_ID_CREATE_NO_USER_REFCOUNT);
+  }
   dst->channels = nullptr;
   dst->channels_num = 0;
   if (src.channels != nullptr && src.channels_num > 0) {
@@ -179,6 +191,10 @@ static void material_paint_layer_foreach_id(MaterialPaintLayer *layer, LibraryFo
   if (BKE_lib_query_foreachid_iter_stop(data)) {
     return;
   }
+  BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(
+      data, IDP_foreach_property(layer->system_properties, IDP_TYPE_FILTER_ID, [&](IDProperty *prop) {
+        BKE_lib_query_idpropertiesForeachIDLink_callback(prop, data);
+      }));
   for (MaterialPaintLayer &item : layer->mask_stack) {
     material_paint_layer_foreach_id(&item, data);
   }
@@ -195,6 +211,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
 {
   if (layer.channels != nullptr && layer.channels_num > 0) {
     writer->write_struct_array(layer.channels_num, layer.channels);
+  }
+  if (layer.system_properties != nullptr) {
+    IDP_BlendWrite(writer, layer.system_properties);
   }
   writer->write_struct_list(&layer.mask_stack);
   for (const MaterialPaintLayer &item : layer.mask_stack) {
@@ -228,6 +247,8 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
      * pointer would make later readers dereference null. Do not trust the file's count. */
     layer.channels_num = 0;
   }
+  BLO_read_struct(reader, IDProperty, &layer.system_properties);
+  IDP_BlendDataRead(reader, &layer.system_properties);
   BLO_read_struct_list(reader, MaterialPaintLayer, &layer.mask_stack);
   for (MaterialPaintLayer &item : layer.mask_stack) {
     material_paint_layer_blend_read(reader, item);

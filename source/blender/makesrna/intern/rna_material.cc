@@ -843,6 +843,12 @@ static Material *rna_paint_layer_material(PointerRNA *ptr, MaterialPaintLayer *l
   return owned ? ma : nullptr;
 }
 
+static IDProperty **rna_MaterialPaintLayer_system_idprops(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  return &layer->system_properties;
+}
+
 static void rna_MaterialPaintLayer_name_set(PointerRNA *ptr, const char *value)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
@@ -1828,6 +1834,7 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   srna = RNA_def_struct(brna, "MaterialPaintLayer", nullptr);
   RNA_def_struct_sdna(srna, "MaterialPaintLayer");
   RNA_def_struct_path_func(srna, "rna_MaterialPaintLayer_path");
+  RNA_def_struct_system_idprops_func(srna, "rna_MaterialPaintLayer_system_idprops");
   RNA_def_struct_ui_text(srna, "Paint Layer", "One row of a layered material's stack");
 
   prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);

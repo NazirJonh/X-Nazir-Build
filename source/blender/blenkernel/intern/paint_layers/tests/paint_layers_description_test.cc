@@ -9,6 +9,7 @@
 #include "BKE_appdir.hh"
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
+#include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
@@ -155,6 +156,10 @@ TEST_F(PaintLayersDescription, blend_round_trip_keeps_layers)
   first->opacity = 0.25f;
   paint_layer_channel_add(*first, *image);
   first->channels[0].value[0] = 0.5f;
+  first->kind_subtype = 7;
+  first->system_properties = bke::idprop::create_group("kind").release();
+  IDP_AddToGroup(first->system_properties, bke::idprop::create("gain", 0.75f).release());
+  IDP_AddToGroup(first->system_properties, bke::idprop::create("steps", 3).release());
   MaterialPaintLayer *second = paint_layer_add(*ma, "Second");
   const bUUID second_marker = second->marker;
   second->flag = 0;
@@ -188,6 +193,17 @@ TEST_F(PaintLayersDescription, blend_round_trip_keeps_layers)
   EXPECT_TRUE(BLI_uuid_equal(reloaded_first->marker, first_marker));
   EXPECT_FLOAT_EQ(reloaded_first->opacity, 0.25f);
   EXPECT_NE(reloaded_first->flag & MA_PAINT_LAYER_ENABLED, 0);
+
+  /* The kind's parameters travel with the row; a row that set none reads back null. */
+  EXPECT_EQ(reloaded_first->kind_subtype, 7);
+  ASSERT_NE(reloaded_first->system_properties, nullptr);
+  const IDProperty *gain = IDP_GetPropertyFromGroup(reloaded_first->system_properties, "gain");
+  const IDProperty *steps = IDP_GetPropertyFromGroup(reloaded_first->system_properties, "steps");
+  ASSERT_NE(gain, nullptr);
+  ASSERT_NE(steps, nullptr);
+  EXPECT_FLOAT_EQ(IDP_float_get(gain), 0.75f);
+  EXPECT_EQ(IDP_int_get(steps), 3);
+  EXPECT_EQ(reloaded_first->next->system_properties, nullptr);
 
   ASSERT_EQ(reloaded_first->channels_num, 1);
   ASSERT_NE(reloaded_first->channels, nullptr);
@@ -297,12 +313,24 @@ TEST_F(PaintLayersDescription, copy_keeps_layers)
   const bUUID first_marker = first->marker;
   Image *channel_image = static_cast<Image *>(BKE_id_new(bmain, ID_IM, "CopyChannel"));
   paint_layer_channel_add(*first, *channel_image);
+  first->kind_subtype = 4;
+  first->system_properties = bke::idprop::create_group("kind").release();
+  IDP_AddToGroup(first->system_properties, bke::idprop::create("gain", 0.5f).release());
   MaterialPaintLayer *second = paint_layer_add(*ma, "Second");
   const bUUID second_marker = second->marker;
   ma->active_layer_marker = second_marker;
 
   Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
   ASSERT_NE(copy, nullptr);
+
+  /* The parameters are owned by the row: the copy has its own group, equal in value. */
+  MaterialPaintLayer *copy_params_row = paint_layers_first(*copy);
+  ASSERT_NE(copy_params_row, nullptr);
+  EXPECT_EQ(copy_params_row->kind_subtype, 4);
+  ASSERT_NE(copy_params_row->system_properties, nullptr);
+  EXPECT_NE(copy_params_row->system_properties, first->system_properties);
+  EXPECT_FLOAT_EQ(IDP_float_get(IDP_GetPropertyFromGroup(copy_params_row->system_properties, "gain")),
+                  0.5f);
 
   EXPECT_TRUE(BKE_paint_layers_is_layered(*copy));
   EXPECT_TRUE(BLI_uuid_equal(copy->active_layer_marker, second_marker));

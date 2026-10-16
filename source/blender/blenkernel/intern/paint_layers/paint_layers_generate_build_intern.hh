@@ -288,6 +288,19 @@ class PaintLayersTreeBuilder {
    */
   void nodes_discard(bNodeTree &tree, Span<bNode *> nodes);
 
+  /**
+   * \a alpha, the Alpha of a map that \a row reads through its Mapping, times the clip factor of
+   * the row's UV wrap: one inside the unit square, zero outside along every axis the wrap clips.
+   * The CPU resample leaves such texels transparent, and every reader of the map's alpha (the row's
+   * coverage and content alpha, a correction's factor, a mask item's weight) takes it from here.
+   * \a alpha unchanged while the wrap repeats on both axes, the mapping does not apply, or the row
+   * built no Mapping (call #mapping_apply first). The nodes made are appended to \a r_nodes.
+   */
+  NodeOutput mapping_clip_alpha(bNodeTree &tree,
+                                const MaterialPaintLayer &row,
+                                NodeOutput alpha,
+                                Vector<bNode *> &r_nodes);
+
   /** The Texture Coordinate node of \a tree whose `UV` output feeds a Mapping, made once. */
   bNode *uv_coordinate_ensure(bNodeTree &tree);
 
@@ -350,6 +363,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
   /** The Mapping node built for a row, so every channel and map of it shares the one node. */
   Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
+  /** The clip factor of a row's UV wrap, built once and shared by every map of the row. */
+  Map<const MaterialPaintLayer *, NodeOutput> mapping_clip_masks_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */
   Map<const MaterialPaintLayer *, NodeOutput> mask_factors_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;

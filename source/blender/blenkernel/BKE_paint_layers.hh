@@ -635,6 +635,26 @@ bool BKE_paint_layers_mapping_set_scale_lock(Material &ma, MaterialPaintLayer *l
  */
 bool BKE_paint_layers_mapping_set_rotation(Material &ma, MaterialPaintLayer *layer, float rotation);
 
+/**
+ * Which axes of a UV \a wrap repeat: \a r_repeat_u / \a r_repeat_v are true for an axis that tiles
+ * and false for one that clips (transparent outside [0, 1]). The one reading of the enum, shared by
+ * the CPU resample and the generator.
+ */
+void BKE_paint_layers_mapping_wrap_axes(int16_t wrap, bool &r_repeat_u, bool &r_repeat_v);
+
+/**
+ * The UV wrap of \a layer. A stored value outside the enum reads as Repeat, so a damaged field
+ * never clips a map. Applied by the graph and the CPU only while the row's mapping applies.
+ */
+int16_t BKE_paint_layers_mapping_wrap_get(const MaterialPaintLayer &layer);
+
+/**
+ * Set the UV wrap of \a layer. Structural: Repeat builds nothing extra, any other mode adds the
+ * clip factor's nodes. False for a value outside #eMaterialPaintLayerMappingWrap or a row not in
+ * \a ma.
+ */
+bool BKE_paint_layers_mapping_set_wrap(Material &ma, MaterialPaintLayer *layer, int16_t wrap);
+
 /** \} */
 
 /** Rename \a layer. */

@@ -545,6 +545,116 @@ TEST_F(PaintLayersMappingEvalTest, an_unmapped_row_still_reads_the_pixel_directl
   expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
 }
 
+/* UV wrap: the clip factor the graph builds against the transparent texels the CPU resample
+ * writes, in every mode, with values that put the evaluated pixel inside and outside the square. */
+
+class PaintLayersWrapEvalTest : public PaintLayersMappingEvalTest {
+ public:
+  /** Values for the pixel (1, 1), whose UV is (0.375, 0.375): some read inside the square on both
+   * axes, some outside on one, some on both. */
+  static Span<Case> wrap_cases()
+  {
+    static const Case all[] = {
+        {{0.0f, 0.0f}, {1.0f, 1.0f}, 0.0f},
+        {{0.8f, 0.0f}, {1.0f, 1.0f}, 0.0f},
+        {{0.0f, -0.5f}, {1.0f, 1.0f}, 0.0f},
+        {{0.1f, 0.2f}, {2.0f, 2.0f}, 0.4f},
+        {{-0.2f, 0.7f}, {0.5f, 0.5f}, 1.0f},
+        {{0.9f, 0.9f}, {1.0f, 1.0f}, 0.0f},
+    };
+    return all;
+  }
+
+  static Span<int16_t> wraps()
+  {
+    static const int16_t all[] = {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT,
+                                  MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X,
+                                  MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y,
+                                  MA_PAINT_LAYER_MAPPING_WRAP_CLIP};
+    return all;
+  }
+};
+
+TEST_F(PaintLayersWrapEvalTest, a_wrapped_fill_layer_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 10, 20, 30, 255));
+  MaterialPaintLayer *fill = add_fill("Fill", add_quad_image("Quad"));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  for (const int16_t wrap : wraps()) {
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, wrap));
+    for (const Case &test : wrap_cases()) {
+      SCOPED_TRACE(::testing::Message() << "wrap=" << wrap << " offset=" << test.offset[0] << ","
+                                        << test.offset[1] << " rotation=" << test.rotation);
+      case_apply(*fill, test);
+      expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+  }
+}
+
+TEST_F(PaintLayersWrapEvalTest, a_wrapped_fill_correction_matches_the_cpu)
+{
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 90, 120, 30, 255));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, "C", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(correction, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_quad_image("Quad")));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, correction, 0.7f));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  for (const int16_t wrap : wraps()) {
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, correction, wrap));
+    for (const Case &test : wrap_cases()) {
+      SCOPED_TRACE(::testing::Message() << "wrap=" << wrap << " offset=" << test.offset[0] << ","
+                                        << test.offset[1] << " rotation=" << test.rotation);
+      case_apply(*correction, test);
+      expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+  }
+}
+
+TEST_F(PaintLayersWrapEvalTest, a_wrapped_fill_mask_item_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 40, 40, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 60, 220, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_quad_image("MaskQuad")));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, item, true));
+  for (const int16_t wrap : wraps()) {
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, item, wrap));
+    for (const Case &test : wrap_cases()) {
+      SCOPED_TRACE(::testing::Message() << "wrap=" << wrap << " offset=" << test.offset[0] << ","
+                                        << test.offset[1] << " rotation=" << test.rotation);
+      case_apply(*item, test);
+      expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+  }
+}
+
+TEST_F(PaintLayersWrapEvalTest, a_clipped_fill_normal_matches_the_cpu)
+{
+  const eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_NORMAL;
+  Image *flat = add_solid_image("Flat", 128, 128, 255, 255);
+  Image *detail = add_solid_image("Detail", 204, 128, 230, 255);
+  make_image_data(flat);
+  make_image_data(detail);
+  add_layer("Bottom", flat, channel);
+  MaterialPaintLayer *fill = add_fill("ClippedNormal", detail, channel);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  for (const Case &test : wrap_cases()) {
+    SCOPED_TRACE(::testing::Message() << "offset=" << test.offset[0] << "," << test.offset[1]
+                                      << " rotation=" << test.rotation);
+    case_apply(*fill, test);
+    expect_graph_matches_cpu(channel, 5e-3f);
+  }
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

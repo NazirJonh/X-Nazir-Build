@@ -10,7 +10,8 @@
  * This is *not* the "render == CPU" test: a tiny interpreter evaluates the generated group at one
  * pixel for the narrow set of nodes the generator emits -- Image Texture (read at the pixel, or
  * through a Mapping), Texture Coordinate, Mapping, Mix (through the same #ramp_blend the CPU uses),
- * Math, Vector Math, Value, RGB, group input/output and the Normal Combine group -- and the result
+ * Math (with Floor and Compare, the UV wrap's clip factor), Vector Math, Value, RGB, group
+ * input/output and the Normal Combine group -- and the result
  * is compared with #BKE_paint_layers_composite_image_layers
  * evaluated at the same pixel.
  *
@@ -347,6 +348,16 @@ class GraphInterpreter {
           case NODE_MATH_DIVIDE:
             value = (b != 0.0f) ? a / b : 0.0f;
             break;
+          case NODE_MATH_FLOOR:
+            value = floorf(a);
+            break;
+          case NODE_MATH_COMPARE: {
+            /* One when the two differ by no more than the epsilon, the node's own rule. */
+            const float epsilon =
+                eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Value_002"_ustr)).r;
+            value = (fabsf(a - b) <= std::max(epsilon, 1e-5f)) ? 1.0f : 0.0f;
+            break;
+          }
           default:
             break;
         }

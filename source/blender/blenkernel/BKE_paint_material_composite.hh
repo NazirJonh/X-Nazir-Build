@@ -118,6 +118,11 @@ struct PaintMaterialCompositeMapping {
   float scale[2] = {1.0f, 1.0f};
   float rotation = 0.0f;
   /**
+   * #eMaterialPaintLayerMappingWrap: what the resample does outside the unit UV square. An axis
+   * that clips reads transparent there, and the map's alpha takes it out of the coverage.
+   */
+  int16_t wrap = 0;
+  /**
    * The mapped map holds tangent-space normals (Normal channel): the resample also rotates and
    * flips the vectors, so the lighting follows the pattern.
    */

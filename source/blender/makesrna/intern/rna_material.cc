@@ -67,6 +67,27 @@ static const EnumPropertyItem rna_enum_material_paint_layer_mapping_space_items[
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* What the row's maps do outside the unit UV square after the mapping. */
+static const EnumPropertyItem rna_enum_material_paint_layer_mapping_wrap_items[] = {
+    {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, "REPEAT", 0, "Repeat", "Repeat along both axes"},
+    {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X,
+     "REPEAT_X",
+     0,
+     "Repeat Horizontally",
+     "Repeat along U; transparent outside the UV square along V"},
+    {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y,
+     "REPEAT_Y",
+     0,
+     "Repeat Vertically",
+     "Repeat along V; transparent outside the UV square along U"},
+    {MA_PAINT_LAYER_MAPPING_WRAP_CLIP,
+     "CLIP",
+     0,
+     "Clip",
+     "One copy; transparent outside the UV square on both axes"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /** How a row blends over what is below it. The internal Normal Combine is not offered: the Normal
  * channel forces it, and #BKE_paint_layers_set_blend refuses it. Shared by the definition and the
  * item callback of a mask correction, which drops the modes that read hue. */
@@ -1008,6 +1029,20 @@ static void rna_MaterialPaintLayer_mapping_rotation_set(PointerRNA *ptr, float v
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     BKE_paint_layers_mapping_set_rotation(*ma, layer, value);
+  }
+}
+
+static int rna_MaterialPaintLayer_mapping_wrap_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_mapping_wrap_get(*layer);
+}
+
+static void rna_MaterialPaintLayer_mapping_wrap_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_mapping_set_wrap(*ma, layer, int16_t(value));
   }
 }
 
@@ -2265,6 +2300,17 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                            "Mapping Rotation",
                            "Rotation of the row's maps around Z in UV space; the vectors of a "
                            "Normal map are rotated with it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "mapping_wrap", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_mapping_wrap_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_mapping_wrap_get",
+                              "rna_MaterialPaintLayer_mapping_wrap_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop,
+                           "UV Wrap",
+                           "What the row's maps do outside the unit UV square after the mapping");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "channels", PROP_COLLECTION, PROP_NONE);

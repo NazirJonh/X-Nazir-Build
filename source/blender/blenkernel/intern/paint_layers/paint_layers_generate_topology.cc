@@ -128,6 +128,19 @@ bool tree_root_hash_get(bNodeTree &tree, uint64_t &r_hash)
 /** \name Topology of a row and of the root
  * \{ */
 
+/**
+ * Mix what the UV wrap decides into \a hash: nothing while the wrap repeats on both axes (or the
+ * mapping does not apply), the mode otherwise. A clip adds the factor's nodes; Repeat mixes
+ * nothing, so a row that never clips hashes as it did before the option existed.
+ */
+static void mapping_wrap_hash_mix(uint64_t &hash, const Material &ma, const MaterialPaintLayer &row)
+{
+  const int16_t wrap = BKE_paint_layers_mapping_wrap_get(row);
+  if (wrap != MA_PAINT_LAYER_MAPPING_WRAP_REPEAT && BKE_paint_layers_mapping_applies(ma, row)) {
+    hash = topology_hash_mix(hash, 0x100 + uint64_t(wrap));
+  }
+}
+
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const Span<int> wired_channels,
@@ -145,6 +158,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
    * applies is structure. The same answer builds the interface, so the two cannot disagree. */
   hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, layer) ? 1 : 0);
+  mapping_wrap_hash_mix(hash, ma, layer);
   /* A row inside an isolating folder is built in the isolated form, with sockets of its own. */
   hash = topology_hash_mix(hash, forms.lookup_default(&layer, {}).in_isolating_folder ? 1 : 0);
   /* A Pass Through folder builds no group, an isolating one does: the mode is structure, although
@@ -175,6 +189,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     /* Which filter it is decides its nodes; its parameters are inputs. */
     hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, effect) ? 1 : 0);
+    mapping_wrap_hash_mix(hash, ma, effect);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
       if (paint_layer_effect_lays(ma, effect, channel)) {
@@ -201,6 +216,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(*mask) ? 1 : 0);
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, *mask) ? 1 : 0);
+    mapping_wrap_hash_mix(hash, ma, *mask);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (record != nullptr && record->image != nullptr) {
@@ -228,6 +244,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, item) ? 1 : 0);
+    mapping_wrap_hash_mix(hash, ma, item);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (!paint_layer_mask_item_lays(item) || record == nullptr) {

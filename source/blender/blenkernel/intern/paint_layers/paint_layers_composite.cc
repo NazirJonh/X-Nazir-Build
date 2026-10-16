@@ -124,6 +124,7 @@ static void composite_mapping_describe(const Material &ma,
   copy_v2_v2(out.offset, row.mapping.offset);
   copy_v2_v2(out.scale, row.mapping.scale);
   out.rotation = row.mapping.rotation;
+  out.wrap = BKE_paint_layers_mapping_wrap_get(row);
   out.tangent_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
 }
 

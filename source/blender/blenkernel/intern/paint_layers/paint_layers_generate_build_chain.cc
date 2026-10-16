@@ -219,7 +219,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       discard();
       return {};
     }
-    alpha = {map, map_alpha};
+    alpha = this->mapping_clip_alpha(tree, *mask, {map, map_alpha}, nodes);
   }
   else {
     bNodeTreeInterfaceSocket **value_iface = mask_value_inputs_.lookup_ptr(&layer);
@@ -325,7 +325,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
         discard();
         return {};
       }
-      item_alpha = {item_map, item_map_alpha};
+      item_alpha = this->mapping_clip_alpha(tree, item, {item_map, item_map_alpha}, nodes);
     }
     else {
       bNodeTreeInterfaceSocket **item_value_iface = mask_value_inputs_.lookup_ptr(&item);
@@ -841,7 +841,11 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     /* The Mapping moved only the read point; the tangent-space vectors follow it. */
     color = this->normal_remap_add(tree, effect, color, &nodes);
   }
-  const NodeOutput alpha = {map, map_alpha};
+  NodeOutput alpha = {map, map_alpha};
+  if (mapped) {
+    /* A clipping UV wrap takes the part outside the square out of the map's alpha. */
+    alpha = this->mapping_clip_alpha(tree, effect, alpha, nodes);
+  }
 
   /* The factor sits in its own `Opacity x Factor` frame, so it stays out of this correction's. */
   bNode *factor_node_for_frame = nullptr;
@@ -1045,17 +1049,18 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     Vector<bNode *> source_nodes;
     source_nodes.append(map);
     out.color = {map, socket_out(*map, "Color")};
-    if (this->mapping_apply(tree, group, ctx.layer, *map, source_nodes) &&
-        ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr)
-    {
+    const bool mapped = this->mapping_apply(tree, group, ctx.layer, *map, source_nodes);
+    if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr) {
       /* The Mapping moved only the read point; the tangent-space vectors follow it. */
       out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
     }
-    layout::frame_add(tree, "Source", source_nodes);
     if (bNodeSocket *map_alpha = socket_out(*map, "Alpha")) {
-      out.coverage = {map, map_alpha};
+      /* A clipping UV wrap takes the part outside the square out of the coverage, and with it the
+       * content alpha, which starts from the coverage. */
+      out.coverage = this->mapping_clip_alpha(tree, ctx.layer, {map, map_alpha}, source_nodes);
       out.content_alpha = out.coverage;
     }
+    layout::frame_add(tree, "Source", source_nodes);
   }
   else {
     /* The constant the row's group takes as an input; it covers fully, and its alpha is an input

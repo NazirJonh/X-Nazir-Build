@@ -697,6 +697,7 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         sub.prop(row, "mapping_scale", text="Scale")
         sub.prop(row, "mapping_scale_lock", text="", icon_only=True)
         col.prop(row, "mapping_rotation", text="Rotation")
+        col.prop(row, "mapping_wrap", text="UV Wrap")
 
 
 class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):

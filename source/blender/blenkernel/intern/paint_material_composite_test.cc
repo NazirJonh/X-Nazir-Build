@@ -2390,6 +2390,151 @@ TEST_F(PaintLayersCompositeTest, tangent_normal_flag_is_only_set_for_a_mapped_no
   EXPECT_NE(BKE_paint_material_composite_stack_hash(layers), with_flag);
 }
 
+/* UV wrap: an axis that clips reads transparent outside the unit square, so the map's alpha takes
+ * the part outside out of the coverage, while an axis that repeats tiles. */
+
+/** The quad map of the wrap cases: red bottom left, green bottom right, blue top left, white top
+ * right. */
+static const uchar kWrapRed[4] = {255, 0, 0, 255};
+static const uchar kWrapGreen[4] = {0, 255, 0, 255};
+static const uchar kWrapBlue[4] = {0, 0, 255, 255};
+static const uchar kWrapWhite[4] = {255, 255, 255, 255};
+
+TEST_F(PaintLayersCompositeTest, wrap_modes_tile_or_clip_each_axis)
+{
+  /* A black base shows wherever the map is transparent. */
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom",
+                                               add_solid_image("Bottom", 4, 0, 0, 0, 255));
+  MaterialPaintLayer *correction = add_fill_correction(
+      bottom, add_quad_image("Map", kWrapRed, kWrapGreen, kWrapBlue, kWrapWhite));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  /* Scale two puts the texel centres of the 4x4 grid at u, v = 0.25, 0.75, 1.25, 1.75. */
+  const float scale2[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, scale2));
+  auto expect_color = [&](const int x, const int y, const float r, const float g, const float b) {
+    const std::array<float, 4> p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, x, y);
+    EXPECT_NEAR(p[0], r, 1e-4f) << x << "," << y;
+    EXPECT_NEAR(p[1], g, 1e-4f) << x << "," << y;
+    EXPECT_NEAR(p[2], b, 1e-4f) << x << "," << y;
+  };
+
+  /* Repeat: both axes tile. */
+  ASSERT_EQ(BKE_paint_layers_mapping_wrap_get(*correction), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT);
+  expect_color(2, 2, 1.0f, 0.0f, 0.0f);
+  expect_color(3, 3, 1.0f, 1.0f, 1.0f);
+
+  /* Clip: one copy, black (the base) outside on both axes. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  expect_color(0, 0, 1.0f, 0.0f, 0.0f);
+  expect_color(1, 0, 0.0f, 1.0f, 0.0f);
+  expect_color(0, 1, 0.0f, 0.0f, 1.0f);
+  expect_color(1, 1, 1.0f, 1.0f, 1.0f);
+  expect_color(2, 0, 0.0f, 0.0f, 0.0f);
+  expect_color(0, 2, 0.0f, 0.0f, 0.0f);
+  expect_color(3, 3, 0.0f, 0.0f, 0.0f);
+
+  /* Repeat X: tiles along U, clips along V. */
+  ASSERT_TRUE(
+      BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
+  expect_color(2, 0, 1.0f, 0.0f, 0.0f);
+  expect_color(3, 0, 0.0f, 1.0f, 0.0f);
+  expect_color(0, 2, 0.0f, 0.0f, 0.0f);
+  expect_color(2, 2, 0.0f, 0.0f, 0.0f);
+
+  /* Repeat Y: tiles along V, clips along U. */
+  ASSERT_TRUE(
+      BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y));
+  expect_color(0, 2, 1.0f, 0.0f, 0.0f);
+  expect_color(1, 3, 1.0f, 1.0f, 1.0f);
+  expect_color(2, 0, 0.0f, 0.0f, 0.0f);
+  expect_color(3, 3, 0.0f, 0.0f, 0.0f);
+}
+
+TEST_F(PaintLayersCompositeTest, a_clipped_fill_layer_lets_the_rows_below_show)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 0, 40, 200, 255));
+  /* What the row below shows on its own, in scene linear. */
+  const std::array<float, 4> below = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 3, 3);
+  MaterialPaintLayer *fill = add_fill_layer(
+      "Fill", add_quad_image("Map", kWrapRed, kWrapGreen, kWrapBlue, kWrapWhite));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const float scale2[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, scale2));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+
+  std::array<float, 4> p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0);
+  EXPECT_NEAR(p[0], 1.0f, 1e-4f) << "inside the square the map covers";
+  EXPECT_NEAR(p[2], 0.0f, 1e-4f);
+  /* Outside, the transparent texel shows the row below as it is. */
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 3, 3);
+  EXPECT_NEAR(p[0], below[0], 1e-4f);
+  EXPECT_NEAR(p[1], below[1], 1e-4f);
+  EXPECT_NEAR(p[2], below[2], 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, a_clipped_mask_item_leaves_the_factor_alone_outside)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 4, 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 1.0f);
+  ASSERT_NE(item, nullptr);
+  const uchar black[4] = {0, 0, 0, 255};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma,
+      item,
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      add_quad_image("MaskMap", black, black, black, black)));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, item, true));
+  const float scale2[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, item, scale2));
+
+  /* Repeat: the black map hides the top row everywhere. */
+  std::array<float, 4> p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 2, 0);
+  EXPECT_NEAR(p[0], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[2], 0.0f, 1e-4f);
+
+  /* Clip: inside the square the map still hides it, outside it adds nothing to the mask, so the
+   * base mask's full factor shows the top row. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, item, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0, 0);
+  EXPECT_NEAR(p[0], 1.0f, 1e-4f);
+  EXPECT_NEAR(p[2], 0.0f, 1e-4f);
+  p = linear_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, 2, 0);
+  EXPECT_NEAR(p[0], 0.0f, 1e-4f);
+  EXPECT_NEAR(p[2], 1.0f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, the_wrap_moves_the_stack_hash_only_while_the_mapping_applies)
+{
+  MaterialPaintLayer *bottom = add_paint_layer("Bottom",
+                                               add_solid_image("Bottom", 4, 0, 0, 0, 255));
+  MaterialPaintLayer *correction = add_fill_correction(
+      bottom, add_quad_image("Map", kWrapRed, kWrapGreen, kWrapBlue, kWrapWhite));
+  auto stack_hash = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+  /* A wrap without an enabled mapping reads nothing: the map is as it is. */
+  const uint64_t plain = stack_hash();
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  EXPECT_EQ(stack_hash(), plain);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, correction, true));
+  const uint64_t clipped = stack_hash();
+  ASSERT_TRUE(
+      BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT));
+  const uint64_t repeated = stack_hash();
+  EXPECT_NE(clipped, repeated);
+  ASSERT_TRUE(
+      BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
+  EXPECT_NE(stack_hash(), clipped);
+  EXPECT_NE(stack_hash(), repeated);
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

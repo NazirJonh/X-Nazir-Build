@@ -1629,6 +1629,38 @@ bool BKE_paint_layers_mapping_set_rotation(Material &ma,
   return true;
 }
 
+void BKE_paint_layers_mapping_wrap_axes(const int16_t wrap, bool &r_repeat_u, bool &r_repeat_v)
+{
+  r_repeat_u = ELEM(wrap, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X);
+  r_repeat_v = ELEM(wrap, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
+}
+
+int16_t BKE_paint_layers_mapping_wrap_get(const MaterialPaintLayer &layer)
+{
+  /* An out-of-range stored value reads as Repeat, the behavior before the option existed. */
+  return (layer.mapping.wrap >= MA_PAINT_LAYER_MAPPING_WRAP_REPEAT &&
+          layer.mapping.wrap <= MA_PAINT_LAYER_MAPPING_WRAP_CLIP) ?
+             layer.mapping.wrap :
+             int16_t(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT);
+}
+
+bool BKE_paint_layers_mapping_set_wrap(Material &ma, MaterialPaintLayer *layer, const int16_t wrap)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  if (wrap < MA_PAINT_LAYER_MAPPING_WRAP_REPEAT || wrap > MA_PAINT_LAYER_MAPPING_WRAP_CLIP) {
+    return false;
+  }
+  if (layer->mapping.wrap == wrap) {
+    return true;
+  }
+  layer->mapping.wrap = wrap;
+  /* The wrap adds or removes the clip factor's nodes, which is topology. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char *name)
 {
   if (!paint_layer_in_stack_or_effect(ma, layer)) {

@@ -2810,6 +2810,76 @@ TEST_F(PaintLayersDescription, mapping_block_copies_with_the_row)
   expect_mapping(*duplicate);
 }
 
+TEST_F(PaintLayersDescription, mapping_wrap_defaults_to_repeat_and_refuses_unknown_modes)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingWrapMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+  EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*fill), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*fill), MA_PAINT_LAYER_MAPPING_WRAP_CLIP);
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_wrap(ma, fill, 4));
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_wrap(ma, fill, -1));
+  EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*fill), MA_PAINT_LAYER_MAPPING_WRAP_CLIP);
+
+  /* A damaged stored value reads as Repeat instead of clipping a map. */
+  fill->mapping.wrap = 77;
+  EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*fill), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT);
+
+  /* A row of another material is refused. */
+  Material &other = *BKE_material_add(bmain, "MappingWrapOther");
+  EXPECT_FALSE(BKE_paint_layers_mapping_set_wrap(other, fill, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+}
+
+TEST_F(PaintLayersDescription, mapping_wrap_is_structural_only_when_it_changes)
+{
+  Material &ma = *BKE_material_add(bmain, "MappingWrapShapeMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, ma, "Mapped");
+
+  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT));
+  EXPECT_EQ(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0) << "the same mode changes nothing";
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
+  EXPECT_NE(ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "a clip adds the factor's nodes, which is topology";
+}
+
+TEST_F(PaintLayersDescription, mapping_wrap_axes_name_the_axes_that_tile)
+{
+  bool repeat_u = false;
+  bool repeat_v = false;
+  BKE_paint_layers_mapping_wrap_axes(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, repeat_u, repeat_v);
+  EXPECT_TRUE(repeat_u);
+  EXPECT_TRUE(repeat_v);
+  BKE_paint_layers_mapping_wrap_axes(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X, repeat_u, repeat_v);
+  EXPECT_TRUE(repeat_u);
+  EXPECT_FALSE(repeat_v);
+  BKE_paint_layers_mapping_wrap_axes(MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y, repeat_u, repeat_v);
+  EXPECT_FALSE(repeat_u);
+  EXPECT_TRUE(repeat_v);
+  BKE_paint_layers_mapping_wrap_axes(MA_PAINT_LAYER_MAPPING_WRAP_CLIP, repeat_u, repeat_v);
+  EXPECT_FALSE(repeat_u);
+  EXPECT_FALSE(repeat_v);
+}
+
+TEST_F(PaintLayersDescription, mapping_wrap_copies_with_the_row)
+{
+  Material *ma = BKE_material_add(bmain, "MappingWrapCopyMat");
+  MaterialPaintLayer *fill = mapping_fill_with_map(*bmain, *ma, "Mapped");
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y));
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  const MaterialPaintLayer *copy_layer = paint_layers_first(*copy);
+  ASSERT_NE(copy_layer, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*copy_layer), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
+  BKE_id_free(bmain, copy);
+
+  MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, fill);
+  ASSERT_NE(duplicate, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*duplicate), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

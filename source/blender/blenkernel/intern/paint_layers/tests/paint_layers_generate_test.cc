@@ -1129,5 +1129,98 @@ TEST_F(PaintLayersGenerateTest, a_mapped_correction_and_mask_item_build_their_ow
   EXPECT_EQ(mapped, 2) << "the row's own Paint map keeps the implicit UV";
 }
 
+/** The Math nodes of \a operation in \a tree. */
+static int math_node_count(const bNodeTree &tree, const int operation)
+{
+  int count = 0;
+  for (const bNode &node : tree.nodes) {
+    if (node.type_legacy == SH_NODE_MATH && node.custom1 == operation) {
+      count++;
+    }
+  }
+  return count;
+}
+
+TEST_F(PaintLayersGenerateTest, a_clipping_wrap_builds_one_factor_per_clipped_axis_and_repeat_none)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  /* A second map in another channel shares the row's one factor. */
+  add_channel(*fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("FillRough"));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+
+  struct WrapCase {
+    int16_t wrap;
+    int axes;
+  };
+  const WrapCase cases[] = {{MA_PAINT_LAYER_MAPPING_WRAP_REPEAT, 0},
+                            {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X, 1},
+                            {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y, 1},
+                            {MA_PAINT_LAYER_MAPPING_WRAP_CLIP, 2}};
+  for (const WrapCase &test : cases) {
+    SCOPED_TRACE(::testing::Message() << "wrap=" << test.wrap);
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, test.wrap));
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    bNodeTree *group = layer_tree_find(*bmain, "Fill");
+    ASSERT_NE(group, nullptr);
+    /* A floor and a compare per clipped axis; a Mapping and its maps exist either way. */
+    EXPECT_EQ(math_node_count(*group, NODE_MATH_FLOOR), test.axes);
+    EXPECT_EQ(math_node_count(*group, NODE_MATH_COMPARE), test.axes);
+    EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 1);
+    EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 2);
+  }
+}
+
+TEST_F(PaintLayersGenerateTest, the_wrap_is_topology_only_while_the_mapping_applies)
+{
+  MaterialPaintLayer *fill = mapping_fill_add(*this, "Fill");
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const auto row_hash = [&]() {
+    return paint_layers::paint_layers_layer_topology_hash(*ma, *fill, wired, forms);
+  };
+
+  /* A wrap on a row whose mapping is off builds nothing: the hash is the one of Repeat. */
+  const uint64_t plain = row_hash();
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  EXPECT_EQ(row_hash(), plain);
+
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, fill, true));
+  const uint64_t clipped = row_hash();
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT));
+  const uint64_t repeated = row_hash();
+  EXPECT_NE(clipped, repeated);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, fill, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
+  const uint64_t repeat_x = row_hash();
+  EXPECT_NE(repeat_x, clipped);
+  EXPECT_NE(repeat_x, repeated);
+}
+
+TEST_F(PaintLayersGenerateTest, a_clipped_correction_and_mask_item_each_get_their_own_factor)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(
+      *ma, row, "Corr", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(correction, nullptr);
+  add_channel(*correction, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("CorrMap"));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Item", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_image("ItemMap")));
+  for (MaterialPaintLayer *mapped : {correction, item}) {
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, mapped, true));
+    ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, mapped, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  }
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  /* Each mapped row owns a Mapping and a factor of two axes. */
+  EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 2);
+  EXPECT_EQ(math_node_count(*group, NODE_MATH_FLOOR), 4);
+  EXPECT_EQ(math_node_count(*group, NODE_MATH_COMPARE), 4);
+}
+
 /** \} */
 }  // namespace blender::bke::tests

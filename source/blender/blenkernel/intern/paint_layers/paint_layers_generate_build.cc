@@ -311,10 +311,142 @@ bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
   return true;
 }
 
+/** A Math node of \a operation placed on the grid; null when it cannot be made. */
+static bNode *clip_math_add(bNodeTree &tree, layout::LayoutGrid &grid, const int operation)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  if (node != nullptr) {
+    node->custom1 = operation;
+    grid.place_extra(*node);
+  }
+  return node;
+}
+
+NodeOutput PaintLayersTreeBuilder::mapping_clip_alpha(bNodeTree &tree,
+                                                      const MaterialPaintLayer &row,
+                                                      const NodeOutput alpha,
+                                                      Vector<bNode *> &r_nodes)
+{
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(BKE_paint_layers_mapping_wrap_get(row), repeat_u, repeat_v);
+  bNode **mapping = mapping_nodes_.lookup_ptr(&row);
+  if ((repeat_u && repeat_v) || mapping == nullptr || alpha.node == nullptr ||
+      alpha.socket == nullptr || !BKE_paint_layers_mapping_applies(ma_, row))
+  {
+    return alpha;
+  }
+
+  NodeOutput mask;
+  if (const NodeOutput *cached = mapping_clip_masks_.lookup_ptr(&row)) {
+    mask = *cached;
+  }
+  else {
+    /* An axis is inside the unit square exactly when `floor(a) == 0`; Compare with an epsilon of
+     * one half reads that without a pair of range tests, the CPU's `0 <= a < 1`. Everything made
+     * is kept apart until the factor is complete, so a failure leaves nothing behind. */
+    Vector<bNode *> made;
+    const auto fail = [&]() {
+      for (bNode *node : made) {
+        bke::node_remove_node(nullptr, tree, *node, true, false);
+      }
+      return alpha;
+    };
+    bNodeSocket *mapping_out = socket_out(**mapping, "Vector");
+    bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+    if (separate != nullptr) {
+      made.append(separate);
+    }
+    bNodeSocket *separate_in = (separate != nullptr) ? socket_in(*separate, "Vector") : nullptr;
+    if (mapping_out == nullptr || separate_in == nullptr) {
+      return fail();
+    }
+    grid_.place_extra(*separate);
+    bke::node_add_link(tree, **mapping, *mapping_out, *separate, *separate_in);
+    const bool clipped[2] = {!repeat_u, !repeat_v};
+    const char *axis_names[2] = {"X", "Y"};
+    NodeOutput inside;
+    for (const int axis : IndexRange(2)) {
+      if (!clipped[axis]) {
+        continue;
+      }
+      bNode *floor_node = clip_math_add(tree, grid_, NODE_MATH_FLOOR);
+      if (floor_node != nullptr) {
+        made.append(floor_node);
+      }
+      bNode *compare = clip_math_add(tree, grid_, NODE_MATH_COMPARE);
+      if (compare != nullptr) {
+        made.append(compare);
+      }
+      bNodeSocket *from = socket_out(*separate, axis_names[axis]);
+      bNodeSocket *floor_in = (floor_node != nullptr) ? socket_in(*floor_node, "Value") : nullptr;
+      bNodeSocket *floor_out = (floor_node != nullptr) ? socket_out(*floor_node, "Value") :
+                                                         nullptr;
+      bNodeSocket *compare_in = (compare != nullptr) ? socket_in(*compare, "Value") : nullptr;
+      bNodeSocket *compare_target = (compare != nullptr) ? socket_in(*compare, "Value_001") :
+                                                           nullptr;
+      bNodeSocket *compare_epsilon = (compare != nullptr) ? socket_in(*compare, "Value_002") :
+                                                            nullptr;
+      bNodeSocket *compare_out = (compare != nullptr) ? socket_out(*compare, "Value") : nullptr;
+      if (from == nullptr || floor_in == nullptr || floor_out == nullptr || compare_in == nullptr ||
+          compare_target == nullptr || compare_epsilon == nullptr || compare_out == nullptr ||
+          compare_target->default_value == nullptr || compare_epsilon->default_value == nullptr)
+      {
+        return fail();
+      }
+      static_cast<bNodeSocketValueFloat *>(compare_target->default_value)->value = 0.0f;
+      static_cast<bNodeSocketValueFloat *>(compare_epsilon->default_value)->value = 0.5f;
+      bke::node_add_link(tree, *separate, *from, *floor_node, *floor_in);
+      bke::node_add_link(tree, *floor_node, *floor_out, *compare, *compare_in);
+      if (inside.node == nullptr) {
+        inside = {compare, compare_out};
+        continue;
+      }
+      /* Both axes clip: inside is the product of the two tests. */
+      bNode *both = clip_math_add(tree, grid_, NODE_MATH_MULTIPLY);
+      if (both != nullptr) {
+        made.append(both);
+      }
+      bNodeSocket *both_a = (both != nullptr) ? socket_in(*both, "Value") : nullptr;
+      bNodeSocket *both_b = (both != nullptr) ? socket_in(*both, "Value_001") : nullptr;
+      bNodeSocket *both_out = (both != nullptr) ? socket_out(*both, "Value") : nullptr;
+      if (both_a == nullptr || both_b == nullptr || both_out == nullptr) {
+        return fail();
+      }
+      bke::node_add_link(tree, *inside.node, *inside.socket, *both, *both_a);
+      bke::node_add_link(tree, *compare, *compare_out, *both, *both_b);
+      inside = {both, both_out};
+    }
+    if (inside.node == nullptr) {
+      return fail();
+    }
+    mask = inside;
+    mapping_clip_masks_.add(&row, mask);
+    for (bNode *node : made) {
+      r_nodes.append(node);
+    }
+  }
+
+  bNode *product = clip_math_add(tree, grid_, NODE_MATH_MULTIPLY);
+  bNodeSocket *product_a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
+  bNodeSocket *product_b = (product != nullptr) ? socket_in(*product, "Value_001") : nullptr;
+  bNodeSocket *product_out = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
+  if (product_a == nullptr || product_b == nullptr || product_out == nullptr) {
+    if (product != nullptr) {
+      bke::node_remove_node(nullptr, tree, *product, true, false);
+    }
+    return alpha;
+  }
+  bke::node_add_link(tree, *alpha.node, *alpha.socket, *product, *product_a);
+  bke::node_add_link(tree, *mask.node, *mask.socket, *product, *product_b);
+  r_nodes.append(product);
+  return {product, product_out};
+}
+
 void PaintLayersTreeBuilder::nodes_discard(bNodeTree &tree, Span<bNode *> nodes)
 {
-  /* A removed Mapping must not stay in the lookup, or a retry of the row would link to freed
-   * memory. */
+  /* A removed Mapping or clip factor must not stay in the lookups, or a retry of the row would link
+   * to freed memory. */
   Vector<const MaterialPaintLayer *> stale;
   for (const auto item : mapping_nodes_.items()) {
     if (nodes.contains(item.value)) {
@@ -323,6 +455,15 @@ void PaintLayersTreeBuilder::nodes_discard(bNodeTree &tree, Span<bNode *> nodes)
   }
   for (const MaterialPaintLayer *row : stale) {
     mapping_nodes_.remove(row);
+  }
+  stale.clear();
+  for (const auto item : mapping_clip_masks_.items()) {
+    if (nodes.contains(item.value.node)) {
+      stale.append(item.key);
+    }
+  }
+  for (const MaterialPaintLayer *row : stale) {
+    mapping_clip_masks_.remove(row);
   }
   for (bNode *node : nodes) {
     bke::node_remove_node(nullptr, tree, *node, true, false);

@@ -1433,6 +1433,9 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
   const float scale_y = BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]);
   const float cos_rot = cosf(mapping.rotation);
   const float sin_rot = sinf(mapping.rotation);
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(mapping.wrap, repeat_u, repeat_v);
   /* One straight-linear tap at texel (tx, ty), re-premultiplied for the filter below: byte buffers
    * are straight-stored, float buffers premultiplied-stored, the convention the tile decode
    * assumes. */
@@ -1476,8 +1479,21 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
       const float sy = v * scale_y;
       float uu = sx * cos_rot - sy * sin_rot + mapping.offset[0];
       float vv = sx * sin_rot + sy * cos_rot + mapping.offset[1];
-      uu -= floorf(uu);
-      vv -= floorf(vv);
+      /* An axis that repeats wraps; one that clips reads transparent outside [0, 1). The row covers
+       * by the map's own alpha, so the transparent texel leaves the coverage there, which is what
+       * the generated graph's clip factor does to the map's Alpha. */
+      if (repeat_u) {
+        uu -= floorf(uu);
+      }
+      if (repeat_v) {
+        vv -= floorf(vv);
+      }
+      float *p = out + (int64_t(y) * ref_width + x) * 4;
+      /* Only an axis that does not repeat is range-tested: a wrapped one can round to exactly 1. */
+      if ((!repeat_u && (uu < 0.0f || uu >= 1.0f)) || (!repeat_v && (vv < 0.0f || vv >= 1.0f))) {
+        p[0] = p[1] = p[2] = p[3] = 0.0f;
+        continue;
+      }
       const float su = uu * float(src->x) - 0.5f;
       const float sv = vv * float(src->y) - 0.5f;
       const int x0 = int(floorf(su));
@@ -1489,7 +1505,6 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
       tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0, src->y), t10);
       tap_straight(wrap_texel(x0, src->x), wrap_texel(y0 + 1, src->y), t01);
       tap_straight(wrap_texel(x0 + 1, src->x), wrap_texel(y0 + 1, src->y), t11);
-      float *p = out + (int64_t(y) * ref_width + x) * 4;
       for (const int k : IndexRange(4)) {
         p[k] = (1.0f - a) * (1.0f - b) * t00[k] + a * (1.0f - b) * t10[k] +
                (1.0f - a) * b * t01[k] + a * b * t11[k];
@@ -1827,6 +1842,7 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
     return hash;
   }
   hash = get_default_hash(hash, mapping.offset[0], mapping.offset[1], mapping.rotation);
+  hash = get_default_hash(hash, mapping.wrap);
   return get_default_hash(hash,
                           BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]),
                           BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]),

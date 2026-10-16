@@ -1166,6 +1166,35 @@ void IMB_rectblend(ImBuf *dbuf,
             dmaskrect += origskip;
           }
           /* No destination mask buffer, do regular blend with mask-texture if present. */
+          else if (mode == IMB_BLEND_MIX) {
+            /* The common painting mode with the blend inlined: through #func_float it is a call
+             * through a pointer for every texel of a dab. Same arithmetic as
+             * #blend_color_mix_float on the masked source. */
+            for (x = width; x > 0; x--, drf += 4, orf += 4, srf += 4, cmr++) {
+              float mask = mask_max * float(*cmr);
+
+              if (texmaskrect) {
+                mask *= (float(*tmr++) / 65535.0f);
+              }
+
+              mask = min_ff(mask, 65535.0);
+
+              if (srf[3] && (mask > 0.0f)) {
+                const float strength = mask / 65535.0f;
+                const float alpha = srf[3] * strength;
+                if (alpha != 0.0f) {
+                  const float inverse = 1.0f - alpha;
+                  drf[0] = inverse * orf[0] + srf[0] * strength;
+                  drf[1] = inverse * orf[1] + srf[1] * strength;
+                  drf[2] = inverse * orf[2] + srf[2] * strength;
+                  drf[3] = inverse * orf[3] + alpha;
+                }
+                else {
+                  copy_v4_v4(drf, orf);
+                }
+              }
+            }
+          }
           else {
             for (x = width; x > 0; x--, drf += 4, orf += 4, srf += 4, cmr++) {
               float mask = mask_max * float(*cmr);

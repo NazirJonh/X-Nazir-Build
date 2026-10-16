@@ -429,7 +429,7 @@ Vector<int> AreaPlaneMesh::triangles_in_sphere(const float4x4 &object_to_brush) 
   const float radius = 1.0f + AREA_PLANE_RADIUS_TOLERANCE;
   const float radius_sq = radius * radius;
 
-  for (const AreaPlaneTriangle &tri : triangles_) {
+  const auto accept = [&](const AreaPlaneTriangle &tri) {
     float3 local[3];
     for (const int i : IndexRange(3)) {
       local[i] = tri.position[i];
@@ -437,7 +437,37 @@ Vector<int> AreaPlaneMesh::triangles_in_sphere(const float4x4 &object_to_brush) 
     }
     float3 nearest;
     closest_on_tri_to_point_v3(nearest, float3(0.0f), local[0], local[1], local[2]);
-    if (math::length_squared(nearest) <= radius_sq) {
+    return math::length_squared(nearest) <= radius_sq;
+  };
+
+  /* Every dab asks this, and a linear scan of the whole mesh costs by mesh size rather than by
+   * brush size. The tree only narrows the candidates: the exact test above decides, so the result is
+   * what the scan gives. The tree is queried with the sphere in object space; the largest axis scale
+   * of the inverse keeps that bound conservative. */
+  this->ensure_bvh();
+  float4x4 brush_to_object;
+  if (bvh_ != nullptr && invert_m4_m4(brush_to_object.ptr(), object_to_brush.ptr())) {
+    const float3 center = math::transform_point(brush_to_object, float3(0.0f));
+    const float scale = std::max({math::length(float3(brush_to_object[0])),
+                                  math::length(float3(brush_to_object[1])),
+                                  math::length(float3(brush_to_object[2]))});
+    Vector<int> candidates;
+    BLI_bvhtree_range_query_cpp(
+        *bvh_, center, radius * scale * 1.01f, [&](const int index, const float3 &, const float) {
+          candidates.append(index);
+        });
+    /* Ascending, as the scan yields them: the caller indexes its per-triangle data in this order. */
+    std::sort(candidates.begin(), candidates.end());
+    for (const int index : candidates) {
+      if (accept(triangles_[index])) {
+        result.append(triangles_[index].index);
+      }
+    }
+    return result;
+  }
+
+  for (const AreaPlaneTriangle &tri : triangles_) {
+    if (accept(tri)) {
       result.append(tri.index);
     }
   }
@@ -684,34 +714,49 @@ Vector<float4x4> area_plane_unfold_matrices(const Span<AreaPlaneTriangle> triang
     return result;
   }
 
-  const int tri_num = triangles.size();
-  Array<Vector<int>> uv_adj(tri_num);
-  Array<Vector<int>> seam_adj(tri_num);
-  for (int i = 0; i < accepted.size(); i++) {
-    for (int j = i + 1; j < accepted.size(); j++) {
-      const int ia = accepted[i];
-      const int ib = accepted[j];
+  /* Worked in slots of #accepted (plus one for the dab triangle when it is not among them) rather
+   * than in triangle indices: the arrays below are then sized by the brush, not by the mesh, which
+   * mattered because this runs for every dab. */
+  const int accepted_num = int(accepted.size());
+  int dab_slot = accepted_num;
+  for (const int i : IndexRange(accepted_num)) {
+    if (accepted[i] == dab_index) {
+      dab_slot = i;
+      break;
+    }
+  }
+  const int slots_num = accepted_num + (dab_slot == accepted_num ? 1 : 0);
+  const auto triangle_of_slot = [&](const int slot) -> const AreaPlaneTriangle & {
+    return triangles[slot < accepted_num ? accepted[slot] : dab_index];
+  };
+
+  Array<Vector<int>> uv_adj(slots_num);
+  Array<Vector<int>> seam_adj(slots_num);
+  for (int i = 0; i < accepted_num; i++) {
+    for (int j = i + 1; j < accepted_num; j++) {
+      const AreaPlaneTriangle &tri_a = triangles[accepted[i]];
+      const AreaPlaneTriangle &tri_b = triangles[accepted[j]];
       int ca[2];
       int cb[2];
-      if (area_plane_shared_verts(triangles[ia], triangles[ib], ca, cb) < 2) {
+      if (area_plane_shared_verts(tri_a, tri_b, ca, cb) < 2) {
         continue;
       }
-      if (area_plane_uv_sewn_edge(triangles[ia], triangles[ib])) {
-        uv_adj[ia].append(ib);
-        uv_adj[ib].append(ia);
+      if (area_plane_uv_sewn_edge(tri_a, tri_b)) {
+        uv_adj[i].append(j);
+        uv_adj[j].append(i);
       }
       else {
-        seam_adj[ia].append(ib);
-        seam_adj[ib].append(ia);
+        seam_adj[i].append(j);
+        seam_adj[j].append(i);
       }
     }
   }
 
-  /* -2 unvisited, -1 dab root, otherwise parent triangle index. UV-sewn paths first. */
-  Array<int> parent(tri_num, -2);
+  /* -2 unvisited, -1 dab root, otherwise parent slot. UV-sewn paths first. */
+  Array<int> parent(slots_num, -2);
   Vector<int> queue;
-  parent[dab_index] = -1;
-  queue.append(dab_index);
+  parent[dab_slot] = -1;
+  queue.append(dab_slot);
   int head = 0;
   while (head < queue.size()) {
     const int u = queue[head++];
@@ -724,7 +769,7 @@ Vector<float4x4> area_plane_unfold_matrices(const Span<AreaPlaneTriangle> triang
   }
 
   Vector<int> queue2;
-  for (const int i : accepted) {
+  for (const int i : IndexRange(accepted_num)) {
     if (parent[i] != -2) {
       queue2.append(i);
     }
@@ -746,13 +791,13 @@ Vector<float4x4> area_plane_unfold_matrices(const Span<AreaPlaneTriangle> triang
     }
   }
 
-  for (int i = 0; i < accepted.size(); i++) {
+  for (int i = 0; i < accepted_num; i++) {
     const int face = accepted[i];
     if (face == dab_index) {
       continue;
     }
     float4x4 mat = float4x4::identity();
-    if (parent[face] == -2) {
+    if (parent[i] == -2) {
       /* Unreachable from the dab triangle via any UV-sewn-then-seam path (e.g. a separate mesh
        * island inside the coverage sphere). #area_plane_unfold_step_matrix computes a hinge from
        * the two triangles' plane intersection, which is only meaningful for triangles that
@@ -762,10 +807,10 @@ Vector<float4x4> area_plane_unfold_matrices(const Span<AreaPlaneTriangle> triang
        * plane rather than a bogus fold. */
     }
     else {
-      int cur = face;
+      int cur = i;
       while (parent[cur] >= 0) {
         const int nxt = parent[cur];
-        mat = area_plane_unfold_step_matrix(triangles[cur], triangles[nxt]) * mat;
+        mat = area_plane_unfold_step_matrix(triangle_of_slot(cur), triangle_of_slot(nxt)) * mat;
         cur = nxt;
       }
     }

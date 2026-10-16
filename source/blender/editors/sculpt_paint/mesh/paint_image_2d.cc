@@ -2699,10 +2699,14 @@ static void paint_2d_sample_area_mtex(
       }
       return;
     }
-    paint_get_tex_pixel(mtex, tex_x, tex_y, pool, thread, r_value, r_rgba);
+    float value_unused;
+    paint_get_tex_pixel(
+        mtex, tex_x, tex_y, pool, thread, r_value != nullptr ? r_value : &value_unused, r_rgba);
   }
   add_v3_fl(r_rgba, painter->brush->texture_sample_bias);
-  *r_value -= painter->brush->texture_sample_bias;
+  if (r_value != nullptr) {
+    *r_value -= painter->brush->texture_sample_bias;
+  }
 }
 
 static bool paint_2d_area_plane_falloff(const Brush *brush,
@@ -2812,17 +2816,17 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
 
   const ed::sculpt_paint::material::ChannelSourceSet::ChannelSource &source =
       painter->channel_sources->source(channel);
-  float value;
-  float4 sampled;
-  paint_2d_sample_area_mtex(
-      painter, source, local_mat, position, uv, thread, pool, &value, sampled);
-
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
   /* Scalar channels read `value` below, so the color conversion and flip are skipped for them. */
   const bool is_color = ELEM(channel,
                              PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                              PAINT_MATERIAL_CHANNEL_EMISSION,
                              PAINT_MATERIAL_CHANNEL_NORMAL);
+  float value = 0.0f;
+  float4 sampled;
+  /* The intensity is a luminance of the sampled color, which a color channel never reads. */
+  paint_2d_sample_area_mtex(
+      painter, source, local_mat, position, uv, thread, pool, is_color ? nullptr : &value, sampled);
   const bke::PaintRuntime *paint_runtime = painter->paint->runtime;
   if (is_color && decode_linear && !is_normal && source.do_linear_conversion &&
       (paint_runtime == nullptr || !paint_runtime->do_linear_conversion))
@@ -2909,8 +2913,27 @@ static void paint_2d_blend_area_buffer(ImagePaintState *s,
                           &tiley,
                           &tilew,
                           &tileh);
-    paint_2d_do_making_brush(
-        s, tile, &region, frombuf, mask_max, blend, tilex, tiley, tilew, tileh);
+    if (tiley == tileh) {
+      paint_2d_do_making_brush(
+          s, tile, &region, frombuf, mask_max, blend, tilex, tiley, tilew, tileh);
+    }
+    else {
+      /* One task per row of undo tiles, as the regular dab does: the tiles are disjoint, and this
+       * serial loop was the whole cost of an Area Plane dab. */
+      Paint2DForeachData data;
+      data.s = s;
+      data.tile = tile;
+      data.region = &region;
+      data.frombuf = frombuf;
+      data.mask_max = mask_max;
+      data.blend = blend;
+      data.tilex = tilex;
+      data.tilew = tilew;
+
+      TaskParallelSettings settings;
+      BLI_parallel_range_settings_defaults(&settings);
+      BLI_task_parallel_range(tiley, tileh + 1, &data, paint_2d_op_foreach_do, &settings);
+    }
 
     tile->cache.curve_mask_cache.curve_mask = saved_curve_mask;
     tile->cache.tex_mask = saved_tex_mask;
@@ -3291,14 +3314,16 @@ static bool paint_2d_area_plane_build_tri_coverage(
   const float uv_origin_x = tile->uv_origin[0];
   const float uv_origin_y = tile->uv_origin[1];
   const Brush *brush = painter->brush;
-  r_cov.pixels.reserve(size_t(std::min(int64_t(w) * int64_t(h), int64_t(1 << 20))));
 
-  Mutex mutex;
+  /* One buffer per row, joined in order afterwards: no lock, and the result is the same on every
+   * run. The bounding box usually covers far more than the triangle, so nothing is reserved up
+   * front for the whole of it. */
+  Array<Vector<AreaPlaneCoveragePixel, 0>> row_pixels(h);
   threading::parallel_for(IndexRange(h), 8, [&](const IndexRange y_range) {
-    Vector<AreaPlaneCoveragePixel> local;
     const int thread = BLI_task_parallel_thread_id(nullptr);
     for (const int64_t ly64 : y_range) {
       const int ly = int(ly64);
+      Vector<AreaPlaneCoveragePixel, 0> &local = row_pixels[ly];
       const float uv_y = uv_origin_y + (float(y0 + ly) + 0.5f) * inv_sy;
       for (int lx = 0; lx < w; lx++) {
         const float2 uv(uv_origin_x + (float(x0 + lx) + 0.5f) * inv_sx, uv_y);
@@ -3335,12 +3360,15 @@ static bool paint_2d_area_plane_build_tri_coverage(
         local.append(pixel);
       }
     }
-    if (local.is_empty()) {
-      return;
-    }
-    std::lock_guard lock(mutex);
-    r_cov.pixels.extend(local);
   });
+  int64_t pixels_num = 0;
+  for (const Vector<AreaPlaneCoveragePixel, 0> &row : row_pixels) {
+    pixels_num += row.size();
+  }
+  r_cov.pixels.reserve(pixels_num);
+  for (const Vector<AreaPlaneCoveragePixel, 0> &row : row_pixels) {
+    r_cov.pixels.extend(row);
+  }
   paint_2d_area_plane_tighten_coverage(r_cov);
   return !r_cov.pixels.is_empty();
 }
@@ -3400,14 +3428,42 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
   const int stride = raster_buf->x;
 
   const bool usable = paint_2d_channel_source_usable_2d(painter, channel);
-  if (!usable) {
-    float3 rgb(painter->material_channel_color[0],
-               painter->material_channel_color[1],
-               painter->material_channel_color[2]);
-    if (apply_color_jitter) {
-      rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter, rgb);
+  /* A constant source has no placement: its colour is the same at every texel. */
+  const bool is_constant_source = usable &&
+                                  painter->channel_sources->source(channel).kind ==
+                                      ed::sculpt_paint::material::ChannelSourceKind::Constant;
+  if (!usable || is_constant_source) {
+    float3 rgb;
+    if (is_constant_source) {
+      /* Shaded once for the whole triangle with the steps the per-texel path below takes, instead of
+       * once per texel: the canvas encode alone is a transfer function per texel. */
+      paint_2d_area_sample_channel_color(painter,
+                                         cache,
+                                         channel,
+                                         float4x4::identity(),
+                                         float3(0.0f),
+                                         float2(0.0f),
+                                         0,
+                                         pool,
+                                         paint_mode,
+                                         true,
+                                         !apply_color_jitter,
+                                         true,
+                                         rgb);
+      if (apply_color_jitter) {
+        rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter, rgb);
+        paint_2d_area_encode_canvas_rgb(cache, false, rgb);
+      }
     }
-    paint_2d_area_encode_canvas_rgb(cache, is_normal, rgb);
+    else {
+      rgb = float3(painter->material_channel_color[0],
+                   painter->material_channel_color[1],
+                   painter->material_channel_color[2]);
+      if (apply_color_jitter) {
+        rgb = BKE_paint_stroke_color_jitter_apply_color(painter->dab_color_jitter, rgb);
+      }
+      paint_2d_area_encode_canvas_rgb(cache, is_normal, rgb);
+    }
     threading::parallel_for(cov.pixels.index_range(), 4096, [&](const IndexRange range) {
       for (const int64_t i : range) {
         const AreaPlaneCoveragePixel &pixel = cov.pixels[i];
@@ -3785,8 +3841,7 @@ static void paint_2d_area_plane_apply(ImagePaintState *s,
                                                local_cov.tris[tri_i]);
         tri_cov = &local_cov.tris[tri_i];
       }
-      if (paint_2d_area_plane_fill_and_blend(s, tile, *tri_cov, channel_local_mat, pool, geom)) {
-      }
+      paint_2d_area_plane_fill_and_blend(s, tile, *tri_cov, channel_local_mat, pool, geom);
     }
 
     if (shared_cov == nullptr) {

@@ -727,9 +727,8 @@ bool combined_preview_gpu_enabled(const Material *ma)
 static const char *gpu_last_reason = nullptr;
 
 /* The developer check of combined_preview_gpu_verify: whether the frame being shaded is one it will
- * compare, and the channel accumulators kept for it so a difference can be traced to a channel.
- * TEMPORARY: on unless BLENDER_PBR_GPU_VERIFY=0, for a parity test session; it shades the whole
- * canvas on the CPU. Restore to opt-in (`env != nullptr && atoi(env) != 0`) afterwards. */
+ * compare, and the channel accumulators kept for it so a difference can be traced to a channel. Off
+ * unless BLENDER_PBR_GPU_VERIFY=1: it shades the whole canvas on the CPU. */
 static bool gpu_verify_due = false;
 static std::array<Vector<float>, int(combined_shading_channels.size())> gpu_verify_channels;
 
@@ -737,7 +736,7 @@ static bool gpu_verify_enabled()
 {
   static const bool enabled = []() {
     const char *env = std::getenv("BLENDER_PBR_GPU_VERIFY");
-    return env == nullptr || std::atoi(env) != 0;
+    return env != nullptr && std::atoi(env) != 0;
   }();
   return enabled;
 }

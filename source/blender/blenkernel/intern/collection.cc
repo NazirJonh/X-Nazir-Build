@@ -38,6 +38,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_rigidbody.h"
 #include "BKE_scene.hh"
@@ -818,6 +819,9 @@ Collection *BKE_collection_duplicate(Main *bmain,
      * See #139715. */
     BKE_libblock_relink_to_newid(
         bmain, &collection_new->id, ID_REMAP_FORCE_OBDATA_IN_EDITMODE | ID_REMAP_SKIP_USER_CLEAR);
+    /* Duplicated materials got fresh owner uids; keep each copy's object masks pointing at them.
+     * Must run before `newid` pointers are cleared. */
+    BKE_paint_layer_object_masks_remap_from_newid(*bmain);
 
 #ifndef NDEBUG
     /* Call to `BKE_libblock_relink_to_newid` above is supposed to have cleared all those flags. */

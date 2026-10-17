@@ -261,6 +261,70 @@ class MATERIAL_OT_paint_layer_mask_toggle(_PaintLayerOperator):
         return {'FINISHED'}
 
 
+class MATERIAL_OT_paint_layer_object_mask_toggle(_PaintLayerOperator):
+    """Show or hide the active layer on an object, or on one UDIM tile of it"""
+
+    bl_idname = "material.paint_layer_object_mask_toggle"
+    bl_label = "Toggle Layer On Object"
+    bl_options = {'REGISTER', 'UNDO', 'INTERNAL'}
+
+    object_name: bpy.props.StringProperty(name="Object")
+    object_session_uid: bpy.props.IntProperty(
+        name="Object Session UID",
+        default=0,
+        description="Session UID of the object; preferred over the name lookup",
+    )
+    tile: bpy.props.IntProperty(name="Tile", default=0, description="UDIM tile, or 0 for the whole object")
+
+    @staticmethod
+    def _target_object(object_name, object_session_uid):
+        if object_session_uid:
+            for candidate in bpy.data.objects:
+                if candidate.session_uid == object_session_uid:
+                    if candidate.library is not None or candidate.override_library is not None:
+                        continue
+                    return candidate
+        # Fallback for scripted calls: only an editable local match; the RNA setter refuses the rest.
+        for candidate in bpy.data.objects:
+            if candidate.name == object_name and candidate.library is None and candidate.override_library is None:
+                return candidate
+        return None
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None:
+            self.report({'ERROR'}, "Paint layer not found" if self.marker else "No active paint layer")
+            return {'CANCELLED'}
+        ob = self._target_object(self.object_name, self.object_session_uid)
+        if ob is None:
+            self.report({'ERROR'}, "Object \"{:s}\" not found".format(self.object_name))
+            return {'CANCELLED'}
+        if self.tile:
+            layer.object_mask_tile_set(ob, self.tile, not layer.object_mask_tile_get(ob, self.tile))
+        else:
+            layer.object_mask_visible_set(ob, not layer.object_mask_visible_get(ob))
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_paint_layer_object_mask_refresh_tiles(_PaintLayerOperator):
+    """Rescan the UVs of the objects using the active layered material for occupied UDIM tiles"""
+
+    bl_idname = "material.paint_layer_object_mask_refresh_tiles"
+    bl_label = "Refresh Tiles"
+    # No undo step: the tile lists are runtime-only caches.
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        mat = _context_material(context)
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        for ob in context.view_layer.objects:
+            if any(slot.material == mat for slot in ob.material_slots):
+                layer.object_mask_tiles(ob, refresh=True)
+        return {'FINISHED'}
+
+
 classes = (
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
@@ -268,4 +332,6 @@ classes = (
     MATERIAL_OT_paint_layer_mask_add,
     MATERIAL_OT_paint_layer_mask_remove,
     MATERIAL_OT_paint_layer_mask_toggle,
+    MATERIAL_OT_paint_layer_object_mask_toggle,
+    MATERIAL_OT_paint_layer_object_mask_refresh_tiles,
 )

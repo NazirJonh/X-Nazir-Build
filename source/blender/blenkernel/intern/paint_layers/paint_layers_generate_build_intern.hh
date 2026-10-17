@@ -173,6 +173,14 @@ class PaintLayersTreeBuilder {
   NodeOutput mask_factor_ensure(bNodeTree &tree, LayerGroup &group, const MaterialPaintLayer &layer);
 
   /**
+   * The row's 0/1 visibility on the object being drawn, read from that object's mask record by an
+   * Attribute node, built once per row and shared by its channels. Empty when the row has no
+   * object mask or the nodes cannot be made. Mesh reads the object's flag; UV Tiles reads the tile
+   * bit of the fragment's UDIM.
+   */
+  NodeOutput object_mask_visible_ensure(bNodeTree &tree, const MaterialPaintLayer &layer);
+
+  /**
    * One row of one channel: its group contents, and the instance sockets the root chains.
    *
    * \param isolated: the row hangs inside a folder, so it works on the folder's pre-multiplied
@@ -367,6 +375,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, NodeOutput> mapping_clip_masks_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */
   Map<const MaterialPaintLayer *, NodeOutput> mask_factors_;
+  /** A row's built object-mask visibility, shared the same way. */
+  Map<const MaterialPaintLayer *, NodeOutput> object_mask_visible_;
   Map<int, bNodeTreeInterfaceSocket *> result_outputs_;
   bNode *group_output_ = nullptr;
   /** Node positions of this build; a fresh builder starts from row zero. */

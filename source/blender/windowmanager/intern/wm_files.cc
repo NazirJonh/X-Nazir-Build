@@ -93,6 +93,7 @@
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -2317,6 +2318,11 @@ static bool wm_file_write(bContext *C,
   const CurvePatchPreviewWriteGuard curve_patch_guard(*bmain);
 
   ED_editors_flush_edits(bmain);
+
+  /* Drop object-mask records orphaned by row, material or "Make Layered" removal so they are
+   * neither saved nor iterated on every lookup. Never during evaluation: this is the pre-save
+   * main-thread hook. */
+  BKE_paint_layer_object_masks_cleanup_all(*bmain);
 
   /* XXX(ton): temp solution to solve bug, real fix coming. */
   bmain->recovered = false;

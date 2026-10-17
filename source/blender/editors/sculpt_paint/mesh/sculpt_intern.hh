@@ -257,6 +257,10 @@ struct ImageData : NonCopyable {
 
   Map<bke::image::TileNumber, ImBuf *> buffers = {};
   Map<bke::image::TileNumber, TileColorspaceProcessor> processors = {};
+  /** The row is hidden on the painted object (object mask, Mesh mode): a stroke writes nothing. */
+  bool object_masked = false;
+  /** UDIM tiles (bit `i` = tile `1001 + i`) a stroke must not write: the row is hidden there. */
+  uint32_t excluded_tiles = 0;
 
   ~ImageData();
 

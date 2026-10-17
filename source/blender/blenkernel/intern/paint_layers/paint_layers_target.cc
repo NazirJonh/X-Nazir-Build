@@ -22,6 +22,7 @@
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "paint_layers_intern.hh"
@@ -211,6 +212,19 @@ bool BKE_paint_layers_find_image_use(Material &ma,
   return found;
 }
 
+/**
+ * What the object mask says about the resolved row on \a ob. Tile 0 asks the Mesh answer alone,
+ * folders included; tiles are answered per pixel through the returned bits.
+ */
+static void object_mask_resolve(const Object &ob, const Material &ma, PaintLayersTarget &r_target)
+{
+  if (r_target.layer == nullptr) {
+    return;
+  }
+  r_target.object_masked = !BKE_paint_layer_object_mask_visible(ob, ma, *r_target.layer, 0);
+  r_target.excluded_tiles = BKE_paint_layer_object_mask_excluded_tiles(ob, ma, *r_target.layer);
+}
+
 bool BKE_paint_layers_target_get(
     Object &ob, const int material_slot, const int channel, PaintLayersTarget &r_target)
 {
@@ -222,7 +236,11 @@ bool BKE_paint_layers_target_get(
   if (ma == nullptr) {
     return false;
   }
-  return BKE_paint_layers_target_get(*ma, channel, r_target);
+  if (!BKE_paint_layers_target_get(*ma, channel, r_target)) {
+    return false;
+  }
+  object_mask_resolve(ob, *ma, r_target);
+  return true;
 }
 
 bool BKE_paint_layers_target_get(Object &ob,
@@ -237,7 +255,11 @@ bool BKE_paint_layers_target_get(Object &ob,
   if (ma == nullptr) {
     return false;
   }
-  return BKE_paint_layers_target_get(*ma, channel, mode, r_target);
+  if (!BKE_paint_layers_target_get(*ma, channel, mode, r_target)) {
+    return false;
+  }
+  object_mask_resolve(ob, *ma, r_target);
+  return true;
 }
 
 bool BKE_paint_layers_target_is_live(const PaintLayersTarget &target)

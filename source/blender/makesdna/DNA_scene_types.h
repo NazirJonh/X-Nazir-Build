@@ -2279,7 +2279,13 @@ struct PaintModeSettings {
    * a row is entered into Mask mode without.
    */
   int8_t layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
-  char _pad_stack_layer[3] = {};
+  /**
+   * Whether the Properties editor shows the object mask of the active row. Runtime UI intent stored
+   * here so the Outliner button and the Python panel share one RNA property; cleared whenever
+   * #layer_target_mode is set (switching to Mask or Preview ends it).
+   */
+  int8_t layer_object_mask_edit = 0;
+  char _pad_stack_layer[2] = {};
 };
 
 /** #PaintModeSettings::new_channel_image_size */

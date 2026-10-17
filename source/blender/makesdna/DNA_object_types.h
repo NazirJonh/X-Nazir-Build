@@ -19,6 +19,7 @@
 #include "DNA_action_types.h" /* bAnimVizSettings */
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
+#include "DNA_uuid_types.h"
 #include "DNA_vec_defaults.h"
 
 namespace blender {
@@ -463,6 +464,37 @@ struct LightLinking {
   LightLinkingRuntime runtime;
 };
 
+/** #ObjectPaintLayerMask::flag */
+enum eObjectPaintLayerMaskFlag : int8_t {
+  /** The row is hidden on this object (Mesh mode). */
+  OB_PAINT_LAYER_MASK_EXCLUDED = 1 << 0,
+};
+
+/**
+ * What one layered-material row hides on this object. Only deviations from "visible everywhere"
+ * are stored: no record means the row shows, which is also what the shader reads for a missing
+ * record, so a new object using the material needs no setup.
+ *
+ * Keyed by the owning material's #Material::paint_layers_owner_uid and the row's marker rather
+ * than by a Material pointer: a copied material keeps its row markers, and the uid is the same on
+ * the evaluated copy, which is where the shader's Attribute node resolves the record.
+ */
+struct ObjectPaintLayerMask {
+  DNA_DEFINE_CXX_METHODS(ObjectPaintLayerMask)
+
+  struct ObjectPaintLayerMask *next = nullptr, *prev = nullptr;
+  bUUID owner_uid = {};
+  bUUID marker = {};
+  /** #eObjectPaintLayerMaskFlag. */
+  int8_t flag = 0;
+  char _pad[3] = {};
+  /** Bit `i` hides UDIM tile `1001 + i` (UV Tiles mode); 24 bits used. */
+  int excluded_tiles = 0;
+  /** Shader mirrors of #flag and #excluded_tiles: Attribute nodes read floats. */
+  float excluded_value = 0.0f;
+  float excluded_tiles_value = 0.0f;
+};
+
 struct Object {
 #ifdef __cplusplus
   DNA_DEFINE_CXX_METHODS(Object)
@@ -697,6 +729,9 @@ struct Object {
    * these bytes as padding so every following member keeps its offset and old files still read
    * correctly. */
   char _pad_sculpt_cursor[19] = {};
+
+  /** Per-object visibility of layered-material rows, one #ObjectPaintLayerMask per row. */
+  ListBaseT<ObjectPaintLayerMask> paint_layer_masks = {nullptr, nullptr};
 
   bke::ObjectRuntime *runtime = nullptr;
 

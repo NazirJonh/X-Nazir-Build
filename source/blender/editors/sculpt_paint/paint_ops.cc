@@ -914,6 +914,11 @@ static wmOperatorStatus layer_target_mode_set_exec(bContext *C, wmOperator *op)
     }
   }
   mode_settings.layer_target_mode = int8_t(mode);
+  /* Choosing a paint target (Mask or content) ends object-mask editing. */
+  if (mode_settings.layer_object_mask_edit != 0) {
+    mode_settings.layer_object_mask_edit = 0;
+    WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  }
 
   /* The slots are what a projection stroke reads: they are the mask's map now, or the row's. */
   BKE_texpaint_slots_refresh_object(scene, ob);

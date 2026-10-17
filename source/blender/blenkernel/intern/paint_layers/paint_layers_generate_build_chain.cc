@@ -26,6 +26,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "NOD_socket.hh"
@@ -380,6 +381,138 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
 
   mask_factors_.add(&layer, current);
   return current;
+}
+
+/** A Math node of \a operation over \a a and the constant \a b; null when it cannot be made. */
+static bNode *math_constant_node_add(bNodeTree &tree,
+                                     layout::LayoutGrid &grid,
+                                     Vector<bNode *> &r_nodes,
+                                     const int operation,
+                                     const NodeOutput a,
+                                     const float b)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+  if (node == nullptr) {
+    return nullptr;
+  }
+  bNodeSocket *a_in = socket_in(*node, "Value");
+  bNodeSocket *b_in = socket_in(*node, "Value_001");
+  if (a_in == nullptr || b_in == nullptr || a.socket == nullptr || b_in->default_value == nullptr) {
+    bke::node_remove_node(nullptr, tree, *node, true, false);
+    return nullptr;
+  }
+  node->custom1 = operation;
+  grid.place_extra(*node);
+  bke::node_add_link(tree, *a.node, *a.socket, *node, *a_in);
+  static_cast<bNodeSocketValueFloat *>(b_in->default_value)->value = b;
+  r_nodes.append(node);
+  return node;
+}
+
+NodeOutput PaintLayersTreeBuilder::object_mask_visible_ensure(bNodeTree &tree,
+                                                              const MaterialPaintLayer &layer)
+{
+  if ((layer.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) == 0) {
+    return {};
+  }
+  if (const NodeOutput *cached = object_mask_visible_.lookup_ptr(&layer)) {
+    return *cached;
+  }
+
+  /* Every node this function adds, so that a failure part way leaves nothing half built behind. */
+  Vector<bNode *> nodes;
+  const auto discard = [&]() {
+    this->nodes_discard(tree, nodes);
+    return NodeOutput{};
+  };
+  /* Math over \a a and the constant \a b, as a #NodeOutput. */
+  const auto with_constant = [&](const int operation, const NodeOutput a, const float b) {
+    bNode *node = math_constant_node_add(tree, grid_, nodes, operation, a, b);
+    return (node != nullptr) ? NodeOutput{node, socket_out(*node, "Value")} : NodeOutput{};
+  };
+
+  /* A missing record reads 0 ("nothing hidden"), which is why records store exclusions. The record
+   * is resolved per object by the Attribute node, so one tree serves every object using the
+   * material. */
+  bNode *attribute = bke::node_add_static_node(nullptr, tree, SH_NODE_ATTRIBUTE);
+  if (attribute == nullptr) {
+    return discard();
+  }
+  nodes.append(attribute);
+  grid_.place_extra(*attribute);
+  NodeShaderAttribute *attribute_data = static_cast<NodeShaderAttribute *>(attribute->storage);
+  attribute_data->type = SHD_ATTRIBUTE_OBJECT;
+  STRNCPY(attribute_data->name,
+          BKE_paint_layer_object_mask_attribute_path(ma_, layer).c_str());
+  NodeOutput excluded = {attribute, socket_out(*attribute, "Fac")};
+  if (excluded.socket == nullptr) {
+    return discard();
+  }
+
+  if (layer.object_mask_type == MA_PAINT_LAYER_OBJECT_MASK_UV_TILES) {
+    /* UDIM standard: 10 columns per row; the mask covers FIRST..FIRST+NUM-1. The UV is the one the
+     * layer's maps read, before any row mapping, because tiles are a property of the mesh. */
+    constexpr float udim_columns = float(bke::PAINT_LAYER_OBJECT_MASK_UDIM_COLUMNS);
+    constexpr float tile_last_exclusive = float(bke::PAINT_LAYER_OBJECT_MASK_TILE_NUM) - 0.5f;
+    bNode *coord = this->uv_coordinate_ensure(tree);
+    bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
+    bNode *separate = bke::node_add_static_node(nullptr, tree, SH_NODE_SEPXYZ);
+    if (uv == nullptr || separate == nullptr) {
+      return discard();
+    }
+    nodes.append(separate);
+    grid_.place_extra(*separate);
+    bke::node_add_link(tree, *coord, *uv, *separate, *socket_in(*separate, "Vector"));
+
+    const NodeOutput column = with_constant(
+        NODE_MATH_FLOOR, {separate, socket_out(*separate, "X")}, 0.0f);
+    const NodeOutput row = with_constant(
+        NODE_MATH_FLOOR, {separate, socket_out(*separate, "Y")}, 0.0f);
+    const NodeOutput row_start = with_constant(NODE_MATH_MULTIPLY, row, udim_columns);
+    const NodeOutput index = math_node_add(
+        tree, grid_, nodes, NODE_MATH_ADD, column, row_start, 0.0f);
+    /* The bit is `floor(bits / 2^index) mod 2`, exact for 24 bits in a float. */
+    const NodeOutput power = math_node_add(
+        tree, grid_, nodes, NODE_MATH_POWER, {}, index, 2.0f);
+    const NodeOutput shifted = math_node_add(
+        tree, grid_, nodes, NODE_MATH_DIVIDE, excluded, power, 0.0f);
+    const NodeOutput floored = with_constant(NODE_MATH_FLOOR, shifted, 0.0f);
+    const NodeOutput bit = with_constant(NODE_MATH_FLOORED_MODULO, floored, 2.0f);
+    /* Tiles outside FIRST..FIRST+NUM-1 are never hidden: the column is 0..9 and the index
+     * 0..NUM-1. */
+    const NodeOutput column_below = with_constant(NODE_MATH_LESS_THAN, column, udim_columns);
+    const NodeOutput column_above = with_constant(NODE_MATH_GREATER_THAN, column, -0.5f);
+    const NodeOutput index_below = with_constant(
+        NODE_MATH_LESS_THAN, index, tile_last_exclusive);
+    const NodeOutput index_above = with_constant(NODE_MATH_GREATER_THAN, index, -0.5f);
+    const NodeOutput column_ok = math_node_add(
+        tree, grid_, nodes, NODE_MATH_MULTIPLY, column_below, column_above, 0.0f);
+    const NodeOutput index_ok = math_node_add(
+        tree, grid_, nodes, NODE_MATH_MULTIPLY, index_below, index_above, 0.0f);
+    const NodeOutput in_range = math_node_add(
+        tree, grid_, nodes, NODE_MATH_MULTIPLY, column_ok, index_ok, 0.0f);
+    excluded = math_node_add(tree, grid_, nodes, NODE_MATH_MULTIPLY, bit, in_range, 0.0f);
+    /* The Math helper reads a missing first operand as its default, so a part that failed has to
+     * be caught here rather than left to link a wrong chain. */
+    for (const NodeOutput &part : {column, row, row_start, index, power, shifted, floored, bit,
+                                   column_below, column_above, index_below, index_above,
+                                   column_ok, index_ok, in_range, excluded})
+    {
+      if (part.socket == nullptr) {
+        return discard();
+      }
+    }
+  }
+
+  /* `visible = 1 - excluded`. */
+  const NodeOutput visible = math_node_add(
+      tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, excluded, 1.0f);
+  if (visible.socket == nullptr) {
+    return discard();
+  }
+  layout::frame_add(tree, "Object Mask", nodes);
+  object_mask_visible_.add(&layer, visible);
+  return visible;
 }
 BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
                                                  const int channel,
@@ -1327,6 +1460,24 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     }
     else {
       const NodeOutput product = this->multiply_nodes_add(tree, {factor_node, factor}, mask);
+      if (product.node != nullptr) {
+        factor_node = product.node;
+        factor = product.socket;
+      }
+    }
+  }
+
+  /* The object mask is one more factor, the same place the row's mask acts: a hidden row is exactly
+   * a row at zero opacity. The CPU composite knows no object, so it stays as the visible case. */
+  const NodeOutput object_visible = this->object_mask_visible_ensure(tree, layer);
+  if (object_visible.node != nullptr) {
+    if (factor == nullptr) {
+      factor_node = object_visible.node;
+      factor = object_visible.socket;
+    }
+    else {
+      const NodeOutput product = this->multiply_nodes_add(
+          tree, {factor_node, factor}, object_visible);
       if (product.node != nullptr) {
         factor_node = product.node;
         factor = product.socket;

@@ -6,6 +6,8 @@
 
 #include "BLI_function_ref.hh"
 
+#include "DNA_uuid_types.h"
+
 namespace blender {
 
 struct Main;
@@ -139,6 +141,9 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
                                          Material &ma_dst,
                                          const Material &ma_src,
                                          int copy_flag);
+
+/** Re-assign generated tree and subgroup ownership to ma's new owner UID. */
+void BKE_paint_layers_owner_uid_changed(Main &bmain, Material &ma, const bUUID &old_uid);
 
 /**
  * Detach the derived data of every layered material, ahead of a memfile undo or redo decode.

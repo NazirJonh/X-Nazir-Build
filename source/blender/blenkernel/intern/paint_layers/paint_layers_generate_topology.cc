@@ -164,6 +164,13 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* A Pass Through folder builds no group, an isolating one does: the mode is structure, although
    * what decides it (mask, blend, opacity) is not all in the hash below. */
   hash = topology_hash_mix(hash, BKE_paint_layers_folder_is_pass_through(layer) ? 1 : 0);
+  if ((layer.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0) {
+    /* Mixed only when set, so every row without an object mask keeps its hash. The mode picks the
+     * Attribute field and the tile nodes. The owner uid is in the Attribute node's name, so a
+     * material copy with a fresh uid rebuilds. */
+    hash = topology_hash_mix(hash, 0x200 + uint64_t(uint8_t(layer.object_mask_type)));
+    topology_hash_uid(hash, ma.paint_layers_owner_uid);
+  }
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, row_participates(ma, layer, channel) ? 1 : 0);

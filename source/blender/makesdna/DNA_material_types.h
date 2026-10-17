@@ -412,6 +412,21 @@ enum eMaterialPaintLayerFlag : int16_t {
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
+/** #MaterialPaintLayer::object_mask_type */
+enum eMaterialPaintLayerObjectMaskType : int8_t {
+  MA_PAINT_LAYER_OBJECT_MASK_MESH = 0,
+  MA_PAINT_LAYER_OBJECT_MASK_UV_TILES = 1,
+};
+
+/** #MaterialPaintLayer::object_mask_flag */
+enum eMaterialPaintLayerObjectMaskFlag : int8_t {
+  /**
+   * The row has an object mask: set by the first hidden object or tile, and what makes the
+   * generator build the Attribute nodes.
+   */
+  MA_PAINT_LAYER_OBJECT_MASK_ACTIVE = 1 << 0,
+};
+
 /**
  * #MaterialPaintLayer::role. Numerically matches the reference's role table.
  */
@@ -650,6 +665,16 @@ struct MaterialPaintLayer {
    * new kind adds no field here. Owned by the row; null while the kind has set none.
    */
   struct IDProperty *system_properties = nullptr;
+  /**
+   * #eMaterialPaintLayerObjectMaskType: whether the row is limited per object (Mesh) or per UDIM
+   * tile of each object (UV Tiles). The per-object choices live on the objects
+   * (#Object::paint_layer_masks), so the material never references the objects using it. General to
+   * the row: a Layer or a folder can carry it, whatever the kind.
+   */
+  int8_t object_mask_type = MA_PAINT_LAYER_OBJECT_MASK_MESH;
+  /** #eMaterialPaintLayerObjectMaskFlag. */
+  int8_t object_mask_flag = 0;
+  char _pad_object_mask[6] = {};
   /**
    * Per (row, channel) overrides, indexed by #eMaterialPaintChannel. A fixed array so every pair has
    * a value and an RNA path whether or not the row has a #channels record for it; a folder, which

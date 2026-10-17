@@ -588,10 +588,17 @@ class LayerMaterialButtonsPanel:
             return layer.mask_items[0]
         return None
 
+    @staticmethod
+    def _object_mask_editing(context):
+        """While the active row's object mask is edited, the tab shows only the Mask panel."""
+        return context.scene.tool_settings.paint_mode.layer_object_mask_edit
+
     @classmethod
     def poll(cls, context):
         # No COMPAT_ENGINES test, for the same reason as the Brush Material tab: the generated tree
         # feeds the viewport whatever the scene's render engine is.
+        if cls._object_mask_editing(context):
+            return False
         mat = context.material
         return mat is not None and not mat.grease_pencil
 
@@ -609,6 +616,8 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
 
     @classmethod
     def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
         return cls._owner_material(context) is not None
 
     def draw(self, context):
@@ -709,6 +718,8 @@ class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
 
     @classmethod
     def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
         return cls._owner_material(context) is not None
 
     def draw(self, context):
@@ -763,6 +774,105 @@ class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):
         draw_material_channel_set(layout, self._owner_material(context))
 
 
+# Last maskable UDIM tile, read from the RNA range of the setter so it follows
+# `PAINT_LAYER_OBJECT_MASK_TILE_LAST` in `BKE_paint_layers_object_mask.hh`.
+_OBJECT_MASK_TILE_LAST = (
+    bpy.types.MaterialPaintLayer.bl_rna.functions["object_mask_tile_set"].parameters["tile"].hard_max
+)
+
+
+def paint_layer_mask_objects(context, mat):
+    """Objects of the active view layer that use `mat` in any slot, each once, sorted by name.
+
+    Only the view layer is listed: objects in other scenes using the material are not shown.
+    """
+    return sorted(
+        (ob for ob in context.view_layer.objects
+         if any(slot.material == mat for slot in ob.material_slots)),
+        key=lambda ob: ob.name,
+    )
+
+
+class LAYER_MATERIAL_PT_object_mask(LayerMaterialButtonsPanel, Panel):
+    """Which objects, or which UDIM tiles of each object, the active layer shows on. While it is
+    edited it is the only panel of the Layered Material tab."""
+
+    bl_idname = "LAYER_MATERIAL_PT_object_mask"
+    bl_label = "Mask"
+
+    @classmethod
+    def poll(cls, context):
+        if not cls._object_mask_editing(context):
+            return False
+        _owner, layer = cls._active_layer(context)
+        return layer is not None
+
+    def draw(self, context):
+        layout = self.layout
+        mat, layer = self._active_layer(context)
+        # The way out of the mask-only tab: clears `layer_object_mask_edit`.
+        header = layout.row()
+        header.prop(context.scene.tool_settings.paint_mode, "layer_object_mask_edit",
+                    text="Edit Mask", toggle=True)
+        # Names the row being configured; same kind icons as the Outliner (folder / fill / layer).
+        if layer.source == 'STACK':
+            kind_icon = 'FILE_FOLDER'
+        elif layer.source == 'CONSTANT':
+            kind_icon = 'GP_DRAW_FILL'
+        else:
+            kind_icon = 'IMAGE_DATA'
+        layout.label(text=layer.name, icon=kind_icon)
+        layout.use_property_split = True
+        layout.prop(layer, "object_mask_type", text="Mask Type")
+        layout.use_property_split = False
+        objects = paint_layer_mask_objects(context, mat)
+        if layer.object_mask_type == 'MESH':
+            col = layout.column(align=True)
+            for ob in objects:
+                visible = layer.object_mask_visible_get(ob)
+                row = col.row(align=True)
+                row.enabled = ob.library is None and ob.override_library is None
+                props = row.operator(
+                    "material.paint_layer_object_mask_toggle",
+                    text=ob.name,
+                    icon='CHECKBOX_HLT' if visible else 'CHECKBOX_DEHLT',
+                    emboss=False,
+                )
+                props.object_name = ob.name
+                props.object_session_uid = ob.session_uid
+                props.marker = layer.marker
+        elif layer.object_mask_type == 'UV_TILES':
+            # Tile lists are cached; UV edits need an explicit rescan.
+            layout.operator("material.paint_layer_object_mask_refresh_tiles", icon='FILE_REFRESH')
+            for ob in objects:
+                box = layout.box()
+                box.label(text=ob.name, icon='OBJECT_DATA')
+                tiles = layer.object_mask_tiles(ob)
+                if not tiles:
+                    box.label(text="No UDIM tiles", icon='INFO')
+                    continue
+                grid = box.grid_flow(columns=5, even_columns=True, align=True)
+                for tile in tiles:
+                    sub = grid.row(align=True)
+                    if tile > _OBJECT_MASK_TILE_LAST:
+                        sub.enabled = False
+                    else:
+                        sub.enabled = ob.library is None and ob.override_library is None
+                    visible = tile > _OBJECT_MASK_TILE_LAST or layer.object_mask_tile_get(ob, tile)
+                    props = sub.operator(
+                        "material.paint_layer_object_mask_toggle",
+                        text=str(tile),
+                        icon='CHECKBOX_HLT' if visible else 'CHECKBOX_DEHLT',
+                        emboss=False,
+                    )
+                    props.object_name = ob.name
+                    props.object_session_uid = ob.session_uid
+                    props.marker = layer.marker
+                    props.tile = tile
+                if any(tile > _OBJECT_MASK_TILE_LAST for tile in tiles):
+                    box.label(text="Tiles above {:d} cannot be masked".format(_OBJECT_MASK_TILE_LAST), icon='INFO')
+
+
 classes = (
     MATERIAL_MT_context_menu,
     MATERIAL_UL_matslots,
@@ -791,6 +901,7 @@ classes = (
     LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_advanced,
     LAYER_MATERIAL_PT_active_channel,
+    LAYER_MATERIAL_PT_object_mask,
 )
 
 

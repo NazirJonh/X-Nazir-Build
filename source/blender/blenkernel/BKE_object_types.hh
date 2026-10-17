@@ -9,11 +9,14 @@
 #pragma once
 
 #include <optional>
+#include <string>
 
 #include "BLI_array.hh"
 #include "BLI_bounds_types.hh"
+#include "BLI_map.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_customdata_types.h" /* #CustomData_MeshMasks. */
 
@@ -152,6 +155,13 @@ struct ObjectRuntime {
   /* Runtime data used by mesh painting modes (Sculpt, Vertex, Weight). */
   /* TODO: Rename the struct and the variable to better indicate its wider usage */
   SculptSession *sculpt_session = nullptr;
+
+  /**
+   * Occupied UDIM tiles per layered material and UV map, see
+   * #BKE_paint_layer_object_mask_object_tiles_cached. Runtime only: the scan walks every face, so
+   * the Properties editor must not repeat it per redraw. Key: owner uid + UV map name.
+   */
+  Map<std::string, Vector<int>> paint_layer_mask_tiles;
 };
 
 }  // namespace bke

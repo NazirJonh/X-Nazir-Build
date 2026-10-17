@@ -92,6 +92,16 @@ struct PaintLayersTarget {
    * record is #channel_record, and its map the one the stroke writes.
    */
   MaterialPaintLayer *mask_item = nullptr;
+  /**
+   * Set by the object-based resolvers when the row is hidden on that object (object mask in Mesh
+   * mode, the row's or an enclosing folder's): a stroke through the object writes nothing.
+   */
+  bool object_masked = false;
+  /**
+   * UDIM tiles (bit `i` = tile `1001 + i`) the row is hidden on for that object (object mask in UV
+   * Tiles mode): a stroke skips them. Set by the object-based resolvers only.
+   */
+  uint32_t excluded_tiles = 0;
 };
 
 /**

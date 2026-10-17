@@ -211,6 +211,7 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "BKE_mesh.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_layers_object_mask.hh"
 #  include "BKE_paint_types.hh"
 #  include "BKE_particle.h"
 #  include "BKE_pointcache.h"
@@ -699,6 +700,19 @@ static PointCloud *rna_PaintCurve_curve_patch_stamps(PaintCurve *pc,
   id_us_min(&points->id);
   WM_main_add_notifier(NC_ID | NA_ADDED, nullptr);
   return points;
+}
+
+static void rna_PaintModeSettings_layer_object_mask_edit_update(Main *bmain,
+                                                                Scene *scene,
+                                                                PointerRNA * /*ptr*/)
+{
+  /* Scan the UVs once on entering, so the panel redraws only read the tile cache. */
+  if (scene != nullptr && scene->toolsettings->paint_mode.layer_object_mask_edit != 0) {
+    BKE_paint_layer_object_mask_tiles_prefetch(*bmain);
+  }
+  /* The Outliner row button and the Properties panel both follow this flag. */
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 }
 
 static void rna_Paint_update(bContext *C, PointerRNA * /*ptr*/)
@@ -3401,6 +3415,15 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       prop,
       "Layer Target",
       "Whether a layered material's stroke paints the active layer's channel content or its mask");
+
+  prop = RNA_def_property(srna, "layer_object_mask_edit", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "layer_object_mask_edit", 1);
+  RNA_def_property_ui_text(
+      prop,
+      "Edit Object Mask",
+      "Show the object mask of the active layer in the material properties");
+  RNA_def_property_update(
+      prop, NC_SPACE | ND_SPACE_PROPERTIES, "rna_PaintModeSettings_layer_object_mask_edit_update");
 }
 
 static const EnumPropertyItem rna_shape_blend_items[] = {

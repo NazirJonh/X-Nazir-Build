@@ -574,6 +574,45 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
   }
 }
 
+static void layer_trees_reassign_owner(bNodeTree &tree,
+                                       const bUUID &old_owner,
+                                       const bUUID &new_owner)
+{
+  for (bNode &node : tree.nodes) {
+    if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(node.id);
+    if (group == nullptr || !BLI_uuid_equal(tree_owner_uid_get(*group), old_owner)) {
+      continue;
+    }
+    tree_owner_uid_set(*group, new_owner);
+    layer_trees_reassign_owner(*group, old_owner, new_owner);
+  }
+}
+
+void BKE_paint_layers_owner_uid_changed(Main & /*bmain*/, Material &ma, const bUUID &old_uid)
+{
+  if (ma.paint_layers_tree != nullptr &&
+      BLI_uuid_equal(tree_owner_uid_get(*ma.paint_layers_tree), old_uid))
+  {
+    tree_owner_uid_set(*ma.paint_layers_tree, ma.paint_layers_owner_uid);
+    layer_trees_reassign_owner(*ma.paint_layers_tree, old_uid, ma.paint_layers_owner_uid);
+  }
+  if (ma.nodetree != nullptr) {
+    for (bNode &node : ma.nodetree->nodes) {
+      bUUID node_uid = BLI_uuid_nil();
+      if (uid_prop_get(node.prop, INSTANCE_OWNER_PROP, node_uid) &&
+          BLI_uuid_equal(node_uid, old_uid))
+      {
+        instance_uid_set(node, ma.paint_layers_owner_uid);
+      }
+    }
+  }
+  BKE_paint_layers_tag_edited(ma);
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Undo
  * \{ */

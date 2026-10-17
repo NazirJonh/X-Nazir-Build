@@ -107,6 +107,12 @@ bool BKE_paint_layers_folder_is_pass_through(const MaterialPaintLayer &folder)
   if (!BLI_listbase_is_empty(&folder.effects)) {
     return false;
   }
+  /* An object mask multiplies the folder's own row factor; an inlined folder has no row, so the
+   * mask would silently hide nothing. The flag is sticky, so toggling visibility stays a value
+   * edit. */
+  if ((folder.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0) {
+    return false;
+  }
   /* The isolated folder computes `over(below, P/a, a)`; laying the children one after another is
    * the same only for the Mix blend at full weight. Opacity below one breaks it for two or more
    * children, because scaling the whole isolated result is not scaling each child's own factor.

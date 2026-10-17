@@ -115,6 +115,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcache.h"
 #include "BKE_pointcloud.hh"
@@ -292,6 +293,8 @@ static void object_copy_data(Main *bmain,
       ob_dst->lightprobe_cache->shared = false;
     }
   }
+
+  BKE_paint_layer_object_masks_copy(*ob_dst, *ob_src);
 }
 
 static void object_free_data(ID *id)
@@ -343,6 +346,8 @@ static void object_free_data(ID *id)
   BKE_light_linking_delete(ob, LIB_ID_CREATE_NO_USER_REFCOUNT);
 
   BKE_lightprobe_cache_free(ob);
+
+  BKE_paint_layer_object_masks_free(*ob);
 
   MEM_delete(ob->runtime);
 }
@@ -847,6 +852,7 @@ static void object_blend_write(BlendWriter *writer, ID *id, const void *id_addre
   BKE_shaderfx_blend_write(writer, &ob->shader_fx);
 
   writer->write_struct_list(&ob->pc_ids);
+  writer->write_struct_list(&ob->paint_layer_masks);
 
   BKE_previewimg_blend_write(writer, ob->preview);
 
@@ -1057,6 +1063,7 @@ static void object_blend_read_data(BlendDataReader *reader, ID *id)
   }
 
   BLO_read_struct_list(reader, LinkData, &ob->pc_ids);
+  BLO_read_struct_list(reader, ObjectPaintLayerMask, &ob->paint_layer_masks);
 
   /* in case this value changes in future, clamp else we get undefined behavior */
   CLAMP(ob->rotmode, ROT_MODE_MIN, ROT_MODE_MAX);
@@ -2867,6 +2874,11 @@ Object *BKE_object_duplicate(Main *bmain,
      * See #139715. */
     BKE_libblock_relink_to_newid(
         bmain, &obn->id, ID_REMAP_FORCE_OBDATA_IN_EDITMODE | ID_REMAP_SKIP_USER_CLEAR);
+
+    /* A USER_DUP_MAT duplicate gets a fresh owner uid; its records still name the source uid until
+     * they are rewritten here. Sub-process duplicates relink later in the editor, which remaps
+     * through the same helper. */
+    BKE_paint_layer_object_masks_duplicate_remap(*obn, *ob);
 
 #ifndef NDEBUG
     /* Call to `BKE_libblock_relink_to_newid` above is supposed to have cleared all those flags. */
@@ -5194,6 +5206,8 @@ void BKE_object_runtime_reset_on_copy(Object *object, const int /*flag*/)
   runtime->pose_backup = nullptr;
   runtime->object_as_temp_curve = nullptr;
   runtime->geometry_set_eval = nullptr;
+  /* The scan result belongs to the source's mesh; a copy (evaluated included) rescans on demand. */
+  runtime->paint_layer_mask_tiles.clear();
   runtime->contained_geometry_types = 0;
   runtime->sculpt_session = nullptr;
 

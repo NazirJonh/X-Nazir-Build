@@ -38,6 +38,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
@@ -51,6 +52,8 @@
 #include "BLI_uuid.h"
 
 #include "BLT_translation.hh"
+
+#include "ED_undo.hh"
 
 #include "RNA_access.hh"
 #include "RNA_types.hh"
@@ -124,6 +127,12 @@ bool layers_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
     return false;
   }
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  /* Choosing a paint target (Mask or content) ends object-mask editing, even when the target is
+   * already the one asked for. */
+  if (paint_mode.layer_object_mask_edit != 0) {
+    paint_mode.layer_object_mask_edit = 0;
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  }
   if (paint_mode.layer_target_mode == mode) {
     return false;
   }
@@ -460,6 +469,12 @@ void paint_stack_rows_append(const Material &material,
                adjustment                                     ? ICON_ARROW_LEFTRIGHT :
                (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? ICON_GP_DRAW_FILL :
                                                                   ICON_IMAGE_RGB;
+    /* Only layers and folders limit where they show; an adjustment acts on what is below it for
+     * every object alike, and corrections and mask items are not rows of this list. */
+    if (!adjustment && layer.role == MA_PAINT_LAYER_ROLE_LAYER) {
+      row.action_icon = ICON_SELECT_SET;
+      row.action_tooltip = TIP_("Choose the objects or UDIM tiles this layer shows on");
+    }
 
     /* The value column edits the row's opacity; a value left at its default reads as inherited
      * rather than deliberately set, so the control dims until the user moves it. */
@@ -748,6 +763,11 @@ class PaintLayersStackSource final : public StackSource,
     /* The header's channel cursor changes which pair the columns address, so the rows rebuild
      * when it moves. */
     hash = hash * 1000003u ^ uint64_t(paint_stack_selected_channel(ctx));
+    /* The action button reads pressed from this flag, so the rows have to rebuild when it flips. */
+    if (ctx.scene != nullptr && ctx.scene->toolsettings != nullptr) {
+      hash = hash * 1000003u ^
+             uint64_t(ctx.scene->toolsettings->paint_mode.layer_object_mask_edit != 0);
+    }
     BKE_paint_layers_foreach(
         material,
         [&](const MaterialPaintLayer &layer, const MaterialPaintLayer *parent) -> bool {
@@ -850,8 +870,16 @@ class PaintLayersStackSource final : public StackSource,
                   ID &owner,
                   Vector<StackRow> &r_rows) const override
   {
-    paint_stack_rows_from_description(
-        layers_owner(owner), paint_stack_selected_channel(ctx), r_rows);
+    const Material &material = layers_owner(owner);
+    paint_stack_rows_from_description(material, paint_stack_selected_channel(ctx), r_rows);
+    if (ctx.scene != nullptr && ctx.scene->toolsettings != nullptr &&
+        ctx.scene->toolsettings->paint_mode.layer_object_mask_edit != 0)
+    {
+      for (StackRow &row : r_rows) {
+        row.action_active = row.action_icon != ICON_NONE && !BLI_uuid_is_nil(row.stable_id) &&
+                            BLI_uuid_equal(material.active_layer_marker, row.stable_id);
+      }
+    }
     return !r_rows.is_empty();
   }
 
@@ -867,8 +895,41 @@ class PaintLayersStackSource final : public StackSource,
     layout.value_width = 2.6f;
     /* Wide enough for the compact "NN% Abr" label; the blend column shares the width. */
     layout.mode_width = 2.6f;
-    layout.action_width = 0.0f;
+    layout.action_width = 1.0f;
     return layout;
+  }
+
+  bool row_action(bContext &C,
+                  ID &owner,
+                  const int ordinal,
+                  const StackRow &row) const override
+  {
+    Scene *scene = CTX_data_scene(&C);
+    SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+    if (scene == nullptr || scene->toolsettings == nullptr || space_outliner == nullptr) {
+      return false;
+    }
+    PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+    if (row.action_active) {
+      paint_mode.layer_object_mask_edit = 0;
+    }
+    else {
+      /* Activating may switch the target mode, which clears the flag -- so set it after. The
+       * activation changes data (the active row), so it gets an undo step like the activate
+       * operator does. */
+      const Material &material = layers_owner(owner);
+      const bool active_changed = !BLI_uuid_equal(material.active_layer_marker, row.stable_id);
+      outliner_stack_row_activate(&C, *space_outliner, ordinal);
+      paint_mode.layer_object_mask_edit = 1;
+      /* Scan the UVs once now, so the Properties redraws only read the tile cache. */
+      BKE_paint_layer_object_mask_tiles_prefetch(*CTX_data_main(&C));
+      if (active_changed) {
+        ED_undo_push(&C, "Activate Paint Layer");
+      }
+    }
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+    return true;
   }
 
   bool row_activate(bContext &C,
@@ -887,6 +948,18 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     BKE_paint_layers_active_set(material, row.stable_id);
+    /* Mask editing only makes sense on a Layer row; leaving it for a correction or mask item ends
+     * it. */
+    if (Scene *scene = CTX_data_scene(&C)) {
+      const MaterialPaintLayer *active = BKE_paint_layers_find(material, row.stable_id);
+      if (scene->toolsettings != nullptr && active != nullptr &&
+          active->role != MA_PAINT_LAYER_ROLE_LAYER &&
+          scene->toolsettings->paint_mode.layer_object_mask_edit != 0)
+      {
+        scene->toolsettings->paint_mode.layer_object_mask_edit = 0;
+        WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+      }
+    }
     /* The mode is global: a layer with no mask is painted on its content, not left as a stroke
      * into nothing, and a mask correction is only ever worked on in the mask. */
     const MaterialPaintLayer *activated = BKE_paint_layers_active_layer_get(material);
@@ -1279,6 +1352,8 @@ class PaintLayersStackSource final : public StackSource,
     if (!BKE_paint_layers_remove(material, layer)) {
       return false;
     }
+    /* Drop the object mask records of the removed row (and its descendants) right away. */
+    BKE_paint_layer_object_masks_cleanup_all(*CTX_data_main(&C));
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return true;
   }

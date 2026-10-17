@@ -34,6 +34,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_string_utf8.h"
 #include "BLI_utildefines.h"
+#include "BLI_uuid.h"
 #include "BLI_vector_set.hh"
 
 #include "BLT_translation.hh"
@@ -65,6 +66,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_object_mask.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
 
@@ -2162,10 +2164,16 @@ static void single_mat_users(
         }
         ma = BKE_object_material_get(ob, short(a));
         if (single_data_needs_duplication(&ma->id)) {
+          const bUUID old_uid = ma->paint_layers_owner_uid;
           man = id_cast<Material *>(
               BKE_id_copy_ex(bmain, &ma->id, nullptr, LIB_ID_COPY_DEFAULT | LIB_ID_COPY_ACTIONS));
           man->id.us = 0;
           BKE_object_material_assign(bmain, ob, man, short(a), BKE_MAT_ASSIGN_EXISTING);
+          /* The single-user copy gets a fresh owner uid; rewrite this object's records that named
+           * the shared uid. Other objects keep the old records by design. */
+          if (!BLI_uuid_is_nil(old_uid) && !BLI_uuid_is_nil(man->paint_layers_owner_uid)) {
+            BKE_paint_layer_object_masks_owner_remap(*bmain, old_uid, *man);
+          }
         }
       }
     }

@@ -72,6 +72,9 @@ class GraphInterpreter {
   /** The interpreter of the tree that holds `instance`; null at the root, whose instance inputs are
    * unlinked. */
   const GraphInterpreter *parent = nullptr;
+  /** What an Attribute node reading the object's mask record returns, the shader's per-object
+   * value: 0 for a missing record, which is "nothing hidden". */
+  float object_mask_value = 0.0f;
 
   /** The value a group-input output socket carries: the instance's matching input socket. */
   RGBA instance_input(const char *identifier) const
@@ -304,6 +307,8 @@ class GraphInterpreter {
         const float s = sinf(angle);
         return {c * vector.r - s * vector.g, s * vector.r + c * vector.g, vector.b, 1.0f};
       }
+      case SH_NODE_ATTRIBUTE:
+        return {object_mask_value, object_mask_value, object_mask_value, object_mask_value};
       case SH_NODE_RGB:
       case SH_NODE_VALUE:
         if (const bNodeSocket *out = bke::node_find_socket(
@@ -360,6 +365,18 @@ class GraphInterpreter {
             break;
           case NODE_MATH_FLOOR:
             value = floorf(a);
+            break;
+          case NODE_MATH_POWER:
+            value = powf(a, b);
+            break;
+          case NODE_MATH_LESS_THAN:
+            value = (a < b) ? 1.0f : 0.0f;
+            break;
+          case NODE_MATH_GREATER_THAN:
+            value = (a > b) ? 1.0f : 0.0f;
+            break;
+          case NODE_MATH_FLOORED_MODULO:
+            value = (b != 0.0f) ? a - floorf(a / b) * b : 0.0f;
             break;
           case NODE_MATH_COMPARE: {
             /* One when the two differ by no more than the epsilon, the node's own rule. */
@@ -507,6 +524,7 @@ class GraphInterpreter {
     child.x = x;
     child.y = y;
     child.parent = this;
+    child.object_mask_value = object_mask_value;
     group->ensure_topology_cache();
     group->ensure_interface_cache();
     const bNode *output = active_group_output(*group);
@@ -580,6 +598,9 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
   Material *ma = nullptr;
+  /** The value an object-mask Attribute node reads in #graph_pixel, see
+   * #GraphInterpreter::object_mask_value. */
+  float object_mask_value = 0.0f;
 
   void SetUp() override
   {
@@ -678,6 +699,7 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
     interpreter.tree = ma->paint_layers_tree;
     interpreter.x = 1;
     interpreter.y = 1;
+    interpreter.object_mask_value = object_mask_value;
     return interpreter.eval_result(result_name(channel));
   }
 

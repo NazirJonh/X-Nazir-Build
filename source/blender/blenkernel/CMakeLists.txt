@@ -276,6 +276,7 @@ set(SRC
   intern/paint_layers/paint_layers_generate_regen.cc
   intern/paint_layers/paint_layers_generate_topology.cc
   intern/paint_layers/paint_layers_generate_values.cc
+  intern/paint_layers/paint_layers_object_mask.cc
   intern/paint_layers/paint_layers_target.cc
   intern/paint_material_cache_common.cc
   intern/paint_material_combined.cc
@@ -543,6 +544,7 @@ set(SRC
   BKE_paint_layers_composite.hh
   BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
+  BKE_paint_layers_object_mask.hh
   BKE_paint_layers_target.hh
   BKE_paint_types.hh
   BKE_paint_material_combined.hh
@@ -856,6 +858,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_graph_eval_formulas_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_passthrough_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_test.cc
+    intern/paint_layers/tests/paint_layers_object_mask_test.cc
     intern/paint_layers/tests/paint_layers_refactor_test.cc
     intern/paint_layers/tests/paint_layers_target_test.cc
     intern/paint_layers/tests/paint_layers_test_util.cc

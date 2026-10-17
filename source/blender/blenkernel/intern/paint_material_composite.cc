@@ -609,6 +609,42 @@ static bool composite_mask_ibuf_is_valid(const ImBuf *ibuf, const int width, con
   return ibuf->byte_buffer.data != nullptr || ibuf->float_buffer.data != nullptr;
 }
 
+float BKE_paint_material_coverage_match(const int16_t map_coverage,
+                                        const float rgb[3],
+                                        const float tolerance,
+                                        const float softness,
+                                        const Span<PaintMaterialCompositeIdColor> colors)
+{
+  if (map_coverage == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
+    /* The island mask is a scalar packed in the red channel of a data map. */
+    return clamp_f(rgb[0], 0.0f, 1.0f);
+  }
+  if (map_coverage != MA_PAINT_LAYER_FILTER_COLOR_ID) {
+    return 0.0f;
+  }
+  const float tol = max_ff(0.0f, tolerance);
+  const float soft = max_ff(0.0f, softness);
+  float match = 0.0f;
+  for (const PaintMaterialCompositeIdColor &entry : colors) {
+    if (!entry.enabled) {
+      continue;
+    }
+    /* The max-channel distance, like the picker's tolerance: a per-channel mean would let a colour
+     * differ wildly in one channel and still read as near. */
+    const float dist = max_ff(max_ff(fabsf(rgb[0] - entry.color[0]), fabsf(rgb[1] - entry.color[1])),
+                              fabsf(rgb[2] - entry.color[2]));
+    /* Advanced mode gives each colour its own tolerance and drops the shared softness: the edge is
+     * hard, as there is one tolerance per colour and no per-colour softness. */
+    const float entry_tol = entry.own_tolerance ? max_ff(0.0f, entry.tolerance) : tol;
+    const float entry_soft = entry.own_tolerance ? 0.0f : soft;
+    /* `1 - smoothstep(tol, tol + soft, dist)`: one inside the tolerance, zero past the falloff. A
+     * zero softness is a hard edge, which #smoothstep already gives for equal edges. */
+    const float entry_match = 1.0f - smoothstep(entry_tol, entry_tol + entry_soft, dist);
+    match = max_ff(match, entry_match);
+  }
+  return match;
+}
+
 /**
  * Lay the tangent-space normal \a top over \a bottom, both encoded in [0, 1].
  *
@@ -796,6 +832,69 @@ static void composite_filter_color(const int16_t filter, const float *params, fl
   }
 }
 
+float BKE_paint_material_mask_factor_eval(
+    const Span<PaintMaterialCompositeMaskBuffer> items,
+    const Span<const float *> item_samples,
+    const Span<const float *> coverage_samples,
+    const int64_t pixel_index)
+{
+  float mask_factor = 1.0f;
+  for (const int item_i : items.index_range()) {
+    const PaintMaterialCompositeMaskBuffer &item = items[item_i];
+    if (item.opacity <= 0.0f) {
+      continue;
+    }
+    const float opacity = clamp_f(item.opacity, 0.0f, 1.0f);
+    if (item.map_coverage != 0) {
+      /* A map-driven coverage operator lays `match` from its own map: `M = M * lerp(1, match,
+       * opacity)`, so opacity zero is a pass-through and a full match leaves M alone. A missing map
+       * samples as `match = 0`, which is not a pass-through but a full restriction; the operator
+       * takes part whenever its element is enabled. */
+      float match = 0.0f;
+      if (coverage_samples[item_i] != nullptr) {
+        match = BKE_paint_material_coverage_match(item.map_coverage,
+                                                  coverage_samples[item_i] + pixel_index * 4,
+                                                  item.coverage_tolerance,
+                                                  item.coverage_softness,
+                                                  item.coverage_colors.as_span());
+      }
+      if (item.invert) {
+        match = 1.0f - match;
+      }
+      /* White/Black carry one here; Gradient carries the item's standard value. */
+      match *= item.coverage_output;
+      mask_factor *= 1.0f + (match - 1.0f) * opacity;
+      continue;
+    }
+    if (item.filter != 0) {
+      /* A filter works on the factor so far as a grey, `M = lerp(M, f(M), opacity)`; its function is
+       * the one a correction applies to a colour. */
+      float grey[3] = {mask_factor, mask_factor, mask_factor};
+      composite_filter_color(item.filter, item.filter_params, grey);
+      mask_factor += (grey[0] - mask_factor) * opacity;
+      continue;
+    }
+    const float *sample = item_samples[item_i];
+    float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
+    float weight = opacity;
+    if (sample != nullptr) {
+      const float *c = sample + pixel_index * 4;
+      gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
+      weight = clamp_f(c[3], 0.0f, 1.0f) * opacity;
+    }
+    /* The grey only: a transparent texel is still one the item does not cover. */
+    if (item.invert) {
+      gray = 1.0f - gray;
+    }
+    /* The factor is a grey colour to the blend, as it is in the graph's Mix node. */
+    float value[4] = {mask_factor, mask_factor, mask_factor, mask_factor};
+    const float top[4] = {gray, gray, gray, gray};
+    blend_row_linear(value, top, item.blend, weight);
+    mask_factor = value[0];
+  }
+  return mask_factor;
+}
+
 static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                                    const rcti &tile,
                                    const float *folder_color,
@@ -937,48 +1036,33 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
    * is `1 - A * op * (1 - C)`. A transparent texel (A = 0) leaves the factor alone, which is what a
    * fresh mask map must do. */
   if (!layer.mask_items.is_empty()) {
-    Vector<float> mask_factor(count, 1.0f);
-    Vector<float> item_storage;
-    for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
-      if (item.opacity <= 0.0f) {
-        continue;
-      }
-      const float opacity = clamp_f(item.opacity, 0.0f, 1.0f);
-      if (item.filter != 0) {
-        /* A filter works on the factor so far as a grey, `M = lerp(M, f(M), opacity)`; its function
-         * is the one a correction applies to a colour. */
-        for (int64_t i = 0; i < count; i++) {
-          float grey[3] = {mask_factor[i], mask_factor[i], mask_factor[i]};
-          composite_filter_color(item.filter, item.filter_params, grey);
-          mask_factor[i] += (grey[0] - mask_factor[i]) * opacity;
-        }
-        continue;
-      }
+    /* Decode every item's map once for the tile, then reduce per texel through the one arithmetic
+     * the strokes share (#BKE_paint_material_mask_factor_eval), so the canvas a stroke paints and
+     * the canvas the render shows cannot disagree about what a mask hides. */
+    const int item_count = layer.mask_items.size();
+    Vector<Vector<float>> item_storage(item_count);
+    Vector<Vector<float>> coverage_storage(item_count);
+    Vector<const float *> item_samples(item_count, nullptr);
+    Vector<const float *> coverage_samples(item_count, nullptr);
+    for (const int item_i : IndexRange(item_count)) {
+      const PaintMaterialCompositeMaskBuffer &item = layer.mask_items[item_i];
       if (item.ibuf != nullptr) {
-        item_storage.resize(count * 4);
-        composite_decode_tile(item.ibuf, item.colorspace_name, tile, item_storage.data());
+        item_storage[item_i].resize(count * 4);
+        composite_decode_tile(item.ibuf, item.colorspace_name, tile, item_storage[item_i].data());
+        item_samples[item_i] = item_storage[item_i].data();
       }
-      for (int64_t i = 0; i < count; i++) {
-        float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
-        float weight = opacity;
-        if (item.ibuf != nullptr) {
-          const float *c = item_storage.data() + i * 4;
-          gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
-          weight = clamp_f(c[3], 0.0f, 1.0f) * opacity;
-        }
-        /* The grey only: a transparent texel is still one the item does not cover. */
-        if (item.invert) {
-          gray = 1.0f - gray;
-        }
-        /* The factor is a grey colour to the blend, as it is in the graph's Mix node. */
-        float value[4] = {mask_factor[i], mask_factor[i], mask_factor[i], mask_factor[i]};
-        const float top[4] = {gray, gray, gray, gray};
-        blend_row_linear(value, top, item.blend, weight);
-        mask_factor[i] = value[0];
+      if (item.coverage_ibuf != nullptr) {
+        coverage_storage[item_i].resize(count * 4);
+        composite_decode_tile(item.coverage_ibuf,
+                              item.coverage_colorspace_name,
+                              tile,
+                              coverage_storage[item_i].data());
+        coverage_samples[item_i] = coverage_storage[item_i].data();
       }
     }
     for (int64_t i = 0; i < count; i++) {
-      r_factor[i] *= mask_factor[i];
+      r_factor[i] *= BKE_paint_material_mask_factor_eval(
+          layer.mask_items.as_span(), item_samples, coverage_samples, i);
     }
   }
 }
@@ -1113,6 +1197,13 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
   }
   for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
     if (item.ibuf != nullptr && !composite_mask_ibuf_is_valid(item.ibuf, width, height)) {
+      return false;
+    }
+    /* A coverage operator's own map: absent is fine (it samples as `match = 0`), present has to be
+     * a readable buffer of the stack's dimensions like any mask. */
+    if (item.coverage_ibuf != nullptr &&
+        !composite_mask_ibuf_is_valid(item.coverage_ibuf, width, height))
+    {
       return false;
     }
   }
@@ -1590,6 +1681,60 @@ static void composite_mapped_remap(ImBuf *&r_ibuf,
   }
 }
 
+ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
+                                           const int tile_number,
+                                           const PaintMaterialCompositeMapping *mapping,
+                                           const int ref_width,
+                                           const int ref_height)
+{
+  if (image == nullptr) {
+    return nullptr;
+  }
+  /* The UDIM tile is what a mask map is sampled by, so the acquisition reads the same tile the
+   * painted map of the stroke does. */
+  ImageUser iuser;
+  BKE_imageuser_default(&iuser);
+  iuser.tile = tile_number;
+  void *lock = nullptr;
+  ImBuf *src = BKE_image_acquire_ibuf(image, &iuser, &lock);
+  if (src == nullptr) {
+    return nullptr;
+  }
+
+  /* A mapping resample first, exactly as the composite acquires a mapped item; the decode below
+   * then straightens whatever buffer the mapping left, the same way the evaluator reads it. */
+  const ImBuf *read = src;
+  ImBuf *mapped = nullptr;
+  if (mapping != nullptr && mapping->enabled) {
+    mapped = composite_resample_mapped(src, ref_width, ref_height, *mapping);
+    if (mapped != nullptr) {
+      read = mapped;
+    }
+  }
+
+  ImBuf *out = nullptr;
+  if (read->byte_buffer.data != nullptr || read->float_buffer.data != nullptr) {
+    out = IMB_allocImBuf(uint(read->x), uint(read->y), ImBufFlags::FloatData);
+    if (out != nullptr && out->float_data() != nullptr) {
+      out->channels = 4;
+      rcti whole;
+      BLI_rcti_init(&whole, 0, read->x, 0, read->y);
+      composite_decode_tile(
+          read, composite_buffer_colorspace_name(read), whole, out->float_data_for_write());
+    }
+    else if (out != nullptr) {
+      IMB_freeImBuf(out);
+      out = nullptr;
+    }
+  }
+
+  if (mapped != nullptr) {
+    IMB_freeImBuf(mapped);
+  }
+  BKE_image_release_ibuf(image, src, lock);
+  return out;
+}
+
 /**
  * Acquire the buffers of \a image_layers into \a r_layers for the linear evaluator, which takes
  * float buffers and constant layers. A folder is acquired through its children, and left out when
@@ -1664,6 +1809,23 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         /* Resampled before the grey is reduced, so the grey is read after the mapping. */
         composite_mapped_remap(buffer.ibuf, item.mapping, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
+      }
+      buffer.map_coverage = item.map_coverage;
+      buffer.coverage_tolerance = item.coverage_tolerance;
+      buffer.coverage_softness = item.coverage_softness;
+      buffer.coverage_output = item.coverage_output;
+      buffer.coverage_colors = item.coverage_colors;
+      if (item.coverage_image != nullptr) {
+        buffer.coverage_ibuf = composite_image_acquire(
+            item.coverage_image, item.coverage_iuser, r_locks);
+        if (buffer.coverage_ibuf != nullptr) {
+          composite_mapped_remap(
+              buffer.coverage_ibuf, item.coverage_mapping, ref_width, ref_height, r_locks);
+          buffer.coverage_colorspace_name = composite_buffer_colorspace_name(
+              buffer.coverage_ibuf);
+        }
+        /* A map that cannot be read is left as absent, so it samples as `match = 0` like a missing
+         * one rather than failing the whole composite; the operator still takes part. */
       }
       layer.mask_items.append(buffer);
     }
@@ -1956,6 +2118,21 @@ uint64_t BKE_paint_material_composite_stack_hash(
         hash = get_default_hash(hash, param);
       }
       hash = composite_mapping_hash(get_default_hash(hash, item.mapping.enabled), item.mapping);
+      /* A map-coverage operator changes the factor from its own map and its colour list, none of
+       * which is the laid item's map: all of it has to move the hash. */
+      hash = get_default_hash(hash,
+                              int(item.map_coverage),
+                              item.coverage_image != nullptr ? item.coverage_image->id.session_uid : 0,
+                              item.coverage_tolerance,
+                              item.coverage_softness,
+                              item.coverage_output);
+      for (const PaintMaterialCompositeIdColor &color : item.coverage_colors) {
+        hash = get_default_hash(
+            hash, color.color[0], color.color[1], color.color[2], color.enabled);
+        hash = get_default_hash(hash, color.tolerance, color.own_tolerance);
+      }
+      hash = composite_mapping_hash(get_default_hash(hash, item.coverage_mapping.enabled),
+                                    item.coverage_mapping);
     }
   }
   return hash;
@@ -2099,6 +2276,8 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     r_images.append(layer.mask_image);
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       r_images.append(item.image);
+      /* A coverage operator reads its own map, so an edit to it must be seen by the cache too. */
+      r_images.append(item.coverage_image);
     }
     for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
       r_images.append(correction.image);

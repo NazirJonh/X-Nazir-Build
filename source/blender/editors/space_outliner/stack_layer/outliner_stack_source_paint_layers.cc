@@ -282,6 +282,18 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
      MA_PAINT_LAYER_FILTER_HSL},
 };
 
+/**
+ * The map-driven filters the Add Effect menu offers over the mask. They only exist in a mask (their
+ * role is a mask item), so they have no correction or adjustment form like #paint_filter_add_kinds.
+ */
+static const PaintFilterAddKind paint_coverage_add_kinds[] = {
+    {"FILTER_COLOR_ID",
+     N_("Color ID"),
+     "Keep the active layer's mask only where an ID Map matches the listed colors",
+     ICON_COLOR,
+     MA_PAINT_LAYER_FILTER_COLOR_ID},
+};
+
 /** The row of one content correction, hung off the row \a owner_ordinal names. */
 StackRow paint_correction_row_build(const Material &material,
                                     const MaterialPaintLayer &effect,
@@ -397,6 +409,10 @@ StackRow paint_mask_item_row_build(const Material &material,
   if (item.source == MA_PAINT_LAYER_SOURCE_FILTER) {
     /* A filter in the mask changes its coverage: no map to paint, no blend, no channels. */
     row.icon = ICON_ARROW_LEFTRIGHT;
+    /* The map-driven filters read as what they select by, not as a tone change. */
+    if (item.kind_subtype == MA_PAINT_LAYER_FILTER_COLOR_ID) {
+      row.icon = ICON_COLOR;
+    }
     return row;
   }
   row.mode_ptr = item_ptr;
@@ -473,7 +489,7 @@ void paint_stack_rows_append(const Material &material,
      * every object alike, and corrections and mask items are not rows of this list. */
     if (!adjustment && layer.role == MA_PAINT_LAYER_ROLE_LAYER) {
       row.action_icon = ICON_SELECT_SET;
-      row.action_tooltip = TIP_("Choose the objects or UDIM tiles this layer shows on");
+      row.action_tooltip = TIP_("Mesh Mask: choose the objects or UDIM tiles this layer shows on");
     }
 
     /* The value column edits the row's opacity; a value left at its default reads as inherited
@@ -1179,6 +1195,15 @@ class PaintLayersStackSource final : public StackSource,
       info.is_effect = true;
       r_kinds.append(info);
     }
+    /* Last, the map-driven filters of the mask, in the order of #paint_coverage_add_kinds. */
+    for (const PaintFilterAddKind &filter : paint_coverage_add_kinds) {
+      StackAddKindInfo info{std::string("MASK_") + filter.identifier,
+                            std::string("Mask ") + filter.name,
+                            filter.description,
+                            filter.icon};
+      info.is_effect = true;
+      r_kinds.append(info);
+    }
   }
 
   int row_add(bContext &C,
@@ -1192,7 +1217,9 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int filter_num = int(std::size(paint_filter_add_kinds));
     constexpr int adjustment_first_kind = filter_first_kind + filter_num;
     constexpr int mask_filter_first_kind = adjustment_first_kind + filter_num;
-    if (kind < 0 || kind >= mask_filter_first_kind + filter_num || !this->is_editable(owner)) {
+    constexpr int coverage_first_kind = mask_filter_first_kind + filter_num;
+    constexpr int coverage_num = int(std::size(paint_coverage_add_kinds));
+    if (kind < 0 || kind >= coverage_first_kind + coverage_num || !this->is_editable(owner)) {
       return -1;
     }
     const bool is_mask_filter = kind >= mask_filter_first_kind;
@@ -1214,7 +1241,9 @@ class PaintLayersStackSource final : public StackSource,
       params.filter = paint_filter_add_kinds[kind - adjustment_first_kind].filter;
     }
     if (is_mask_filter) {
-      params.filter = paint_filter_add_kinds[kind - mask_filter_first_kind].filter;
+      params.filter = (kind >= coverage_first_kind) ?
+                          paint_coverage_add_kinds[kind - coverage_first_kind].filter :
+                          paint_filter_add_kinds[kind - mask_filter_first_kind].filter;
     }
     params.kind = is_mask_filter ? PaintLayerAddKind::MaskFilter :
                   is_adjustment  ? PaintLayerAddKind::Adjustment :

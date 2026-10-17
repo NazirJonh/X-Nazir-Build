@@ -298,6 +298,9 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
 /** \name Map Sampling
  * \{ */
 
+/** Read the map at the nearest texel instead of filtering it; set by the ID map of a coverage item. */
+#define COMBINED_MAP_NEAREST 131072
+
 /**
  * One straight, scene-linear texel of a map at the canvas \a uv, read through the row's UV mapping.
  *
@@ -331,7 +334,19 @@ float4 sample_map(sampler2D tx,
     clipped = (!repeat_u && (sample_uv.x < 0.0f || sample_uv.x >= 1.0f)) ||
               (!repeat_v && (sample_uv.y < 0.0f || sample_uv.y >= 1.0f));
   }
-  float4 color = clipped ? float4(0.0f) : textureLod(tx, sample_uv, lod);
+  float4 color;
+  if (clipped) {
+    color = float4(0.0f);
+  }
+  else if ((flags & COMBINED_MAP_NEAREST) != 0) {
+    /* An ID map is a lookup: the texel under the point, never a blend of two. */
+    int2 size = textureSize(tx, 0);
+    int2 texel = clamp(int2(floor(sample_uv * float2(size))), int2(0), size - 1);
+    color = texelFetch(tx, texel, 0);
+  }
+  else {
+    color = textureLod(tx, sample_uv, lod);
+  }
   if ((flags & COMBINED_LAYER_PREMULTIPLIED) != 0 && color.w > 0.0f) {
     color.xyz = color.xyz / color.w;
   }
@@ -364,6 +379,13 @@ float4 sample_map(sampler2D tx,
 #define COMBINED_MASK_INIT 0
 #define COMBINED_MASK_ITEM 1
 #define COMBINED_MASK_MAP 2
+/* A map-driven coverage item (`BKE_paint_material_coverage_match`) is several passes: the match so
+ * far is kept in the `y` of the accumulator, `x` being the factor. BEGIN zeroes it; each Color ID
+ * colour (COLOR) or the UV Island scalar (SCALAR) raises it; END inverts, scales and lays it. */
+#define COMBINED_MASK_COV_BEGIN 3
+#define COMBINED_MASK_COV_COLOR 4
+#define COMBINED_MASK_COV_SCALAR 5
+#define COMBINED_MASK_COV_END 6
 
 #define COMBINED_MASK_HAS_MAP 2
 #define COMBINED_MASK_PREMULTIPLIED 8
@@ -417,6 +439,56 @@ void mask_comp([[resource_table]] MaskResources &srt,
   if (any(lessThan(uv, float2(0.0f))) || any(greaterThanEqual(uv, float2(1.0f)))) {
     /* Outside the canvas the layer pass writes nothing, so the factor is not read there. */
     imageStore(srt.mask_img, texel, float4(m));
+    return;
+  }
+
+  if (srt.mode >= COMBINED_MASK_COV_BEGIN) {
+    float match = imageLoad(srt.mask_img, texel).y;
+    if (srt.mode == COMBINED_MASK_COV_BEGIN) {
+      match = 0.0f;
+    }
+    else if (srt.mode == COMBINED_MASK_COV_END) {
+      if ((srt.flags & COMBINED_MASK_INVERT) != 0) {
+        match = 1.0f - match;
+      }
+      /* White and Black carry one; Gradient carries the item's standard value. */
+      match *= srt.influence;
+      m *= 1.0f + (match - 1.0f) * clamp(srt.opacity, 0.0f, 1.0f);
+    }
+    else {
+      float4 c = sample_map(srt.mask_tx,
+                            uv,
+                            srt.flags,
+                            srt.mapping_offset,
+                            srt.mapping_scale,
+                            srt.mapping_rotation,
+                            srt.lod);
+      if (srt.mode == COMBINED_MASK_COV_SCALAR) {
+        match = clamp(c.x, 0.0f, 1.0f);
+      }
+      else {
+        /* The colour in `filter_params_0.xyz`, its tolerance in `.w` and the falloff width in
+         * `filter_params_1.x`: the max-channel distance, `1 - smoothstep(tol, tol + soft, dist)`
+         * with the CPU's own edge cases (a hard edge when the two are equal). */
+        float3 delta = abs(c.xyz - srt.filter_params_0.xyz);
+        float dist = max(max(delta.x, delta.y), delta.z);
+        float edge0 = srt.filter_params_0.w;
+        float edge1 = edge0 + srt.filter_params_1.x;
+        float s;
+        if (dist < edge0) {
+          s = 0.0f;
+        }
+        else if (dist >= edge1) {
+          s = 1.0f;
+        }
+        else {
+          float t = (dist - edge0) / (edge1 - edge0);
+          s = (3.0f - 2.0f * t) * (t * t);
+        }
+        match = max(match, 1.0f - s);
+      }
+    }
+    imageStore(srt.mask_img, texel, float4(m, match, 0.0f, 0.0f));
     return;
   }
 

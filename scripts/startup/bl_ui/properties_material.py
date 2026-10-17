@@ -13,6 +13,7 @@ from bl_ui.space_properties import PropertiesAnimationMixin
 from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
     draw_material_layer_channels,
+    draw_material_mask_coverage_item,
     draw_material_mask_item,
 )
 
@@ -637,11 +638,15 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             layout.label(text=item.name, icon='MOD_MASK')
             if item.source == 'FILTER':
                 # A filter in the mask changes its one coverage: opacity and the kind's parameters,
-                # and no channels to choose.
+                # and no channels to choose. A map-coverage operator draws its own mode, tolerance
+                # and colours in #draw_material_mask_coverage_item.
                 layout.prop(item, "opacity", text="Opacity")
                 layout.separator()
-                for param in item.kind_params:
-                    layout.prop(param, "value", text=param.label, slider=True)
+                if item.is_map_coverage:
+                    draw_material_mask_coverage_item(layout, context, item)
+                else:
+                    for param in item.kind_params:
+                        layout.prop(param, "value", text=param.label, slider=True)
                 return
             draw_material_mask_item(layout, context, item)
             return
@@ -798,7 +803,7 @@ class LAYER_MATERIAL_PT_object_mask(LayerMaterialButtonsPanel, Panel):
     edited it is the only panel of the Layered Material tab."""
 
     bl_idname = "LAYER_MATERIAL_PT_object_mask"
-    bl_label = "Mask"
+    bl_label = "Mesh Mask"
 
     @classmethod
     def poll(cls, context):
@@ -813,7 +818,7 @@ class LAYER_MATERIAL_PT_object_mask(LayerMaterialButtonsPanel, Panel):
         # The way out of the mask-only tab: clears `layer_object_mask_edit`.
         header = layout.row()
         header.prop(context.scene.tool_settings.paint_mode, "layer_object_mask_edit",
-                    text="Edit Mask", toggle=True)
+                    text="Edit Mesh Mask", toggle=True)
         # Names the row being configured; same kind icons as the Outliner (folder / fill / layer).
         if layer.source == 'STACK':
             kind_icon = 'FILE_FOLDER'

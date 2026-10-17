@@ -93,6 +93,16 @@ inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";
 inline constexpr const char *ROLE_MAPPING_SCALE = "mapping_scale";
 /** #INPUT_ROLE_PROP value of a row's UV mapping rotation (a Vector input holding 0, 0, angle). */
 inline constexpr const char *ROLE_MAPPING_ROTATION = "mapping_rotation";
+/** #INPUT_ROLE_PROP value of one Color ID colour's enable flag (the marker is the map-coverage
+ * item's); the entry is named by #INPUT_ID_COLOR_PROP. */
+inline constexpr const char *ROLE_ID_COLOR_ENABLED = "id_color_enabled";
+/** #INPUT_ROLE_PROP value of one Color ID colour (an RGBA input in the map's raw data space). */
+inline constexpr const char *ROLE_ID_COLOR = "id_color";
+/** #INPUT_ROLE_PROP value of one Color ID colour's own tolerance (Advanced mode). */
+inline constexpr const char *ROLE_ID_COLOR_TOLERANCE = "id_color_tolerance";
+/** On a #ROLE_ID_COLOR / #ROLE_ID_COLOR_ENABLED input: the position of the colour in the item's
+ * #MaterialPaintLayer::id_colors list, so the value sync finds it without storing anything else. */
+inline constexpr const char *INPUT_ID_COLOR_PROP = "pbr_paint_layers_id_color";
 
 bNode *instance_find(const Material &ma, const bUUID &owner_uid);
 bNode *material_output_find(Material &ma);

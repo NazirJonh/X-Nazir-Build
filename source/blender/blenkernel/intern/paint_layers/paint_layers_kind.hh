@@ -18,6 +18,7 @@
 
 #include "DNA_ID.h"
 #include "DNA_material_types.h"
+#include "DNA_scene_types.h"
 
 #include "BKE_lib_query.hh"
 
@@ -43,32 +44,6 @@ struct PaintLayerDependency {
   /** The channel the ID belongs to, or -1. */
   int8_t channel;
 };
-
-/**
- * Report the IDs \a row itself holds, not those of its mask items, effects or children: the
- * consumers already recurse over those lists in their own order.
- */
-inline void paint_layer_dependencies(MaterialPaintLayer &row,
-                                     const FunctionRef<void(PaintLayerDependency &)> fn)
-{
-  for (int i = 0; i < row.channels_num; i++) {
-    MaterialPaintLayerChannel &record = row.channels[i];
-    /* The slot is the stored `Image *`, which shares its address with the `ID *` it starts with. */
-    PaintLayerDependency dep{reinterpret_cast<ID **>(&record.image),
-                             PaintLayerDependencyKind::ImageMap,
-                             PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
-                             int8_t(record.channel)};
-    fn(dep);
-  }
-}
-
-/** Read-only counterpart: the callee must not write through the slot. */
-inline void paint_layer_dependencies(const MaterialPaintLayer &row,
-                                     const FunctionRef<void(const PaintLayerDependency &)> fn)
-{
-  paint_layer_dependencies(const_cast<MaterialPaintLayer &>(row),
-                           [&](PaintLayerDependency &dep) { fn(dep); });
-}
 
 /* -------------------------------------------------------------------- */
 /** \name Kind registry
@@ -119,6 +94,15 @@ enum PaintLayerKindFlag : uint8_t {
    * the coverage so far. It owns no map and takes part through its channel records only.
    */
   PAINT_LAYER_KIND_ACTS_ON_BELOW = 1 << 1,
+  /**
+   * A map-driven mask coverage operator (Color ID, UV Island): it lays `match` from the map of its
+   * Base Color record over the coverage below it, `cov = lerp(cov_below, cov_below * match,
+   * opacity)`. Unlike #PAINT_LAYER_KIND_ACTS_ON_BELOW it owns a map, and unlike a laid mask item it
+   * takes part whenever its element is enabled: a missing map samples as `match = 0` instead of
+   * dropping the operator out. Its Base Color record is structural -- no user channel switch -- so
+   * the element's visibility is the only thing that turns it on or off.
+   */
+  PAINT_LAYER_KIND_MAP_COVERAGE = 1 << 2,
 };
 
 struct PaintLayerKindInfo {
@@ -134,6 +118,12 @@ struct PaintLayerKindInfo {
   int params_num = 0;
   /** #PaintLayerKindFlag bits. */
   uint8_t flags = 0;
+  /**
+   * Whether the kind's map may be a stroke target. A #PAINT_LAYER_KIND_MAP_COVERAGE kind whose map
+   * is reference-only (Color ID: an external ID Map) reports false, so the target resolve and the UI
+   * refuse to select it for painting. Meaningless for a kind that owns no map.
+   */
+  bool map_paintable = false;
 };
 
 /** The positions of the Levels filter's parameters in its schema. */
@@ -152,6 +142,15 @@ enum PaintLayerHslParam : int {
   PAINT_LAYER_HSL_SATURATION = 1,
   PAINT_LAYER_HSL_VALUE = 2,
   PAINT_LAYER_HSL_PARAM_NUM = 3,
+};
+
+/** The positions of a map-coverage operator's parameters in its schema. */
+enum PaintLayerCoverageParam : int {
+  /** How far a sample may differ from a stored colour and still match (max-channel). */
+  PAINT_LAYER_COVERAGE_TOLERANCE = 0,
+  /** The width of the falloff past the tolerance; zero reads as a hard edge. */
+  PAINT_LAYER_COVERAGE_SOFTNESS = 1,
+  PAINT_LAYER_COVERAGE_PARAM_NUM = 2,
 };
 
 /**
@@ -213,6 +212,65 @@ inline bool paint_layer_kind_has_flag(const MaterialPaintLayer &row, const Paint
 {
   const PaintLayerKindInfo *info = paint_layer_kind_of(row);
   return info != nullptr && (info->flags & flag) != 0;
+}
+
+/** Whether \a row is a map-driven mask coverage operator (Color ID or UV Island). */
+inline bool paint_layer_kind_is_map_coverage(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_MAP_COVERAGE);
+}
+
+/** Whether \a row's kind allows its map to be a stroke target; false for an unknown kind. */
+inline bool paint_layer_kind_map_paintable(const MaterialPaintLayer &row)
+{
+  const PaintLayerKindInfo *info = paint_layer_kind_of(row);
+  return info != nullptr && info->map_paintable;
+}
+
+/**
+ * Report the IDs \a row itself holds, not those of its mask items, effects or children: the
+ * consumers already recurse over those lists in their own order.
+ *
+ * A map-coverage operator reads one structural map, in its Base Color record: reporting that record
+ * alone (rather than walking every record) keeps the ID walk, the map collection and the map copy
+ * in step with what the kind actually samples.
+ */
+inline void paint_layer_dependencies(MaterialPaintLayer &row,
+                                     const FunctionRef<void(PaintLayerDependency &)> fn)
+{
+  if (paint_layer_kind_is_map_coverage(row)) {
+    for (int i = 0; i < row.channels_num; i++) {
+      MaterialPaintLayerChannel &record = row.channels[i];
+      if (record.channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+        continue;
+      }
+      /* The slot is the stored `Image *`, which shares its address with the `ID *` it starts with. */
+      PaintLayerDependency dep{reinterpret_cast<ID **>(&record.image),
+                               PaintLayerDependencyKind::ImageMap,
+                               PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
+                               int8_t(record.channel)};
+      fn(dep);
+      return;
+    }
+    return;
+  }
+  for (int i = 0; i < row.channels_num; i++) {
+    MaterialPaintLayerChannel &record = row.channels[i];
+    /* The slot is the stored `Image *`, which shares its address with the `ID *` it starts with. */
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&record.image),
+                             PaintLayerDependencyKind::ImageMap,
+                             PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
+                             int8_t(record.channel)};
+    fn(dep);
+  }
+}
+
+/** Read-only counterpart: the callee must not write through the slot. */
+inline void paint_layer_dependencies(const MaterialPaintLayer &row,
+                                     const FunctionRef<void(const PaintLayerDependency &)> fn)
+{
+  paint_layer_dependencies(const_cast<MaterialPaintLayer &>(row),
+                           [&](PaintLayerDependency &dep) { fn(dep); });
 }
 
 /** \} */

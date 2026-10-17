@@ -7,6 +7,7 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 /* For #eMaterialPaintChannel, which used to arrive through `BKE_paint_material_composite.hh` --
@@ -52,6 +53,8 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
 
@@ -1059,6 +1062,7 @@ static Array<RowFactorCache> compute_paint_row_factors(
     const bool alpha_masking_active,
     const ImageData &layout_image_data,
     const bool needs_baked_target_uv,
+    const PaintLayersMaskSampler *mask_sampler,
     PixelNode &pixel_node)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -1166,6 +1170,16 @@ static Array<RowFactorCache> compute_paint_row_factors(
             calc_brush_strength_factors(cache, brush, tls.distances, factors);
             calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
             scale_factors(factors, cache.bstrength);
+
+            /* The active row's own mask clips the stroke the way it clips the row in the render:
+             * a texel the mask hides keeps a zero factor and is never written. */
+            if (mask_sampler != nullptr) {
+              const int row_x = int(pixel_row.start_image_coordinate.x) + int(range.start());
+              const int row_y = int(pixel_row.start_image_coordinate.y);
+              for (const int i : range.index_range()) {
+                factors[i] *= mask_sampler->sample(tile_data.tile_number, row_x + i, row_y);
+              }
+            }
 
             if (alpha_masking_active && active_sampler != nullptr) {
               MutableSpan<float> alpha_factors =
@@ -2034,6 +2048,29 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       ob, material_canvas_mode);
   const FaceSelectionPaintFilter face_selection_filter = FaceSelectionPaintFilter::from_object(ob);
 
+  /* The active row whose mask clips the stroke: a mask being painted is not clipped by itself, and a
+   * plain Mode=`Image` canvas has no layered row at all. */
+  if (!cache.paint_mask_sampler_resolved) {
+    /* Built once per stroke: it decodes the mask maps, which is far too heavy to repeat per dab or
+     * per node, and the mask cannot change while the stroke paints another map. */
+    cache.paint_mask_sampler_resolved = true;
+    if (material_canvas_mode && paint_mode_settings.layer_target_mode != PAINT_LAYER_TARGET_MASK) {
+      Material *active_material = BKE_paint_layers_active_material_get(&ob);
+      const MaterialPaintLayer *mask_layer = (active_material != nullptr) ?
+                                                 BKE_paint_layers_active_layer_get(
+                                                     *active_material) :
+                                                 nullptr;
+      if (mask_layer != nullptr) {
+        cache.paint_mask_sampler = std::make_unique<PaintLayersMaskSampler>(*active_material,
+                                                                            *mask_layer);
+        if (cache.paint_mask_sampler->is_empty()) {
+          cache.paint_mask_sampler.reset();
+        }
+      }
+    }
+  }
+  PaintLayersMaskSampler *mask_sampler = cache.paint_mask_sampler.get();
+
   /* The plain Mode=`Image` canvas paints the brush color itself, so its dab color gets the
    * Randomize Color jitter here - the material channel targets below resolve their own stroke
    * colors through #BKE_paint_material_channel_stroke_color_get instead. */
@@ -2284,6 +2321,18 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     }
     /* Factors come before the undo push: their per-tile bounds limit which undo tiles are saved. */
     if (!factor_caches_valid) {
+      /* The mask's tiles are acquired on this thread, after the painted maps were fetched (their
+       * size is the reference) and before the threaded factor pass only reads them. */
+      if (mask_sampler != nullptr) {
+        node_mask.foreach_index([&](const int i) {
+          for (const UDIMTilePixels &tile : pixel_nodes[i].tiles) {
+            if (const ImBuf *painted = image_data.buffers.lookup_default(tile.tile_number, nullptr))
+            {
+              mask_sampler->tile_acquire(tile.tile_number, painted->x, painted->y);
+            }
+          }
+        });
+      }
       node_mask.foreach_index(
           [&](const int i, const int pos) {
             node_factor_caches[pos] = compute_paint_row_factors(ss,
@@ -2298,6 +2347,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                                 active_sampler != nullptr &&
                                                                     active_sampler
                                                                         ->uses_baked_target_uv(),
+                                                                mask_sampler,
                                                                 pixel_nodes[i]);
           },
           exec_mode::grain_size(1));

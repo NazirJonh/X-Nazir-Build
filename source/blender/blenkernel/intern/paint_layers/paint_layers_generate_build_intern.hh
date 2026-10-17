@@ -87,6 +87,14 @@ struct NodeOutput {
   bNodeSocket *socket = nullptr;
 };
 
+/** The interface inputs of one Color ID colour: its enable flag, its RGB constant and, in Advanced
+ * mode, its own tolerance. */
+struct IdColorInputs {
+  bNodeTreeInterfaceSocket *enabled = nullptr;
+  bNodeTreeInterfaceSocket *color = nullptr;
+  bNodeTreeInterfaceSocket *tolerance = nullptr;
+};
+
 /**
  * What a chain has accumulated so far: its colour and, inside a folder, the coverage. The coverage
  * is empty on the stack's own chain, which blends straight over an opaque bottom.
@@ -228,6 +236,17 @@ class PaintLayersTreeBuilder {
   KindEmitResult row_source_emit(const RowEmitContext &ctx);
 
   /**
+   * The `match` a map-coverage mask item \a item lays, built into its group: for UV Island the red
+   * channel of its map, for Color ID the best match over its colours. The map is read through an
+   * Image Texture with Closest interpolation and its Mapping; a missing map is a constant zero, so
+   * the operator restricts everything as the CPU reads it. Nodes made are appended to \a r_nodes.
+   */
+  NodeOutput map_coverage_match_add(bNodeTree &tree,
+                                    LayerGroup &group,
+                                    const MaterialPaintLayer &item,
+                                    Vector<bNode *> &r_nodes);
+
+  /**
    * The instance sockets of a row whose group was kept unchanged: its nodes and interface already
    * hold the row, so only the contract sockets are looked up again in the new instance.
    */
@@ -358,6 +377,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> effect_opacity_inputs_;
   /** A filter correction's parameter inputs in its kind's schema order, keyed by the correction. */
   Map<const MaterialPaintLayer *, Vector<bNodeTreeInterfaceSocket *>> effect_param_inputs_;
+  /** The interface inputs of every Color ID colour of an item, in list order, keyed by the item. */
+  Map<const MaterialPaintLayer *, Vector<IdColorInputs>> id_color_inputs_;
   /** The constant input of a row's map-less channel, keyed by the row and the channel. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_inputs_;
   /** The alpha of that constant, its own float input, keyed the same way. */

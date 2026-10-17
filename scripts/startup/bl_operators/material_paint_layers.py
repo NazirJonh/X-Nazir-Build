@@ -261,6 +261,66 @@ class MATERIAL_OT_paint_layer_mask_toggle(_PaintLayerOperator):
         return {'FINISHED'}
 
 
+class MATERIAL_OT_paint_layer_mask_filter_add(_PaintLayerOperator):
+    """Add a Color ID filter over the layer's mask: it keeps the coverage only where an ID Map
+    matches the listed colours."""
+
+    bl_idname = "material.paint_layer_mask_filter_add"
+    bl_label = "Add Mask Filter"
+
+    filter_type: bpy.props.EnumProperty(
+        name="Filter",
+        items=(
+            ('COLOR_ID', "Color ID", "Keep the coverage where an ID Map matches the listed colors"),
+        ),
+        default='COLOR_ID',
+    )
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        try:
+            # A filter works on the coverage below it, so the layer gets its white mask first, like
+            # the other mask corrections.
+            if not len(layer.mask_items):
+                layer.mask_add(value=1.0)
+            layer.mask_filter_add(filter_type=self.filter_type)
+        except RuntimeError as ex:
+            self.report({'WARNING'}, str(ex))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class MATERIAL_OT_paint_layer_id_color_remove(Operator):
+    """Remove a color from the active Color ID mask item."""
+
+    bl_idname = "material.paint_layer_id_color_remove"
+    bl_label = "Remove Color"
+    bl_options = {'UNDO', 'REGISTER'}
+
+    index: bpy.props.IntProperty(
+        name="Index",
+        description="Position of the color in the item's list",
+        min=0,
+        options={'SKIP_SAVE'},
+    )
+
+    @classmethod
+    def poll(cls, context):
+        mat = _context_material(context)
+        return mat is not None and mat.is_layered and mat.paint_layers.active_mask_item is not None
+
+    def execute(self, context):
+        item = _context_material(context).paint_layers.active_mask_item
+        try:
+            item.id_color_remove(index=self.index)
+        except RuntimeError as ex:
+            self.report({'WARNING'}, str(ex))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 class MATERIAL_OT_paint_layer_object_mask_toggle(_PaintLayerOperator):
     """Show or hide the active layer on an object, or on one UDIM tile of it"""
 
@@ -332,6 +392,8 @@ classes = (
     MATERIAL_OT_paint_layer_mask_add,
     MATERIAL_OT_paint_layer_mask_remove,
     MATERIAL_OT_paint_layer_mask_toggle,
+    MATERIAL_OT_paint_layer_mask_filter_add,
+    MATERIAL_OT_paint_layer_id_color_remove,
     MATERIAL_OT_paint_layer_object_mask_toggle,
     MATERIAL_OT_paint_layer_object_mask_refresh_tiles,
 )

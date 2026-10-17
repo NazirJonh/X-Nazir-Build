@@ -438,6 +438,13 @@ bool ED_paintcurve_snap_point(bContext *C,
 
 /* `paint_canvas.cc` */
 
+/**
+ * The image the mask-filter pickers (Color ID, UV Island) show flat on every mesh while one is
+ * running, or null. Workbench reads it to draw the object with this image instead of its material,
+ * so the 3D Viewport shows the same map the Image Editor does.
+ */
+Image *ED_paint_mask_filter_preview_image_get(const Main &bmain);
+
 /** Color type of an object can be overridden in sculpt/paint mode. */
 eV3DShadingColorType ED_paint_shading_color_override(bContext *C,
                                                      const PaintModeSettings *settings,

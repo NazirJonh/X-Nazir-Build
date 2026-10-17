@@ -20,6 +20,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLI_array.hh"
@@ -1024,6 +1025,14 @@ struct StrokeCache {
    * stroke that paints with a mode other than Mix. See #paint::image::MaterialStrokeAccum.
    */
   std::unique_ptr<paint::image::MaterialStrokeAccum> material_raster_accum;
+
+  /**
+   * The active row's mask as the strokes sample it, built on the first dab of a stroke (see
+   * #SCULPT_do_paint_brush_image); null when the row has no mask. #paint_mask_sampler_resolved tells
+   * "not built yet" from "built and empty".
+   */
+  std::unique_ptr<PaintLayersMaskSampler> paint_mask_sampler;
+  bool paint_mask_sampler_resolved = false;
 
   /** Poly Paint: material paint attributes (scalar or color) created by #brush_stroke_init for
    * this stroke, as opposed to attributes that already existed. Undo removes these instead of

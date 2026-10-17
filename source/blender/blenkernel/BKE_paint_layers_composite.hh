@@ -23,6 +23,7 @@ namespace blender {
 struct Image;
 struct ImBuf;
 struct Material;
+struct MaterialPaintLayer;
 struct ReportList;
 struct rcti;
 
@@ -87,5 +88,71 @@ bool BKE_paint_layers_composite_image(const Material &ma,
                                       Image &dst,
                                       const rcti *region = nullptr,
                                       ReportList *reports = nullptr);
+
+/**
+ * The row's mask items as the evaluator reads them, bottom to top: the same description
+ * #BKE_paint_layers_composite_image_layers carries per layer, exposed for a caller that samples the
+ * mask itself (the strokes, see #PaintLayersMaskSampler).
+ *
+ * \return false when the row has no mask.
+ */
+bool BKE_paint_layers_mask_items(const Material &ma,
+                                 const MaterialPaintLayer &layer,
+                                 Vector<PaintMaterialCompositeMaskItem> &r_items);
+
+/**
+ * A CPU sampler of one row's effective mask, for the paint strokes.
+ *
+ * The row's mask stack is described once through the same reader the composite uses
+ * (#BKE_paint_layers_mask_items), and its maps are acquired per UDIM tile through the same decode
+ * and mapping the composite acquires them with. #sample returns the scalar factor `M` the composite
+ * lays the row's coverage under (#BKE_paint_material_mask_factor_eval), so a stroke cannot hide what
+ * the render shows: one reading of the mask rules for the canvas and for the render.
+ *
+ * A row with no mask items is empty and samples as one. A map that cannot be read is treated as an
+ * absent one, as in the composite: a laid item falls back to its constant, a map-driven operator to
+ * `match = 0`.
+ */
+class PaintLayersMaskSampler {
+ public:
+  PaintLayersMaskSampler(const Material &ma, const MaterialPaintLayer &layer);
+  ~PaintLayersMaskSampler();
+
+  PaintLayersMaskSampler(const PaintLayersMaskSampler &) = delete;
+  PaintLayersMaskSampler &operator=(const PaintLayersMaskSampler &) = delete;
+
+  /** Whether the row has any mask item to apply. */
+  bool is_empty() const;
+
+  /**
+   * Acquire the maps of UDIM \a tile_number, the painted map's tile being \a ref_width x
+   * \a ref_height. Repeating an already acquired tile is free. Not thread safe: acquire every tile
+   * on one thread before the threads that call #sample start.
+   */
+  void tile_acquire(int tile_number, int ref_width, int ref_height);
+
+  /**
+   * The mask factor at texel (\a x, \a y) of UDIM \a tile_number; 1 for a tile that was not
+   * acquired. Read only, so any number of threads may call it once the tiles are acquired.
+   */
+  float sample(int tile_number, int x, int y) const;
+
+ private:
+  struct Tile {
+    int tile_number = -1;
+    int width = 0;
+    int height = 0;
+    /** Owned decoded buffers per item (mask map / coverage map), or null where the item has none. */
+    Vector<ImBuf *> items;
+    Vector<ImBuf *> coverage;
+    /** Pointers into the buffers above, for the evaluator; null where a buffer is absent. */
+    Vector<const float *> item_samples;
+    Vector<const float *> coverage_samples;
+  };
+
+  Vector<PaintMaterialCompositeMaskItem> items_;
+  Vector<PaintMaterialCompositeMaskBuffer> buffers_;
+  Vector<Tile> tiles_;
+};
 
 }  // namespace blender

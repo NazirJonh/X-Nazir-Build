@@ -32,6 +32,7 @@
 #include "NOD_socket.hh"
 
 #include "DNA_ID.h"
+#include "DNA_customdata_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_tree_interface_types.h"
@@ -56,7 +57,18 @@ static NodeOutput math_node_add(bNodeTree &tree,
                                 int operation,
                                 NodeOutput a,
                                 NodeOutput b,
-                                float a_default);
+                                float a_default = 0.0f);
+
+/** A Math node of \a operation over \a a and the constant \a b; defined with the mask code below. */
+static bNode *math_constant_node_add(bNodeTree &tree,
+                                     layout::LayoutGrid &grid,
+                                     Vector<bNode *> &r_nodes,
+                                     int operation,
+                                     NodeOutput a,
+                                     float b);
+
+/** A Mix node in float mode, `mix(A, B, factor)`; defined with the isolated-fold code below. */
+static bNode *mix_float_node_add(bNodeTree &tree);
 
 NodeOutput PaintLayersTreeBuilder::multiply_nodes_add(bNodeTree &tree,
                                                       const NodeOutput a,
@@ -295,6 +307,75 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       }
       continue;
     }
+    if (paint_layer_kind_is_map_coverage(item)) {
+      /* `M = M * lerp(1, match, opacity)`: the operator lays its map's match over the coverage so
+       * far. A missing map is `match = 0`; the invert flips the match, as on the CPU. */
+      bNodeTreeInterfaceSocket **item_opacity_iface = mask_opacity_inputs_.lookup_ptr(&item);
+      bNodeSocket *item_opacity = (item_opacity_iface != nullptr) ?
+                                      this->group_input_socket(group, **item_opacity_iface) :
+                                      nullptr;
+      if (item_opacity == nullptr) {
+        discard();
+        return {};
+      }
+      NodeOutput match = this->map_coverage_match_add(tree, group, item, nodes);
+      if (match.socket == nullptr) {
+        discard();
+        return {};
+      }
+      if (paint_layer_mask_item_inverted(item)) {
+        match = math_node_add(tree, grid_, nodes, NODE_MATH_SUBTRACT, {}, match, 1.0f);
+        if (match.socket == nullptr) {
+          discard();
+          return {};
+        }
+      }
+      /* Gradient: `match *= value`, the standard value input of the item; White/Black read one. */
+      bNodeTreeInterfaceSocket **value_iface = mask_value_inputs_.lookup_ptr(&item);
+      bNodeSocket *item_value = (value_iface != nullptr) ?
+                                    this->group_input_socket(group, **value_iface) :
+                                    nullptr;
+      if (item_value == nullptr) {
+        discard();
+        return {};
+      }
+      match = math_node_add(
+          tree, grid_, nodes, NODE_MATH_MULTIPLY, match, {group.group_input, item_value});
+      if (match.socket == nullptr) {
+        discard();
+        return {};
+      }
+      bNode *fold = mix_float_node_add(tree);
+      bNodeSocket *fold_a = (fold != nullptr) ? socket_in(*fold, "A_Float") : nullptr;
+      bNodeSocket *fold_b = (fold != nullptr) ? socket_in(*fold, "B_Float") : nullptr;
+      bNodeSocket *fold_factor = (fold != nullptr) ? socket_in(*fold, "Factor_Float") : nullptr;
+      bNodeSocket *fold_result = (fold != nullptr) ? socket_out(*fold, "Result_Float") : nullptr;
+      if (fold_a == nullptr || fold_b == nullptr || fold_factor == nullptr ||
+          fold_result == nullptr)
+      {
+        if (fold != nullptr) {
+          bke::node_remove_node(nullptr, tree, *fold, true, false);
+        }
+        discard();
+        return {};
+      }
+      nodes.append(fold);
+      grid_.place_extra(*fold);
+      if (fold_a->default_value != nullptr) {
+        static_cast<bNodeSocketValueFloat *>(fold_a->default_value)->value = 1.0f;
+      }
+      bke::node_add_link(tree, *match.node, *match.socket, *fold, *fold_b);
+      bke::node_add_link(tree, *group.group_input, *item_opacity, *fold, *fold_factor);
+      const NodeOutput product = this->multiply_nodes_add(
+          tree, current, {fold, fold_result});
+      if (product.node == nullptr) {
+        discard();
+        return {};
+      }
+      nodes.append(product.node);
+      current = product;
+      continue;
+    }
     const MaterialPaintLayerChannel *item_record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     bNodeTreeInterfaceSocket **item_opacity_iface = mask_opacity_inputs_.lookup_ptr(&item);
@@ -407,6 +488,303 @@ static bNode *math_constant_node_add(bNodeTree &tree,
   static_cast<bNodeSocketValueFloat *>(b_in->default_value)->value = b;
   r_nodes.append(node);
   return node;
+}
+
+/** A Value node holding \a value; the null output when it cannot be made. */
+static NodeOutput value_node_add(bNodeTree &tree,
+                                 layout::LayoutGrid &grid,
+                                 Vector<bNode *> &r_nodes,
+                                 const float value)
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+  bNodeSocket *out = (node != nullptr) ? socket_out(*node, "Value") : nullptr;
+  if (out == nullptr || out->default_value == nullptr) {
+    if (node != nullptr) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+    return {};
+  }
+  static_cast<bNodeSocketValueFloat *>(out->default_value)->value = value;
+  grid.place_extra(*node);
+  r_nodes.append(node);
+  return {node, out};
+}
+
+/**
+ * A Separate XYZ node over the vector \a vector. \a r_xyz receives its three outputs; false, with
+ * nothing left in the tree, when the node cannot be made.
+ */
+static bool separate_xyz_node_add(bNodeTree &tree,
+                                  layout::LayoutGrid &grid,
+                                  Vector<bNode *> &r_nodes,
+                                  const NodeOutput vector,
+                                  NodeOutput r_xyz[3])
+{
+  bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_SEPXYZ);
+  if (node == nullptr) {
+    return false;
+  }
+  bNodeSocket *vector_in = socket_in(*node, "Vector");
+  bNodeSocket *outs[3] = {socket_out(*node, "X"), socket_out(*node, "Y"), socket_out(*node, "Z")};
+  if (vector_in == nullptr || outs[0] == nullptr || outs[1] == nullptr || outs[2] == nullptr ||
+      vector.socket == nullptr)
+  {
+    bke::node_remove_node(nullptr, tree, *node, true, false);
+    return false;
+  }
+  grid.place_extra(*node);
+  r_nodes.append(node);
+  bke::node_add_link(tree, *vector.node, *vector.socket, *node, *vector_in);
+  for (const int i : IndexRange(3)) {
+    r_xyz[i] = {node, outs[i]};
+  }
+  return true;
+}
+
+/**
+ * A Vector Math node of \a operation whose first input is \a a and, when \a b carries a socket, its
+ * second is \a b; null when it cannot be made.
+ */
+static bNode *vector_math_node_add(bNodeTree &tree,
+                                   layout::LayoutGrid &grid,
+                                   Vector<bNode *> &r_nodes,
+                                   const int operation,
+                                   const NodeOutput a,
+                                   const NodeOutput b)
+{
+  bNode *node = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNodeSocket *a_in = (node != nullptr) ? socket_in(*node, "Vector") : nullptr;
+  bNodeSocket *b_in = (node != nullptr) ? socket_in(*node, "Vector_001") : nullptr;
+  if (node == nullptr || a_in == nullptr || b_in == nullptr || a.socket == nullptr) {
+    if (node != nullptr) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+    return nullptr;
+  }
+  node->custom1 = operation;
+  grid.place_extra(*node);
+  bke::node_add_link(tree, *a.node, *a.socket, *node, *a_in);
+  if (b.socket != nullptr) {
+    bke::node_add_link(tree, *b.node, *b.socket, *node, *b_in);
+  }
+  r_nodes.append(node);
+  return node;
+}
+
+/** The island scalar of a UV Island map: its red channel, clamped to 0..1 as the CPU reads it. */
+static NodeOutput uv_island_match_add(bNodeTree &tree,
+                                      layout::LayoutGrid &grid,
+                                      Vector<bNode *> &r_nodes,
+                                      const NodeOutput map_color)
+{
+  NodeOutput xyz[3];
+  if (!separate_xyz_node_add(tree, grid, r_nodes, map_color, xyz)) {
+    return {};
+  }
+  /* A byte data map is already within range, this only guards a float one. */
+  bNode *lower = math_constant_node_add(tree, grid, r_nodes, NODE_MATH_MAXIMUM, xyz[0], 0.0f);
+  if (lower == nullptr) {
+    return {};
+  }
+  bNode *upper = math_constant_node_add(
+      tree, grid, r_nodes, NODE_MATH_MINIMUM, {lower, socket_out(*lower, "Value")}, 1.0f);
+  return (upper != nullptr) ? NodeOutput{upper, socket_out(*upper, "Value")} : NodeOutput{};
+}
+
+/** The max-channel distance `max(|a.r-b.r|, |a.g-b.g|, |a.b-b.b|)` of two colours, as the CPU. */
+static NodeOutput color_distance_add(bNodeTree &tree,
+                                     layout::LayoutGrid &grid,
+                                     Vector<bNode *> &r_nodes,
+                                     const NodeOutput a,
+                                     const NodeOutput b)
+{
+  bNode *diff = vector_math_node_add(tree, grid, r_nodes, NODE_VECTOR_MATH_SUBTRACT, a, b);
+  bNodeSocket *diff_out = (diff != nullptr) ? socket_out(*diff, "Vector") : nullptr;
+  if (diff_out == nullptr) {
+    return {};
+  }
+  bNode *abs_node = vector_math_node_add(
+      tree, grid, r_nodes, NODE_VECTOR_MATH_ABSOLUTE, {diff, diff_out}, {});
+  bNodeSocket *abs_out = (abs_node != nullptr) ? socket_out(*abs_node, "Vector") : nullptr;
+  if (abs_out == nullptr) {
+    return {};
+  }
+  NodeOutput xyz[3];
+  if (!separate_xyz_node_add(tree, grid, r_nodes, {abs_node, abs_out}, xyz)) {
+    return {};
+  }
+  const NodeOutput dist_xy = math_node_add(tree, grid, r_nodes, NODE_MATH_MAXIMUM, xyz[0], xyz[1]);
+  if (dist_xy.socket == nullptr) {
+    return {};
+  }
+  return math_node_add(tree, grid, r_nodes, NODE_MATH_MAXIMUM, dist_xy, xyz[2]);
+}
+
+/**
+ * `1 - smoothstep(tolerance, falloff_end, dist)`: one inside the tolerance and zero past the falloff,
+ * which is the CPU's match. Map Range does the ramp, with its output flipped.
+ */
+static NodeOutput falloff_match_add(bNodeTree &tree,
+                                    layout::LayoutGrid &grid,
+                                    Vector<bNode *> &r_nodes,
+                                    const NodeOutput dist,
+                                    const NodeOutput tolerance,
+                                    const NodeOutput falloff_end)
+{
+  bNode *range = bke::node_add_static_node(nullptr, tree, SH_NODE_MAP_RANGE);
+  bNodeSocket *value = (range != nullptr) ? socket_in(*range, "Value") : nullptr;
+  bNodeSocket *from_min = (range != nullptr) ? socket_in(*range, "From Min") : nullptr;
+  bNodeSocket *from_max = (range != nullptr) ? socket_in(*range, "From Max") : nullptr;
+  bNodeSocket *to_min = (range != nullptr) ? socket_in(*range, "To Min") : nullptr;
+  bNodeSocket *to_max = (range != nullptr) ? socket_in(*range, "To Max") : nullptr;
+  bNodeSocket *result = (range != nullptr) ? socket_out(*range, "Result") : nullptr;
+  if (value == nullptr || from_min == nullptr || from_max == nullptr || to_min == nullptr ||
+      to_max == nullptr || result == nullptr || to_min->default_value == nullptr ||
+      to_max->default_value == nullptr)
+  {
+    if (range != nullptr) {
+      bke::node_remove_node(nullptr, tree, *range, true, false);
+    }
+    return {};
+  }
+  if (NodeMapRange *storage = static_cast<NodeMapRange *>(range->storage)) {
+    storage->data_type = CD_PROP_FLOAT;
+    storage->interpolation_type = NODE_MAP_RANGE_SMOOTHSTEP;
+    storage->clamp = 1;
+  }
+  grid.place_extra(*range);
+  r_nodes.append(range);
+  bke::node_add_link(tree, *dist.node, *dist.socket, *range, *value);
+  bke::node_add_link(tree, *tolerance.node, *tolerance.socket, *range, *from_min);
+  bke::node_add_link(tree, *falloff_end.node, *falloff_end.socket, *range, *from_max);
+  static_cast<bNodeSocketValueFloat *>(to_min->default_value)->value = 1.0f;
+  static_cast<bNodeSocketValueFloat *>(to_max->default_value)->value = 0.0f;
+  return {range, result};
+}
+
+NodeOutput PaintLayersTreeBuilder::map_coverage_match_add(bNodeTree &tree,
+                                                          LayerGroup &group,
+                                                          const MaterialPaintLayer &item,
+                                                          Vector<bNode *> &r_nodes)
+{
+  /* A constant zero is `match = 0` for a missing map or an empty colour list: the operator still
+   * takes part and restricts everything, exactly as the CPU reads it. */
+  if (!paint_layer_map_coverage_has_map(item)) {
+    return value_node_add(tree, grid_, r_nodes, 0.0f);
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_map_coverage_record(item);
+
+  bNode *map = this->image_map_node_add(tree, *record->image);
+  if (map == nullptr) {
+    return {};
+  }
+  r_nodes.append(map);
+  grid_.place_extra(*map);
+  this->mapping_apply(tree, group, item, *map, r_nodes);
+  /* The ID map is a lookup, not a gradient: nearest texel, so a texel matches only its own colour,
+   * as the picker and the CPU read it. */
+  if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
+    storage->interpolation = SHD_INTERP_CLOSEST;
+  }
+  bNodeSocket *map_color_socket = socket_out(*map, "Color");
+  if (map_color_socket == nullptr) {
+    return {};
+  }
+  const NodeOutput map_color = {map, map_color_socket};
+
+  if (item.kind_subtype == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
+    return uv_island_match_add(tree, grid_, r_nodes, map_color);
+  }
+
+  /* Color ID: Simple reads the item's shared tolerance and softness; Advanced gives every colour
+   * its own tolerance and a hard edge. */
+  const bool advanced = paint_layer_mask_item_color_id_advanced(item);
+  const auto param_input = [&](const int index) -> bNodeSocket * {
+    Vector<bNodeTreeInterfaceSocket *> *params = effect_param_inputs_.lookup_ptr(&item);
+    if (params == nullptr || index >= params->size() || (*params)[index] == nullptr) {
+      return nullptr;
+    }
+    return this->group_input_socket(group, *(*params)[index]);
+  };
+  NodeOutput tol;
+  NodeOutput falloff_end;
+  if (!advanced) {
+    bNodeSocket *tol_socket = param_input(PAINT_LAYER_COVERAGE_TOLERANCE);
+    bNodeSocket *soft_socket = param_input(PAINT_LAYER_COVERAGE_SOFTNESS);
+    if (tol_socket == nullptr || soft_socket == nullptr) {
+      return {};
+    }
+    tol = {group.group_input, tol_socket};
+    const NodeOutput soft = {group.group_input, soft_socket};
+    /* A zero softness is a hard edge on the CPU; Map Range divides by the range, so floor it to a
+     * step far below one byte, which keeps the two edges apart without changing a byte result. */
+    bNode *soft_floor = math_constant_node_add(
+        tree, grid_, r_nodes, NODE_MATH_MAXIMUM, soft, 1.0f / 65536.0f);
+    if (soft_floor == nullptr) {
+      return {};
+    }
+    falloff_end = math_node_add(
+        tree, grid_, r_nodes, NODE_MATH_ADD, tol, {soft_floor, socket_out(*soft_floor, "Value")});
+    if (falloff_end.socket == nullptr) {
+      return {};
+    }
+  }
+
+  Vector<IdColorInputs> *inputs = id_color_inputs_.lookup_ptr(&item);
+  NodeOutput match;
+  for (const IdColorInputs &entry : (inputs != nullptr) ? inputs->as_span() : Span<IdColorInputs>()) {
+    bNodeSocket *color_socket = (entry.color != nullptr) ?
+                                    this->group_input_socket(group, *entry.color) :
+                                    nullptr;
+    bNodeSocket *enabled_socket = (entry.enabled != nullptr) ?
+                                      this->group_input_socket(group, *entry.enabled) :
+                                      nullptr;
+    if (color_socket == nullptr || enabled_socket == nullptr) {
+      return {};
+    }
+    NodeOutput entry_tol = tol;
+    NodeOutput entry_falloff_end = falloff_end;
+    if (advanced) {
+      bNodeSocket *entry_tol_socket = (entry.tolerance != nullptr) ?
+                                          this->group_input_socket(group, *entry.tolerance) :
+                                          nullptr;
+      if (entry_tol_socket == nullptr) {
+        return {};
+      }
+      entry_tol = {group.group_input, entry_tol_socket};
+      /* A hard edge: Map Range needs two distinct ends, so add a step far below one byte. */
+      bNode *end = math_constant_node_add(
+          tree, grid_, r_nodes, NODE_MATH_ADD, entry_tol, 1.0f / 65536.0f);
+      if (end == nullptr) {
+        return {};
+      }
+      entry_falloff_end = {end, socket_out(*end, "Value")};
+    }
+    const NodeOutput dist = color_distance_add(
+        tree, grid_, r_nodes, map_color, {group.group_input, color_socket});
+    if (dist.socket == nullptr) {
+      return {};
+    }
+    const NodeOutput entry_match = falloff_match_add(
+        tree, grid_, r_nodes, dist, entry_tol, entry_falloff_end);
+    if (entry_match.socket == nullptr) {
+      return {};
+    }
+    /* A disabled colour contributes nothing, so it neither matches nor lifts the maximum. */
+    const NodeOutput gate = this->multiply_nodes_add(
+        tree, entry_match, {group.group_input, enabled_socket});
+    if (gate.node == nullptr) {
+      return {};
+    }
+    r_nodes.append(gate.node);
+    match = (match.socket == nullptr) ?
+                gate :
+                math_node_add(tree, grid_, r_nodes, NODE_MATH_MAXIMUM, match, gate);
+    if (match.socket == nullptr) {
+      return {};
+    }
+  }
+  return (match.socket != nullptr) ? match : value_node_add(tree, grid_, r_nodes, 0.0f);
 }
 
 NodeOutput PaintLayersTreeBuilder::object_mask_visible_ensure(bNodeTree &tree,
@@ -615,7 +993,7 @@ static NodeOutput math_node_add(bNodeTree &tree,
                                 const int operation,
                                 const NodeOutput a,
                                 const NodeOutput b,
-                                const float a_default = 0.0f)
+                                const float a_default)
 {
   bNode *node = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
   if (node == nullptr) {
@@ -897,6 +1275,10 @@ bool PaintLayersTreeBuilder::filter_lay(bNodeTree &tree,
       layout::frame_add(tree, effect.name, nodes);
       return true;
     }
+    case MA_PAINT_LAYER_FILTER_COLOR_ID:
+    case MA_PAINT_LAYER_FILTER_UV_ISLAND:
+      /* Map-coverage operators only exist in a mask, where #map_coverage_match_add builds them. */
+      break;
   }
   return false;
 }

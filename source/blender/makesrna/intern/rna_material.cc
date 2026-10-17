@@ -1678,6 +1678,12 @@ static std::optional<std::string> rna_MaterialPaintLayerKindParam_path(const Poi
             owner = &effect;
           }
         }
+        /* A filter in the mask (Levels, Color ID) keeps its parameters on the mask item. */
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          if (holds(item)) {
+            owner = &item;
+          }
+        }
         return owner == nullptr;
       });
   std::string row_path;
@@ -1686,6 +1692,236 @@ static std::optional<std::string> rna_MaterialPaintLayerKindParam_path(const Poi
     return std::nullopt;
   }
   return fmt::format("{}.kind_params[\"{}\"]", row_path, prop->name);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Color ID colours and map-coverage filters
+ * \{ */
+
+static void rna_MaterialPaintLayer_id_colors_begin(CollectionPropertyIterator *iter,
+                                                   PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  rna_iterator_listbase_begin(iter, ptr, &layer->id_colors, nullptr);
+}
+
+static int rna_MaterialPaintLayer_filter_type_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer->source == MA_PAINT_LAYER_SOURCE_FILTER) ? int(layer->kind_subtype) : 0;
+}
+
+static int rna_MaterialPaintLayer_output_map_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *item = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (BKE_paint_layers_mask_item_is_gradient(*item)) {
+    return 2;
+  }
+  return BKE_paint_layers_mask_item_is_inverted(*item) ? 1 : 0;
+}
+
+static void rna_MaterialPaintLayer_output_map_set(PointerRNA *ptr, const int value)
+{
+  MaterialPaintLayer *item = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, item);
+  if (ma == nullptr || !BKE_paint_layers_is_map_coverage(*item)) {
+    return;
+  }
+  BKE_paint_layers_mask_item_set_gradient(*ma, item, value == 2);
+  if (value != 2) {
+    BKE_paint_layers_channel_set_invert(
+        *ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, value == 1);
+  }
+}
+
+static int rna_MaterialPaintLayer_color_id_mode_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_mask_item_is_color_id_advanced(
+             *static_cast<const MaterialPaintLayer *>(ptr->data)) ?
+             1 :
+             0;
+}
+
+static void rna_MaterialPaintLayer_color_id_mode_set(PointerRNA *ptr, const int value)
+{
+  MaterialPaintLayer *item = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, item)) {
+    BKE_paint_layers_mask_item_set_color_id_advanced(*ma, item, value == 1);
+  }
+}
+
+static bool rna_MaterialPaintLayer_output_alpha_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_mask_item_is_alpha_background(
+      *static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
+static void rna_MaterialPaintLayer_output_alpha_set(PointerRNA *ptr, const bool value)
+{
+  MaterialPaintLayer *item = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, item)) {
+    BKE_paint_layers_mask_item_set_alpha_background(*ma, item, value);
+  }
+}
+
+static bool rna_MaterialPaintLayer_is_map_coverage_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_is_map_coverage(*static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
+static bool rna_MaterialPaintLayer_map_paintable_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_map_coverage_paintable(
+      *static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
+/** The Color ID item that holds the colour \a ptr stands for, or null for a stale pointer. */
+static MaterialPaintLayer *rna_MaterialPaintLayerIdColor_item(PointerRNA *ptr, Material **r_ma)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  *r_ma = ma;
+  if (ma == nullptr) {
+    return nullptr;
+  }
+  return BKE_paint_layers_id_color_owner(
+      *ma, *static_cast<const MaterialPaintLayerIdColor *>(ptr->data));
+}
+
+static void rna_MaterialPaintLayerIdColor_color_get(PointerRNA *ptr, float *values)
+{
+  const MaterialPaintLayerIdColor *color = static_cast<const MaterialPaintLayerIdColor *>(ptr->data);
+  copy_v3_v3(values, color->color);
+}
+
+static void rna_MaterialPaintLayerIdColor_color_set(PointerRNA *ptr, const float *values)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *item = rna_MaterialPaintLayerIdColor_item(ptr, &ma);
+  if (item != nullptr) {
+    BKE_paint_layers_id_color_set_color(
+        *ma, item, static_cast<MaterialPaintLayerIdColor *>(ptr->data), values);
+  }
+}
+
+static bool rna_MaterialPaintLayerIdColor_enabled_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerIdColor *color = static_cast<const MaterialPaintLayerIdColor *>(ptr->data);
+  return (color->flag & MA_PAINT_LAYER_ID_COLOR_ENABLED) != 0;
+}
+
+static void rna_MaterialPaintLayerIdColor_enabled_set(PointerRNA *ptr, const bool value)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *item = rna_MaterialPaintLayerIdColor_item(ptr, &ma);
+  if (item != nullptr) {
+    BKE_paint_layers_id_color_set_enabled(
+        *ma, item, static_cast<MaterialPaintLayerIdColor *>(ptr->data), value);
+  }
+}
+
+static float rna_MaterialPaintLayerIdColor_tolerance_get(PointerRNA *ptr)
+{
+  return static_cast<const MaterialPaintLayerIdColor *>(ptr->data)->tolerance;
+}
+
+static void rna_MaterialPaintLayerIdColor_tolerance_set(PointerRNA *ptr, const float value)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *item = rna_MaterialPaintLayerIdColor_item(ptr, &ma);
+  if (item != nullptr) {
+    BKE_paint_layers_id_color_set_tolerance(
+        *ma, item, static_cast<MaterialPaintLayerIdColor *>(ptr->data), value);
+  }
+}
+
+static bool rna_MaterialPaintLayerIdColor_show_advanced_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerIdColor *color = static_cast<const MaterialPaintLayerIdColor *>(ptr->data);
+  return (color->flag & MA_PAINT_LAYER_ID_COLOR_EXPANDED) != 0;
+}
+
+static void rna_MaterialPaintLayerIdColor_show_advanced_set(PointerRNA *ptr, const bool value)
+{
+  MaterialPaintLayerIdColor *color = static_cast<MaterialPaintLayerIdColor *>(ptr->data);
+  SET_FLAG_FROM_TEST(color->flag, value, MA_PAINT_LAYER_ID_COLOR_EXPANDED);
+}
+
+static std::optional<std::string> rna_MaterialPaintLayerIdColor_path(const PointerRNA *ptr)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  const MaterialPaintLayerIdColor *color = static_cast<const MaterialPaintLayerIdColor *>(ptr->data);
+  if (ma == nullptr) {
+    return std::nullopt;
+  }
+  const MaterialPaintLayer *item = BKE_paint_layers_id_color_owner(*ma, *color);
+  std::string item_path;
+  if (item == nullptr ||
+      !rna_paint_layer_path_find(ma->paint_layers, item, "paint_layers", item_path))
+  {
+    return std::nullopt;
+  }
+  return fmt::format("{}.id_colors[{}]", item_path, BLI_findindex(&item->id_colors, color));
+}
+
+static MaterialPaintLayer *rna_MaterialPaintLayer_mask_filter_add(PointerRNA ptr,
+                                                                  ReportList *reports,
+                                                                  const int filter_type)
+{
+  MaterialPaintLayer *layer = nullptr;
+  Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer);
+  if (ma == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Paint layer is not part of this material");
+    return nullptr;
+  }
+  MaterialPaintLayer *item = BKE_paint_layers_mask_filter_add(
+      *ma, layer, eMaterialPaintLayerFilter(filter_type));
+  if (item == nullptr) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "Cannot add a mask filter: the layer needs a mask first, and the filter must be known");
+    return nullptr;
+  }
+  /* The picker and the capture act on the active mask item, so the one just added is the one the
+   * user goes on to set up. */
+  BKE_paint_layers_active_set(*ma, item->marker);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  return item;
+}
+
+static MaterialPaintLayerIdColor *rna_MaterialPaintLayer_id_color_add(PointerRNA ptr,
+                                                                      ReportList *reports,
+                                                                      const float color[3])
+{
+  MaterialPaintLayer *item = nullptr;
+  Material *ma = rna_MaterialPaintLayer_owner(ptr, &item);
+  MaterialPaintLayerIdColor *record = (ma != nullptr) ?
+                                          BKE_paint_layers_id_color_add(*ma, item, color) :
+                                          nullptr;
+  if (record == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Only a Color ID mask item holds colours");
+    return nullptr;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  return record;
+}
+
+static void rna_MaterialPaintLayer_id_color_remove(PointerRNA ptr,
+                                                   ReportList *reports,
+                                                   const int index)
+{
+  MaterialPaintLayer *item = nullptr;
+  Material *ma = rna_MaterialPaintLayer_owner(ptr, &item);
+  MaterialPaintLayerIdColor *color = (item != nullptr) ?
+                                         static_cast<MaterialPaintLayerIdColor *>(
+                                             BLI_findlink(&item->id_colors, index)) :
+                                         nullptr;
+  if (color == nullptr || !BKE_paint_layers_id_color_remove(*ma, item, color)) {
+    BKE_report(reports, RPT_ERROR, "No such colour on this mask item");
+    return;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
 /** \} */
@@ -1913,6 +2149,27 @@ static void rna_MaterialPaintLayerChannel_image_set(PointerRNA *ptr,
         eMaterialPaintChannel(rna_MaterialPaintLayerChannel_channel_get(ptr)),
         static_cast<Image *>(value.data));
   }
+}
+
+static void rna_MaterialPaintLayerChannel_image_update(Main *bmain,
+                                                       Scene *scene,
+                                                       PointerRNA *ptr)
+{
+  /* A Color ID item compares the map's texels against stored colours, so the map is read as data:
+   * the colour space is part of "the ID Map" being right. Dropping an image, opening one and
+   * picking one all come through the image property. This is the update callback, as only it gets
+   * the #Main the colour space signal needs. */
+  MaterialPaintLayer *layer = nullptr;
+  if (rna_paint_layer_sub_owner(ptr, &layer) != nullptr && layer != nullptr &&
+      BKE_paint_layers_is_map_coverage(*layer) && !BKE_paint_layers_map_coverage_paintable(*layer))
+  {
+    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+        ptr->data);
+    if (record->image != nullptr) {
+      BKE_paint_layers_map_coverage_image_use_data(*bmain, *record->image);
+    }
+  }
+  rna_Material_update(bmain, scene, ptr);
 }
 
 static void rna_MaterialPaintLayerChannel_value_get(PointerRNA *ptr, float *value)
@@ -2213,6 +2470,40 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Values are #eMaterialPaintLayerFilter; 0 is "not a filter" and is only ever read. */
+static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
+    {0, "NONE", 0, "None", "Not a filter"},
+    {MA_PAINT_LAYER_FILTER_INVERT, "INVERT", 0, "Invert", "Invert the colour or coverage below"},
+    {MA_PAINT_LAYER_FILTER_LEVELS, "LEVELS", 0, "Levels", "Remap the levels of what is below"},
+    {MA_PAINT_LAYER_FILTER_HSL, "HSL", 0, "Hue Saturation Value", "Shift hue, saturation, value"},
+    {MA_PAINT_LAYER_FILTER_COLOR_ID,
+     "COLOR_ID",
+     0,
+     "Color ID",
+     "Keep the coverage where an ID Map matches the listed colours"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* The Output Map of a map-coverage mask item. White and Black are the two states of the item's
+ * invert flag; Gradient scales its match by its standard value. */
+static const EnumPropertyItem rna_enum_material_paint_layer_output_map_items[] = {
+    {0, "WHITE", 0, "White", "The filter keeps what it matches"},
+    {1, "BLACK", 0, "Black", "The filter hides what it matches"},
+    {2,
+     "GRADIENT",
+     0,
+     "Gradient",
+     "Scale the match by the item's standard gradient value"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* How a Color ID item reads its tolerance: one shared pair, or one tolerance per colour. */
+static const EnumPropertyItem rna_enum_material_paint_layer_color_id_mode_items[] = {
+    {0, "SIMPLE", 0, "Simple", "Use the shared tolerance and softness"},
+    {1, "ADVANCED", 0, "Advanced", "Give every colour its own tolerance, with a hard edge"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* Values must match #PaintLayersIssueCode. */
 static const EnumPropertyItem rna_enum_material_paint_layer_issue_code_items[] = {
     {0,
@@ -2316,6 +2607,48 @@ static void rna_def_material_paint_layer_kind_param(BlenderRNA *brna)
                                "rna_MaterialPaintLayerKindParam_value_range");
   RNA_def_property_ui_text(prop, "Value", "Value of the parameter, within its range");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+}
+
+static void rna_def_material_paint_layer_id_color(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerIdColor", nullptr);
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintLayerIdColor_path");
+  RNA_def_struct_ui_text(
+      srna, "Color ID Color", "One colour of a Color ID mask item, matched on its ID Map");
+
+  PropertyRNA *prop = RNA_def_property(srna, "color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerIdColor_color_get",
+                               "rna_MaterialPaintLayerIdColor_color_set",
+                               nullptr);
+  RNA_def_property_ui_text(
+      prop, "Color", "The matched colour, as the ID Map's texels read in the shader");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayerIdColor_enabled_get",
+                                 "rna_MaterialPaintLayerIdColor_enabled_set");
+  RNA_def_property_ui_text(prop, "Enabled", "Whether the colour takes part in the match");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "tolerance", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerIdColor_tolerance_get",
+                               "rna_MaterialPaintLayerIdColor_tolerance_set",
+                               nullptr);
+  RNA_def_property_ui_text(
+      prop, "Tolerance", "The colour's own tolerance in Advanced mode; a hard edge past it");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "show_advanced", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayerIdColor_show_advanced_get",
+                                 "rna_MaterialPaintLayerIdColor_show_advanced_set");
+  RNA_def_property_ui_text(prop, "Show Advanced", "Unfold the colour's own controls");
 }
 
 static void rna_def_material_paint_layer(BlenderRNA *brna)
@@ -2577,6 +2910,73 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                            "Corrections",
                            "The content corrections laid over the layer's colour, bottom to top");
 
+  prop = RNA_def_property(srna, "filter_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_filter_items);
+  RNA_def_property_enum_funcs(prop, "rna_MaterialPaintLayer_filter_type_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Filter Type", "Which filter a filter row is; None for any other row");
+
+  prop = RNA_def_property(srna, "output_map", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_output_map_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_output_map_get",
+                              "rna_MaterialPaintLayer_output_map_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Output Map",
+                           "What a map-coverage mask item gives back: White keeps what it matches, "
+                           "Black hides it, Gradient scales the match by the standard value");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "output_alpha", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_output_alpha_get",
+                                 "rna_MaterialPaintLayer_output_alpha_set");
+  RNA_def_property_ui_text(prop,
+                           "Alpha Background",
+                           "Carry the output coverage in alpha, leaving the background transparent");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "color_id_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_color_id_mode_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_color_id_mode_get",
+                              "rna_MaterialPaintLayer_color_id_mode_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Color ID Mode",
+                           "Simple uses one tolerance and softness; Advanced gives every colour "
+                           "its own tolerance");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "is_map_coverage", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_is_map_coverage_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Is Map Coverage",
+                           "Whether this mask item restricts the coverage by a map (Color ID or UV "
+                           "Island)");
+
+  prop = RNA_def_property(srna, "map_paintable", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_map_paintable_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Map Paintable", "Whether the item's map may be painted; a Color ID's ID Map is not");
+
+  prop = RNA_def_property(srna, "id_colors", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerIdColor");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_MaterialPaintLayer_id_colors_begin",
+                                    "rna_iterator_listbase_next",
+                                    "rna_iterator_listbase_end",
+                                    "rna_iterator_listbase_get",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Colors", "The colours a Color ID mask item matches, newest first");
+
   prop = RNA_def_property(srna, "is_mask_base", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MA_PAINT_LAYER_MASK_BASE);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
@@ -2614,6 +3014,34 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   parm = RNA_def_float(func, "value", 1.0f, 0.0f, 1.0f, "Value", "Constant coverage", 0.0f, 1.0f);
   parm = RNA_def_pointer(func, "item", "MaterialPaintLayer", "", "The new mask item");
   RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "mask_filter_add", "rna_MaterialPaintLayer_mask_filter_add");
+  RNA_def_function_ui_description(
+      func, "Add a filter to the layer's mask, over the items already there");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  RNA_def_enum(func,
+               "filter_type",
+               rna_enum_material_paint_layer_filter_items,
+               MA_PAINT_LAYER_FILTER_COLOR_ID,
+               "Filter Type",
+               "Which filter to add");
+  parm = RNA_def_pointer(func, "item", "MaterialPaintLayer", "", "The new mask item");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "id_color_add", "rna_MaterialPaintLayer_id_color_add");
+  RNA_def_function_ui_description(func, "Add a colour on top of a Color ID mask item's list");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_float_color(
+      func, "color", 3, nullptr, 0.0f, 1.0f, "Color", "The colour to match", 0.0f, 1.0f);
+  RNA_def_parameter_flags(parm, PROP_THICK_WRAP, PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "id_color", "MaterialPaintLayerIdColor", "", "The new colour");
+  RNA_def_function_return(func, parm);
+
+  func = RNA_def_function(srna, "id_color_remove", "rna_MaterialPaintLayer_id_color_remove");
+  RNA_def_function_ui_description(func, "Remove the colour at \"index\" from a Color ID mask item");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+  parm = RNA_def_int(func, "index", 0, 0, INT_MAX, "Index", "Position in the list", 0, INT_MAX);
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
 
   func = RNA_def_function(srna, "effect_add", "rna_MaterialPaintLayer_effect_add");
   RNA_def_function_ui_description(
@@ -2855,7 +3283,7 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
       prop, nullptr, "rna_MaterialPaintLayerChannel_image_set", nullptr, nullptr);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Image", "The channel's map, or none for a constant");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerChannel_image_update");
 
   prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_array(prop, 4);
@@ -3983,6 +4411,7 @@ void RNA_def_material(BlenderRNA *brna)
   rna_def_material_lineart(brna);
   rna_def_material_paint_layer_issue(brna);
   rna_def_material_paint_layer_kind_param(brna);
+  rna_def_material_paint_layer_id_color(brna);
   rna_def_material_paint_layer(brna);
   rna_def_material_paint_layer_channel(brna);
   rna_def_material_paint_layer_channel_settings(brna);

@@ -705,6 +705,13 @@ static constexpr int gpu_mask_from_alpha = 1024;
 static constexpr int gpu_mask_init = 0;
 static constexpr int gpu_mask_item = 1;
 static constexpr int gpu_mask_map = 2;
+/* A map-driven coverage item: begin, one pass per colour (or one scalar), end. */
+static constexpr int gpu_mask_cov_begin = 3;
+static constexpr int gpu_mask_cov_color = 4;
+static constexpr int gpu_mask_cov_scalar = 5;
+static constexpr int gpu_mask_cov_end = 6;
+/* The ID map is read at its nearest texel. */
+static constexpr int gpu_map_nearest = 131072;
 
 bool combined_preview_gpu_enabled(const Material *ma)
 {
@@ -1291,6 +1298,47 @@ bool combined_preview_gpu_update(const Material &ma,
         continue;
       }
       int item_flags = item.invert ? gpu_mask_invert : 0;
+      if (item.map_coverage != 0) {
+        /* The match accumulates over the passes; a missing or unreadable map leaves it at zero, the
+         * full restriction the CPU composite gives. */
+        mask_step(gpu_mask_cov_begin, nullptr, 0, 1.0f, 1.0f, 1.0f, int(CompositeBlend::Mix), 0, nullptr, nullptr);
+        bool premultiplied = false;
+        gpu::Texture *coverage_map = item.coverage_image != nullptr ?
+                                         gpu_map_texture(
+                                             item.coverage_image, item.coverage_iuser, premultiplied) :
+                                         nullptr;
+        if (coverage_map != nullptr) {
+          const int map_flags = gpu_layer_has_map | gpu_map_nearest |
+                                (premultiplied ? gpu_layer_premultiplied : 0);
+          if (item.map_coverage == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
+            mask_step(gpu_mask_cov_scalar, coverage_map, map_flags, 1.0f, 1.0f, 1.0f,
+                      int(CompositeBlend::Mix), 0, nullptr, &item.coverage_mapping);
+          }
+          else if (item.map_coverage == MA_PAINT_LAYER_FILTER_COLOR_ID) {
+            const float shared_tol = std::max(0.0f, item.coverage_tolerance);
+            const float shared_soft = std::max(0.0f, item.coverage_softness);
+            for (const PaintMaterialCompositeIdColor &entry : item.coverage_colors) {
+              if (!entry.enabled) {
+                continue;
+              }
+              /* Advanced gives each colour its own tolerance and a hard edge. */
+              const float params[8] = {entry.color[0],
+                                       entry.color[1],
+                                       entry.color[2],
+                                       entry.own_tolerance ? std::max(0.0f, entry.tolerance) : shared_tol,
+                                       entry.own_tolerance ? 0.0f : shared_soft,
+                                       0.0f,
+                                       0.0f,
+                                       0.0f};
+              mask_step(gpu_mask_cov_color, coverage_map, map_flags, 1.0f, 1.0f, 1.0f,
+                        int(CompositeBlend::Mix), 0, params, &item.coverage_mapping);
+            }
+          }
+        }
+        mask_step(gpu_mask_cov_end, nullptr, item_flags, 1.0f, item.opacity, item.coverage_output,
+                  int(CompositeBlend::Mix), 0, nullptr, nullptr);
+        continue;
+      }
       gpu::Texture *item_map = nullptr;
       if (item.filter == 0 && item.image != nullptr) {
         bool premultiplied = false;

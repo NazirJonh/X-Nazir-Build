@@ -245,6 +245,12 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
   if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
     return true;
   }
+  /* A map-coverage operator takes part whenever its element is enabled, even with no map: the
+   * missing map samples as `match = 0` rather than dropping the operator out (that would be a
+   * pass-through, the opposite of the operator's restriction). See #paint_layer_map_coverage_has_map. */
+  if (paint_layer_kind_is_map_coverage(item)) {
+    return true;
+  }
   /* A filter item changes the coverage built so far: it has no map or grey of its own and so no
    * record, and what it changes is the opacity's business. */
   if (paint_layer_effect_is_filter(item)) {
@@ -254,6 +260,34 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
       item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   return paint_layer_channel_live(record) &&
          (record->image != nullptr || paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_FLAT_VALUE));
+}
+
+/** The Base Color record a map-coverage operator \a item samples, or null when it has none. */
+inline const MaterialPaintLayerChannel *paint_layer_map_coverage_record(
+    const MaterialPaintLayer &item)
+{
+  return paint_layer_channel_find(item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+/**
+ * Whether the map-coverage operator \a item has a map to sample.
+ *
+ * A record the user switched off (#MA_PAINT_LAYER_CHANNEL_DISABLED) counts as no map, exactly like
+ * an absent one: the kind has no user channel switch, so `DISABLED` is the only way a saved file or
+ * an edit expresses "the map is gone", and both must read as `match = 0` rather than as an error.
+ * The operator takes part either way (see #paint_layer_mask_item_lays); this only decides whether it
+ * matches anything.
+ */
+inline bool paint_layer_map_coverage_has_map(const MaterialPaintLayer &item)
+{
+  const MaterialPaintLayerChannel *record = paint_layer_map_coverage_record(item);
+  return paint_layer_channel_live(record) && record->image != nullptr;
+}
+
+/** How many Color ID colours \a item carries; zero for every other kind. */
+inline int paint_layer_id_color_count(const MaterialPaintLayer &item)
+{
+  return item.id_colors.count();
 }
 
 /**
@@ -277,6 +311,27 @@ inline bool paint_layer_mask_item_inverted(const MaterialPaintLayer &item)
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(
       item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   return record != nullptr && (record->flag & MA_PAINT_LAYER_CHANNEL_INVERT) != 0;
+}
+
+/**
+ * Whether the map-coverage item \a item outputs its match scaled by its constant value instead of
+ * the plain White/Black result. The value itself is the record's grey, the standard gradient value.
+ */
+inline bool paint_layer_mask_item_gradient(const MaterialPaintLayer &item)
+{
+  return (item.flag & MA_PAINT_LAYER_MASK_ITEM_GRADIENT) != 0;
+}
+
+/** Whether the Color ID item compares each colour with its own tolerance. */
+inline bool paint_layer_mask_item_color_id_advanced(const MaterialPaintLayer &item)
+{
+  return (item.flag & MA_PAINT_LAYER_MASK_ITEM_COLOR_ID_ADVANCED) != 0;
+}
+
+/** Whether the output map carries its coverage in the alpha channel. */
+inline bool paint_layer_mask_item_alpha_background(const MaterialPaintLayer &item)
+{
+  return (item.flag & MA_PAINT_LAYER_MASK_ITEM_ALPHA_BACKGROUND) != 0;
 }
 
 /**

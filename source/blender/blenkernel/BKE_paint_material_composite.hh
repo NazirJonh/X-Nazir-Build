@@ -234,6 +234,17 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
  * by default, which says what the coverage is where the item covers. The row's coverage is scaled
  * by the final `M`.
  */
+/** One colour a Color ID map-coverage operator matches, in the map's raw data space. */
+struct PaintMaterialCompositeIdColor {
+  float color[3] = {};
+  /** The colour's own tolerance in Advanced mode; ignored unless #own_tolerance is set. */
+  float tolerance = 0.5f;
+  /** A disabled colour is skipped by the match. */
+  bool enabled = true;
+  /** Color ID Advanced mode: use #tolerance and a hard edge instead of the shared pair. */
+  bool own_tolerance = false;
+};
+
 struct PaintMaterialCompositeMaskItem {
   /** The painted map, or null while the item is still a constant. */
   Image *image = nullptr;
@@ -255,6 +266,28 @@ struct PaintMaterialCompositeMaskItem {
   float filter_params[8] = {};
   /** The item's UV mapping, applied to its map while the buffers are acquired. */
   PaintMaterialCompositeMapping mapping;
+
+  /**
+   * A map-driven mask coverage operator (#MA_PAINT_LAYER_FILTER_COLOR_ID / _UV_ISLAND), or 0 for a
+   * laid or filter item. It lays `match` from #coverage_image: `M = M * lerp(1, match, opacity)`.
+   * A missing map is `match = 0` (the operator still takes part); the element's visibility is the
+   * only switch, and its absence is folded into #opacity by the describe step.
+   */
+  int16_t map_coverage = 0;
+  /** The operator's map (the item's Base Color record image), or null when it has none. */
+  Image *coverage_image = nullptr;
+  /** Null selects the default #ImageUser. */
+  const ImageUser *coverage_iuser = nullptr;
+  /** How far a sample may differ from a colour and still match (max-channel), 0..1. */
+  float coverage_tolerance = 0.0f;
+  /** The width of the falloff past the tolerance; zero is a hard edge. */
+  float coverage_softness = 0.0f;
+  /** The scale the match is multiplied by (the item's Gradient value, one for White/Black). */
+  float coverage_output = 1.0f;
+  /** The colours the Color ID operator matches; the enabled ones decide the match. */
+  Vector<PaintMaterialCompositeIdColor> coverage_colors;
+  /** The operator's UV mapping, applied to its map while the buffers are acquired. */
+  PaintMaterialCompositeMapping coverage_mapping;
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
@@ -291,6 +324,17 @@ struct PaintMaterialCompositeMaskBuffer {
   /** See #PaintMaterialCompositeMaskItem::filter. */
   int16_t filter = 0;
   float filter_params[8] = {};
+  /** See #PaintMaterialCompositeMaskItem::map_coverage. */
+  int16_t map_coverage = 0;
+  /** The operator's map as a buffer, or null when it has none. */
+  ImBuf *coverage_ibuf = nullptr;
+  /** Colorspace name of #coverage_ibuf's own buffer, or null for scene linear. */
+  const char *coverage_colorspace_name = nullptr;
+  float coverage_tolerance = 0.0f;
+  float coverage_softness = 0.0f;
+  /** See #PaintMaterialCompositeMaskItem::coverage_output. */
+  float coverage_output = 1.0f;
+  Vector<PaintMaterialCompositeIdColor> coverage_colors;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
@@ -326,6 +370,61 @@ struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
  * colour chain's own, which a Mix lerps and an isolating folder's divide drops.
  */
 bool BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel channel);
+
+/**
+ * The match a map-driven mask coverage operator lays from one sampled texel.
+ *
+ * #map_coverage names the operator (#MA_PAINT_LAYER_FILTER_UV_ISLAND or _COLOR_ID); \a rgb is the
+ * texel in the map's raw data space, the same space the stored colours live in. UV Island reads the
+ * red channel as a scalar; Color ID matches the nearest enabled colour within \a tolerance and fades
+ * over \a softness past it (max-channel distance), and no enabled colour means no match. An entry
+ * with #PaintMaterialCompositeIdColor::own_tolerance uses its own tolerance and a hard edge. The one
+ * rule the CPU composite here and the strokes share, so the two cannot disagree about what a mask
+ * hides; a missing map is handled by the caller (\a rgb all zero reads as `match = 0` for UV Island
+ * but is not relied on for Color ID).
+ */
+float BKE_paint_material_coverage_match(int16_t map_coverage,
+                                        const float rgb[3],
+                                        float tolerance,
+                                        float softness,
+                                        Span<PaintMaterialCompositeIdColor> colors);
+
+/**
+ * The scalar factor a row's mask items lay at one texel of the evaluation.
+ *
+ * The one arithmetic the linear composite and the strokes share: the composite calls it per pixel
+ * while it lays a row down, and a stroke calls it to know which texels its own row's mask hides, so
+ * the canvas a stroke paints and the canvas the render shows cannot disagree about what a mask
+ * covers. The factor starts at one and every item combines with what the items below it left,
+ * bottom to top (see #PaintMaterialCompositeMaskItem).
+ *
+ * \param items: the row's mask items, bottom to top.
+ * \param item_samples: item \a i's decoded texel (straight scene-linear RGBA, `pixel_index * 4`
+ *                      floats into it), or null when the item has no map.
+ * \param coverage_samples: item \a i's decoded coverage-map texel, or null (a map-driven operator
+ *                          without a readable map samples as `match = 0`).
+ * \param pixel_index: the texel index (row-major) to read both sample arrays at.
+ */
+float BKE_paint_material_mask_factor_eval(
+    Span<PaintMaterialCompositeMaskBuffer> items,
+    Span<const float *> item_samples,
+    Span<const float *> coverage_samples,
+    int64_t pixel_index);
+
+/**
+ * Acquire \a image's map for UDIM \a tile_number, decode it to straight scene-linear float RGBA,
+ * and resample it to \a ref_width x \a ref_height through \a mapping when the mapping applies.
+ *
+ * The pixels are the ones #BKE_paint_material_mask_factor_eval reads: the same decode and the same
+ * mapping resample the linear composite applies while it acquires a stack, so a mask sampled here
+ * is the mask the render hides with. The caller owns the returned buffer and frees it with
+ * #IMB_freeImBuf. Null when the map cannot be read.
+ */
+ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
+                                           int tile_number,
+                                           const PaintMaterialCompositeMapping *mapping,
+                                           int ref_width,
+                                           int ref_height);
 
 /** Layers bottom to top: index 0 is composited first and everything else lands on top of it. */
 struct PaintMaterialCompositeStack {

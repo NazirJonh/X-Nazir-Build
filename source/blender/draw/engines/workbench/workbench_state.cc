@@ -417,6 +417,22 @@ ObjectState::ObjectState(const DRWContext *draw_ctx,
     }
   }
 
+  /* A mask-filter picker (Color ID, UV Island) shows its map flat on the active mesh, so the area
+   * the user samples reads the same here as in the Image Editor. */
+  const bool picker_candidate = is_active && ob->type == OB_MESH && !draw_ctx->is_scene_render();
+  if (blender::Image *picker_image = picker_candidate ?
+                                         ED_paint_mask_filter_preview_image_get(
+                                             *DEG_get_bmain(draw_ctx->depsgraph)) :
+                                         nullptr;
+      picker_image != nullptr && has_uv())
+  {
+    color_type = V3D_SHADING_TEXTURE_COLOR;
+    show_missing_texture = true;
+    image_paint_override = MaterialTexture(picker_image);
+    image_paint_override.sampler_state.extend_x = GPU_SAMPLER_EXTEND_MODE_REPEAT;
+    image_paint_override.sampler_state.extend_yz = GPU_SAMPLER_EXTEND_MODE_REPEAT;
+  }
+
   use_per_material_batches = image_paint_override.gpu.texture == nullptr &&
                              ELEM(color_type,
                                   V3D_SHADING_TEXTURE_COLOR,

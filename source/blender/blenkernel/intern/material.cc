@@ -127,6 +127,8 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
     BKE_material_paint_layer_free(&child);
   }
   layer->children = {nullptr, nullptr};
+  /* The Color ID colours are plain sub-data with no ID references, so they are freed outright. */
+  layer->id_colors.free_no_destruct();
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
   /* The ID users of the parameters are released by the generic free pass through
@@ -176,6 +178,16 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
   for (const MaterialPaintLayer &child : src.children) {
     BLI_addtail(&dst->children, material_paint_layer_copy(child));
   }
+  /* The copied list head above points at the source's colours; they are owned sub-data like the
+   * items, so each gets a copy of its own. */
+  dst->id_colors = {nullptr, nullptr};
+  for (const MaterialPaintLayerIdColor &color : src.id_colors) {
+    MaterialPaintLayerIdColor *copy = MEM_new<MaterialPaintLayerIdColor>(__func__);
+    copy_v3_v3(copy->color, color.color);
+    copy->tolerance = color.tolerance;
+    copy->flag = color.flag;
+    BLI_addtail(&dst->id_colors, copy);
+  }
   return dst;
 }
 
@@ -215,6 +227,7 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
+  writer->write_struct_list(&layer.id_colors);
   writer->write_struct_list(&layer.mask_stack);
   for (const MaterialPaintLayer &item : layer.mask_stack) {
     material_paint_layer_blend_write(writer, item);
@@ -249,6 +262,7 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
   }
   BLO_read_struct(reader, IDProperty, &layer.system_properties);
   IDP_BlendDataRead(reader, &layer.system_properties);
+  BLO_read_struct_list(reader, MaterialPaintLayerIdColor, &layer.id_colors);
   BLO_read_struct_list(reader, MaterialPaintLayer, &layer.mask_stack);
   for (MaterialPaintLayer &item : layer.mask_stack) {
     material_paint_layer_blend_read(reader, item);

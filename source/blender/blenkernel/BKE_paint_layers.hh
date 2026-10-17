@@ -35,6 +35,7 @@ struct Main;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
+struct MaterialPaintLayerIdColor;
 struct ReportList;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
@@ -355,6 +356,123 @@ bool BKE_paint_layers_mask_item_remove(Material &ma, MaterialPaintLayer *item);
 /** The row whose mask holds \a item (base or correction), or null when it is no mask item of
  * \a ma. */
 MaterialPaintLayer *BKE_paint_layers_mask_item_owner(Material &ma, const MaterialPaintLayer &item);
+
+/* -------------------------------------------------------------------- */
+/** \name Color ID colours of a map-coverage mask item
+ *
+ * The colours a #MA_PAINT_LAYER_FILTER_COLOR_ID item matches. The list is owned by the item; these
+ * calls are the only mutators RNA and the operators go through, so no caller writes the DNA list
+ * directly. Adding or removing a colour changes the generated graph's shape (a comparison per
+ * colour), so those tag a topology edit; the colour and its enabled flag are values the graph reads
+ * as inputs, so those tag a value-only edit.
+ * \{ */
+
+/**
+ * Add a colour to the Color ID item \a item, on top of the list (newest first), enabled.
+ * \return the new record, or null when \a item is not a Color ID item of \a ma.
+ */
+MaterialPaintLayerIdColor *BKE_paint_layers_id_color_add(Material &ma,
+                                                         MaterialPaintLayer *item,
+                                                         const float color[3]);
+
+/** Remove \a color from its item. False when it is not one of the item's colours. */
+bool BKE_paint_layers_id_color_remove(Material &ma,
+                                      MaterialPaintLayer *item,
+                                      MaterialPaintLayerIdColor *color);
+
+/** Enable or disable \a color; a disabled colour is skipped by the match. Value-only. */
+bool BKE_paint_layers_id_color_set_enabled(Material &ma,
+                                           MaterialPaintLayer *item,
+                                           MaterialPaintLayerIdColor *color,
+                                           bool enabled);
+
+/** Set \a color's RGB, in the ID Map's raw data space. Value-only. */
+bool BKE_paint_layers_id_color_set_color(Material &ma,
+                                         MaterialPaintLayer *item,
+                                         MaterialPaintLayerIdColor *color,
+                                         const float value[3]);
+
+/** Set the per-colour tolerance of \a color, used in Advanced mode. Value-only. */
+bool BKE_paint_layers_id_color_set_tolerance(Material &ma,
+                                             MaterialPaintLayer *item,
+                                             MaterialPaintLayerIdColor *color,
+                                             float tolerance);
+
+/**
+ * Make \a image read as data (the Non-Color role), as the ID Map of a Color ID item must: the
+ * shader, the CPU mask and the picker then all see the file's raw texel values, whatever colorspace
+ * the file was opened with. Does nothing when it already is data.
+ */
+void BKE_paint_layers_map_coverage_image_use_data(Main &bmain, Image &image);
+
+/** Whether \a item is a map-driven mask coverage operator (Color ID or UV Island). */
+bool BKE_paint_layers_is_map_coverage(const MaterialPaintLayer &item);
+
+/**
+ * The Image a map-coverage item samples, or null when it has none or its Base Color record is
+ * disabled: the same rule the shader and the CPU mask follow.
+ */
+Image *BKE_paint_layers_map_coverage_image_get(const MaterialPaintLayer &item);
+
+/** Tolerance and softness of the map-coverage item \a item (its kind's parameters). */
+float BKE_paint_layers_coverage_tolerance_get(const MaterialPaintLayer &item);
+float BKE_paint_layers_coverage_softness_get(const MaterialPaintLayer &item);
+
+/** Whether the output of the mask item \a item is inverted (black where it matches). */
+bool BKE_paint_layers_mask_item_is_inverted(const MaterialPaintLayer &item);
+
+/** Whether the map-coverage item \a item outputs its match scaled by its gradient value. */
+bool BKE_paint_layers_mask_item_is_gradient(const MaterialPaintLayer &item);
+
+/**
+ * Enable or disable the Gradient output of the map-coverage item \a item: its match is then scaled
+ * by the item's Base Color constant (see #BKE_paint_layers_mask_item_output_value). Value-only.
+ * \return false when \a item is not a map-coverage mask item of \a ma.
+ */
+bool BKE_paint_layers_mask_item_set_gradient(Material &ma,
+                                             MaterialPaintLayer *item,
+                                             bool gradient);
+
+/** Whether the Color ID item compares each colour with its own tolerance (Advanced mode). */
+bool BKE_paint_layers_mask_item_is_color_id_advanced(const MaterialPaintLayer &item);
+
+/**
+ * Enable or disable the per-colour tolerance mode of the Color ID item \a item. It changes the
+ * generated graph's shape (one tolerance input per colour), so it is a topology edit.
+ * \return false when \a item is not a Color ID mask item of \a ma.
+ */
+bool BKE_paint_layers_mask_item_set_color_id_advanced(Material &ma,
+                                                      MaterialPaintLayer *item,
+                                                      bool advanced);
+
+/** Whether the output map of \a item carries its coverage in the alpha channel. */
+bool BKE_paint_layers_mask_item_is_alpha_background(const MaterialPaintLayer &item);
+
+/** Store the alpha-background choice of the map-coverage item \a item. Value-only. */
+bool BKE_paint_layers_mask_item_set_alpha_background(Material &ma,
+                                                     MaterialPaintLayer *item,
+                                                     bool alpha_background);
+
+/**
+ * The scale the match of \a item is multiplied by: the item's Base Color constant in Gradient mode,
+ * one otherwise. The generator, the CPU composite and the pickers read this one number.
+ */
+float BKE_paint_layers_mask_item_output_value(const MaterialPaintLayer &item);
+
+/**
+ * Whether the map of the map-coverage operator \a item may be written: the UV Island capture does,
+ * a Color ID item's map is an external ID Map and is reference only. False for any other item.
+ */
+bool BKE_paint_layers_map_coverage_paintable(const MaterialPaintLayer &item);
+
+/**
+ * The Color ID item of \a ma whose list holds \a color, or null when it is in none (a stale
+ * pointer). The colours carry no back pointer, so RNA finds the owner by address.
+ */
+MaterialPaintLayer *BKE_paint_layers_id_color_owner(Material &ma,
+                                                    const MaterialPaintLayerIdColor &color);
+
+/** \} */
 
 /**
  * The mask correction the active marker names, or null when it names a row, a content correction or
@@ -762,6 +880,12 @@ enum class PaintLayersIssueCode : int8_t {
    * more kinds, or an edit made around the API.
    */
   KindNotAllowed = 3,
+  /**
+   * An enabled map-coverage mask item (Color ID, UV Island) without a map. The operator still takes
+   * part and matches nothing (`match = 0`), so a whole mask can disappear with no visible reason;
+   * this says why.
+   */
+  MapCoverageMissingMap = 4,
 };
 
 /** One entry #BKE_paint_layers_issues_get reports. */

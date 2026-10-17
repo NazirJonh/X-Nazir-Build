@@ -111,6 +111,10 @@ bool values_sync_socket(Material &ma,
     if (STREQ(role, ROLE_MASK_OPACITY)) {
       value = BKE_paint_layers_effective_opacity(*mask);
     }
+    else if (paint_layer_kind_is_map_coverage(*mask)) {
+      /* Gradient carries the item's standard value; White/Black read one. */
+      value = BKE_paint_layers_mask_item_output_value(*mask);
+    }
     else {
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(
           *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -173,6 +177,49 @@ bool values_sync_socket(Material &ma,
     copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket.default_value)->value, record->value);
     if (iface.socket_data != nullptr) {
       copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(iface.socket_data)->value, record->value);
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_ID_COLOR_ENABLED) || STREQ(role, ROLE_ID_COLOR) ||
+      STREQ(role, ROLE_ID_COLOR_TOLERANCE))
+  {
+    /* One colour of a Color ID item's list, named by its position; a list that shrank under the
+     * tree is a hand edit, so the caller rebuilds rather than keeping a stale colour. */
+    const int index = prop_int_get(iface.properties, INPUT_ID_COLOR_PROP, -1);
+    if (index < 0 || socket.default_value == nullptr) {
+      return false;
+    }
+    const MaterialPaintLayerIdColor *color = nullptr;
+    int position = 0;
+    for (const MaterialPaintLayerIdColor &entry : layer->id_colors) {
+      if (position == index) {
+        color = &entry;
+        break;
+      }
+      position++;
+    }
+    if (color == nullptr) {
+      return false;
+    }
+    if (STREQ(role, ROLE_ID_COLOR_ENABLED)) {
+      const float value = (color->flag & MA_PAINT_LAYER_ID_COLOR_ENABLED) != 0 ? 1.0f : 0.0f;
+      static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+      if (iface.socket_data != nullptr) {
+        static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+      }
+    }
+    else if (STREQ(role, ROLE_ID_COLOR_TOLERANCE)) {
+      static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = color->tolerance;
+      if (iface.socket_data != nullptr) {
+        static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = color->tolerance;
+      }
+    }
+    else {
+      float value[4] = {color->color[0], color->color[1], color->color[2], 1.0f};
+      copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket.default_value)->value, value);
+      if (iface.socket_data != nullptr) {
+        copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(iface.socket_data)->value, value);
+      }
     }
     return true;
   }

@@ -247,6 +247,13 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     /* A filter item is nodes of its own, and which filter decides them. */
     hash = topology_hash_mix(hash, uint64_t(uint8_t(item.source)));
     hash = topology_hash_mix(hash, uint64_t(uint16_t(item.kind_subtype)));
+    /* A map-coverage item builds one comparison per stored colour, so the count is structure; each
+     * colour's value and enabled flag are inputs the graph reads, so they stay out of the hash. */
+    if (paint_layer_kind_is_map_coverage(item)) {
+      hash = topology_hash_mix(hash, 0x300 + uint64_t(item.id_colors.count()));
+      /* Advanced Color ID grows one tolerance input per colour. */
+      hash = topology_hash_mix(hash, paint_layer_mask_item_color_id_advanced(item) ? 1 : 0);
+    }
     hash = topology_hash_mix(hash, uint64_t(uint8_t(item.blend)));
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <utility>
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase_iterator.hh"
@@ -34,6 +35,7 @@
 #include "DNA_scene_types.h"
 
 #include "IMB_colormanagement.hh"
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 namespace blender {
@@ -187,6 +189,79 @@ static bool composite_row_source_describe(const Material &ma,
 }
 
 /**
+ * Describe \a layer's mask stack to the evaluator, bottom to top: the base first, then the
+ * corrections over it in the order they were added. One that lays nothing yet is not carried, as
+ * the generator builds nothing for it. The mask is one for all channels of the row, so the same
+ * description reaches every channel's stack.
+ *
+ * The one place the description is read for the mask, so the CPU composite and the strokes that
+ * sample the mask themselves (#PaintLayersMaskSampler) cannot drift apart.
+ */
+static void composite_mask_items_describe(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  if (BKE_paint_layers_mask_base(layer) == nullptr) {
+    return;
+  }
+  for (const MaterialPaintLayer &mask : layer.mask_stack) {
+    if (paint_layer_kind_is_map_coverage(mask)) {
+      /* A map-driven coverage operator: it lays its map's `match` over the coverage below,
+       * whether or not it has a map yet (a missing map is `match = 0`, not a pass-through). Its
+       * Base Color record is structural, so the map is read from it directly. */
+      PaintMaterialCompositeMaskItem item;
+      item.opacity = BKE_paint_layers_effective_opacity(mask);
+      item.map_coverage = mask.kind_subtype;
+      item.invert = paint_layer_mask_item_inverted(mask);
+      item.coverage_tolerance = paint_layer_kind_param_get(mask, PAINT_LAYER_COVERAGE_TOLERANCE);
+      item.coverage_softness = paint_layer_kind_param_get(mask, PAINT_LAYER_COVERAGE_SOFTNESS);
+      item.coverage_output = BKE_paint_layers_mask_item_output_value(mask);
+      if (paint_layer_map_coverage_has_map(mask)) {
+        item.coverage_image = paint_layer_map_coverage_record(mask)->image;
+        composite_mapping_describe(
+            ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, item.coverage_mapping);
+      }
+      for (const MaterialPaintLayerIdColor &color : mask.id_colors) {
+        PaintMaterialCompositeIdColor out_color;
+        copy_v3_v3(out_color.color, color.color);
+        out_color.tolerance = color.tolerance;
+        out_color.own_tolerance = paint_layer_mask_item_color_id_advanced(mask);
+        out_color.enabled = (color.flag & MA_PAINT_LAYER_ID_COLOR_ENABLED) != 0;
+        item.coverage_colors.append(out_color);
+      }
+      r_items.append(item);
+      continue;
+    }
+    if (paint_layer_effect_is_filter(mask)) {
+      /* A filter changes the coverage so far; it owns no map or grey and no record. */
+      PaintMaterialCompositeMaskItem filter;
+      filter.opacity = BKE_paint_layers_effective_opacity(mask);
+      filter.filter = mask.kind_subtype;
+      composite_filter_params(mask, filter.filter_params);
+      r_items.append(filter);
+      continue;
+    }
+    const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
+        mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {
+      continue;
+    }
+    PaintMaterialCompositeMaskItem item;
+    item.opacity = BKE_paint_layers_effective_opacity(mask);
+    item.image = mask_record->image;
+    item.iuser = nullptr;
+    item.constant_gray = paint_layer_mask_constant(*mask_record);
+    item.blend = CompositeBlend(
+        BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+    item.invert = paint_layer_mask_item_inverted(mask);
+    if (item.image != nullptr) {
+      composite_mapping_describe(ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, item.mapping);
+    }
+    r_items.append(item);
+  }
+}
+
+/**
  * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is
  * one entry carrying its children, which the evaluator composites in isolation; a folder nothing of
  * which takes part is left out, as it is on the generator's side.
@@ -263,38 +338,7 @@ static void composite_image_layers_collect(const Material &ma,
     }
     /* The mask is one for all channels of the row, so the same item reaches every channel's
      * stack, exactly as the generator reads the one set of mask inputs in every channel chain. */
-    /* The base first, then the corrections over it in the order they were added; one that lays
-     * nothing yet is not carried, as the generator builds nothing for it. */
-    if (BKE_paint_layers_mask_base(layer) != nullptr) {
-      for (const MaterialPaintLayer &mask : layer.mask_stack) {
-        if (paint_layer_effect_is_filter(mask)) {
-          /* A filter changes the coverage so far; it owns no map or grey and no record. */
-          PaintMaterialCompositeMaskItem filter;
-          filter.opacity = BKE_paint_layers_effective_opacity(mask);
-          filter.filter = mask.kind_subtype;
-          composite_filter_params(mask, filter.filter_params);
-          out.mask_items.append(filter);
-          continue;
-        }
-        const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
-            mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-        if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {
-          continue;
-        }
-        PaintMaterialCompositeMaskItem item;
-        item.opacity = BKE_paint_layers_effective_opacity(mask);
-        item.image = mask_record->image;
-        item.iuser = nullptr;
-        item.constant_gray = paint_layer_mask_constant(*mask_record);
-        item.blend = CompositeBlend(
-            BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
-        item.invert = paint_layer_mask_item_inverted(mask);
-        if (item.image != nullptr) {
-          composite_mapping_describe(ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, item.mapping);
-        }
-        out.mask_items.append(item);
-      }
-    }
+    composite_mask_items_describe(ma, layer, out.mask_items);
     r_layers.append(std::move(out));
   }
 }
@@ -453,6 +497,136 @@ bool BKE_paint_layers_composite_image(const Material &ma,
     BKE_report(reports, RPT_ERROR, "Failed to composite the channel");
   }
   return ok;
+}
+
+bool BKE_paint_layers_mask_items(const Material &ma,
+                                 const MaterialPaintLayer &layer,
+                                 Vector<PaintMaterialCompositeMaskItem> &r_items)
+{
+  r_items.clear();
+  composite_mask_items_describe(ma, layer, r_items);
+  return !r_items.is_empty();
+}
+
+PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
+                                               const MaterialPaintLayer &layer)
+{
+  composite_mask_items_describe(ma, layer, items_);
+  /* The evaluator's own form of the description, so #BKE_paint_material_mask_factor_eval reads the
+   * same opacity/blend/invert/filter/coverage fields the composite reads. */
+  buffers_.resize(items_.size());
+  for (const int i : items_.index_range()) {
+    const PaintMaterialCompositeMaskItem &item = items_[i];
+    PaintMaterialCompositeMaskBuffer &buffer = buffers_[i];
+    buffer.constant_gray = item.constant_gray;
+    buffer.opacity = item.opacity;
+    buffer.blend = item.blend;
+    buffer.invert = item.invert;
+    buffer.filter = item.filter;
+    std::copy(std::begin(item.filter_params),
+              std::end(item.filter_params),
+              std::begin(buffer.filter_params));
+    buffer.map_coverage = item.map_coverage;
+    buffer.coverage_tolerance = item.coverage_tolerance;
+    buffer.coverage_softness = item.coverage_softness;
+    buffer.coverage_output = item.coverage_output;
+    buffer.coverage_colors = item.coverage_colors;
+  }
+}
+
+PaintLayersMaskSampler::~PaintLayersMaskSampler()
+{
+  for (Tile &tile : tiles_) {
+    for (ImBuf *ibuf : tile.items) {
+      if (ibuf != nullptr) {
+        IMB_freeImBuf(ibuf);
+      }
+    }
+    for (ImBuf *ibuf : tile.coverage) {
+      if (ibuf != nullptr) {
+        IMB_freeImBuf(ibuf);
+      }
+    }
+  }
+}
+
+bool PaintLayersMaskSampler::is_empty() const
+{
+  return items_.is_empty();
+}
+
+void PaintLayersMaskSampler::tile_acquire(const int tile_number,
+                                          const int ref_width,
+                                          const int ref_height)
+{
+  for (const int i : tiles_.index_range()) {
+    if (tiles_[i].tile_number == tile_number) {
+      return;
+    }
+  }
+
+  Tile tile;
+  tile.tile_number = tile_number;
+  tile.width = ref_width;
+  tile.height = ref_height;
+  const int item_count = items_.size();
+  tile.items.resize(item_count, nullptr);
+  tile.coverage.resize(item_count, nullptr);
+  tile.item_samples.resize(item_count, nullptr);
+  tile.coverage_samples.resize(item_count, nullptr);
+  for (const int i : items_.index_range()) {
+    const PaintMaterialCompositeMaskItem &item = items_[i];
+    if (item.image != nullptr) {
+      ImBuf *ibuf = BKE_paint_material_mask_map_acquire(
+          item.image, tile_number, &item.mapping, ref_width, ref_height);
+      /* A buffer that does not match the tile the stroke paints on is not sampled: an item of
+       * another size would be read out of bounds, and the composite refuses such a stack too. */
+      if (ibuf != nullptr && ibuf->x == ref_width && ibuf->y == ref_height) {
+        tile.items[i] = ibuf;
+        tile.item_samples[i] = ibuf->float_data();
+      }
+      else if (ibuf != nullptr) {
+        IMB_freeImBuf(ibuf);
+      }
+    }
+    if (item.coverage_image != nullptr) {
+      ImBuf *ibuf = BKE_paint_material_mask_map_acquire(
+          item.coverage_image, tile_number, &item.coverage_mapping, ref_width, ref_height);
+      if (ibuf != nullptr && ibuf->x == ref_width && ibuf->y == ref_height) {
+        tile.coverage[i] = ibuf;
+        tile.coverage_samples[i] = ibuf->float_data();
+      }
+      else if (ibuf != nullptr) {
+        IMB_freeImBuf(ibuf);
+      }
+    }
+  }
+
+  tiles_.append(std::move(tile));
+}
+
+float PaintLayersMaskSampler::sample(const int tile_number, const int x, const int y) const
+{
+  if (items_.is_empty()) {
+    return 1.0f;
+  }
+  const Tile *found = nullptr;
+  for (const Tile &candidate : tiles_) {
+    if (candidate.tile_number == tile_number) {
+      found = &candidate;
+      break;
+    }
+  }
+  if (found == nullptr) {
+    return 1.0f;
+  }
+  const Tile &tile = *found;
+  if (x < 0 || y < 0 || x >= tile.width || y >= tile.height) {
+    return 1.0f;
+  }
+  const int64_t pixel_index = int64_t(y) * tile.width + x;
+  return BKE_paint_material_mask_factor_eval(
+      buffers_.as_span(), tile.item_samples, tile.coverage_samples, pixel_index);
 }
 
 }  // namespace blender

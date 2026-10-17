@@ -153,6 +153,14 @@ bool BKE_paint_layers_target_get(Material &ma,
   if (r_target.mask_item == nullptr) {
     return false;
   }
+  /* A map-coverage item whose kind is reference-only (Color ID: an external ID Map) is not a stroke
+   * target; editability is a trait of the kind, so the user cannot pick it by accident. A paintable
+   * one (UV Island) is written by its capture, not by a stroke, but is still a valid target image. */
+  if (paint_layer_kind_is_map_coverage(*r_target.mask_item) &&
+      !paint_layer_kind_map_paintable(*r_target.mask_item))
+  {
+    return false;
+  }
   r_target.channel_record = paint_layer_channel_find(*r_target.mask_item, channel);
   return true;
 }

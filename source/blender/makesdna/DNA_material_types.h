@@ -409,6 +409,22 @@ enum eMaterialPaintLayerFlag : int16_t {
    * #MaterialPaintLayer::mask_stack, and removed only together with the whole mask.
    */
   MA_PAINT_LAYER_MASK_BASE = 1 << 1,
+  /**
+   * A map-coverage mask item outputs its match scaled by its Base Color constant (the standard
+   * gradient value) instead of the plain White/Black result. Its output is `match * value`, so a
+   * value of one reads as White. Only meaningful on a map-coverage item.
+   */
+  MA_PAINT_LAYER_MASK_ITEM_GRADIENT = 1 << 2,
+  /**
+   * A Color ID mask item compares each colour with its own tolerance, and the shared tolerance and
+   * softness are unused. Advanced mode; changes the generated graph's shape.
+   */
+  MA_PAINT_LAYER_MASK_ITEM_COLOR_ID_ADVANCED = 1 << 3,
+  /**
+   * The output map carries the coverage in the alpha channel, with a transparent background, rather
+   * than as a filled grey. Stored for consumers that export or reuse the mask as an image.
+   */
+  MA_PAINT_LAYER_MASK_ITEM_ALPHA_BACKGROUND = 1 << 4,
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
@@ -493,6 +509,40 @@ enum eMaterialPaintLayerFilter : int16_t {
   MA_PAINT_LAYER_FILTER_INVERT = 1,
   MA_PAINT_LAYER_FILTER_LEVELS = 2,
   MA_PAINT_LAYER_FILTER_HSL = 3,
+  /** A map-driven mask coverage operator: matches colours of the element's Base Color map. */
+  MA_PAINT_LAYER_FILTER_COLOR_ID = 4,
+  /** A map-driven mask coverage operator: matches the island mask of the element's Base Color map. */
+  MA_PAINT_LAYER_FILTER_UV_ISLAND = 5,
+};
+
+/** #MaterialPaintLayerIdColor::flag */
+enum eMaterialPaintLayerIdColorFlag : int8_t {
+  /** The colour takes part in the Color ID match; a disabled one is skipped. */
+  MA_PAINT_LAYER_ID_COLOR_ENABLED = 1 << 0,
+  /** The per-colour controls are unfolded in the UI. */
+  MA_PAINT_LAYER_ID_COLOR_EXPANDED = 1 << 1,
+};
+ENUM_OPERATORS(eMaterialPaintLayerIdColorFlag)
+
+/**
+ * One colour a Color ID mask item matches, kept in #MaterialPaintLayer::id_colors.
+ *
+ * The colour is stored in the ID Map's raw data space, the same values the picker reads, so the
+ * CPU composite, the generated graph and the picker compare the map's texels without a conversion
+ * that could drift between them.
+ */
+struct MaterialPaintLayerIdColor {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerIdColor)
+
+  struct MaterialPaintLayerIdColor *next = nullptr, *prev = nullptr;
+  /** The matched colour, in the map's raw data space. */
+  float color[3] = {};
+  /** The colour's own tolerance in Advanced mode; the shared kind parameter in Simple mode. */
+  float tolerance = 0.5f;
+  /** #eMaterialPaintLayerIdColorFlag. */
+  int8_t flag = MA_PAINT_LAYER_ID_COLOR_ENABLED;
+  /* Pads the struct to a multiple of the pointer size, as every DNA struct must. */
+  char _pad[7] = {};
 };
 
 /** #MaterialPaintLayerChannel::state */
@@ -654,6 +704,12 @@ struct MaterialPaintLayer {
    * #MA_PAINT_LAYER_ROLE_EFFECT row with no children, mask or corrections of its own.
    */
   ListBaseT<MaterialPaintLayer> effects = {nullptr, nullptr};
+  /**
+   * The colours a Color ID map-coverage operator matches (#MA_PAINT_LAYER_FILTER_COLOR_ID), newest
+   * first. Owned by the row (freed, copied and written with it); empty for every other kind. The
+   * ordinal is not stored: the list order is the display order.
+   */
+  ListBaseT<MaterialPaintLayerIdColor> id_colors = {nullptr, nullptr};
   /**
    * UV mapping of this row's own maps. Stored by value, so a flat copy carries it. Zeroes read back
    * as disabled; a zero scale axis reads back as one. General to the row, not a parameter of its

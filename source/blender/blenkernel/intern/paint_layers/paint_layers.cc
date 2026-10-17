@@ -20,6 +20,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
@@ -27,6 +28,7 @@
 #include "BKE_material.hh"
 #include "BKE_report.hh"
 
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
@@ -472,6 +474,33 @@ static void paint_layer_channels_duplicate(Main &bmain,
   }
 }
 
+/** A copy of \a src's Color ID colours linked on \a dst, each with its own record. */
+static void paint_layer_id_colors_duplicate(MaterialPaintLayer &dst, const MaterialPaintLayer &src)
+{
+  for (const MaterialPaintLayerIdColor &color : src.id_colors) {
+    MaterialPaintLayerIdColor *copy = MEM_new<MaterialPaintLayerIdColor>(__func__);
+    copy->color[0] = color.color[0];
+    copy->color[1] = color.color[1];
+    copy->color[2] = color.color[2];
+    copy->tolerance = color.tolerance;
+    copy->flag = color.flag;
+    BLI_addtail(&dst.id_colors, copy);
+  }
+}
+
+/**
+ * A copy of \a src's kind parameters onto \a dst. A stateful kind (a map-coverage operator's
+ * tolerance and softness) keeps its values with the copy; the destination's own group, if it has
+ * one already, is left alone.
+ */
+static void paint_layer_properties_duplicate(MaterialPaintLayer &dst, const MaterialPaintLayer &src)
+{
+  if (src.system_properties != nullptr && dst.system_properties == nullptr) {
+    dst.system_properties = IDP_CopyProperty_ex(src.system_properties,
+                                                LIB_ID_CREATE_NO_USER_REFCOUNT);
+  }
+}
+
 /**
  * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
  * for the same reason as the channel maps.
@@ -483,6 +512,7 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
   item_copy->role = item.role;
   item_copy->source = item.source;
+  item_copy->kind_subtype = item.kind_subtype;
   item_copy->blend = item.blend;
   item_copy->flag = item.flag;
   item_copy->opacity = item.opacity;
@@ -490,6 +520,8 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
   paint_layer_channels_duplicate(bmain, *item_copy, item);
+  paint_layer_id_colors_duplicate(*item_copy, item);
+  paint_layer_properties_duplicate(*item_copy, item);
   return item_copy;
 }
 
@@ -507,10 +539,13 @@ static void paint_layer_branch_duplicate(Main &bmain,
   dst.opacity = src.opacity;
   dst.blend = src.blend;
   dst.source = src.source;
+  dst.kind_subtype = src.kind_subtype;
   memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
   /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
   dst.mapping = dna::shallow_copy(src.mapping);
   paint_layer_channels_duplicate(bmain, dst, src);
+  paint_layer_id_colors_duplicate(dst, src);
+  paint_layer_properties_duplicate(dst, src);
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as
    * the channel maps. */
@@ -760,7 +795,11 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
                                                 const char *name)
 {
   const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_FILTER, filter);
-  if (kind == nullptr || !paint_layer_in_stack(ma, owner)) {
+  /* A map-coverage kind is only allowed as a mask item, so it can never be added as a content
+   * correction; the role table is the one place the rule lives. */
+  if (kind == nullptr || !paint_layer_in_stack(ma, owner) ||
+      (kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT)) == 0)
+  {
     return nullptr;
   }
   MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : kind->name);
@@ -952,6 +991,18 @@ MaterialPaintLayer *BKE_paint_layers_mask_filter_add(Material &ma,
   item->flag = MA_PAINT_LAYER_ENABLED;
   paint_layer_kind_params_init(*item);
   BLI_addtail(&layer->mask_stack, item);
+  if (paint_layer_kind_is_map_coverage(*item)) {
+    /* The Base Color record is structural: it holds the map the operator samples, with no user
+     * channel switch. It starts with no map, so the item matches nothing until one is assigned. */
+    if (MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+            ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+    {
+      /* Its value is the Gradient output scale; start at one, the White result, so switching the
+       * output to Gradient does not black the mask out before the user moves the slider. */
+      const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+      copy_v4_v4(record->value, white);
+    }
+  }
 
   BKE_paint_layers_tag_edited(ma);
   return item;
@@ -975,6 +1026,223 @@ bool BKE_paint_layers_mask_item_remove(Material &ma, MaterialPaintLayer *item)
   BKE_material_paint_layer_free(item);
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+/** Whether \a item is a Color ID mask item owned by \a ma (the only kind that has id_colors). */
+static bool paint_layer_map_coverage_item_owned(const Material &ma,
+                                                const MaterialPaintLayer *item)
+{
+  return item != nullptr && item->role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+         paint_layer_kind_is_map_coverage(*item) &&
+         item->kind_subtype == MA_PAINT_LAYER_FILTER_COLOR_ID && paint_layer_owned(ma, item);
+}
+
+MaterialPaintLayerIdColor *BKE_paint_layers_id_color_add(Material &ma,
+                                                         MaterialPaintLayer *item,
+                                                         const float color[3])
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item)) {
+    return nullptr;
+  }
+  MaterialPaintLayerIdColor *record = MEM_new<MaterialPaintLayerIdColor>(__func__);
+  copy_v3_v3(record->color, color);
+  record->flag = MA_PAINT_LAYER_ID_COLOR_ENABLED;
+  /* New colours go on top of the list: the UI shows the newest first. */
+  BLI_addhead(&item->id_colors, record);
+  BKE_paint_layers_tag_edited(ma);
+  return record;
+}
+
+bool BKE_paint_layers_id_color_remove(Material &ma,
+                                      MaterialPaintLayer *item,
+                                      MaterialPaintLayerIdColor *color)
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item) || color == nullptr ||
+      BLI_findindex(&item->id_colors, color) == -1)
+  {
+    return false;
+  }
+  BLI_remlink(&item->id_colors, color);
+  MEM_delete(color);
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_id_color_set_enabled(Material &ma,
+                                           MaterialPaintLayer *item,
+                                           MaterialPaintLayerIdColor *color,
+                                           const bool enabled)
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item) || color == nullptr ||
+      BLI_findindex(&item->id_colors, color) == -1)
+  {
+    return false;
+  }
+  /* Which colours take part is an input the graph reads, not a node: a value edit, no rebuild. */
+  SET_FLAG_FROM_TEST(color->flag, enabled, MA_PAINT_LAYER_ID_COLOR_ENABLED);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_id_color_set_color(Material &ma,
+                                         MaterialPaintLayer *item,
+                                         MaterialPaintLayerIdColor *color,
+                                         const float value[3])
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item) || color == nullptr ||
+      BLI_findindex(&item->id_colors, color) == -1)
+  {
+    return false;
+  }
+  copy_v3_v3(color->color, value);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_id_color_set_tolerance(Material &ma,
+                                             MaterialPaintLayer *item,
+                                             MaterialPaintLayerIdColor *color,
+                                             const float tolerance)
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item) || color == nullptr ||
+      BLI_findindex(&item->id_colors, color) == -1)
+  {
+    return false;
+  }
+  color->tolerance = clamp_f(tolerance, 0.0f, 1.0f);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+void BKE_paint_layers_map_coverage_image_use_data(Main &bmain, Image &image)
+{
+  const char *data_name = IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DATA);
+  if (data_name == nullptr || STREQ(image.colorspace_settings.name, data_name)) {
+    return;
+  }
+  /* The ID Map is compared texel by texel against stored colours: an sRGB or filmic decode would
+   * change the values the shader, the CPU mask and the picker read, so it is read as data. */
+  STRNCPY(image.colorspace_settings.name, data_name);
+  BKE_image_signal(&bmain, &image, nullptr, IMA_SIGNAL_COLORMANAGE);
+}
+
+float BKE_paint_layers_coverage_tolerance_get(const MaterialPaintLayer &item)
+{
+  return paint_layer_kind_param_get(item, PAINT_LAYER_COVERAGE_TOLERANCE);
+}
+
+float BKE_paint_layers_coverage_softness_get(const MaterialPaintLayer &item)
+{
+  return paint_layer_kind_param_get(item, PAINT_LAYER_COVERAGE_SOFTNESS);
+}
+
+bool BKE_paint_layers_mask_item_is_inverted(const MaterialPaintLayer &item)
+{
+  return paint_layer_mask_item_inverted(item);
+}
+
+bool BKE_paint_layers_mask_item_is_gradient(const MaterialPaintLayer &item)
+{
+  return (item.flag & MA_PAINT_LAYER_MASK_ITEM_GRADIENT) != 0;
+}
+
+bool BKE_paint_layers_mask_item_set_gradient(Material &ma,
+                                             MaterialPaintLayer *item,
+                                             const bool gradient)
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item)) {
+    return false;
+  }
+  /* The output scale is a value the graph reads, not a node: a value edit, no rebuild. */
+  SET_FLAG_FROM_TEST(item->flag, gradient, MA_PAINT_LAYER_MASK_ITEM_GRADIENT);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mask_item_is_color_id_advanced(const MaterialPaintLayer &item)
+{
+  return (item.flag & MA_PAINT_LAYER_MASK_ITEM_COLOR_ID_ADVANCED) != 0;
+}
+
+bool BKE_paint_layers_mask_item_set_color_id_advanced(Material &ma,
+                                                      MaterialPaintLayer *item,
+                                                      const bool advanced)
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item) ||
+      item->kind_subtype != MA_PAINT_LAYER_FILTER_COLOR_ID)
+  {
+    return false;
+  }
+  if (BKE_paint_layers_mask_item_is_color_id_advanced(*item) == advanced) {
+    return true;
+  }
+  /* Each colour grows its own tolerance input, so the graph's shape changes. */
+  SET_FLAG_FROM_TEST(item->flag, advanced, MA_PAINT_LAYER_MASK_ITEM_COLOR_ID_ADVANCED);
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mask_item_is_alpha_background(const MaterialPaintLayer &item)
+{
+  return (item.flag & MA_PAINT_LAYER_MASK_ITEM_ALPHA_BACKGROUND) != 0;
+}
+
+bool BKE_paint_layers_mask_item_set_alpha_background(Material &ma,
+                                                     MaterialPaintLayer *item,
+                                                     const bool alpha_background)
+{
+  if (!paint_layer_map_coverage_item_owned(ma, item)) {
+    return false;
+  }
+  SET_FLAG_FROM_TEST(item->flag, alpha_background, MA_PAINT_LAYER_MASK_ITEM_ALPHA_BACKGROUND);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+float BKE_paint_layers_mask_item_output_value(const MaterialPaintLayer &item)
+{
+  if (item.role != MA_PAINT_LAYER_ROLE_MASK_ITEM || !paint_layer_kind_is_map_coverage(item) ||
+      !paint_layer_mask_item_gradient(item))
+  {
+    return 1.0f;
+  }
+  const MaterialPaintLayerChannel *record = paint_layer_map_coverage_record(item);
+  return (record != nullptr) ? paint_layer_mask_constant(*record) : 1.0f;
+}
+
+bool BKE_paint_layers_is_map_coverage(const MaterialPaintLayer &item)
+{
+  return paint_layer_kind_is_map_coverage(item);
+}
+
+bool BKE_paint_layers_map_coverage_paintable(const MaterialPaintLayer &item)
+{
+  return paint_layer_kind_is_map_coverage(item) && paint_layer_kind_map_paintable(item);
+}
+
+Image *BKE_paint_layers_map_coverage_image_get(const MaterialPaintLayer &item)
+{
+  if (!paint_layer_map_coverage_has_map(item)) {
+    return nullptr;
+  }
+  return paint_layer_map_coverage_record(item)->image;
+}
+
+MaterialPaintLayer *BKE_paint_layers_id_color_owner(Material &ma,
+                                                    const MaterialPaintLayerIdColor &color)
+{
+  MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+        for (MaterialPaintLayer &item : row.mask_stack) {
+          if (BLI_findindex(&item.id_colors, &color) != -1) {
+            owner = &item;
+            return false;
+          }
+        }
+        return true;
+      });
+  return owner;
 }
 
 bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer)
@@ -1903,6 +2171,22 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
         }
         for (const MaterialPaintLayer &item : layer.mask_stack) {
           check_kind(item, true);
+        }
+        /* An enabled map-coverage item with no map takes part and matches nothing; say so, or the
+         * whole mask seems to vanish for no reason. */
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          if (!paint_layer_kind_is_map_coverage(item) ||
+              (item.flag & MA_PAINT_LAYER_ENABLED) == 0 || paint_layer_map_coverage_has_map(item))
+          {
+            continue;
+          }
+          PaintLayersIssue issue;
+          issue.layer = layer.marker;
+          issue.correction = item.marker;
+          issue.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+          issue.code = PaintLayersIssueCode::MapCoverageMissingMap;
+          issue.text = TIP_("This mask item has no map; it matches nothing");
+          r_issues.append(issue);
         }
 
         const bool folder = BKE_paint_layers_is_folder(layer);

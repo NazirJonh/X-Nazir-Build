@@ -789,6 +789,73 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     filter_params_create(item, true);
     SNPRINTF(base, "%s %s", layer_name, item_name);
     this->mapping_inputs_create(group, item, base);
+    if (paint_layer_kind_is_map_coverage(item)) {
+      /* The operator's tolerance and softness: values of its kind's schema, like a filter's. */
+      const PaintLayerKindInfo *kind = paint_layer_kind_of(item);
+      for (int i = 0; kind != nullptr && i < kind->params_num; i++) {
+        char param_base[200];
+        SNPRINTF(param_base, "%s %s %s", layer_name, item_name, kind->params[i].label);
+        bNodeTreeInterfaceSocket *param = layer_group_value_input(
+            group, param_base, "NodeSocketFloat", ROLE_PARAM, item.marker, -1);
+        if (param != nullptr) {
+          prop_int_set(param->properties, INPUT_PARAM_PROP, i);
+          group_input_default_set(group, *param, paint_layer_kind_param_get(item, i));
+        }
+        /* Kept even when null, so the builder sees the set is incomplete and builds nothing. */
+        effect_param_inputs_.lookup_or_add_default(&item).append(param);
+      }
+      /* Every colour is a value input: adding or removing one changes the count and rebuilds, but
+       * editing a colour or its tick moves in place. */
+      Vector<IdColorInputs> &inputs = id_color_inputs_.lookup_or_add_default(&item);
+      int color_index = 0;
+      for (const MaterialPaintLayerIdColor &color : item.id_colors) {
+        IdColorInputs entry;
+        char color_base[200];
+        SNPRINTF(color_base, "%s %s Colour %d Enabled", layer_name, item_name, color_index);
+        entry.enabled = layer_group_value_input(
+            group, color_base, "NodeSocketFloat", ROLE_ID_COLOR_ENABLED, item.marker, -1);
+        if (entry.enabled != nullptr) {
+          prop_int_set(entry.enabled->properties, INPUT_ID_COLOR_PROP, color_index);
+          group_input_default_set(group,
+                                  *entry.enabled,
+                                  (color.flag & MA_PAINT_LAYER_ID_COLOR_ENABLED) != 0 ? 1.0f :
+                                                                                        0.0f);
+        }
+        SNPRINTF(color_base, "%s %s Colour %d", layer_name, item_name, color_index);
+        entry.color = layer_group_value_input(
+            group, color_base, "NodeSocketColor", ROLE_ID_COLOR, item.marker, -1);
+        if (entry.color != nullptr) {
+          prop_int_set(entry.color->properties, INPUT_ID_COLOR_PROP, color_index);
+          float value[4] = {color.color[0], color.color[1], color.color[2], 1.0f};
+          group_input_default_set(group, *entry.color, value);
+        }
+        if (paint_layer_mask_item_color_id_advanced(item)) {
+          SNPRINTF(color_base, "%s %s Colour %d Tolerance", layer_name, item_name, color_index);
+          entry.tolerance = layer_group_value_input(
+              group, color_base, "NodeSocketFloat", ROLE_ID_COLOR_TOLERANCE, item.marker, -1);
+          if (entry.tolerance != nullptr) {
+            prop_int_set(entry.tolerance->properties, INPUT_ID_COLOR_PROP, color_index);
+            group_input_default_set(group, *entry.tolerance, color.tolerance);
+          }
+        }
+        inputs.append(entry);
+        color_index++;
+      }
+      /* The record's value is the Gradient output scale, not a constant mask. */
+      if (record != nullptr) {
+        /* The output scale: one for White/Black, the item's gradient value in Gradient mode. It is
+         * always built, so switching the mode or moving the value rebuilds nothing. */
+        SNPRINTF(base, "%s %s Output", layer_name, item_name);
+        bNodeTreeInterfaceSocket *value = layer_group_value_input(
+            group, base, "NodeSocketFloat", ROLE_MASK_VALUE, item.marker, -1);
+        if (value != nullptr) {
+          group_input_default_set(
+              group, *value, BKE_paint_layers_mask_item_output_value(item));
+          mask_value_inputs_.add(&item, value);
+        }
+      }
+      continue;
+    }
     if (record != nullptr && record->image == nullptr) {
       SNPRINTF(base, "%s %s", layer_name, item_name);
       bNodeTreeInterfaceSocket *value = layer_group_value_input(

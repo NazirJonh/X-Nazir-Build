@@ -41,6 +41,13 @@ static const PaintLayerKindParam hsl_params[] = {
 };
 static_assert(std::size(hsl_params) == PAINT_LAYER_HSL_PARAM_NUM);
 
+static const PaintLayerKindParam coverage_params[] = {
+    /* Half the range: a pick matches the whole region of its colour, not only the exact texel value. */
+    {"tolerance", "Tolerance", 0.5f, 0.0f, 1.0f},
+    {"softness", "Softness", 0.0f, 0.0f, 1.0f},
+};
+static_assert(std::size(coverage_params) == PAINT_LAYER_COVERAGE_PARAM_NUM);
+
 void paint_layer_hsl_apply(float rgb[3], const float params[PAINT_LAYER_HSL_PARAM_NUM])
 {
   float hsv[3];
@@ -63,6 +70,10 @@ static constexpr uint8_t all_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LA
 static constexpr uint8_t filter_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
                                         paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
+
+/* A map-coverage operator only exists as an item of a row's mask; it is never a row or a content
+ * correction of its own. */
+static constexpr uint8_t mask_item_roles = paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM);
 
 /* New kinds are added here. A kind that needs the row bake is registered with a `TODO:` naming
  * it, so what is deferred shows up in a search of this file. */
@@ -109,6 +120,17 @@ static const PaintLayerKindInfo kinds[] = {
      hsl_params,
      int(std::size(hsl_params)),
      PAINT_LAYER_KIND_ACTS_ON_BELOW},
+    /* A map-coverage operator: the map of its Base Color record is an external ID Map, so the map
+     * is reference-only and a stroke must not turn it into a paint target. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_COLOR_ID,
+     "Color ID",
+     PaintLayerKindCategory::Operator,
+     mask_item_roles,
+     coverage_params,
+     int(std::size(coverage_params)),
+     PAINT_LAYER_KIND_MAP_COVERAGE,
+     false},
     /* TODO: Gradient Map filter, needs a ColorBand parameter. */
     /* TODO: Blur filter, needs the row bake (Phase 3). */
     /* TODO: Sharpen filter, needs the row bake (Phase 3). */

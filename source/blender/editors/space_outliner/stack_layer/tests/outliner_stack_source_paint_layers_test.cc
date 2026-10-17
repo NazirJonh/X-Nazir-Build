@@ -73,7 +73,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 16u);
+  ASSERT_EQ(kinds.size(), 17u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -104,6 +104,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_EQ(kinds[13].identifier, "MASK_FILTER_INVERT");
   EXPECT_TRUE(kinds[13].is_effect);
   EXPECT_EQ(kinds[15].identifier, "MASK_FILTER_HSL");
+  /* The map-driven filters follow, only as corrections of the mask. */
+  EXPECT_EQ(kinds[16].identifier, "MASK_FILTER_COLOR_ID");
+  EXPECT_TRUE(kinds[16].is_effect);
   EXPECT_FALSE(kinds[15].takes_color);
 }
 

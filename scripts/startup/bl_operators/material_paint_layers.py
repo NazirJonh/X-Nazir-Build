@@ -262,8 +262,8 @@ class MATERIAL_OT_paint_layer_mask_toggle(_PaintLayerOperator):
 
 
 class MATERIAL_OT_paint_layer_mask_filter_add(_PaintLayerOperator):
-    """Add a Color ID filter over the layer's mask: it keeps the coverage only where an ID Map
-    matches the listed colours."""
+    """Add a Color ID or UV Island filter over the layer's mask: it keeps the coverage only where
+    an ID Map matches the listed colours, or on the captured UV islands."""
 
     bl_idname = "material.paint_layer_mask_filter_add"
     bl_label = "Add Mask Filter"
@@ -272,6 +272,7 @@ class MATERIAL_OT_paint_layer_mask_filter_add(_PaintLayerOperator):
         name="Filter",
         items=(
             ('COLOR_ID', "Color ID", "Keep the coverage where an ID Map matches the listed colors"),
+            ('UV_ISLAND', "UV Island", "Keep the coverage on the UV islands captured from the Image Editor"),
         ),
         default='COLOR_ID',
     )

@@ -131,6 +131,16 @@ static const PaintLayerKindInfo kinds[] = {
      int(std::size(coverage_params)),
      PAINT_LAYER_KIND_MAP_COVERAGE,
      false},
+    /* A map-coverage operator whose map is written by the UV Island capture, so it is paintable. */
+    {MA_PAINT_LAYER_SOURCE_FILTER,
+     MA_PAINT_LAYER_FILTER_UV_ISLAND,
+     "UV Island",
+     PaintLayerKindCategory::Operator,
+     mask_item_roles,
+     coverage_params,
+     int(std::size(coverage_params)),
+     PAINT_LAYER_KIND_MAP_COVERAGE,
+     true},
     /* TODO: Gradient Map filter, needs a ColorBand parameter. */
     /* TODO: Blur filter, needs the row bake (Phase 3). */
     /* TODO: Sharpen filter, needs the row bake (Phase 3). */

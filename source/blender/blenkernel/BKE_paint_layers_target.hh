@@ -209,4 +209,30 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
  */
 int BKE_paint_layers_active_maps_ensure(Main &bmain, Material &ma, int image_size);
 
+/**
+ * The Base Color map of the map-coverage mask item \a item, created zero-filled on the first call.
+ *
+ * The map is the coverage the operator samples (`match`): a scalar for UV Island, an RGBA the Color
+ * ID comparisons read. Only a kind whose map is paintable takes one; a reference-only kind (Color
+ * ID, an external ID Map) refuses, so the description never grows a map the user did not assign.
+ * The name follows the mask maps' `"<layer> <item>"` convention, and the map is straight-alpha
+ * Non-Color data, like every other paint-layer map.
+ *
+ * \param image_size: the fallback width and height, used only when the material has no size of its
+ * own (#Material::paint_layers_image_size is zero).
+ * \return the map, or null when \a item is not a paintable map-coverage mask item of \a ma, or the
+ * description edit to attach the map failed.
+ */
+Image *BKE_paint_layers_map_coverage_map_ensure(Main &bmain,
+                                                Material &ma,
+                                                MaterialPaintLayer &item,
+                                                int image_size);
+
+/**
+ * Make sure the tiled coverage map \a image has UDIM tile \a tile_number, adding it zero-filled and
+ * shaped like the first tile when it is missing.
+ * \return false when \a image is not a tiled image or the tile cannot be made.
+ */
+bool BKE_paint_layers_map_coverage_tile_ensure(Image &image, int tile_number);
+
 }  // namespace blender

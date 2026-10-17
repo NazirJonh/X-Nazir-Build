@@ -253,6 +253,7 @@ def _draw_mask_output(layout, record, item):
     White and Black are two states of the item's invert flag; Gradient is a mode of its own. The
     gradient slider is the same one a map-less mask base uses, with its invert toggle beside it.
     The alpha choice moves the coverage into the alpha channel, leaving the background transparent.
+    Bake to Image writes that result into a new image, to use as the mask map of another object.
     """
     header, panel = layout.panel("material_paint_mask_output", default_closed=False)
     header.label(text="Output")
@@ -264,6 +265,7 @@ def _draw_mask_output(layout, record, item):
         row = panel.row(align=True)
         row.template_material_paint_value_slider(item, "mask_value")
         row.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
+    panel.operator("paint.mask_item_bake", text="Bake to Image", icon='IMAGE_DATA')
 
 
 def draw_material_mask_coverage_item(layout, _context, item):
@@ -278,54 +280,61 @@ def draw_material_mask_coverage_item(layout, _context, item):
         return
     layout.separator()
 
-    # The empty-slot variant is the drop target: the ID Map can be dragged onto it.
-    row = layout.row(align=True)
-    row.template_ID_browser(
-        record,
-        "image",
-        open="image.open",
-        text="Drop image: ID Map",
-        image_filter='PAINT_SOURCE',
-        use_unlink=True,
-        use_users=False,
-    )
-    layout.prop(item, "color_id_mode", text="Mode", expand=True)
-    if item.color_id_mode == 'SIMPLE':
-        for param in item.kind_params:
-            layout.prop(param, "value", text=param.label, slider=True)
-
-    # Pick Color sits right before the colours, with air above and below it.
-    layout.separator()
-    row = layout.row(align=True)
-    row.enabled = record.image is not None
-    row.operator("paint.id_color_pick", text="Pick Color", icon='EYEDROPPER')
-    layout.separator()
-
-    if not len(item.id_colors):
-        layout.label(text="No colors: nothing is kept", icon='INFO')
-    advanced = item.color_id_mode == 'ADVANCED'
-    for index, color in enumerate(item.id_colors):
+    if item.filter_type == 'COLOR_ID':
+        # The empty-slot variant is the drop target: the ID Map can be dragged onto it.
         row = layout.row(align=True)
-        row.prop(color, "enabled", text="")
-        sub = row.row(align=True)
-        sub.enabled = color.enabled
-        sub.prop(color, "color", text="")
-        remove = row.operator("material.paint_layer_id_color_remove", text="", icon='X')
-        remove.index = index
-        if advanced:
-            row.prop(color,
-                     "show_advanced",
-                     text="",
-                     icon='TRIA_DOWN' if color.show_advanced else 'TRIA_RIGHT',
-                     emboss=False)
-        if advanced and color.show_advanced:
-            sub = layout.row()
-            sub.use_property_split = True
-            sub.prop(color, "tolerance", text="Tolerance", slider=True)
-            # A little air below an unfolded colour, so the rows read apart.
-            layout.separator()
+        row.template_ID_browser(
+            record,
+            "image",
+            open="image.open",
+            text="Drop image: ID Map",
+            image_filter='PAINT_SOURCE',
+            use_unlink=True,
+            use_users=False,
+        )
+        layout.prop(item, "color_id_mode", text="Mode", expand=True)
+        if item.color_id_mode == 'SIMPLE':
+            for param in item.kind_params:
+                layout.prop(param, "value", text=param.label, slider=True)
 
-    # The output sits below the colours: it is what all of them together give back.
+        # Pick Color sits right before the colours, with air above and below it.
+        layout.separator()
+        row = layout.row(align=True)
+        row.enabled = record.image is not None
+        row.operator("paint.id_color_pick", text="Pick Color", icon='EYEDROPPER')
+        layout.separator()
+
+        if not len(item.id_colors):
+            layout.label(text="No colors: nothing is kept", icon='INFO')
+        advanced = item.color_id_mode == 'ADVANCED'
+        for index, color in enumerate(item.id_colors):
+            row = layout.row(align=True)
+            row.prop(color, "enabled", text="")
+            sub = row.row(align=True)
+            sub.enabled = color.enabled
+            sub.prop(color, "color", text="")
+            remove = row.operator("material.paint_layer_id_color_remove", text="", icon='X')
+            remove.index = index
+            if advanced:
+                row.prop(color,
+                         "show_advanced",
+                         text="",
+                         icon='TRIA_DOWN' if color.show_advanced else 'TRIA_RIGHT',
+                         emboss=False)
+            if advanced and color.show_advanced:
+                sub = layout.row()
+                sub.use_property_split = True
+                sub.prop(color, "tolerance", text="Tolerance", slider=True)
+                # A little air below an unfolded colour, so the rows read apart.
+                layout.separator()
+
+        # The output sits below the colours: it is what all of them together give back.
+        layout.separator()
+        _draw_mask_output(layout, record, item)
+        return
+
+    # UV Island: the map is created by the first pick.
+    layout.operator("paint.uv_island_pick", text="Select Islands (Box)", icon='RESTRICT_SELECT_OFF')
     layout.separator()
     _draw_mask_output(layout, record, item)
 

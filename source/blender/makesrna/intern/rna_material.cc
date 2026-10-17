@@ -2481,6 +2481,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_filter_items[] = {
      0,
      "Color ID",
      "Keep the coverage where an ID Map matches the listed colours"},
+    {MA_PAINT_LAYER_FILTER_UV_ISLAND,
+     "UV_ISLAND",
+     0,
+     "UV Island",
+     "Keep the coverage on the UV islands captured from the Image Editor selection"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 

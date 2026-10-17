@@ -292,6 +292,11 @@ static const PaintFilterAddKind paint_coverage_add_kinds[] = {
      "Keep the active layer's mask only where an ID Map matches the listed colors",
      ICON_COLOR,
      MA_PAINT_LAYER_FILTER_COLOR_ID},
+    {"FILTER_UV_ISLAND",
+     N_("UV Island"),
+     "Keep the active layer's mask only on the UV islands captured from the Image Editor",
+     ICON_UV_ISLANDSEL,
+     MA_PAINT_LAYER_FILTER_UV_ISLAND},
 };
 
 /** The row of one content correction, hung off the row \a owner_ordinal names. */
@@ -412,6 +417,9 @@ StackRow paint_mask_item_row_build(const Material &material,
     /* The map-driven filters read as what they select by, not as a tone change. */
     if (item.kind_subtype == MA_PAINT_LAYER_FILTER_COLOR_ID) {
       row.icon = ICON_COLOR;
+    }
+    else if (item.kind_subtype == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
+      row.icon = ICON_UV_ISLANDSEL;
     }
     return row;
   }

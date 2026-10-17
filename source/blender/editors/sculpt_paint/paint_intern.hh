@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "BLI_array.hh"
 #include "BLI_index_mask_fwd.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
@@ -1119,6 +1120,35 @@ void PAINT_OT_image_symmetry_edit(wmOperatorType *ot);
 /* paint_image_paint_mask_island.cc */
 void PAINT_OT_paint_mask_island(wmOperatorType *ot);
 
+/**
+ * Fill \a r_island (one flag per face of \a ob's original mesh) with the UV island under \a uv, the
+ * island definition the Image Editor selection uses.
+ * \return false when \a uv hit no face of \a ob.
+ */
+bool paint_mask_island_find_object(const Scene &scene,
+                                   Object &ob,
+                                   const float2 &uv,
+                                   Array<bool> &r_island);
+
+/**
+ * The islands that contain any face of \a seed_faces (one flag per face of \a ob's mesh).
+ * \return false when no seed face exists or the mesh cannot be converted one to one.
+ */
+bool paint_mask_island_find_from_faces(const Scene &scene,
+                                       Object &ob,
+                                       Span<bool> seed_faces,
+                                       Array<bool> &r_island);
+
+/**
+ * Like #paint_mask_island_find_object for a UV rectangle: every island that any of its faces
+ * touches.
+ * \return false when the rectangle hit no face of \a ob.
+ */
+bool paint_mask_island_find_rect(const Scene &scene,
+                                 Object &ob,
+                                 const rctf &uv_rect,
+                                 Array<bool> &r_island);
+
 void PAINT_OT_image_select_move(wmOperatorType *ot);
 void PAINT_OT_image_select_move_confirm(wmOperatorType *ot);
 void PAINT_OT_image_select_move_cancel(wmOperatorType *ot);
@@ -1139,6 +1169,8 @@ void PAINT_OT_image_select_warp_undo_step(wmOperatorType *ot);
 
 /* paint_image_mask_filters.cc */
 void PAINT_OT_id_color_pick(wmOperatorType *ot);
+void PAINT_OT_uv_island_pick(wmOperatorType *ot);
+void PAINT_OT_mask_item_bake(wmOperatorType *ot);
 
 /* Selection masks in the 3D Viewport (Sculpt texture painting): the operators live in
  * selection/paint_image_select_view3d.hh (declared in `blender::ed::sculpt_paint` next to the rest of

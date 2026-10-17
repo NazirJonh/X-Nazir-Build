@@ -81,13 +81,17 @@ static void paint_layers_image_fill(Image &image, const bool is_color, const flo
   BKE_image_release_ibuf(&image, ibuf, lock);
 }
 
-static Image *paint_layers_map_create(
-    Main &bmain, const char *name, const int size, const bool is_color, const float rgba[4])
+static Image *paint_layers_map_create(Main &bmain,
+                                      const char *name,
+                                      const int size,
+                                      const bool is_color,
+                                      const float rgba[4],
+                                      const bool tiled = false)
 {
   /* 32 planes, not 24: the buffer's color mode decides how many channels a PNG pack writes, and a
    * map's alpha is its coverage, so a 24-plane map would reopen fully opaque. */
   Image *image = BKE_image_add_generated(
-      &bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, rgba, false, !is_color, false);
+      &bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, rgba, false, !is_color, tiled);
   if (image == nullptr) {
     return nullptr;
   }
@@ -320,7 +324,13 @@ static Image *paint_layers_mask_ensure_writable(Main &bmain,
                "%s %s",
                target.layer->name[0] != '\0' ? target.layer->name : "Layer",
                item->name[0] != '\0' ? item->name : "Mask");
-  Image *image = paint_layers_map_create(bmain, name, image_size, /*is_color=*/false, record->value);
+  /* A map-coverage map (UV Island) is tiled, so islands of other UDIM tiles can be written. */
+  Image *image = paint_layers_map_create(bmain,
+                                         name,
+                                         image_size,
+                                         /*is_color=*/false,
+                                         record->value,
+                                         paint_layer_kind_is_map_coverage(*item));
   if (image == nullptr) {
     return nullptr;
   }
@@ -334,6 +344,84 @@ static Image *paint_layers_mask_ensure_writable(Main &bmain,
    * become an orphan once its mask is removed. */
   id_us_min(&image->id);
   return record->image;
+}
+
+Image *BKE_paint_layers_map_coverage_map_ensure(Main &bmain,
+                                                Material &ma,
+                                                MaterialPaintLayer &item,
+                                                const int image_size)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_mask_item_owner(ma, item);
+  if (layer == nullptr || !paint_layer_kind_is_map_coverage(item) ||
+      !paint_layer_kind_map_paintable(item))
+  {
+    return nullptr;
+  }
+  MaterialPaintLayerChannel *record = paint_layer_channel_find(item,
+                                                               PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (record != nullptr && record->image != nullptr) {
+    return record->image;
+  }
+  /* The material owns the size, so every map of its stack agrees; the caller's is the fallback. */
+  const int map_size = ma.paint_layers_image_size > 0 ? int(ma.paint_layers_image_size) :
+                                                        image_size;
+  /* Zero-filled: the operator restricts everything until a capture or a stroke raises it. */
+  /* Opaque black: the scalar is the RGB, and an opaque map reads the same on every path. */
+  const float zero[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  char name[192];
+  BLI_snprintf(name,
+               sizeof(name),
+               "%s %s",
+               layer->name[0] != '\0' ? layer->name : "Layer",
+               item.name[0] != '\0' ? item.name : "UV Island");
+  /* Tiled, so a UV island on another UDIM tile can get its own tile on demand. */
+  Image *image = paint_layers_map_create(
+      bmain, name, map_size, /*is_color=*/false, zero, /*tiled=*/true);
+  if (image == nullptr) {
+    return nullptr;
+  }
+  if (!BKE_paint_layers_channel_set_image(ma, &item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image)) {
+    BKE_id_free(&bmain, image);
+    return nullptr;
+  }
+  /* The record took its own user; the one the new image was born with goes, so the map can become
+   * an orphan once its item is removed. */
+  id_us_min(&image->id);
+  /* #BKE_paint_layers_channel_set_image does not reallocate the records, so \a record stays valid,
+   * but the item may have had none: read the image back through the record the setter used. */
+  return paint_layer_channel_find(item, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image;
+}
+
+bool BKE_paint_layers_map_coverage_tile_ensure(Image &image, const int tile_number)
+{
+  if (image.source != IMA_SRC_TILED) {
+    return false;
+  }
+  if (BKE_image_get_tile(&image, tile_number) != nullptr) {
+    return true;
+  }
+  const ImageTile *base = static_cast<const ImageTile *>(image.tiles.first);
+  if (base == nullptr) {
+    return false;
+  }
+  /* #BKE_image_add_tile keeps the list sorted only when it already is. */
+  BKE_image_sort_tiles(&image);
+  ImageTile *tile = BKE_image_add_tile(&image, tile_number, nullptr);
+  if (tile == nullptr) {
+    return false;
+  }
+  /* The new tile is generated like the first one: same size, depth and zero-filled data colour. */
+  tile->gen_x = base->gen_x;
+  tile->gen_y = base->gen_y;
+  tile->gen_type = base->gen_type;
+  tile->gen_flag = base->gen_flag;
+  tile->gen_depth = base->gen_depth;
+  copy_v4_v4(tile->gen_color, base->gen_color);
+  if (!BKE_image_fill_tile(&image, tile)) {
+    BKE_image_remove_tile(&image, tile);
+    return false;
+  }
+  return true;
 }
 
 Image *BKE_paint_layers_target_ensure_writable(Main &bmain,

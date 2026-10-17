@@ -2975,6 +2975,8 @@ void ED_operatortypes_paint()
   /* Face selection paint mask from a UV island picked in the Image Editor. */
   WM_operatortype_append(PAINT_OT_paint_mask_island);
   WM_operatortype_append(PAINT_OT_id_color_pick);
+  WM_operatortype_append(PAINT_OT_uv_island_pick);
+  WM_operatortype_append(PAINT_OT_mask_item_bake);
   WM_operatortype_append(PAINT_OT_image_select_move);
   WM_operatortype_append(PAINT_OT_image_select_move_confirm);
   WM_operatortype_append(PAINT_OT_image_select_move_cancel);

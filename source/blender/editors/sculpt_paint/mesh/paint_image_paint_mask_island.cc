@@ -108,10 +108,10 @@ static bool face_uv_contains_point(const BMFace &face, const BMUVOffsets &offset
  * hit. Hidden faces are never part of an island.
  * \return True when \a uv hit at least one face of \a ob.
  */
-static bool paint_mask_island_find_object(const Scene &scene,
-                                          Object &ob,
-                                          const float2 &uv,
-                                          Array<bool> &r_island)
+bool paint_mask_island_find_object(const Scene &scene,
+                                   Object &ob,
+                                   const float2 &uv,
+                                   Array<bool> &r_island)
 {
   Mesh *mesh = id_cast<Mesh *>(ob.data);
   r_island.reinitialize(mesh->faces_num);
@@ -172,6 +172,154 @@ static bool paint_mask_island_find_object(const Scene &scene,
   /* The BMesh is a conversion of the mesh without topology changes, so `BM_face_at_index()` order
    * is the mesh's face order -- the same assumption the Image Editor selection tools make. */
   BLI_assert(island_faces.size() == int64_t(r_island.size()));
+  r_island.as_mutable_span().copy_from(island_faces);
+
+  BM_mesh_free(bm);
+  return true;
+}
+
+/** True when the UV polygon \a poly and the rectangle \a rect share any area or border. */
+static bool uv_polygon_intersects_rect(const Span<float2> poly, const rctf &rect)
+{
+  if (poly.size() < 3) {
+    return false;
+  }
+  for (const float2 &uv : poly) {
+    if (BLI_rctf_isect_pt(&rect, uv.x, uv.y)) {
+      return true;
+    }
+  }
+  const float2 corners[4] = {float2(rect.xmin, rect.ymin),
+                             float2(rect.xmax, rect.ymin),
+                             float2(rect.xmax, rect.ymax),
+                             float2(rect.xmin, rect.ymax)};
+  const float(*poly_co)[2] = reinterpret_cast<const float(*)[2]>(poly.data());
+  for (const float2 &corner : corners) {
+    const float point[2] = {corner.x, corner.y};
+    if (isect_point_poly_v2(point, poly_co, uint(poly.size()))) {
+      return true;
+    }
+  }
+  for (const int i : poly.index_range()) {
+    const float2 &a = poly[i];
+    const float2 &b = poly[(i + 1) % poly.size()];
+    for (int j = 0; j < 4; j++) {
+      const float2 &c = corners[j];
+      const float2 &d = corners[(j + 1) % 4];
+      if (isect_seg_seg_v2_simple(a, b, c, d)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool paint_mask_island_find_rect(const Scene &scene,
+                                 Object &ob,
+                                 const rctf &uv_rect,
+                                 Array<bool> &r_island)
+{
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  r_island.reinitialize(mesh->faces_num);
+  r_island.fill(false);
+
+  /* The original mesh, as in #paint_mask_island_find_object: the islands are the authored layout. */
+  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(mesh);
+  BMeshCreateParams create_params{};
+  BMeshFromMeshParams convert_params{};
+  convert_params.calc_face_normal = false;
+  convert_params.calc_vert_normal = false;
+  BMesh *bm = BM_mesh_create(&allocsize, &create_params);
+  BM_mesh_bm_from_me(bm, mesh, &convert_params);
+
+  const BMUVOffsets offsets = image_paint_selection_uv_offsets_get(bm, &ob, &scene);
+
+  Vector<int> seed_faces;
+  if (offsets.uv >= 0) {
+    BMIter fiter;
+    BMFace *efa;
+    int face_index;
+    Vector<float2> corner_uvs;
+    BM_ITER_MESH_INDEX (efa, &fiter, bm, BM_FACES_OF_MESH, face_index) {
+      if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
+        continue;
+      }
+      corner_uvs.clear();
+      rctf face_uv_bounds;
+      BLI_rctf_init_minmax(&face_uv_bounds);
+      BMIter liter;
+      BMLoop *l;
+      BM_ITER_ELEM (l, &liter, efa, BM_LOOPS_OF_FACE) {
+        const float *corner_uv = BM_ELEM_CD_GET_FLOAT_P(l, offsets.uv);
+        corner_uvs.append(float2(corner_uv[0], corner_uv[1]));
+        BLI_rctf_do_minmax_v(&face_uv_bounds, corner_uv);
+      }
+      /* Cheap reject on the bounds before the exact polygon test. */
+      if (!BLI_rctf_isect(&face_uv_bounds, &uv_rect, nullptr)) {
+        continue;
+      }
+      if (uv_polygon_intersects_rect(corner_uvs, uv_rect)) {
+        seed_faces.append(face_index);
+      }
+    }
+  }
+
+  if (seed_faces.is_empty()) {
+    BM_mesh_free(bm);
+    return false;
+  }
+
+  /* Whole islands: a box that touches an island selects all of it. */
+  Array<bool> island_faces(bm->totface, false);
+  ED_uvedit_uv_islands_tag_from_face_indices(
+      &scene, bm, offsets, seed_faces, int(UVDelimitMode::Seam), island_faces);
+  BLI_assert(island_faces.size() == int64_t(r_island.size()));
+  r_island.as_mutable_span().copy_from(island_faces);
+
+  BM_mesh_free(bm);
+  return true;
+}
+
+bool paint_mask_island_find_from_faces(const Scene &scene,
+                                       Object &ob,
+                                       const Span<bool> seed_faces,
+                                       Array<bool> &r_island)
+{
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  r_island.reinitialize(mesh->faces_num);
+  r_island.fill(false);
+  if (seed_faces.size() != int64_t(mesh->faces_num)) {
+    return false;
+  }
+
+  const BMAllocTemplate allocsize = BMALLOC_TEMPLATE_FROM_ME(mesh);
+  BMeshCreateParams create_params{};
+  BMeshFromMeshParams convert_params{};
+  convert_params.calc_face_normal = false;
+  convert_params.calc_vert_normal = false;
+  BMesh *bm = BM_mesh_create(&allocsize, &create_params);
+  BM_mesh_bm_from_me(bm, mesh, &convert_params);
+
+  const BMUVOffsets offsets = image_paint_selection_uv_offsets_get(bm, &ob, &scene);
+  Vector<int> seeds;
+  if (offsets.uv >= 0 && bm->totface == mesh->faces_num) {
+    BMIter fiter;
+    BMFace *efa;
+    int face_index;
+    BM_ITER_MESH_INDEX (efa, &fiter, bm, BM_FACES_OF_MESH, face_index) {
+      if (seed_faces[face_index] && !BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
+        seeds.append(face_index);
+      }
+    }
+  }
+  if (seeds.is_empty()) {
+    BM_mesh_free(bm);
+    return false;
+  }
+
+  Array<bool> island_faces(bm->totface, false);
+  ED_uvedit_uv_islands_tag_from_face_indices(
+      &scene, bm, offsets, seeds, int(UVDelimitMode::Seam), island_faces);
   r_island.as_mutable_span().copy_from(island_faces);
 
   BM_mesh_free(bm);

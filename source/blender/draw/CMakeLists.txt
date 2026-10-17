@@ -685,6 +685,7 @@ set(GLSL_SRC
   engines/overlay/shaders/overlay_edit_uv_image_mask_frag.glsl
   engines/overlay/shaders/overlay_edit_uv_image_vert.glsl
   engines/overlay/shaders/overlay_edit_uv_stretching_vert.glsl
+  engines/overlay/shaders/overlay_edit_uv_passepartout.bsl.hh
   engines/overlay/shaders/overlay_edit_uv_tiled_image_borders_vert.glsl
   engines/overlay/shaders/overlay_edit_uv_verts_frag.glsl
   engines/overlay/shaders/overlay_edit_uv_verts_vert.glsl

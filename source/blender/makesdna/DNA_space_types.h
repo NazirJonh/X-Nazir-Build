@@ -777,6 +777,14 @@ struct SpaceImage {
    * block in versioning_520.cc.
    */
   float face_selection_opacity = 0.05f;
+  /**
+   * Opacity of the PBR passepartout: the veil the composite is covered with where no UV face lies,
+   * since a texel there never reaches the object. Zero shows the gaps. The pad keeps the pointer
+   * member below 8-byte aligned. A file written before the field existed zero-fills it; see the
+   * versioning block in versioning_520.cc.
+   */
+  float pbr_passepartout = 1.0f;
+  char _pad_passepartout[4] = {};
   /* Runtime data, not written to .blend. */
   ed::image::SpaceImage_Runtime *runtime = nullptr;
 };

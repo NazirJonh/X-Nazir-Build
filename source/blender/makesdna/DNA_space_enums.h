@@ -861,7 +861,8 @@ enum eSpaceImage_Flag : int {
   SI_PREVSPACE = (1 << 15),
   SI_FULLWINDOW = (1 << 16),
 
-  SI_FLAG_UNUSED_17 = (1 << 17),
+  /** Veil the canvas outside the UV faces in the composite (see #SpaceImage::pbr_passepartout). */
+  SI_DRAW_PBR_PASSEPARTOUT = (1 << 17),
   SI_FLAG_UNUSED_18 = (1 << 18),
 
   /**

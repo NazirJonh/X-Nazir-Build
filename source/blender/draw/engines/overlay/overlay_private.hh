@@ -617,6 +617,7 @@ class ShaderModule {
    * out). */
   StaticShader uv_face_selection = {"overlay_edit_uv_face_selection"};
   StaticShader uv_image_borders = {"overlay_edit_uv_tiled_image_borders"};
+  StaticShader uv_passepartout = {"overlay_edit_uv_passepartout"};
   StaticShader uv_paint_mask = {"overlay_edit_uv_mask_image"};
   StaticShader uv_wireframe = {"overlay_wireframe_uv"};
   StaticShader xray_fade = {"overlay_xray_fade_pipeline"};

@@ -2373,6 +2373,14 @@ class IMAGE_PT_overlay_uv_display(Panel):
         sub.prop(uvedit, "uv_face_opacity", text="Faces")
         sub.prop(uvedit, "uv_edge_opacity", text="Edges")
 
+        if sima.mode == 'PAINT':
+            # The composite outside every UV face never reaches the object: veil it, or show the gaps.
+            row = col.row(align=True)
+            row.prop(sima, "show_pbr_passepartout", text="")
+            sub = row.row(align=True)
+            sub.active = sima.show_pbr_passepartout
+            sub.prop(sima, "pbr_passepartout", text="PBR Passepartout")
+
 
 class IMAGE_PT_overlay_image(Panel):
     bl_space_type = 'IMAGE_EDITOR'

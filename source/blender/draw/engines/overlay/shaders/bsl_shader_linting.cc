@@ -8,6 +8,7 @@
 
 #include "overlay_antialiasing.bsl.hh"          /* IWYU pragma: export */
 #include "overlay_edit_curve_normals.bsl.hh"    /* IWYU pragma: export */
+#include "overlay_edit_uv_passepartout.bsl.hh"  /* IWYU pragma: export */
 #include "overlay_sculpt_symmetry_plane.bsl.hh" /* IWYU pragma: export */
 #include "overlay_symmetry_contour.bsl.hh"      /* IWYU pragma: export */
 #include "overlay_xray_fade.bsl.hh"             /* IWYU pragma: export */

@@ -4557,7 +4557,10 @@ void blo_do_versions_280(FileData *fd, Library * /*lib*/, Main *bmain)
               SpaceImage *sima = reinterpret_cast<SpaceImage *>(&sl);
               sima->flag &= ~(SI_FLAG_UNUSED_0 | SI_FLAG_UNUSED_1 | SI_FLAG_UNUSED_3 |
                               SI_FLAG_UNUSED_6 | SI_FLAG_UNUSED_7 | SI_FLAG_UNUSED_8 |
-                              SI_FLAG_UNUSED_17 | SI_FLAG_UNUSED_18 | SI_FLAG_UNUSED_23 |
+                              /* Was unused when this ran; now #SI_DRAW_PBR_PASSEPARTOUT, which
+                               * files this old must not come back in. The versioning in
+                               * versioning_520.cc sets it afterwards. */
+                              SI_DRAW_PBR_PASSEPARTOUT | SI_FLAG_UNUSED_18 | SI_FLAG_UNUSED_23 |
                               /* Was unused when this ran; now #SI_PAINT_COMPOSITE_MODE, which
                                * files this old must not come back in. */
                               SI_PAINT_COMPOSITE_MODE);

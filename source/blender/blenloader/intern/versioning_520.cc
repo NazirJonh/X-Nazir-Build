@@ -2102,6 +2102,25 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The PBR passepartout is new: a file written before it zero-fills the opacity, which would show
+   * the gaps, and leaves the flag clear. Restore the default that veils them.
+   *
+   * NOTE: Keyed on the member existence like the block above. */
+  if (!DNA_struct_member_exists_with_alias(fd->filesdna, "SpaceImage", "float", "pbr_passepartout"))
+  {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &sl : area.spacedata) {
+          if (sl.spacetype == SPACE_IMAGE) {
+            SpaceImage &sima = reinterpret_cast<SpaceImage &>(sl);
+            sima.pbr_passepartout = 1.0f;
+            sima.flag |= SI_DRAW_PBR_PASSEPARTOUT;
+          }
+        }
+      }
+    }
+  }
+
   /* The proportional editing highlight is new, and a file written before it leaves the flag
    * cleared. Enable it so the feature is visible right away, matching the DNA default.
    *

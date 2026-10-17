@@ -7777,6 +7777,24 @@ static void rna_def_space_image(BlenderRNA *brna)
       "will not paint");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
 
+  /* PBR passepartout: the veil over the composite where no UV face lies. */
+  prop = RNA_def_property(srna, "show_pbr_passepartout", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", SI_DRAW_PBR_PASSEPARTOUT);
+  RNA_def_property_ui_text(prop,
+                           "Show PBR Passepartout",
+                           "Cover the parts of the composite outside every UV face, since they do "
+                           "not reach the object");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
+  prop = RNA_def_property(srna, "pbr_passepartout", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "pbr_passepartout");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop,
+                           "PBR Passepartout",
+                           "Opacity of the cover over the composite outside every UV face; zero "
+                           "shows the empty gaps between the UV islands");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+
   prop = RNA_def_property(srna, "image_user", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_NEVER_NULL);
   RNA_def_property_pointer_sdna(prop, nullptr, "iuser");

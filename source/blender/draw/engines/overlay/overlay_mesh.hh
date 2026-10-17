@@ -597,6 +597,11 @@ class MeshUVs : Overlay {
    * the face selection mask (#Mesh.editflag & #ME_EDIT_PAINT_FACE_SEL) leaves out. */
   PassSimple face_selection_ps_ = {"FaceSelection"};
 
+  /* PBR passepartout: the UV faces are written to the depth buffer alone, then every cell of the
+   * image plane is veiled where the depth test finds nothing written, i.e. outside all UV faces. */
+  PassSimple passepartout_mask_ps_ = {"PassepartoutMask"};
+  PassSimple passepartout_ps_ = {"Passepartout"};
+
   /* TODO(fclem): Should be its own Overlay?. */
   PassSimple image_border_ps_ = {"ImageBorder"};
 
@@ -621,6 +626,12 @@ class MeshUVs : Overlay {
    * mask) is evaluated in #edit_object_sync.
    */
   bool show_face_selection_ = false;
+
+  /**
+   * PBR passepartout (#SpaceImage::pbr_passepartout). Only over the composite of a layered
+   * material in Image Paint mode: any other image has no "texel that never reaches the object".
+   */
+  bool show_passepartout_ = false;
 
   /** Wireframe Overlay */
   /* Draw final evaluated UVs (modifier stack applied) as grayed out wire-frame. */
@@ -766,6 +777,10 @@ class MeshUVs : Overlay {
        * (#SI_DRAW_FACE_SELECTION); a zero opacity hides it too. */
       show_face_selection_ = space_mode_is_paint && (space_image->flag & SI_DRAW_FACE_SELECTION) &&
                              (space_image->face_selection_opacity > 0.0f);
+
+      show_passepartout_ = space_mode_is_paint && (space_image->flag & SI_PAINT_COMPOSITE_MODE) &&
+                           (space_image->flag & SI_DRAW_PBR_PASSEPARTOUT) &&
+                           (space_image->pbr_passepartout > 0.0f) && image != nullptr;
     }
 
     {
@@ -879,6 +894,17 @@ class MeshUVs : Overlay {
       pass.push_constant("ucolor", float4(1.0f, 1.0f, 1.0f, space_image->face_selection_opacity));
     }
 
+    if (show_passepartout_) {
+      /* Depth only: the faces mark the texels that reach the object, the color is left alone. */
+      auto &pass = passepartout_mask_ps_;
+      pass.init();
+      pass.state_set(DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_ALWAYS);
+      pass.shader_set(res.shaders->uv_face_selection.get());
+      pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
+      pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+      pass.push_constant("ucolor", float4(0.0f));
+    }
+
     if (show_mesh_analysis_) {
       auto &pass = analysis_ps_;
       pass.init();
@@ -937,6 +963,11 @@ class MeshUVs : Overlay {
       gpu::Batch *geom = DRW_mesh_batch_cache_get_uv_face_selection(*ob, mesh);
       face_selection_ps_.draw(geom, res_handle);
     }
+    /* Every face of the object, whatever its selection: a texel inside one reaches the object. */
+    if (show_passepartout_ && has_active_object_uvmap) {
+      gpu::Batch *geom = DRW_mesh_batch_cache_get_uv_face_selection(*ob, mesh);
+      passepartout_mask_ps_.draw(geom, res_handle);
+    }
   }
 
   void edit_object_sync(Manager &manager,
@@ -989,6 +1020,10 @@ class MeshUVs : Overlay {
     {
       gpu::Batch *geom = DRW_mesh_batch_cache_get_uv_face_selection(ob, mesh);
       face_selection_ps_.draw(geom, res_handle);
+    }
+    if (show_passepartout_ && has_active_object_uvmap) {
+      gpu::Batch *geom = DRW_mesh_batch_cache_get_uv_face_selection(ob, mesh);
+      passepartout_mask_ps_.draw(geom, res_handle);
     }
 
     /* Fully editable UVs in the UV Editor. */
@@ -1182,6 +1217,40 @@ class MeshUVs : Overlay {
       }
     }
 
+    if (show_passepartout_) {
+      /* A veiled texel reads as empty canvas, which is what it is for the object. Only where the
+       * mask pass left the depth alone, hence the strict depth test. */
+      float4 veil_color;
+      /* A little lighter than the background, so the veil still reads apart from the editor's own
+       * empty space. */
+      constexpr int veil_shade = 12;
+      ui::theme::get_color_shade_4fv(TH_BACK, veil_shade, veil_color);
+      srgb_to_linearrgb_v4(veil_color, veil_color);
+      veil_color.w = space_image->pbr_passepartout;
+
+      auto &pass = passepartout_ps_;
+      pass.init();
+      pass.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_DEPTH_LESS | DRW_STATE_BLEND_ALPHA);
+      pass.shader_set(res.shaders->uv_passepartout.get());
+      pass.push_constant("ucolor", veil_color);
+
+      /* One cell per UDIM tile, or the single cell of a plain image. */
+      Vector<int2> cells;
+      if (image->source == IMA_SRC_TILED) {
+        for (const ImageTile &tile : image->tiles) {
+          const int tile_offset = tile.tile_number - 1001;
+          cells.append(int2(tile_offset % 10, tile_offset / 10));
+        }
+      }
+      if (cells.is_empty()) {
+        cells.append(int2(0));
+      }
+      for (const int2 &cell : cells) {
+        pass.push_constant("tile_pos", float3(float(cell.x), float(cell.y), 0.0f));
+        pass.draw(res.shapes.quad_solid.get());
+      }
+    }
+
     if (show_stencil_) {
       auto &pass = brush_stencil_ps_;
       pass.init();
@@ -1239,6 +1308,14 @@ class MeshUVs : Overlay {
     GPU_framebuffer_bind(framebuffer);
     if (show_mask_ && (mask_mode_ != MASK_OVERLAY_COMBINED)) {
       manager.submit(paint_mask_ps_, view);
+    }
+    /* The faces' depth first, then the veil outside them; both below the UV guide passes. */
+    if (show_passepartout_) {
+      /* The 2D overlay targets are not cleared for depth, and the veil is told apart from the UV
+       * faces by nothing but the depth they wrote. */
+      GPU_framebuffer_clear_depth(framebuffer, 1.0f);
+      manager.submit(passepartout_mask_ps_, view);
+      manager.submit(passepartout_ps_, view);
     }
     /* Below the UV guide / wireframe passes, so the UV layout stays readable on top of the veil. */
     if (show_face_selection_) {

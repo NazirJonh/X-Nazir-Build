@@ -111,6 +111,7 @@
 #include "mesh/paint_material_attribute.hh"
 #include "mesh/sculpt_expand.hh"
 #include "mesh/sculpt_intern.hh"
+#include "uv_mapping/uv_mapping_target.hh"
 
 namespace blender {
 
@@ -936,6 +937,36 @@ void PAINT_OT_layer_target_mode_set(wmOperatorType *ot)
                           PAINT_LAYER_TARGET_CONTENT,
                           "Mode",
                           "Target to switch to");
+}
+
+/** Toggle the scale lock of the row the Mapping panel and the gizmo edit. */
+static bool layer_mapping_scale_lock_toggle_poll(bContext *C)
+{
+  ed::sculpt_paint::uv_mapping::PaintLayerRowMappingTarget target;
+  return target.resolve(*C);
+}
+
+static wmOperatorStatus layer_mapping_scale_lock_toggle_exec(bContext *C, wmOperator * /*op*/)
+{
+  ed::sculpt_paint::uv_mapping::PaintLayerRowMappingTarget target;
+  if (!target.resolve(*C)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (!target.set_scale_locked(!target.scale_locked())) {
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, target.material());
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_layer_mapping_scale_lock_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Layer Mapping Scale Lock";
+  ot->idname = "PAINT_OT_layer_mapping_scale_lock_toggle";
+  ot->description = "Lock or unlock the scale axes of the shown layer row's UV mapping";
+  ot->exec = layer_mapping_scale_lock_toggle_exec;
+  ot->poll = layer_mapping_scale_lock_toggle_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
 /* -------------------------------------------------------------------- */
@@ -2830,6 +2861,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_layer_target_mode_set);
+  WM_operatortype_append(PAINT_OT_layer_mapping_scale_lock_toggle);
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);
   WM_operatortype_append(PAINT_OT_material_channel_source_clear);

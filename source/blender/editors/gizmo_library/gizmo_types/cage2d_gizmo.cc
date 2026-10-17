@@ -488,6 +488,40 @@ static void imm_draw_point_aspect_2d(
   }
 }
 
+/** The box outline alone, dashed: alternating \a color and a dark gap so it reads on any map. */
+static void cage2d_draw_rect_dashed(const rctf *r, const float color[3], const float line_width)
+{
+  uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR);
+
+  float viewport[4];
+  GPU_viewport_size_get_f(viewport);
+  immUniform2f("viewport_size", viewport[2] / UI_SCALE_FAC, viewport[3] / UI_SCALE_FAC);
+  immUniform1i("colors_len", 2); /* "Advanced" mode: two alternating colors. */
+  immUniform4f("color", color[0], color[1], color[2], 1.0f);
+  immUniform4f("color2", 0.0f, 0.0f, 0.0f, 1.0f);
+  immUniform1f("dash_width", 6.0f);
+  immUniform1f("udash_factor", 0.5f);
+  GPU_line_width(line_width * U.pixelsize);
+
+  immBegin(GPU_PRIM_LINES, 8);
+  immVertex3f(pos, r->xmin, r->ymin, 0.0f);
+  immVertex3f(pos, r->xmax, r->ymin, 0.0f);
+
+  immVertex3f(pos, r->xmax, r->ymin, 0.0f);
+  immVertex3f(pos, r->xmax, r->ymax, 0.0f);
+
+  immVertex3f(pos, r->xmax, r->ymax, 0.0f);
+  immVertex3f(pos, r->xmin, r->ymax, 0.0f);
+
+  immVertex3f(pos, r->xmin, r->ymax, 0.0f);
+  immVertex3f(pos, r->xmin, r->ymin, 0.0f);
+  immEnd();
+
+  immUnbindProgram();
+}
+
 static void cage2d_draw_rect_wire(const rctf *r,
                                   const float margin[2],
                                   const float color[3],
@@ -507,20 +541,22 @@ static void cage2d_draw_rect_wire(const rctf *r,
   immUniform2fv("viewportSize", &viewport[2]);
   immUniform1f("lineWidth", line_width * U.pixelsize);
 
-  /* Small 'lines' primitives more efficient for hardware processing than line-strip. */
-  immBegin(GPU_PRIM_LINES, 8);
-  immVertex3f(pos, r->xmin, r->ymin, 0.0f);
-  immVertex3f(pos, r->xmax, r->ymin, 0.0f);
+  if ((draw_options & ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE) == 0) {
+    /* Small 'lines' primitives more efficient for hardware processing than line-strip. */
+    immBegin(GPU_PRIM_LINES, 8);
+    immVertex3f(pos, r->xmin, r->ymin, 0.0f);
+    immVertex3f(pos, r->xmax, r->ymin, 0.0f);
 
-  immVertex3f(pos, r->xmax, r->ymin, 0.0f);
-  immVertex3f(pos, r->xmax, r->ymax, 0.0f);
+    immVertex3f(pos, r->xmax, r->ymin, 0.0f);
+    immVertex3f(pos, r->xmax, r->ymax, 0.0f);
 
-  immVertex3f(pos, r->xmax, r->ymax, 0.0f);
-  immVertex3f(pos, r->xmin, r->ymax, 0.0f);
+    immVertex3f(pos, r->xmax, r->ymax, 0.0f);
+    immVertex3f(pos, r->xmin, r->ymax, 0.0f);
 
-  immVertex3f(pos, r->xmin, r->ymax, 0.0f);
-  immVertex3f(pos, r->xmin, r->ymin, 0.0f);
-  immEnd();
+    immVertex3f(pos, r->xmin, r->ymax, 0.0f);
+    immVertex3f(pos, r->xmin, r->ymin, 0.0f);
+    immEnd();
+  }
 
   if (transform_flag & ED_GIZMO_CAGE_XFORM_FLAG_ROTATE) {
     immBegin(GPU_PRIM_LINES, 4);
@@ -866,6 +902,9 @@ static void gizmo_cage2d_draw_intern(wmGizmo *gz,
       if (draw_style == ED_GIZMO_CAGE2D_STYLE_BOX_TRANSFORM) {
         cage2d_draw_rect_wire(&r, margin, black, transform_flag, draw_options, outline_line_width);
         cage2d_draw_rect_wire(&r, margin, color, transform_flag, draw_options, gz->line_width);
+        if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE) {
+          cage2d_draw_rect_dashed(&r, color, gz->line_width);
+        }
 
         if (draw_options & ED_GIZMO_CAGE_DRAW_FLAG_ALL_HANDLES) {
           /* Show all edge and corner handles permanently (opt-in, e.g. image-paint selection). */
@@ -1511,6 +1550,7 @@ static void GIZMO_GT_cage_2d(wmGizmoType *gzt)
        0,
        "Center Handle Plus",
        ""},
+      {ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE, "DASHED_OUTLINE", 0, "Dashed Outline", ""},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const float unit_v2[2] = {1.0f, 1.0f};

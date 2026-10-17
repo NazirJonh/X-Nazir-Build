@@ -480,6 +480,9 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   item_copy->blend = item.blend;
   item_copy->flag = item.flag;
   item_copy->opacity = item.opacity;
+  /* The row's UV mapping is part of its state, not of its kind: a pasted fill or fill
+   * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
+  item_copy->mapping = dna::shallow_copy(item.mapping);
   paint_layer_channels_duplicate(bmain, *item_copy, item);
   return item_copy;
 }
@@ -499,6 +502,8 @@ static void paint_layer_branch_duplicate(Main &bmain,
   dst.blend = src.blend;
   dst.source = src.source;
   memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
+  /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
+  dst.mapping = dna::shallow_copy(src.mapping);
   paint_layer_channels_duplicate(bmain, dst, src);
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as
@@ -1529,6 +1534,11 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
   return false;
 }
 
+bool BKE_paint_layers_row_is_paintable(const MaterialPaintLayer &row)
+{
+  return !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE);
+}
+
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer)
 {
   return (layer.mapping.flag & MA_PAINT_LAYER_MAPPING_ENABLED) != 0;
@@ -1589,6 +1599,28 @@ bool BKE_paint_layers_mapping_set_scale(Material &ma,
     next[1] = lead;
   }
   copy_v2_v2(layer->mapping.scale, next);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_mapping_set_values(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         const float offset[2],
+                                         const float scale[2],
+                                         const float rotation)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  float next[2] = {BKE_paint_layers_mapping_scale_normalize(scale[0]),
+                   BKE_paint_layers_mapping_scale_normalize(scale[1])};
+  if (BKE_paint_layers_mapping_scale_lock_get(*layer)) {
+    /* The caller owns the lead axis here, so a locked row takes the X value. */
+    next[1] = next[0];
+  }
+  copy_v2_v2(layer->mapping.offset, offset);
+  copy_v2_v2(layer->mapping.scale, next);
+  layer->mapping.rotation = rotation;
   BKE_paint_layers_tag_value_edited(ma);
   return true;
 }

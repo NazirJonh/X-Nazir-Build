@@ -205,7 +205,8 @@ void PaintLayersTreeBuilder::mapping_inputs_create(LayerGroup &group,
     float value[3];
     Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &store;
   };
-  /* The Mapping node reads three Vectors: the offset in x, y; the scale in x, y; the angle in z. */
+  /* The mapping chain reads three Vectors: the offset in x, y; the scale in x, y; the angle in
+   * z (fed to the Vector Rotate in front of the Mapping node). */
   const MappingInput inputs[3] = {
       {"Offset",
        ROLE_MAPPING_OFFSET,
@@ -270,17 +271,32 @@ bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
     bNode *coord = this->uv_coordinate_ensure(tree);
     bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
     mapping = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
+    /* A Vector Rotate in front of the Mapping node gives `offset + scale * (R * uv)`: the
+     * Mapping node alone would scale first and shear the pattern when the scale is not uniform.
+     * The rectangle the gizmo draws is this transform. */
+    bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
     bNodeSocket *mapping_vector = (mapping != nullptr) ? socket_in(*mapping, "Vector") : nullptr;
-    if (uv == nullptr || mapping_vector == nullptr || socket_out(*mapping, "Vector") == nullptr) {
+    bNodeSocket *rotate_vector = (rotate != nullptr) ? socket_in(*rotate, "Vector") : nullptr;
+    bNodeSocket *rotate_rotation = (rotate != nullptr) ? socket_in(*rotate, "Rotation") : nullptr;
+    bNodeSocket *rotate_out = (rotate != nullptr) ? socket_out(*rotate, "Vector") : nullptr;
+    if (uv == nullptr || mapping_vector == nullptr || socket_out(*mapping, "Vector") == nullptr ||
+        rotate_vector == nullptr || rotate_rotation == nullptr || rotate_out == nullptr)
+    {
       if (mapping != nullptr) {
         bke::node_remove_node(nullptr, tree, *mapping, true, false);
       }
+      if (rotate != nullptr) {
+        bke::node_remove_node(nullptr, tree, *rotate, true, false);
+      }
       return false;
     }
-    /* Point: `R * (uv * scale) + offset`, the same transform the CPU resample applies. */
+    /* Point mapping keeps only the scale and the offset; the rotation is the rotate node's. */
     mapping->custom1 = NODE_MAPPING_TYPE_POINT;
+    rotate->custom1 = NODE_VECTOR_ROTATE_TYPE_EULER_XYZ;
     grid_.place_extra(*mapping);
-    bke::node_add_link(tree, *coord, *uv, *mapping, *mapping_vector);
+    grid_.place_extra(*rotate);
+    bke::node_add_link(tree, *coord, *uv, *rotate, *rotate_vector);
+    bke::node_add_link(tree, *rotate, *rotate_out, *mapping, *mapping_vector);
     /* The values ride the row group's inputs; an input missing here leaves the socket at its
      * identity default instead. */
     const auto link_value = [&](Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &inputs,
@@ -295,10 +311,18 @@ bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
       }
     };
     link_value(mapping_offset_inputs_, "Location");
-    link_value(mapping_rotation_inputs_, "Rotation");
     link_value(mapping_scale_inputs_, "Scale");
+    if (bNodeTreeInterfaceSocket **iface = mapping_rotation_inputs_.lookup_ptr(&row)) {
+      bNodeSocket *source = (iface != nullptr && *iface != nullptr) ?
+                                this->group_input_socket(group, **iface) :
+                                nullptr;
+      if (source != nullptr) {
+        bke::node_add_link(tree, *group.group_input, *source, *rotate, *rotate_rotation);
+      }
+    }
     mapping_nodes_.add(&row, mapping);
     r_nodes.append(mapping);
+    r_nodes.append(rotate);
   }
   bNodeSocket *mapping_out = socket_out(*mapping, "Vector");
   if (mapping_out == nullptr) {
@@ -480,10 +504,20 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
     return color;
   }
   bNode &mapping = **found;
-  /* Rotation and Scale come from the very sockets feeding the row's Mapping. Links are read from
-   * the tree because `bNodeSocket::link` can be stale. */
-  const bNodeSocket *mapping_rotation = socket_in(mapping, "Rotation");
+  /* Rotation and Scale come from the very sockets feeding the row's chain. Links are read from
+   * the tree because `bNodeSocket::link` can be stale. The rotation feeds the Vector Rotate that
+   * sits before the Mapping node, not the Mapping node itself. */
+  const bNodeSocket *mapping_vector = socket_in(mapping, "Vector");
   const bNodeSocket *mapping_scale = socket_in(mapping, "Scale");
+  bNode *chain_rotate = nullptr;
+  for (bNodeLink &link : tree.links) {
+    if (link.tosock == mapping_vector) {
+      chain_rotate = link.fromnode;
+    }
+  }
+  const bNodeSocket *mapping_rotation = (chain_rotate != nullptr) ?
+                                            socket_in(*chain_rotate, "Rotation") :
+                                            nullptr;
   NodeOutput rotation;
   NodeOutput scale;
   for (bNodeLink &link : tree.links) {
@@ -497,9 +531,10 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
 
   bNode *decode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
   bNode *sign = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-  bNode *remap = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
+  bNode *flip = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
   bNode *encode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-  const std::array<bNode *, 4> created = {decode, sign, remap, encode};
+  const std::array<bNode *, 5> created = {decode, sign, flip, rotate, encode};
   const auto discard = [&]() {
     for (bNode *node : created) {
       if (node != nullptr) {
@@ -508,16 +543,20 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
     }
     return color;
   };
-  if (decode == nullptr || sign == nullptr || remap == nullptr || encode == nullptr) {
+  if (decode == nullptr || sign == nullptr || flip == nullptr || rotate == nullptr ||
+      encode == nullptr)
+  {
     return discard();
   }
   decode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
   encode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
   sign->custom1 = NODE_VECTOR_MATH_SIGN;
-  /* The Texture type is `(R^-1 * v) / scale`: with the scale reduced to its sign the division is a
-   * flip, so this is `S * R^T * v`, the transform a covariant normal needs when the UVs go through
-   * `R * S`. The scale's magnitude and the offset do not affect a direction. */
-  remap->custom1 = NODE_MAPPING_TYPE_TEXTURE;
+  flip->custom1 = NODE_VECTOR_MATH_MULTIPLY;
+  /* The UVs go through `S * R`, so a tangent normal needs its covariant counterpart
+   * `R^T * S`: flip by the sign of the scale (its magnitude does not turn a direction), then
+   * rotate back. */
+  rotate->custom1 = NODE_VECTOR_ROTATE_TYPE_EULER_XYZ;
+  rotate->custom2 = 1; /* Invert: rotation undone. */
   const auto set_madd = [](bNode &node, const float multiplier, const float addend) {
     const char *names[2] = {"Vector_001", "Vector_002"};
     const float values[2] = {multiplier, addend};
@@ -535,15 +574,18 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
   bNodeSocket *decode_out = socket_out(*decode, "Vector");
   bNodeSocket *sign_in = socket_in(*sign, "Vector");
   bNodeSocket *sign_out = socket_out(*sign, "Vector");
-  bNodeSocket *remap_in = socket_in(*remap, "Vector");
-  bNodeSocket *remap_rotation = socket_in(*remap, "Rotation");
-  bNodeSocket *remap_scale = socket_in(*remap, "Scale");
-  bNodeSocket *remap_out = socket_out(*remap, "Vector");
+  bNodeSocket *flip_a = socket_in(*flip, "Vector");
+  bNodeSocket *flip_b = socket_in(*flip, "Vector_001");
+  bNodeSocket *flip_out = socket_out(*flip, "Vector");
+  bNodeSocket *rotate_in = socket_in(*rotate, "Vector");
+  bNodeSocket *rotate_rotation = socket_in(*rotate, "Rotation");
+  bNodeSocket *rotate_out = socket_out(*rotate, "Vector");
   bNodeSocket *encode_in = socket_in(*encode, "Vector");
   bNodeSocket *encode_out = socket_out(*encode, "Vector");
   if (decode_in == nullptr || decode_out == nullptr || sign_in == nullptr || sign_out == nullptr ||
-      remap_in == nullptr || remap_rotation == nullptr || remap_scale == nullptr ||
-      remap_out == nullptr || encode_in == nullptr || encode_out == nullptr)
+      flip_a == nullptr || flip_b == nullptr || flip_out == nullptr || rotate_in == nullptr ||
+      rotate_rotation == nullptr || rotate_out == nullptr || encode_in == nullptr ||
+      encode_out == nullptr)
   {
     return discard();
   }
@@ -554,7 +596,7 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
     }
   }
   if (rotation.node != nullptr && rotation.socket != nullptr) {
-    bke::node_add_link(tree, *rotation.node, *rotation.socket, *remap, *remap_rotation);
+    bke::node_add_link(tree, *rotation.node, *rotation.socket, *rotate, *rotate_rotation);
   }
   if (scale.node != nullptr && scale.socket != nullptr) {
     bke::node_add_link(tree, *scale.node, *scale.socket, *sign, *sign_in);
@@ -564,9 +606,10 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
     copy_v3_fl(static_cast<bNodeSocketValueVector *>(sign_in->default_value)->value, 1.0f);
   }
   bke::node_add_link(tree, *color.node, *color.socket, *decode, *decode_in);
-  bke::node_add_link(tree, *decode, *decode_out, *remap, *remap_in);
-  bke::node_add_link(tree, *sign, *sign_out, *remap, *remap_scale);
-  bke::node_add_link(tree, *remap, *remap_out, *encode, *encode_in);
+  bke::node_add_link(tree, *decode, *decode_out, *flip, *flip_a);
+  bke::node_add_link(tree, *sign, *sign_out, *flip, *flip_b);
+  bke::node_add_link(tree, *flip, *flip_out, *rotate, *rotate_in);
+  bke::node_add_link(tree, *rotate, *rotate_out, *encode, *encode_in);
   return {encode, encode_out};
 }
 

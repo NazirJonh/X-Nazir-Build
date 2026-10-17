@@ -1398,7 +1398,7 @@ static void composite_image_own(ImBuf *ibuf, Vector<CompositeImageLock> &r_locks
  * RGBA premultiplied scene-linear ImBuf the caller owns.
  *
  * Each reference texel centre `((x + 0.5) / W, (y + 0.5) / H)` is transformed exactly like the
- * generated Mapping node (Point) does -- scale, then rotate around Z, then offset -- and the source
+ * generated Mapping node chain does -- rotate around Z, then scale, then offset -- and the source
  * is read bilinearly at `u * W_src - 0.5` with Repeat edges, the texel-centre convention of the
  * Image Texture node. The taps are decoded to linear and filtered premultiplied, the way that node
  * filters before it un-premultiplies; the evaluator straightens the result on read, like every
@@ -1499,10 +1499,12 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
     const float v = (float(y) + 0.5f) / float(ref_height);
     for (int x = 0; x < ref_width; x++) {
       const float u = (float(x) + 0.5f) / float(ref_width);
-      const float sx = u * scale_x;
-      const float sy = v * scale_y;
-      float uu = sx * cos_rot - sy * sin_rot + mapping.offset[0];
-      float vv = sx * sin_rot + sy * cos_rot + mapping.offset[1];
+      /* Rotate the canvas UV first, then scale along the canvas axes: this is the transform the
+       * gizmo's rectangle shows, and it keeps a non-uniform scale from shearing the pattern. */
+      const float ru = u * cos_rot - v * sin_rot;
+      const float rv = u * sin_rot + v * cos_rot;
+      float uu = ru * scale_x + mapping.offset[0];
+      float vv = rv * scale_y + mapping.offset[1];
       /* An axis that repeats wraps; one that clips reads transparent outside [0, 1). The row covers
        * by the map's own alpha, so the transparent texel leaves the coverage there, which is what
        * the generated graph's clip factor does to the map's Alpha. */
@@ -1534,9 +1536,9 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
                (1.0f - a) * b * t01[k] + a * b * t11[k];
       }
       if (mapping.tangent_normal && p[3] > 0.0f) {
-        /* The mapping moved only the read point; the tangent-space vectors follow it. `S * R^T`
-         * (rotation undone, then flipped by the scale's sign) is the covariant counterpart of the
-         * UV transform `R * S`; the magnitude of the scale does not turn a direction.
+        /* The mapping moved only the read point; the tangent-space vectors follow it. `R^T * S`
+         * (flipped by the scale's sign, then rotated back) is the covariant counterpart of the
+         * UV transform `S * R`; the magnitude of the scale does not turn a direction.
          * Un-premultiply first so the alpha does not skew the decode. */
         const float inv_alpha = 1.0f / p[3];
         const float nx = 2.0f * p[0] * inv_alpha - 1.0f;
@@ -1544,8 +1546,10 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
         const float nz = 2.0f * p[2] * inv_alpha - 1.0f;
         const float rx = scale_x < 0.0f ? -1.0f : 1.0f;
         const float ry = scale_y < 0.0f ? -1.0f : 1.0f;
-        p[0] = (0.5f * rx * (cos_rot * nx + sin_rot * ny) + 0.5f) * p[3];
-        p[1] = (0.5f * ry * (-sin_rot * nx + cos_rot * ny) + 0.5f) * p[3];
+        const float fx = rx * nx;
+        const float fy = ry * ny;
+        p[0] = (0.5f * (cos_rot * fx + sin_rot * fy) + 0.5f) * p[3];
+        p[1] = (0.5f * (-sin_rot * fx + cos_rot * fy) + 0.5f) * p[3];
         p[2] = (0.5f * nz + 0.5f) * p[3];
       }
     }

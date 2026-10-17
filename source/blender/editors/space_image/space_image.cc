@@ -763,6 +763,11 @@ static void IMAGE_GGT_paint_shape_transform_3d(wmGizmoGroupType *gzgt)
   ED_image_paint_shape3d_gizmo_setup(gzgt);
 }
 
+static void IMAGE_GGT_paint_layer_mapping(wmGizmoGroupType *gzgt)
+{
+  ED_image_paint_layer_mapping_gizmo_setup(gzgt);
+}
+
 static void image_widgets()
 {
   const wmGizmoMapType_Params params{SPACE_IMAGE, RGN_TYPE_WINDOW};
@@ -784,6 +789,7 @@ static void image_widgets()
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_select_transform);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_shape_transform);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_shape_transform_3d);
+  WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_layer_mapping);
 }
 
 /************************** main region ***************************/
@@ -1264,9 +1270,18 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
        * enabling a row) change the composite without touching an image, so they report only
        * #NC_MATERIAL. The composite cache is hash-gated, so a redraw that finds nothing new is
        * cheap. */
+      /* The layer mapping gizmo follows the shown row, its enabled flag and its map: all of
+       * those report only #NC_MATERIAL. */
+      if (sima->mode == SI_MODE_PAINT) {
+        WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
+      }
       if ((sima->flag & SI_PAINT_COMPOSITE_MODE) != 0) {
         ED_region_tag_redraw(region);
         break;
+      }
+      /* Only the gizmo needs this redraw: it reads the row's values, not an image. */
+      if (wmn->data == ND_SHADING && sima->mode == SI_MODE_PAINT) {
+        ED_region_tag_redraw(region);
       }
       if (wmn->data == ND_SHADING_LINKS) {
         if (sima->iuser.scene &&
@@ -1278,6 +1293,13 @@ static void image_main_region_listener(const wmRegionListenerParams *params)
       break;
     case NC_NODE:
       if (ELEM(wmn->action, NA_EDITED, NA_SELECTED)) {
+        WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
+        ED_region_tag_redraw(region);
+      }
+      break;
+    case NC_SCENE:
+      /* The layer target mode decides which row the Mapping panel and the gizmo edit. */
+      if (wmn->data == ND_MODE || wmn->data == ND_TOOLSETTINGS) {
         WM_gizmomap_tag_refresh(region->runtime->gizmo_map);
         ED_region_tag_redraw(region);
       }

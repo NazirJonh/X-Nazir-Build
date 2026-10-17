@@ -286,13 +286,23 @@ class GraphInterpreter {
                   scale.b != 0.0f ? (vector.b - location.b) / scale.b : 0.0f,
                   1.0f};
         }
-        /* Point: `R * (v * scale) + location`, scale first. */
-        const float sx = vector.r * scale.r;
-        const float sy = vector.g * scale.g;
-        return {cos_z * sx - sin_z * sy + location.r,
-                sin_z * sx + cos_z * sy + location.g,
+        /* Point: `v * scale + location`. The generated chain turns the vector in a Vector Rotate
+         * in front of this node, so the node's own Rotation stays at zero. */
+        return {vector.r * scale.r + location.r,
+                vector.g * scale.g + location.g,
                 vector.b * scale.b + location.b,
                 1.0f};
+      }
+      case SH_NODE_VECTOR_ROTATE: {
+        /* Euler Z only, the one the generated chain uses: `R(angle) * v`, or its inverse. */
+        const RGBA vector = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Vector"_ustr));
+        const RGBA rotation = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Rotation"_ustr));
+        const float angle = node.custom2 ? -rotation.b : rotation.b;
+        const float c = cosf(angle);
+        const float s = sinf(angle);
+        return {c * vector.r - s * vector.g, s * vector.r + c * vector.g, vector.b, 1.0f};
       }
       case SH_NODE_RGB:
       case SH_NODE_VALUE:
@@ -403,6 +413,11 @@ class GraphInterpreter {
                   vector.g * scale.g + offset.g,
                   vector.b * scale.b + offset.b,
                   1.0f};
+        }
+        if (node.custom1 == NODE_VECTOR_MATH_MULTIPLY) {
+          const RGBA other = eval_socket(
+              *bke::node_find_socket(mutable_node, SOCK_IN, "Vector_001"_ustr));
+          return {vector.r * other.r, vector.g * other.g, vector.b * other.b, 1.0f};
         }
         if (node.custom1 == NODE_VECTOR_MATH_DIVIDE) {
           /* Per component, zero where the divisor is zero: what an empty folder relies on. */

@@ -595,6 +595,13 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
  */
 bool BKE_paint_layers_mapping_applies(const Material &ma, const MaterialPaintLayer &layer);
 
+/**
+ * Whether strokes may write into \a row's own channels. A Fill row lays a flat value (with an
+ * optional map read through its mapping); painting it would turn that map into a stroke target.
+ * Its content is edited by corrections instead. A row's mask is still paintable.
+ */
+bool BKE_paint_layers_row_is_paintable(const MaterialPaintLayer &row);
+
 /** Whether \a layer's mapping is enabled. */
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer);
 
@@ -616,6 +623,16 @@ bool BKE_paint_layers_mapping_set_offset(Material &ma,
 bool BKE_paint_layers_mapping_set_scale(Material &ma,
                                         MaterialPaintLayer *layer,
                                         const float scale[2]);
+
+/**
+ * Set offset, scale and rotation of \a layer in one step (one tag per call, for per-event gizmo
+ * drags). Value-only. While the scale lock is on both axes take the X value of \a scale.
+ */
+bool BKE_paint_layers_mapping_set_values(Material &ma,
+                                         MaterialPaintLayer *layer,
+                                         const float offset[2],
+                                         const float scale[2],
+                                         float rotation);
 
 /** Whether the scale axes of \a layer move together (the Lock toggle). */
 bool BKE_paint_layers_mapping_scale_lock_get(const MaterialPaintLayer &layer);

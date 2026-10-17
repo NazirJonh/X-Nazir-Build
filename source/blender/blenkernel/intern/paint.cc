@@ -4760,6 +4760,27 @@ bool BKE_paint_principled_channel_image_ensure(Main &bmain,
 }
 
 /**
+ * Whether a stroke in \a mode_settings has no row of the layered material \a ob to write into: the
+ * active row is a Fill, a flat value with an optional map read through its mapping, whose content
+ * is edited through corrections. Its mask is still paintable.
+ *
+ * Only strokes ask this. Readers (the Image Editor's canvas, the outliner, RNA) keep resolving a
+ * Fill's map through #BKE_paint_layers_target_get, so a Fill row still gets its images shown.
+ */
+static bool paint_layers_active_row_blocks_strokes(Object &ob,
+                                                   const PaintModeSettings &mode_settings)
+{
+  Material *ma = BKE_paint_layers_active_material_get(&ob);
+  if (ma == nullptr ||
+      BKE_paint_layers_target_mode(&mode_settings) != PaintLayersTargetMode::Content)
+  {
+    return false;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(*ma);
+  return row == nullptr || !BKE_paint_layers_row_is_paintable(*row);
+}
+
+/**
  * The layered material's counterpart of the graph path of
  * #paint_material_images_ensure_writable_for_mask: the active row grows a map for every channel in
  * \a channel_mask it takes and has none for.
@@ -4771,6 +4792,9 @@ static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_m
     Main &bmain, Object &ob, const PaintModeSettings &mode_settings, const uint32_t channel_mask)
 {
   PaintMaterialImagesEnsureResult result;
+  if (paint_layers_active_row_blocks_strokes(ob, mode_settings)) {
+    return result;
+  }
 
   /* The channels the row takes and that have no map yet. Collected first and resolved again one by
    * one below: adding a map edits the row, and a target points into its records. */
@@ -4977,6 +5001,14 @@ static Vector<PaintMaterialImageTarget> paint_material_image_targets_get_for_mas
     const BrushMaterialPaint *value_source)
 {
   Vector<PaintMaterialImageTarget> targets;
+
+  /* A layered material's active Fill row is not a stroke target: its map is read through the
+   * row's mapping and painted only through corrections. Guard both the brush and the shape
+   * entry points here, where every stroke gathers its images. */
+  if (paint_layers_active_row_blocks_strokes(ob, mode_settings)) {
+    return targets;
+  }
+
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (!info.supports_image_paint) {
       /* No image backend for this channel yet, so there is no map to paint into. */

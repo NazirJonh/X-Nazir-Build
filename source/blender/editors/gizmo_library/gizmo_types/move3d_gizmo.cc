@@ -403,7 +403,9 @@ static int gizmo_move_test_select(bContext *C, wmGizmo *gz, const int mval[2])
   /* The 'gz->scale_final' is already applied to the projection
    * when #WM_GIZMO_DRAW_NO_SCALE isn't set. */
   const float radius = (gz->flag & WM_GIZMO_DRAW_NO_SCALE) ? gz->scale_final : 1.0f;
-  if (len_squared_v2(point_local) < radius) {
+  /* Compare squared lengths: with #WM_GIZMO_DRAW_NO_SCALE the radius is in pixels, and the ring is
+   * drawn with it, so comparing against the radius itself left a hit area of its square root. */
+  if (len_squared_v2(point_local) < radius * radius) {
     return 0;
   }
 

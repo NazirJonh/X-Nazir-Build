@@ -301,10 +301,10 @@ float3 apply_filter(int filter_kind, float3 rgb, float4 p0, float4 p1)
 /**
  * One straight, scene-linear texel of a map at the canvas \a uv, read through the row's UV mapping.
  *
- * `uv' = R * (uv * scale) + offset` is the transform of the Mapping node and of the CPU resample.
- * An axis that repeats wraps; one that clips reads transparent outside [0, 1). A tangent-space
- * Normal map has its vectors follow the mapping, as in `composite_resample_mapped`: rotation undone,
- * then flipped by the sign of the scale.
+ * `uv' = (R * uv) * scale + offset` is the transform of the generated Mapping node chain and of
+ * the CPU resample. An axis that repeats wraps; one that clips reads transparent outside [0, 1).
+ * A tangent-space Normal map has its vectors follow the mapping, as in
+ * `composite_resample_mapped`: flipped by the sign of the scale, then rotated back.
  */
 float4 sample_map(sampler2D tx,
                   float2 uv,
@@ -317,10 +317,9 @@ float4 sample_map(sampler2D tx,
   float2 sample_uv = uv;
   bool clipped = false;
   if ((flags & COMBINED_LAYER_MAPPED) != 0) {
-    float2 scaled = uv * mapping_scale;
-    sample_uv = float2(scaled.x * mapping_rotation.x - scaled.y * mapping_rotation.y,
-                       scaled.x * mapping_rotation.y + scaled.y * mapping_rotation.x) +
-                mapping_offset;
+    float2 rotated = float2(uv.x * mapping_rotation.x - uv.y * mapping_rotation.y,
+                            uv.x * mapping_rotation.y + uv.y * mapping_rotation.x);
+    sample_uv = rotated * mapping_scale + mapping_offset;
     bool repeat_u = (flags & COMBINED_LAYER_REPEAT_U) != 0;
     bool repeat_v = (flags & COMBINED_LAYER_REPEAT_V) != 0;
     if (repeat_u) {
@@ -342,8 +341,10 @@ float4 sample_map(sampler2D tx,
     float ry = (mapping_scale.y < 0.0f) ? -1.0f : 1.0f;
     float c = mapping_rotation.x;
     float s = mapping_rotation.y;
-    color.xyz = float3(0.5f * rx * (c * n.x + s * n.y) + 0.5f,
-                       0.5f * ry * (-s * n.x + c * n.y) + 0.5f,
+    float fx = rx * n.x;
+    float fy = ry * n.y;
+    color.xyz = float3(0.5f * (c * fx + s * fy) + 0.5f,
+                       0.5f * (-s * fx + c * fy) + 0.5f,
                        0.5f * n.z + 0.5f);
   }
   return color;

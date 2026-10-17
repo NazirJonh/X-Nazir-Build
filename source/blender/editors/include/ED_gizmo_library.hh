@@ -143,6 +143,9 @@ enum {
   /** Draw the center handle as a plus (+) instead of the default cross (X).
    * Opt-in so existing cage gizmos keep the cross glyph. */
   ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE_PLUS = (1 << 4),
+  /** Draw the box outline of #ED_GIZMO_CAGE2D_STYLE_BOX_TRANSFORM dashed instead of solid.
+   * Opt-in so existing cage gizmos keep the solid outline. */
+  ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE = (1 << 5),
 };
 
 /** #wmGizmo.highlight_part */

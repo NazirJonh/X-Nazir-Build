@@ -197,7 +197,8 @@ static void paint_select_transform_gizmo_setup(const bContext * /*C*/, wmGizmoGr
                ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE |
                    ED_GIZMO_CAGE_DRAW_FLAG_XFORM_CENTER_HANDLE_PLUS |
                    ED_GIZMO_CAGE_DRAW_FLAG_CORNER_HANDLES | ED_GIZMO_CAGE_DRAW_FLAG_ALL_HANDLES |
-                   ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE);
+                   ED_GIZMO_CAGE_DRAW_FLAG_XFORM_INTERIOR_TRANSLATE |
+                   ED_GIZMO_CAGE_DRAW_FLAG_DASHED_OUTLINE);
   WM_gizmo_set_fn_custom_modal(ggd->gz_cage, paint_select_transform_cage_modal);
   /* Interior-translate cursor depends on modal state, so refresh it on modal transitions. */
   ggd->gz_cage->flag |= WM_GIZMO_REFRESH_CURSOR_ON_MODAL;

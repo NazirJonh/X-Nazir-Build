@@ -107,8 +107,8 @@ struct PaintMaterialCompositeConstant {
 
 /**
  * The UV mapping of a row's own map (a Fill layer, correction or mask): when #enabled, the map is
- * read through `uv' = R * (uv * scale) + offset` with Repeat edges, the transform the Mapping node
- * of the generated graph applies. Copied from the description when the stack is derived; the
+ * read through `uv' = (R * uv) * scale + offset` with Repeat edges, the transform the Vector Rotate
+ * and Mapping nodes of the generated graph apply. Copied from the description when the stack is derived; the
  * resample happens while the buffers are acquired, so the evaluator reads the remapped buffer and
  * never sees these.
  */

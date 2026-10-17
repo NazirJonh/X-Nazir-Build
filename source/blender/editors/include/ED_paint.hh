@@ -485,6 +485,11 @@ void ED_image_paint_select_scale_set(SpaceImage *sima, const float scale[2]);
 /** Register the gizmo group that draws the floating selection transform cage. */
 void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 
+/* `uv_mapping/paint_layer_mapping_gizmo.cc` */
+
+/** Register the gizmo group that edits the shown layer row's UV mapping (offset/scale/rotation). */
+void ED_image_paint_layer_mapping_gizmo_setup(wmGizmoGroupType *gzgt);
+
 /* `paint_image_shape_gizmo.cc` */
 
 /** Register the gizmo group that draws the live Vector shape session's transform cage. */

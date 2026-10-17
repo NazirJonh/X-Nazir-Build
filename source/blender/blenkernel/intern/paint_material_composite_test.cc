@@ -2112,11 +2112,11 @@ TEST_F(PaintLayersCompositeTest, mapping_formula_matches_the_shader_node)
   EXPECT_NEAR(p[1], 0.75f, 1e-3f);
   EXPECT_NEAR(p[2], 0.75f, 1e-3f);
 
-  /* Order: scale (2, 1), then rotate 90 degrees, then offset (0.25, 0). Pixel (0,0): uv =
-   * (0.125, 0.125) -> scaled (0.25, 0.125) -> rotated (-0.125, 0.25) -> offset (0.125, 0.25).
-   * su = 0.125 * 2 - 0.5 = -0.25 -> x0 = -1 (texel 1) with a = 0.75; sv = 0.25 * 2 - 0.5 = 0, so
-   * only the row y = 0 is read: 0.25 * green + 0.75 * red = (0.75, 0.25, 0). Rotating before
-   * scaling, or offsetting before rotating, lands on different texels. */
+  /* Order: rotate 90 degrees, then scale (2, 1), then offset (0.25, 0). Pixel (0,0): uv =
+   * (0.125, 0.125) -> rotated (-0.125, 0.125) -> scaled (-0.25, 0.125) -> offset (0, 0.125).
+   * su = 0 * 2 - 0.5 = -0.5 -> x0 = -1 (texel 1) with a = 0.5; sv = 0.125 * 2 - 0.5 = -0.25 ->
+   * y0 = -1 (row 1) with b = 0.75. Weights: red 0.375, green 0.375, blue 0.125, white 0.125,
+   * so (0.5, 0.5, 0.25). Scaling before rotating lands on different texels. */
   const float aniso[2] = {2.0f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale_lock(*ma, correction, false));
   ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, correction, aniso));
@@ -2124,9 +2124,9 @@ TEST_F(PaintLayersCompositeTest, mapping_formula_matches_the_shader_node)
   const float side[2] = {0.25f, 0.0f};
   ASSERT_TRUE(BKE_paint_layers_mapping_set_offset(*ma, correction, side));
   p = at(0, 0);
-  EXPECT_NEAR(p[0], 0.75f, 1e-3f);
-  EXPECT_NEAR(p[1], 0.25f, 1e-3f);
-  EXPECT_NEAR(p[2], 0.0f, 1e-3f);
+  EXPECT_NEAR(p[0], 0.5f, 1e-3f);
+  EXPECT_NEAR(p[1], 0.5f, 1e-3f);
+  EXPECT_NEAR(p[2], 0.25f, 1e-3f);
 }
 
 /** The mapping reaches a Fill layer's own map, not only a correction's. */
@@ -2344,11 +2344,9 @@ TEST_F(PaintLayersCompositeTest, mapped_normal_map_rotates_and_mirrors_its_vecto
     ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, fill, test.scale));
     const float cos_rot = cosf(test.rotation);
     const float sin_rot = sinf(test.rotation);
-    float expected[3] = {(test.scale[0] < 0.0f ? -1.0f : 1.0f) *
-                             (cos_rot * detail[0] + sin_rot * detail[1]),
-                         (test.scale[1] < 0.0f ? -1.0f : 1.0f) *
-                             (-sin_rot * detail[0] + cos_rot * detail[1]),
-                         detail[2]};
+    const float fx = (test.scale[0] < 0.0f ? -1.0f : 1.0f) * detail[0];
+    const float fy = (test.scale[1] < 0.0f ? -1.0f : 1.0f) * detail[1];
+    float expected[3] = {cos_rot * fx + sin_rot * fy, -sin_rot * fx + cos_rot * fy, detail[2]};
     normalize_v3(expected);
     const std::array<float, 4> got = linear_pixel(channel, 1, 2);
     EXPECT_NEAR(got[0], expected[0] * 0.5f + 0.5f, 0.01f);

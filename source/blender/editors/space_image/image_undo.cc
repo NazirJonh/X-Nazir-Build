@@ -342,10 +342,26 @@ static void ptile_restore_runtime_map(PaintTileMap *paint_tile_map)
                     tile_copy_size);
     }
 
-    BKE_image_partial_update_mark_full_update(image);
+    /* Only the rectangle that was written back. A blanket full-update mark here turned every
+     * session re-stamp (Curve Patch restore-and-restamp, once per mouse move) into a whole-canvas
+     * rebuild of the material composite and a whole-map re-upload of the GPU texture the Combined
+     * preview samples, however small the patch was. */
+    const ImageTile *image_tile = BKE_image_get_tile_from_iuser(image, &ptile->iuser);
+    if (image_tile != nullptr && tile_copy_size.x > 0 && tile_copy_size.y > 0) {
+      rcti restored_region;
+      BLI_rcti_init(&restored_region,
+                    tile_pos.x,
+                    tile_pos.x + tile_copy_size.x,
+                    tile_pos.y,
+                    tile_pos.y + tile_copy_size.y);
+      BKE_image_partial_update_mark_region(image, image_tile, ibuf, &restored_region);
+    }
+    else {
+      BKE_image_partial_update_mark_full_update(image);
+    }
 
     /* Neither material cache is told: both subscribe to the image's partial-update log, which the
-     * full-update mark above already wrote to. */
+     * mark above already wrote to. */
 
     if (ibuf->float_data()) {
       ibuf->userflags |= IB_RECT_INVALID; /* force recreate of char rect */
@@ -1498,32 +1514,6 @@ void ED_image_undo_push_end()
   }
 }
 
-/**
- * Tell the partial-update system that every image `paint_tile_map` covers changed wholesale.
- *
- * #ptile_restore_runtime_map writes pristine pixels straight into the `ImBuf` and notifies
- * nothing. That was adequate where it was written -- projection painting, which is followed by a
- * full 3D viewport redraw regardless -- but the Image Editor draws through `PartialUpdateChecker`,
- * so any region the restore reverted and the caller does not dirty again keeps displaying the
- * stale content even though the pixels underneath are already correct.
- *
- * Deliberately NOT folded into #ptile_restore_runtime_map itself: that one is shared with the
- * projection-paint path, where the mark would be pure overhead on a hot path. Only the
- * session-owned map helpers below, whose callers are Image Editor sessions, pay for it.
- */
-static void ptile_map_mark_images_full_update(PaintTileMap *paint_tile_map)
-{
-  /* A session typically touches a single image, so the last-marked check is enough to keep this
-   * O(tiles) with no allocation; a UDIM set marks each of its images once per contiguous run. */
-  Image *last_marked = nullptr;
-  for (PaintTile *ptile : paint_tile_map->map.values()) {
-    if (ptile->image != nullptr && ptile->image != last_marked) {
-      BKE_image_partial_update_mark_full_update(ptile->image);
-      last_marked = ptile->image;
-    }
-  }
-}
-
 PaintTileMap *ED_image_paint_tile_map_new()
 {
   return MEM_new<PaintTileMap>(__func__);
@@ -1536,8 +1526,8 @@ void ED_image_paint_tile_map_free(PaintTileMap *paint_tile_map)
 
 void ED_image_paint_tile_map_restore(PaintTileMap *paint_tile_map)
 {
+  /* #ptile_restore_runtime_map marks exactly the rectangles it writes back. */
   ptile_restore_runtime_map(paint_tile_map);
-  ptile_map_mark_images_full_update(paint_tile_map);
   /* Drop any per-stroke alpha accumulation so the next re-stamp starts from zero coverage, exactly
    * as the first stamp did. The mask buffer itself is kept: reallocating it per cycle would churn
    * one allocation per touched tile per mouse move. A writer that pushes its tiles with a null

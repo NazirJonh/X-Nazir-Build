@@ -481,6 +481,14 @@ class ChannelUvSampler {
   /** True when \a channel has a source that can be sampled. */
   bool has_usable_source(eMaterialPaintChannel channel) const;
 
+  /** True when a color sample of \a channel is converted to scene linear on every read, which a
+   * caller can instead do in batches by passing `decode_linear = false` to #color_at_uv and
+   * decoding the raw values itself with #colorspace. */
+  bool needs_linear_conversion(eMaterialPaintChannel channel) const;
+
+  /** The color space the raw samples of \a channel are stored in. */
+  const ocio::ColorSpace *colorspace(eMaterialPaintChannel channel) const;
+
   /** See #ChannelSourceSampler::scalar_at_uv. */
   float scalar_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;
 

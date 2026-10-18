@@ -9,6 +9,8 @@
 #include "paint_image_curve_patch_raster.hh"
 
 #include <cfloat>
+#include <cstdint>
+#include <cstdio>
 #include <optional>
 
 #include "BLI_index_range.hh"
@@ -419,6 +421,26 @@ static void blend_tile_region(const TileRegion &region,
   float *float_data = is_float ? ibuf.float_data_for_write() : nullptr;
   uchar *byte_data = is_float ? nullptr : ibuf.byte_data_for_write();
   const ColorSpace *byte_colorspace = is_float ? nullptr : ibuf.byte_buffer.colorspace;
+  /* Randomize Color, scoped as described at its use below. */
+  const bool target_jitters_color = target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR ||
+                                    !target.is_material_channel;
+  /* A byte canvas stores colors in its own color space, so every written pixel needs one
+   * scene-linear -> canvas conversion. Done per pixel that is an OCIO call each, which cost ~10 us
+   * apiece in the measured log and dominated the whole restamp (Normal, the one target that is
+   * never encoded, was 20-40x faster). Collected per row instead and converted as a single buffer.
+   * Normal-Mix writes packed direction data that must not be encoded, so it keeps the direct path.
+   */
+  const bool defer_encode = !is_float && byte_colorspace != nullptr &&
+                            target.blend != IMB_BLEND_NORMAL_MIX;
+  /* The same for decoding a Base Color source into scene linear: the sampler is asked for the raw
+   * texel, and the row is decoded as one buffer before the color jitter is applied to it. */
+  const ocio::ColorSpace *source_colorspace = nullptr;
+  if (defer_encode && target_has_source && target.is_color_channel && !target.is_normal_channel &&
+      channel_sources->needs_linear_conversion(target.channel))
+  {
+    source_colorspace = channel_sources->colorspace(target.channel);
+  }
+  const bool defer_decode = source_colorspace != nullptr;
 
   const int row_count = region.y1 - region.y0;
   const int width = region.x1 - region.x0;
@@ -428,6 +450,17 @@ static void blend_tile_region(const TileRegion &region,
      * shared #Tex, not in the sampler, so a constant id would let every worker mutate slot 0
      * at once. */
     const int thread_id = BLI_task_parallel_thread_id(nullptr);
+    /* One row's worth of pixels waiting for the batched color conversion above. */
+    Vector<int> pending_i;
+    Vector<float3> pending_rgb;
+    Vector<float> pending_alpha;
+    Vector<int> decode_slots;
+    Vector<float3> decode_buf;
+    if (defer_encode) {
+      pending_i.reserve(width);
+      pending_rgb.reserve(width);
+      pending_alpha.reserve(width);
+    }
     for (const int row_offset : row_range) {
       const int y_px = region.y0 + row_offset;
 
@@ -537,7 +570,8 @@ static void blend_tile_region(const TileRegion &region,
                 float3(0.0f, 1.0f, 0.0f));
           }
           else if (target.is_color_channel) {
-            paint_rgb = channel_sources->color_at_uv(target.channel, sample->patch_uv, thread_id);
+            paint_rgb = channel_sources->color_at_uv(
+                target.channel, sample->patch_uv, thread_id, /*decode_linear=*/!defer_decode);
           }
           else {
             paint_rgb = float3(
@@ -562,8 +596,18 @@ static void blend_tile_region(const TileRegion &region,
          * seed (frozen at session begin) keeps every re-stamp of one patch on the same randomized
          * colors. Base Color only, plus the plain image canvas' brush color -- the same scoping
          * as the stroke engines. */
-        if (target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR || !target.is_material_channel) {
+        const bool decode_later = defer_decode && target_has_source && sample->patch_uv_valid;
+        if (target_jitters_color && !decode_later) {
           paint_rgb = BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, paint_rgb);
+        }
+        if (defer_encode) {
+          if (decode_later) {
+            decode_slots.append(int(pending_i.size()));
+          }
+          pending_i.append(i);
+          pending_rgb.append(paint_rgb);
+          pending_alpha.append(alpha);
+          continue;
         }
 
         if (target.blend == IMB_BLEND_NORMAL_MIX) {
@@ -597,6 +641,46 @@ static void blend_tile_region(const TileRegion &region,
           image_curve_patch_blend_src_byte(paint_rgb, alpha, byte_colorspace, src);
           IMB_blend_color_byte(byte_data + 4 * coord, byte_data + 4 * coord, src, target.blend);
         }
+      }
+
+      if (!pending_i.is_empty()) {
+        if (!decode_slots.is_empty()) {
+          decode_buf.resize(decode_slots.size());
+          for (const int k : decode_slots.index_range()) {
+            decode_buf[k] = pending_rgb[decode_slots[k]];
+          }
+          IMB_colormanagement_colorspace_to_scene_linear(
+              reinterpret_cast<float *>(decode_buf.data()),
+              int(decode_buf.size()),
+              1,
+              3,
+              source_colorspace,
+              false);
+          for (const int k : decode_slots.index_range()) {
+            pending_rgb[decode_slots[k]] = target_jitters_color ?
+                                               BKE_paint_stroke_color_jitter_apply_color(
+                                                   dab_color_jitter, decode_buf[k]) :
+                                               decode_buf[k];
+          }
+        }
+        IMB_colormanagement_scene_linear_to_colorspace(
+            reinterpret_cast<float *>(pending_rgb.data()),
+            int(pending_rgb.size()),
+            1,
+            3,
+            byte_colorspace);
+        for (const int k : pending_i.index_range()) {
+          const size_t coord = size_t(y_px) * ibuf.x + region.x0 + pending_i[k];
+          const float3 &rgb = pending_rgb[k];
+          const float col_f[4] = {rgb.x, rgb.y, rgb.z, pending_alpha[k]};
+          uchar src[4];
+          rgba_float_to_uchar(src, col_f);
+          IMB_blend_color_byte(byte_data + 4 * coord, byte_data + 4 * coord, src, target.blend);
+        }
+        pending_i.clear();
+        pending_rgb.clear();
+        pending_alpha.clear();
+        decode_slots.clear();
       }
     }
   });
@@ -701,7 +785,7 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
   /* Everything above is canvas-independent -- the patch geometry and its coverage bounds are the
    * same whichever map is being written -- so it is resolved once and the pixel work below repeats
    * per canvas. One iteration for Mode=`Image`, one per enabled Principled channel for
-   * Mode=`Material`.
+  * Mode=`Material`.
    *
    * Unlike the 3D canvas, a channel map of a DIFFERENT resolution needs no special handling: every
    * pixel is addressed through UV, so `ref_tile_resolution` -> UV -> this tile's own resolution
@@ -783,8 +867,13 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
     BKE_image_release_ibuf(target.image, ibuf, nullptr);
   }
   /* Per canvas: a channel map the editor is not displaying still has to reach the viewport's
-   * material preview, and the notifier carries which image changed. */
-  WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, target.image);
+   * material preview, and the notifier carries which image changed. A live restamp runs on every
+   * mouse move, so it reports #NA_PAINTING like the 2D paint stroke does: #NA_EDITED also refreshes
+   * the Image Editor's whole area and scopes and rebuilds the layer stack rows. Only the commit
+   * (the one draw that sets `final_quality`, on a session that is destroyed right after) reports
+   * the finished edit. */
+  const bool is_final = session.frozen_patch_params.final_quality;
+  WM_event_add_notifier(C, NC_IMAGE | (is_final ? NA_EDITED : NA_PAINTING), target.image);
   }
   }
 }

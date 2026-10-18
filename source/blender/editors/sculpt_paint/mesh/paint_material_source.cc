@@ -1052,13 +1052,13 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
                                      const float2 &uv,
                                      const int thread) const
 {
-  const float2 range = BKE_paint_material_channel_range(settings_, channel);
-  const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
-
   const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
   if (source.kind == ChannelSourceKind::Constant) {
     return source.constant_value.x;
   }
+  /* Resolved only on the paths that need it: this runs once per pixel on the flat canvas, and the
+   * common sampled path uses neither the fallback nor the unclamped brush value. */
+  const float fallback = BKE_paint_material_channel_value(brush_paint_, settings_, channel);
   if (!source.usable) {
     return fallback;
   }
@@ -1067,7 +1067,20 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
   if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba)) {
     return fallback;
   }
+  const float2 range = BKE_paint_material_channel_range(settings_, channel);
   return math::clamp(value, range.x, range.y);
+}
+
+bool ChannelUvSampler::needs_linear_conversion(const eMaterialPaintChannel channel) const
+{
+  const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  /* A constant is returned by #color_at_uv as is, never decoded. */
+  return source.kind != ChannelSourceKind::Constant && source.do_linear_conversion;
+}
+
+const ocio::ColorSpace *ChannelUvSampler::colorspace(const eMaterialPaintChannel channel) const
+{
+  return sources_.source(channel).colorspace;
 }
 
 float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
@@ -1076,12 +1089,12 @@ float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
                                      const bool decode_linear) const
 {
   const bool is_normal = channel == PAINT_MATERIAL_CHANNEL_NORMAL;
-  const float3 fallback = color_channel_fallback(channel, brush_paint_, paint_, brush_);
 
   const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
   if (source.kind == ChannelSourceKind::Constant) {
     return float3(source.constant_value);
   }
+  const float3 fallback = color_channel_fallback(channel, brush_paint_, paint_, brush_);
   if (!source.usable) {
     return fallback;
   }

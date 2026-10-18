@@ -1941,10 +1941,15 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                  blended, pixel.tex_color, pixel.tex_valid, strength) *
                              pixel.alpha_factor;
 
-        /* The destination alpha is carried through untouched in BOTH branches: the color a patch
-         * paints is a `float3` (`BKE_brush_color_get()`, or a channel color), so writing
-         * anything else would invent data neither the brush nor the channel specified. A
-         * channel configured for an alpha-targeting mode therefore affects only its RGB here. */
+        /* The color a patch paints is a `float3` (`BKE_brush_color_get()`, or a channel color), so
+         * the only alpha it contributes is its own coverage. That coverage accumulates onto the
+         * destination alpha with the straight-alpha "over", in every branch below. On an opaque map
+         * (`orig.w == 1`) that leaves alpha at 1 and the weight at `t`, so nothing changes; on a
+         * paint-layer map, whose alpha IS the coverage and starts transparent, carrying the
+         * destination alpha through would leave the painted color invisible to the layer composite.
+         * Normal was the only channel that did this before. */
+        const float coverage = std::clamp(factor, 0.0f, 1.0f);
+        const float alpha_out = orig.w + coverage * (1.0f - orig.w);
         /* Precedence, matching the stroke engine: the CHANNEL's own source wins (that is the
          * image assigned to Base Color in the channel panel); failing that the ribbon's own
          * texture supplies the color; failing that the flat channel/brush color. A ribbon
@@ -1976,15 +1981,11 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
            * (float map) or packed into 0..1 (byte map -- every 8-bit normal map), and getting it
            * wrong reinterprets every texel already in the map. `do_paint_pixels()` passes the
            * real flag; so does this. */
-          const float t = std::clamp(factor, 0.0f, 1.0f);
+          const float t = coverage;
           const float target_n[3] = {
               paint_rgb.x * 2.0f - 1.0f, paint_rgb.y * 2.0f - 1.0f, paint_rgb.z * 2.0f - 1.0f};
-          /* The one exception to "alpha is carried through": a normal patch over a transparent map
-           * would stay invisible, so coverage accumulates with the straight-alpha "over" and the
-           * normal mixes by `t / alpha_out`. An opaque map gives `t` and alpha 1 as before, the
-           * same rule as #IMB_BLEND_NORMAL_MIX in the imbuf blend. `orig` is the frozen
-           * pre-patch value, so a restamp stays idempotent. */
-          const float alpha_out = orig.w + t * (1.0f - orig.w);
+          /* The normal mixes by `t / alpha_out` (the same rule as #IMB_BLEND_NORMAL_MIX in the
+           * imbuf blend). `orig` is the frozen pre-patch value, so a restamp stays idempotent. */
           const float weight = (alpha_out > 0.0f) ? t / alpha_out : 0.0f;
           const float3 orig_rgb(orig);
           float blended_normal[3];
@@ -1999,8 +2000,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
         else if (blend_mode == IMB_BLEND_MIX) {
           /* `composite_coverage()` would compute the same RGB for Mix, but it is a lerp either
            * way; keep the direct form so the common canvas pays nothing for the general path. */
-          chunk.values[pixel.local] = float4(math::interpolate(float3(orig), paint_rgb, factor),
-                                             orig.w);
+          const float weight = (alpha_out > 0.0f) ? coverage / alpha_out : 0.0f;
+          chunk.values[pixel.local] = float4(
+              math::interpolate(float3(orig), paint_rgb, weight), alpha_out);
         }
         else {
           /* `orig` is the frozen pre-patch value and `factor` this restamp's total coverage of
@@ -2010,7 +2012,7 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
            * requires. */
           const float4 mix(paint_rgb * factor, factor);
           float4 composited = material::composite_coverage(orig, mix, blend_mode);
-          composited.w = orig.w;
+          composited.w = alpha_out;
           chunk.values[pixel.local] = composited;
         }
       }

@@ -22,6 +22,8 @@
 #include "BLI_timecode.h"
 #include "BLT_translation.hh"
 
+#include "DNA_material_types.h"
+
 #include "ED_screen.hh"
 
 #include "UI_resources.hh"
@@ -221,6 +223,21 @@ void template_running_jobs(Layout *layout, bContext *C)
         }
       }
       if (owner) {
+        break;
+      }
+    }
+  }
+
+  /* A material bake to images runs in a job keyed on the source material, not on a scene, so none
+   * of the lookups above see it. */
+  if (owner == nullptr) {
+    for (Material &material : bmain->materials) {
+      if (WM_jobs_test(wm, &material, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE)) {
+        owner = &material;
+        icon = ICON_MATERIAL;
+        cancel_fn = [owner](bContext &C) {
+          WM_jobs_stop_all_from_owner(CTX_wm_manager(&C), owner);
+        };
         break;
       }
     }

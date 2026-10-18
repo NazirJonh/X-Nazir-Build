@@ -21,9 +21,12 @@
  */
 
 #include <array>
+#include <cstdint>
 #include <memory>
 
 #include "BLI_math_vector_types.hh"
+#include "BLI_span.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_paint_material_resolve.hh"
 
@@ -38,6 +41,8 @@ struct ImBuf;
 struct Image;
 struct Main;
 struct Material;
+struct wmWindow;
+struct wmWindowManager;
 }  // namespace blender
 
 namespace blender::ed::material_bake {
@@ -170,5 +175,102 @@ bool material_source_preview_get(const BrushMaterialPaint &brush_paint,
                                  int visible_material_channels,
                                  MaterialSourcePreview &r_preview,
                                  std::shared_ptr<const MaterialSourceBake> &r_bake);
+
+
+/* -------------------------------------------------------------------- */
+/** \name Material to Images
+ *
+ * Bakes a material's Principled channels into #Image data-blocks the user owns, rather than into
+ * the session-local #ImBuf cache above. The link back to the source material lives in the image's
+ * system IDProperties (#ImageMaterialSource), so a baked map knows what to re-bake itself from.
+ * \{ */
+
+/**
+ * The node-tree state hash used to tell a baked map from a stale one. Covers #Material.nodetree
+ * and every group tree it reaches; independent of the material's session UID.
+ */
+uint64_t material_bake_source_node_tree_hash(const Material &ma);
+
+/** Whether the baked map \a image needs re-baking. False when it carries no bake link. */
+bool material_bake_source_is_stale(const Image &image);
+
+/** Whether a bake job for \a image is currently in flight. */
+bool material_bake_source_is_baking(const Image &image);
+
+/**
+ * One channel to bake into its own #Image. v1 carries only the channel; an object, a UV map or a
+ * socket override are the documented seam for mesh-space and arbitrary-socket bakes and go here
+ * without touching #material_bake_to_images's signature.
+ */
+struct BakeTargetSpec {
+  eMaterialPaintChannel channel;
+};
+
+struct MaterialBakeToImagesParams {
+  /** Source material. Not localized by the caller -- #material_bake_to_images copies it. */
+  Material *material = nullptr;
+  Span<BakeTargetSpec> targets;
+  /** Square side; clamped to [16, 8192]. */
+  int size = 2048;
+  /** Run to completion on the calling thread instead of in a #wmJob. */
+  bool blocking = false;
+  /**
+   * Re-fill the existing linked target of each (material, channel) instead of creating a new
+   * #Image. Channels with no existing target are skipped.
+   */
+  bool reuse_existing = false;
+  /** #Image::paint_layer_id to stamp on every created map. Empty -> a fresh UUID is generated. */
+  char layer_id[37] = "";
+};
+
+struct MaterialBakeToImagesResult {
+  char layer_id[37] = "";
+  Vector<Image *> created;
+  Vector<eMaterialPaintChannel> created_channels;
+  Vector<eMaterialPaintChannel> skipped_unavailable;
+  bool ok = false;
+};
+
+/**
+ * Bake \a params.targets of \a params.material into one #Image each, on the unit UV square.
+ *
+ * Preflight, target creation and the link write happen on the calling thread before this returns.
+ * The render and the pixel write-back run in a #wmJob unless \a params.blocking. \a wm / \a win may
+ * be null only when \a params.blocking is true.
+ */
+MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
+                                                   wmWindowManager *wm,
+                                                   wmWindow *win,
+                                                   const MaterialBakeToImagesParams &params);
+
+/**
+ * Create a target #Image for (\a material, \a channel) exactly as the bake does, linked back to the
+ * material. Exposed for tests so the colorspace contract of a baked map can be checked without a
+ * render; production reaches it through #material_bake_to_images.
+ *
+ * With \a placeholder the image only holds a 1x1 buffer (the link still records \a size); the
+ * caller is expected to hand it a full-size render buffer afterwards.
+ */
+Image *bake_target_image_create(Main &bmain,
+                                Material &material,
+                                eMaterialPaintChannel channel,
+                                int size,
+                                const char *layer_id,
+                                uint64_t current_hash,
+                                bool placeholder = false);
+
+/**
+ * Write a rendered scene-linear buffer into \a image exactly as the completion callback does.
+ * Exposed for tests alongside #bake_target_image_create.
+ */
+void bake_target_image_write_back(Image &image, const ImBuf &rendered);
+
+/**
+ * Bring a reused map to the colorspace its channel needs, converting the pixels out of a legacy
+ * display space first. Exposed for tests alongside #bake_target_image_create.
+ */
+void bake_target_image_normalize_colorspace(Image &image, eMaterialPaintChannel channel);
+
+/** \} */
 
 }  // namespace blender::ed::material_bake

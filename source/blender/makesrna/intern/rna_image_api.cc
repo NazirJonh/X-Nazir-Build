@@ -47,6 +47,8 @@
 
 #  include "MEM_guardedalloc.h"
 
+#  include "ED_material_bake.hh"
+
 #  include "WM_api.hh"
 
 namespace blender {
@@ -551,6 +553,36 @@ static void rna_Image_clear_selection_mask(Image *image,
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Material Source
+ * \{ */
+
+static void rna_Image_rebake_material_source(Image *image, bContext *C, bool blocking)
+{
+  using namespace ed::material_bake;
+  ImageMaterialSource source;
+  if (!BKE_image_material_source_get(*image, source)) {
+    /* Not a baked map. Silent rather than an error: callers batch over a layer's images. */
+    return;
+  }
+  BakeTargetSpec spec{eMaterialPaintChannel(source.channel)};
+  MaterialBakeToImagesParams params;
+  params.material = source.material;
+  params.targets = Span<BakeTargetSpec>(&spec, 1);
+  params.size = source.bake_size;
+  params.blocking = blocking;
+  params.reuse_existing = true;
+  BLI_uuid_format(params.layer_id, image->paint_layer_id);
+  material_bake_to_images(*CTX_data_main(C), CTX_wm_manager(C), CTX_wm_window(C), params);
+}
+
+static void rna_Image_clear_material_source(Image *image)
+{
+  BKE_image_material_source_clear(*image);
+}
+
+/** \} */
+
 }  // namespace blender
 
 #else
@@ -983,6 +1015,16 @@ void RNA_api_image(StructRNA *srna)
                   false,
                   "All Tiles",
                   "Clear the selection mask on all UDIM tiles instead of just the given tile");
+
+  func = RNA_def_function(srna, "rebake_material_source", "rna_Image_rebake_material_source");
+  RNA_def_function_ui_description(
+      func, "Re-bake this map from its source material into the same data-block");
+  RNA_def_function_flag(func, FUNC_USE_CONTEXT);
+  RNA_def_boolean(func, "blocking", false, "Blocking", "Run synchronously to completion");
+
+  func = RNA_def_function(srna, "clear_material_source", "rna_Image_clear_material_source");
+  RNA_def_function_ui_description(
+      func, "Detach this map from its source material; it becomes an ordinary image");
 
   /* TODO: pack/unpack, maybe should be generic functions? */
 }

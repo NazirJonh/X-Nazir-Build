@@ -1940,6 +1940,48 @@ bool BKE_paint_material_composite_eval_images_linear(
   return ok;
 }
 
+bool BKE_paint_material_composite_eval_row_content(const PaintMaterialCompositeImageLayer &row,
+                                                   float *r_color_rgba,
+                                                   float *r_coverage_gray,
+                                                   const rcti *region,
+                                                   const int channel)
+{
+  if (r_color_rgba == nullptr || r_coverage_gray == nullptr) {
+    return false;
+  }
+  Vector<CompositeImageLock> locks;
+  PaintMaterialCompositeStack stack;
+  const bool built = composite_stack_build_linear(
+      Span<PaintMaterialCompositeImageLayer>(&row, 1), locks, stack);
+  bool ok = false;
+  rcti area;
+  if (built && stack.layers.size() == 1 && composite_stack_validate_linear(stack) &&
+      BKE_paint_material_composite_area_get(stack.width, stack.height, region, area))
+  {
+    const PaintMaterialCompositeLayer &layer = stack.layers.first();
+    const int64_t count = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
+    Vector<float> color(count * 4);
+    Vector<float> factor(count);
+    composite_layer_apply(layer, area, color.data(), factor.data());
+    /* Normal keeps its own map alpha: its content coverage has nowhere else to live, and a
+     * substituted row reads it back as `common x content`. */
+    const bool keep_alpha = layer.tracks_content_alpha || channel == PAINT_MATERIAL_CHANNEL_NORMAL;
+    for (int64_t i = 0; i < count; i++) {
+      r_color_rgba[i * 4 + 0] = color[i * 4 + 0];
+      r_color_rgba[i * 4 + 1] = color[i * 4 + 1];
+      r_color_rgba[i * 4 + 2] = color[i * 4 + 2];
+      /* The colour's alpha is the row's content alpha, so the generated chain can read it back after
+       * substitution. A channel that tracks none stays opaque; its transparency is the coverage
+       * alone. */
+      r_color_rgba[i * 4 + 3] = keep_alpha ? color[i * 4 + 3] : 1.0f;
+      r_coverage_gray[i] = clamp_f(layer.opacity * factor[i], 0.0f, 1.0f);
+    }
+    ok = true;
+  }
+  composite_images_release(locks);
+  return ok;
+}
+
 /**
  * Dimensions and byte colorspace of the bottom-most enabled layer.
  *

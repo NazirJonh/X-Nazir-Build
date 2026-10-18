@@ -98,6 +98,18 @@ enum eMaterialPaintLayersFlag : short {
   MA_PAINT_LAYERED = 1 << 0,
   /** The description changed; whatever is derived from it is out of date. */
   MA_PAINT_LAYERS_REGEN = 1 << 2,
+  /**
+   * Some row with a bake had a value-only edit (`opacity`, `fill`, a mask value, `enabled`), or a
+   * pixel edit arrived; the planner at the regeneration point re-bakes the rows whose stored hash no
+   * longer matches. Set by the edit paths that cannot rebuild the tree the way
+   * #MA_PAINT_LAYERS_REGEN does. Runtime only: a file never carries it.
+   */
+  MA_PAINT_LAYERS_BAKE_STALE = 1 << 4,
+  /**
+   * The user cancelled the heavy bake job; the worker is not queued again until the next edit, or
+   * the same stale rows would restart it right away. Runtime only: a file never carries it.
+   */
+  MA_PAINT_LAYERS_BAKE_CANCELLED = 1 << 5,
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
 
@@ -667,6 +679,43 @@ struct MaterialPaintLayerMapping {
   char _pad[6] = {};
 };
 
+/** #MaterialPaintLayerBake::mode */
+enum eMaterialPaintLayerBakeMode : int8_t {
+  /** Bake only what is heavy and not being edited; everything else is evaluated live. */
+  MA_PAINT_LAYER_BAKE_AUTO = 0,
+  /** Always bake, and show the row as stale until the bake is current. */
+  MA_PAINT_LAYER_BAKE_ALWAYS = 1,
+  /** Never bake; the row is evaluated live. */
+  MA_PAINT_LAYER_BAKE_NEVER = 2,
+};
+
+/**
+ * The baked cache of one description row, or null while nothing is baked.
+ *
+ * Cache, not truth: the description plus its live maps are what the row *is*, and these maps are a
+ * snapshot the generator and the CPU compositor may read instead of evaluating the row's subtree.
+ * The #hash is the whole validity test -- there is no separate "valid" flag to save -- and the maps
+ * are owned here as ID references (see the layer's `foreach_id`).
+ */
+struct MaterialPaintLayerBake {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerBake)
+
+  /**
+   * One map per #eMaterialPaintChannel index, or null where the channel is not baked. The literal
+   * length is #PAINT_MATERIAL_CHANNEL_NUM, which `paint_layers.cc` static_asserts.
+   */
+  struct Image *images[10] = {};
+  /** The baked coverage map, or null. */
+  struct Image *coverage = nullptr;
+  /** #eMaterialPaintLayerBakeMode. */
+  int8_t mode = MA_PAINT_LAYER_BAKE_AUTO;
+  char _pad[3] = {};
+  /** Square side the maps were baked at. */
+  int size = 0;
+  /** The description hash at the last successful bake, low word first. */
+  uint32_t hash[2] = {};
+};
+
 /**
  * One row of a layered material's stack, the DNA description of what the material is painted with.
  *
@@ -745,6 +794,11 @@ struct MaterialPaintLayer {
    * `paint_layers.cc` static_asserts.
    */
   MaterialPaintLayerChannelSettings channel_settings[10] = {};
+  /**
+   * The row's baked cache, or null while nothing is baked. Owned by the row (freed, copied and
+   * written with it).
+   */
+  struct MaterialPaintLayerBake *bake = nullptr;
 };
 
 struct Material {

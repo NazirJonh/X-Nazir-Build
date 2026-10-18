@@ -263,6 +263,7 @@ set(SRC
   intern/paint_brush_group_override.cc
   intern/paint_canvas.cc
   intern/paint_layers/paint_layers.cc
+  intern/paint_layers/paint_layers_bake.cc
   intern/paint_layers/paint_layers_kind.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_edit.cc
@@ -851,6 +852,7 @@ if(WITH_GTESTS)
     intern/multires_group_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
+    intern/paint_layers/tests/paint_layers_bake_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_content_alpha_test.cc

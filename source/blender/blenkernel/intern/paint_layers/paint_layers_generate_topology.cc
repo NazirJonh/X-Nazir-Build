@@ -171,6 +171,26 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, 0x200 + uint64_t(uint8_t(layer.object_mask_type)));
     topology_hash_uid(hash, ma.paint_layers_owner_uid);
   }
+  if (paint_layer_row_substituted(ma, layer)) {
+    /* A baked row is built from its bake's maps alone: which channels have one, which maps, and
+     * whether the live row had a map of its own (its alpha then covers) is structure; the
+     * corrections, the mask and the rest of the description are inside the bake. */
+    hash = topology_hash_mix(hash, 0x400);
+    for (const int channel : wired_channels) {
+      hash = topology_hash_mix(hash, uint64_t(channel));
+      Image *baked = nullptr;
+      if (paint_layer_row_baked_channel(ma, layer, channel, &baked)) {
+        topology_hash_string(hash, baked->id.name);
+        const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+        hash = topology_hash_mix(hash, (record != nullptr && record->image != nullptr) ? 1 : 0);
+      }
+      else {
+        hash = topology_hash_mix(hash, 0);
+      }
+    }
+    topology_hash_string(hash, layer.bake->coverage->id.name);
+    return hash;
+  }
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, row_participates(ma, layer, channel) ? 1 : 0);

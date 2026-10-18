@@ -69,6 +69,11 @@ inline constexpr const char *TREE_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_topolog
 inline constexpr const char *TREE_ROOT_TOPOLOGY_LOW_PROP = "pbr_paint_layers_root_topology";
 inline constexpr const char *TREE_ROOT_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_root_topology_hi";
 
+/** On a row's opacity input: set (to 1) when the row was built from its bake, so that input holds
+ * the row's visibility alone -- the bake already holds its opacity -- and the value sync can tell a
+ * group built that way from one built live. */
+inline constexpr const char *INPUT_SUBSTITUTED_PROP = "pbr_paint_layers_baked";
+
 /** #INPUT_ROLE_PROP value of a layer's opacity (enabled already folded in). A content correction's
  * opacity input carries the same role with the correction's own marker. */
 inline constexpr const char *ROLE_OPACITY = "opacity";

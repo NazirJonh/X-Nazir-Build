@@ -131,6 +131,8 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
   layer->id_colors.free_no_destruct();
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
+  /* The maps of the bake cache are released like the channel maps, by the generic free pass. */
+  MEM_SAFE_DELETE(layer->bake);
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -142,6 +144,7 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
 
 static void material_paint_layers_free(Material &material)
 {
+  BKE_paint_layers_bake_runtime_free(material);
   for (MaterialPaintLayer &layer : material.paint_layers.items_mutable()) {
     BKE_material_paint_layer_free(&layer);
   }
@@ -153,6 +156,10 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
   MaterialPaintLayer *dst = static_cast<MaterialPaintLayer *>(MEM_dupalloc(&src));
   dst->next = nullptr;
   dst->prev = nullptr;
+  /* The bake cache is the row's own: a copy keeps the pointers and the generic copy pass adds the
+   * users; the generated-tree copy then gives it maps of its own (see maps_copy). */
+  dst->bake = (src.bake != nullptr) ? static_cast<MaterialPaintLayerBake *>(MEM_dupalloc(src.bake)) :
+                                      nullptr;
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -224,6 +231,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   if (layer.channels != nullptr && layer.channels_num > 0) {
     writer->write_struct_array(layer.channels_num, layer.channels);
   }
+  if (layer.bake != nullptr) {
+    writer->write_struct(layer.bake);
+  }
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -260,6 +270,15 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
      * pointer would make later readers dereference null. Do not trust the file's count. */
     layer.channels_num = 0;
   }
+  BLO_read_struct(reader, MaterialPaintLayerBake, &layer.bake);
+  if (layer.bake != nullptr && !BLO_read_data_is_undo(reader)) {
+    /* The bake maps are generated images whose pixels the file does not keep, and the pixel-edit
+     * subscription that vouches for them is runtime only. A loaded bake therefore proves nothing:
+     * clearing the hash makes the first plan bake the row again. A memfile undo keeps the images
+     * (their buffers survive in the session), so it keeps the hash too. */
+    layer.bake->hash[0] = 0;
+    layer.bake->hash[1] = 0;
+  }
   BLO_read_struct(reader, IDProperty, &layer.system_properties);
   IDP_BlendDataRead(reader, &layer.system_properties);
   BLO_read_struct_list(reader, MaterialPaintLayerIdColor, &layer.id_colors);
@@ -279,6 +298,8 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
 
 static void material_paint_layers_blend_read(BlendDataReader *reader, Material &material)
 {
+  /* The pending-bake and cancel marks are derived state; a file never carries them. */
+  material.paint_layers_flag &= ~(MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_BAKE_CANCELLED);
   BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
   for (MaterialPaintLayer &layer : material.paint_layers) {
     material_paint_layer_blend_read(reader, layer);
@@ -492,6 +513,21 @@ static void material_blend_read_data(BlendDataReader *reader, ID *id)
   material_paint_layers_blend_read(reader, *ma);
 }
 
+/**
+ * Carry the bake runtime across a memfile undo. A changed material is read back as a new ID whose
+ * runtime entry is empty, while the global map it replaced survived undo under an unchanged
+ * `session_uid`; handing the entry to the new ID keeps the subscriptions of its baked rows, so
+ * Ctrl+Z does not cost a re-bake. The old ID's free path then leaves it alone.
+ */
+static void material_undo_preserve(BlendLibReader * /*reader*/, ID *id_new, ID *id_old)
+{
+  if (id_new == id_old) {
+    return;
+  }
+  BKE_paint_layers_bake_runtime_owner_transfer(*id_cast<Material *>(id_new),
+                                               *id_cast<Material *>(id_old));
+}
+
 IDTypeInfo IDType_ID_MA = {
     .id_code = Material::id_type,
     .id_filter = FILTER_ID_MA,
@@ -518,7 +554,7 @@ IDTypeInfo IDType_ID_MA = {
     .blend_read_data = material_blend_read_data,
     .blend_read_after_liblink = nullptr,
 
-    .blend_read_undo_preserve = nullptr,
+    .blend_read_undo_preserve = material_undo_preserve,
 
     .lib_override_apply_post = nullptr,
 };

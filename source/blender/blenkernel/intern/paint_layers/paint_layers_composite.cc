@@ -263,6 +263,114 @@ static void composite_mask_items_describe(const Material &ma,
   }
 }
 
+static void composite_image_layers_collect(const Material &ma,
+                                           const ListBaseT<MaterialPaintLayer> &list,
+                                           int channel,
+                                           float pass_through_scale,
+                                           Vector<PaintMaterialCompositeImageLayer> &r_layers,
+                                           bool isolating = false);
+
+/**
+ * Describe the row \a layer (not a Pass Through folder) in \a channel to the evaluator. False when
+ * the row takes no part, which the generator leaves out as well.
+ *
+ * A row whose bake stands in (#paint_layer_row_substituted) is one plain layer of its baked colour
+ * and coverage maps: the bake already holds the row's corrections, mask and opacity, so nothing of
+ * them is described again. \a ignore_own_bake describes the live row instead, which is what the
+ * bake itself renders from.
+ */
+static bool composite_image_layer_build(const Material &ma,
+                                        const MaterialPaintLayer &layer,
+                                        const int channel,
+                                        const float pass_through_scale,
+                                        const bool isolating,
+                                        const bool ignore_own_bake,
+                                        PaintMaterialCompositeImageLayer &out)
+{
+  if (!ignore_own_bake && paint_layer_row_substituted(ma, layer)) {
+    Image *baked_color = nullptr;
+    if (!paint_layer_row_baked_channel(ma, layer, channel, &baked_color)) {
+      return false;
+    }
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+    out.color_image = baked_color;
+    out.color_iuser = nullptr;
+    out.mask_image = layer.bake->coverage;
+    out.mask_iuser = nullptr;
+    out.mask_from_alpha = false;
+    out.mask_influence = 1.0f;
+    /* The colour map's alpha is the content alpha the live row had (a folder's subtree, or its
+     * map); a flat constant had none and covers by the shared coverage alone, as it does live. */
+    out.color_alpha_coverage = BKE_paint_layers_is_folder(layer) ||
+                               (record != nullptr && record->image != nullptr);
+    out.blend = layer_channel_blend(layer, channel);
+    /* The coverage map already holds the row's opacity and mask; only visibility stays live, the
+     * same 0/1 the generated graph multiplies in. */
+    out.opacity = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) * pass_through_scale;
+    out.enabled = true;
+    out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+        eMaterialPaintChannel(channel));
+    return true;
+  }
+  if (BKE_paint_layers_is_folder(layer)) {
+    Vector<PaintMaterialCompositeImageLayer> children;
+    composite_image_layers_collect(
+        ma, layer.children, channel, pass_through_scale, children, true);
+    /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
+     * here is not: the correction brings the coverage in over nothing. */
+    if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
+      return false;
+    }
+    out.is_folder = true;
+    out.children.assign(std::make_move_iterator(children.begin()),
+                        std::make_move_iterator(children.end()));
+  }
+  else if (!composite_row_source_describe(ma, layer, channel, isolating, out)) {
+    return false;
+  }
+  out.blend = layer_channel_blend(layer, channel);
+  out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
+  out.enabled = true;
+  out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+      eMaterialPaintChannel(channel));
+  /* The corrections lay over the row's colour, in the order they were added. A correction that
+   * lays nothing in this channel is not carried, as the generator builds nothing for it. */
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_effect_filters(ma, effect, channel)) {
+      PaintMaterialCompositeCorrection filter;
+      filter.filter = effect.kind_subtype;
+      composite_filter_params(effect, filter.filter_params);
+      filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                       pass_through_scale;
+      out.content_corrections.append(filter);
+      continue;
+    }
+    if (!paint_layer_effect_lays(ma, effect, channel)) {
+      continue;
+    }
+    PaintMaterialCompositeCorrection correction;
+    const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
+    if (effect_record->image != nullptr) {
+      correction.image = effect_record->image;
+      composite_mapping_describe(ma, effect, channel, correction.mapping);
+    }
+    else {
+      /* Only a Fill correction lays without a map: its flat colour. */
+      copy_v4_v4(correction.constant_color, effect_record->value);
+      correction.has_constant_color = true;
+    }
+    correction.iuser = nullptr;
+    correction.blend = layer_channel_blend(effect, channel);
+    correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                         pass_through_scale;
+    out.content_corrections.append(correction);
+  }
+  /* The mask is one for all channels of the row, so the same item reaches every channel's stack,
+   * exactly as the generator reads the one set of mask inputs in every channel chain. */
+  composite_mask_items_describe(ma, layer, out.mask_items);
+  return true;
+}
+
 /**
  * Append the rows of \a list that take part in \a channel to \a r_layers, bottom to top. A folder is
  * one entry carrying its children, which the evaluator composites in isolation; a folder nothing of
@@ -273,7 +381,7 @@ static void composite_image_layers_collect(const Material &ma,
                                            const int channel,
                                            const float pass_through_scale,
                                            Vector<PaintMaterialCompositeImageLayer> &r_layers,
-                                           const bool isolating = false)
+                                           const bool isolating)
 {
   for (const MaterialPaintLayer &layer : list) {
     /* A Pass Through folder is flattened into this list, the way the generator expands it in the
@@ -285,63 +393,9 @@ static void composite_image_layers_collect(const Material &ma,
       continue;
     }
     PaintMaterialCompositeImageLayer out;
-    if (BKE_paint_layers_is_folder(layer)) {
-      Vector<PaintMaterialCompositeImageLayer> children;
-      composite_image_layers_collect(
-          ma, layer.children, channel, pass_through_scale, children, true);
-      /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
-       * here is not: the correction brings the coverage in over nothing. */
-      if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
-        continue;
-      }
-      out.is_folder = true;
-      out.children.assign(std::make_move_iterator(children.begin()),
-                          std::make_move_iterator(children.end()));
+    if (composite_image_layer_build(ma, layer, channel, pass_through_scale, isolating, false, out)) {
+      r_layers.append(std::move(out));
     }
-    else if (!composite_row_source_describe(ma, layer, channel, isolating, out)) {
-      continue;
-    }
-    out.blend = layer_channel_blend(layer, channel);
-    out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
-    out.enabled = true;
-    out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
-        eMaterialPaintChannel(channel));
-    /* The corrections lay over the row's colour, in the order they were added. A correction that
-     * lays nothing in this channel is not carried, as the generator builds nothing for it. */
-    for (const MaterialPaintLayer &effect : layer.effects) {
-      if (paint_layer_effect_filters(ma, effect, channel)) {
-        PaintMaterialCompositeCorrection filter;
-        filter.filter = effect.kind_subtype;
-        composite_filter_params(effect, filter.filter_params);
-        filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
-                         pass_through_scale;
-        out.content_corrections.append(filter);
-        continue;
-      }
-      if (!paint_layer_effect_lays(ma, effect, channel)) {
-        continue;
-      }
-      PaintMaterialCompositeCorrection correction;
-      const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
-      if (effect_record->image != nullptr) {
-        correction.image = effect_record->image;
-        composite_mapping_describe(ma, effect, channel, correction.mapping);
-      }
-      else {
-        /* Only a Fill correction lays without a map: its flat colour. */
-        copy_v4_v4(correction.constant_color, effect_record->value);
-        correction.has_constant_color = true;
-      }
-      correction.iuser = nullptr;
-      correction.blend = layer_channel_blend(effect, channel);
-      correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
-                           pass_through_scale;
-      out.content_corrections.append(correction);
-    }
-    /* The mask is one for all channels of the row, so the same item reaches every channel's
-     * stack, exactly as the generator reads the one set of mask inputs in every channel chain. */
-    composite_mask_items_describe(ma, layer, out.mask_items);
-    r_layers.append(std::move(out));
   }
 }
 
@@ -629,6 +683,117 @@ float PaintLayersMaskSampler::sample(const int tile_number, const int x, const i
   const int64_t pixel_index = int64_t(y) * tile.width + x;
   return BKE_paint_material_mask_factor_eval(
       buffers_.as_span(), tile.item_samples, tile.coverage_samples, pixel_index);
+}
+
+/**
+ * The live description of \a layer in \a channel, as the evaluator reads one row: what a bake of
+ * the row renders. A Pass Through folder has no row of its own to describe.
+ */
+static bool composite_bake_entry(const Material &ma,
+                                 const MaterialPaintLayer &layer,
+                                 const int channel,
+                                 PaintMaterialCompositeImageLayer &r_entry)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
+      (BKE_paint_layers_is_folder(layer) && BKE_paint_layers_folder_is_pass_through(layer)))
+  {
+    return false;
+  }
+  return composite_image_layer_build(ma, layer, channel, 1.0f, false, true, r_entry);
+}
+
+bool BKE_paint_layers_bake_render_node(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const int channel,
+                                       const int size,
+                                       float *r_color_rgba,
+                                       float *r_coverage_gray,
+                                       const int *dst_rect)
+{
+  if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
+    return false;
+  }
+  PaintMaterialCompositeImageLayer entry;
+  if (!composite_bake_entry(ma, layer, channel, entry)) {
+    return false;
+  }
+  /* The row's content, straight and with its own factor, from the one shared isolated-group
+   * formula -- for a leaf and a folder alike. */
+  int width = 0;
+  int height = 0;
+  if (!BKE_paint_material_composite_stack_dimensions(Span<PaintMaterialCompositeImageLayer>(&entry, 1),
+                                                     width,
+                                                     height) ||
+      width <= 0 || height <= 0)
+  {
+    return false;
+  }
+  /* The rectangle of the `size`-square result to produce, and the source pixels it samples. A full
+   * render produces all of it; a partial re-bake passes the changed tile so the composite runs over
+   * that source rectangle alone. */
+  int dx0 = 0, dy0 = 0, dx1 = size, dy1 = size;
+  if (dst_rect != nullptr) {
+    dx0 = clamp_i(dst_rect[0], 0, size);
+    dy0 = clamp_i(dst_rect[1], 0, size);
+    dx1 = clamp_i(dst_rect[2], 0, size);
+    dy1 = clamp_i(dst_rect[3], 0, size);
+  }
+  if (dx0 >= dx1 || dy0 >= dy1) {
+    return false;
+  }
+  /* The source pixels nearest-sampled into `[dx0, dx1) x [dy0, dy1)`: the first and last output
+   * pixel of the rectangle map to the source span that has to be composited. */
+  const int sx0 = int(int64_t(dx0) * width / size);
+  const int sx1 = (dx1 >= size) ? width : int((int64_t(dx1) * width + size - 1) / size);
+  const int sy0 = int(int64_t(dy0) * height / size);
+  const int sy1 = (dy1 >= size) ? height : int((int64_t(dy1) * height + size - 1) / size);
+  rcti area;
+  BLI_rcti_init(&area, max_ii(0, sx0), min_ii(width, sx1), max_ii(0, sy0), min_ii(height, sy1));
+  const int area_w = BLI_rcti_size_x(&area);
+  const int area_h = BLI_rcti_size_y(&area);
+  if (area_w <= 0 || area_h <= 0) {
+    return false;
+  }
+  Vector<float> content_color(int64_t(area_w) * area_h * 4);
+  Vector<float> content_coverage(int64_t(area_w) * area_h);
+  const rcti region = area;
+  if (!BKE_paint_material_composite_eval_row_content(
+          entry, content_color.data(), content_coverage.data(), &region, channel))
+  {
+    return false;
+  }
+  /* Resample only the requested rectangle: each output pixel reads the composited source span. */
+  for (int y = dy0; y < dy1; y++) {
+    const int src_y = min_ii(int(int64_t(y) * height / size), height - 1);
+    const int local_y = src_y - area.ymin;
+    for (int x = dx0; x < dx1; x++) {
+      const int src_x = min_ii(int(int64_t(x) * width / size), width - 1);
+      const int64_t src = int64_t(local_y) * area_w + (src_x - area.xmin);
+      const int64_t dst = int64_t(y) * size + x;
+      r_color_rgba[dst * 4 + 0] = content_color[src * 4 + 0];
+      r_color_rgba[dst * 4 + 1] = content_color[src * 4 + 1];
+      r_color_rgba[dst * 4 + 2] = content_color[src * 4 + 2];
+      /* The content alpha travels with the colour, so a substituted row reads its own transparency
+       * back instead of turning opaque. */
+      r_color_rgba[dst * 4 + 3] = content_color[src * 4 + 3];
+      r_coverage_gray[dst] = content_coverage[src];
+    }
+  }
+  return true;
+}
+
+bool BKE_paint_layers_row_dimensions(const Material &ma,
+                                     const MaterialPaintLayer &layer,
+                                     const int channel,
+                                     int &r_width,
+                                     int &r_height)
+{
+  PaintMaterialCompositeImageLayer entry;
+  if (!composite_bake_entry(ma, layer, channel, entry)) {
+    return false;
+  }
+  return BKE_paint_material_composite_stack_dimensions(
+      Span<PaintMaterialCompositeImageLayer>(&entry, 1), r_width, r_height);
 }
 
 }  // namespace blender

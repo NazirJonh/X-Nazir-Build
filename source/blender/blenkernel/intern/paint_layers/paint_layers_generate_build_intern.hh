@@ -138,6 +138,8 @@ struct RowEmitContext {
   bNodeSocket *below_alpha;
   bNodeSocket *folder_color;
   bNodeSocket *folder_alpha;
+  /** The row's bake in this channel when its bake stands in, else null: the source is then that map. */
+  Image *baked_color;
 };
 
 /** The blend of one row over what is below: a Normal Combine instance or a Mix node. */

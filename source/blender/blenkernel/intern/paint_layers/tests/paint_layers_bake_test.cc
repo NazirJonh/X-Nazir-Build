@@ -1,0 +1,370 @@
+/* SPDX-FileCopyrightText: 2026 Nazir Galimov
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * Paint Layers row bake tests: the cache key, the synchronous planner, the worker job, and what the
+ * generator and the CPU composite read once a row is baked.
+ *
+ * The fixture lives in `paint_layers_generate_test_fixture.hh`.
+ */
+
+#include "paint_layers_generate_test_fixture.hh"
+
+#include "BKE_lib_id.hh"
+#include "BKE_paint_layers_composite.hh"
+
+#include "../paint_layers_intern.hh"
+
+namespace blender::bke::tests {
+
+class PaintLayersBakeTest : public PaintLayersGenerateTest {
+ public:
+  /** A Paint row baked on request: Always, so the planner does not wait for it to be heavy. */
+  MaterialPaintLayer *add_baked_row(const char *name)
+  {
+    MaterialPaintLayer *layer = add_paint_layer(name, add_image(name));
+    EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+    return layer;
+  }
+
+  /** Nothing is active, so no row is held live for editing. */
+  void clear_active() const
+  {
+    BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  }
+
+  /**
+   * A folder with two rows inside another folder with one more row, the inner one isolating (its
+   * opacity is below one: a plain grouping folder is Pass Through and never baked). The inner
+   * folder is nested at level 2, the depth AUTO bakes, and heavy enough to go to the worker.
+   */
+  MaterialPaintLayer *add_nested_folder(MaterialPaintLayer **r_first = nullptr)
+  {
+    MaterialPaintLayer *first = add_paint_layer("A", add_image("A"));
+    MaterialPaintLayer *second = add_paint_layer("B", add_image("B"));
+    MaterialPaintLayer *members[] = {first, second};
+    MaterialPaintLayer *inner = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 2));
+    EXPECT_NE(inner, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, inner, 0.9f));
+    MaterialPaintLayer *top = add_paint_layer("C", add_image("C"));
+    MaterialPaintLayer *outer_members[] = {inner, top};
+    EXPECT_NE(BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(outer_members, 2)), nullptr);
+    if (r_first != nullptr) {
+      *r_first = first;
+    }
+    return inner;
+  }
+
+  /** The image node of \a tree (and the layer groups under it) that reads \a image. */
+  static int image_reader_count(const bNodeTree &tree, const Image *image)
+  {
+    int count = 0;
+    for (const bNode &node : tree.nodes) {
+      if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == &image->id) {
+        count++;
+      }
+      if (node.is_group() && node.id != nullptr && GS(node.id->name) == ID_NT &&
+          !BKE_paint_material_is_normal_combine_group(node))
+      {
+        count += image_reader_count(*reinterpret_cast<const bNodeTree *>(node.id), image);
+      }
+    }
+    return count;
+  }
+};
+
+TEST_F(PaintLayersBakeTest, mode_and_size_round_trip)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Row", add_image("Row"));
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*layer), MA_PAINT_LAYER_BAKE_AUTO);
+  EXPECT_EQ(layer->bake, nullptr) << "reading the mode must not allocate a cache";
+
+  EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_NEVER));
+  EXPECT_EQ(BKE_paint_layers_bake_mode_get(*layer), MA_PAINT_LAYER_BAKE_NEVER);
+  EXPECT_TRUE(BKE_paint_layers_bake_size_set(*ma, *layer, 64));
+  EXPECT_EQ(BKE_paint_layers_bake_size_get(*layer), 64);
+
+  EXPECT_FALSE(BKE_paint_layers_bake_mode_set(*ma, *layer, 99)) << "an unknown mode is refused";
+  EXPECT_FALSE(BKE_paint_layers_bake_size_set(*ma, *layer, 0));
+}
+
+TEST_F(PaintLayersBakeTest, a_bake_is_invalid_until_its_hash_is_stamped)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Row", add_image("Row"));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *layer)) << "no cache at all";
+
+  BKE_paint_layers_bake_struct_ensure(*layer);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *layer)) << "a zero hash proves nothing";
+
+  BKE_paint_layers_bake_finalize(*ma, *layer);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+
+  /* The opacity is baked into the coverage, so it is part of what the hash vouches for. */
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.5f));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+}
+
+TEST_F(PaintLayersBakeTest, the_hash_ignores_the_visibility_of_the_row_itself)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Row", add_image("Row"));
+  BKE_paint_layers_bake_struct_ensure(*layer);
+  BKE_paint_layers_bake_finalize(*ma, *layer);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+
+  /* Visibility stays a live factor, so hiding the row neither invalidates nor needs a re-bake. */
+  EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, layer, false));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+}
+
+TEST_F(PaintLayersBakeTest, the_planner_bakes_a_requested_row_and_it_stands_in)
+{
+  MaterialPaintLayer *layer = add_baked_row("Row");
+  clear_active();
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *layer));
+
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_EQ(layer->bake->size, 8) << "the size follows the row's map";
+  EXPECT_NE(layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_NE(layer->bake->coverage, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *layer));
+  Image *baked = nullptr;
+  EXPECT_TRUE(paint_layer_row_baked_channel(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &baked));
+  EXPECT_EQ(baked, layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_FALSE(paint_layer_row_baked_channel(*ma, *layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, nullptr))
+      << "a channel the row has no map in has no baked map either";
+
+  /* A second pass has nothing left to do. */
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+}
+
+TEST_F(PaintLayersBakeTest, the_row_being_edited_stays_live)
+{
+  MaterialPaintLayer *layer = add_baked_row("Row");
+  BKE_paint_layers_active_set(*ma, layer->marker);
+  EXPECT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *layer));
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  EXPECT_EQ(layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+
+  clear_active();
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *layer));
+}
+
+TEST_F(PaintLayersBakeTest, a_hidden_row_and_a_never_row_are_not_baked)
+{
+  MaterialPaintLayer *hidden = add_baked_row("Hidden");
+  MaterialPaintLayer *never = add_baked_row("Never");
+  EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, hidden, false));
+  EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, never, MA_PAINT_LAYER_BAKE_NEVER));
+  clear_active();
+
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *hidden));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *never));
+}
+
+TEST_F(PaintLayersBakeTest, a_value_edit_makes_the_row_live_until_it_is_baked_again)
+{
+  MaterialPaintLayer *layer = add_baked_row("Row");
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
+  Image *first_map = layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.25f));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *layer));
+
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *layer));
+  EXPECT_EQ(layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], first_map)
+      << "a re-bake fills the row's maps in place";
+}
+
+TEST_F(PaintLayersBakeTest, a_pixel_edit_of_a_source_map_makes_the_row_live)
+{
+  Image *source = add_image("Row");
+  MaterialPaintLayer *layer = add_paint_layer("Row", source);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
+  ma->paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+
+  BKE_image_partial_update_mark_full_update(source);
+  BKE_paint_layers_bake_notice_changes(*ma);
+
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *layer));
+  EXPECT_TRUE(BKE_paint_layers_bake_stale_get(*ma));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0)
+      << "the generated graph was built from the bake and has to be rebuilt";
+}
+
+TEST_F(PaintLayersBakeTest, the_cpu_composite_reads_the_bake_as_one_plain_layer)
+{
+  MaterialPaintLayer *layer = add_baked_row("Row");
+  ASSERT_NE(BKE_paint_layers_correction_add(*ma, layer, "Fix", MA_PAINT_LAYER_SOURCE_CONSTANT),
+            nullptr);
+  clear_active();
+
+  Vector<PaintMaterialCompositeImageLayer> live;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, live));
+  ASSERT_EQ(live.size(), 1);
+  EXPECT_NE(live[0].color_image, nullptr);
+  EXPECT_EQ(live[0].content_corrections.size(), 1);
+
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  Vector<PaintMaterialCompositeImageLayer> baked;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, baked));
+  ASSERT_EQ(baked.size(), 1);
+  EXPECT_EQ(baked[0].color_image, layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_EQ(baked[0].mask_image, layer->bake->coverage);
+  /* The bake already holds the corrections and the mask, so nothing is laid twice. */
+  EXPECT_TRUE(baked[0].content_corrections.is_empty());
+  EXPECT_TRUE(baked[0].mask_items.is_empty());
+}
+
+TEST_F(PaintLayersBakeTest, the_generator_reads_the_bake_instead_of_the_row)
+{
+  Image *source = add_image("Row");
+  MaterialPaintLayer *layer = add_paint_layer("Row", source);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, source), 1);
+
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  Image *color_map = layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  ASSERT_NE(color_map, nullptr);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, source), 0)
+      << "a baked row no longer reads its own map";
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, color_map), 1);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, layer->bake->coverage), 1);
+
+  /* A value edit of the baked row is topology: the row is live again and reads its own map. */
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, source), 1);
+  EXPECT_EQ(image_reader_count(*ma->paint_layers_tree, color_map), 0);
+}
+
+TEST_F(PaintLayersBakeTest, a_value_sync_of_a_stale_baked_shape_asks_for_a_rebuild)
+{
+  MaterialPaintLayer *layer = add_baked_row("Row");
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_TRUE(BKE_paint_layers_values_sync(*ma));
+
+  /* The group was built from the bake; once the row is live the sync cannot make it right. */
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, layer, 0.5f));
+  EXPECT_FALSE(BKE_paint_layers_values_sync(*ma));
+}
+
+TEST_F(PaintLayersBakeTest, a_nested_folder_is_baked_by_the_worker_job)
+{
+  MaterialPaintLayer *inner = add_nested_folder();
+  ASSERT_NE(inner, nullptr);
+  clear_active();
+
+  MaterialPaintLayer *outer = BKE_paint_layers_parent(*ma, *inner);
+  ASSERT_NE(outer, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_folder_auto_bake_allowed(*ma, *outer))
+      << "a folder in the stack root stays live";
+  ASSERT_TRUE(BKE_paint_layers_folder_auto_bake_allowed(*ma, *inner));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_heavy(*ma, *inner));
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  /* The synchronous planner leaves a heavy row to the worker. */
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *inner));
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  float last_progress = -1.0f;
+  BKE_paint_layers_bake_job_compute(*job, [&](const float progress) { last_progress = progress; }, {});
+  EXPECT_FLOAT_EQ(last_progress, 1.0f);
+  EXPECT_TRUE(BKE_paint_layers_bake_job_commit(*job));
+  BKE_paint_layers_bake_job_free(*job);
+
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *inner));
+  EXPECT_FALSE(BKE_paint_layers_bake_heavy_pending(*ma));
+
+  /* The outer folder is Pass Through, so its rows are laid in the stack as if it were not there:
+   * the baked folder is one plain layer for the CPU, its children no longer composited. */
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 2);
+  EXPECT_FALSE(layers[0].is_folder);
+  EXPECT_TRUE(layers[0].children.empty());
+  EXPECT_EQ(layers[0].color_image, inner->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  EXPECT_EQ(layers[0].mask_image, inner->bake->coverage);
+}
+
+TEST_F(PaintLayersBakeTest, a_job_result_of_a_row_edited_meanwhile_is_not_taken_for_current)
+{
+  MaterialPaintLayer *first = nullptr;
+  MaterialPaintLayer *inner = add_nested_folder(&first);
+  ASSERT_NE(inner, nullptr);
+  clear_active();
+
+  PaintLayersBakeJob *job = BKE_paint_layers_bake_job_create(*bmain, *ma);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_bake_job_compute(*job, {}, {});
+  /* An edit lands while the worker has run on the old state. */
+  EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, first, 0.25f));
+  BKE_paint_layers_bake_job_commit(*job);
+  BKE_paint_layers_bake_job_free(*job);
+
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *inner))
+      << "the stamped hash is the one the render was made from";
+  EXPECT_FALSE(paint_layer_row_substituted(*ma, *inner));
+  EXPECT_TRUE(BKE_paint_layers_bake_heavy_pending(*ma)) << "the planner queues it anew";
+}
+
+TEST_F(PaintLayersBakeTest, a_copied_material_starts_without_a_cache_of_its_own)
+{
+  MaterialPaintLayer *layer = add_baked_row("Row");
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
+
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  const MaterialPaintLayer *copied = copy->paint_layers.first;
+  ASSERT_NE(copied, nullptr);
+  ASSERT_NE(copied->bake, nullptr);
+  EXPECT_EQ(copied->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr)
+      << "re-baking the copy must not write into the original's maps";
+  EXPECT_EQ(copied->bake->coverage, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*copy, *copied));
+  EXPECT_TRUE(paint_layer_row_substituted(*ma, *layer)) << "the original keeps its bake";
+}
+
+TEST_F(PaintLayersBakeTest, a_removed_row_lets_go_of_its_bake)
+{
+  MaterialPaintLayer *layer = add_baked_row("Row");
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  Image *map = layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+  Image *coverage = layer->bake->coverage;
+  const int map_users = map->id.us;
+  const int coverage_users = coverage->id.us;
+
+  EXPECT_TRUE(BKE_paint_layers_remove(*ma, layer));
+  EXPECT_EQ(map->id.us, map_users - 1);
+  EXPECT_EQ(coverage->id.us, coverage_users - 1);
+}
+
+}  // namespace blender::bke::tests

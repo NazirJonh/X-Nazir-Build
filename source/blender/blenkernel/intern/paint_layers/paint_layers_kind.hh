@@ -27,6 +27,11 @@ namespace blender {
 enum class PaintLayerDependencyKind : uint8_t {
   /* A channel's paint map. */
   ImageMap = 0,
+  /**
+   * A map of the row's bake cache: generated from the description, so it is never packed on save
+   * and a copy of the material gets its own.
+   */
+  BakeCache = 1,
 };
 
 /** What a change to the dependency invalidates. */
@@ -238,6 +243,21 @@ inline bool paint_layer_kind_map_paintable(const MaterialPaintLayer &row)
 inline void paint_layer_dependencies(MaterialPaintLayer &row,
                                      const FunctionRef<void(PaintLayerDependency &)> fn)
 {
+  /* The bake cache first: the colour maps by channel, then the shared coverage map. */
+  if (row.bake != nullptr) {
+    for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+      PaintLayerDependency dep{reinterpret_cast<ID **>(&row.bake->images[i]),
+                               PaintLayerDependencyKind::BakeCache,
+                               PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
+                               int8_t(i)};
+      fn(dep);
+    }
+    PaintLayerDependency coverage_dep{reinterpret_cast<ID **>(&row.bake->coverage),
+                                      PaintLayerDependencyKind::BakeCache,
+                                      PAINT_LAYER_DEP_PIXELS | PAINT_LAYER_DEP_OWNERSHIP,
+                                      -1};
+    fn(coverage_dep);
+  }
   if (paint_layer_kind_is_map_coverage(row)) {
     for (int i = 0; i < row.channels_num; i++) {
       MaterialPaintLayerChannel &record = row.channels[i];
@@ -280,6 +300,7 @@ inline LibraryForeachIDCallbackFlag paint_layer_dependency_foreach_flag(const Pa
 {
   switch (dep.kind) {
     case PaintLayerDependencyKind::ImageMap:
+    case PaintLayerDependencyKind::BakeCache:
       return IDWALK_CB_USER;
   }
   return IDWALK_CB_NOP;

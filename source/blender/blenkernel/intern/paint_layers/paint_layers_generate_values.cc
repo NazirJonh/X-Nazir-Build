@@ -74,8 +74,17 @@ bool values_sync_socket(Material &ma,
     if (socket.default_value == nullptr) {
       return false;
     }
-    const float value = BKE_paint_layers_channel_opacity_effective(*layer, channel) *
-                        forms.lookup_default(layer, {}).pass_through_scale;
+    /* A group built from its row's bake holds the row's visibility alone; one built live holds the
+     * full opacity. If the row's state moved since (a pixel edit made the bake invalid, say) the
+     * group has the wrong shape and cannot be fixed by a value, so the caller rebuilds. */
+    const bool built_baked = prop_int_get(iface.properties, INPUT_SUBSTITUTED_PROP, 0) != 0;
+    if (built_baked != paint_layer_row_substituted(ma, *layer)) {
+      return false;
+    }
+    const float scale = forms.lookup_default(layer, {}).pass_through_scale;
+    const float value = built_baked ?
+                            ((layer->flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) * scale :
+                            BKE_paint_layers_channel_opacity_effective(*layer, channel) * scale;
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
     if (iface.socket_data != nullptr) {
       static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;

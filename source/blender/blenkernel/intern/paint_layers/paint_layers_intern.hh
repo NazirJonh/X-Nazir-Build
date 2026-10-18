@@ -24,6 +24,10 @@
 
 namespace blender {
 
+struct Image;
+struct Main;
+struct MaterialPaintLayerBake;
+
 /**
  * The record of \a layer's channels array that stands for \a channel, or null when it has none.
  *
@@ -342,5 +346,113 @@ inline bool paint_layer_mask_item_alpha_background(const MaterialPaintLayer &ite
  * code; it answers #MA_RAMP_BLEND, and the Normal channel never reaches this with it.
  */
 int BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend blend);
+
+/* -------------------------------------------------------------------- */
+/** \name Row bake
+ *
+ * What the bake (`paint_layers_bake.cc`) shares with the code that reads the description. A baked
+ * row is one decision, #paint_layer_row_substituted, which the generator and the CPU composite both
+ * ask, so a row cannot be a cache on one side and live on the other.
+ * \{ */
+
+/** The cap on the nodes an AUTO row may cost live; a row that would add more is baked. */
+constexpr int PAINT_LAYERS_AUTO_BAKE_NODES = 36;
+
+/** What a child whose valid bake stands in costs its parent's weight: one map, like one channel. */
+constexpr int PAINT_LAYERS_BAKED_CHILD_WEIGHT = 6;
+
+/**
+ * Whether the bake of \a layer stands in for the row right now: it is a Layer row (never a filter
+ * or a Pass Through folder), its mode is not Never, nothing inside it keeps it live (a mapping, an
+ * object mask) and the stored bake is valid (#BKE_paint_layers_bake_is_valid). The one test for the
+ * generator, the CPU composite and the topology hash.
+ */
+bool paint_layer_row_substituted(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer is substituted and its bake holds a map for \a channel: the row then takes part
+ * in the channel through that map and nothing else. \a r_color receives the colour map.
+ */
+bool paint_layer_row_baked_channel(const Material &ma,
+                                   const MaterialPaintLayer &layer,
+                                   int channel,
+                                   Image **r_color);
+
+/**
+ * Start (or restart) the partial-update subscription over the maps \a layer's bake depends on.
+ * Called when a bake is written, so pixel edits to those maps are noticed by
+ * #BKE_paint_layers_bake_notice_changes.
+ */
+void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer);
+
+/**
+ * Drain \a ma's subscriptions: a pixel edit to a source map marks its row's bake changed, the
+ * material stale and its generated graph for a rebuild (the row is no longer substituted).
+ */
+void BKE_paint_layers_bake_notice_changes(Material &ma);
+
+/**
+ * The union of the pixel rectangles \a layer's source maps changed in since its last bake, as
+ * (xmin, xmax, ymin, ymax); false when nothing is known (the first bake, a full-update answer).
+ * The planner uses it to re-bake only the changed tile-sized rectangle.
+ */
+bool BKE_paint_layers_bake_changed_region(const Material &ma,
+                                          const MaterialPaintLayer &layer,
+                                          int r_region[4]);
+
+/**
+ * Bring every light baked row of \a ma current, the synchronous half of the planner: a row that is
+ * due and not heavy is rendered through #BKE_paint_layers_bake_render_node into its service maps,
+ * stamped and subscribed. Callers run this on the main thread after draining the subscription
+ * (#BKE_paint_layers_bake_notice_changes). A heavy row is left to the worker job
+ * (#BKE_paint_layers_bake_job_create).
+ *
+ * \return true when some row was baked or released, so the caller knows the tree needs a rebuild.
+ */
+bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed = nullptr);
+
+/**
+ * Allocate \a layer's bake cache if it has none and return it, without marking anything: the
+ * caller owns the edit and tags the description itself.
+ */
+MaterialPaintLayerBake *BKE_paint_layers_bake_struct_ensure(MaterialPaintLayer &layer);
+
+/**
+ * Point \a layer's baked map for \a channel at \a image (negative \a channel is its coverage
+ * map), maintaining the image's user count.
+ */
+bool BKE_paint_layers_bake_set_map(Material &ma,
+                                   MaterialPaintLayer &layer,
+                                   int channel,
+                                   Image *image);
+
+/**
+ * Composite \a layer's subtree for \a channel the way a bake of it would: the isolated-group model
+ * -- the straight colour, the content alpha in its fourth component and the coverage it lays by --
+ * into \a size x \a size buffers. The planner and the generator's substitution read this one
+ * function's result, so a baked map means one thing. Source maps are composited at their own
+ * resolution and nearest-sampled to \a size.
+ *
+ * \param dst_rect: (x0, y0, x1, y1) in result pixels; when given only that rectangle is computed
+ * and written, which is how a partial re-bake touches one changed tile.
+ * \return false when the row has nothing to render in \a channel.
+ */
+bool BKE_paint_layers_bake_render_node(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       int channel,
+                                       int size,
+                                       float *r_color_rgba,
+                                       float *r_coverage_gray,
+                                       const int *dst_rect = nullptr);
+
+/** The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. */
+bool BKE_paint_layers_row_dimensions(const Material &ma,
+                                     const MaterialPaintLayer &layer,
+                                     int channel,
+                                     int &r_width,
+                                     int &r_height);
+
+/** \} */
+
 
 }  // namespace blender

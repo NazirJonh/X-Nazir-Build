@@ -232,7 +232,9 @@ void template_running_jobs(Layout *layout, bContext *C)
    * of the lookups above see it. */
   if (owner == nullptr) {
     for (Material &material : bmain->materials) {
-      if (WM_jobs_test(wm, &material, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE)) {
+      if (WM_jobs_test(wm, &material, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE) ||
+          WM_jobs_test(wm, &material, WM_JOB_TYPE_PAINT_LAYERS_BAKE))
+      {
         owner = &material;
         icon = ICON_MATERIAL;
         cancel_fn = [owner](bContext &C) {

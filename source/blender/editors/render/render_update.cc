@@ -50,11 +50,12 @@
 #include "SEQ_relations.hh"
 #include "SEQ_sequencer.hh"
 
-#include "ED_material_bake.hh"
 #include "ED_image.hh"
+#include "ED_material_bake.hh"
 #include "ED_node.hh"
 #include "ED_node_preview.hh"
 #include "ED_paint.hh"
+#include "ED_paint_layers_bake.hh"
 #include "ED_render.hh"
 #include "ED_view3d.hh"
 
@@ -159,6 +160,11 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
   }
 
   update_compositor(update_ctx);
+
+  /* The regeneration point baked the light paint-layer rows synchronously; anything heavy it left
+   * pending is queued here, on the main thread, right after the depsgraph update. */
+  ed::material_bake::paint_layers_bake_jobs_ensure(
+      *wm, static_cast<wmWindow *>(wm->windows.first), *bmain);
 
   recursive_check = false;
 }

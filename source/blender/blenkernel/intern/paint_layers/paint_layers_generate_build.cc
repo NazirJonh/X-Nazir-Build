@@ -616,6 +616,32 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
 void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer)
 {
   const char *layer_name = layer.name[0] != '\0' ? layer.name : "Layer";
+  if (paint_layer_row_substituted(ma_, layer)) {
+    /* A row built from its bake has one input per channel it has a map in: its visibility. The
+     * opacity, the mask and the corrections are inside the bake, and its own object mask is applied
+     * by the nodes that read the object, not by an input. */
+    for (const int channel : wired_channels_) {
+      if (!paint_layer_row_baked_channel(ma_, layer, channel, nullptr)) {
+        continue;
+      }
+      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+          eMaterialPaintChannel(channel));
+      char base[200];
+      SNPRINTF(base, "%s %s Opacity", layer_name, info.ui_name);
+      bNodeTreeInterfaceSocket *opacity = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_OPACITY, layer.marker, channel);
+      if (opacity != nullptr) {
+        prop_int_set(opacity->properties, INPUT_SUBSTITUTED_PROP, 1);
+        group_input_default_set(
+            group,
+            *opacity,
+            ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
+                forms_.lookup_default(&layer, {}).pass_through_scale);
+        opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
+      }
+    }
+    return;
+  }
   this->mapping_inputs_create(group, layer, layer_name);
   for (const int channel : wired_channels_) {
     if (!row_participates(ma_, layer, channel)) {
@@ -1072,7 +1098,9 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
     NodeOutput folder_alpha;
     const bool track_alpha = BKE_paint_material_channel_tracks_content_alpha(
         eMaterialPaintChannel(channel));
-    if (BKE_paint_layers_is_folder(layer)) {
+    /* A folder whose bake stands in builds nothing of what it holds: its row reads the bake. */
+    if (BKE_paint_layers_is_folder(layer) && !paint_layer_row_baked_channel(ma_, layer, channel, nullptr))
+    {
       bNode *p_zero = zero_node_add(tree_, true, location_x, location_y - 140.0f);
       bNode *a_zero = zero_node_add(tree_, false, location_x, location_y - 260.0f);
       /* The content alpha is accumulated pre-multiplied beside the colour, from zero. */

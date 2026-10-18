@@ -2020,6 +2020,8 @@ enum eWM_JobType {
    * slot is shared by owner and type, and the two install different callbacks into it.
    */
   WM_JOB_TYPE_MATERIAL_IMAGES_BAKE,
+  /** Heavy paint-layer bakes, keyed on the material; see `render_paint_layers_bake.cc`. */
+  WM_JOB_TYPE_PAINT_LAYERS_BAKE,
   /* Add as needed, bake, seq proxy build
    * if having hard coded values is a problem. */
 };

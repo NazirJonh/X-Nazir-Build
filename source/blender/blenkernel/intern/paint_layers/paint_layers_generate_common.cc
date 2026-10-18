@@ -211,6 +211,11 @@ bool leaf_participates(const Material &ma, const MaterialPaintLayer &layer, cons
 
 bool row_participates(const Material &ma, const MaterialPaintLayer &layer, const int channel)
 {
+  /* A row whose bake stands in takes part through the bake's map and nothing else, whatever it
+   * holds: the generator builds a source from that map alone, and so does the CPU composite. */
+  if (paint_layer_row_substituted(ma, layer)) {
+    return paint_layer_row_baked_channel(ma, layer, channel, nullptr);
+  }
   if (!BKE_paint_layers_is_folder(layer)) {
     return leaf_participates(ma, layer, channel);
   }

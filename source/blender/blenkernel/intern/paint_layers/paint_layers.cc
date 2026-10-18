@@ -57,12 +57,18 @@ namespace blender {
 
 void BKE_paint_layers_tag_edited(Material &ma)
 {
+  /* An edit is a reason to try a cancelled heavy bake again. */
+  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
   DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
 }
 
 void BKE_paint_layers_tag_value_edited(Material &ma)
 {
+  /* A value can be baked into a row's cache (the hash covers opacity and fill), and this path does
+   * not rebuild the tree, so the planner has to be asked for a re-bake as well. */
+  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
+  ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
   /* A value edit changes no socket set: every row's inputs already exist, so the generated tree
    * keeps its nodes and only its values are re-synced. Never MA_PAINT_LAYERS_REGEN; SYNC_TO_EVAL so
    * the evaluated copy the shader reads is refreshed. If the tree does not match the description's
@@ -731,6 +737,17 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
       id_us_min(&layer.channels[i].image->id);
     }
   }
+  /* The bake cache is the row's too: its maps lose the row's user and stay as orphans. */
+  if (layer.bake != nullptr) {
+    for (Image *image : layer.bake->images) {
+      if (image != nullptr) {
+        id_us_min(&image->id);
+      }
+    }
+    if (layer.bake->coverage != nullptr) {
+      id_us_min(&layer.bake->coverage->id);
+    }
+  }
   for (MaterialPaintLayer &item : layer.mask_stack) {
     paint_layer_release_users(item);
   }
@@ -1362,6 +1379,11 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
 {
+  /* Leaving a row is when its deferred bake becomes due: the row and its ancestor folders left
+   * behind may carry a cache that has to catch up (see #BKE_paint_layers_bake_row_is_deferred). */
+  if (!BLI_uuid_equal(ma.active_layer_marker, marker)) {
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+  }
   ma.active_layer_marker = marker;
 }
 

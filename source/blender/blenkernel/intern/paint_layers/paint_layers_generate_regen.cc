@@ -453,6 +453,13 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain)
     {
       continue;
     }
+    /* Drain the bake subscriptions: a pixel edit to a source map shows up here and marks the
+     * material for the planner, the same point the tree is brought current. Then the planner
+     * re-bakes the light rows whose stored hash no longer matches, on the main thread; a heavy row
+     * is left to the editor's worker job. A bake that was written, or a row that stopped being
+     * substituted, tags the rebuild below. */
+    BKE_paint_layers_bake_notice_changes(ma);
+    BKE_paint_layers_bake_plan_run(bmain, ma);
     const bool needs_regen = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0 ||
                              ma.paint_layers_tree == nullptr;
     if (needs_regen) {
@@ -482,6 +489,16 @@ static bool copy_owns_generated_tree(const Main *bmain, const int copy_flag)
 static void maps_copy(Main &bmain, ListBaseT<MaterialPaintLayer> &rows, Map<Image *, Image *> &clones)
 {
   for (MaterialPaintLayer &row : rows) {
+    /* A baked row of the copy starts with no cache of its own: sharing the original's maps would
+     * let a re-bake of the copy change what the original shows. The planner bakes it again. */
+    if (row.bake != nullptr) {
+      for (Image *&baked : row.bake->images) {
+        baked = nullptr;
+      }
+      row.bake->coverage = nullptr;
+      row.bake->hash[0] = 0;
+      row.bake->hash[1] = 0;
+    }
     paint_layer_dependencies(row, [&](PaintLayerDependency &dep) {
       if (dep.kind != PaintLayerDependencyKind::ImageMap || *dep.slot == nullptr ||
           !ID_IS_EDITABLE(*dep.slot))
@@ -791,6 +808,24 @@ void BKE_paint_layers_undo_validate(Main &bmain)
     Material &ma = *materials[i];
     undo_dangling_id_clear(ma.paint_layers_tree, live);
 
+    /* A bake cache whose maps the decode freed is not a cache any more: clearing the hash makes the
+     * planner render the row again. */
+    BKE_paint_layers_foreach(
+        ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+          if (row.bake == nullptr) {
+            return true;
+          }
+          bool dangling = undo_dangling_id_clear(row.bake->coverage, live);
+          for (Image *&image : row.bake->images) {
+            dangling |= undo_dangling_id_clear(image, live);
+          }
+          if (dangling) {
+            row.bake->hash[0] = 0;
+            row.bake->hash[1] = 0;
+          }
+          return true;
+        });
+
     /* The generated trees a material owns, which a decode may have kept as they were while the
      * maps and groups they name were freed. The material's own tree holds the group instances. */
     Vector<bNodeTree *> trees = owned_by_material[i];
@@ -806,6 +841,8 @@ void BKE_paint_layers_undo_validate(Main &bmain)
     ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
     DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
   }
+  /* The pixel-edit subscriptions name images by address: drop the ones the decode freed. */
+  BKE_paint_layers_bake_subscriptions_validate(bmain);
 }
 
 /** \} */

@@ -983,4 +983,133 @@ int BKE_paint_layers_pack_maps(const Main &bmain, bool for_autosave, ReportList 
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Bake
+ *
+ * A baked row is a cache of its live subtree: the description plus its live maps stay what the row
+ * is, and the bake is read instead of them only while it is valid. The planner re-bakes a row whose
+ * stored hash no longer matches, synchronously for a light one and on a worker for a heavy one.
+ * \{ */
+
+/** The bake mode of \a layer, an #eMaterialPaintLayerBakeMode (AUTO when nothing is baked). */
+int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer);
+
+/** Set the bake mode of \a layer, allocating its bake cache if needed. */
+bool BKE_paint_layers_bake_mode_set(Material &ma, MaterialPaintLayer &layer, int mode);
+
+/** The square side \a layer's maps are baked at, or 0 when nothing is baked. */
+int BKE_paint_layers_bake_size_get(const MaterialPaintLayer &layer);
+
+/** Set the square side \a layer's maps are baked at, invalidating any stored bake. */
+bool BKE_paint_layers_bake_size_set(Material &ma, MaterialPaintLayer &layer, int size);
+
+/** Mark \a layer's bake stale so the planner re-bakes it; allocates the cache if needed. */
+void BKE_paint_layers_bake_request(MaterialPaintLayer &layer);
+
+/** Drop \a layer's bake cache and mark the generated tree stale. */
+bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer);
+
+/** Whether a value edit or a pixel change left some row of \a ma waiting to be re-baked. */
+bool BKE_paint_layers_bake_stale_get(const Material &ma);
+/** Clear \a ma's pending-bake mark; the planner calls this once the queue is drained. */
+void BKE_paint_layers_bake_stale_clear(Material &ma);
+
+/**
+ * Hash of the subtree and parameters \a layer's bake depends on, the validity key: two 32-bit
+ * words, low first. Pixel edits are not visible here; they arrive through the partial-update
+ * subscription and settle as a re-bake of the changed rectangle.
+ */
+void BKE_paint_layers_bake_hash(const Material &ma,
+                                const MaterialPaintLayer &layer,
+                                uint32_t r_hash[2]);
+
+/**
+ * Whether \a layer's stored bake can stand in for its live subtree right now: a bake exists, its
+ * stored hash matches #BKE_paint_layers_bake_hash and the runtime subscription has reported no
+ * change to the source maps since the bake. The subscription is runtime-only: a freshly loaded file
+ * has none, which is why a load clears every stored hash and the first plan re-bakes.
+ */
+bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Stamp \a layer's bake hash from its description and start the pixel-edit subscription, after its
+ * maps were filled. This is what makes #paint_layer_row_substituted take the row.
+ */
+void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer must stay live for bake reasons: a UV mapping applies to it or anything inside
+ * it (a bake would freeze the slider values), or a row inside it has an object mask (the choice is
+ * made in the shader, after every shared cache). The row's own object mask does not block.
+ */
+bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer must stay live right now rather than be baked: it is the active row, or an
+ * ancestor of it, so the user is editing inside it and a bake would fight the edit.
+ */
+bool BKE_paint_layers_bake_row_is_deferred(const Material &ma, const MaterialPaintLayer &layer);
+
+/** The map side at or above which a bake counts as heavy regardless of the subtree's weight. */
+constexpr int PAINT_LAYERS_HEAVY_BAKE_SIZE = 2048;
+
+/**
+ * Whether \a layer's bake is heavy enough to leave the main thread: its subtree would add more
+ * than a fixed number of generated nodes, or its declared map size is at least
+ * #PAINT_LAYERS_HEAVY_BAKE_SIZE. A light row is baked synchronously by the planner; a heavy one by
+ * the worker job.
+ */
+bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * The level of \a layer among the folders around it, a folder in the stack root being 1. The AUTO
+ * mode bakes only folders nested at level 2 or deeper; a folder in the root is what the user keeps
+ * working in.
+ */
+int BKE_paint_layers_folder_level(const Material &ma, const MaterialPaintLayer &layer);
+bool BKE_paint_layers_folder_auto_bake_allowed(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Whether any heavy, not-yet-valid baked row of \a ma waits for a worker. */
+bool BKE_paint_layers_bake_heavy_pending(const Material &ma);
+
+/** Release the runtime \a ma's bake keeps outside the file (subscriptions, remembered sizes). */
+void BKE_paint_layers_bake_runtime_free(Material &ma);
+
+/**
+ * Hand the bake runtime of \a src to \a dst when the undo system replaces a material with a
+ * re-read copy that keeps the same `session_uid`; without it the old ID's free path would drop the
+ * entries the new ID still uses.
+ */
+void BKE_paint_layers_bake_runtime_owner_transfer(Material &dst, Material &src);
+
+/**
+ * A heavy-bake job: the description is localized on the main thread at creation, the pixels are
+ * computed from the copy on the worker (#BKE_paint_layers_bake_job_compute), and the maps are
+ * written back to the live material on the main thread (#BKE_paint_layers_bake_job_commit).
+ */
+struct PaintLayersBakeJob;
+
+/** A job for every due heavy row of \a ma, or null when nothing can be queued. Main thread. */
+PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma);
+
+/**
+ * The worker half: reads only the localized copy and shared images. \a report_progress gets 0..1;
+ * \a is_cancelled is polled between channels, and a cancelled job writes nothing (see
+ * #BKE_paint_layers_bake_job_commit).
+ */
+void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
+                                       FunctionRef<void(float progress)> report_progress,
+                                       FunctionRef<bool()> is_cancelled);
+
+/**
+ * The main-thread half: write the rendered maps into the live material and stamp their hashes.
+ * \return true when some row was written, so the caller notifies the shading.
+ */
+bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job);
+
+/** Release the job and its localized copy. */
+void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job);
+
+/** \} */
+
 }  // namespace blender

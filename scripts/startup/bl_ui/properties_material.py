@@ -714,6 +714,46 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         col.prop(row, "mapping_wrap", text="UV Wrap")
 
 
+class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
+    """The bake cache of the active row: when its subtree is rendered into maps the stack reads.
+
+    A baked row is a cache of the live row, not a replacement for it: it is read only while it
+    matches the row's description, and the first edit to the row or to a map it reads brings the
+    live row back until the cache is rendered again. Auto bakes the heavy folders that are nested in
+    another folder and are not being edited; Always bakes any row once it is not being edited.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_bake"
+    bl_label = "Bake"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if not super().poll(context):
+            return False
+        owner, layer = cls._active_layer(context)
+        if owner is None or layer is None:
+            return False
+        return cls._shown_mask_item(context, owner, layer) is None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        owner, layer = self._active_layer(context)
+        if layer is None:
+            return
+
+        layout.prop(layer, "bake_mode", text="Mode")
+        layout.prop(layer, "bake_size", text="Size")
+        if layer.bake_mode != 'NEVER':
+            layout.label(
+                text="Baked" if layer.bake_is_valid else "Not baked yet",
+                icon='CHECKMARK' if layer.bake_is_valid else 'TIME',
+            )
+
+
 class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
     """The settings of the layered material as a whole; its sections are sub-panels."""
 
@@ -903,6 +943,7 @@ classes = (
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_mapping,
+    LAYER_MATERIAL_PT_bake,
     LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_advanced,
     LAYER_MATERIAL_PT_active_channel,

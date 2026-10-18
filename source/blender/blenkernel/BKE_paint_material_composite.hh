@@ -521,6 +521,23 @@ bool BKE_paint_material_composite_eval_images_linear(
     const float bottom_color[4] = nullptr);
 
 /**
+ * Render one row to straight scene-linear colour and the coverage it lays by, both before the
+ * row's neighbours are involved: the content a bake of the row stores.
+ *
+ * \a r_color_rgba holds four floats per texel of \a region (the whole row when null) and carries
+ * the row's content alpha in the fourth when the channel tracks one (always for Normal), one
+ * otherwise. \a r_coverage_gray is `opacity x factor` per texel. The row is composited as an
+ * isolated layer over nothing, a folder through its children, with its corrections and mask.
+ *
+ * \return false when the row has no content to render in \a channel or the buffers cannot be read.
+ */
+bool BKE_paint_material_composite_eval_row_content(const PaintMaterialCompositeImageLayer &row,
+                                                   float *r_color_rgba,
+                                                   float *r_coverage_gray,
+                                                   const rcti *region,
+                                                   int channel);
+
+/**
  * Whether scene-linear values must be converted to or from \a colorspace: it is a known colour
  * space that is neither a data space nor scene linear. False for null.
  */

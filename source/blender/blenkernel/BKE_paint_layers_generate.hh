@@ -170,4 +170,11 @@ void BKE_paint_layers_undo_prepare(Main &bmain);
  */
 void BKE_paint_layers_undo_validate(Main &bmain);
 
+/**
+ * Drop the bake change subscriptions on images that no longer exist in \a bmain. Called at the end
+ * of #BKE_paint_layers_undo_validate: a decode that freed a source map leaves a subscription naming
+ * it, and the row is marked changed so it is re-baked.
+ */
+void BKE_paint_layers_bake_subscriptions_validate(Main &bmain);
+
 }  // namespace blender

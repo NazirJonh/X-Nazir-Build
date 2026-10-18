@@ -19,6 +19,7 @@ set(SRC
   render_material_bake_ops.cc
   render_opengl.cc
   render_ops.cc
+  render_paint_layers_bake.cc
   render_preview.cc
   render_shading.cc
   render_texture_cache.cc

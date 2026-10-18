@@ -1333,6 +1333,60 @@ static void rna_MaterialPaintLayer_object_mask_tile_set(PointerRNA ptr,
   }
 }
 
+static int rna_MaterialPaintLayer_bake_mode_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_bake_mode_get(*static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
+static void rna_MaterialPaintLayer_bake_mode_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  if (ma != nullptr && BKE_paint_layers_bake_mode_set(*ma, *layer, value)) {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+}
+
+static int rna_MaterialPaintLayer_bake_size_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_bake_size_get(*static_cast<const MaterialPaintLayer *>(ptr->data));
+}
+
+static void rna_MaterialPaintLayer_bake_size_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  if (ma != nullptr && BKE_paint_layers_bake_size_set(*ma, *layer, value)) {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+}
+
+static bool rna_MaterialPaintLayer_bake_is_valid_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  const Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  return ma != nullptr && BKE_paint_layers_bake_is_valid(*ma, *layer);
+}
+
+static void rna_MaterialPaintLayer_bake_request(PointerRNA ptr)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    BKE_paint_layers_bake_request(*layer);
+    ma->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+}
+
+static void rna_MaterialPaintLayer_bake_clear(PointerRNA ptr)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
+    BKE_paint_layers_bake_clear(*ma, *layer);
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
+  }
+}
+
 static void rna_MaterialPaintLayer_object_mask_tiles(PointerRNA ptr,
                                                      Object *object,
                                                      const bool refresh,
@@ -2671,6 +2725,22 @@ static void rna_def_material_paint_layer_id_color(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Show Advanced", "Unfold the colour's own controls");
 }
 
+/* Values match #eMaterialPaintLayerBakeMode. */
+static const EnumPropertyItem rna_enum_material_paint_layer_bake_mode_items[] = {
+    {MA_PAINT_LAYER_BAKE_AUTO,
+     "AUTO",
+     0,
+     "Auto",
+     "Bake the heavy inactive folders; the row being edited is evaluated live"},
+    {MA_PAINT_LAYER_BAKE_ALWAYS,
+     "ALWAYS",
+     0,
+     "Always",
+     "Always bake, whatever the row weighs, once it is not being edited"},
+    {MA_PAINT_LAYER_BAKE_NEVER, "NEVER", 0, "Never", "Never bake; evaluate the row live"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_def_material_paint_layer(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3110,6 +3180,39 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   func = RNA_def_function(srna, "mask_remove", "rna_MaterialPaintLayer_mask_remove");
   RNA_def_function_ui_description(func, "Remove the layer's mask");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA | FUNC_USE_REPORTS);
+
+  prop = RNA_def_property(srna, "bake_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_bake_mode_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_bake_mode_get",
+                              "rna_MaterialPaintLayer_bake_mode_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop, "Bake Mode", "When the row's subtree is baked into a cache");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "bake_size", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(prop,
+                             "rna_MaterialPaintLayer_bake_size_get",
+                             "rna_MaterialPaintLayer_bake_size_set",
+                             nullptr);
+  RNA_def_property_range(prop, 0, 4096);
+  RNA_def_property_ui_text(
+      prop, "Bake Size", "Square side the row's baked maps are created at; zero follows the content");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "bake_is_valid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_bake_is_valid_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Bake Is Valid", "Whether the stored bake still matches the row's description");
+
+  func = RNA_def_function(srna, "bake_request", "rna_MaterialPaintLayer_bake_request");
+  RNA_def_function_ui_description(func, "Mark the row's bake stale so the planner re-bakes it");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
+
+  func = RNA_def_function(srna, "bake_clear", "rna_MaterialPaintLayer_bake_clear");
+  RNA_def_function_ui_description(func, "Drop the row's baked cache");
+  RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
 
   static const EnumPropertyItem object_mask_type_items[] = {
       {MA_PAINT_LAYER_OBJECT_MASK_MESH, "MESH", 0, "Mesh", "Choose the objects the layer shows on"},

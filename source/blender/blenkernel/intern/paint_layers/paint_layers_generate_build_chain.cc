@@ -1609,6 +1609,50 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     out.coverage = {no_coverage, no_coverage_out};
     out.content_alpha = out.coverage;
   }
+  else if (ctx.baked_color != nullptr) {
+    /* The row's bake: its colour map, whose alpha is the content alpha the live row had, and the
+     * shared coverage map, a grey holding `mask x opacity`. The factor the chain builds from this is
+     * `visibility x coverage (x content alpha, when the live row had content of its own)`, which is
+     * what the live row's factor was. */
+    bNode *color_map = this->image_map_node_add(tree, *ctx.baked_color);
+    bNode *coverage_map = this->image_map_node_add(tree, *ctx.layer.bake->coverage);
+    bNodeSocket *color_out = (color_map != nullptr) ? socket_out(*color_map, "Color") : nullptr;
+    bNodeSocket *alpha_out = (color_map != nullptr) ? socket_out(*color_map, "Alpha") : nullptr;
+    bNodeSocket *coverage_out = (coverage_map != nullptr) ? socket_out(*coverage_map, "Color") :
+                                                            nullptr;
+    Vector<bNode *> source_nodes;
+    for (bNode *node : {color_map, coverage_map}) {
+      if (node != nullptr) {
+        source_nodes.append(node);
+      }
+    }
+    if (color_out == nullptr || alpha_out == nullptr || coverage_out == nullptr) {
+      this->nodes_discard(tree, source_nodes);
+      return {};
+    }
+    grid_.place(*color_map, layout::Column::Source, 0);
+    grid_.place(*coverage_map, layout::Column::Source, 1);
+    out.color = {color_map, color_out};
+    /* The coverage map stores the scalar in grey RGB, so the factor is the mean of the three
+     * channels, exactly as the CPU reads it. */
+    const NodeOutput common = this->rgb_mean_nodes_add(tree, {coverage_map, coverage_out}, source_nodes);
+    if (common.socket == nullptr) {
+      this->nodes_discard(tree, source_nodes);
+      return {};
+    }
+    out.coverage = common;
+    const bool live_content = BKE_paint_layers_is_folder(ctx.layer) ||
+                              (paint_layer_channel_find(ctx.layer, ctx.channel) != nullptr &&
+                               paint_layer_channel_find(ctx.layer, ctx.channel)->image != nullptr);
+    if (live_content) {
+      const NodeOutput covered = this->multiply_nodes_add(tree, common, {color_map, alpha_out});
+      if (covered.socket != nullptr) {
+        out.coverage = covered;
+      }
+    }
+    out.content_alpha = {color_map, alpha_out};
+    layout::frame_add(tree, "Source", source_nodes);
+  }
   else if (ctx.record != nullptr && ctx.record->image != nullptr) {
     /* A map covers by its own alpha, so a texel it leaves transparent shows what is below. */
     bNode *map = this->image_map_node_add(tree, *ctx.record->image);
@@ -1689,11 +1733,15 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
       eMaterialPaintChannel(channel));
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+  /* A row whose bake stands in is built from the bake's maps alone: it holds nothing it would lay
+   * itself, so it is built like a leaf whatever it is, and none of its corrections or mask. */
+  Image *baked_color = nullptr;
+  const bool substituted = paint_layer_row_baked_channel(ma_, layer, channel, &baked_color);
   /* A folder owns no record: its source is the isolated result of what it holds. */
-  const bool folder = BKE_paint_layers_is_folder(layer);
+  const bool folder = BKE_paint_layers_is_folder(layer) && !substituted;
   /* A Paint row with no map and no value alpha takes part only for the corrections laid over it:
    * its own content covers nothing. */
-  const bool empty_base = !folder && paint_layer_row_empty_base(ma_, layer, channel);
+  const bool empty_base = !folder && !substituted && paint_layer_row_empty_base(ma_, layer, channel);
   /* An adjustment changes the stack below it, so it has no source of its own. Inside an isolating
    * folder the accumulation is pre-multiplied and partly covered, which a filter of the colour
    * cannot read; the row is left out there, as the CPU composite leaves it out. */
@@ -1701,7 +1749,7 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   if (adjustment && isolated) {
     return {};
   }
-  if (record == nullptr && !folder && !empty_base && !adjustment) {
+  if (record == nullptr && !folder && !empty_base && !adjustment && !substituted) {
     return {};
   }
 
@@ -1829,7 +1877,8 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
                               below,
                               below_alpha,
                               folder_color,
-                              folder_alpha};
+                              folder_alpha,
+                              baked_color};
   const KindEmitResult emitted = this->row_source_emit(emit_context);
   if (emitted.color.socket == nullptr) {
     return {};
@@ -1847,7 +1896,11 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   {
     NodeOutput content = {source_node, source};
     NodeOutput &coverage_in_out = folder ? folder_cover : row_coverage;
+    /* The bake already holds the corrections laid over the row. */
     for (const MaterialPaintLayer &effect : layer.effects) {
+      if (substituted) {
+        break;
+      }
       this->correction_lay(tree,
                            group,
                            effect,
@@ -1903,7 +1956,8 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   }
 
   /* The row's mask lays its own factor over the row's, the same for every channel. */
-  const NodeOutput mask = this->mask_factor_ensure(tree, group, layer);
+  /* The bake holds the row's mask too, so it is laid once, not twice. */
+  const NodeOutput mask = substituted ? NodeOutput{} : this->mask_factor_ensure(tree, group, layer);
   if (mask.node != nullptr) {
     if (factor == nullptr) {
       factor_node = mask.node;
@@ -2195,7 +2249,10 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
       return {};
     }
   }
-  if (BKE_paint_layers_is_folder(layer)) {
+  /* A folder built from its bake has no sockets for what it holds. */
+  const bool folder_sockets = BKE_paint_layers_is_folder(layer) &&
+                              !paint_layer_row_baked_channel(ma_, layer, channel, nullptr);
+  if (folder_sockets) {
     result.folder_color = instance_input("Folder Color", "NodeSocketColor", true);
     result.folder_coverage = instance_input("Folder Coverage", "NodeSocketFloat", true);
     if (result.folder_color == nullptr || result.folder_coverage == nullptr) {
@@ -2208,7 +2265,7 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
     if (result.below_alpha == nullptr || result.result_alpha == nullptr) {
       return {};
     }
-    if (BKE_paint_layers_is_folder(layer)) {
+    if (folder_sockets) {
       result.folder_alpha = instance_input("Folder Content Alpha", "NodeSocketFloat", true);
       if (result.folder_alpha == nullptr) {
         return {};

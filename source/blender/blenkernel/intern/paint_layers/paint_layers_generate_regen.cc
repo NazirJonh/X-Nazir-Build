@@ -809,9 +809,10 @@ void BKE_paint_layers_undo_validate(Main &bmain)
     undo_dangling_id_clear(ma.paint_layers_tree, live);
 
     /* A bake cache whose maps the decode freed is not a cache any more: clearing the hash makes the
-     * planner render the row again. */
+     * planner render the row again. A Material row whose source the decode freed reads nothing. */
     BKE_paint_layers_foreach(
         ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+          undo_dangling_id_clear(row.material, live);
           if (row.bake == nullptr) {
             return true;
           }

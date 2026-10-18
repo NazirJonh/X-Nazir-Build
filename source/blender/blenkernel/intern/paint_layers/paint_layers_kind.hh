@@ -32,6 +32,8 @@ enum class PaintLayerDependencyKind : uint8_t {
    * and a copy of the material gets its own.
    */
   BakeCache = 1,
+  /** The material a Material row reads: a user of that material, never a map to paint. */
+  SourceMaterial = 2,
 };
 
 /** What a change to the dependency invalidates. */
@@ -108,6 +110,12 @@ enum PaintLayerKindFlag : uint8_t {
    * the element's visibility is the only thing that turns it on or off.
    */
   PAINT_LAYER_KIND_MAP_COVERAGE = 1 << 2,
+  /**
+   * The kind reads another ID instead of owning a map (a Material row): it has no channel records
+   * of its own, so a stroke has nothing to write into and a new record would be one the kind never
+   * reads. What it shows is decided from that ID, not from the row.
+   */
+  PAINT_LAYER_KIND_READS_SOURCE = 1 << 3,
 };
 
 struct PaintLayerKindInfo {
@@ -243,7 +251,16 @@ inline bool paint_layer_kind_map_paintable(const MaterialPaintLayer &row)
 inline void paint_layer_dependencies(MaterialPaintLayer &row,
                                      const FunctionRef<void(PaintLayerDependency &)> fn)
 {
-  /* The bake cache first: the colour maps by channel, then the shared coverage map. */
+  /* The source first: it is what a Material row is, and the bake below is built from it. */
+  if (row.material != nullptr || row.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    PaintLayerDependency dep{reinterpret_cast<ID **>(&row.material),
+                             PaintLayerDependencyKind::SourceMaterial,
+                             PAINT_LAYER_DEP_TOPOLOGY | PAINT_LAYER_DEP_PIXELS |
+                                 PAINT_LAYER_DEP_OWNERSHIP,
+                             -1};
+    fn(dep);
+  }
+  /* The bake cache: the colour maps by channel, then the shared coverage map. */
   if (row.bake != nullptr) {
     for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
       PaintLayerDependency dep{reinterpret_cast<ID **>(&row.bake->images[i]),
@@ -301,6 +318,7 @@ inline LibraryForeachIDCallbackFlag paint_layer_dependency_foreach_flag(const Pa
   switch (dep.kind) {
     case PaintLayerDependencyKind::ImageMap:
     case PaintLayerDependencyKind::BakeCache:
+    case PaintLayerDependencyKind::SourceMaterial:
       return IDWALK_CB_USER;
   }
   return IDWALK_CB_NOP;

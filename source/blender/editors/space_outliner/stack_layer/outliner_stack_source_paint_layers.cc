@@ -506,6 +506,7 @@ void paint_stack_rows_append(const Material &material,
     row.icon = folder                                         ? ICON_FILE_FOLDER :
                adjustment                                     ? ICON_ARROW_LEFTRIGHT :
                (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? ICON_GP_DRAW_FILL :
+               (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ? ICON_MATERIAL :
                                                                   ICON_IMAGE_RGB;
     /* Only layers and folders limit where they show; an adjustment acts on what is below it for
      * every object alike, and corrections and mask items are not rows of this list. */
@@ -539,8 +540,9 @@ void paint_stack_rows_append(const Material &material,
       content.name = IFACE_("Content");
       row.content_sections.append(std::move(content));
     }
-    else if (adjustment) {
-      /* Nothing to show or switch to: the brush has no content to work on in this row. */
+    else if (adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      /* Nothing to show or switch to: the brush has no content to work on in this row. A Material
+       * row shows what its source shows and owns no map to paint. */
     }
     else if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
       /* A Fill is its colour: one swatch with the bucket drawn over it, and no channel-texture
@@ -573,7 +575,7 @@ void paint_stack_rows_append(const Material &material,
       row.preview_slots.append(std::move(channels_slot));
     }
 
-    if (!folder && !adjustment) {
+    if (!folder && !adjustment && layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
       /* The channel maps are the layer's internals rather than rows of their own; the section
        * stays so the brush can switch to the content and later rows can attach to it. */
       StackContentSection channels;
@@ -1147,7 +1149,8 @@ class PaintLayersStackSource final : public StackSource,
   void add_kinds(Vector<StackAddKindInfo> &r_kinds) const override
   {
     /* The kinds whose features exist: Paint, Fill, Folder and the two corrections. The others are
-     * appended here as they land, in the order #row_add dispatches by index. */
+     * appended here as they land, in the order #row_add dispatches by index; the Material layer
+     * comes after the last filter. */
     r_kinds.append({"PAINT",
                     N_("Paint Layer"),
                     "A layer that shows nothing until it is painted on",
@@ -1226,6 +1229,13 @@ class PaintLayersStackSource final : public StackSource,
       info.is_effect = true;
       r_kinds.append(info);
     }
+    /* Last of all, so no index above moves: a layer that shows what another material shows. */
+    StackAddKindInfo material{"MATERIAL",
+                              N_("Material Layer"),
+                              "A layer that shows what another material shows",
+                              ICON_MATERIAL};
+    material.source_id_type = ID_MA;
+    r_kinds.append(material);
   }
 
   int row_add(bContext &C,
@@ -1241,13 +1251,16 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int mask_filter_first_kind = adjustment_first_kind + filter_num;
     constexpr int coverage_first_kind = mask_filter_first_kind + filter_num;
     constexpr int coverage_num = int(std::size(paint_coverage_add_kinds));
-    if (kind < 0 || kind >= coverage_first_kind + coverage_num || !this->is_editable(owner)) {
+    constexpr int material_kind = coverage_first_kind + coverage_num;
+    if (kind < 0 || kind > material_kind || !this->is_editable(owner)) {
       return -1;
     }
-    const bool is_mask_filter = kind >= mask_filter_first_kind;
-    const bool is_adjustment = kind >= adjustment_first_kind && !is_mask_filter;
+    const bool is_material = kind == material_kind;
+    const bool is_mask_filter = kind >= mask_filter_first_kind && !is_material;
+    const bool is_adjustment = kind >= adjustment_first_kind && !is_mask_filter && !is_material;
     /* A filter correction hangs on a layer; an adjustment is a layer. */
-    const bool is_filter = kind >= filter_first_kind && !is_adjustment && !is_mask_filter;
+    const bool is_filter = kind >= filter_first_kind && !is_adjustment && !is_mask_filter &&
+                           !is_material;
     Material &material = layers_owner(owner);
     MaterialPaintLayer *anchor = (ordinal < 0) ?
                                      nullptr :
@@ -1267,7 +1280,17 @@ class PaintLayersStackSource final : public StackSource,
                           paint_coverage_add_kinds[kind - coverage_first_kind].filter :
                           paint_filter_add_kinds[kind - mask_filter_first_kind].filter;
     }
-    params.kind = is_mask_filter ? PaintLayerAddKind::MaskFilter :
+    if (is_material) {
+      /* The Add resolved the data-block it names before the call; a kind that needs one is never
+       * called without it, but the call is also open to scripts. */
+      if (args.source == nullptr || GS(args.source->name) != ID_MA) {
+        BKE_report(CTX_wm_reports(&C), RPT_WARNING, "A Material layer needs a material to read");
+        return -1;
+      }
+      params.source = id_cast<Material *>(args.source);
+    }
+    params.kind = is_material    ? PaintLayerAddKind::Material :
+                  is_mask_filter ? PaintLayerAddKind::MaskFilter :
                   is_adjustment  ? PaintLayerAddKind::Adjustment :
                   is_filter      ? PaintLayerAddKind::Filter :
                   (kind == 1)   ? PaintLayerAddKind::Fill :
@@ -1318,6 +1341,11 @@ class PaintLayersStackSource final : public StackSource,
                    RPT_WARNING,
                    "An adjustment needs a Pass Through folder or the top of the stack");
       }
+      if (is_material) {
+        BKE_report(CTX_wm_reports(&C),
+                   RPT_WARNING,
+                   "That material cannot be read here: it is this material, or it already reads it");
+      }
       return -1;
     }
     /* A new layer is painted on its content, not on the mask the previous one was edited in; a mask
@@ -1331,7 +1359,7 @@ class PaintLayersStackSource final : public StackSource,
       BKE_paint_layers_active_set(material, created->marker);
       layers_texpaint_slots_refresh(C);
     }
-    else if (params.kind == PaintLayerAddKind::Paint || is_adjustment) {
+    else if (params.kind == PaintLayerAddKind::Paint || is_adjustment || is_material) {
       /* The target resolves through the active row, and a plain Add leaves the previous one active
        * until the caller activates the new row, so the maps below would land on the wrong layer. */
       BKE_paint_layers_active_set(material, created->marker);

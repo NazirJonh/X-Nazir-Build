@@ -652,6 +652,13 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             return
 
         layout.prop(layer, "opacity", text="Opacity")
+        # A Material row owns no channel records: it lays what its source material shows.
+        if layer.source == 'MATERIAL':
+            layout.separator()
+            layout.prop(layer, "material", text="Source")
+            if layer.material is None:
+                layout.label(text="No source material", icon='ERROR')
+            return
         # A filter has no map or channel records: what it is told is the parameters of its kind.
         if layer.source == 'FILTER':
             layout.separator()
@@ -733,7 +740,7 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
         if not super().poll(context):
             return False
         owner, layer = cls._active_layer(context)
-        if owner is None or layer is None:
+        if owner is None or layer is None or layer.source == 'MATERIAL':
             return False
         return cls._shown_mask_item(context, owner, layer) is None
 

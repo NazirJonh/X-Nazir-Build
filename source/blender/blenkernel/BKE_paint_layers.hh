@@ -615,7 +615,8 @@ bool BKE_paint_layers_channel_set_image(Material &ma,
  * left untouched: channels are keyed by #eMaterialPaintChannel, so there is never a second record
  * for one channel to find.
  *
- * \return the record, or null when \a layer is null or not part of \a ma.
+ * \return the record, or null when \a layer is null or not part of \a ma, or is a folder or a
+ * Material row: those take part through what they hold or read, not through records of their own.
  */
 MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
                                                         MaterialPaintLayer *layer,
@@ -825,6 +826,21 @@ bool BKE_paint_layers_set_blend(Material &ma,
 bool BKE_paint_layers_set_source(Material &ma,
                                  MaterialPaintLayer *layer,
                                  eMaterialPaintLayerSource source);
+
+/**
+ * Whether \a from reads \a target, directly or through the sources of its own Material rows (the
+ * rows of the stack, their corrections and masks, and what folders hold). A material reads itself.
+ * The walk follows the descriptions only: it asks nothing of the generated trees.
+ */
+bool BKE_paint_layers_material_depends_on(const Material &from, const Material &target);
+
+/**
+ * Point the Material row \a layer at \a source, taking the user of the new material and letting go
+ * of the old one. Refused (false) for a row that is not a Material row, for a null \a source, for
+ * the owner itself and for a source that already reads \a ma: the pair would read each other, and
+ * every walk over the sources would never end.
+ */
+bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source);
 
 /**
  * The Base Color \a layer shows: the value of its Base-Color channel record, which is where a Fill's

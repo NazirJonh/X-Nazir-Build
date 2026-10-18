@@ -87,6 +87,17 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      PAINT_LAYER_KIND_FLAT_VALUE},
+    /* A material is read, not painted: the row has no records and lays what the source shows. Only
+     * a row of the stack for now; a correction or a mask item reading a material comes with its
+     * own rules. */
+    {MA_PAINT_LAYER_SOURCE_MATERIAL,
+     0,
+     "Material",
+     PaintLayerKindCategory::Source,
+     paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER),
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_READS_SOURCE},
     /* A folder owns children, which corrections and mask items never have. */
     {MA_PAINT_LAYER_SOURCE_STACK,
      0,

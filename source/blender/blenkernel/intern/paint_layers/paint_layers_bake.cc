@@ -537,6 +537,8 @@ static uint64_t bake_hash_layer(uint64_t h,
    * row's own cache does not depend on its own on/off state. */
   h = bake_hash_mix(h, uint16_t(layer.flag & ~MA_PAINT_LAYER_ENABLED));
   h = bake_hash_mix(h, uint8_t(layer.role));
+  /* A Material row inside a baked folder: which material it reads is part of the folder's pixels. */
+  h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
   h = bake_hash_float(h, layer.opacity);
   /* Only the fact that the mapping applies: such a row stays live and is never baked
    * (#BKE_paint_layers_bake_blocked), so the slider values must not move the hash. */
@@ -1079,6 +1081,11 @@ static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
 static bool bake_row_is_candidate(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (layer.role != MA_PAINT_LAYER_ROLE_LAYER || paint_layer_row_is_adjustment(layer)) {
+    return false;
+  }
+  /* A row that reads a material has no live subtree to cache; what it shows is rendered from its
+   * source, which is not the planner's to do from the row's own description. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     return false;
   }
   return !BKE_paint_layers_bake_blocked(ma, layer);

@@ -23,6 +23,7 @@ namespace blender {
 
 struct AnimData;
 struct Image;
+struct Material;
 struct bNodeTree;
 
 /* MaterialGPencilStyle->flag */
@@ -502,10 +503,15 @@ enum eMaterialPaintLayerSource : int8_t {
   /** A flat colour the row lays whatever its channels' alpha; a Fill. */
   MA_PAINT_LAYER_SOURCE_CONSTANT = 1,
   /**
+   * Another material, read through #MaterialPaintLayer::material: the row lays what that material
+   * shows in the paint channels. It owns no channel records and no maps of its own.
+   */
+  MA_PAINT_LAYER_SOURCE_MATERIAL = 2,
+  /**
    * A folder: the row holds its stack in #MaterialPaintLayer::children and lays their isolated
    * result over what is below with its own blend, opacity and mask. It owns no channel records and
-   * no maps. Numerically matches the reference's source table: 2 and 3 are reserved for the
-   * Material and Node Group sources.
+   * no maps. Numerically matches the reference's source table: 3 is reserved for the Node Group
+   * source.
    */
   MA_PAINT_LAYER_SOURCE_STACK = 4,
   /**
@@ -732,7 +738,7 @@ struct MaterialPaintLayer {
   bUUID marker = {};
   /** #eMaterialPaintLayerBlend. */
   int8_t blend = MA_PAINT_LAYER_BLEND_MIX;
-  /** #eMaterialPaintLayerSource: a painted map (Image), a flat colour (Constant) or a folder. */
+  /** #eMaterialPaintLayerSource: what the row paints with. */
   int8_t source = MA_PAINT_LAYER_SOURCE_IMAGE;
   /** #eMaterialPaintLayerFlag. */
   int16_t flag = MA_PAINT_LAYER_ENABLED;
@@ -799,6 +805,12 @@ struct MaterialPaintLayer {
    * written with it).
    */
   struct MaterialPaintLayerBake *bake = nullptr;
+  /**
+   * The material a #MA_PAINT_LAYER_SOURCE_MATERIAL row reads, or null for every other source. A
+   * user of the material, reported to the ID walk through the row's dependencies; it never names
+   * the owner or a material that reads the owner.
+   */
+  Material *material = nullptr;
 };
 
 struct Material {

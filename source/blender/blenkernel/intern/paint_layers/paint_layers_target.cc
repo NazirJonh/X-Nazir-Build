@@ -141,6 +141,10 @@ bool BKE_paint_layers_target_get(Material &ma,
     if (paint_layer_effect_is_filter(*layer)) {
       return false;
     }
+    /* Likewise a row that reads a material: it owns no map for a stroke to write into. */
+    if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+      return false;
+    }
     r_target.channel_record = paint_layer_channel_find(*layer, channel);
     return true;
   }

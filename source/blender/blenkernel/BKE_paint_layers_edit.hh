@@ -68,6 +68,11 @@ enum class PaintLayerAddKind : int8_t {
    * #PaintLayerAddParams::filter. The base mask is made first, white, when the row has none.
    */
   MaskFilter,
+  /**
+   * A row that lays what another material shows, #PaintLayerAddParams::source. Refused for no
+   * source, for the owner itself and for a source that reads the owner.
+   */
+  Material,
 };
 
 struct PaintLayerAddParams {
@@ -89,6 +94,8 @@ struct PaintLayerAddParams {
   const float *fill_color = nullptr;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
+  /** The material a #PaintLayerAddKind::Material Add reads. */
+  Material *source = nullptr;
 };
 
 /**

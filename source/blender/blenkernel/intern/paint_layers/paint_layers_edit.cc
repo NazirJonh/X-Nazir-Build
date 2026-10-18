@@ -239,12 +239,25 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     }
     return item;
   }
+  if (params.kind == PaintLayerAddKind::Material &&
+      (params.source == nullptr || BKE_paint_layers_material_depends_on(*params.source, ma)))
+  {
+    return nullptr;
+  }
   const char *name_base = (params.kind == PaintLayerAddKind::Fill)   ? "Fill" :
                           (params.kind == PaintLayerAddKind::Folder) ? "Folder" :
                                                                        "Layer";
-  const std::string name = (params.name != nullptr) ?
-                               std::string(params.name) :
-                               BKE_paint_layers_unique_default_name(ma, name_base);
+  std::string name;
+  if (params.name != nullptr) {
+    name = params.name;
+  }
+  else if (params.kind == PaintLayerAddKind::Material) {
+    /* A material row goes by the name of what it reads, the way a dropped map names its layer. */
+    name = params.source->id.name + 2;
+  }
+  else {
+    name = BKE_paint_layers_unique_default_name(ma, name_base);
+  }
   PaintLayerPlace place = params.place;
   if (params.anchor != nullptr && BKE_paint_layers_is_folder(*params.anchor) &&
       place == PaintLayerPlace::Above)
@@ -254,6 +267,13 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
   MaterialPaintLayer *created = BKE_paint_layers_add(ma, name.c_str(), params.anchor, place);
   if (created == nullptr) {
     return nullptr;
+  }
+  if (params.kind == PaintLayerAddKind::Material) {
+    /* A material row owns no channel records: it lays what its source shows. The source was checked
+     * above, so the row never exists without one. */
+    created->source = MA_PAINT_LAYER_SOURCE_MATERIAL;
+    BKE_paint_layers_set_material(ma, created, params.source);
+    return created;
   }
   if (params.kind == PaintLayerAddKind::Folder) {
     /* A folder owns no channel records: it takes part through its children. */

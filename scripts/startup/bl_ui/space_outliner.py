@@ -63,6 +63,10 @@ class OUTLINER_HT_tool_header(Header):
             props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
             props.type = 'FILL'
             props.label = "Add Fill Layer"
+            # A layer that shows what another material shows; the Add asks which one.
+            props = row.operator("outliner.stack_layer_add", text="", icon='MATERIAL')
+            props.type = 'MATERIAL'
+            props.label = "Add Material Layer"
             # Corrections hang on the selected layer or on its mask; one menu holds them all.
             row = layout.row(align=True)
             # An enum menu button: it opens a real menu of the correction kinds and shows the

@@ -668,7 +668,8 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
                                                          int place,
                                                          bool make_active,
                                                          int source,
-                                                         bool create_maps)
+                                                         bool create_maps,
+                                                         Material *source_material)
 {
   /* The authoring policy is the shared BKE one (#BKE_paint_layers_add_with_policy): the same
    * default names and channels every other authoring path gets. An empty name means the unique
@@ -680,6 +681,14 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
       break;
     case MA_PAINT_LAYER_SOURCE_STACK:
       params.kind = PaintLayerAddKind::Folder;
+      break;
+    case MA_PAINT_LAYER_SOURCE_MATERIAL:
+      if (source_material == nullptr) {
+        BKE_report(reports, RPT_ERROR, "A Material layer needs the material it reads");
+        return nullptr;
+      }
+      params.kind = PaintLayerAddKind::Material;
+      params.source = source_material;
       break;
     default:
       params.kind = PaintLayerAddKind::Paint;
@@ -696,7 +705,12 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
   params.place = PaintLayerPlace(place);
   MaterialPaintLayer *layer = BKE_paint_layers_add_with_policy(*ma, params);
   if (layer == nullptr) {
-    BKE_report(reports, RPT_ERROR, "Cannot add a paint layer here");
+    BKE_report(reports,
+               RPT_ERROR,
+               params.kind == PaintLayerAddKind::Material ?
+                   "Cannot add a layer reading that material here: it is this material, or it "
+                   "already reads this one" :
+                   "Cannot add a paint layer here");
     return nullptr;
   }
   /* A fresh row becomes the cursor, mirroring what the UI does when it adds one, unless the caller
@@ -1112,6 +1126,36 @@ static const EnumPropertyItem *rna_MaterialPaintLayer_blend_itemf(bContext * /*C
   RNA_enum_item_end(&items, &items_num);
   *r_free = true;
   return items;
+}
+
+static void rna_MaterialPaintLayer_material_set(PointerRNA *ptr,
+                                                PointerRNA value,
+                                                ReportList *reports)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    return;
+  }
+  Material *source = static_cast<Material *>(value.data);
+  if (source == nullptr) {
+    BKE_report(reports, RPT_ERROR, "A Material layer needs the material it reads");
+    return;
+  }
+  if (!BKE_paint_layers_set_material(*ma, layer, source)) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That material cannot be read here: it is this material, or it already reads it");
+  }
+}
+
+static bool rna_MaterialPaintLayer_material_poll(PointerRNA *ptr, PointerRNA value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  const Material *owner = rna_paint_layer_material(ptr, layer);
+  const Material *source = static_cast<const Material *>(value.data);
+  return owner == nullptr || source == nullptr ||
+         !BKE_paint_layers_material_depends_on(*source, *owner);
 }
 
 static int rna_MaterialPaintLayer_source_get(PointerRNA *ptr)
@@ -2534,6 +2578,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_place_items[] = {
 static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {MA_PAINT_LAYER_SOURCE_IMAGE, "IMAGE", 0, "Image", "A painted map"},
     {MA_PAINT_LAYER_SOURCE_CONSTANT, "CONSTANT", 0, "Constant", "A flat colour"},
+    {MA_PAINT_LAYER_SOURCE_MATERIAL, "MATERIAL", 0, "Material", "What another material shows"},
     {MA_PAINT_LAYER_SOURCE_STACK, "STACK", 0, "Stack", "A nested stack of layers (a folder)"},
     {MA_PAINT_LAYER_SOURCE_FILTER, "FILTER", 0, "Filter", "A change to the colour below it"},
     {0, nullptr, 0, nullptr, nullptr},
@@ -2793,6 +2838,19 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_enum_funcs(
       prop, "rna_MaterialPaintLayer_source_get", "rna_MaterialPaintLayer_source_set", nullptr);
   RNA_def_property_ui_text(prop, "Source", "What the layer reads its values from");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "material");
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(prop,
+                                 nullptr,
+                                 "rna_MaterialPaintLayer_material_set",
+                                 nullptr,
+                                 "rna_MaterialPaintLayer_material_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Material", "The material a Material layer reads; none for every other source");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "fill_color", PROP_FLOAT, PROP_COLOR);
@@ -3530,6 +3588,11 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
                   "Create Maps",
                   "Create a map for every channel of the material's set now, at the material's "
                   "image size, instead of on the first stroke");
+  RNA_def_pointer(func,
+                  "material",
+                  "Material",
+                  "Material",
+                  "The material a layer of the Material source reads");
   parm = RNA_def_pointer(func, "layer", "MaterialPaintLayer", "", "The newly created paint layer");
   RNA_def_function_return(func, parm);
 

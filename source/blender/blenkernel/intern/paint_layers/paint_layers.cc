@@ -507,6 +507,15 @@ static void paint_layer_properties_duplicate(MaterialPaintLayer &dst, const Mate
   }
 }
 
+/** The copy reads the material \a src reads: one more user, and the source itself stays shared. */
+static void paint_layer_material_duplicate(MaterialPaintLayer &dst, const MaterialPaintLayer &src)
+{
+  dst.material = src.material;
+  if (dst.material != nullptr) {
+    id_us_plus(&dst.material->id);
+  }
+}
+
 /**
  * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
  * for the same reason as the channel maps.
@@ -525,6 +534,7 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   /* The row's UV mapping is part of its state, not of its kind: a pasted fill or fill
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
+  paint_layer_material_duplicate(*item_copy, item);
   paint_layer_channels_duplicate(bmain, *item_copy, item);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
@@ -549,6 +559,7 @@ static void paint_layer_branch_duplicate(Main &bmain,
   memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
   /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
   dst.mapping = dna::shallow_copy(src.mapping);
+  paint_layer_material_duplicate(dst, src);
   paint_layer_channels_duplicate(bmain, dst, src);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
@@ -732,6 +743,9 @@ void BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask)
  */
 static void paint_layer_release_users(MaterialPaintLayer &layer)
 {
+  if (layer.material != nullptr) {
+    id_us_min(&layer.material->id);
+  }
   for (const int i : IndexRange(layer.channels_num)) {
     if (layer.channels[i].image != nullptr) {
       id_us_min(&layer.channels[i].image->id);
@@ -1606,8 +1620,11 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
   if (!paint_layer_owned(ma, layer)) {
     return nullptr;
   }
-  /* A folder carries no maps of its own: it takes part in a channel through its children. */
-  if (BKE_paint_layers_is_folder(*layer)) {
+  /* A folder carries no maps of its own: it takes part in a channel through its children. A row
+   * that reads a material has none either: a record would be one the kind never reads. */
+  if (BKE_paint_layers_is_folder(*layer) ||
+      paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE))
+  {
     return nullptr;
   }
   if (MaterialPaintLayerChannel *existing = paint_layer_channel_find(*layer, channel)) {
@@ -1849,7 +1866,8 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
 
 bool BKE_paint_layers_row_is_paintable(const MaterialPaintLayer &row)
 {
-  return !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE);
+  return !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE) &&
+         !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE);
 }
 
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer)
@@ -2090,8 +2108,9 @@ bool BKE_paint_layers_set_source(Material &ma,
   if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
     return false;
   }
-  /* Turning a folder into a layer would orphan what it holds, and ungrouping is the one way out. */
-  if (BKE_paint_layers_is_folder(*layer)) {
+  /* Turning a folder into a layer would orphan what it holds, and ungrouping is the one way out. A
+   * Material row has no map to turn into a colour or back: it is added as one, and removed. */
+  if (BKE_paint_layers_is_folder(*layer) || layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return false;
   }
   if (layer->source == source) {
@@ -2122,6 +2141,64 @@ bool BKE_paint_layers_set_source(Material &ma,
     }
   }
   layer->source = source;
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+/**
+ * Whether a Material row of \a list or of what it holds reads \a target, through any depth.
+ * \a visited keeps the walk finite and linear when the descriptions are not the acyclic graph the
+ * edit paths keep them in (an ID remap, such as merging materials, can bypass those checks).
+ */
+static bool paint_layers_list_reads_material(const ListBaseT<MaterialPaintLayer> &list,
+                                             const Material &target,
+                                             Set<const Material *> &visited)
+{
+  for (const MaterialPaintLayer &layer : list) {
+    if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
+      if (layer.material == &target) {
+        return true;
+      }
+      if (visited.add(layer.material) &&
+          paint_layers_list_reads_material(layer.material->paint_layers, target, visited))
+      {
+        return true;
+      }
+    }
+    if (paint_layers_list_reads_material(layer.children, target, visited) ||
+        paint_layers_list_reads_material(layer.effects, target, visited) ||
+        paint_layers_list_reads_material(layer.mask_stack, target, visited))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BKE_paint_layers_material_depends_on(const Material &from, const Material &target)
+{
+  /* The descriptions only; the pair check in #BKE_paint_layers_set_material keeps them acyclic. */
+  Set<const Material *> visited;
+  visited.add(&from);
+  return &from == &target || paint_layers_list_reads_material(from.paint_layers, target, visited);
+}
+
+bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source)
+{
+  if (!paint_layer_in_stack(ma, layer) || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return false;
+  }
+  if (source == nullptr || BKE_paint_layers_material_depends_on(*source, ma)) {
+    return false;
+  }
+  if (layer->material == source) {
+    return true;
+  }
+  if (layer->material != nullptr) {
+    id_us_min(&layer->material->id);
+  }
+  layer->material = source;
+  id_us_plus(&source->id);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

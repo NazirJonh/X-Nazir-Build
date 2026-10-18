@@ -24,6 +24,7 @@ struct UserDef;
 struct bUserNameMatchFilterTag;
 struct bUserNameMatchMapType;
 struct bUserNameMatchToken;
+enum eUserStandardCatalog : int;
 
 /**
  * Runtime filter state for template/image grid name-matching (not persisted in DNA as such --
@@ -169,5 +170,12 @@ bool BKE_name_matching_token_set_value(bUserNameMatchMapType *map_type,
 bUserNameMatchFilterTag *BKE_name_matching_filter_tag_add(UserDef *userdef, const char *name);
 
 void BKE_name_matching_filter_tag_remove(UserDef *userdef, bUserNameMatchFilterTag *tag);
+
+/**
+ * Root catalog path newly imported images are kept in for \a usage (Preferences → Assets → Name
+ * Matching → Standard Catalog). Never empty: a cleared setting falls back to the built-in default.
+ */
+std::string BKE_name_matching_standard_catalog_get(const UserDef &userdef,
+                                                   eUserStandardCatalog usage);
 
 }  // namespace blender

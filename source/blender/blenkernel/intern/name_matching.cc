@@ -488,6 +488,15 @@ void BKE_name_matching_userdef_ensure_defaults(UserDef *userdef)
 {
   name_matching_userdef_repair_lists(userdef);
 
+  /* Preferences saved before the standard catalogs existed read back zeroed; show the defaults
+   * in the UI instead of empty fields. */
+  if (userdef->standard_catalog_brush_texture[0] == '\0') {
+    STRNCPY(userdef->standard_catalog_brush_texture, "Brush Texture");
+  }
+  if (userdef->standard_catalog_fill_layer[0] == '\0') {
+    STRNCPY(userdef->standard_catalog_fill_layer, "Source Texture");
+  }
+
   if (!userdef->name_match_map_types.is_empty()) {
     /* Sanitize nested token lists and abort if the chain itself is poisoned mid-list. */
     for (bUserNameMatchMapType *map_type =
@@ -559,6 +568,24 @@ void BKE_name_matching_userdef_ensure_defaults(UserDef *userdef)
   add_builtin("PATTERNS", "Patterns", {"pattern", "patterns"});
   add_builtin("GRUNGE", "Grunge", {"grunge"});
   add_builtin("SPECULAR", "Specular", {"S", "spec", "specular"});
+}
+
+std::string BKE_name_matching_standard_catalog_get(const UserDef &userdef,
+                                                   const eUserStandardCatalog usage)
+{
+  const char *path = "";
+  const char *fallback = "";
+  switch (usage) {
+    case USER_STANDARD_CATALOG_BRUSH_TEXTURE:
+      path = userdef.standard_catalog_brush_texture;
+      fallback = "Brush Texture";
+      break;
+    case USER_STANDARD_CATALOG_FILL_LAYER:
+      path = userdef.standard_catalog_fill_layer;
+      fallback = "Source Texture";
+      break;
+  }
+  return path[0] != '\0' ? path : fallback;
 }
 
 }  // namespace blender

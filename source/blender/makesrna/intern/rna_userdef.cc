@@ -8451,6 +8451,22 @@ static void rna_def_userdef_name_matching(BlenderRNA *brna)
     RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
   }
 
+  prop = RNA_def_property(srna, "standard_catalog_brush_texture", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "standard_catalog_brush_texture");
+  RNA_def_property_ui_text(prop,
+                           "Brush Texture",
+                           "Root catalog for images dropped onto brush texture slots and brush "
+                           "paint channels (\"Brush Texture\" when empty)");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
+  prop = RNA_def_property(srna, "standard_catalog_fill_layer", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "standard_catalog_fill_layer");
+  RNA_def_property_ui_text(prop,
+                           "Fill Layer",
+                           "Root catalog for images dropped onto Fill layer slots (\"Source "
+                           "Texture\" when empty)");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
   prop = RNA_def_property(srna, "active_map_type", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "active_name_match_map_type");
   RNA_def_property_ui_text(

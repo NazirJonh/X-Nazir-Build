@@ -1404,7 +1404,7 @@ void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot)
  * a channel are routed through the Preferences name-matching map types ("..._basecolor.png" ends
  * up on Base Color, "..._normal.png" on Normal, and so on); the interactive drop path shows the
  * resulting routing in a confirm dialog first. Images brought in from outside the current file
- * are kept there as assets, in a catalog under "Brush Texture" by default.
+ * are kept there as assets, in a catalog under the target's standard catalog.
  * \{ */
 
 /** Map types that route onto a material paint channel. Keyed by
@@ -1523,11 +1523,26 @@ static const char *material_paint_channel_map_type_identifier(const eMaterialPai
   return nullptr;
 }
 
+/** True when the drop targeted a Fill layer slot (names its material and layer). */
+static bool material_paint_channels_assign_images_targets_layer(wmOperator *op)
+{
+  return RNA_struct_property_is_set(op->ptr, "material_name") &&
+         RNA_struct_property_is_set(op->ptr, "layer_marker");
+}
+
 /**
- * Root catalog of every catalog this operator creates, so images imported through the paint
- * channels stay easy to find in the Asset Browser. Also the default target catalog.
+ * Standard root catalog (Preferences → Name Matching → Standard Catalog) of the drop target, so
+ * images imported through the paint channels stay easy to find in the Asset Browser. A drop on a
+ * Fill layer slot names its layer; anything else targets a brush.
  */
-static constexpr const char *PAINT_CHANNEL_IMAGES_ROOT_CATALOG = "Brush Texture";
+static std::string material_paint_channels_assign_images_standard_catalog(wmOperator *op)
+{
+  return BKE_name_matching_standard_catalog_get(
+      U,
+      material_paint_channels_assign_images_targets_layer(op) ?
+          USER_STANDARD_CATALOG_FILL_LAYER :
+          USER_STANDARD_CATALOG_BRUSH_TEXTURE);
+}
 
 static void material_paint_channels_assign_images_catalog_search(
     const bContext *C,
@@ -1542,7 +1557,8 @@ static void material_paint_channels_assign_images_catalog_search(
 
 /**
  * Resolve (creating it when needed) the current-file catalog newly imported images are placed
- * in: a new "Brush Texture/<name>" catalog, or the chosen existing catalog path.
+ * in: a new catalog (inside the standard catalog unless "use_standard_catalog" is off), or the
+ * chosen existing catalog path.
  */
 static const asset_system::AssetCatalog *material_paint_channels_assign_images_catalog_ensure(
     Main *bmain, wmOperator *op)
@@ -1554,7 +1570,8 @@ static const asset_system::AssetCatalog *material_paint_channels_assign_images_c
     return nullptr;
   }
 
-  const asset_system::AssetCatalogPath root_path(PAINT_CHANNEL_IMAGES_ROOT_CATALOG);
+  const std::string standard_catalog = material_paint_channels_assign_images_standard_catalog(op);
+  const asset_system::AssetCatalogPath root_path(standard_catalog);
   if (!RNA_boolean_get(op->ptr, "create_catalog")) {
     char catalog_path[MAX_NAME];
     RNA_string_get(op->ptr, "catalog_path", catalog_path);
@@ -1578,17 +1595,23 @@ static const asset_system::AssetCatalog *material_paint_channels_assign_images_c
     return nullptr;
   }
 
-  ed::asset::library_ensure_catalogs_in_path(*library, root_path);
-  if (library->catalog_service().find_catalog_by_path(root_path / sanitized)) {
-    BKE_reportf(op->reports,
-                RPT_ERROR,
-                "A catalog named \"%s/%s\" already exists",
-                PAINT_CHANNEL_IMAGES_ROOT_CATALOG,
-                sanitized.c_str());
+  /* Without the standard catalog the new catalog becomes a root catalog. */
+  const bool use_standard = RNA_boolean_get(op->ptr, "use_standard_catalog");
+  const asset_system::AssetCatalogPath parent_path = use_standard ?
+                                                         root_path :
+                                                         asset_system::AssetCatalogPath("");
+  if (use_standard) {
+    ed::asset::library_ensure_catalogs_in_path(*library, parent_path);
+  }
+  const asset_system::AssetCatalogPath new_path = use_standard ? parent_path / sanitized :
+                                                                  asset_system::AssetCatalogPath(
+                                                                      sanitized);
+  if (library->catalog_service().find_catalog_by_path(new_path)) {
+    BKE_reportf(op->reports, RPT_ERROR, "A catalog named \"%s\" already exists", new_path.c_str());
     return nullptr;
   }
   const asset_system::AssetCatalog *catalog = ed::asset::catalog_add(
-      library, sanitized, root_path.str());
+      library, sanitized, parent_path.str());
   if (catalog == nullptr) {
     BKE_reportf(op->reports, RPT_ERROR, "Failed to create catalog \"%s\"", sanitized.c_str());
   }
@@ -1607,13 +1630,13 @@ static Brush *material_paint_channels_assign_images_brush_get(bContext *C, wmOpe
   return paint ? BKE_paint_brush(paint) : nullptr;
 }
 
-/** The layer the drop targeted by name and marker, or nullptr. */
+/** The layer the drop targeted by name and marker, or nullptr. Sets \a r_material when found. */
 static MaterialPaintLayer *material_paint_channels_assign_images_layer_get(bContext *C,
-                                                                           wmOperator *op)
+                                                                           wmOperator *op,
+                                                                           Material *&r_material)
 {
-  if (!RNA_struct_property_is_set(op->ptr, "material_name") ||
-      !RNA_struct_property_is_set(op->ptr, "layer_marker"))
-  {
+  r_material = nullptr;
+  if (!material_paint_channels_assign_images_targets_layer(op)) {
     return nullptr;
   }
   char material_name[MAX_ID_NAME];
@@ -1623,15 +1646,13 @@ static MaterialPaintLayer *material_paint_channels_assign_images_layer_get(bCont
   if (material == nullptr) {
     return nullptr;
   }
-  if (material->paint_layers.is_empty()) {
-    return nullptr;
-  }
   char layer_marker[UUID_STRING_SIZE];
   RNA_string_get(op->ptr, "layer_marker", layer_marker);
   bUUID target_uuid;
   BLI_uuid_parse_string(&target_uuid, layer_marker);
   for (MaterialPaintLayer &layer : material->paint_layers) {
     if (BLI_uuid_equal(layer.marker, target_uuid)) {
+      r_material = material;
       return &layer;
     }
   }
@@ -1711,31 +1732,16 @@ static Image *material_paint_channels_assign_images_entry_image(bContext *C,
   return image;
 }
 
-/** Assign the image to all channels of a layer that have an entry in the images list. */
-static void material_paint_channels_assign_images_layer_assign(
-    Material *material,
-    MaterialPaintLayer *layer,
-    PropertyRNA *images_prop,
-    PointerRNA *op_ptr,
-    FunctionRef<Image *(PointerRNA &)> image_getter)
+/** Assign \a image to the channel of a layer, creating the channel when the layer lacks it. */
+static bool material_paint_channels_assign_images_layer_assign(Material &material,
+                                                               MaterialPaintLayer &layer,
+                                                               const eMaterialPaintChannel channel,
+                                                               Image &image)
 {
-  RNA_PROP_BEGIN (op_ptr, itemptr, images_prop) {
-    std::optional<eMaterialPaintChannel> channel =
-        material_paint_channels_assign_images_entry_channel(itemptr);
-    if (!channel) {
-      continue;
-    }
-    Image *image = image_getter(itemptr);
-    if (image == nullptr) {
-      continue;
-    }
-    /* Ensure the channel exists, then set the image. */
-    if (BKE_paint_layers_channel_add(*material, layer, *channel) == nullptr) {
-      continue;
-    }
-    BKE_paint_layers_channel_set_image(*material, layer, *channel, image);
+  if (BKE_paint_layers_channel_add(material, &layer, channel) == nullptr) {
+    return false;
   }
-  RNA_PROP_END;
+  return BKE_paint_layers_channel_set_image(material, &layer, channel, &image);
 }
 
 /** Keep a newly imported image in the current file as an asset of \a catalog. */
@@ -1790,13 +1796,15 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
     return OPERATOR_CANCELLED;
   }
 
-  MaterialPaintLayer *layer = material_paint_channels_assign_images_layer_get(C, op);
-  Brush *brush = nullptr;
   Material *material = nullptr;
-  if (layer != nullptr) {
-    char material_name[MAX_ID_NAME];
-    RNA_string_get(op->ptr, "material_name", material_name);
-    material = id_cast<Material *>(BKE_libblock_find_name(CTX_data_main(C), ID_MA, material_name));
+  MaterialPaintLayer *layer = nullptr;
+  Brush *brush = nullptr;
+  if (material_paint_channels_assign_images_targets_layer(op)) {
+    layer = material_paint_channels_assign_images_layer_get(C, op, material);
+    if (layer == nullptr) {
+      BKE_report(op->reports, RPT_ERROR, "The target paint layer no longer exists");
+      return OPERATOR_CANCELLED;
+    }
   }
   else {
     brush = material_paint_channels_assign_images_brush_get(C, op);
@@ -1826,93 +1834,64 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
   int skipped = 0;
   bool marked_any = false;
 
-  if (layer != nullptr) {
-    /* Layer assignment path: assign all images in one batch. */
-    material_paint_channels_assign_images_layer_assign(
-        material,
-        layer,
-        RNA_struct_find_property(op->ptr, "images"),
-        op->ptr,
-        [&](PointerRNA &itemptr) -> Image * {
-          if (!RNA_boolean_get(&itemptr, "use_import")) {
-            return nullptr;
-          }
-          const std::optional<eMaterialPaintChannel> channel =
-              material_paint_channels_assign_images_entry_channel(itemptr);
+  RNA_BEGIN (op->ptr, itemptr, "images") {
+    if (!RNA_boolean_get(&itemptr, "use_import")) {
+      continue;
+    }
+    const std::optional<eMaterialPaintChannel> channel =
+        material_paint_channels_assign_images_entry_channel(itemptr);
 
-          bool is_new_import = false;
-          Image *image = material_paint_channels_assign_images_entry_image(
-              C, op, itemptr, is_new_import);
-          if (image == nullptr) {
-            skipped++;
-            return nullptr;
-          }
-          if (is_new_import && catalog) {
-            marked_any |= material_paint_channels_assign_images_mark_asset(
-                C, image, *catalog, channel);
-          }
+    bool is_new_import = false;
+    Image *image = material_paint_channels_assign_images_entry_image(
+        C, op, itemptr, is_new_import);
+    if (image == nullptr) {
+      skipped++;
+      continue;
+    }
+    if (is_new_import && catalog) {
+      marked_any |= material_paint_channels_assign_images_mark_asset(C, image, *catalog, channel);
+    }
 
-          if (!channel) {
-            if (is_new_import) {
-              imported_only++;
-            }
-            else {
-              skipped++;
-            }
-            return nullptr;
-          }
-
-          assigned++;
-          return image;
-        });
-  }
-  else {
-    /* Brush assignment path (original code). */
-    RNA_BEGIN (op->ptr, itemptr, "images") {
-      if (!RNA_boolean_get(&itemptr, "use_import")) {
-        continue;
+    if (!channel) {
+      /* "None" with import enabled only brings the image in as an asset. */
+      if (is_new_import) {
+        imported_only++;
       }
-      const std::optional<eMaterialPaintChannel> channel =
-          material_paint_channels_assign_images_entry_channel(itemptr);
-
-      bool is_new_import = false;
-      Image *image = material_paint_channels_assign_images_entry_image(
-          C, op, itemptr, is_new_import);
-      if (image == nullptr) {
+      else {
         skipped++;
-        continue;
       }
-      if (is_new_import && catalog) {
-        marked_any |= material_paint_channels_assign_images_mark_asset(C, image, *catalog, channel);
-      }
+      continue;
+    }
 
-      if (!channel) {
-        /* "None" with import enabled only brings the image in as an asset. */
-        if (is_new_import) {
-          imported_only++;
-        }
-        else {
-          skipped++;
-        }
-        continue;
-      }
-
-      BrushMaterialPaintChannel *channel_data = &brush->material_paint->channels[*channel];
-      PointerRNA channel_ptr = RNA_pointer_create_discrete(
-          &brush->id, RNA_BrushMaterialPaintChannel, channel_data);
-      RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image->id));
-      if (RNA_pointer_get(&channel_ptr, "source_image").data != &image->id) {
+    if (layer != nullptr) {
+      if (!material_paint_channels_assign_images_layer_assign(*material, *layer, *channel, *image))
+      {
         BKE_reportf(op->reports,
                     RPT_WARNING,
-                    "Could not assign \"%s\" to this material paint channel",
+                    "Could not assign \"%s\" to this layer channel",
                     image->id.name + 2);
         skipped++;
         continue;
       }
       assigned++;
+      continue;
     }
-    RNA_END;
+
+    BrushMaterialPaintChannel *channel_data = &brush->material_paint->channels[*channel];
+    PointerRNA channel_ptr = RNA_pointer_create_discrete(
+        &brush->id, RNA_BrushMaterialPaintChannel, channel_data);
+    RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image->id));
+    if (RNA_pointer_get(&channel_ptr, "source_image").data != &image->id) {
+      BKE_reportf(op->reports,
+                  RPT_WARNING,
+                  "Could not assign \"%s\" to this material paint channel",
+                  image->id.name + 2);
+      skipped++;
+      continue;
+    }
+    assigned++;
   }
+  RNA_END;
 
   if (marked_any) {
     ed::asset::refresh_asset_library(C, asset_system::current_file_library_reference());
@@ -2038,6 +2017,11 @@ static void material_paint_channels_assign_images_draw(bContext * /*C*/, wmOpera
   layout->use_property_split_set(true);
   layout->prop(ptr, "create_catalog", UI_ITEM_NONE, IFACE_("Create New Catalog"), ICON_NONE);
   if (RNA_boolean_get(ptr, "create_catalog")) {
+    layout->prop(ptr,
+                 "use_standard_catalog",
+                 UI_ITEM_NONE,
+                 IFACE_("Inside Standard Catalog"),
+                 ICON_NONE);
     layout->prop(ptr, "new_catalog_name", UI_ITEM_NONE, IFACE_("Name"), ICON_NONE);
   }
   else {
@@ -2089,7 +2073,9 @@ static wmOperatorStatus material_paint_channels_assign_images_invoke(bContext *C
     return OPERATOR_CANCELLED;
   }
   if (!RNA_struct_property_is_set(op->ptr, "catalog_path")) {
-    RNA_string_set(op->ptr, "catalog_path", PAINT_CHANNEL_IMAGES_ROOT_CATALOG);
+    RNA_string_set(op->ptr,
+                   "catalog_path",
+                   material_paint_channels_assign_images_standard_catalog(op).c_str());
   }
   if (!RNA_struct_property_is_set(op->ptr, "new_catalog_name")) {
     const std::string base_name = material_paint_channels_assign_images_base_name(op);
@@ -2167,7 +2153,15 @@ void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot)
                          "create_catalog",
                          false,
                          "Create New Catalog",
-                         "Put newly imported images in a new catalog under \"Brush Texture\"");
+                         "Put newly imported images in a new catalog");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+
+  prop = RNA_def_boolean(ot->srna,
+                         "use_standard_catalog",
+                         true,
+                         "Inside Standard Catalog",
+                         "Create the new catalog inside the standard catalog of the drop target "
+                         "(Preferences > Assets > Name Matching > Standard Catalog)");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 
   prop = RNA_def_string(ot->srna,
@@ -2175,7 +2169,7 @@ void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot)
                         nullptr,
                         MAX_NAME,
                         "Catalog Name",
-                        "Name of the new catalog, created under \"Brush Texture\"");
+                        "Name of the new catalog");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 
   prop = RNA_def_string(ot->srna,
@@ -2183,8 +2177,8 @@ void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot)
                         nullptr,
                         MAX_NAME,
                         "Catalog",
-                        "Current-file catalog for newly imported images (\"Brush Texture\" when "
-                        "empty)");
+                        "Current-file catalog for newly imported images (the standard catalog "
+                        "when empty)");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
   RNA_def_property_string_search_func_runtime(prop,
                                               material_paint_channels_assign_images_catalog_search,

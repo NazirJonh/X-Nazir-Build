@@ -1044,6 +1044,12 @@ struct bUserNameMatchFilterTag {
   char name[/*MAX_NAME*/ 64] = "";
 };
 
+/** Drop targets that keep their imported images in a configurable root catalog. */
+enum eUserStandardCatalog : int {
+  USER_STANDARD_CATALOG_BRUSH_TEXTURE = 0,
+  USER_STANDARD_CATALOG_FILL_LAYER = 1,
+};
+
 /**
  * Settings for an asset shelf, stored in the Preferences. Most settings are still stored in the
  * asset shelf instance in #AssetShelfSettings. This is just for the options that should be shared
@@ -1399,6 +1405,13 @@ struct UserDef {
   /** Index of the filter tag being edited in the Preferences UI. */
   short active_name_match_filter_tag = 0;
   char _pad_name_match[4] = {};
+  /**
+   * Preferences → Assets → Name Matching → Standard Catalog: root catalog newly imported images
+   * are kept in, per drop target. Empty (e.g. a file saved before these existed) means the
+   * built-in default, see #BKE_name_matching_standard_catalog_get.
+   */
+  char standard_catalog_brush_texture[64] = "Brush Texture";
+  char standard_catalog_fill_layer[64] = "Source Texture";
 
   /** Last official Blender version selected for preferences synchronization. */
   char sync_source_version[16] = "";

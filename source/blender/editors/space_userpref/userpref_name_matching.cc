@@ -654,6 +654,18 @@ static void userpref_name_matching_filter_tags_panel_draw(const bContext *C, Pan
   draw_active_filter_tag_settings(layout, *active);
 }
 
+static void userpref_name_matching_standard_catalog_panel_draw(const bContext * /*C*/,
+                                                               Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  layout.use_property_split_set(true);
+  layout.use_property_decorate_set(false);
+
+  PointerRNA ptr = RNA_pointer_create_discrete(nullptr, RNA_PreferencesNameMatching, &U);
+  layout.prop(&ptr, "standard_catalog_brush_texture", UI_ITEM_NONE, IFACE_("Brush"), ICON_NONE);
+  layout.prop(&ptr, "standard_catalog_fill_layer", UI_ITEM_NONE, IFACE_("Fill Layer"), ICON_NONE);
+}
+
 /** Filter Tags is implemented but intentionally hidden from the UI for now (see caller). */
 static bool userpref_name_matching_filter_tags_panel_poll(const bContext * /*C*/,
                                                           PanelType * /*pt*/)
@@ -701,6 +713,12 @@ void userpref_name_matching_panel_register(ARegionType &region_type)
                                   "USERPREF_PT_name_matching_map_types",
                                   N_("Map Types"),
                                   userpref_name_matching_map_types_panel_draw);
+
+  name_matching_subpanel_register(region_type,
+                                  parent,
+                                  "USERPREF_PT_name_matching_standard_catalog",
+                                  N_("Standard Catalog"),
+                                  userpref_name_matching_standard_catalog_panel_draw);
 
   /* Filter Tags is fully implemented (DNA, RNA, BKE CRUD, operators) but the feature is
    * intentionally hidden from the UI for now: the panel stays registered (so scripts/tests can

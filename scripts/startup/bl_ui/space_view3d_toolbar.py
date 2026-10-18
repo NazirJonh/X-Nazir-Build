@@ -363,7 +363,7 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
         # Material Paint channels only work with the Paint brush type; deformation brushes
         # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
         brush = context.tool_settings.sculpt.brush
-        return brush is not None and brush.sculpt_brush_type == 'PAINT'
+        return brush is not None and brush.sculpt_brush_type in {'PAINT', 'ERASE'}
 
     def draw_header(self, context):
         layout = self.layout
@@ -825,7 +825,7 @@ class VIEW3D_PT_slots_paint_canvas(SelectPaintSlotHelper, View3DPanel, Panel):
         # Material Paint channels only work with the Paint brush type; Smear, other sculpt
         # brushes, and non-brush tools have no material-channel sampling/blending behind them.
         brush = context.tool_settings.sculpt.brush
-        return brush is not None and brush.sculpt_brush_type in {'PAINT', 'TEXTURE_FILL'}
+        return brush is not None and brush.sculpt_brush_type in {'PAINT', 'ERASE', 'TEXTURE_FILL'}
 
     def get_mode_settings(self, context):
         return context.tool_settings.paint_mode
@@ -1026,7 +1026,7 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
         ):
             is_pbr_paint = (
                 context.sculpt_object and
-                brush.sculpt_brush_type == 'PAINT' and
+                brush.sculpt_brush_type in {'PAINT', 'ERASE'} and
                 context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
             )
             if is_pbr_paint:
@@ -1076,7 +1076,7 @@ class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
             return False
         return not (
             context.sculpt_object and
-            brush.sculpt_brush_type == 'PAINT' and
+            brush.sculpt_brush_type in {'PAINT', 'ERASE'} and
             context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
         )
 

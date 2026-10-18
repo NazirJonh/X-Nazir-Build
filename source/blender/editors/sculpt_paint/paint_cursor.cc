@@ -294,6 +294,8 @@ struct LoadTexData {
   const MTex *alpha_mtex;
   /** Source Mode: Material pixels. Null in Source Mode: Maps, where #mtex carries a #Tex. */
   const ed::material_bake::MaterialSourcePreview *material_source;
+  /** Erase brush: draw the texture luminance as white alpha instead of its colors. */
+  bool erase_mask;
 };
 
 /**
@@ -417,7 +419,20 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
         paint_get_tex_pixel(mtex, x, y, pool, thread_id, &avg, rgba);
       }
 
-      if (col) {
+      if (col && data->erase_mask) {
+        /* The erase texture is a strength mask: white shows opaque white, black is invisible,
+         * grey is proportional. Premultiplied, so rgb carries the same factor as alpha. */
+        const float mask = clamp_f(avg - br->texture_sample_bias, 0.0f, 1.0f) *
+                           (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL) ?
+                                1.0f :
+                                BKE_brush_curve_strength_clamped(br, len, 1.0f));
+        const uchar value = uchar(mask * 255.0f);
+        buffer[index * 4] = value;
+        buffer[index * 4 + 1] = value;
+        buffer[index * 4 + 2] = value;
+        buffer[index * 4 + 3] = value;
+      }
+      else if (col) {
         const bool is_data = colorspace != nullptr &&
                              IMB_colormanagement_space_is_data(colorspace);
         if (convert_to_linear && !is_data) {
@@ -514,7 +529,9 @@ static int load_tex(Paint *paint,
   MTex alpha_mtex_storage = {};
   const MTex *alpha_mtex = nullptr;
   /* The Alpha channel only masks material strokes, so it must not dim the brush's own texture. */
-  if (col && mtex_override != nullptr &&
+  const bool erase_mask = col && mtex_override != nullptr && material_source == nullptr &&
+                          br->sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE;
+  if (col && mtex_override != nullptr && !erase_mask &&
       paint_overlay_alpha_mask_mtex(paint, br, vc, alpha_mtex_storage))
   {
     alpha_mtex = &alpha_mtex_storage;
@@ -617,6 +634,7 @@ static int load_tex(Paint *paint,
     data.radius = radius;
     data.alpha_mtex = alpha_mtex;
     data.material_source = material_source;
+    data.erase_mask = erase_mask;
 
     TaskParallelSettings settings;
     BLI_parallel_range_settings_defaults(&settings);
@@ -1030,6 +1048,12 @@ static bool paint_draw_tex_overlay(Paint *paint,
 
     float final_color[4];
     paint_tex_overlay_resolve_color(col, overlay_alpha, final_color);
+    if (primary && col && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE) {
+      /* The erase mask is cached without the Strength so changing it does not rebuild the
+       * texture; the Strength caps the erase per stroke, so show it as overlay intensity. The
+       * texture is premultiplied, so scaling the whole color scales coverage and rgb alike. */
+      mul_v4_fl(final_color, clamp_f(BKE_brush_alpha_get(paint, brush), 0.0f, 1.0f));
+    }
     immUniformColor4fv(final_color);
 
     gpu::Texture *texture = (primary) ? primary_snap.overlay_texture :
@@ -1289,7 +1313,9 @@ static bool paint_cursor_context_init(bContext *C,
   const bool try_material_preview =
       pcontext.brush->material_paint != nullptr &&
       ((pcontext.mode == PaintMode::Sculpt &&
-        pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) ||
+        ELEM(pcontext.brush->sculpt_brush_type,
+             SCULPT_BRUSH_TYPE_PAINT,
+             SCULPT_BRUSH_TYPE_ERASE)) ||
        pcontext.mode == PaintMode::Texture2D);
   if (try_material_preview) {
     const PaintModeSettings &paint_mode_settings = CTX_data_tool_settings(C)->paint_mode;
@@ -1308,7 +1334,11 @@ static bool paint_cursor_context_init(bContext *C,
       /* Source Mode: Material has no #Tex to sample, so its pixels come from the bake instead.
        * Everything downstream -- placement, map mode, the hide rules below -- stays shared. */
       bool has_preview = false;
-      if (pcontext.brush->material_paint->source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+      /* Sculpt and the Image Editor share the Erase brush; both sample its own texture. */
+      const bool is_erase_brush = pcontext.brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_ERASE;
+      if (!is_erase_brush &&
+          pcontext.brush->material_paint->source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL)
+      {
         has_preview = ed::material_bake::material_source_preview_get(
             *pcontext.brush->material_paint,
             paint_mode_settings,
@@ -1317,6 +1347,12 @@ static bool paint_cursor_context_init(bContext *C,
             pcontext.material_preview_bake);
         pcontext.material_preview_mtex_storage = dna::shallow_copy(
             pcontext.material_preview_source.mtex);
+      }
+      else if (is_erase_brush) {
+        /* The Erase brush has no channel sources; its own texture is the strength mask, so it is
+         * what the stroke samples and what the overlay must show. */
+        pcontext.material_preview_mtex_storage = dna::shallow_copy(pcontext.brush->mtex);
+        has_preview = pcontext.brush->mtex.tex != nullptr;
       }
       else {
         has_preview = BKE_paint_material_preview_mtex_get(*pcontext.brush->material_paint,
@@ -1340,7 +1376,7 @@ static bool paint_cursor_context_init(bContext *C,
           pcontext.material_preview_mtex_storage.brush_map_mode == MTEX_MAP_MODE_TILED &&
           pcontext.paint->runtime->stroke_active;
       const bool hide_idle_view_in_sculpt =
-          pcontext.mode != PaintMode::Texture2D &&
+          pcontext.mode != PaintMode::Texture2D && !is_erase_brush &&
           pcontext.material_preview_mtex_storage.brush_map_mode == MTEX_MAP_MODE_VIEW &&
           !pcontext.paint->runtime->draw_anchored;
       if (has_preview && !hide_idle_view_in_sculpt && !hide_for_active_tiled_stroke) {

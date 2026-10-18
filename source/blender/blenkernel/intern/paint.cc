@@ -1782,6 +1782,7 @@ bool BKE_paint_sculpt_brush_type_consumes_face_selection(const eBrushSculptType 
 {
   return ELEM(type,
               SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_ERASE,
               SCULPT_BRUSH_TYPE_SMEAR,
               SCULPT_BRUSH_TYPE_BLUR,
               SCULPT_BRUSH_TYPE_TEXTURE_FILL);
@@ -5061,6 +5062,23 @@ static Vector<PaintMaterialImageTarget> paint_material_image_targets_get_for_mas
     targets.append(target);
   }
   return targets;
+}
+
+bool BKE_paint_mask_erase_fill_get(Image *image, float r_fill[4])
+{
+  if (image == nullptr) {
+    return false;
+  }
+  const ImageTile *tile = BKE_image_get_tile(image, 0);
+  if (tile == nullptr || tile->gen_color[3] < 1.0f) {
+    return false;
+  }
+  const float grey = (tile->gen_color[0] + tile->gen_color[1] + tile->gen_color[2]) / 3.0f;
+  r_fill[0] = grey;
+  r_fill[1] = grey;
+  r_fill[2] = grey;
+  r_fill[3] = 1.0f;
+  return true;
 }
 
 Vector<PaintMaterialImageTarget> BKE_paint_material_image_targets_get(

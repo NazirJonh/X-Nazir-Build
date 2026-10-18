@@ -288,6 +288,13 @@ struct ImagePaintTarget {
    * keeps the stock #Brush.blend behavior unchanged.
    */
   bool is_material_channel = false;
+  /** True when this target is the mask map of a Mask-mode stroke, not a material channel. */
+  bool is_mask_target = false;
+  /**
+   * The opaque fill a mask map was created with (Black/White Mask), when it has one. Erase paints
+   * back toward it, since clearing alpha would let the mask stack's base (full coverage) show.
+   */
+  std::optional<float4> mask_erase_fill;
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
   const char *channel_name = nullptr;
 };
@@ -956,6 +963,20 @@ struct StrokeCache {
    */
   std::unique_ptr<PaintLayersMaskSampler> paint_mask_sampler;
   bool paint_mask_sampler_resolved = false;
+
+  /**
+   * Effective paint state for the stroke, resolved once in #stroke_cache_init. The paint-path
+   * branches read these instead of #StrokeToggleSettings.invert, which the Erase brush reuses
+   * with a different meaning; the invert flag itself is left to the non-paint branches (normal
+   * weight, alt smooth, draw inversion).
+   *
+   * - #material_erase: the Erase brush, a true erase. Ctrl is ignored, as the brush uses no
+   *   colors.
+   * - #material_invert: Ctrl on any other paint brush, painting with the secondary color and
+   *   the channel defaults.
+   */
+  bool material_erase = false;
+  bool material_invert = false;
 
   /** Poly Paint: material paint attributes (scalar or color) created by #brush_stroke_init for
    * this stroke, as opposed to attributes that already existed. Undo removes these instead of
@@ -1669,7 +1690,11 @@ bool sculpt_brush_uses_image_canvas(const Brush &brush,
 
 inline bool brush_type_is_paint(const int tool)
 {
-  return ELEM(tool, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_SMEAR, SCULPT_BRUSH_TYPE_BLUR);
+  return ELEM(tool,
+              SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_ERASE,
+              SCULPT_BRUSH_TYPE_SMEAR,
+              SCULPT_BRUSH_TYPE_BLUR);
 }
 
 inline bool brush_type_is_mask(const int tool)

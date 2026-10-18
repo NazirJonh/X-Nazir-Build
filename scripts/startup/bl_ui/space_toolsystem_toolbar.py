@@ -1728,6 +1728,16 @@ class _defs_sculpt:
         )
 
     @ToolDef.from_fn
+    def erase():
+        return dict(
+            idname="builtin_brush.erase",
+            label="Erase",
+            icon="brush.gpencil_draw.erase",
+            options={'USE_BRUSHES'},
+            brush_type='ERASE',
+        )
+
+    @ToolDef.from_fn
     def texture_fill():
         return dict(
             idname="builtin_brush.texture_fill",
@@ -2219,7 +2229,7 @@ class _defs_sculpt:
 
     @ToolDef.from_fn
     def color_gradient():
-        def draw_settings(context, layout, _tool):
+        def draw_settings(context, layout, tool):
             settings = context.tool_settings.sculpt
             region_is_header = context.region.type == 'TOOL_HEADER'
 
@@ -2255,7 +2265,7 @@ class _defs_sculpt:
             if settings.gradient_type != 'CURVE':
                 # Interactive editing: the gradient stays live with draggable handles after the
                 # drag ends; confirmed with Enter, cancelled with Esc.
-                props = layout.operator_properties("sculpt.color_gradient")
+                props = tool.operator_properties("sculpt.color_gradient")
                 layout.prop(props, "interactive")
             if (
                     not region_is_header and
@@ -2525,6 +2535,17 @@ class _defs_texture_paint:
             idname="builtin.brush",
             label="Paint",
             icon="brush.sculpt.paint",
+            options={'USE_BRUSHES'},
+        )
+
+    @ToolDef.from_fn
+    def erase():
+        # No brush_type: image brush types have no Erase entry. The tool is recognized by its
+        # idname in wm_toolsystem.cc and activates the shared material Erase brush.
+        return dict(
+            idname="builtin_brush.erase",
+            label="Erase",
+            icon="brush.gpencil_draw.erase",
             options={'USE_BRUSHES'},
         )
 
@@ -4767,6 +4788,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ],
         'PAINT': [
             _brush_tool,
+            _defs_texture_paint.erase,
             _defs_texture_paint.blur,
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,
@@ -5212,6 +5234,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.clone_mesh,
             _defs_sculpt.layer_eraser,
             _defs_sculpt.texture_fill,
+            _defs_sculpt.erase,
             _defs_sculpt.color_gradient,
             (
                 _defs_sculpt_paint_shape.rect,
@@ -5247,6 +5270,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         ],
         'PAINT_TEXTURE': [
             _brush_tool,
+            _defs_texture_paint.erase,
             _defs_texture_paint.blur,
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,
@@ -5420,6 +5444,8 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
     _tools_paint_display = [
         _defs_sculpt.paint,
         _defs_sculpt.texture_fill,
+        None,
+        _defs_sculpt.erase,
         None,
         (
             _defs_sculpt.hide_border,

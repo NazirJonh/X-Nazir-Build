@@ -1190,7 +1190,7 @@ class VIEW3D_HT_header(Header):
                 paint = tool_settings.sculpt
                 brush = paint.brush
                 if brush:
-                    is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'SMEAR', 'TEXTURE_FILL', 'CLONE'}
+                    is_paint_tool = brush.sculpt_brush_type in {'PAINT', 'ERASE', 'SMEAR', 'TEXTURE_FILL', 'CLONE'}
             else:
                 is_paint_tool = tool and tool.use_paint_canvas
 
@@ -8848,7 +8848,7 @@ def sculpt_face_selection_mask_controls_visible(context):
     brush = sculpt.brush if sculpt is not None else None
     return (
         brush is not None and
-        brush.sculpt_brush_type in {'PAINT', 'SMEAR', 'BLUR', 'TEXTURE_FILL'}
+        brush.sculpt_brush_type in {'PAINT', 'ERASE', 'SMEAR', 'BLUR', 'TEXTURE_FILL'}
     )
 
 

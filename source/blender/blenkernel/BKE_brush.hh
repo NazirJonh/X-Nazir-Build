@@ -23,6 +23,7 @@
 namespace blender {
 
 enum class PaintMode : int8_t;
+enum ePaintMaterialEraseMode : int8_t;
 struct Brush;
 struct BrushCurvePatchTextureSlot;
 struct BrushMaterialPaint;
@@ -101,6 +102,35 @@ BrushMaterialPaint *BKE_brush_material_paint_create_default();
  * Call before reading/writing per-channel material paint values.
  */
 void BKE_brush_material_paint_ensure(Brush *brush);
+
+/**
+ * Applies an #ePaintMaterialEraseMode as a one-shot preset to \a brush, mirroring the stock
+ * texture-paint Erase brushes: distance falloff, antialiasing and pressure-driven size. Only
+ * runs when the mode is picked (from the RNA update callback or while creating the brush), so
+ * user tweaks to those parameters are kept in between.
+ */
+void BKE_brush_material_erase_mode_apply(Brush *brush, ePaintMaterialEraseMode mode);
+
+/** True for the shared material Erase brush (Sculpt and Texture/Image paint). */
+bool BKE_brush_is_material_erase(const Brush &brush);
+
+/**
+ * Adds a new local Erase brush for Sculpt Mode PBR Paint: a #Brush with
+ * #SCULPT_BRUSH_TYPE_ERASE, stock Erase stroke defaults and a default channel selection.
+ * Duplicate names are made unique automatically. Activation is the caller's job (typically
+ * #BKE_paint_brush_set_synced). \a paint is used to sync the unified size.
+ */
+Brush *BKE_brush_material_erase_create_default(Main *bmain, Paint *paint);
+
+/**
+ * Returns the local Sculpt Erase brush, preferring the one named "Erase", creating it (with the
+ * preset snapshot taken) when none exists. \a r_created tells the caller which happened.
+ * Linked brushes are never reused. Activation is the caller's job.
+ */
+Brush *BKE_brush_material_erase_ensure(Main &bmain,
+                                       Scene &scene,
+                                       Paint &paint,
+                                       bool *r_created = nullptr);
 
 /**
  * Deep-copies channels/base_color/flags/shared_source_mapping from \a src. The caller owns the

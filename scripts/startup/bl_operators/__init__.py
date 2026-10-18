@@ -99,5 +99,6 @@ def unregister():
 
     for mod in reversed(_modules_loaded):
         for cls in reversed(mod.classes):
-            if cls.is_registered:
+            # `IDFilter` has no `is_registered`; it is always registered at this point.
+            if getattr(cls, "is_registered", True):
                 unregister_class(cls)

@@ -72,6 +72,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
@@ -231,6 +232,12 @@ struct BrushPainter {
    * Image Editor and the Sculpt viewport cannot drift apart on what a channel blends like.
    */
   short material_channel_blend = -1;
+  /**
+   * An Erase brush stroke without invert. It paints one constant color per target (the mask fill,
+   * or nothing that ERASE_ALPHA reads), so a brush texture only scales the strength: its color is
+   * never used.
+   */
+  bool material_erase = false;
   float material_channel_color[3] = {};
 
   /**
@@ -1019,7 +1026,7 @@ static ushort *brush_painter_mask_ibuf_new(BrushPainter *painter, const int size
     for (x = 0; x < size; x++, m++) {
       float res;
       brush_imbuf_tex_co(mask_mapping, x, y, texco);
-      res = BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool);
+      res =BKE_brush_sample_masktex(painter->paint, brush, texco, thread, pool);
       *m = ushort(65535.0f * res);
     }
   }
@@ -1260,6 +1267,10 @@ static void brush_painter_imbuf_fill(BrushPainter *painter,
              * a source (or the texture itself) is the color, the Color slider does not multiply. */
             mul_v3_v3(rgba, brush_rgb);
           }
+          if (painter->material_erase) {
+            /* The texture only scales the erase strength through its alpha. */
+            copy_v3_v3(rgba, brush_rgb);
+          }
         }
         else {
           copy_v3_v3(rgba, brush_rgb);
@@ -1407,6 +1418,10 @@ static void brush_painter_imbuf_update(BrushPainter *painter,
                   /* Classic Image Paint tints the brush texture with Color. PBR Paint matches Sculpt:
                    * a source (or the texture itself) is the color, the Color slider does not multiply. */
                   mul_v3_v3(rgba, brush_rgb);
+                }
+                if (painter->material_erase) {
+                  /* The texture only scales the erase strength through its alpha. */
+                  copy_v3_v3(rgba, brush_rgb);
                 }
               }
               else {
@@ -2392,7 +2407,7 @@ static void paint_2d_do_making_brush(ImagePaintState *s,
                     region->width,
                     region->height,
                     IMB_BlendMode(blend),
-                    ((s->brush->flag & BRUSH_ACCUMULATE) != 0));
+                    ((s->brush->flag & BRUSH_ACCUMULATE) != 0 && !s->painter->material_erase));
     }
   }
 }
@@ -2858,6 +2873,21 @@ static float paint_2d_area_sample_alpha_factor(const BrushPainter *painter,
                                                 ImagePool *pool)
 {
   float alpha_factor = painter->material_alpha_fallback;
+  if (painter->material_erase) {
+    /* An erase stroke has no channel sources; the brush texture itself scales the strength. */
+    const MTex *mtex = &painter->brush->mtex;
+    const float3 point = math::transform_point(alpha_local_mat, position);
+    float value = 1.0f;
+    float4 sampled;
+    paint_get_tex_pixel(mtex,
+                        point.x * mtex->size[0] + mtex->ofs[0],
+                        point.y * mtex->size[1] + mtex->ofs[1],
+                        pool,
+                        thread,
+                        &value,
+                        sampled);
+    return math::clamp(value - painter->brush->texture_sample_bias, 0.0f, 1.0f);
+  }
   if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
     float value;
     float4 sampled;
@@ -3407,7 +3437,9 @@ static bool paint_2d_area_plane_fill_and_blend(ImagePaintState *s,
    * the filter here, where the destination image and its tile are known, rather than baking it
    * into #AreaPlaneTriCoverage for the first channel. */
   const auto pixel_strength = [&](const AreaPlaneCoveragePixel &pixel) {
-    const ushort strength = paint_2d_area_plane_pixel_strength(pixel, is_alpha_dest);
+    /* Erasing the Alpha target still follows the brush texture, which lives in the pixel alpha. */
+    const ushort strength = paint_2d_area_plane_pixel_strength(
+        pixel, is_alpha_dest && !painter->material_erase);
     if (!has_selection_mask) {
       return strength;
     }
@@ -3775,7 +3807,9 @@ static void paint_2d_area_plane_apply(ImagePaintState *s,
       geom.flipped,
       canvas_rotation);
   const float4x4 channel_local_mat = ed::sculpt_paint::area_plane_object_to_local(channel_frame);
-  const bool capture_alpha = painter->material_alpha_masking;
+  /* Erase has no sources, but a brush texture still has to scale its strength. */
+  const bool capture_alpha = painter->material_alpha_masking ||
+                             (painter->material_erase && painter->brush->mtex.tex != nullptr);
   const float4x4 alpha_local_mat =
       capture_alpha ? ed::sculpt_paint::area_plane_object_to_local(paint_2d_area_channel_frame(
                           painter,
@@ -3787,8 +3821,17 @@ static void paint_2d_area_plane_apply(ImagePaintState *s,
                           canvas_rotation)) :
                       geom.object_to_brush;
 
-  ImagePool *pool = painter->channel_sources != nullptr ? painter->channel_sources->pool() :
-                                                          nullptr;
+  /* An erase stroke has no channel sources, so fall back to the stroke pool; without one every
+   * brush-texture sample acquires and releases the ImBuf. The Area Plane path never runs the
+   * brush image refresh that normally creates that pool, so create it here; the stroke end frees
+   * it. */
+  if (painter->pool == nullptr) {
+    painter->pool = BKE_image_pool_new();
+  }
+  ImagePool *pool = (painter->channel_sources != nullptr &&
+                     painter->channel_sources->pool() != nullptr) ?
+                        painter->channel_sources->pool() :
+                        painter->pool;
 
 
   for (int i = 0; i < s->num_tiles; i++) {
@@ -4403,6 +4446,8 @@ void paint_2d_stroke(void *ps,
  * \param material_channel_blend: The #IMB_BlendMode this material channel paints with, as resolved
  *   by #BKE_paint_material_channel_blend_mode, or -1 when this is not a material channel stroke and
  *   #Brush.blend applies.
+ * \param material_erase: True for an Erase brush stroke without invert (see
+ *   #BrushPainter.material_erase). The brush still behaves as a Draw brush for dab generation.
  * \param init_brush_tex: When true, begin brush texture nodetree exec (once per stroke root).
  * \return Stroke state or null on failure (caller owns success).
  */
@@ -4414,6 +4459,7 @@ static ImagePaintState *paint_2d_new_stroke_for_image(bContext *C,
                                                      const float material_channel_value,
                                                      const float *material_channel_rgb,
                                                      const short material_channel_blend,
+                                                     const bool material_erase,
                                                      const bool init_brush_tex,
                                                      const bool use_pbr_clone_stamp)
 {
@@ -4518,8 +4564,16 @@ static ImagePaintState *paint_2d_new_stroke_for_image(bContext *C,
   }
 
   /* create painter */
-  s->painter = brush_painter_2d_new(scene, paint, s->brush, mode == BrushStrokeMode::Invert);
+  s->painter = brush_painter_2d_new(
+      scene, paint, s->brush, mode == BrushStrokeMode::Invert && !material_erase);
   s->painter->material_channel_blend = material_channel_blend;
+  s->painter->material_erase = material_erase;
+  if (material_erase) {
+    /* Erase caps at Strength per stroke for every mapping and stroke method, like Sculpt. The
+     * masked path blends each dab against the undo-tile originals with a max-accumulated mask, so
+     * a per-dab changing texture or an airbrush cannot compound past the cap. */
+    s->do_masking = true;
+  }
   if (material_channel_rgb != nullptr) {
     s->painter->use_material_channel_color = true;
     copy_v3_v3(s->painter->material_channel_color, material_channel_rgb);
@@ -4674,10 +4728,14 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     }
 
     const Paint *paint = BKE_paint_get_active_from_context(C);
-    const bool invert = mode == BrushStrokeMode::Invert;
+    /* Same rule as Sculpt: the Erase brush uses no colors, so Ctrl does not switch it to painting
+     * with the secondary color. */
+    const bool material_erase = BKE_brush_is_material_erase(*brush);
+    const bool invert = mode == BrushStrokeMode::Invert && !material_erase;
 
     std::shared_ptr<ed::sculpt_paint::material::ChannelSourceSet> channel_sources;
-    if (!invert) {
+    /* Erase reads no color source: the brush texture only scales its strength. */
+    if (!invert && !material_erase) {
       channel_sources = std::make_shared<ed::sculpt_paint::material::ChannelSourceSet>(
           brush_paint, paint_mode, settings->imapaint.paint.visible_material_channels);
       if (!channel_sources->is_active()) {
@@ -4746,6 +4804,8 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       }
     }
 
+    const bool mask_stroke = BKE_paint_layers_target_mode(&paint_mode) ==
+                             PaintLayersTargetMode::Mask;
     ImagePaintState *primary = nullptr;
     Vector<ImagePaintState *> extras;
     for (const PaintMaterialImageTarget &target : targets) {
@@ -4753,9 +4813,22 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       const float *rgb_ptr = nullptr;
       float value = -1.0f;
       /* Resolved once here so the 2D path and the Sculpt path agree on the mode per channel. */
-      const short channel_blend = BKE_paint_material_channel_blend_mode(
+      short channel_blend = BKE_paint_material_channel_blend_mode(
           brush_paint, target.channel, invert);
-      if (target.is_color_channel) {
+      float mask_fill[4];
+      /* A Mask-mode stroke has one target: the mask map, resolved as Base Color. */
+      const bool mask_fill_erase = material_erase && mask_stroke &&
+                                   target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+                                   BKE_paint_mask_erase_fill_get(target.image, mask_fill);
+      if (material_erase) {
+        /* Clearing alpha would show the mask stack's base over an opaque Black/White Mask, so
+         * that one mixes toward its fill instead. */
+        channel_blend = mask_fill_erase ? IMB_BLEND_MIX : IMB_BLEND_ERASE_ALPHA;
+      }
+      if (mask_fill_erase) {
+        value = (mask_fill[0] + mask_fill[1] + mask_fill[2]) / 3.0f;
+      }
+      else if (target.is_color_channel) {
         const float3 rgb = BKE_paint_material_channel_color_get(
             brush_paint, *paint, *brush, target.channel, invert);
         copy_v3_v3(rgb_storage, rgb);
@@ -4785,6 +4858,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
                                                             value,
                                                             rgb_ptr,
                                                             channel_blend,
+                                                            material_erase,
                                                             primary == nullptr,
                                                             clone_context.active);
       if (state == nullptr) {
@@ -4828,7 +4902,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     image = paint_mode.canvas_image;
   }
   ImagePaintState *state = paint_2d_new_stroke_for_image(
-      C, op, mode, image, nullptr, -1.0f, nullptr, -1, true, clone_context.active);
+      C, op, mode, image, nullptr, -1.0f, nullptr, -1, false, true, clone_context.active);
   if (state != nullptr) {
     state->clone_context = clone_context;
   }
@@ -4915,6 +4989,7 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
 void paint_2d_stroke_done(void *ps)
 {
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
+
 
   for (int i = 0; i < s->material_extra_states_num; i++) {
     paint_2d_stroke_done_single(s->material_extra_states[i], false);

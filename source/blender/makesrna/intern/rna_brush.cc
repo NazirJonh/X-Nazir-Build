@@ -362,6 +362,7 @@ const EnumPropertyItem rna_enum_brush_sculpt_brush_type_items[] = {
     {SCULPT_BRUSH_TYPE_SMEAR, "SMEAR", 0, "Smear", ""},
     {SCULPT_BRUSH_TYPE_BLUR, "BLUR", 0, "Blur", ""},
     {SCULPT_BRUSH_TYPE_TEXTURE_FILL, "TEXTURE_FILL", 0, "Texture Fill", ""},
+    {SCULPT_BRUSH_TYPE_ERASE, "ERASE", 0, "Erase", ""},
     {SCULPT_BRUSH_TYPE_CLONE,
      "CLONE",
      0,
@@ -910,6 +911,10 @@ static bool rna_BrushCapabilitiesImagePaint_has_space_attenuation_get(PointerRNA
 static bool rna_BrushCapabilitiesImagePaint_has_color_get(PointerRNA *ptr)
 {
   Brush *br = static_cast<Brush *>(ptr->data);
+  /* The shared material Erase brush is a Draw brush by type but paints no color. */
+  if (BKE_brush_is_material_erase(*br)) {
+    return false;
+  }
   return ELEM(br->image_brush_type, IMAGE_PAINT_BRUSH_TYPE_DRAW, IMAGE_PAINT_BRUSH_TYPE_FILL);
 }
 
@@ -1782,6 +1787,21 @@ static std::optional<std::string> rna_BrushMaterialPaint_path(const PointerRNA *
 static void rna_BrushMaterialPaint_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
   Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  BKE_brush_tag_unsaved_changes(br);
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
+}
+
+/* Picking an erase mode applies its stock stroke parameters (falloff, antialiasing)
+ * as a one-shot preset; tweaks made afterwards are kept until the mode is picked again. */
+static void rna_Brush_material_paint_erase_mode_update(Main * /*bmain*/,
+                                                       Scene * /*scene*/,
+                                                       PointerRNA *ptr)
+{
+  Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  if (br->material_paint == nullptr) {
+    return;
+  }
+  BKE_brush_material_erase_mode_apply(br, ePaintMaterialEraseMode(br->material_paint->erase_mode));
   BKE_brush_tag_unsaved_changes(br);
   WM_main_add_notifier(NC_BRUSH | NA_EDITED, br);
 }
@@ -4447,6 +4467,35 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "Sample Alpha to mask other active channels' writes during this stroke when the Alpha "
       "channel is enabled");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_alpha_mode_update");
+
+  static const EnumPropertyItem prop_erase_mode_items[] = {
+      {BRUSH_MATERIAL_PAINT_ERASE_HARD,
+       "HARD",
+       0,
+       "Hard",
+       "Constant falloff with a short edge ramp, like the stock Erase Hard brush"},
+      {BRUSH_MATERIAL_PAINT_ERASE_SOFT,
+       "SOFT",
+       0,
+       "Soft",
+       "Smooth falloff, like the stock Erase Soft brush"},
+      {BRUSH_MATERIAL_PAINT_ERASE_PIXEL_ART,
+       "PIXEL_ART",
+       0,
+       "Pixel Art",
+       "Constant falloff without antialiasing, like the stock Erase Pixel Art brush"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "erase_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "erase_mode");
+  RNA_def_property_enum_items(prop, prop_erase_mode_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Erase Mode",
+      "Stroke parameter preset (falloff and antialiasing) applied when the mode is picked; "
+      "user tweaks made afterwards are kept");
+  RNA_def_property_update(prop, 0, "rna_Brush_material_paint_erase_mode_update");
 }
 
 static void rna_def_brush_clone_stamp_mesh_settings(BlenderRNA *brna)

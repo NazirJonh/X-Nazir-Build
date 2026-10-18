@@ -1784,6 +1784,12 @@ struct PaintMaterialImageTarget {
 };
 
 /**
+ * The opaque grey an erase stroke restores on a mask map, from the map's generated fill (a Black
+ * or White Mask starts opaque). Returns false for a transparent fill, where erase clears alpha.
+ */
+bool BKE_paint_mask_erase_fill_get(Image *image, float r_fill[4]);
+
+/**
  * Collects enabled channels that successfully resolve to a target Image on \a ob - either a
  * Principled Image Texture, or the active row's channel map of a layered material (whose
  * #PaintMaterialImageTarget::iuser is null).

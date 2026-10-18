@@ -86,6 +86,13 @@ class Wireframe : Overlay {
   Vector<std::unique_ptr<MultiresWireUBO>> multires_wire_ubo_pool_;
   /* Number of pool entries handed out in the current frame. Reset in `begin_sync`. */
   int multires_wire_ubo_used_ = 0;
+  /* Bound for every wireframe draw that is not a Multires one. The shader declares
+   * `multires_wire_buf` in all variants, and an unbound slot would keep whatever buffer an earlier
+   * pass left there (on Vulkan that can be a buffer too large for the render-graph upload). */
+  MultiresWireUBO default_multires_ubo_;
+  /* Matches `UNIFORM_BUF(2, OVERLAY_MultiresWireData, multires_wire_buf)` in
+   * `overlay_wireframe_infos.hh`. */
+  static constexpr int multires_wire_slot_ = 2;
 
  public:
   void begin_sync(Resources &res, const State &state) final
@@ -120,6 +127,12 @@ class Wireframe : Overlay {
       pass.init();
       pass.bind_ubo(OVERLAY_GLOBALS_SLOT, &res.globals_buf);
       pass.bind_ubo(DRW_CLIPPING_UBO_SLOT, &res.clip_planes_buf);
+      default_multires_ubo_.object_diameter = 1.0f;
+      default_multires_ubo_.wire_level_max = 0.0f;
+      default_multires_ubo_.wire_level_min = 0.0f;
+      default_multires_ubo_.level_reveal_extra = 0.0f;
+      default_multires_ubo_.push_update();
+      pass.bind_ubo(multires_wire_slot_, &default_multires_ubo_);
       pass.state_set(DRW_STATE_FIRST_VERTEX_CONVENTION | DRW_STATE_WRITE_COLOR |
                          DRW_STATE_WRITE_DEPTH | DRW_STATE_DEPTH_LESS_EQUAL,
                      state.clipping_plane_count);

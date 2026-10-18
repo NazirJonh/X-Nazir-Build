@@ -687,6 +687,7 @@ static constexpr int gpu_layer_mapped = 32;
 static constexpr int gpu_layer_repeat_u = 64;
 static constexpr int gpu_layer_repeat_v = 128;
 static constexpr int gpu_layer_tangent_normal = 256;
+static constexpr int gpu_layer_normal_directx = 262144;
 static constexpr int gpu_layer_has_mask = 2048;
 static constexpr int gpu_layer_row_store = 4096;
 static constexpr int gpu_layer_row_use = 8192;
@@ -1448,6 +1449,9 @@ bool combined_preview_gpu_update(const Material &ma,
           return gpu_refuse("a layer map has no GPU texture");
         }
         flags |= gpu_layer_has_map;
+        if (layer.normal_directx) {
+          flags |= gpu_layer_normal_directx;
+        }
         if (premultiplied) {
           flags |= gpu_layer_premultiplied;
         }

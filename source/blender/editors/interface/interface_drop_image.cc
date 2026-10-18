@@ -16,6 +16,7 @@
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
 #include "DNA_material_types.h"
+#include "DNA_uuid_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -30,6 +31,7 @@
 #include "BLI_fileops.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_listbase.h"
+#include "BLI_uuid.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_path_utils.hh"
@@ -52,6 +54,7 @@
 #include "BKE_main_invariants.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_texture.h"
@@ -932,7 +935,36 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
   bool targets_paint_channel() const
   {
     return !wrap_in_texture_ && target_ptr_.type &&
-           RNA_struct_is_a(target_ptr_.type, RNA_BrushMaterialPaintChannel);
+           (RNA_struct_is_a(target_ptr_.type, RNA_BrushMaterialPaintChannel) ||
+            RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayerChannel));
+  }
+
+  /** The stack row that holds the dropped-on #MaterialPaintLayerChannel, with its marker as a
+   * string; false when the target is a brush channel or the record is not in its material. */
+  bool layer_target_get(std::string &r_material_name, std::string &r_marker) const
+  {
+    if (!target_ptr_.type || !RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayerChannel) ||
+        !target_ptr_.owner_id || GS(target_ptr_.owner_id->name) != ID_MA)
+    {
+      return false;
+    }
+    const Material &ma = *id_cast<const Material *>(target_ptr_.owner_id);
+    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+        target_ptr_.data);
+    bool found = false;
+    BKE_paint_layers_foreach(
+        ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+          if (record >= layer.channels && record < layer.channels + layer.channels_num) {
+            char marker[UUID_STRING_SIZE];
+            BLI_uuid_format(marker, layer.marker);
+            r_marker = marker;
+            found = true;
+            return false;
+          }
+          return true;
+        });
+    r_material_name = ma.id.name + 2;
+    return found;
   }
 
   /** All image file paths carried by a path drag, absolute and normalized. */
@@ -1065,6 +1097,12 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     /* The channel belongs to this brush, which is not necessarily the active one. */
     if (target_ptr_.owner_id && GS(target_ptr_.owner_id->name) == ID_BR) {
       RNA_int_set(&props, "brush_session_uid", int(target_ptr_.owner_id->session_uid));
+    }
+    /* A Layer Material slot names its stack row, so the images go to that row's channels. */
+    std::string material_name, layer_marker;
+    if (layer_target_get(material_name, layer_marker)) {
+      RNA_string_set(&props, "material_name", material_name.c_str());
+      RNA_string_set(&props, "layer_marker", layer_marker.c_str());
     }
 
     const wmOperatorStatus status = WM_operator_name_call(

@@ -32,6 +32,7 @@
 #define COMBINED_LAYER_REPEAT_U 64
 #define COMBINED_LAYER_REPEAT_V 128
 #define COMBINED_LAYER_TANGENT_NORMAL 256
+#define COMBINED_LAYER_NORMAL_DIRECTX 262144
 #define COMBINED_LAYER_HAS_MASK 2048
 /* The row stage: the layer pass stores the row's colour and coverage instead of blending them, and a
  * later pass blends what the corrections left. */
@@ -618,6 +619,9 @@ void layer_comp([[resource_table]] LayerResources &srt,
                        srt.mapping_scale,
                        srt.mapping_rotation,
                        srt.lod);
+      if ((srt.flags & COMBINED_LAYER_NORMAL_DIRECTX) != 0) {
+        top.y = 1.0f - top.y;
+      }
     }
     if ((srt.flags & COMBINED_LAYER_ALPHA_COVERAGE) != 0) {
       coverage = clamp(top.w, 0.0f, 1.0f);

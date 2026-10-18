@@ -1697,6 +1697,23 @@ bool BKE_paint_layers_channel_set_invert(Material &ma,
   return true;
 }
 
+bool BKE_paint_layers_normal_set_directx(Material &ma, MaterialPaintLayer *layer, const bool directx)
+{
+  MaterialPaintLayerChannel *record = paint_layer_channel_in_stack(
+      ma, layer, PAINT_MATERIAL_CHANNEL_NORMAL);
+  if (record == nullptr) {
+    return false;
+  }
+  if (directx) {
+    record->flag |= MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX;
+  }
+  else {
+    record->flag &= ~MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX;
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 /* The mapping sits between pointer members of #MaterialPaintLayer: a size that is not a multiple of
  * 8 would leave the row's DNA with a hole. */
 static_assert(sizeof(MaterialPaintLayerMapping) == 32, "MaterialPaintLayerMapping must be 32 bytes");

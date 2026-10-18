@@ -656,6 +656,16 @@ bool BKE_paint_layers_channel_set_invert(Material &ma,
                                          bool invert);
 
 /**
+ * Set whether \a layer's Normal record reads its map as a DirectX tangent-space normal map
+ * (#MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) rather than OpenGL. The generator flips the map's green
+ * channel with nodes, so the choice is visible in the Shader Editor. Part of the graph's
+ * structure, so it regenerates.
+ *
+ * \return false when \a layer carries no Normal record or is not part of \a ma.
+ */
+bool BKE_paint_layers_normal_set_directx(Material &ma, MaterialPaintLayer *layer, bool directx);
+
+/**
  * Set the per-channel opacity multiplier of \a layer's \a channel, applied over the row's own
  * opacity. Any row may carry one, a folder or a correction included, whether or not it has a
  * record for the channel.

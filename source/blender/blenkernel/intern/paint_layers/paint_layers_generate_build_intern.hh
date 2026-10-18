@@ -290,6 +290,16 @@ class PaintLayersTreeBuilder {
   NodeOutput rgb_mean_nodes_add(bNodeTree &tree, NodeOutput color, Vector<bNode *> &r_nodes);
 
   /**
+   * \a color with its green channel flipped (`G' = 1 - G`): Separate XYZ, a Subtract from one and
+   * Combine XYZ. Turns a DirectX tangent-space normal map into the OpenGL one the Normal Map node
+   * reads. The nodes made are appended to \a r_nodes; empty when one is missing, in which case
+   * nothing was added.
+   */
+  NodeOutput normal_green_flip_nodes_add(bNodeTree &tree,
+                                         NodeOutput color,
+                                         Vector<bNode *> &r_nodes);
+
+  /**
    * The three UV mapping inputs of \a row (offset, scale, rotation), named after \a label, in
    * \a group's interface. Made only while the row's mapping applies, so toggling it changes the
    * interface once; a slider move syncs the values in place and never rebuilds.

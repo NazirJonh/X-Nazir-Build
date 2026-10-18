@@ -2309,6 +2309,21 @@ static void rna_MaterialPaintLayerChannel_invert_set(PointerRNA *ptr, bool value
   }
 }
 
+static int rna_MaterialPaintLayerChannel_normal_space_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return (record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0 ? 1 : 0;
+}
+
+static void rna_MaterialPaintLayerChannel_normal_space_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    BKE_paint_layers_normal_set_directx(*ma, layer, value == 1);
+  }
+}
+
 /**
  * The row whose #MaterialPaintLayer::channel_settings holds \a settings, or null when it is not in
  * \a ma's stack. A row's mask items and corrections are searched too: their settings are addressed
@@ -3321,6 +3336,26 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayerChannel_invert_get", "rna_MaterialPaintLayerChannel_invert_set");
   RNA_def_property_ui_text(
       prop, "Invert", "Read the map's grey (or the flat grey) of a mask correction as 1 - value");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  static const EnumPropertyItem normal_space_items[] = {
+      {0, "OPENGL", 0, "OpenGL", "Tangent-space normal map with green pointing up (+Y)"},
+      {1,
+       "DIRECTX",
+       0,
+       "DirectX",
+       "Tangent-space normal map with green pointing down (-Y); the generated graph flips the "
+       "green channel"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "normal_space", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, normal_space_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayerChannel_normal_space_get",
+                              "rna_MaterialPaintLayerChannel_normal_space_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop, "Tangent Space", "Convention of the Normal map: OpenGL or DirectX tangent space");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   /* The scalar channels' single value, stored in `value[0]`; colour channels use `value`. */

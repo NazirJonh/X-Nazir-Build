@@ -97,6 +97,11 @@ def _draw_layer_channel_source(panel, record, locked=False):
         use_unlink=True,
         use_users=False,
     )
+    # A Normal map made elsewhere comes in either tangent-space convention. The choice lives in the
+    # record and becomes a green-flip node chain in the generated graph (Shader Editor).
+    if record.channel == 'NORMAL' and not locked:
+        space_row = panel.row(align=True)
+        space_row.prop(record, "normal_space", text="Tangent Space", expand=True)
 
 
 def _layer_color_eyedropper_path(record):

@@ -563,6 +563,13 @@ enum eMaterialPaintLayerChannelFlag : int8_t {
    * painted the wrong way round as not. Taken from the padding, so older files read as off.
    */
   MA_PAINT_LAYER_CHANNEL_INVERT = 1 << 0,
+  /**
+   * A Normal record's map is a DirectX tangent-space normal map (green points down). Off reads the
+   * map as OpenGL, the convention of the shader's Normal Map node. Part of the graph's structure:
+   * the generator adds a node flipping the green channel. Taken from the padding, so older files
+   * read as OpenGL.
+   */
+  MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX = 1 << 1,
 };
 
 /**

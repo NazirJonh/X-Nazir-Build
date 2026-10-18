@@ -913,6 +913,11 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
   }
   else if (layer.color_ibuf != nullptr) {
     composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
+    if (layer.normal_directx) {
+      for (int64_t i = 0; i < count; i++) {
+        r_color[i * 4 + 1] = 1.0f - r_color[i * 4 + 1];
+      }
+    }
   }
   else {
     /* The stack was validated: a layer without a map is a constant. */

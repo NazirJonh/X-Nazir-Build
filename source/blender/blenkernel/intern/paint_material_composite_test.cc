@@ -1807,6 +1807,19 @@ TEST_F(PaintLayersCompositeTest, normal_channel_combines_instead_of_mixing)
   EXPECT_GT(result[0], 160.0f / 255.0f);
 }
 
+TEST_F(PaintLayersCompositeTest, directx_normal_map_is_converted_to_opengl_before_composite)
+{
+  MaterialPaintLayer *row = add_paint_layer(
+      "DirectX", add_solid_image("DirectX", 4, 128, 64, 240, 255, true),
+      PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_TRUE(BKE_paint_layers_normal_set_directx(*ma, row, true));
+
+  const std::array<float, 4> result = linear_pixel(PAINT_MATERIAL_CHANNEL_NORMAL, 1, 1);
+  EXPECT_NEAR(result[0], 128.0f / 255.0f, 1e-4f);
+  EXPECT_NEAR(result[1], 191.0f / 255.0f, 1e-4f);
+  EXPECT_NEAR(result[2], 240.0f / 255.0f, 1e-4f);
+}
+
 TEST_F(PaintLayersCompositeTest, normal_channel_export_is_unit_length)
 {
   add_paint_layer("Tilt",

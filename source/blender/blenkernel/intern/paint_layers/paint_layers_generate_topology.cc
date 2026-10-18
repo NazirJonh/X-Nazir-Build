@@ -180,6 +180,11 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
     if (record != nullptr && record->image != nullptr) {
       topology_hash_string(hash, record->image->id.name);
+      /* The DirectX green flip is nodes of its own. */
+      if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        hash = topology_hash_mix(
+            hash, (record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0 ? 1 : 0);
+      }
     }
     else {
       hash = topology_hash_mix(hash, 0);

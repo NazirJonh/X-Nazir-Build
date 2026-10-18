@@ -185,6 +185,62 @@ NodeOutput PaintLayersTreeBuilder::rgb_mean_nodes_add(bNodeTree &tree,
   return {divide, d_out};
 }
 
+NodeOutput PaintLayersTreeBuilder::normal_green_flip_nodes_add(bNodeTree &tree,
+                                                               const NodeOutput color,
+                                                               Vector<bNode *> &r_nodes)
+{
+  bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+  bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineXYZ"_ustr);
+  const auto discard = [&]() {
+    for (bNode *node : {separate, combine}) {
+      if (node != nullptr) {
+        bke::node_remove_node(nullptr, tree, *node, true, false);
+      }
+    }
+  };
+  if (separate == nullptr || combine == nullptr || color.node == nullptr ||
+      color.socket == nullptr)
+  {
+    discard();
+    return {};
+  }
+  bNodeSocket *sep_vector = socket_in(*separate, "Vector");
+  bNodeSocket *sep_x = socket_out(*separate, "X");
+  bNodeSocket *sep_y = socket_out(*separate, "Y");
+  bNodeSocket *sep_z = socket_out(*separate, "Z");
+  bNodeSocket *com_x = socket_in(*combine, "X");
+  bNodeSocket *com_y = socket_in(*combine, "Y");
+  bNodeSocket *com_z = socket_in(*combine, "Z");
+  bNodeSocket *com_out = socket_out(*combine, "Vector");
+  if (sep_vector == nullptr || sep_x == nullptr || sep_y == nullptr || sep_z == nullptr ||
+      com_x == nullptr || com_y == nullptr || com_z == nullptr || com_out == nullptr)
+  {
+    discard();
+    return {};
+  }
+  /* The Subtract is built last: it is the only node that can fail after these two exist, and it
+   * removes only itself. */
+  Vector<bNode *> flip_nodes;
+  const NodeOutput flipped = math_node_add(
+      tree, grid_, flip_nodes, NODE_MATH_SUBTRACT, {}, {separate, sep_y}, 1.0f);
+  if (flipped.node == nullptr || flipped.socket == nullptr) {
+    discard();
+    return {};
+  }
+  grid_.place(*separate, layout::Column::Source, 1);
+  grid_.place(*combine, layout::Column::Source, 3);
+  bke::node_add_link(tree, *color.node, *color.socket, *separate, *sep_vector);
+  bke::node_add_link(tree, *separate, *sep_x, *combine, *com_x);
+  bke::node_add_link(tree, *flipped.node, *flipped.socket, *combine, *com_y);
+  bke::node_add_link(tree, *separate, *sep_z, *combine, *com_z);
+  r_nodes.append(separate);
+  for (bNode *node : flip_nodes) {
+    r_nodes.append(node);
+  }
+  r_nodes.append(combine);
+  return {combine, com_out};
+}
+
 NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
                                                       LayerGroup &group,
                                                       const MaterialPaintLayer &layer)
@@ -1565,6 +1621,19 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     source_nodes.append(map);
     out.color = {map, socket_out(*map, "Color")};
     const bool mapped = this->mapping_apply(tree, group, ctx.layer, *map, source_nodes);
+    if (ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr &&
+        (ctx.record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0)
+    {
+      /* A DirectX map has its green pointing down; the Normal Map node reads OpenGL, so the green
+       * is flipped in nodes the user can see in the Shader Editor. Alpha stays the map's. Done
+       * before the remap below, which expects OpenGL vectors, as the composite and the GPU
+       * preview do. */
+      const NodeOutput flipped = this->normal_green_flip_nodes_add(
+          tree, out.color, source_nodes);
+      if (flipped.node != nullptr) {
+        out.color = flipped;
+      }
+    }
     if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr) {
       /* The Mapping moved only the read point; the tangent-space vectors follow it. */
       out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);

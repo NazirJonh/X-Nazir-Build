@@ -179,6 +179,8 @@ static bool composite_row_source_describe(const Material &ma,
     /* A fresh paint map is transparent where nothing was painted; that texel must show the rows
      * below rather than cover them with the map's black. */
     out.color_alpha_coverage = true;
+    out.normal_directx = channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+                         (record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0;
     composite_mapping_describe(ma, layer, channel, out.mapping);
     return true;
   }

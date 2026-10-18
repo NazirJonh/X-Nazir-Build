@@ -141,6 +141,8 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    * channel map; a constant covers by its opacity alone. Read by the linear evaluator only.
    */
   bool color_alpha_coverage = false;
+  /** A Normal map authored in DirectX convention; convert its green channel to OpenGL before blend. */
+  bool normal_directx = false;
   /**
    * The mask is the image's alpha rather than its colour.
    *

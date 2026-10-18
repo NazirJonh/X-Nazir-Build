@@ -65,6 +65,8 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 
+#include "DEG_depsgraph.hh"
+
 #include "ED_asset.hh"
 #include "ED_asset_catalog.hh"
 #include "ED_asset_image_utils.hh"
@@ -1605,6 +1607,60 @@ static Brush *material_paint_channels_assign_images_brush_get(bContext *C, wmOpe
   return paint ? BKE_paint_brush(paint) : nullptr;
 }
 
+/** The layer the drop targeted by name and marker, or nullptr. */
+static MaterialPaintLayer *material_paint_channels_assign_images_layer_get(bContext *C,
+                                                                           wmOperator *op)
+{
+  if (!RNA_struct_property_is_set(op->ptr, "material_name") ||
+      !RNA_struct_property_is_set(op->ptr, "layer_marker"))
+  {
+    return nullptr;
+  }
+  char material_name[MAX_ID_NAME];
+  RNA_string_get(op->ptr, "material_name", material_name);
+  Material *material = id_cast<Material *>(
+      BKE_libblock_find_name(CTX_data_main(C), ID_MA, material_name));
+  if (material == nullptr) {
+    return nullptr;
+  }
+  if (material->paint_layers.is_empty()) {
+    return nullptr;
+  }
+  char layer_marker[UUID_STRING_SIZE];
+  RNA_string_get(op->ptr, "layer_marker", layer_marker);
+  bUUID target_uuid;
+  BLI_uuid_parse_string(&target_uuid, layer_marker);
+  for (MaterialPaintLayer &layer : material->paint_layers) {
+    if (BLI_uuid_equal(layer.marker, target_uuid)) {
+      return &layer;
+    }
+  }
+  return nullptr;
+}
+
+static std::optional<eMaterialPaintChannel> material_paint_channels_assign_images_entry_channel(
+    PointerRNA &itemptr)
+{
+  /* The dialog enum (or an explicit enum set by a script) is authoritative; the hidden
+   * channel_identifier is a script-only alternative, read when the enum stays "None". */
+  const int channel_value = RNA_enum_get(&itemptr, "channel");
+  std::optional<eMaterialPaintChannel> channel = std::nullopt;
+  if (channel_value != 0) {
+    channel = eMaterialPaintChannel(channel_value - 1);
+  }
+  else {
+    char channel_identifier[64];
+    RNA_string_get(&itemptr, "channel_identifier", channel_identifier);
+    if (channel_identifier[0] != '\0') {
+      channel = material_paint_channel_from_identifier(channel_identifier);
+    }
+  }
+  if (channel && (*channel < 0 || *channel >= PAINT_MATERIAL_CHANNEL_NUM)) {
+    return std::nullopt;
+  }
+  return channel;
+}
+
 /**
  * Image of one "images" entry: an asset (imported now, only after the user confirmed), an
  * existing image data-block, or an image file. \a r_is_new_import is set when the image comes
@@ -1655,27 +1711,31 @@ static Image *material_paint_channels_assign_images_entry_image(bContext *C,
   return image;
 }
 
-static std::optional<eMaterialPaintChannel> material_paint_channels_assign_images_entry_channel(
-    PointerRNA &itemptr)
+/** Assign the image to all channels of a layer that have an entry in the images list. */
+static void material_paint_channels_assign_images_layer_assign(
+    Material *material,
+    MaterialPaintLayer *layer,
+    PropertyRNA *images_prop,
+    PointerRNA *op_ptr,
+    FunctionRef<Image *(PointerRNA &)> image_getter)
 {
-  /* The dialog enum (or an explicit enum set by a script) is authoritative; the hidden
-   * channel_identifier is a script-only alternative, read when the enum stays "None". */
-  const int channel_value = RNA_enum_get(&itemptr, "channel");
-  std::optional<eMaterialPaintChannel> channel = std::nullopt;
-  if (channel_value != 0) {
-    channel = eMaterialPaintChannel(channel_value - 1);
-  }
-  else {
-    char channel_identifier[64];
-    RNA_string_get(&itemptr, "channel_identifier", channel_identifier);
-    if (channel_identifier[0] != '\0') {
-      channel = material_paint_channel_from_identifier(channel_identifier);
+  RNA_PROP_BEGIN (op_ptr, itemptr, images_prop) {
+    std::optional<eMaterialPaintChannel> channel =
+        material_paint_channels_assign_images_entry_channel(itemptr);
+    if (!channel) {
+      continue;
     }
+    Image *image = image_getter(itemptr);
+    if (image == nullptr) {
+      continue;
+    }
+    /* Ensure the channel exists, then set the image. */
+    if (BKE_paint_layers_channel_add(*material, layer, *channel) == nullptr) {
+      continue;
+    }
+    BKE_paint_layers_channel_set_image(*material, layer, *channel, image);
   }
-  if (channel && (*channel < 0 || *channel >= PAINT_MATERIAL_CHANNEL_NUM)) {
-    return std::nullopt;
-  }
-  return channel;
+  RNA_PROP_END;
 }
 
 /** Keep a newly imported image in the current file as an asset of \a catalog. */
@@ -1730,10 +1790,20 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
     return OPERATOR_CANCELLED;
   }
 
-  Brush *brush = material_paint_channels_assign_images_brush_get(C, op);
-  if (brush == nullptr || brush->material_paint == nullptr) {
-    BKE_report(op->reports, RPT_ERROR, "No material paint brush to assign the images to");
-    return OPERATOR_CANCELLED;
+  MaterialPaintLayer *layer = material_paint_channels_assign_images_layer_get(C, op);
+  Brush *brush = nullptr;
+  Material *material = nullptr;
+  if (layer != nullptr) {
+    char material_name[MAX_ID_NAME];
+    RNA_string_get(op->ptr, "material_name", material_name);
+    material = id_cast<Material *>(BKE_libblock_find_name(CTX_data_main(C), ID_MA, material_name));
+  }
+  else {
+    brush = material_paint_channels_assign_images_brush_get(C, op);
+    if (brush == nullptr || brush->material_paint == nullptr) {
+      BKE_report(op->reports, RPT_ERROR, "No material paint brush to assign the images to");
+      return OPERATOR_CANCELLED;
+    }
   }
 
   /* The dialog already applied the matching, and the user may have cleared channels to "None"
@@ -1755,50 +1825,94 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
   int imported_only = 0;
   int skipped = 0;
   bool marked_any = false;
-  RNA_BEGIN (op->ptr, itemptr, "images") {
-    if (!RNA_boolean_get(&itemptr, "use_import")) {
-      continue;
-    }
-    const std::optional<eMaterialPaintChannel> channel =
-        material_paint_channels_assign_images_entry_channel(itemptr);
 
-    bool is_new_import = false;
-    Image *image = material_paint_channels_assign_images_entry_image(
-        C, op, itemptr, is_new_import);
-    if (image == nullptr) {
-      skipped++;
-      continue;
-    }
-    if (is_new_import && catalog) {
-      marked_any |= material_paint_channels_assign_images_mark_asset(C, image, *catalog, channel);
-    }
+  if (layer != nullptr) {
+    /* Layer assignment path: assign all images in one batch. */
+    material_paint_channels_assign_images_layer_assign(
+        material,
+        layer,
+        RNA_struct_find_property(op->ptr, "images"),
+        op->ptr,
+        [&](PointerRNA &itemptr) -> Image * {
+          if (!RNA_boolean_get(&itemptr, "use_import")) {
+            return nullptr;
+          }
+          const std::optional<eMaterialPaintChannel> channel =
+              material_paint_channels_assign_images_entry_channel(itemptr);
 
-    if (!channel) {
-      /* "None" with import enabled only brings the image in as an asset. */
-      if (is_new_import) {
-        imported_only++;
-      }
-      else {
-        skipped++;
-      }
-      continue;
-    }
+          bool is_new_import = false;
+          Image *image = material_paint_channels_assign_images_entry_image(
+              C, op, itemptr, is_new_import);
+          if (image == nullptr) {
+            skipped++;
+            return nullptr;
+          }
+          if (is_new_import && catalog) {
+            marked_any |= material_paint_channels_assign_images_mark_asset(
+                C, image, *catalog, channel);
+          }
 
-    BrushMaterialPaintChannel *channel_data = &brush->material_paint->channels[*channel];
-    PointerRNA channel_ptr = RNA_pointer_create_discrete(
-        &brush->id, RNA_BrushMaterialPaintChannel, channel_data);
-    RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image->id));
-    if (RNA_pointer_get(&channel_ptr, "source_image").data != &image->id) {
-      BKE_reportf(op->reports,
-                  RPT_WARNING,
-                  "Could not assign \"%s\" to this material paint channel",
-                  image->id.name + 2);
-      skipped++;
-      continue;
-    }
-    assigned++;
+          if (!channel) {
+            if (is_new_import) {
+              imported_only++;
+            }
+            else {
+              skipped++;
+            }
+            return nullptr;
+          }
+
+          assigned++;
+          return image;
+        });
   }
-  RNA_END;
+  else {
+    /* Brush assignment path (original code). */
+    RNA_BEGIN (op->ptr, itemptr, "images") {
+      if (!RNA_boolean_get(&itemptr, "use_import")) {
+        continue;
+      }
+      const std::optional<eMaterialPaintChannel> channel =
+          material_paint_channels_assign_images_entry_channel(itemptr);
+
+      bool is_new_import = false;
+      Image *image = material_paint_channels_assign_images_entry_image(
+          C, op, itemptr, is_new_import);
+      if (image == nullptr) {
+        skipped++;
+        continue;
+      }
+      if (is_new_import && catalog) {
+        marked_any |= material_paint_channels_assign_images_mark_asset(C, image, *catalog, channel);
+      }
+
+      if (!channel) {
+        /* "None" with import enabled only brings the image in as an asset. */
+        if (is_new_import) {
+          imported_only++;
+        }
+        else {
+          skipped++;
+        }
+        continue;
+      }
+
+      BrushMaterialPaintChannel *channel_data = &brush->material_paint->channels[*channel];
+      PointerRNA channel_ptr = RNA_pointer_create_discrete(
+          &brush->id, RNA_BrushMaterialPaintChannel, channel_data);
+      RNA_pointer_set(&channel_ptr, "source_image", RNA_id_pointer_create(&image->id));
+      if (RNA_pointer_get(&channel_ptr, "source_image").data != &image->id) {
+        BKE_reportf(op->reports,
+                    RPT_WARNING,
+                    "Could not assign \"%s\" to this material paint channel",
+                    image->id.name + 2);
+        skipped++;
+        continue;
+      }
+      assigned++;
+    }
+    RNA_END;
+  }
 
   if (marked_any) {
     ed::asset::refresh_asset_library(C, asset_system::current_file_library_reference());
@@ -1811,8 +1925,14 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
   }
 
   if (assigned > 0) {
-    BKE_brush_tag_unsaved_changes(brush);
-    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+    if (brush != nullptr) {
+      BKE_brush_tag_unsaved_changes(brush);
+      WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+    }
+    if (layer != nullptr) {
+      DEG_id_tag_update(&material->id, ID_RECALC_SHADING);
+      WM_main_add_notifier(NC_MATERIAL | ND_SHADING, material);
+    }
   }
 
   if (skipped > 0) {
@@ -2069,6 +2189,22 @@ void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot)
   RNA_def_property_string_search_func_runtime(prop,
                                               material_paint_channels_assign_images_catalog_search,
                                               PROP_STRING_SEARCH_SUGGESTION);
+
+  prop = RNA_def_string(ot->srna,
+                        "material_name",
+                        nullptr,
+                        MAX_ID_NAME,
+                        "Material Name",
+                        "Name of the material that owns the target layer");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  prop = RNA_def_string(ot->srna,
+                        "layer_marker",
+                        nullptr,
+                        UUID_STRING_SIZE,
+                        "Layer Marker",
+                        "UUID string identifying the target layer");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 /** \} */

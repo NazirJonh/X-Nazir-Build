@@ -655,7 +655,16 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         # A Material row owns no channel records: it lays what its source material shows.
         if layer.source == 'MATERIAL':
             layout.separator()
-            layout.prop(layer, "material", text="Source")
+            # The ID Browser popover: a grid with the Material asset libraries, instead of a plain
+            # search list. A Material row always reads a material, so the built-in unlink and the
+            # user count are left out; the pointer's own poll and setter refuse a cycle.
+            layout.template_ID_browser(
+                layer, "material",
+                text="Source",
+                use_rename=False,
+                use_unlink=False,
+                use_users=False,
+            )
             if layer.material is None:
                 layout.label(text="No source material", icon='ERROR')
             return
@@ -721,6 +730,42 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         col.prop(row, "mapping_wrap", text="UV Wrap")
 
 
+class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
+    """The source material's Surface inputs of the active Material layer, edited in place.
+
+    Drawing the material's own node tree here is what makes the source editable without leaving the
+    tab; the same ``OUTPUT_MATERIAL`` node the shader editor shows is drawn as a property panel.
+    """
+
+    bl_idname = "LAYER_MATERIAL_PT_source_surface"
+    bl_label = "Source Material"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
+        owner, layer = cls._active_layer(context)
+        if owner is None or layer is None or layer.source != 'MATERIAL':
+            return False
+        return cls._shown_mask_item(context, owner, layer) is None and layer.material is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        _, layer = self._active_layer(context)
+        if layer is None or layer.material is None:
+            return
+        source = layer.material
+        if source.library is not None:
+            layout.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+            return
+        if source.node_tree is None:
+            layout.label(text="The source has no nodes", icon='INFO')
+            return
+        panel_node_draw(layout, source.node_tree, 'OUTPUT_MATERIAL', "Surface")
+
+
 class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
     """The bake cache of the active row: when its subtree is rendered into maps the stack reads.
 
@@ -740,7 +785,7 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
         if not super().poll(context):
             return False
         owner, layer = cls._active_layer(context)
-        if owner is None or layer is None or layer.source == 'MATERIAL':
+        if owner is None or layer is None:
             return False
         return cls._shown_mask_item(context, owner, layer) is None
 
@@ -753,7 +798,17 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
             return
 
         layout.prop(layer, "bake_mode", text="Mode")
-        layout.prop(layer, "bake_size", text="Size")
+        layout.prop(layer, "bake_size_preset", text="Size")
+        if layer.source == 'MATERIAL':
+            # The maps of a Material row are rendered from its source: they are what the row shows.
+            if layer.bake_mode == 'NEVER':
+                layout.label(text="Not shown: the row has no live form yet", icon='INFO')
+            else:
+                layout.label(
+                    text="Rendered" if layer.bake_is_valid else "Rendering or out of date",
+                    icon='CHECKMARK' if layer.bake_is_valid else 'TIME',
+                )
+            return
         if layer.bake_mode != 'NEVER':
             layout.label(
                 text="Baked" if layer.bake_is_valid else "Not baked yet",
@@ -950,6 +1005,7 @@ classes = (
     BRUSH_MATERIAL_PT_custom_props,
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_mapping,
+    LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_bake,
     LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_advanced,

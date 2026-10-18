@@ -16,6 +16,8 @@
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
+#include "BKE_lib_id.hh"
+
 #include "paint_layers_kind.hh"
 
 namespace blender {
@@ -272,7 +274,18 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     /* A material row owns no channel records: it lays what its source shows. The source was checked
      * above, so the row never exists without one. */
     created->source = MA_PAINT_LAYER_SOURCE_MATERIAL;
-    BKE_paint_layers_set_material(ma, created, params.source);
+    Material *source = params.source;
+    if (params.bmain != nullptr) {
+      /* The copy is made once the row exists, so a refused Add leaves no orphan behind. */
+      if (Material *copy = id_cast<Material *>(BKE_id_copy(params.bmain, &params.source->id))) {
+        source = copy;
+      }
+    }
+    BKE_paint_layers_set_material(ma, created, source);
+    if (source != params.source) {
+      /* The copy was made with one user, which the row now holds in its place. */
+      id_us_min(&source->id);
+    }
     return created;
   }
   if (params.kind == PaintLayerAddKind::Folder) {

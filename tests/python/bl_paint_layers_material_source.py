@@ -88,6 +88,20 @@ class PaintLayersMaterialSourceTest(unittest.TestCase):
         layer.source = 'IMAGE'
         self.assertEqual(layer.source, 'MATERIAL')
 
+    def test_a_material_layer_is_not_rendered_until_the_editor_does_it(self):
+        owner = make_material("Owner")
+        source = make_material("Source")
+        layer = owner.paint_layers.new(source='MATERIAL', material=source)
+        # No window manager in a background run, so nothing renders: the row owes its maps.
+        self.assertFalse(layer.bake_is_valid)
+        layer.bake_mode = 'NEVER'
+        self.assertEqual(layer.bake_mode, 'NEVER')
+        layer.bake_request()
+        self.assertFalse(layer.bake_is_valid)
+        layer.bake_mode = 'ALWAYS'
+        layer.bake_size = 256
+        self.assertEqual(layer.bake_size, 256)
+
     def test_a_correction_does_not_read_a_material(self):
         owner = make_material("Owner")
         source = make_material("Source")

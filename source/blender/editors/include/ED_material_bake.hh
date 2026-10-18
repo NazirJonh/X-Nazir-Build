@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -33,6 +34,7 @@
 #include "DNA_brush_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
+#include "DNA_uuid_types.h"
 
 struct bContext;
 
@@ -204,6 +206,33 @@ bool material_bake_source_is_baking(const Image &image);
  */
 struct BakeTargetSpec {
   eMaterialPaintChannel channel;
+  /**
+   * A map that already exists and is re-filled instead of a new one being created. The caller
+   * checks that it is a bake of the same material (#BKE_image_material_source_get) and of the
+   * wanted size.
+   */
+  Image *existing = nullptr;
+  /**
+   * The target is the coverage of a layered material's row rather than a channel of its own, so the
+   * owner's channel set (#MaterialBakeToImagesParams::set_material) does not drop it.
+   */
+  bool is_coverage = false;
+};
+
+struct MaterialBakeToImagesResult;
+
+/**
+ * The Material row of a layered material a render is for. The job keeps it and tells
+ * #BKE_paint_layers_material_bake_land how the render ended: landed with every map, or not.
+ */
+struct MaterialBakeRowLink {
+  bool active = false;
+  /** #ID::session_uid of the layered material that owns the row. */
+  uint32_t owner_session_uid = 0;
+  bUUID marker = {};
+  /** The structural and source hashes at the start (#BKE_paint_layers_material_bake_stamp_get). */
+  uint32_t hash[2] = {};
+  uint32_t source_hash[2] = {};
 };
 
 struct MaterialBakeToImagesParams {
@@ -221,6 +250,34 @@ struct MaterialBakeToImagesParams {
   bool reuse_existing = false;
   /** #Image::paint_layer_id to stamp on every created map. Empty -> a fresh UUID is generated. */
   char layer_id[37] = "";
+  /**
+   * The layered material the maps are for: only the channels of its set are rendered (a coverage
+   * target is always). Null renders every requested channel.
+   */
+  Material *set_material = nullptr;
+  /**
+   * A channel that is a plain value gets a one-texel map instead of a full-size one: sampled
+   * anywhere it reads the same, and a constant does not need a float image per channel.
+   */
+  bool compact_constants = false;
+  /**
+   * The Material row this render is for. Its maps are handed over by #before_render, and when the
+   * render ends the row is told whether they landed.
+   */
+  MaterialBakeRowLink row;
+  /**
+   * Called on the main thread once the targets exist and the source has been copied, before the
+   * render starts: where a caller wires the created maps into what shows them. Returning false
+   * cancels the bake.
+   */
+  FunctionRef<bool(const MaterialBakeToImagesResult &)> before_render;
+  /**
+   * What the window manager keys the job on, so a second render with the same key restarts the
+   * first. Null keys it on #material, which suits a bake of one material into maps of its own; the
+   * rows of several layered materials that read one source must not restart each other, so a row
+   * passes itself.
+   */
+  const void *job_owner = nullptr;
 };
 
 struct MaterialBakeToImagesResult {
@@ -270,6 +327,15 @@ void bake_target_image_write_back(Image &image, const ImBuf &rendered);
  * display space first. Exposed for tests alongside #bake_target_image_create.
  */
 void bake_target_image_normalize_colorspace(Image &image, eMaterialPaintChannel channel);
+
+/**
+ * Render the maps every Material row of the layered material \a ma is due for
+ * (#BKE_paint_layers_material_row_due): one job per row, from a copy of its source, into the row's
+ * own maps. The maps are handed to the row before the render starts and the row is told when they
+ * land. A row whose render for the current state is already running is left to it. Called on the
+ * main thread after the depsgraph update, for every layered material of the file.
+ */
+void material_bake_layered_rows_ensure(Main &bmain, Material &ma);
 
 /** \} */
 

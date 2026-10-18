@@ -52,6 +52,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_scene.hh"
 
 #include "BLI_assert.h"
@@ -1289,7 +1290,42 @@ struct MaterialBakeImagesJob {
   /** Node-tree hash the targets carry once this bake lands. */
   uint64_t baked_hash = 0;
   uint32_t material_session_uid = 0;
+  /** The Material row of a layered material the maps are for, told how the render ended. */
+  MaterialBakeRowLink row;
 };
+
+/**
+ * The Material rows with a render in flight, by marker, and the state each started from. A scene
+ * update asks again for a row that is not current yet; while a render of this very state runs the
+ * answer is to wait, or the render would be restarted by every redraw and never end. Main thread
+ * only: the starter and the free callback both run there.
+ */
+struct RowRenderState {
+  uint32_t hash[2] = {};
+  uint32_t source_hash[2] = {};
+
+  bool operator==(const RowRenderState &other) const
+  {
+    return hash[0] == other.hash[0] && hash[1] == other.hash[1] &&
+           source_hash[0] == other.source_hash[0] && source_hash[1] == other.source_hash[1];
+  }
+};
+
+static Map<UUID, RowRenderState> &row_renders_in_flight()
+{
+  static Map<UUID, RowRenderState> map;
+  return map;
+}
+
+static RowRenderState row_render_state(const MaterialBakeRowLink &row)
+{
+  RowRenderState state;
+  state.hash[0] = row.hash[0];
+  state.hash[1] = row.hash[1];
+  state.source_hash[0] = row.source_hash[0];
+  state.source_hash[1] = row.source_hash[1];
+  return state;
+}
 
 static int bake_size_clamp(const int size)
 {
@@ -1635,12 +1671,20 @@ static void material_bake_images_endjob(void *customdata)
   /* The render is of the material as it was copied. An edit since then has already started the
    * bake of the newer state; an undo since then restores both the material and the maps' link to
    * the older one, and nothing would ever start a bake to put the undone pixels right. Either way,
-   * these pixels describe a state the material is no longer in. */
-  if (source_material == nullptr ||
-      material_bake_source_node_tree_hash(*source_material) != job.baked_hash)
+   * these pixels describe a state the material is no longer in.
+   *
+   * A Material row's maps are the exception: it compares the source's content hash it started from
+   * with the source's now (#BKE_paint_layers_material_bake_land), so pixels of an older state are
+   * taken and the row is stale against them, and the next scene update renders it again. Dropping
+   * them here on a hash that moves for reasons of its own (a tree sharing a group) would leave the
+   * row without maps for good. */
+  if (!job.row.active &&
+      (source_material == nullptr ||
+       material_bake_source_node_tree_hash(*source_material) != job.baked_hash))
   {
     return;
   }
+  bool all_landed = true;
   for (const int i : job.channels.index_range()) {
     ImBuf *rendered = job.rendered[i];
     const uint32_t session_uid = job.target_session_uids[i];
@@ -1661,6 +1705,7 @@ static void material_bake_images_endjob(void *customdata)
       /* A channel that failed to render (including a cancelled job, whose buffers stay empty) keeps
        * its old pixels and its old hash, so it stays stale and the next re-bake picks it up
        * again. The buffer, if any, stays with the job and is freed with it. */
+      all_landed = false;
       continue;
     }
     if (!bake_target_image_adopt(*target, job.rendered[i], job.channels[i])) {
@@ -1678,6 +1723,16 @@ static void material_bake_images_endjob(void *customdata)
     material_bake_images_stale_remove(session_uid);
     /* The pending claim is released by #material_bake_images_free, which always follows. */
   }
+  if (job.row.active) {
+    for (Material &owner : bmain->materials) {
+      if (owner.id.session_uid == job.row.owner_session_uid) {
+        BKE_paint_layers_material_bake_land(
+            owner, job.row.marker, job.row.hash, job.row.source_hash, all_landed);
+        WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &owner.id);
+        break;
+      }
+    }
+  }
 }
 
 static void material_bake_images_free(void *customdata)
@@ -1694,6 +1749,13 @@ static void material_bake_images_free(void *customdata)
   }
   for (const uint32_t session_uid : job->target_session_uids) {
     material_bake_images_pending_remove(session_uid);
+  }
+  if (job->row.active) {
+    /* Only the entry of this very render: a newer one for the same row replaced it already. */
+    const RowRenderState *state = row_renders_in_flight().lookup_ptr(UUID(job->row.marker));
+    if (state != nullptr && *state == row_render_state(job->row)) {
+      row_renders_in_flight().remove(UUID(job->row.marker));
+    }
   }
   MEM_delete(job);
 }
@@ -1716,13 +1778,28 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
     return result;
   }
 
-  Vector<eMaterialPaintChannel> to_create;
+  /* Deduplicated per channel for new maps; an explicit target is its own entry. */
+  Vector<const BakeTargetSpec *> to_create;
   for (const BakeTargetSpec &target : params.targets) {
+    /* A channel outside the owning layered material's set is not rendered into a map. A coverage
+     * target is the row's composition factor rather than a channel, so the set never drops it. A
+     * plain Bake to Images has no owner and renders every requested channel. */
+    if (!target.is_coverage && params.set_material != nullptr &&
+        !BKE_paint_layers_channel_in_set(*params.set_material, target.channel))
+    {
+      continue;
+    }
     if (resolve.channels[target.channel] == ChannelResolution::Unavailable) {
       result.skipped_unavailable.append_non_duplicates(target.channel);
       continue;
     }
-    to_create.append_non_duplicates(target.channel);
+    const bool duplicate = std::any_of(
+        to_create.begin(), to_create.end(), [&](const BakeTargetSpec *other) {
+          return other->channel == target.channel && other->existing == target.existing;
+        });
+    if (!duplicate) {
+      to_create.append(&target);
+    }
   }
   if (to_create.is_empty()) {
     return result;
@@ -1739,8 +1816,11 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   Vector<eMaterialPaintChannel> render_channels;
   Vector<uint32_t> render_target_uids;
-  for (const eMaterialPaintChannel channel : to_create) {
-    Image *image = params.reuse_existing ?
+  for (const BakeTargetSpec *target : to_create) {
+    const eMaterialPaintChannel channel = target->channel;
+    const bool constant = resolve.channels[channel] == ChannelResolution::Constant;
+    Image *image = target->existing != nullptr ? target->existing :
+                   params.reuse_existing ?
                        bake_target_image_find(bmain, *params.material, channel) :
                        bake_target_image_create(bmain,
                                                 *params.material,
@@ -1748,9 +1828,8 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                                 size,
                                                 result.layer_id,
                                                 current_hash,
-                                                /*placeholder=*/resolve.channels[channel] !=
-                                                    ChannelResolution::Constant &&
-                                                    !params.blocking);
+                                                /*placeholder=*/(!constant && !params.blocking) ||
+                                                    (constant && params.compact_constants));
     if (image == nullptr) {
       /* Only reachable when re-baking a layer whose target for this channel is gone. */
       continue;
@@ -1779,6 +1858,20 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 
   result.ok = !result.created.is_empty();
   if (render_channels.is_empty()) {
+    if (result.ok && params.before_render && !params.before_render(result)) {
+      result.ok = false;
+    }
+    if (result.ok && params.row.active) {
+      /* Every map was filled above (all values): there is no job to end, so this is where the row
+       * hears that they landed. */
+      for (Material &owner : bmain.materials) {
+        if (owner.id.session_uid == params.row.owner_session_uid) {
+          BKE_paint_layers_material_bake_land(
+              owner, params.row.marker, params.row.hash, params.row.source_hash, true);
+          break;
+        }
+      }
+    }
     return result;
   }
 
@@ -1819,9 +1912,18 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   job->size = size;
   job->baked_hash = current_hash;
   job->material_session_uid = params.material->id.session_uid;
+  job->row = params.row;
 
   for (const uint32_t session_uid : job->target_session_uids) {
     material_bake_images_pending_add(session_uid);
+  }
+
+  /* After the copy, so a hand-over that edits the source material itself cannot leak into the
+   * render; before the job, so no worker thread is touching node trees while it runs. */
+  if (params.before_render && !params.before_render(result)) {
+    material_bake_images_free(job);
+    result.ok = false;
+    return result;
   }
 
   if (params.blocking) {
@@ -1838,7 +1940,9 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
    * renders instead. */
   wmJob *wm_job = WM_jobs_get(wm,
                               win,
-                              params.material,
+                              params.job_owner != nullptr ?
+                                  params.job_owner :
+                                  static_cast<const void *>(params.material),
                               "Baking material to images...",
                               WM_JOB_EXCL_RENDER | WM_JOB_PROGRESS,
                               WM_JOB_TYPE_MATERIAL_IMAGES_BAKE);
@@ -1851,5 +1955,119 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 }
 
 /** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Material Rows
+ * \{ */
+
+/** The side a Material row's maps are rendered at when the row has not been given one. */
+constexpr int MATERIAL_ROW_DEFAULT_SIZE = 1024;
+
+void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
+{
+  wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
+  if (wm == nullptr || !BKE_paint_layers_is_layered(ma)) {
+    return;
+  }
+  wmWindow *win = static_cast<wmWindow *>(wm->windows.first);
+
+  Vector<MaterialPaintLayer *> rows;
+  BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) {
+    if (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      rows.append(&row);
+    }
+    return true;
+  });
+
+  for (MaterialPaintLayer *row : rows) {
+    if (!BKE_paint_layers_material_row_due(ma, *row)) {
+      continue;
+    }
+    /* The side is the row's own choice; a fresh row takes the default. The structural hash covers
+     * it, so it is set before the state the render starts from is read. */
+    const int size = bake_size_clamp(BKE_paint_layers_bake_size_get(*row) > 0 ?
+                                         BKE_paint_layers_bake_size_get(*row) :
+                                         MATERIAL_ROW_DEFAULT_SIZE);
+    if (BKE_paint_layers_bake_size_get(*row) != size) {
+      BKE_paint_layers_bake_size_set(ma, *row, size);
+    }
+    if (row->bake == nullptr) {
+      /* The size could not be stored, so there is nothing to hand the maps to. */
+      continue;
+    }
+    MaterialBakeRowLink link;
+    link.active = true;
+    link.owner_session_uid = ma.id.session_uid;
+    link.marker = row->marker;
+    BKE_paint_layers_material_bake_stamp_get(ma, *row, link.hash, link.source_hash);
+    if (const RowRenderState *running = row_renders_in_flight().lookup_ptr(UUID(row->marker));
+        running != nullptr && *running == row_render_state(link))
+    {
+      continue;
+    }
+
+    /* Reuse the row's own maps so a re-render does not mint a new `.00N` set every time, as long as
+     * they are still renders of this source. A value channel needs no full-size map (and a map of
+     * another size is not reused for a rendered one). */
+    const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(row->material);
+    Vector<BakeTargetSpec> targets;
+    for (const int channel_index : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      const eMaterialPaintChannel channel = eMaterialPaintChannel(channel_index);
+      Image *existing = (channel == PAINT_MATERIAL_CHANNEL_ALPHA) ?
+                            row->bake->coverage :
+                            row->bake->images[channel_index];
+      if (existing != nullptr) {
+        ImageMaterialSource source;
+        int existing_w = 0;
+        int existing_h = 0;
+        BKE_image_get_size(existing, nullptr, &existing_w, &existing_h);
+        const bool constant = resolve.channels[channel] == ChannelResolution::Constant;
+        if (!BKE_image_material_source_get(*existing, source) ||
+            source.material != row->material || source.channel != channel_index ||
+            (!constant && (existing_w != size || existing_h != size)))
+        {
+          existing = nullptr;
+        }
+      }
+      targets.append({channel, existing, channel == PAINT_MATERIAL_CHANNEL_ALPHA});
+    }
+
+    MaterialBakeToImagesParams params;
+    params.material = row->material;
+    /* The row belongs to \a ma: its channel set decides which channels are rendered. */
+    params.set_material = &ma;
+    params.targets = targets;
+    params.size = size;
+    params.blocking = false;
+    params.compact_constants = true;
+    params.job_owner = row;
+    params.row = link;
+    /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
+    const auto hand_over = [&](const MaterialBakeToImagesResult &result) -> bool {
+      Vector<int> channels;
+      Vector<Image *> images;
+      for (const int i : result.created.index_range()) {
+        channels.append(int(result.created_channels[i]));
+        images.append(result.created[i]);
+      }
+      BKE_paint_layers_material_bake_apply(
+          bmain, ma, *row, size, channels.as_span(), images.as_span());
+      return true;
+    };
+    params.before_render = hand_over;
+    const MaterialBakeToImagesResult result = material_bake_to_images(bmain, wm, win, params);
+    if (!result.ok) {
+      /* Nothing could be rendered (no Principled BSDF, no channel the source feeds): the same
+       * state would only fail the same way, so the row waits for something to change. */
+      BKE_paint_layers_material_bake_land(ma, link.marker, link.hash, link.source_hash, false);
+    }
+    else if (BKE_paint_layers_material_row_due(ma, *row)) {
+      row_renders_in_flight().add_overwrite(UUID(link.marker), row_render_state(link));
+    }
+  }
+}
+
+/** \} */
+
 
 }  // namespace blender::ed::material_bake

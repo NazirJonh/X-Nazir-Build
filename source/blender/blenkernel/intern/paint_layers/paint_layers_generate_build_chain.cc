@@ -1737,6 +1737,10 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
    * itself, so it is built like a leaf whatever it is, and none of its corrections or mask. */
   Image *baked_color = nullptr;
   const bool substituted = paint_layer_row_baked_channel(ma_, layer, channel, &baked_color);
+  /* A Material row is laid like a painted row whose map is the one rendered from its source: it
+   * keeps its corrections and its mask, which the bake of a subtree would have held. */
+  const bool material_baked = !substituted &&
+                              paint_layer_row_material_map(ma_, layer, channel, &baked_color);
   /* A folder owns no record: its source is the isolated result of what it holds. */
   const bool folder = BKE_paint_layers_is_folder(layer) && !substituted;
   /* A Paint row with no map and no value alpha takes part only for the corrections laid over it:
@@ -1749,7 +1753,9 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   if (adjustment && isolated) {
     return {};
   }
-  if (record == nullptr && !folder && !empty_base && !adjustment && !substituted) {
+  if (record == nullptr && !folder && !empty_base && !adjustment && !substituted &&
+      !material_baked)
+  {
     return {};
   }
 

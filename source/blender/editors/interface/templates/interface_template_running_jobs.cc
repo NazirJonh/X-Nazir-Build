@@ -14,6 +14,7 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_main.hh"
+#include "BKE_paint_layers.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_string_utf8.h"
@@ -240,6 +241,32 @@ void template_running_jobs(Layout *layout, bContext *C)
         cancel_fn = [owner](bContext &C) {
           WM_jobs_stop_all_from_owner(CTX_wm_manager(&C), owner);
         };
+        break;
+      }
+    }
+  }
+
+  /* A Material row of a layered material is rendered in a job keyed on the row itself (several
+   * layered materials may read one source), which neither lookup above finds. */
+  if (owner == nullptr) {
+    for (Material &material : bmain->materials) {
+      if (!BKE_paint_layers_is_layered(material)) {
+        continue;
+      }
+      BKE_paint_layers_foreach(
+          material, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) {
+            if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
+                WM_jobs_test(wm, &layer, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE))
+            {
+              owner = &layer;
+              icon = ICON_MATERIAL;
+              cancel_fn = [owner](bContext &C) {
+                WM_jobs_stop_all_from_owner(CTX_wm_manager(&C), owner);
+              };
+            }
+            return owner == nullptr;
+          });
+      if (owner != nullptr) {
         break;
       }
     }

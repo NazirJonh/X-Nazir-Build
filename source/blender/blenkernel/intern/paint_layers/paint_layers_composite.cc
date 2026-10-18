@@ -164,6 +164,20 @@ static bool composite_row_source_describe(const Material &ma,
   if (!paint_layer_row_participates(ma, layer, channel)) {
     return false;
   }
+  Image *material_color = nullptr;
+  if (paint_layer_row_material_map(ma, layer, channel, &material_color)) {
+    /* The map rendered from the row's source, and the coverage beside it: the source's transparency
+     * modulates the row's opacity per pixel, as it does in the generated graph. The colour's own
+     * alpha is not a content alpha of the row's, so it does not cover. */
+    out.color_image = material_color;
+    out.color_iuser = nullptr;
+    out.mask_image = layer.bake->coverage;
+    out.mask_iuser = nullptr;
+    out.mask_from_alpha = false;
+    out.mask_influence = 1.0f;
+    out.color_alpha_coverage = false;
+    return true;
+  }
   if (paint_layer_row_empty_base(ma, layer, channel)) {
     /* Only its corrections lay here: its own constant covers nothing, so the row starts from zero
      * coverage and the corrections bring it in. */

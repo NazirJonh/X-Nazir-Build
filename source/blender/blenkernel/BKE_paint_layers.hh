@@ -842,6 +842,91 @@ bool BKE_paint_layers_material_depends_on(const Material &from, const Material &
  */
 bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source);
 
+/* -------------------------------------------------------------------- */
+/** \name Material rows: maps rendered from the source
+ *
+ * A Material row shows maps the editor renders from its source material (one per channel of the
+ * owner's set, and the source's transparency as the row's coverage). They live in the row's bake
+ * (#MaterialPaintLayer::bake), but are not a cache of the row's subtree: the row's opacity, blend,
+ * mask and corrections stay live over them. The row's bake hash is only structural (the source, the
+ * size, the channel set); whether the maps still describe the source is the source's content hash
+ * and the pixel subscription, read on the main thread. While they do not, the old maps keep showing
+ * until the new ones land.
+ * \{ */
+
+/**
+ * The content hash of \a ma's node trees (topology plus every value that changes what they
+ * evaluate to), or zero when it has none. Walks every node, so the main thread asks for the cached
+ * answer below.
+ */
+uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma);
+
+/**
+ * As above, remembered against the cheap node tree update signal so a scene update that changed
+ * nothing of the source does not walk it. Main thread only.
+ */
+uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma);
+
+/** Drop the remembered hash of \a ma, which is being freed. */
+void BKE_paint_layers_source_material_hash_forget(const Material &ma);
+
+/**
+ * Whether the maps of the Material row \a layer no longer describe its source: it has none yet, the
+ * source's content moved since the render started, or a texture the source reads was painted on.
+ * Main thread only.
+ */
+bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether the editor should render the maps of the Material row \a layer now: it reads a material
+ * that has a node tree, is not set to Never, is not hidden, its maps are missing or stale, and the
+ * last render started from this very state did not just fail. Main thread only.
+ */
+bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * The hashes a render of \a layer starts from: the structural one and the source's content hash,
+ * low word first. Handed back to #BKE_paint_layers_material_bake_land when the render ends.
+ */
+void BKE_paint_layers_material_bake_stamp_get(const Material &ma,
+                                              const MaterialPaintLayer &layer,
+                                              uint32_t r_hash[2],
+                                              uint32_t r_source_hash[2]);
+
+/**
+ * Hand the maps of a render about to start to the Material row \a layer: one image per entry of
+ * \a channels (an alpha entry becomes the row's coverage), every other channel's map is let go, a
+ * source without transparency gets a one-texel white coverage. The structural hash is stamped and
+ * the pixel subscription started now, so the generator wires the new maps in while they render and
+ * an edit made during the render is seen after it. The source hash waits for
+ * #BKE_paint_layers_material_bake_land.
+ */
+void BKE_paint_layers_material_bake_apply(Main &bmain,
+                                          Material &ma,
+                                          MaterialPaintLayer &layer,
+                                          int size,
+                                          Span<int> channels,
+                                          Span<Image *> images);
+
+/**
+ * A render for the Material row \a marker ended, started from \a hash / \a source_hash. Landed,
+ * the row takes \a source_hash as what its pixels reflect (unless the row itself changed
+ * meanwhile, and then they are not its own). Not landed (cancelled, failed), the state is
+ * remembered so the same render is not started again by every scene update.
+ *
+ * \return whether the row took the maps.
+ */
+bool BKE_paint_layers_material_bake_land(Material &ma,
+                                         const bUUID &marker,
+                                         const uint32_t hash[2],
+                                         const uint32_t source_hash[2],
+                                         bool landed);
+
+/** Forget that the last render of \a layer failed and mark its maps stale: it is rendered again. */
+void BKE_paint_layers_material_bake_retry(Material &ma, MaterialPaintLayer &layer);
+
+/** \} */
+
 /**
  * The Base Color \a layer shows: the value of its Base-Color channel record, which is where a Fill's
  * colour lives (a Layer row keeps every channel, Base Color included, in records). Zero when the row

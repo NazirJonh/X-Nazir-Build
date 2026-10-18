@@ -10,6 +10,7 @@
  * paint-layer knowledge.
  */
 
+#include "ED_material_bake.hh"
 #include "ED_paint_layers_bake.hh"
 
 #include "BLI_listbase.h"
@@ -95,11 +96,16 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
   const int no_bake_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
   for (Material &ma : bmain.materials) {
     if ((ma.id.tag & no_bake_tags) != 0 || !BKE_paint_layers_is_layered(ma) ||
-        !ID_IS_EDITABLE(&ma.id) || paint_layers_bake_active().contains(ma.id.session_uid))
+        !ID_IS_EDITABLE(&ma.id))
     {
       continue;
     }
-    if (!BKE_paint_layers_bake_heavy_pending(ma)) {
+    /* The rows that read another material are rendered from that material, a job of their own per
+     * row and independent of the heavy planner's one job per layered material. */
+    material_bake_layered_rows_ensure(bmain, ma);
+    if (paint_layers_bake_active().contains(ma.id.session_uid) ||
+        !BKE_paint_layers_bake_heavy_pending(ma))
+    {
       continue;
     }
     PaintLayersBakeJob *bake = BKE_paint_layers_bake_job_create(bmain, ma);

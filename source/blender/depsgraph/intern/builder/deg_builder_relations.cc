@@ -75,6 +75,7 @@
 #include "BKE_nla.hh"
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_pointcache.h"
 #include "BKE_shader_fx.hh"
 #include "BKE_shrinkwrap.hh"
@@ -3249,6 +3250,30 @@ void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
         &material->nodetree->id, NodeType::NTREE_OUTPUT, OperationCode::NTREE_OUTPUT);
     add_relation(ntree_key, material_key, "Material's NTree");
     build_nested_nodetree(&material->id, material->nodetree);
+  }
+
+  /* A Material row's source is normally assigned to no object, so it has no node in the graph;
+   * without one, edits to it never reach the editors. Build the source and make this material's
+   * update wait for its shading, so an edit to the source flushes through the same graph. The
+   * relation is added even when the source was already built by another owner, and it cannot go
+   * through the `owner` branch above: a material has no `SHADING` operation of its own, only
+   * `MATERIAL_UPDATE`. */
+  if (BKE_paint_layers_is_layered(*material)) {
+    BKE_paint_layers_foreach(
+        *material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
+          if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer.material == nullptr ||
+              layer.material == material)
+          {
+            return true;
+          }
+          build_material(layer.material, nullptr);
+          add_relation(
+              ComponentKey(&layer.material->id, NodeType::SHADING),
+              OperationKey(&material->id, NodeType::SHADING, OperationCode::MATERIAL_UPDATE),
+              "Paint Layer Source Material -> Layered Material",
+              RELATION_CHECK_BEFORE_ADD);
+          return true;
+        });
   }
 }
 

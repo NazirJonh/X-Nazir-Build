@@ -691,7 +691,10 @@ enum eMaterialPaintLayerBakeMode : int8_t {
   MA_PAINT_LAYER_BAKE_AUTO = 0,
   /** Always bake, and show the row as stale until the bake is current. */
   MA_PAINT_LAYER_BAKE_ALWAYS = 1,
-  /** Never bake; the row is evaluated live. */
+  /**
+   * Never bake; the row is evaluated live. A Material row has no live form yet, so it shows
+   * nothing in this mode.
+   */
   MA_PAINT_LAYER_BAKE_NEVER = 2,
 };
 
@@ -720,6 +723,12 @@ struct MaterialPaintLayerBake {
   int size = 0;
   /** The description hash at the last successful bake, low word first. */
   uint32_t hash[2] = {};
+  /**
+   * Of a Material row: the content hash of the source material the maps were rendered from, low
+   * word first. The row's #hash is structural and cheap to test anywhere; the source is compared
+   * against this on the main thread, where the source's node trees may be read.
+   */
+  uint32_t source_hash[2] = {};
 };
 
 /**

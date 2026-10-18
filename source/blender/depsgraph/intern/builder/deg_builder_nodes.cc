@@ -78,6 +78,7 @@
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_particle.h"
 #include "BKE_pointcache.h"
 #include "BKE_rigidbody.h"
@@ -2169,6 +2170,22 @@ void DepsgraphNodeBuilder::build_material(Material *material)
   build_parameters(&material->id);
   /* Material's nodetree. */
   build_nodetree(material->nodetree);
+
+  /* A Material row reads another material's shader graph, and that source is normally assigned to
+   * no object, so it would have no node in the graph at all: an edit to it would tag an ID outside
+   * the graph and the editors would never hear of it. Building the source here puts it in the
+   * graph. Recursion and source cycles are stopped by `built_map_`, which is tagged above. */
+  if (BKE_paint_layers_is_layered(*material)) {
+    BKE_paint_layers_foreach(
+        *material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
+          if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr &&
+              layer.material != material)
+          {
+            build_material(layer.material);
+          }
+          return true;
+        });
+  }
 }
 
 void DepsgraphNodeBuilder::build_materials(Material **materials, int num_materials)

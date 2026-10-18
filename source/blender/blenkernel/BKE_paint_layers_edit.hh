@@ -96,6 +96,12 @@ struct PaintLayerAddParams {
   int16_t filter = 0;
   /** The material a #PaintLayerAddKind::Material Add reads. */
   Material *source = nullptr;
+  /**
+   * When set, a #PaintLayerAddKind::Material row reads a local copy of \a source made in this
+   * database rather than \a source itself: each row then has settings of its own, and a linked
+   * source becomes editable. Null makes the row share \a source.
+   */
+  Main *bmain = nullptr;
 };
 
 /**

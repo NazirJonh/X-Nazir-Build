@@ -29,6 +29,21 @@ struct Main;
 struct MaterialPaintLayerBake;
 
 /**
+ * Whether \a layer is a Material row that shows maps rendered from its source in \a channel: the
+ * row has its colour map and the coverage map, the map is not outside the material's channel set,
+ * the mode is not Never and the maps still belong to the row (the structural hash). A map the
+ * source has since moved on from still shows until the new one lands. \a r_color receives the
+ * colour map. Safe on evaluated copies: it reads the row alone.
+ *
+ * The row then takes part in the channel through those maps, as a painted row takes part through
+ * its own: its corrections, mask, opacity and blend stay live over them.
+ */
+bool paint_layer_row_material_map(const Material &ma,
+                                  const MaterialPaintLayer &layer,
+                                  int channel,
+                                  Image **r_color);
+
+/**
  * The record of \a layer's channels array that stands for \a channel, or null when it has none.
  *
  * The participation rules built on this are shared by every reader of the description, so a row
@@ -219,7 +234,8 @@ inline bool paint_layer_row_participates(const Material &ma,
 {
   return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) ||
          paint_layer_effects_lay(ma, layer, channel) ||
-         paint_layer_adjustment_acts(ma, layer, channel);
+         paint_layer_adjustment_acts(ma, layer, channel) ||
+         paint_layer_row_material_map(ma, layer, channel, nullptr);
 }
 
 /**
@@ -233,6 +249,7 @@ inline bool paint_layer_row_empty_base(const Material &ma,
                                        const int channel)
 {
   return !paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) &&
+         !paint_layer_row_material_map(ma, layer, channel, nullptr) &&
          paint_layer_effects_lay(ma, layer, channel);
 }
 

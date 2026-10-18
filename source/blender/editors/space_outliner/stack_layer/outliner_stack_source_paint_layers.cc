@@ -542,7 +542,14 @@ void paint_stack_rows_append(const Material &material,
     }
     else if (adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
       /* Nothing to show or switch to: the brush has no content to work on in this row. A Material
-       * row shows what its source shows and owns no map to paint. */
+       * row shows what its source shows and owns no map to paint. With a mask the row does have
+       * two targets, and the slot back to the content (made below) needs its section. */
+      if (BKE_paint_layers_mask_base(layer) != nullptr) {
+        StackContentSection content;
+        content.identifier = "CHANNELS";
+        content.name = IFACE_("Content");
+        row.content_sections.append(std::move(content));
+      }
     }
     else if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
       /* A Fill is its colour: one swatch with the bucket drawn over it, and no channel-texture
@@ -587,9 +594,10 @@ void paint_stack_rows_append(const Material &material,
     /* The mask: a slot of its own, whose click switches the brush to it, and the section that slot
      * reveals. Its switch rides on the row, so a switched-off mask is kept and listed. */
     if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
-      if (folder) {
-        /* The slot that switches back to the content, ahead of the mask's. The folder icon stays
-         * in front of it, as it does for a folder with no mask. */
+      if (folder || adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        /* The slot that switches back to the content, ahead of the mask's. The row icon stays in
+         * front of it, as it does for a folder with no mask; these rows have no map of their own to
+         * show in a slot, so without this one the brush could not leave the mask. */
         StackRowPreview content_slot;
         content_slot.section_id = "CHANNELS";
         content_slot.icon = ICON_BRUSHES_ALL;
@@ -1235,6 +1243,8 @@ class PaintLayersStackSource final : public StackSource,
                               "A layer that shows what another material shows",
                               ICON_MATERIAL};
     material.source_id_type = ID_MA;
+    /* Picked from the ID Browser popover, with the Material asset libraries. */
+    material.source_browse_prop = "paint_layer_add_material";
     r_kinds.append(material);
   }
 
@@ -1288,6 +1298,8 @@ class PaintLayersStackSource final : public StackSource,
         return -1;
       }
       params.source = id_cast<Material *>(args.source);
+      /* Each Material row reads a material of its own, so its settings are its own. */
+      params.bmain = CTX_data_main(&C);
     }
     params.kind = is_material    ? PaintLayerAddKind::Material :
                   is_mask_filter ? PaintLayerAddKind::MaskFilter :

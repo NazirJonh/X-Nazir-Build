@@ -363,6 +363,15 @@ struct StackAddKindInfo {
    */
   short source_id_type = 0;
   /**
+   * The name of a pointer property of the owner ID that adds the row when a data-block is assigned
+   * to it, or null. A kind that sets it is picked from the ID Browser popover (asset libraries
+   * included) instead of the search dialog: the popover can only assign to a property of an ID, and
+   * an operator has none. The property must take the #source_id_type, read as none, and do the
+   * whole Add in its setter, including the undo push (it is the browser that assigns it, and the
+   * browser pushes none).
+   */
+  const char *source_browse_prop = nullptr;
+  /**
    * A correction laid over another row rather than a row of the stack. The Effects menu lists
    * only these, so every correction is added from one place.
    */

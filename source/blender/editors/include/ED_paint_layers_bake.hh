@@ -24,8 +24,9 @@ namespace blender::ed::material_bake {
 
 /**
  * Start a job for every layered material with a heavy, not-yet-valid baked row and no job of its
- * own already in flight. Called on the main thread after the depsgraph update; a material with
- * nothing heavy pending is skipped without touching the job system.
+ * own already in flight, and the render of every Material row that is due
+ * (#material_bake_layered_rows_ensure). Called on the main thread after the depsgraph update; a
+ * material with nothing pending is skipped without touching the job system.
  */
 void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bmain);
 

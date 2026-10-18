@@ -28,9 +28,11 @@
 
 #include "BLI_listbase.h"
 #include "BLI_threads.h"
+#include "BLI_timer.h"
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_icons.hh"
 #include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
@@ -162,9 +164,29 @@ void ED_render_scene_update(const DEGEditorUpdateContext *update_ctx, const bool
   update_compositor(update_ctx);
 
   /* The regeneration point baked the light paint-layer rows synchronously; anything heavy it left
-   * pending is queued here, on the main thread, right after the depsgraph update. */
-  ed::material_bake::paint_layers_bake_jobs_ensure(
-      *wm, static_cast<wmWindow *>(wm->windows.first), *bmain);
+   * pending is queued from a one-shot timer. Starting the jobs tags the depsgraph, and tags set
+   * from this callback would outlive the update: the next redraw would find the graph not fully
+   * evaluated (asserted by e.g. the icon preview requests of the UI). */
+  static const char timer_id = 0;
+  const uintptr_t timer_uuid = uintptr_t(&timer_id);
+  if (!BLI_timer_is_registered(timer_uuid)) {
+    BLI_timer_register(
+        timer_uuid,
+        [](uintptr_t /*uuid*/, void * /*user_data*/) -> double {
+          /* Read when it fires: a file load may have replaced the database since. */
+          Main *timer_bmain = G_MAIN;
+          if (timer_bmain != nullptr && !timer_bmain->wm.is_empty()) {
+            wmWindowManager *timer_wm = static_cast<wmWindowManager *>(timer_bmain->wm.first);
+            ed::material_bake::paint_layers_bake_jobs_ensure(
+                *timer_wm, static_cast<wmWindow *>(timer_wm->windows.first), *timer_bmain);
+          }
+          return -1.0;
+        },
+        nullptr,
+        nullptr,
+        0.0,
+        false);
+  }
 
   recursive_check = false;
 }

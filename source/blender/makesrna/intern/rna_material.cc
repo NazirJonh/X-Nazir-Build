@@ -197,6 +197,7 @@ static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_it
 #  include "ED_image.hh"
 #  include "ED_node.hh"
 #  include "ED_screen.hh"
+#  include "ED_undo.hh"
 
 #  include "RNA_prototypes.hh"
 
@@ -689,6 +690,8 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
       }
       params.kind = PaintLayerAddKind::Material;
       params.source = source_material;
+      /* Each Material row reads a material of its own, so its settings are its own. */
+      params.bmain = bmain;
       break;
     default:
       params.kind = PaintLayerAddKind::Paint;
@@ -732,6 +735,65 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
   /* BKE only tags DEG; the editors need the WM notifier too. */
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
   return layer;
+}
+
+/* The ID Browser popover assigns a data-block to a pointer property of an ID, and an operator has
+ * none, so "add a Material layer" is the assignment of this write-only property: reading it always
+ * answers none, setting it adds a row that reads the picked material above the active row. */
+static PointerRNA rna_Material_paint_layer_add_material_get(PointerRNA * /*ptr*/)
+{
+  return RNA_id_pointer_create(nullptr);
+}
+
+/* The material picked by the last assignment, consumed by the update callback that follows it.
+ * The row is not added in the setter: RNA's debug check requires a setter whose getter reads none
+ * to leave the user count of the assigned ID untouched, and a new row takes a user. */
+static Material *rna_paint_layer_add_material_pending = nullptr;
+
+static void rna_Material_paint_layer_add_material_set(PointerRNA * /*ptr*/,
+                                                      PointerRNA value,
+                                                      ReportList * /*reports*/)
+{
+  rna_paint_layer_add_material_pending = static_cast<Material *>(value.data);
+}
+
+static bool rna_Material_paint_layer_add_material_poll(PointerRNA *ptr, PointerRNA value)
+{
+  const Material *ma = id_cast<const Material *>(ptr->owner_id);
+  const Material *source = static_cast<const Material *>(value.data);
+  return ma == nullptr || source == nullptr || !BKE_paint_layers_material_depends_on(*source, *ma);
+}
+
+/* Adds the row for the material the setter recorded. The popover assignment pushes no undo step of
+ * its own. */
+static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA *ptr)
+{
+  Material *source = rna_paint_layer_add_material_pending;
+  rna_paint_layer_add_material_pending = nullptr;
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (source == nullptr || ma == nullptr) {
+    return;
+  }
+  ReportList *reports = CTX_wm_reports(C);
+  if (!BKE_paint_layers_is_layered(*ma)) {
+    BKE_report(reports, RPT_ERROR, "The material is not a layered material");
+    return;
+  }
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Material;
+  params.source = source;
+  params.bmain = CTX_data_main(C);
+  params.anchor = BKE_paint_layers_active_layer_get(*ma);
+  MaterialPaintLayer *layer = BKE_paint_layers_add_with_policy(*ma, params);
+  if (layer == nullptr) {
+    BKE_report(reports,
+               RPT_ERROR,
+               "That material cannot be read here: it is this material, or it already reads it");
+    return;
+  }
+  BKE_paint_layers_active_set(*ma, layer->marker);
+  ED_undo_push(C, "Add Material Layer");
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ptr->owner_id);
 }
 
 static void rna_Material_paint_layers_remove(Material *ma,
@@ -1405,6 +1467,34 @@ static void rna_MaterialPaintLayer_bake_size_set(PointerRNA *ptr, int value)
   }
 }
 
+/* The menu form of `bake_size`: a preset size, or zero for "follow the content". A size set from
+ * Python that is not a preset reads as the nearest one; the items are
+ * #rna_enum_material_paint_layer_bake_size_preset_items. */
+static int rna_MaterialPaintLayer_bake_size_preset_get(PointerRNA *ptr)
+{
+  const int size = rna_MaterialPaintLayer_bake_size_get(ptr);
+  if (size <= 0) {
+    return 0;
+  }
+  int best = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  for (const int preset : {PAINT_NEW_CHANNEL_IMAGE_SIZE_256,
+                           PAINT_NEW_CHANNEL_IMAGE_SIZE_512,
+                           PAINT_NEW_CHANNEL_IMAGE_SIZE_1K,
+                           PAINT_NEW_CHANNEL_IMAGE_SIZE_2K,
+                           PAINT_NEW_CHANNEL_IMAGE_SIZE_4K})
+  {
+    if (std::abs(preset - size) < std::abs(best - size)) {
+      best = preset;
+    }
+  }
+  return best;
+}
+
+static void rna_MaterialPaintLayer_bake_size_preset_set(PointerRNA *ptr, int value)
+{
+  rna_MaterialPaintLayer_bake_size_set(ptr, value);
+}
+
 static bool rna_MaterialPaintLayer_bake_is_valid_get(PointerRNA *ptr)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
@@ -1417,6 +1507,10 @@ static void rna_MaterialPaintLayer_bake_request(PointerRNA ptr)
   MaterialPaintLayer *layer = nullptr;
   if (Material *ma = rna_MaterialPaintLayer_owner(ptr, &layer)) {
     BKE_paint_layers_bake_request(*layer);
+    if (layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      /* An explicit request also lifts the hold a failed render put on the row. */
+      BKE_paint_layers_material_bake_retry(*ma, *layer);
+    }
     ma->paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
     WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
   }
@@ -2786,6 +2880,17 @@ static const EnumPropertyItem rna_enum_material_paint_layer_bake_mode_items[] = 
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The menu form of `bake_size`: a preset size, or zero for "follow the content". */
+static const EnumPropertyItem rna_enum_material_paint_layer_bake_size_preset_items[] = {
+    {0, "AUTO", 0, "Auto", "Follow the content of the row"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_256, "SIZE_256", 0, "256 (256 x 256)", "256 x 256"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_512, "SIZE_512", 0, "512 (512 x 512)", "512 x 512"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_1K, "SIZE_1K", 0, "1K (1024 x 1024)", "1024 x 1024"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_2K, "SIZE_2K", 0, "2K (2048 x 2048)", "2048 x 2048"},
+    {PAINT_NEW_CHANNEL_IMAGE_SIZE_4K, "SIZE_4K", 0, "4K (4096 x 4096)", "4096 x 4096"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static void rna_def_material_paint_layer(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3258,6 +3363,16 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "Bake Size", "Square side the row's baked maps are created at; zero follows the content");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
+  prop = RNA_def_property(srna, "bake_size_preset", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_bake_size_preset_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_bake_size_preset_get",
+                              "rna_MaterialPaintLayer_bake_size_preset_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop, "Bake Size", "Square side the row's baked maps are created at, as a preset");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
   prop = RNA_def_property(srna, "bake_is_valid", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_bake_is_valid_get", nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
@@ -3265,7 +3380,9 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "Bake Is Valid", "Whether the stored bake still matches the row's description");
 
   func = RNA_def_function(srna, "bake_request", "rna_MaterialPaintLayer_bake_request");
-  RNA_def_function_ui_description(func, "Mark the row's bake stale so the planner re-bakes it");
+  RNA_def_function_ui_description(func,
+                                  "Mark the row's bake stale so it is rendered again (by the planner, "
+                                  "or by the editor for a Material row)");
   RNA_def_function_flag(func, FUNC_SELF_AS_RNA);
 
   func = RNA_def_function(srna, "bake_clear", "rna_MaterialPaintLayer_bake_clear");
@@ -4541,6 +4658,22 @@ void RNA_def_material(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Layered Material", "The material's stack is a DNA description of its paint layers");
+
+  prop = RNA_def_property(srna, "paint_layer_add_material", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_Material_paint_layer_add_material_get",
+                                 "rna_Material_paint_layer_add_material_set",
+                                 nullptr,
+                                 "rna_Material_paint_layer_add_material_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_HIDDEN);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_NO_COMPARISON);
+  RNA_def_property_ui_text(prop,
+                           "Add Material Layer",
+                           "Write-only: assigning a material adds a layer that reads it above the "
+                           "active layer; reads as none");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_material_update");
 
   prop = RNA_def_property(srna, "paint_layers_image_size", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_image_size");

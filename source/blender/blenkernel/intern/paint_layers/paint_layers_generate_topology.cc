@@ -209,6 +209,14 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     else {
       hash = topology_hash_mix(hash, 0);
     }
+    /* A Material row reads the map rendered from its source: which one is the nodes, and the
+     * coverage beside it. The pixels are not structure. */
+    Image *material_color = nullptr;
+    if (paint_layer_row_material_map(ma, layer, channel, &material_color)) {
+      hash = topology_hash_mix(hash, 0x500);
+      topology_hash_string(hash, material_color->id.name);
+      topology_hash_string(hash, layer.bake->coverage->id.name);
+    }
   }
   /* A content correction is nodes of its own (a map, a Mix and a coverage fold) in each channel it
    * lays a map in, so which ones do, and which map, is structure; its opacity is an input. Its

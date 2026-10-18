@@ -196,6 +196,15 @@ wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent
   if (!kind_known || (!kind_info.takes_color && !needs_source)) {
     return stack_row_add_exec(C, op);
   }
+  if (needs_source && kind_info.source_browse_prop != nullptr) {
+    /* The popover's assignment does the Add: nothing is created until a data-block is picked. */
+    const StackReadContext ctx = outliner_stack_read_context(*C);
+    if (ID *owner = outliner_stack_owner_get(ctx, *space_outliner)) {
+      ui::id_browser_popover_invoke(
+          C, RNA_id_pointer_create(owner), kind_info.source_browse_prop, false);
+      return OPERATOR_FINISHED;
+    }
+  }
   return WM_operator_props_dialog_popup(C, op, 220, std::nullopt, IFACE_("Add"));
 }
 

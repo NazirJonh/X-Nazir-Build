@@ -507,13 +507,26 @@ static void paint_layer_properties_duplicate(MaterialPaintLayer &dst, const Mate
   }
 }
 
-/** The copy reads the material \a src reads: one more user, and the source itself stays shared. */
-static void paint_layer_material_duplicate(MaterialPaintLayer &dst, const MaterialPaintLayer &src)
+/**
+ * The copy of a Material row reads a copy of the material \a src reads, so the two rows keep
+ * settings of their own. A row that has none, or a material that cannot be copied, is read shared.
+ */
+static void paint_layer_material_duplicate(Main &bmain,
+                                           MaterialPaintLayer &dst,
+                                           const MaterialPaintLayer &src)
 {
   dst.material = src.material;
-  if (dst.material != nullptr) {
-    id_us_plus(&dst.material->id);
+  if (dst.material == nullptr) {
+    return;
   }
+  if (src.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    if (Material *copy = id_cast<Material *>(BKE_id_copy(&bmain, &src.material->id))) {
+      /* The copy was made with one user, which the row takes in its place. */
+      dst.material = copy;
+      return;
+    }
+  }
+  id_us_plus(&dst.material->id);
 }
 
 /**
@@ -534,7 +547,7 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   /* The row's UV mapping is part of its state, not of its kind: a pasted fill or fill
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
-  paint_layer_material_duplicate(*item_copy, item);
+  paint_layer_material_duplicate(bmain, *item_copy, item);
   paint_layer_channels_duplicate(bmain, *item_copy, item);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
@@ -559,7 +572,7 @@ static void paint_layer_branch_duplicate(Main &bmain,
   memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
   /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
   dst.mapping = dna::shallow_copy(src.mapping);
-  paint_layer_material_duplicate(dst, src);
+  paint_layer_material_duplicate(bmain, dst, src);
   paint_layer_channels_duplicate(bmain, dst, src);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);

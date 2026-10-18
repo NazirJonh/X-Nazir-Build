@@ -286,6 +286,7 @@ paint_intern.hh
   mesh/paint_material_attribute.hh
   mesh/paint_material_blend.hh
   mesh/paint_material_source.hh
+  mesh/paint_material_stroke_accum.hh
   mesh/paint_image_shape_composite.hh
   mesh/paint_image_uv_geom.hh
   mesh/paint_image_uv_symmetry.hh

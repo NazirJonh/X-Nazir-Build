@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
@@ -128,6 +129,28 @@ struct DirectSampleLayout {
 };
 
 /**
+ * The one channel whose source texture may drive a Mask stroke, or nullopt when the Mask value is
+ * a flat scalar (#BKE_paint_material_mask_value_get).
+ *
+ * Alpha applies only while #BKE_paint_material_mask_alpha_active (the channel is on, or the brush
+ * is the default Mask brush), matching the constant's own fallback to coverage; Base Color has no
+ * on/off of its own. Both engines pick the channel here, so Sculpt and Image 2D
+ * cannot disagree. A Base Color pick is reduced to #BKE_paint_material_mask_luminance by the
+ * caller after the sample is decoded to scene-linear.
+ */
+std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterialPaint &brush_paint);
+
+/**
+ * Final value of a sampled scalar \a channel: clamped to \a range, and mirrored inside it first
+ * when \a channel is Alpha with #BrushMaterialPaintChannel.source_invert set. The single place the
+ * Alpha texture inversion happens, shared by every Sculpt and Image 2D scalar read.
+ */
+float scalar_source_finish(const BrushMaterialPaint &brush_paint,
+                           eMaterialPaintChannel channel,
+                           const float2 &range,
+                           float sampled);
+
+/**
  * Which #MTex each material paint channel samples from, and whether it is usable.
  *
  * Resolved once per stroke and read-only afterwards. Owns the #ImagePool used to probe image
@@ -203,9 +226,16 @@ class ChannelSourceSet {
   bool active_ = false;
 
  public:
+  /**
+   * \param resolve_mask_source: Only meaningful while #PaintModeSettings::layer_target_mode is
+   * #PAINT_LAYER_TARGET_MASK. Resolves exactly the one channel #mask_source_channel_get names, so
+   * a Mask stroke can sample its value per pixel. Without it a Mask stroke resolves nothing and
+   * #is_active stays false, which is what every other consumer of a Mask target relies on.
+   */
   ChannelSourceSet(const BrushMaterialPaint &brush_paint,
                    const PaintModeSettings &settings,
-                   int visible_material_channels);
+                   int visible_material_channels,
+                   bool resolve_mask_source = false);
   ~ChannelSourceSet();
 
   bool is_active() const;
@@ -269,7 +299,8 @@ class ChannelSourceSampler {
                        const Brush &brush,
                        const BrushMaterialPaint &brush_paint,
                        const PaintModeSettings &settings,
-                       int visible_material_channels);
+                       int visible_material_channels,
+                       bool resolve_mask_source = false);
   ~ChannelSourceSampler() = default;
 
   /** Whether any enabled channel has a usable source, so callers can skip the sampling path. */

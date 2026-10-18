@@ -1940,6 +1940,30 @@ static void rna_BrushMaterialPaint_alpha_mode_update(Main *bmain, Scene *scene, 
   rna_BrushMaterialPaint_update(bmain, scene, ptr);
 }
 
+static bool rna_BrushMaterialPaint_is_mask_default_get(PointerRNA *ptr)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<const BrushMaterialPaint *>(ptr->data);
+  return (brush_paint->mask_flag & BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH) != 0;
+}
+
+/** The stroke-side answer the PBR Paint panel's #material_paint_writable_channels mirrors
+ * (properties_paint_common.py), exposed per channel: whether this brush's configuration writes
+ * \a channel to a Material image canvas for a stroke with \a paint_mode and the visible
+ * channels of \a paint. */
+static bool rna_BrushMaterialPaint_writes_to_target(BrushMaterialPaint *brush_paint,
+                                                    Paint *paint,
+                                                    PaintModeSettings *paint_mode,
+                                                    int channel)
+{
+  if (paint == nullptr || paint_mode == nullptr) {
+    return false;
+  }
+  return BKE_paint_material_channel_writes_to_target(*brush_paint,
+                                                     *paint_mode,
+                                                     paint->visible_material_channels,
+                                                     eMaterialPaintChannel(channel));
+}
+
 static void rna_BrushMaterialPaint_channels_begin(CollectionPropertyIterator *iter,
                                                   PointerRNA *ptr)
 {
@@ -3997,6 +4021,8 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
 {
   StructRNA *srna;
   PropertyRNA *prop;
+  FunctionRNA *func;
+  PropertyRNA *parm;
 
   static const EnumPropertyItem prop_blend_items[] = {
       {IMB_BLEND_MIX, "MIX", 0, "Mix", "Use Mix blending mode while painting"},
@@ -4224,6 +4250,27 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Value", "Paint value (scalar channels use X; Normal uses XYZ tangent)");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  /* Only the Alpha channel's entry is read, and only in Mask mode: the second value of the Alpha
+   * pair (see #BKE_paint_material_mask_value_get). */
+  prop = RNA_def_property(srna, "value_secondary", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "value_secondary");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop,
+                           "Secondary Value",
+                           "Second paint value of the Alpha channel, used by the Mask brush "
+                           "for secondary (inverted) strokes");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  /* Inverts the texture itself, so it applies wherever the Alpha texture is sampled. */
+  prop = RNA_def_property(srna, "use_source_invert", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "source_invert", 1);
+  RNA_def_property_ui_text(prop,
+                           "Invert Source",
+                           "Invert the sampled source texture value (only used by the Alpha "
+                           "channel's entry in BrushMaterialPaint.channels)");
+  RNA_def_property_update(prop, NC_TEXTURE, "rna_BrushMaterialPaint_update");
 
   prop = RNA_def_property(srna, "normal_color", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_array(prop, 3);
@@ -4496,6 +4543,59 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "Stroke parameter preset (falloff and antialiasing) applied when the mode is picked; "
       "user tweaks made afterwards are kept");
   RNA_def_property_update(prop, 0, "rna_Brush_material_paint_erase_mode_update");
+
+  static const EnumPropertyItem prop_mask_source_items[] = {
+      {BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA,
+       "ALPHA",
+       0,
+       "Alpha",
+       "Use the brush's Alpha channel; falls back to Coverage while Alpha is off"},
+      {BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR,
+       "BASE_COLOR",
+       0,
+       "Base Color",
+       "Use the luminance of the brush's Base Color"},
+      {BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE,
+       "COVERAGE",
+       0,
+       "Coverage",
+       "Use the grey level of the brush's primary color, or secondary when inverted"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "mask_source", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "mask_source");
+  RNA_def_property_enum_items(prop, prop_mask_source_items);
+  RNA_def_property_ui_text(
+      prop, "Mask Source", "Channel that sets the mask value while painting in Mask mode");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
+  prop = RNA_def_property(srna, "is_mask_default", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_BrushMaterialPaint_is_mask_default_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Default Mask Brush", "Whether this is the default brush used for the Mask");
+
+  /* A bool per channel rather than a bitmask, so which channels are asked about (the UI order,
+   * without Custom and Height) stays the Python side's own vocabulary. */
+  func = RNA_def_function(srna, "writes_to_target", "rna_BrushMaterialPaint_writes_to_target");
+  RNA_def_function_ui_description(
+      func, "Whether this brush writes the channel to a Material image canvas this stroke");
+  parm = RNA_def_pointer(
+      func, "paint", "Paint", "", "The paint-mode settings whose visible channels apply");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_pointer(
+      func, "paint_mode", "PaintModeSettings", "", "The paint mode settings a stroke would use");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED);
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                      "Channel",
+                      "The channel to ask about");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_boolean(func, "result", false, "", "");
+  RNA_def_function_return(func, parm);
 }
 
 static void rna_def_brush_clone_stamp_mesh_settings(BlenderRNA *brna)

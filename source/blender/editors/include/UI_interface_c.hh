@@ -428,6 +428,11 @@ enum {
    * buttons currently.
    */
   BUT2_FORCE_SEMI_MODAL_ACTIVE = 1 << 1,
+  /**
+   * A popover button drawn as the gradient color of the float property it carries, see
+   * #template_material_paint_value_swatch.
+   */
+  BUT2_VALUE_SWATCH = 1 << 2,
 };
 
 /** #Button.dragflag */
@@ -3269,6 +3274,17 @@ void template_material_paint_value_slider(Layout *layout,
                                           PointerRNA *ptr,
                                           StringRefNull propname,
                                           int index);
+/**
+ * Swatch showing the gradient color of float property  propname at  index, opening the
+ * popover panel  panel_type on click (where the value is edited, e.g. with
+ * #template_material_paint_value_slider).
+ */
+void template_material_paint_value_swatch(Layout *layout,
+                                          bContext *C,
+                                          PointerRNA *ptr,
+                                          StringRefNull propname,
+                                          int index,
+                                          StringRefNull panel_type);
 /**
  * \param icon_scale: Scale of the icon, 1x == button height.
  */

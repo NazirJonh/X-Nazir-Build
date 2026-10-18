@@ -24,6 +24,8 @@ from bl_ui.properties_paint_common import (
     brush_color_eyedropper_draw,
     draw_material_paint_channels,
     material_paint_has_any_map,
+    draw_material_mask_brush_reset,
+    draw_mask_alpha_swatches,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -415,6 +417,7 @@ class _draw_tool_settings_context_mode:
         brush = paint.brush
 
         BrushAssetShelf.draw_popup_selector(layout, context, brush)
+        draw_material_mask_brush_reset(layout, context)
 
         if brush is None:
             return False
@@ -451,13 +454,14 @@ class _draw_tool_settings_context_mode:
             draw_image_paint_fill_expand(layout, context, brush)
 
         if capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL':
-            material_paint = brush.material_paint
-            row = layout.row(align=True)
-            row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
-            row.ui_units_x = 4
-            UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
-            UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
-            row.separator()
+            if not draw_mask_alpha_swatches(layout, context, brush):
+                material_paint = brush.material_paint
+                row = layout.row(align=True)
+                row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
+                row.ui_units_x = 4
+                UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
+                UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
+                row.separator()
             blend_row = layout.row()
             blend_row.active = context.tool_settings.paint_mode.canvas_source not in {
                 'MATERIAL', 'MATERIAL_PAINT',

@@ -197,6 +197,27 @@ enum eBrushMaterialPaintSourceMode : int8_t {
   BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL = 1,
 };
 
+/**
+ * Which channel drives the scalar value written into the mask while painting in Mask mode
+ * (#PAINT_LAYER_TARGET_MASK). Only read when the brush is the Mask brush.
+ */
+enum eBrushMaterialPaintMaskSource : int8_t {
+  /** The brush's Alpha channel; falls back to #BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE when off. */
+  BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA = 0,
+  /** Rec.709 luminance of the brush's Base Color, in linear space. */
+  BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR = 1,
+  /**
+   * Grey level of the brush's primary (or secondary when inverted) color: the plain mean of its
+   * RGB, the way a color stroke has always been written into a mask. Not the luminance used for
+   * #BRUSH_MATERIAL_PAINT_MASK_SOURCE_BASE_COLOR, which weighs the channels by perceived brightness.
+   */
+  BRUSH_MATERIAL_PAINT_MASK_SOURCE_COVERAGE = 2,
+};
+
+/** #BrushMaterialPaint.mask_flag bit: the brush is the Mask brush created by the default Mask
+ * setup, not any brush the user picked. */
+#define BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH (1 << 0)
+
 /** How a source material's channels are laid out onto the paint target. */
 enum eBrushMaterialPaintSourceLayout : int8_t {
   /** Through the shared brush mapping, like the Maps slots. */
@@ -236,8 +257,19 @@ struct BrushMaterialPaintChannel {
   char source_select_mode = 0;
   /** UI-only: collapses the inline preview grid shown when #source_select_mode is Grid. */
   char show_source_grid = 1;
-  /* #source_mtex is 8-byte aligned; pad up to its offset rather than to the next word. */
-  char _pad[6] = {};
+  /**
+   * Inverts the sampled #source_mtex value (`1 - v` over the channel range). Only read for the
+   * Alpha channel: the inversion is a property of the texture, so it applies wherever Alpha is
+   * sampled, not only for a Mask stroke.
+   */
+  char source_invert = 0;
+  char _pad1 = 0;
+  /**
+   * Second paint value of the Alpha channel. Only read in Mask mode, where Alpha primary is
+   * \a value[0] and this is the one used for an inverted (secondary) stroke.
+   */
+  float value_secondary = 0.0f;
+  /* #source_mtex is 8-byte aligned; the fields above end exactly at its offset (24). */
 
   /**
    * Source texture sampled instead of `value` / base color. Inactive when `tex` is null.
@@ -280,9 +312,13 @@ struct BrushMaterialPaint {
   char source_mode = 0;
   /** #eBrushMaterialPaintSourceLayout. */
   char source_layout = 0;
-  /* #source_material is pointer-aligned: 4 (size_random) + 2 (modes) + this padding keep the
-   * int + pointer pair below on their natural boundaries without hidden compiler padding. */
-  char _pad2[6] = {};
+  /** #eBrushMaterialPaintMaskSource. Only read when the brush paints the Mask. */
+  char mask_source = 0;
+  /** Bit flags, see #BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH. */
+  char mask_flag = 0;
+  /* #source_material is pointer-aligned: 4 (size_random) + 2 (modes) + 2 (mask) + this padding keep
+   * the int + pointer pair below on their natural boundaries without hidden compiler padding. */
+  char _pad2[4] = {};
   /**
    * Side of the square bake buffer in pixels. Deliberately smaller than
    * #PaintModeSettings.new_channel_image_size: this is a scratch buffer several channels of which

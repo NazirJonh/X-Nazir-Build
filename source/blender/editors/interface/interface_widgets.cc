@@ -29,6 +29,7 @@
 #include "BLI_utildefines.h"
 
 #include "BKE_context.hh"
+#include "BKE_paint.hh"
 
 #include "RNA_access.hh"
 
@@ -116,6 +117,7 @@ enum class WidgetStyle {
   IconLabel,
   PreviewTile,
   Swatch,
+  ValueSwatch,
   RGBPicker,
   Unitvec,
   Box,
@@ -4752,6 +4754,40 @@ static void widget_swatch(Button *but,
   }
 }
 
+/**
+ * Swatch for a scalar material-paint value, filled with the color its gradient slider shows at
+ * that value, so the swatch reads the same as the slider in its popover.
+ */
+static void widget_value_swatch(Button *but,
+                                uiWidgetColors *wcol,
+                                rcti *rect,
+                                const WidgetStateInfo *state,
+                                int roundboxalign,
+                                const float zoom)
+{
+  float value_min = 0.0f;
+  float value_max = 1.0f;
+  float step, precision;
+  RNA_property_float_ui_range(
+      &but->rnapoin, but->rnaprop, &value_min, &value_max, &step, &precision);
+  const float value = RNA_property_array_check(but->rnaprop) ?
+                          RNA_property_float_get_index(
+                              &but->rnapoin, but->rnaprop, but->rnaindex) :
+                          RNA_property_float_get(&but->rnapoin, but->rnaprop);
+  const float range = value_max - value_min;
+  const float t = (range > 0.0f) ? clamp_f((value - value_min) / range, 0.0f, 1.0f) : 0.0f;
+
+  float col[4];
+  BKE_paint_material_value_gradient_color(value_min, value_max, t, col);
+  col[3] = widget_alpha_factor(state);
+
+  WidgetBase wtb;
+  widget_init(&wtb);
+  const float rad = widget_radius_from_zoom(zoom, wcol);
+  round_box_edges(&wtb, roundboxalign, rect, rad);
+  widgetbase_draw_color(&wtb, wcol, col, false);
+}
+
 static void widget_unitvec(Button *but,
                            uiWidgetColors *wcol,
                            rcti *rect,
@@ -5848,6 +5884,10 @@ static WidgetType *widget_type(WidgetStyle type)
       wt.custom = widget_swatch;
       break;
 
+    case WidgetStyle::ValueSwatch:
+      wt.custom = widget_value_swatch;
+      break;
+
     case WidgetStyle::Box:
       wt.custom = widget_box;
       wt.wcol_theme = &btheme->tui.wcol_box;
@@ -5976,6 +6016,9 @@ static int widget_roundbox_set(Button *but, rcti *rect)
  */
 static WidgetType *popover_widget_type(Button *but, rcti *rect)
 {
+  if (but->flag2 & BUT2_VALUE_SWATCH) {
+    return widget_type(WidgetStyle::ValueSwatch);
+  }
   /* Besides the explicit #BUT_NO_MENU_TRIA opt-out, just check size:
    * add up/down arrows if there is room. */
   if ((but->drawflag & BUT_NO_MENU_TRIA) ||

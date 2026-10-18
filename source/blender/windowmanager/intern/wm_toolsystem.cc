@@ -363,7 +363,15 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
 
   /* Do after switching tool, since switching tool will attempt to restore the last used brush of
    * that tool (in #toolsystem_brush_activate_from_toolref_for_object_paint()). */
-  if (!BKE_paint_brush_set_synced(*CTX_data_scene(C), *paint, brush)) {
+  Scene *scene = CTX_data_scene(C);
+  if (scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK &&
+      ELEM(paint_mode, PaintMode::Sculpt, PaintMode::Texture2D))
+  {
+    /* In Mask the brush is remembered as the Mask brush; the content bindings and the pair sync
+     * are left alone. */
+    return BKE_paint_material_mask_brush_set(*scene, *paint, brush);
+  }
+  if (!BKE_paint_brush_set_synced(*scene, *paint, brush)) {
     return false;
   }
 
@@ -393,6 +401,10 @@ bool WM_toolsystem_activate_brush_and_tool(bContext *C, Paint *paint, Brush *bru
 void WM_toolsystem_brush_bindings_update_from_active(bContext *C, Paint *paint)
 {
   if (paint == nullptr || paint->brush == nullptr || paint->brush_asset_reference == nullptr) {
+    return;
+  }
+  /* The Mask brush is not a content brush, so it must not be written into the bindings. */
+  if (CTX_data_scene(C)->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
     return;
   }
   const bToolRef *active_tool = toolsystem_active_tool_from_context_or_view3d(C);
@@ -460,6 +472,42 @@ std::optional<AssetWeakReference> WM_toolsystem_last_brush_asset_from_brush_type
   return BKE_paint_brush_type_default_reference(paint->runtime->paint_mode, std::nullopt);
 }
 
+/**
+ * Activate the Mask brush for the tool \a tref while the paint target is the mask.
+ *
+ * The content bindings are never read here, so a content brush can't become the Mask brush. The
+ * remembered Mask brush is kept while it fits the tool; otherwise the default Mask brush is used.
+ */
+static void toolsystem_mask_brush_activate_for_tool(Main *bmain,
+                                                    Scene *scene,
+                                                    Paint *paint,
+                                                    const bToolRef *tref,
+                                                    const PaintMode paint_mode)
+{
+  const bToolRef_Runtime *tref_rt = tref->runtime;
+
+  /* The Erase tools change the Mask to the shared material Erase brush, as they do for content. */
+  if (toolsystem_is_texture_erase_tool(tref) ||
+      (paint_mode == PaintMode::Sculpt && tref_rt->brush_type == SCULPT_BRUSH_TYPE_ERASE))
+  {
+    Brush *erase_brush = BKE_brush_material_erase_ensure(*bmain, *scene, *paint);
+    /* Not remembered: a tool substitutes a brush, the user did not choose it for the Mask. */
+    BKE_paint_material_mask_brush_set(*scene, *paint, erase_brush, false);
+    return;
+  }
+
+  Brush *mask_brush = scene->toolsettings->paint_mode.mask_active_brush;
+  const bool fits_tool = mask_brush != nullptr && BKE_paint_can_use_brush(paint, mask_brush) &&
+                         (tref_rt->brush_type == -1 ||
+                          BKE_paint_get_brush_type_from_paintmode(mask_brush, paint_mode) ==
+                              tref_rt->brush_type);
+  if (!fits_tool) {
+    mask_brush = BKE_brush_material_mask_ensure(*bmain, *scene, *paint);
+  }
+  /* The remembered brush is left as it is, so returning to a tool it fits restores it. */
+  BKE_paint_material_mask_brush_set(*scene, *paint, mask_brush, false);
+}
+
 static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
                                                                     const WorkSpace *workspace,
                                                                     const bToolRef *tref)
@@ -477,6 +525,18 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
     Scene *scene = WM_window_get_active_scene(&win);
     BKE_paint_ensure_from_paintmode(scene, paint_mode);
     Paint *paint = BKE_paint_get_active_from_paintmode(scene, paint_mode);
+
+    /* While the mask is the paint target, the tool only changes the Mask brush. The content brush
+     * and its bindings, and the pair sync, must not see the Mask brush. */
+    if (scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+      if (ELEM(paint_mode, PaintMode::Sculpt, PaintMode::Texture2D)) {
+        toolsystem_mask_brush_activate_for_tool(bmain, scene, paint, tref, paint_mode);
+      }
+      /* Other modes (Texture Paint 3D) do not paint a mask. They are skipped rather than falling
+       * through, because Texture 3D shares #ToolSettings::imapaint with Image 2D and the content
+       * restore below would replace the Mask brush there. */
+      continue;
+    }
 
     const bool skip_image_restore_for_sync = BKE_paint_material_sync_suppresses_brush_restore(
         scene, paint);

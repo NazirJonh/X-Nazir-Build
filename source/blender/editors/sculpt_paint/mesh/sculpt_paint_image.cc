@@ -952,8 +952,16 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
                                const ed::sculpt_paint::StrokeCache &cache,
                                const float4 &brush_color_default)
 {
-  if (target.is_mask_target && cache.material_erase && target.mask_erase_fill) {
-    return *target.mask_erase_fill;
+  if (target.is_mask_target) {
+    if (cache.material_erase && target.mask_erase_fill) {
+      return *target.mask_erase_fill;
+    }
+    /* A mask map is opaque grey: the stroke paints the value the brush's mask source selects.
+     * A fixed white would change nothing on a white Multiply map. */
+    BLI_assert(brush.material_paint != nullptr);
+    const float grey = BKE_paint_material_mask_value_get(
+        *brush.material_paint, sd.paint, brush, cache.material_invert);
+    return float4(grey, grey, grey, 1.0f);
   }
   if (target.is_color_channel) {
     return float4(BKE_paint_material_channel_stroke_color_get(*brush.material_paint,
@@ -1141,6 +1149,7 @@ static Array<RowFactorCache> compute_paint_row_factors(
     const FaceSelectionPaintFilter &face_selection_filter,
     const ed::sculpt_paint::material::ChannelSourceSampler *active_sampler,
     const bool alpha_masking_active,
+    const std::optional<eMaterialPaintChannel> mask_coverage_channel,
     const ImageData &layout_image_data,
     const bool needs_baked_target_uv,
     const PaintLayersMaskSampler *mask_sampler,
@@ -1259,6 +1268,24 @@ static Array<RowFactorCache> compute_paint_row_factors(
               const int row_y = int(pixel_row.start_image_coordinate.y);
               for (const int i : range.index_range()) {
                 factors[i] *= mask_sampler->sample(tile_data.tile_number, row_x + i, row_y);
+              }
+            }
+
+            if (mask_coverage_channel && active_sampler != nullptr) {
+              /* A Mask source texture is the stroke's coverage, not its value: the value written
+               * stays the brush's, so black texels leave the mask as it was instead of
+               * overwriting it. */
+              const Span<material::TexelSampleContext> contexts =
+                  tile_cache.row_contexts[row_i].as_span().slice(range);
+              const int thread_id = BLI_task_parallel_thread_id(nullptr);
+              const bool is_color = *mask_coverage_channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+              for (const int i : range.index_range()) {
+                const float coverage =
+                    is_color ? BKE_paint_material_mask_luminance(active_sampler->color(
+                                   *mask_coverage_channel, contexts[i], thread_id)) :
+                               active_sampler->scalar(
+                                   *mask_coverage_channel, contexts[i], thread_id);
+                factors[i] *= math::clamp(coverage, 0.0f, 1.0f);
               }
             }
 
@@ -2190,8 +2217,11 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
 
-  const bool alpha_masking_active = !cache.material_invert && !cache.material_erase &&
-                                    active_sampler != nullptr &&
+  /* Alpha is the Mask value's source in Mask mode, never a mask over it: its sampler entry is
+   * read per target below. */
+  const bool mask_mode = paint_mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK;
+  const bool alpha_masking_active = !mask_mode && !cache.material_invert &&
+                                    !cache.material_erase && active_sampler != nullptr &&
                                     brush->material_paint != nullptr &&
                                      BKE_paint_material_channel_masks_stroke(
                                          *brush->material_paint,
@@ -2259,8 +2289,15 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       return cache.material_raster_accum.get();
     };
     MaterialStrokeAccum *stroke_accum = accum_for(material_blend, blend_mode);
-    if (target.is_mask_target && cache.material_erase && target.mask_erase_fill) {
-      brush_color_storage = *target.mask_erase_fill;
+    if (target.is_mask_target) {
+      /* Same value as #paint_brush_color: the per-dab pick lives here for the leading target,
+       * while grouped candidates resolve through that helper. */
+      BLI_assert(brush->material_paint != nullptr);
+      const float mask_grey = BKE_paint_material_mask_value_get(
+          *brush->material_paint, sd.paint, *brush, cache.material_invert);
+      brush_color_storage = (cache.material_erase && target.mask_erase_fill) ?
+                                *target.mask_erase_fill :
+                                float4(mask_grey, mask_grey, mask_grey, 1.0f);
       brush_color_ptr = &brush_color_storage;
     }
     else if (target.is_color_channel) {
@@ -2328,7 +2365,10 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     /* Normal needs the tangent-basis path and Alpha acts as a stroke mask rather than as ordinary
      * channel payload; neither can share the plain multi-destination pass. */
     const auto is_pairable_channel = [](const ImagePaintTarget &candidate) {
-      return !candidate.is_normal_channel && candidate.channel != PAINT_MATERIAL_CHANNEL_ALPHA;
+      /* #ImagePaintTarget::channel is meaningless for a mask, and its source channel is resolved
+       * per target below, so a mask never shares a pass. */
+      return !candidate.is_mask_target && !candidate.is_normal_channel &&
+             candidate.channel != PAINT_MATERIAL_CHANNEL_ALPHA;
     };
     /* Same sampler representation (#ChannelSourceSampler::color vs ::scalar) and the same value
      * range. `is_color_channel` alone only covers the first half: a future scalar channel with a
@@ -2391,6 +2431,25 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
     }
     const bool group_write = dests.size() >= 2;
 
+    /* A mask target has no channel of its own: when the brush's mask source has a usable texture
+     * that one channel (a Base Color sample reduced to its luminance) scales the stroke's
+     * coverage in #compute_paint_row_factors, and the value written stays the flat #brush_color.
+     * Sampling it as the value would make every dab overwrite what earlier strokes painted. */
+    const ed::sculpt_paint::material::ChannelSourceSampler *target_sampler = active_sampler;
+    std::optional<eMaterialPaintChannel> mask_coverage_channel;
+    if (target.is_mask_target) {
+      std::optional<eMaterialPaintChannel> mask_channel;
+      if (active_sampler != nullptr && brush->material_paint != nullptr) {
+        mask_channel = ed::sculpt_paint::material::mask_source_channel_get(
+            *brush->material_paint);
+      }
+      if (mask_channel && active_sampler != nullptr &&
+          active_sampler->has_usable_source(*mask_channel))
+      {
+        mask_coverage_channel = *mask_channel;
+      }
+      target_sampler = nullptr;
+    }
 
     /* Destinations are prepared here, before the threaded paint pass. #fetch_image_buffers
      * inserts into #ImageData::buffers and #ImageData::processors, so doing it from inside the
@@ -2426,6 +2485,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                                 face_selection_filter,
                                                                 active_sampler,
                                                                 alpha_masking_active,
+                                                                mask_coverage_channel,
                                                                 image_data,
                                                                 active_sampler != nullptr &&
                                                                     active_sampler
@@ -2457,7 +2517,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                   stroke_accum,
                                   pixel_nodes[i],
                                   node_factor_caches[pos],
-                                  active_sampler,
+                                  target_sampler,
                                   target.channel,
                                   target.is_color_channel,
                                   target.is_normal_channel,

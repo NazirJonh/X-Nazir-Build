@@ -2286,6 +2286,19 @@ struct PaintModeSettings {
    */
   int8_t layer_object_mask_edit = 0;
   char _pad_stack_layer[2] = {};
+
+  /**
+   * The brush last used while painting a mask, remembered globally (not per material/object) so
+   * returning to mask editing keeps using it. Null before the first time a mask is edited, in
+   * which case a default is picked and assigned here.
+   */
+  Brush *mask_active_brush = nullptr;
+
+  /**
+   * The brush that was active right before switching to mask editing; restored on the way back
+   * and then cleared. Null when not currently editing a mask.
+   */
+  Brush *mask_saved_brush = nullptr;
 };
 
 /** #PaintModeSettings::new_channel_image_size */

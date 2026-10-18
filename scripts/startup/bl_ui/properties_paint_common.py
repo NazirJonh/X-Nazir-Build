@@ -250,6 +250,13 @@ class BrushAssetShelf:
         )
 
 
+def draw_material_mask_brush_reset(layout, context):
+    """Offer a way back to the default Mask brush, only while the Mask is the paint target."""
+    if context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+        return
+    layout.operator("paint.material_mask_brush_reset", text="", icon='FILE_REFRESH')
+
+
 def brush_asset_shelf_filter_draw(panel, context):
     if context.asset_shelf.bl_idname != BrushAssetShelf.get_shelf_name_from_context(context):
         return
@@ -1440,13 +1447,20 @@ def brush_settings(layout, context, brush, popover=False):
                 material_paint is None or material_paint.use_sync_base_color_with_brush
             )
             ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
-            row = layout.row(align=True)
-            row.active = synced_with_material_paint
-            UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
-            UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
-            row.separator()
-            row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
-            row.prop(ups, "use_unified_color", text="", icon='BRUSHES_ALL')
+            mask_alpha = _mask_alpha_channel(context, brush)
+            if mask_alpha is not None:
+                # A mask holds one grayscale value; offering an RGB color here would suggest
+                # that a color is written into it.
+                _draw_mask_alpha_pair(layout, mask_alpha)
+            else:
+                row = layout.row(align=True)
+                row.active = synced_with_material_paint
+                UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
+                UnifiedPaintPanel.prop_unified_color(
+                    row, context, brush, "secondary_color", text="")
+                row.separator()
+                row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
+                row.prop(ups, "use_unified_color", text="", icon='BRUSHES_ALL')
             layout.prop(brush, "blend", text="Blend Mode")
 
         # Per sculpt tool options.
@@ -2301,6 +2315,15 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
             "paint.material_channel_source_clear", text="", icon='X',
         ).channel = channel.channel
 
+    # Layer channels share this drawer but have no inversion; only a brush's Alpha does.
+    if (channel.channel == 'ALPHA' and texture is not None and
+            "use_source_invert" in channel.bl_rna.properties):
+        # Inverts the texture itself, so it holds for every read of Alpha (stroke mask and Mask
+        # value alike). Matched to the browser's two-unit row height like the buttons above.
+        invert = row.row(align=False)
+        invert.scale_y = 2.0
+        invert.prop(channel, "use_source_invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
+
     if use_grid:
         # Same disclosure-triangle pattern as "Show Size Curve" in the Brush Settings panel: an
         # icon-only, unembossed toggle that collapses the grid without losing the assigned image.
@@ -2508,6 +2531,54 @@ def material_paint_writable_channels(brush, paint, paint_mode_settings):
     return writable
 
 
+def _mask_alpha_channel(context, brush):
+    """The Alpha channel record when its value pair drives the Mask stroke, else ``None``.
+
+    Mirrors #BKE_paint_material_mask_alpha_active: the default Mask brush always owns the pair,
+    any other brush must enable its Alpha channel. While this is set, the brush colors do not
+    decide the written value, so the color pickers give way to the black-and-white pair.
+    """
+    paint_mode = context.tool_settings.paint_mode
+    if paint_mode.layer_target_mode != 'MASK' or brush is None:
+        return None
+    material_paint = brush.material_paint
+    if material_paint is None or material_paint.mask_source != 'ALPHA':
+        return None
+    for channel in material_paint.channels:
+        if channel.channel == 'ALPHA':
+            if material_paint.is_mask_default or channel.use:
+                return channel
+            break
+    return None
+
+
+def _draw_mask_alpha_pair(layout, channel):
+    """Primary and secondary Mask value as grayscale sliders, with a swap between them."""
+    row = layout.row(align=True)
+    row.template_material_paint_value_slider(channel, "value", index=0)
+    row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
+    row.template_material_paint_value_slider(channel, "value_secondary", index=0)
+
+
+def draw_mask_alpha_swatches(layout, context, brush):
+    """Header stand-in for the color swatches while the Mask takes its value from the Alpha pair.
+
+    Each button opens a grayscale popup instead of a color picker. Returns ``False`` when the
+    regular color swatches apply.
+    """
+    channel = _mask_alpha_channel(context, brush)
+    if channel is None:
+        return False
+    row = layout.row(align=True)
+    row.ui_units_x = 4
+    row.template_material_paint_value_swatch(
+        channel, "value", index=0, panel="PAINT_PT_material_mask_value_primary")
+    row.template_material_paint_value_swatch(
+        channel, "value_secondary", panel="PAINT_PT_material_mask_value_secondary")
+    row.separator()
+    return True
+
+
 def draw_material_paint_channels(
         context, layout, brush, paint, paint_mode, *, show_custom):
     """Draw Material / Material Paint channel enable + value rows.
@@ -2598,6 +2669,10 @@ def draw_material_paint_channels(
             draw_brush_texture_properties(
                 tex_col, brush, context.sculpt_object, default_closed=True,
             )
+    # The Mask reads this value from the brush, so the choice only matters while painting a mask.
+    is_mask_target = paint_mode is not None and paint_mode.layer_target_mode == 'MASK'
+    if is_mask_target:
+        layout.prop(material_paint, "mask_source")
     layout.separator()
 
     # Use one aligned grid_flow so channel toggles wrap when the panel is too narrow.
@@ -2606,6 +2681,14 @@ def draw_material_paint_channels(
     # canvas, so it also selects the vertex-storable channel subset here.
     visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom)
     toggle_labels = _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS
+    if is_mask_target:
+        # A Mask stroke reads one channel at most (see #BrushMaterialPaint.mask_source), the
+        # others would only suggest that their values reach the mask.
+        mask_channel_ids = {
+            'ALPHA': ['ALPHA'],
+            'BASE_COLOR': ['BASE_COLOR'],
+        }.get(material_paint.mask_source, [])
+        toggle_ids = [channel_id for channel_id in toggle_ids if channel_id in mask_channel_ids]
 
     # Shared source-texture mapping is drawn before the channel toggles so it reads as a setup step
     # rather than being buried under whichever channel panels happen to be open.
@@ -2687,7 +2770,15 @@ def draw_material_paint_channels(
         if show_custom and channel_id in ('NORMAL', 'EMISSION'):
             continue
         channel = channels[channel_id]
-        if not (channel.use and channel_id in visible):
+        if is_mask_target:
+            # Only the channel the Mask reads; the default Mask brush owns the Alpha pair without
+            # enabling the channel (see #BKE_paint_material_mask_alpha_active).
+            if channel_id not in mask_channel_ids:
+                continue
+            if not (channel.use or (channel_id == 'ALPHA' and
+                                    _mask_alpha_channel(context, brush) is not None)):
+                continue
+        elif not (channel.use and channel_id in visible):
             continue
         _channel_panel_sep()
         # One shared channel widget for the brush and the layer stack; the adapter supplies where
@@ -3216,7 +3307,11 @@ def draw_color_settings(context, layout, brush, color_type=False):
             row.prop(brush, "color_type", expand=True)
 
     # Color wheel
-    if brush.color_type == 'COLOR':
+    mask_alpha = _mask_alpha_channel(context, brush) if brush.color_type == 'COLOR' else None
+    if mask_alpha is not None:
+        # Same reason as in the sculpt brush settings: the Mask value is not a color.
+        _draw_mask_alpha_pair(layout, mask_alpha)
+    elif brush.color_type == 'COLOR':
         material_paint = brush.material_paint
         # PBR Paint's Base Color channel becomes the color source once it stops mirroring the
         # brush color; keep Color/Secondary Color visible but inert so the brush's own color
@@ -3678,13 +3773,14 @@ def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
     draw_image_paint_fill_expand(layout, context, brush)
 
     if capabilities.has_color:
-        material_paint = brush.material_paint
-        row = layout.row(align=True)
-        row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
-        row.ui_units_x = 4
-        UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
-        UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
-        row.separator()
+        if not draw_mask_alpha_swatches(layout, context, brush):
+            material_paint = brush.material_paint
+            row = layout.row(align=True)
+            row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
+            row.ui_units_x = 4
+            UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
+            UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
+            row.separator()
         layout.prop(brush, "blend", text="" if compact else iface_("Blend"), translate=False)
 
     UnifiedPaintPanel.prop_unified(
@@ -4002,8 +4098,34 @@ class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
         )
 
 
+class _MaterialMaskValuePopover:
+    # Not a registered type itself: subclassing a registered Panel would unregister its `draw`.
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    def draw(self, context):
+        brush = UnifiedPaintPanel.paint_settings(context).brush
+        channel = _mask_alpha_channel(context, brush)
+        if channel is None:
+            return
+        self.layout.template_material_paint_value_slider(channel, self._prop_name, index=0)
+
+
+class PAINT_PT_material_mask_value_primary(_MaterialMaskValuePopover, bpy.types.Panel):
+    bl_label = "Mask Value"
+    _prop_name = "value"
+
+
+class PAINT_PT_material_mask_value_secondary(_MaterialMaskValuePopover, bpy.types.Panel):
+    bl_label = "Mask Secondary Value"
+    _prop_name = "value_secondary"
+
+
 classes = (
     PAINT_GT_mp_source,
+    PAINT_PT_material_mask_value_primary,
+    PAINT_PT_material_mask_value_secondary,
     PAINT_MT_material_paint_channel_socket,
     PAINT_MT_material_layer_channel_socket,
     PAINT_MT_material_paint_brush_sync,

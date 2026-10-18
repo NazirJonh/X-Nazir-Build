@@ -915,7 +915,21 @@ static wmOperatorStatus layer_target_mode_set_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
   }
-  mode_settings.layer_target_mode = int8_t(mode);
+  const bool leaving_mask = mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK &&
+                            mode != PAINT_LAYER_TARGET_MASK;
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (paint != nullptr) {
+    /* Puts the Mask brush in hand on the way in and the remembered content brush on the way out. */
+    BKE_paint_material_layer_target_mode_set(
+        *CTX_data_main(C), *scene, *paint, mode_settings, mode);
+  }
+  else {
+    mode_settings.layer_target_mode = int8_t(mode);
+  }
+  if (leaving_mask && paint != nullptr && paint->brush != nullptr) {
+    /* The restored content brush may belong to another tool, so that tool becomes active too. */
+    WM_toolsystem_activate_brush_and_tool(C, paint, paint->brush);
+  }
   /* Choosing a paint target (Mask or content) ends object-mask editing. */
   if (mode_settings.layer_object_mask_edit != 0) {
     mode_settings.layer_object_mask_edit = 0;
@@ -1077,9 +1091,16 @@ static wmOperatorStatus stack_layer_paste_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
     BKE_paint_layers_active_set(*ma, copy->marker);
-    scene->toolsettings->paint_mode.layer_target_mode =
-        (copy->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ? PAINT_LAYER_TARGET_MASK :
-                                                        PAINT_LAYER_TARGET_CONTENT;
+    const ePaintLayerTargetMode pasted_mode = (copy->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ?
+                                                  PAINT_LAYER_TARGET_MASK :
+                                                  PAINT_LAYER_TARGET_CONTENT;
+    if (Paint *paint = BKE_paint_get_active_from_context(C)) {
+      BKE_paint_material_layer_target_mode_set(
+          *bmain, *scene, *paint, scene->toolsettings->paint_mode, pasted_mode);
+    }
+    else {
+      scene->toolsettings->paint_mode.layer_target_mode = int8_t(pasted_mode);
+    }
   }
   else if (stack_layer_clipboard.is_mask) {
     /* A correction is not a row of the stack and has no mask to replace: paste onto its layer. */
@@ -2458,7 +2479,14 @@ static wmOperatorStatus material_erase_brush_add_exec(bContext *C, wmOperator *o
     BKE_reportf(op->reports, RPT_INFO, "Reusing Erase brush \"%s\"", brush->id.name + 2);
   }
 
-  if (!BKE_paint_brush_set_synced(scene, *paint, brush)) {
+  /* In Mask mode the Erase brush becomes the Mask brush, so the remembered Mask brush follows the
+   * user's choice. */
+  const bool in_mask_mode = scene.toolsettings->paint_mode.layer_target_mode ==
+                            PAINT_LAYER_TARGET_MASK;
+  const bool activated = in_mask_mode ?
+                             BKE_paint_material_mask_brush_set(scene, *paint, brush) :
+                             BKE_paint_brush_set_synced(scene, *paint, brush);
+  if (!activated) {
     BKE_report(op->reports, RPT_ERROR, "Could not activate the Erase brush");
     return OPERATOR_CANCELLED;
   }
@@ -2476,6 +2504,47 @@ void PAINT_OT_material_erase_brush_add(wmOperatorType *ot)
       "coverage from the active channels";
   ot->exec = material_erase_brush_add_exec;
   ot->poll = ed::sculpt_paint::sculpt_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+static wmOperatorStatus material_mask_brush_reset_exec(bContext *C, wmOperator *op)
+{
+  Main &bmain = *CTX_data_main(C);
+  Scene &scene = *CTX_data_scene(C);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint");
+    return OPERATOR_CANCELLED;
+  }
+  /* The remembered Mask brush only exists while the paint target is the mask, so resetting it
+   * outside Mask mode would have nothing to reset. */
+  if (scene.toolsettings->paint_mode.layer_target_mode != PAINT_LAYER_TARGET_MASK) {
+    BKE_report(op->reports, RPT_ERROR, "Reset is only available while painting a mask");
+    return OPERATOR_CANCELLED;
+  }
+
+  Brush *brush = BKE_brush_material_mask_ensure(bmain, scene, *paint);
+  if (!BKE_paint_material_mask_brush_set(scene, *paint, brush)) {
+    BKE_report(op->reports, RPT_ERROR, "Could not activate the default Mask brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+static bool material_mask_brush_reset_poll(bContext *C)
+{
+  return ed::sculpt_paint::sculpt_mode_poll(C) || image_texture_paint_poll(C);
+}
+
+void PAINT_OT_material_mask_brush_reset(wmOperatorType *ot)
+{
+  ot->name = "Reset Mask Brush";
+  ot->idname = "PAINT_OT_material_mask_brush_reset";
+  ot->description = "Switch the Mask to the default Mask brush";
+  ot->exec = material_mask_brush_reset_exec;
+  ot->poll = material_mask_brush_reset_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
@@ -3028,6 +3097,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_brush_group_override_toggle);
   WM_operatortype_append(PAINT_OT_material_paint_brush_ensure);
   WM_operatortype_append(PAINT_OT_material_erase_brush_add);
+  WM_operatortype_append(PAINT_OT_material_mask_brush_reset);
   WM_operatortype_append(PAINT_OT_material_paint_source_mode_set);
   WM_operatortype_append(PAINT_OT_material_paint_source_material_set);
   WM_operatortype_append(PAINT_OT_material_paint_images_ensure);

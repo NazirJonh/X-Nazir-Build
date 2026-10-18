@@ -848,6 +848,22 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                     reader,
                                                     &toolsett_old->paint_mode.canvas_image,
                                                     IDWALK_CB_NOP);
+  /* The Mask brushes are bookkeeping for the brush swap; brushes are not memfile-undo data, so
+   * the pointers must follow the current Main instead of the decoded one. */
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->paint_mode.mask_active_brush,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->paint_mode.mask_active_brush,
+                                                    IDWALK_CB_NOP);
+  BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                    &toolsett->paint_mode.mask_saved_brush,
+                                                    do_undo_restore,
+                                                    SCENE_FOREACH_UNDO_RESTORE,
+                                                    reader,
+                                                    &toolsett_old->paint_mode.mask_saved_brush,
+                                                    IDWALK_CB_NOP);
 
   /* These two Object pointers should just follow the normal Undo behavior. See #153065. */
   BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
@@ -1747,6 +1763,8 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
     }
 
     BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.canvas_image);
+    BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_active_brush);
+    BLO_read_raw_address(reader, &sce->toolsettings->paint_mode.mask_saved_brush);
     BLO_read_struct(reader, SequencerToolSettings, &sce->toolsettings->sequencer_tool_settings);
 
     BLO_read_struct_list(reader,

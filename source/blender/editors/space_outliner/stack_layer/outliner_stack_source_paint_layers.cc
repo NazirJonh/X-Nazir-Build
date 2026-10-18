@@ -61,6 +61,7 @@
 #include "UI_resources.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "../outliner_intern.hh"
@@ -136,7 +137,20 @@ bool layers_target_mode_set(bContext &C, const ePaintLayerTargetMode mode)
   if (paint_mode.layer_target_mode == mode) {
     return false;
   }
-  paint_mode.layer_target_mode = int8_t(mode);
+  const bool leaving_mask = paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK &&
+                            mode != PAINT_LAYER_TARGET_MASK;
+  if (Paint *paint = BKE_paint_get_active_from_context(&C)) {
+    /* Puts the Mask brush in hand on the way in and the remembered content brush on the way out. */
+    BKE_paint_material_layer_target_mode_set(
+        *CTX_data_main(&C), *scene, *paint, paint_mode, mode);
+    if (leaving_mask && paint->brush != nullptr) {
+      /* The restored content brush may belong to another tool, so that tool becomes active too. */
+      WM_toolsystem_activate_brush_and_tool(&C, paint, paint->brush);
+    }
+  }
+  else {
+    paint_mode.layer_target_mode = int8_t(mode);
+  }
   layers_texpaint_slots_refresh(C);
   WM_event_add_notifier(&C, NC_SCENE | ND_TOOLSETTINGS, scene);
   return true;

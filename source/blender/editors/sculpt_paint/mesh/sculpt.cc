@@ -8195,7 +8195,7 @@ static void init_material_paint_for_object(const Scene &scene,
 static void init_material_canvas_for_object(Main &bmain,
                                              wmOperator *op,
                                              Object &ob,
-                                             const Brush &brush,
+                                             Brush &brush,
                                              const Sculpt &sd,
                                              PaintModeSettings &paint_mode_init)
 {
@@ -8209,13 +8209,25 @@ static void init_material_canvas_for_object(Main &bmain,
   }
 
   BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(&ob, ob.actcol));
+  if (brush.material_paint == nullptr &&
+      paint_mode_init.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+  {
+    /* A Mask stroke may use a brush that never had material paint settings. */
+    BKE_brush_material_paint_ensure(&brush);
+  }
   if (brush.material_paint == nullptr) {
     return;
   }
   const BrushMaterialPaint &brush_paint = *brush.material_paint;
   BKE_paint_material_images_ensure_writable(
       bmain, ob, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+  /* A Mask stroke writes the mask map only, so the brush's PBR channel toggles are no reason to
+   * warn about missing channel textures. */
+  const bool mask_target_mode = paint_mode_init.layer_target_mode == PAINT_LAYER_TARGET_MASK;
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (mask_target_mode) {
+      break;
+    }
     if (info.socket_name == nullptr) {
       continue;
     }
@@ -8237,9 +8249,15 @@ static void init_material_canvas_for_object(Main &bmain,
   }
 
   /* Same stroke-scoped sampler as Material Paint: raster image targets also sample per-channel
-   * sources through StrokeCache::material_source_sampler. */
+   * sources through StrokeCache::material_source_sampler. A Mask stroke additionally resolves its
+   * one mask-source channel, which only the raster path knows how to sample. */
   ss.cache->material_source_sampler = std::make_unique<material::ChannelSourceSampler>(
-      ss, brush, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+      ss,
+      brush,
+      brush_paint,
+      paint_mode_init,
+      sd.paint.visible_material_channels,
+      /*resolve_mask_source=*/true);
 }
 
 static void brush_stroke_init(bContext *C, const wmOperator *op)

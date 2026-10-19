@@ -20,7 +20,9 @@
 #include "BKE_paint_layers.hh"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <utility>
 
@@ -33,6 +35,7 @@
 #include "BKE_main.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_material_resolve.hh"
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -112,6 +115,12 @@ struct BakeMaterialRuntime {
    * (the source, the row) or for an explicit retry.
    */
   Map<UUID, BakeFailure> failed;
+  /**
+   * The shape each Material row last gave its group (#paint_layer_material_live_signature), by
+   * marker: what the scene update compares against to know a source edit changed what the
+   * generator builds.
+   */
+  Map<UUID, uint64_t> live_signature;
 };
 
 Map<uint32_t, BakeMaterialRuntime> &bake_runtime()
@@ -346,6 +355,25 @@ static void bake_collect_source_images(const Material &ma,
       if (layer.bake->coverage != nullptr && !r_images.contains(layer.bake->coverage)) {
         r_images.append(layer.bake->coverage);
       }
+    }
+    /* The textures it shows live: a stroke on one changes the folder's result at once. A rendered
+     * map is not one: it is written by the row's own render, which would then read as an edit of
+     * its source and start the render again. */
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+          ma, layer, channel, PaintLayerMaterialUse::Composite);
+      if (source.kind == PaintLayerMaterialSourceKind::LiveImage && source.image != nullptr &&
+          !r_images.contains(source.image))
+      {
+        r_images.append(source.image);
+      }
+    }
+    const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+        ma, layer, PaintLayerMaterialUse::Composite);
+    if (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha && coverage.image != nullptr &&
+        !r_images.contains(coverage.image))
+    {
+      r_images.append(coverage.image);
     }
   }
   paint_layer_dependencies(layer, [&](const PaintLayerDependency &dep) {
@@ -648,6 +676,7 @@ static uint64_t bake_hash_layer(uint64_t h,
     /* Inside a baked folder a Material row is read through the maps it shows, so which source and
      * which maps it has move the folder's cache; their pixels are the subscription's. */
     h = bake_hash_mix(h, layer.material != nullptr ? layer.material->id.session_uid : 0);
+    h = bake_hash_mix(h, paint_layer_material_live_signature(ma, layer));
     if (layer.bake != nullptr) {
       for (const Image *image : layer.bake->images) {
         h = bake_hash_mix(h, image != nullptr ? image->id.session_uid : 0);
@@ -675,8 +704,6 @@ static uint64_t bake_hash_layer(uint64_t h,
   }
   return h;
 }
-
-static bool bake_material_row_shown(const Material &ma, const MaterialPaintLayer &layer);
 
 /**
  * The structural hash of a Material row: which material it reads, the side its maps are rendered at
@@ -714,7 +741,10 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     /* Reads the source's node trees: main thread only. The generator and the CPU composite ask
      * #paint_layer_row_material_map instead, which reads the row alone. */
-    return bake_material_row_shown(ma, layer) && !BKE_paint_layers_material_row_stale(ma, layer);
+    /* A row with nothing to render is as current as it can be. */
+    return !BKE_paint_layers_material_row_needs_render(ma, layer) ||
+           (paint_layer_row_material_shown(ma, layer) &&
+            !BKE_paint_layers_material_row_stale(ma, layer));
   }
   uint32_t hash[2];
   BKE_paint_layers_bake_hash(ma, layer, hash);
@@ -1444,9 +1474,9 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
  * they do not, the old maps keep showing until the new ones land.
  * \{ */
 
-static bool bake_material_row_shown(const Material &ma, const MaterialPaintLayer &layer)
+bool paint_layer_row_material_shown(const Material &ma, const MaterialPaintLayer &layer)
 {
-  if (layer.bake == nullptr || layer.bake->coverage == nullptr || layer.material == nullptr ||
+  if (layer.bake == nullptr || layer.material == nullptr ||
       layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER || layer.role != MA_PAINT_LAYER_ROLE_LAYER)
   {
     return false;
@@ -1465,7 +1495,7 @@ bool paint_layer_row_material_map(const Material &ma,
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
       !paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) || layer.bake == nullptr ||
       layer.bake->images[channel] == nullptr || paint_layer_channel_filtered(ma, channel) ||
-      !bake_material_row_shown(ma, layer))
+      !paint_layer_row_material_shown(ma, layer))
   {
     return false;
   }
@@ -1531,7 +1561,20 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
   if (bake_row_is_hidden(ma, layer)) {
     return false;
   }
-  if (bake_material_row_shown(ma, layer) && !BKE_paint_layers_material_row_stale(ma, layer)) {
+  /* The active row is the one being edited: in Auto its graph is shown live and the render catches
+   * up once the active marker leaves it. Always has no live form (its maps are what the row
+   * shows), so it renders on every edit. */
+  if (BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_ALWAYS &&
+      BKE_paint_layers_bake_row_is_deferred(ma, layer))
+  {
+    return false;
+  }
+  /* Everything the source supplies is a value or a plain texture: there is nothing to render. */
+  if (!BKE_paint_layers_material_row_needs_render(ma, layer)) {
+    return false;
+  }
+  if (paint_layer_row_material_shown(ma, layer) && !BKE_paint_layers_material_row_stale(ma, layer))
+  {
     return false;
   }
   uint32_t hash[2];
@@ -1551,6 +1594,105 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
   return true;
 }
 
+void BKE_paint_layers_material_row_log(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const char *event)
+{
+  /* Why a render of a Material row starts: which of the three answers made it due. */
+  uint32_t hash[2];
+  uint32_t source_hash[2];
+  BKE_paint_layers_material_bake_stamp_get(ma, layer, hash, source_hash);
+  bool changed = false;
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    if (const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid)) {
+      for (const BakeLayerSubscription &entry : runtime->layers) {
+        if (BLI_uuid_equal(entry.marker, layer.marker)) {
+          changed = changed || entry.changed;
+        }
+      }
+    }
+  }
+  const MaterialPaintLayerBake *bake = layer.bake;
+  printf(
+      "[paint-layers material row] %s: row '%s' shown=%d needs_render=%d struct_hash=%08x%08x "
+      "stored_struct=%08x%08x source_hash=%08x%08x stored_source=%08x%08x pixels_changed=%d\n",
+      event,
+      layer.name,
+      int(paint_layer_row_material_shown(ma, layer)),
+      int(BKE_paint_layers_material_row_needs_render(ma, layer)),
+      hash[1],
+      hash[0],
+      bake != nullptr ? bake->hash[1] : 0u,
+      bake != nullptr ? bake->hash[0] : 0u,
+      source_hash[1],
+      source_hash[0],
+      bake != nullptr ? bake->source_hash[1] : 0u,
+      bake != nullptr ? bake->source_hash[0] : 0u,
+      int(changed));
+  if (layer.material == nullptr || layer.material->nodetree == nullptr) {
+    printf("[paint-layers material row]   source has no node tree\n");
+    return;
+  }
+  const std::shared_ptr<const MaterialSourceResolve> resolve = BKE_paint_layers_source_resolve(
+      *layer.material);
+  printf("[paint-layers material row]   mode=%d group_wrappable=%d\n",
+         int(BKE_paint_layers_bake_mode_get(layer)),
+         int(BKE_paint_layers_source_group_wrappable(*layer.material)));
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+        ma, layer, channel);
+    printf(
+        "[paint-layers material row]   channel %d: resolved=%d group_ok=%d shown_kind=%d "
+        "needs_render=%d\n",
+        channel,
+        int(resolve->channels[channel]),
+        int(paint_layer_material_source_group_channel(ma, layer, channel)),
+        int(source.kind),
+        int(BKE_paint_layers_material_channel_needs_render(ma, layer, channel)));
+  }
+}
+
+bool BKE_paint_layers_material_sources_notice(Material &ma)
+{
+  Vector<std::pair<bUUID, uint64_t>> signatures;
+  BKE_paint_layers_foreach(
+      static_cast<const Material &>(ma),
+      [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) {
+        if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE)) {
+          signatures.append({row.marker, paint_layer_material_live_signature(ma, row)});
+        }
+        return true;
+      });
+  if (signatures.is_empty()) {
+    return false;
+  }
+  bool changed = false;
+  {
+    std::lock_guard lock(bake_runtime_mutex());
+    BakeMaterialRuntime &runtime = bake_runtime().lookup_or_add(ma.id.session_uid,
+                                                                BakeMaterialRuntime{});
+    runtime.owner = &ma;
+    for (const auto &[marker, signature] : signatures) {
+      uint64_t *previous = runtime.live_signature.lookup_ptr(UUID(marker));
+      if (previous == nullptr) {
+        /* A row seen for the first time was built with the state it has: nothing moved. */
+        runtime.live_signature.add(UUID(marker), signature);
+      }
+      else if (*previous != signature) {
+        *previous = signature;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    /* The shape of a row's group follows its source: a value that became a texture is other nodes.
+     */
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+  }
+  return changed;
+}
+
 void BKE_paint_layers_material_bake_retry(Material &ma, MaterialPaintLayer &layer)
 {
   {
@@ -1565,7 +1707,7 @@ void BKE_paint_layers_material_bake_retry(Material &ma, MaterialPaintLayer &laye
   }
 }
 
-void BKE_paint_layers_material_bake_apply(Main &bmain,
+void BKE_paint_layers_material_bake_apply(Main & /*bmain*/,
                                           Material &ma,
                                           MaterialPaintLayer &layer,
                                           const int size,
@@ -1598,24 +1740,9 @@ void BKE_paint_layers_material_bake_apply(Main &bmain,
       BKE_paint_layers_bake_set_map(ma, layer, channel, nullptr);
     }
   }
-  if (alpha != nullptr) {
-    BKE_paint_layers_bake_set_map(ma, layer, -1, alpha);
-  }
-  else {
-    /* A source with no transparency covers fully: one white texel is the whole map. The map of an
-     * earlier render (it carries the bake link) is no longer the row's coverage; an earlier white
-     * texel is kept as it is. */
-    ImageMaterialSource previous_link;
-    if (bake->coverage != nullptr &&
-        (bake->coverage->gen_x != 1 || BKE_image_material_source_get(*bake->coverage, previous_link)))
-    {
-      BKE_paint_layers_bake_set_map(ma, layer, -1, nullptr);
-    }
-    if (Image *white = bake_service_image(bmain, layer, -1, 1, false)) {
-      const float one = 1.0f;
-      bake_write_coverage_image(*white, &one, nullptr);
-    }
-  }
+  /* A coverage map only exists while the source's transparency is rendered: when it is a value or
+   * a plain texture, or the source has none, it is shown as it is and the old map goes. */
+  BKE_paint_layers_bake_set_map(ma, layer, -1, alpha);
   /* The structural hash is stamped now so the generator wires the new maps in while they render;
    * the source hash only when they land. The subscription starts here too, so a pixel edit of the
    * source made during the render is seen after it. */

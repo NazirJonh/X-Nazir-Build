@@ -13,6 +13,8 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
 
+#include "BLI_string.h"
+
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -183,6 +185,8 @@ static bool resolve_image_source(const bNodeSocket &source,
   }
   r_image.image = image;
   r_image.iuser = &storage->iuser;
+  r_image.node = &node;
+  r_image.alpha_output = source.identifier != nullptr && STREQ(source.identifier, "Alpha");
   r_reason = ChannelUnavailableReason::None;
   return true;
 }

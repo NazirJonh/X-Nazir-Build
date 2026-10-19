@@ -165,6 +165,34 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_LIVE_CONSTANT) || STREQ(role, ROLE_LIVE_COVERAGE)) {
+    /* A plain value of the row's source. A source that stopped supplying one here is a different
+     * shape of group, which only a rebuild can make right. */
+    if (socket.default_value == nullptr) {
+      return false;
+    }
+    if (STREQ(role, ROLE_LIVE_COVERAGE)) {
+      const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma, *layer);
+      if (coverage.kind != PaintLayerMaterialCoverageKind::LiveConstant) {
+        return false;
+      }
+      static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = coverage.constant;
+      if (iface.socket_data != nullptr) {
+        static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = coverage.constant;
+      }
+      return true;
+    }
+    const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+        ma, *layer, channel);
+    if (source.kind != PaintLayerMaterialSourceKind::LiveConstant) {
+      return false;
+    }
+    copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(socket.default_value)->value, source.constant);
+    if (iface.socket_data != nullptr) {
+      copy_v4_v4(static_cast<bNodeSocketValueRGBA *>(iface.socket_data)->value, source.constant);
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_FILL_ALPHA)) {
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(*layer,
                                                                       eMaterialPaintChannel(channel));

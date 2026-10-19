@@ -50,6 +50,18 @@ inline constexpr const char *INSTANCE_OWNER_PROP = "pbr_paint_layers_instance";
 /** On a layer's own node group: the marker of the layer it holds. The tree also carries
  * #TREE_OWNER_PROP of the material, so a copy never adopts the source's groups. */
 inline constexpr const char *TREE_LAYER_PROP = "pbr_paint_layers_layer_tree";
+/**
+ * On a Material row's source group: the marker of the row it was made for. The tree also carries
+ * #TREE_OWNER_PROP of the material; its topology hash words hold the content hash of the source it
+ * copies, so the sync knows when the source moved.
+ */
+inline constexpr const char *TREE_SOURCE_ROW_PROP = "pbr_paint_layers_source_row";
+/**
+ * On a private copy of a group a Material row's source reaches its Principled BSDF through (see
+ * #source_group_fill): owned by the instance node of its parent copy and deleted with it
+ * (#source_group_paths_prune). The tree also carries #TREE_OWNER_PROP of the material.
+ */
+inline constexpr const char *TREE_SOURCE_PATH_PROP = "pbr_paint_layers_source_path";
 /** On a generated group interface input: how its value is read from the description. */
 inline constexpr const char *INPUT_ROLE_PROP = "pbr_paint_layers_role";
 /** On a generated group interface input: the marker of the layer it stands for. */
@@ -82,6 +94,13 @@ inline constexpr const char *ROLE_FILL = "fill";
 /** #INPUT_ROLE_PROP value of that constant's alpha: the content alpha a map-less row lays, which
  * no colour socket can hand over on its own. */
 inline constexpr const char *ROLE_FILL_ALPHA = "fill_alpha";
+/** #INPUT_ROLE_PROP value of the plain value a Material row's source supplies in a channel: an
+ * RGBA input of the row's group, filled from the source and kept current by the value sync, so
+ * editing the value in the source never rebuilds the row. */
+inline constexpr const char *ROLE_LIVE_CONSTANT = "live_constant";
+/** #INPUT_ROLE_PROP value of a Material row's coverage when the source's Alpha is a plain value
+ * (a float input, the same way). */
+inline constexpr const char *ROLE_LIVE_COVERAGE = "live_coverage";
 /** #INPUT_ROLE_PROP value of a parameter of a kind (the marker is the row's own); the parameter is
  * named by #INPUT_PARAM_PROP. */
 inline constexpr const char *ROLE_PARAM = "param";
@@ -219,6 +238,37 @@ void interface_name_unique(const bNodeTreeInterface &interface,
                            const char *base,
                            char *r_buffer,
                            size_t buffer_size);
+
+/** The marker of the row \a tree is the source group of; false for every other tree. */
+bool source_group_row_get(const bNodeTree &tree, bUUID &r_marker);
+
+/** Mark \a tree as the source group of the row \a marker. */
+void source_group_row_set(bNodeTree &tree, const bUUID &marker);
+
+/**
+ * Fill the empty or stale group \a wrapper with a copy of \a source's shader graph: every node but
+ * the Material Output and the Principled BSDF, with the links among them, and one output per paint
+ * channel the Principled input of which is fed by a node (the Normal as the encoded map the chain
+ * reads), plus the coverage from Alpha. The nodes are cleared first and the interface is kept, so
+ * the instances stay linked. When the Principled BSDF
+ * sits inside groups of the source, each group on the way is copied privately
+ * (#TREE_SOURCE_PATH_PROP) and exposes the channels one level up; the groups beside the path stay
+ * shared with the source (#BKE_paint_layers_source_group_wrappable).
+ *
+ * \return false when the source cannot be wrapped; the group is then left empty.
+ */
+bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source);
+
+/** Delete the private group copies of \a owner_uid that no instance node uses any more. */
+void source_group_paths_prune(Main &bmain, const bUUID &owner_uid);
+
+/** The output of \a instance (an instance of the source group \a wrapper) for the paint channel.
+ */
+bNodeSocket *source_group_output(const bNodeTree &wrapper, bNode &instance, int channel);
+
+/** The hash the source group stores in its topology words: the source's content and the fill's
+ * version. */
+uint64_t source_group_content_hash(const Material &source);
 
 /** Remove every node of \a tree, leaving its interface untouched. */
 void tree_clear_nodes(Main &bmain, bNodeTree &tree);

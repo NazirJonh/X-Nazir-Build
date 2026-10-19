@@ -164,18 +164,40 @@ static bool composite_row_source_describe(const Material &ma,
   if (!paint_layer_row_participates(ma, layer, channel)) {
     return false;
   }
-  Image *material_color = nullptr;
-  if (paint_layer_row_material_map(ma, layer, channel, &material_color)) {
-    /* The map rendered from the row's source, and the coverage beside it: the source's transparency
-     * modulates the row's opacity per pixel, as it does in the generated graph. The colour's own
-     * alpha is not a content alpha of the row's, so it does not cover. */
-    out.color_image = material_color;
-    out.color_iuser = nullptr;
-    out.mask_image = layer.bake->coverage;
-    out.mask_iuser = nullptr;
-    out.mask_from_alpha = false;
-    out.mask_influence = 1.0f;
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    /* The same decision the generator makes (#PaintLayersTreeBuilder::material_source_emit): the
+     * source's plain value, its plain texture or the map rendered from it for the colour, and its
+     * transparency, which is not the colour's alpha and so does not cover through it, as the
+     * coverage. A plain-value coverage is folded into the opacity by the caller. */
+    const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+        ma, layer, channel, PaintLayerMaterialUse::Composite);
+    const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+        ma, layer, PaintLayerMaterialUse::Composite);
+    if (source.kind == PaintLayerMaterialSourceKind::None ||
+        coverage.kind == PaintLayerMaterialCoverageKind::Pending)
+    {
+      return false;
+    }
+    if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+      copy_v4_v4(out.constant_color, source.constant);
+      out.has_constant_color = true;
+    }
+    else {
+      out.color_image = source.image;
+      out.color_iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ? source.iuser :
+                                                                                   nullptr;
+    }
     out.color_alpha_coverage = false;
+    if (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha ||
+        coverage.kind == PaintLayerMaterialCoverageKind::Baked)
+    {
+      out.mask_image = coverage.image;
+      out.mask_iuser = (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha) ?
+                           coverage.iuser :
+                           nullptr;
+      out.mask_from_alpha = coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha;
+      out.mask_influence = 1.0f;
+    }
     return true;
   }
   if (paint_layer_row_empty_base(ma, layer, channel)) {
@@ -344,6 +366,13 @@ static bool composite_image_layer_build(const Material &ma,
   }
   out.blend = layer_channel_blend(layer, channel);
   out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+        ma, layer, PaintLayerMaterialUse::Composite);
+    if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+      out.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
+    }
+  }
   out.enabled = true;
   out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
       eMaterialPaintChannel(channel));

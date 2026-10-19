@@ -118,7 +118,81 @@ class LayerTreeFactory {
       {
         old_.append(&candidate);
       }
+      bUUID source_marker = BLI_uuid_nil();
+      if (source_group_row_get(candidate, source_marker) &&
+          BLI_uuid_equal(tree_owner_uid_get(candidate), ma.paint_layers_owner_uid))
+      {
+        old_sources_.append(&candidate);
+      }
     }
+  }
+
+  /**
+   * The group holding a copy of the source graph of the Material row \a layer, filled and current:
+   * its old one refilled when the source's content moved, or a fresh one. Null when the source
+   * cannot be wrapped; the group is then left for #prune_unused.
+   */
+  bNodeTree *source_group_get(const MaterialPaintLayer &layer)
+  {
+    if (layer.material == nullptr) {
+      return nullptr;
+    }
+    if (bNodeTree **handed = source_handed_.lookup_ptr(&layer)) {
+      return *handed;
+    }
+    char name[MAX_ID_NAME - 2];
+    SNPRINTF(name, ".PL Source %s", layer.name[0] != '\0' ? layer.name : "Layer");
+    bNodeTree *group = nullptr;
+    for (bNodeTree *candidate : old_sources_) {
+      bUUID marker = BLI_uuid_nil();
+      if (!sources_used_.contains(candidate) && source_group_row_get(*candidate, marker) &&
+          BLI_uuid_equal(marker, layer.marker))
+      {
+        group = candidate;
+        break;
+      }
+    }
+    bool current = false;
+    if (group == nullptr) {
+      group = bke::node_tree_add_tree(&bmain_, name, "ShaderNodeTree");
+      if (group == nullptr) {
+        return nullptr;
+      }
+      /* The only user must be the instance node, which adds its own reference when assigned. */
+      id_us_min(&group->id);
+      tree_owner_uid_set(*group, ma_.paint_layers_owner_uid);
+      source_group_row_set(*group, layer.marker);
+      created_ = true;
+    }
+    else {
+      uint64_t stored = 0;
+      current = tree_topology_hash_get(*group, stored) &&
+                stored == source_group_content_hash(*layer.material);
+      if (!STREQ(group->id.name + 2, name)) {
+        BKE_id_rename(bmain_, group->id, name);
+      }
+    }
+    sources_used_.append(group);
+    if (!current) {
+      tree_hash_clear(*group);
+      /* A fill replaces the private copies of the groups the source is reached through, which are
+       * ID references that appeared or disappeared. */
+      created_ = true;
+      if (!source_group_fill(bmain_, *group, *layer.material)) {
+        /* Remembered, so the other channels of the row do not fill it again. */
+        source_handed_.add(&layer, nullptr);
+        return nullptr;
+      }
+      pending_hashes_.append({group, source_group_content_hash(*layer.material)});
+    }
+    source_handed_.add(&layer, group);
+    return group;
+  }
+
+  /** The source groups handed out so far. */
+  Span<bNodeTree *> sources_used() const
+  {
+    return sources_used_;
   }
 
   /** The group holding \a layer's nodes: its old one (kept or emptied), or a fresh one. */
@@ -197,17 +271,29 @@ class LayerTreeFactory {
       }
       /* The layer is gone and its group has no users; a tree the user linked keeps its users. */
       if (ID_REAL_USERS(&layer_tree->id) <= 0) {
-        BKE_id_delete(&bmain_, layer_tree);
-        deleted_ = true;
+        this->tree_delete(layer_tree);
       }
     }
     for (bNodeTree *layer_tree : used_) {
       /* The build asked for a group but did not instantiate it, so nothing owns it. */
       if (ID_REAL_USERS(&layer_tree->id) <= 0) {
-        BKE_id_delete(&bmain_, layer_tree);
-        deleted_ = true;
+        this->tree_delete(layer_tree);
       }
     }
+    /* Last: deleting a layer group frees the instance that held its source group. */
+    for (bNodeTree *source_tree : old_sources_) {
+      if (!sources_used_.contains(source_tree) && ID_REAL_USERS(&source_tree->id) <= 0) {
+        this->tree_delete(source_tree);
+      }
+    }
+    for (bNodeTree *source_tree : sources_used_) {
+      /* A source group that was filled but is not instantiated, or whose fill failed. */
+      if (ID_REAL_USERS(&source_tree->id) <= 0) {
+        this->tree_delete(source_tree);
+      }
+    }
+    /* The private copies of the groups a deleted source group instanced. */
+    source_group_paths_prune(bmain_, ma_.paint_layers_owner_uid);
   }
 
   /** Record the topology of every group this pass built; call once the whole build succeeded. */
@@ -229,6 +315,17 @@ class LayerTreeFactory {
   }
 
  private:
+  /** Delete \a tree, and forget the hash a build meant to store on it. */
+  void tree_delete(bNodeTree *tree)
+  {
+    pending_hashes_.remove_if(
+        [&](const std::pair<bNodeTree *, uint64_t> &item) { return item.first == tree; });
+    /* Its nodes go first so the groups they instance lose that user before they are pruned. */
+    tree_clear_nodes(bmain_, *tree);
+    BKE_id_delete(&bmain_, tree);
+    deleted_ = true;
+  }
+
   Main &bmain_;
   Material &ma_;
   Span<int> wired_channels_;
@@ -238,6 +335,10 @@ class LayerTreeFactory {
   Vector<bNodeTree *> old_;
   /** The groups handed out in this regeneration. */
   Vector<bNodeTree *> used_;
+  /** The source groups this material owned before the regeneration, and those handed out since. */
+  Vector<bNodeTree *> old_sources_;
+  Vector<bNodeTree *> sources_used_;
+  Map<const MaterialPaintLayer *, bNodeTree *> source_handed_;
   /** The group handed to each row this pass, so a second ask returns the same tree. */
   Map<const MaterialPaintLayer *, bNodeTree *> handed_;
   /** The rows whose group was kept unchanged (its topology hash matched). */
@@ -292,6 +393,52 @@ static bNode *instance_ensure(Material &ma, bNodeTree &tree)
     BKE_ntree_update_tag_node_property(ma.nodetree, instance);
   }
   return instance;
+}
+
+/**
+ * Refill, in place, the source group of each Material row whose source's content moved since the
+ * group was filled. A kept root and a kept layer group do not rebuild, so this is what brings a
+ * source edit that changed no structure (a node's setting, a link) into the group. The group's
+ * outputs stay as they were: a change in which channels it feeds is a structural change that the
+ * row's live signature (#paint_layer_material_live_signature) turns into a rebuild.
+ */
+static void source_groups_refresh(Main &bmain, Material &ma)
+{
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (layer.material == nullptr) {
+          return true;
+        }
+        for (bNodeTree &group : bmain.nodetrees) {
+          bUUID marker = BLI_uuid_nil();
+          if (!source_group_row_get(group, marker) || !BLI_uuid_equal(marker, layer.marker) ||
+              !BLI_uuid_equal(tree_owner_uid_get(group), ma.paint_layers_owner_uid))
+          {
+            continue;
+          }
+          const uint64_t content = source_group_content_hash(*layer.material);
+          uint64_t stored = 0;
+          if (tree_topology_hash_get(group, stored) && stored == content) {
+            break;
+          }
+          tree_hash_clear(group);
+          if (source_group_fill(bmain, group, *layer.material)) {
+            tree_topology_hash_set(group, content);
+            /* The private copies of the groups on the source's path are new IDs. */
+            DEG_relations_tag_update(&bmain);
+          }
+          else {
+            /* Nothing to show any more: the rebuild decides what the row lays instead. */
+            ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+          }
+          BKE_ntree_update_tag_all(&group);
+          BKE_ntree_update_after_single_tree_change(bmain, group);
+          DEG_id_tag_update(&group.id, ID_RECALC_SYNC_TO_EVAL);
+          DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+          break;
+        }
+        return true;
+      });
 }
 
 /**
@@ -375,6 +522,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * root cannot be trusted, so the full rebuild below takes over. */
   const bool kept = keep_root && BKE_paint_layers_values_sync(ma);
   if (kept) {
+    source_groups_refresh(bmain, ma);
     regenerate_tags(bmain, ma, *tree, false);
   }
   else {
@@ -388,8 +536,12 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     const auto layer_unchanged = [&](const MaterialPaintLayer &layer) -> bool {
       return factory.is_unchanged(layer);
     };
+    const auto source_group_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
+      return factory.source_group_get(layer);
+    };
     ctx.layer_tree_get = layer_tree_get;
     ctx.layer_unchanged = layer_unchanged;
+    ctx.source_group_get = source_group_get;
 
     tree_clear(bmain, *tree);
     /* The root's own hash goes the same way: a pass that fails before the instance is wired must
@@ -397,7 +549,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     tree_hash_clear(*tree);
     BKE_paint_layers_tree_build(ma, *tree, ctx);
 
-    generated_trees_update(bmain, factory.used(), *tree);
+    /* Innermost first: a source group sits in a layer group, which sits in the root. */
+    Vector<bNodeTree *> generated(factory.sources_used());
+    generated.extend(factory.used());
+    generated_trees_update(bmain, generated, *tree);
     factory.prune_unused();
 
     bNode *instance = instance_ensure(ma, *tree);
@@ -422,6 +577,8 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     /* Everything was built and wired: only now do the stored hashes say "this is what exists". */
     factory.topology_hashes_commit();
     tree_root_hash_set(*tree, root_hash);
+    /* A layer group kept unchanged still holds the source group of the old content. */
+    source_groups_refresh(bmain, ma);
 
     relations_changed = factory.groups_created() || factory.groups_deleted() || created_tree ||
                         report.replaced_foreign_tree;
@@ -459,11 +616,18 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain)
      * is left to the editor's worker job. A bake that was written, or a row that stopped being
      * substituted, tags the rebuild below. */
     BKE_paint_layers_bake_notice_changes(ma);
+    /* A source edit that changed what a Material row's group is made of (a value that became a
+     * texture) marks the rebuild too; one that only moved a value is the evaluation's sync. */
+    BKE_paint_layers_material_sources_notice(ma);
     BKE_paint_layers_bake_plan_run(bmain, ma);
     const bool needs_regen = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0 ||
                              ma.paint_layers_tree == nullptr;
     if (needs_regen) {
       BKE_paint_layers_regenerate(bmain, ma);
+    }
+    else {
+      /* A source edit that moved no structure: the groups copying its graph follow it in place. */
+      source_groups_refresh(bmain, ma);
     }
   }
 }

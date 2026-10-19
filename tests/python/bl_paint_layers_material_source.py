@@ -88,19 +88,32 @@ class PaintLayersMaterialSourceTest(unittest.TestCase):
         layer.source = 'IMAGE'
         self.assertEqual(layer.source, 'MATERIAL')
 
-    def test_a_material_layer_is_not_rendered_until_the_editor_does_it(self):
+    def test_a_source_of_plain_values_needs_no_render(self):
         owner = make_material("Owner")
         source = make_material("Source")
         layer = owner.paint_layers.new(source='MATERIAL', material=source)
-        # No window manager in a background run, so nothing renders: the row owes its maps.
-        self.assertFalse(layer.bake_is_valid)
+        # The default node tree is a Principled BSDF with plain values: shown as they are.
+        self.assertTrue(layer.bake_is_valid)
         layer.bake_mode = 'NEVER'
         self.assertEqual(layer.bake_mode, 'NEVER')
         layer.bake_request()
-        self.assertFalse(layer.bake_is_valid)
+        self.assertTrue(layer.bake_is_valid)
         layer.bake_mode = 'ALWAYS'
         layer.bake_size = 256
         self.assertEqual(layer.bake_size, 256)
+
+    def test_a_source_graph_is_rendered_by_the_editor(self):
+        owner = make_material("Owner")
+        source = make_material("Source")
+        nodes = source.node_tree.nodes
+        principled = next(n for n in nodes if n.type == 'BSDF_PRINCIPLED')
+        noise = nodes.new('ShaderNodeTexNoise')
+        source.node_tree.links.new(noise.outputs['Color'], principled.inputs['Base Color'])
+        layer = owner.paint_layers.new(source='MATERIAL', material=source)
+        # No window manager in a background run, so nothing renders: the row owes its map.
+        self.assertFalse(layer.bake_is_valid)
+        layer.bake_mode = 'NEVER'
+        self.assertFalse(layer.bake_is_valid)
 
     def test_a_correction_does_not_read_a_material(self):
         owner = make_material("Owner")

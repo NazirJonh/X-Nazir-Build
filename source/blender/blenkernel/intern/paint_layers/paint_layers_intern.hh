@@ -25,23 +25,139 @@
 namespace blender {
 
 struct Image;
+struct ImageUser;
 struct Main;
 struct MaterialPaintLayerBake;
+struct bNode;
 
 /**
  * Whether \a layer is a Material row that shows maps rendered from its source in \a channel: the
- * row has its colour map and the coverage map, the map is not outside the material's channel set,
- * the mode is not Never and the maps still belong to the row (the structural hash). A map the
- * source has since moved on from still shows until the new one lands. \a r_color receives the
- * colour map. Safe on evaluated copies: it reads the row alone.
- *
- * The row then takes part in the channel through those maps, as a painted row takes part through
- * its own: its corrections, mask, opacity and blend stay live over them.
+ * row has its colour map for the channel, the map is not outside the material's channel set, the
+ * mode is not Never and the maps still belong to the row (the structural hash). A map the source
+ * has since moved on from still shows until the new one lands. \a r_color receives the colour map.
+ * Safe on evaluated copies: it reads the row alone.
  */
 bool paint_layer_row_material_map(const Material &ma,
                                   const MaterialPaintLayer &layer,
                                   int channel,
                                   Image **r_color);
+
+/**
+ * Whether the maps of the Material row \a layer are the row's to show: it has a bake of the
+ * source it reads, at the side it asks for, for the channels the material asks for, and the mode
+ * is not Never. The structural half of validity; reads the row alone.
+ */
+bool paint_layer_row_material_shown(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Where a Material row's colour in one channel comes from. */
+enum class PaintLayerMaterialSourceKind : int8_t {
+  /** The row lays nothing in the channel (yet). */
+  None = 0,
+  /** The map rendered from the source (#paint_layer_row_material_map). */
+  Baked,
+  /** The source's plain value: a live input of the row's group, so editing it never rebuilds. */
+  LiveConstant,
+  /** The source's own Image Texture, shown without the source's graph around it. */
+  LiveImage,
+  /**
+   * The source's graph, copied into a node group of its own that the row instantiates: shown live
+   * in the generated graph, never in the CPU composite, which cannot evaluate a shader.
+   */
+  SourceGroup,
+};
+
+/** Who is asking what a Material row lays: the shader graph or the CPU composite. */
+enum class PaintLayerMaterialUse : int8_t {
+  /** The CPU composite (the Image Editor, paint slots, a folder's cache): maps and live textures.
+   */
+  Composite = 0,
+  /** The generated graph: also the source's own graph through its group. */
+  Graph,
+};
+
+struct PaintLayerMaterialSource {
+  PaintLayerMaterialSourceKind kind = PaintLayerMaterialSourceKind::None;
+  /** #LiveConstant: the value; its alpha is one. */
+  float constant[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  /** #LiveImage: the source's image; #Baked: the rendered map. */
+  Image *image = nullptr;
+  /** #LiveImage: the node's own image user and node, for its sampling settings. */
+  const ImageUser *iuser = nullptr;
+  const bNode *node = nullptr;
+};
+
+/**
+ * What the Material row \a row lays in the colour \a channel. Per channel and in this order: the
+ * source's plain value, the source's plain Image Texture, the map rendered from the source. The
+ * answer for a channel does not depend on the others, so a source with a texture in one channel
+ * and a graph in the next shows the texture live and the graph from its render.
+ */
+PaintLayerMaterialSource paint_layer_material_channel_source(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    int channel,
+    PaintLayerMaterialUse use = PaintLayerMaterialUse::Graph);
+
+/** Where a Material row's coverage (the source's transparency) comes from. */
+enum class PaintLayerMaterialCoverageKind : int8_t {
+  /** The source has no transparency: the row covers by its opacity alone. */
+  Full = 0,
+  /** The source's Alpha is a plain value: a live input of the row's group. */
+  LiveConstant,
+  /** The source's Alpha is the Alpha output of its own Image Texture. */
+  LiveAlpha,
+  /** The map rendered from the source (a grey: its three channels carry the coverage). */
+  Baked,
+  /** The source's Alpha graph, from its group (#PaintLayerMaterialSourceKind::SourceGroup). */
+  SourceGroup,
+  /** The coverage has to be rendered and is not yet: the row takes part in nothing meanwhile. */
+  Pending,
+};
+
+struct PaintLayerMaterialCoverage {
+  PaintLayerMaterialCoverageKind kind = PaintLayerMaterialCoverageKind::Full;
+  float constant = 1.0f;
+  Image *image = nullptr;
+  const ImageUser *iuser = nullptr;
+  const bNode *node = nullptr;
+};
+
+PaintLayerMaterialCoverage paint_layer_material_coverage_source(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    PaintLayerMaterialUse use = PaintLayerMaterialUse::Graph);
+
+/**
+ * Whether the Material row \a row takes part in the colour \a channel: it has a source in the
+ * channel (#paint_layer_material_channel_source) and its coverage is ready. The one test for the
+ * generator and the CPU composite.
+ */
+bool paint_layer_row_reads_source(const Material &ma, const MaterialPaintLayer &row, int channel);
+
+/**
+ * Whether the graph of \a row's source in \a channel can be copied into a group: the Principled
+ * BSDF is reached through groups the wrapper can copy (#BKE_paint_layers_source_group_wrappable),
+ * and the source supplies the channel as a graph (the Normal as the encoded map the chain reads).
+ * The coverage is asked as the alpha channel.
+ */
+bool paint_layer_material_source_group_channel(const Material &ma,
+                                               const MaterialPaintLayer &row,
+                                               int channel);
+
+/**
+ * Compare the shape every Material row of \a ma gives its group with the one it gave when it was
+ * last seen, and mark \a ma for regeneration when a source edit changed it. Main thread, at the
+ * regeneration point. \return whether anything moved.
+ */
+bool BKE_paint_layers_material_sources_notice(Material &ma);
+
+/**
+ * A hash of the shape the Material row \a row gives its group: which source each channel and the
+ * coverage come from, and which image a live one reads. It moves when a source edit changes what
+ * the generator builds (a channel turning from a value into a texture), never when only a value
+ * moves.
+ */
+uint64_t paint_layer_material_live_signature(const Material &ma, const MaterialPaintLayer &row);
 
 /**
  * The record of \a layer's channels array that stands for \a channel, or null when it has none.
@@ -235,7 +351,7 @@ inline bool paint_layer_row_participates(const Material &ma,
   return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) ||
          paint_layer_effects_lay(ma, layer, channel) ||
          paint_layer_adjustment_acts(ma, layer, channel) ||
-         paint_layer_row_material_map(ma, layer, channel, nullptr);
+         paint_layer_row_reads_source(ma, layer, channel);
 }
 
 /**
@@ -249,7 +365,7 @@ inline bool paint_layer_row_empty_base(const Material &ma,
                                        const int channel)
 {
   return !paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) &&
-         !paint_layer_row_material_map(ma, layer, channel, nullptr) &&
+         !paint_layer_row_reads_source(ma, layer, channel) &&
          paint_layer_effects_lay(ma, layer, channel);
 }
 

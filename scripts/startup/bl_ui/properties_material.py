@@ -800,12 +800,17 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
         layout.prop(layer, "bake_mode", text="Mode")
         layout.prop(layer, "bake_size_preset", text="Size")
         if layer.source == 'MATERIAL':
-            # The maps of a Material row are rendered from its source: they are what the row shows.
+            # A plain value and a plain texture of the source are shown as they are. What the
+            # source supplies as a graph is shown through a copy of that graph (Auto and Never)
+            # or from the maps rendered from it (Always); the maps are also what the Image Editor
+            # and the paint slots read.
             if layer.bake_mode == 'NEVER':
-                layout.label(text="Not shown: the row has no live form yet", icon='INFO')
+                layout.label(text="Nothing is rendered: the graph of the source is shown live", icon='INFO')
             else:
+                if layer.bake_mode == 'AUTO':
+                    layout.label(text="The graph of the source is shown live", icon='INFO')
                 layout.label(
-                    text="Rendered" if layer.bake_is_valid else "Rendering or out of date",
+                    text="Maps up to date" if layer.bake_is_valid else "Maps rendering or out of date",
                     icon='CHECKMARK' if layer.bake_is_valid else 'TIME',
                 )
             return

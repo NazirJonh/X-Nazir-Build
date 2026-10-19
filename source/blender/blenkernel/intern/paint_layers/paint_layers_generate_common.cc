@@ -109,6 +109,16 @@ bool uid_prop_get(const IDProperty *properties, const char *key, bUUID &r_uid)
   return BLI_uuid_parse_string(&r_uid, formatted);
 }
 
+bool source_group_row_get(const bNodeTree &tree, bUUID &r_marker)
+{
+  return uid_prop_get(tree.id.properties, TREE_SOURCE_ROW_PROP, r_marker);
+}
+
+void source_group_row_set(bNodeTree &tree, const bUUID &marker)
+{
+  uid_prop_set(tree.id.properties, TREE_SOURCE_ROW_PROP, marker);
+}
+
 bUUID tree_owner_uid_get(const bNodeTree &tree)
 {
   bUUID uid = BLI_uuid_nil();
@@ -338,7 +348,7 @@ void layer_trees_copy(Main *bmain,
       continue;
     }
     bUUID marker = BLI_uuid_nil();
-    if (!layer_tree_marker_get(*group, marker)) {
+    if (!layer_tree_marker_get(*group, marker) && !source_group_row_get(*group, marker)) {
       continue;
     }
     bNodeTree *group_copy = id_cast<bNodeTree *>(BKE_id_copy(bmain, &group->id));

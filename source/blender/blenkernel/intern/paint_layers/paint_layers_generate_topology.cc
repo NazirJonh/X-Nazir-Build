@@ -209,14 +209,13 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     else {
       hash = topology_hash_mix(hash, 0);
     }
-    /* A Material row reads the map rendered from its source: which one is the nodes, and the
-     * coverage beside it. The pixels are not structure. */
-    Image *material_color = nullptr;
-    if (paint_layer_row_material_map(ma, layer, channel, &material_color)) {
-      hash = topology_hash_mix(hash, 0x500);
-      topology_hash_string(hash, material_color->id.name);
-      topology_hash_string(hash, layer.bake->coverage->id.name);
-    }
+  }
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    /* A Material row's nodes follow its source: which channels are a value, a texture or a
+     * rendered map, which image each reads and how, and the same for the coverage. The values are
+     * inputs. */
+    hash = topology_hash_mix(hash, 0x500);
+    hash = topology_hash_mix(hash, paint_layer_material_live_signature(ma, layer));
   }
   /* A content correction is nodes of its own (a map, a Mix and a coverage fold) in each channel it
    * lays a map in, so which ones do, and which map, is structure; its opacity is an input. Its

@@ -25,6 +25,7 @@
 #include "paint_layers_generate_layout.hh"
 
 #include <memory>
+#include <utility>
 
 namespace blender {
 
@@ -279,6 +280,23 @@ class PaintLayersTreeBuilder {
   NodeOutput multiply_nodes_add(bNodeTree &tree, NodeOutput a, NodeOutput b);
 
   /**
+   * What a Material row lays in the channel of \a ctx: its source's plain value (an input of the
+   * group), its source's plain Image Texture, or the map rendered from it, with the coverage its
+   * source's transparency gives. Empty when the row has nothing there.
+   */
+  KindEmitResult material_source_emit(const RowEmitContext &ctx);
+
+  /**
+   * The output of the Material row's source group for \a channel, instancing the group in \a tree
+   * once for the row, outside the frames since every channel of the row shares it. Null when the
+   * row has no source group or it has no output for the channel; the caller then reads the row's
+   * map.
+   */
+  NodeOutput source_group_output_get(bNodeTree &tree,
+                                     const MaterialPaintLayer &layer,
+                                     int channel);
+
+  /**
    * An Image Texture node of \a tree reading \a image, holding one user of it, so every map source
    * is made the same way. Null when the node cannot be created; the caller places it.
    */
@@ -395,6 +413,11 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_inputs_;
   /** The alpha of that constant, its own float input, keyed the same way. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> fill_alpha_inputs_;
+  /** The plain value a Material row's source supplies in a channel, keyed by the row and channel.
+   */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> live_constant_inputs_;
+  /** The coverage of a Material row whose source's Alpha is a plain value, keyed by the row. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> live_coverage_inputs_;
   /** A row's base mask opacity and constant inputs, keyed by the row. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_opacity_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_value_inputs_;
@@ -404,6 +427,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_rotation_inputs_;
   /** The Mapping node built for a row, so every channel and map of it shares the one node. */
   Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
+  /** The instance of a Material row's source group, with the group, keyed by the row. */
+  Map<const MaterialPaintLayer *, std::pair<bNode *, bNodeTree *>> source_group_instances_;
   /** The clip factor of a row's UV wrap, built once and shared by every map of the row. */
   Map<const MaterialPaintLayer *, NodeOutput> mapping_clip_masks_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */

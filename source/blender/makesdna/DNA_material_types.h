@@ -689,11 +689,14 @@ struct MaterialPaintLayerMapping {
 enum eMaterialPaintLayerBakeMode : int8_t {
   /** Bake only what is heavy and not being edited; everything else is evaluated live. */
   MA_PAINT_LAYER_BAKE_AUTO = 0,
-  /** Always bake, and show the row as stale until the bake is current. */
+  /**
+   * Always bake, and show the row as stale until the bake is current. A Material row shows the
+   * render of its source, never a copy of the source's graph.
+   */
   MA_PAINT_LAYER_BAKE_ALWAYS = 1,
   /**
-   * Never bake; the row is evaluated live. A Material row has no live form yet, so it shows
-   * nothing in this mode.
+   * Never bake; the row is evaluated live. A Material row shows its source's graph through a copy
+   * of it, and only what that cannot show (a graph reached through a Group node) is empty here.
    */
   MA_PAINT_LAYER_BAKE_NEVER = 2,
 };

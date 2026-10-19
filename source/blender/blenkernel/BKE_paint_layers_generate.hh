@@ -49,6 +49,12 @@ struct PaintLayersBuildContext {
    * Empty (the default) means every group is built from scratch.
    */
   FunctionRef<bool(const MaterialPaintLayer &layer)> layer_unchanged;
+  /**
+   * Hands out the group holding a copy of the source's shader graph for the Material row \a layer,
+   * filled and current, or null when the source cannot be wrapped. Empty (the default) means no
+   * row shows its source's graph and each reads the map rendered from it.
+   */
+  FunctionRef<bNodeTree *(const MaterialPaintLayer &layer)> source_group_get;
 };
 
 /**

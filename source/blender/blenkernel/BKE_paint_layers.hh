@@ -20,6 +20,7 @@
  */
 
 #include <cstdint>
+#include <memory>
 
 #include "BLI_function_ref.hh"
 #include "BLI_span.hh"
@@ -36,6 +37,7 @@ struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
 struct MaterialPaintLayerIdColor;
+struct MaterialSourceResolve;
 struct ReportList;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
@@ -867,8 +869,41 @@ uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma);
  */
 uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma);
 
-/** Drop the remembered hash of \a ma, which is being freed. */
+/**
+ * What \a source supplies to every paint channel (#BKE_paint_material_source_resolve), remembered
+ * against the node tree update signal so the generator and the CPU composite, which ask once per
+ * row and channel, do not walk the source each time. The answer points into \a source's own node
+ * trees and is only good for as long as they are not edited; it is made from the tree it is asked
+ * of, so an evaluated copy never gets the original's pointers.
+ */
+std::shared_ptr<const MaterialSourceResolve> BKE_paint_layers_source_resolve(
+    const Material &source);
+
+/**
+ * Whether the Principled BSDF that drives \a source's Material Output is reached through no more
+ * than #SOURCE_GROUP_MAX_DEPTH nested groups: the condition for copying the source's graph into a
+ * group of its own. Remembered with the resolve above.
+ */
+bool BKE_paint_layers_source_group_wrappable(const Material &source);
+
+/** The most nested groups a source's graph is followed through to its Principled BSDF. */
+inline constexpr int SOURCE_GROUP_MAX_DEPTH = 8;
+
+/** Drop the remembered hash and resolve of \a ma, which is being freed. */
 void BKE_paint_layers_source_material_hash_forget(const Material &ma);
+
+/**
+ * Whether the colour \a channel (or, for the alpha channel, the coverage) of the Material row
+ * \a row has to be rendered into a map: its source supplies it as a graph rather than as a plain
+ * value or a plain Image Texture, which are shown as they are. A channel outside the material's
+ * set needs nothing.
+ */
+bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
+                                                    const MaterialPaintLayer &row,
+                                                    int channel);
+
+/** Whether any channel of \a row needs a map (#BKE_paint_layers_material_channel_needs_render). */
+bool BKE_paint_layers_material_row_needs_render(const Material &ma, const MaterialPaintLayer &row);
 
 /**
  * Whether the maps of the Material row \a layer no longer describe its source: it has none yet, the
@@ -884,6 +919,11 @@ bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaint
  */
 bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer);
 
+/** Print the state that decides whether the render of the Material row \a layer is due. */
+void BKE_paint_layers_material_row_log(const Material &ma,
+                                       const MaterialPaintLayer &layer,
+                                       const char *event);
+
 /**
  * The hashes a render of \a layer starts from: the structural one and the source's content hash,
  * low word first. Handed back to #BKE_paint_layers_material_bake_land when the render ends.
@@ -896,7 +936,7 @@ void BKE_paint_layers_material_bake_stamp_get(const Material &ma,
 /**
  * Hand the maps of a render about to start to the Material row \a layer: one image per entry of
  * \a channels (an alpha entry becomes the row's coverage), every other channel's map is let go, a
- * source without transparency gets a one-texel white coverage. The structural hash is stamped and
+ * coverage the render does not hand a map for is let go too. The structural hash is stamped and
  * the pixel subscription started now, so the generator wires the new maps in while they render and
  * an edit made during the render is seen after it. The source hash waits for
  * #BKE_paint_layers_material_bake_land.

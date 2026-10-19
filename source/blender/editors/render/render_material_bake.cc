@@ -1726,8 +1726,14 @@ static void material_bake_images_endjob(void *customdata)
   if (job.row.active) {
     for (Material &owner : bmain->materials) {
       if (owner.id.session_uid == job.row.owner_session_uid) {
-        BKE_paint_layers_material_bake_land(
+        const bool took = BKE_paint_layers_material_bake_land(
             owner, job.row.marker, job.row.hash, job.row.source_hash, all_landed);
+        if (MaterialPaintLayer *row = BKE_paint_layers_find(owner, job.row.marker)) {
+          printf("[paint-layers material row] render end: all_landed=%d took=%d\n",
+                 int(all_landed),
+                 int(took));
+          BKE_paint_layers_material_row_log(owner, *row, "after land");
+        }
         WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &owner.id);
         break;
       }
@@ -1819,7 +1825,8 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
   for (const BakeTargetSpec *target : to_create) {
     const eMaterialPaintChannel channel = target->channel;
     const bool constant = resolve.channels[channel] == ChannelResolution::Constant;
-    Image *image = target->existing != nullptr ? target->existing :
+    Image *image = target->existing != nullptr ?
+                       target->existing :
                    params.reuse_existing ?
                        bake_target_image_find(bmain, *params.material, channel) :
                        bake_target_image_create(bmain,
@@ -1828,8 +1835,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
                                                 size,
                                                 result.layer_id,
                                                 current_hash,
-                                                /*placeholder=*/(!constant && !params.blocking) ||
-                                                    (constant && params.compact_constants));
+                                                /*placeholder=*/!constant && !params.blocking);
     if (image == nullptr) {
       /* Only reachable when re-baking a layer whose target for this channel is gone. */
       continue;
@@ -2006,13 +2012,15 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
       continue;
     }
 
-    /* Reuse the row's own maps so a re-render does not mint a new `.00N` set every time, as long as
-     * they are still renders of this source. A value channel needs no full-size map (and a map of
-     * another size is not reused for a rendered one). */
-    const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(row->material);
+    /* Only what the source supplies as a graph is rendered: its plain values and plain textures
+     * are shown as they are. Reuse the row's own maps so a re-render does not mint a new `.00N`
+     * set every time, as long as they are still renders of this source at this size. */
     Vector<BakeTargetSpec> targets;
     for (const int channel_index : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
       const eMaterialPaintChannel channel = eMaterialPaintChannel(channel_index);
+      if (!BKE_paint_layers_material_channel_needs_render(ma, *row, channel_index)) {
+        continue;
+      }
       Image *existing = (channel == PAINT_MATERIAL_CHANNEL_ALPHA) ?
                             row->bake->coverage :
                             row->bake->images[channel_index];
@@ -2021,10 +2029,9 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
         int existing_w = 0;
         int existing_h = 0;
         BKE_image_get_size(existing, nullptr, &existing_w, &existing_h);
-        const bool constant = resolve.channels[channel] == ChannelResolution::Constant;
         if (!BKE_image_material_source_get(*existing, source) ||
             source.material != row->material || source.channel != channel_index ||
-            (!constant && (existing_w != size || existing_h != size)))
+            existing_w != size || existing_h != size)
         {
           existing = nullptr;
         }
@@ -2032,6 +2039,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
       targets.append({channel, existing, channel == PAINT_MATERIAL_CHANNEL_ALPHA});
     }
 
+    BKE_paint_layers_material_row_log(ma, *row, "render start");
     MaterialBakeToImagesParams params;
     params.material = row->material;
     /* The row belongs to \a ma: its channel set decides which channels are rendered. */
@@ -2039,7 +2047,6 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
     params.targets = targets;
     params.size = size;
     params.blocking = false;
-    params.compact_constants = true;
     params.job_owner = row;
     params.row = link;
     /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */

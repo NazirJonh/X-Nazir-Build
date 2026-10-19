@@ -10,6 +10,7 @@
  */
 
 #include <cstring>
+#include <memory>
 #include <mutex>
 
 #include "BLI_index_range.hh"
@@ -17,10 +18,12 @@
 #include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_vector.hh"
 
 #include "BKE_node.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_material_resolve.hh"
 
 #include "DNA_ID.h"
 #include "DNA_color_types.h"
@@ -377,6 +380,31 @@ std::mutex &source_hash_memo_mutex()
   return mutex;
 }
 
+/**
+ * What the resolver found in a source, by node tree address: an evaluated copy has trees (and
+ * images) of its own, and the pointers inside the answer must be the ones of the tree it was made
+ * from. The same signal as above says when the answer is out of date.
+ */
+struct SourceResolveMemo {
+  uint64_t signal = 0;
+  std::shared_ptr<const MaterialSourceResolve> resolve;
+  /** The Principled BSDF is reached through at most #SOURCE_GROUP_MAX_DEPTH groups, so its graph
+   * can be copied into a group. */
+  bool group_wrappable = false;
+};
+
+Map<const bNodeTree *, SourceResolveMemo> &source_resolve_memo()
+{
+  static Map<const bNodeTree *, SourceResolveMemo> memo;
+  return memo;
+}
+
+std::mutex &source_resolve_memo_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
 }  // namespace
 
 uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma)
@@ -404,8 +432,60 @@ uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma)
 
 void BKE_paint_layers_source_material_hash_forget(const Material &ma)
 {
-  std::lock_guard lock(source_hash_memo_mutex());
-  source_hash_memo().remove(ma.id.session_uid);
+  {
+    std::lock_guard lock(source_hash_memo_mutex());
+    source_hash_memo().remove(ma.id.session_uid);
+  }
+  if (ma.nodetree != nullptr) {
+    std::lock_guard lock(source_resolve_memo_mutex());
+    source_resolve_memo().remove(ma.nodetree);
+  }
+}
+
+/** The memoized answer for \a source, made when the signal moved. */
+static SourceResolveMemo source_resolve_entry(const Material &source)
+{
+  if (source.nodetree == nullptr) {
+    SourceResolveMemo none;
+    none.resolve = std::make_shared<const MaterialSourceResolve>(
+        BKE_paint_material_source_resolve(&source));
+    return none;
+  }
+  source.nodetree->ensure_topology_cache();
+  Set<const bNodeTree *> visited;
+  uint64_t signal = 0;
+  source_signal_recursive(*source.nodetree, visited, signal);
+  {
+    std::lock_guard lock(source_resolve_memo_mutex());
+    if (const SourceResolveMemo *memo = source_resolve_memo().lookup_ptr(source.nodetree)) {
+      if (memo->signal == signal) {
+        return *memo;
+      }
+    }
+  }
+  SourceResolveMemo entry;
+  entry.signal = signal;
+  entry.resolve = std::make_shared<const MaterialSourceResolve>(
+      BKE_paint_material_source_resolve(&source));
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  Vector<const bNode *> group_path;
+  entry.group_wrappable = BKE_paint_material_principled_find(source, reason, &group_path) !=
+                              nullptr &&
+                          group_path.size() <= SOURCE_GROUP_MAX_DEPTH;
+  std::lock_guard lock(source_resolve_memo_mutex());
+  source_resolve_memo().add_overwrite(source.nodetree, entry);
+  return entry;
+}
+
+std::shared_ptr<const MaterialSourceResolve> BKE_paint_layers_source_resolve(
+    const Material &source)
+{
+  return source_resolve_entry(source).resolve;
+}
+
+bool BKE_paint_layers_source_group_wrappable(const Material &source)
+{
+  return source_resolve_entry(source).group_wrappable;
 }
 
 /** \} */

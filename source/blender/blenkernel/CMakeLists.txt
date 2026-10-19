@@ -265,6 +265,7 @@ set(SRC
   intern/paint_layers/paint_layers.cc
   intern/paint_layers/paint_layers_bake.cc
   intern/paint_layers/paint_layers_kind.cc
+  intern/paint_layers/paint_layers_material_live.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_edit.cc
   intern/paint_layers/paint_layers_generate_build.cc
@@ -275,6 +276,7 @@ set(SRC
   intern/paint_layers/paint_layers_generate_layout.cc
   intern/paint_layers/paint_layers_generate_layout.hh
   intern/paint_layers/paint_layers_generate_regen.cc
+  intern/paint_layers/paint_layers_generate_source_group.cc
   intern/paint_layers/paint_layers_generate_topology.cc
   intern/paint_layers/paint_layers_generate_values.cc
   intern/paint_layers/paint_layers_object_mask.cc

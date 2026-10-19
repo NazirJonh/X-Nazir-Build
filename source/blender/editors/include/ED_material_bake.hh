@@ -256,11 +256,6 @@ struct MaterialBakeToImagesParams {
    */
   Material *set_material = nullptr;
   /**
-   * A channel that is a plain value gets a one-texel map instead of a full-size one: sampled
-   * anywhere it reads the same, and a constant does not need a float image per channel.
-   */
-  bool compact_constants = false;
-  /**
    * The Material row this render is for. Its maps are handed over by #before_render, and when the
    * render ends the row is told whether they landed.
    */

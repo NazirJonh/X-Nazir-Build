@@ -17,6 +17,7 @@
 
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_ustring.hh"
 
 #include "BKE_lib_id.hh"
@@ -1560,6 +1561,219 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   return true;
 }
 
+/** Give a live Image Texture the sampling its source node has, so it reads the map as the source
+ * does. */
+static void live_image_settings_copy(bNode &map, const bNode *source_node)
+{
+  NodeTexImage *dst = static_cast<NodeTexImage *>(map.storage);
+  const NodeTexImage *src = (source_node != nullptr) ?
+                                static_cast<const NodeTexImage *>(source_node->storage) :
+                                nullptr;
+  if (dst != nullptr && src != nullptr) {
+    dst->interpolation = src->interpolation;
+    dst->extension = src->extension;
+  }
+}
+
+NodeOutput PaintLayersTreeBuilder::source_group_output_get(bNodeTree &tree,
+                                                           const MaterialPaintLayer &layer,
+                                                           const int channel)
+{
+  std::pair<bNode *, bNodeTree *> *found = source_group_instances_.lookup_ptr(&layer);
+  if (found == nullptr) {
+    std::pair<bNode *, bNodeTree *> made{nullptr, nullptr};
+    bNodeTree *group = ctx_.source_group_get ? ctx_.source_group_get(layer) : nullptr;
+    if (group != nullptr && tree_.typeinfo != nullptr && tree_.typeinfo->group_idname != nullptr) {
+      bNode *instance = bke::node_add_node(nullptr, tree, tree_.typeinfo->group_idname);
+      if (instance != nullptr) {
+        instance->id = &group->id;
+        /* The factory group has no users; assigning the id makes this instance its only one. */
+        id_us_plus(&group->id);
+        STRNCPY_UTF8(instance->label, layer.material->id.name + 2);
+        nodes::update_node_declaration_and_sockets(tree, *instance);
+        grid_.place(*instance, layout::Column::Source, 0);
+        made = {instance, group};
+      }
+    }
+    found = &source_group_instances_.lookup_or_add(&layer, made);
+  }
+  if (found->first == nullptr) {
+    return {};
+  }
+  bNodeSocket *socket = source_group_output(*found->second, *found->first, channel);
+  if (socket == nullptr) {
+    return {};
+  }
+  return {found->first, socket};
+}
+
+KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext &ctx)
+{
+  bNodeTree &tree = ctx.tree;
+  LayerGroup &group = ctx.group;
+  KindEmitResult out;
+  Vector<bNode *> source_nodes;
+  const auto discard = [&]() {
+    this->nodes_discard(tree, source_nodes);
+    return KindEmitResult{};
+  };
+
+  /* The colour: the source's plain value (a live input), its plain texture, or the map rendered
+   * from it. The content alpha of a value is one; of a map, the map's own. */
+  const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+      ma_, ctx.layer, ctx.channel);
+  switch (source.kind) {
+    case PaintLayerMaterialSourceKind::LiveConstant: {
+      bNodeTreeInterfaceSocket *const *live = nullptr;
+      if (Map<int, bNodeTreeInterfaceSocket *> *by_channel = live_constant_inputs_.lookup_ptr(
+              &ctx.layer))
+      {
+        live = by_channel->lookup_ptr(ctx.channel);
+      }
+      if (live == nullptr) {
+        return {};
+      }
+      out.color = {ctx.group.group_input, group_input_socket(group, **live)};
+      bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+      bNodeSocket *one_out = (one != nullptr) ? socket_out(*one, "Value") : nullptr;
+      if (one_out == nullptr || one_out->default_value == nullptr) {
+        return discard();
+      }
+      source_nodes.append(one);
+      static_cast<bNodeSocketValueFloat *>(one_out->default_value)->value = 1.0f;
+      grid_.place(*one, layout::Column::Source, 1);
+      out.content_alpha = {one, one_out};
+      break;
+    }
+    case PaintLayerMaterialSourceKind::SourceGroup: {
+      /* The source's graph itself, evaluated by the shader: its colour, and a content alpha of one
+       * since a shader graph has no alpha of its own. */
+      NodeOutput shown = this->source_group_output_get(tree, ctx.layer, ctx.channel);
+      Image *rendered = nullptr;
+      if (shown.socket == nullptr &&
+          paint_layer_row_material_map(ma_, ctx.layer, ctx.channel, &rendered))
+      {
+        /* The group has no output for the channel (its graph is reached through a Group node):
+         * the map rendered from it stands in. */
+        bNode *map = this->image_map_node_add(tree, *rendered);
+        bNodeSocket *map_color = (map != nullptr) ? socket_out(*map, "Color") : nullptr;
+        if (map_color == nullptr) {
+          return discard();
+        }
+        source_nodes.append(map);
+        grid_.place(*map, layout::Column::Source, 0);
+        shown = {map, map_color};
+      }
+      if (shown.socket == nullptr) {
+        return discard();
+      }
+      bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+      bNodeSocket *one_out = (one != nullptr) ? socket_out(*one, "Value") : nullptr;
+      if (one_out == nullptr || one_out->default_value == nullptr) {
+        return discard();
+      }
+      source_nodes.append(one);
+      static_cast<bNodeSocketValueFloat *>(one_out->default_value)->value = 1.0f;
+      grid_.place(*one, layout::Column::Source, 1);
+      out.color = shown;
+      out.content_alpha = {one, one_out};
+      break;
+    }
+    case PaintLayerMaterialSourceKind::LiveImage:
+    case PaintLayerMaterialSourceKind::Baked: {
+      bNode *map = this->image_map_node_add(tree, *source.image);
+      if (map == nullptr) {
+        return {};
+      }
+      source_nodes.append(map);
+      bNodeSocket *color_out = socket_out(*map, "Color");
+      bNodeSocket *alpha_out = socket_out(*map, "Alpha");
+      if (color_out == nullptr || alpha_out == nullptr) {
+        return discard();
+      }
+      if (source.kind == PaintLayerMaterialSourceKind::LiveImage) {
+        live_image_settings_copy(*map, source.node);
+      }
+      grid_.place(*map, layout::Column::Source, 0);
+      out.color = {map, color_out};
+      out.content_alpha = {map, alpha_out};
+      break;
+    }
+    case PaintLayerMaterialSourceKind::None:
+      return {};
+  }
+
+  /* The coverage: the source's transparency, which is not the colour map's alpha. */
+  const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma_, ctx.layer);
+  switch (coverage.kind) {
+    case PaintLayerMaterialCoverageKind::Full:
+      break;
+    case PaintLayerMaterialCoverageKind::LiveConstant: {
+      const auto live = live_coverage_inputs_.lookup_ptr(&ctx.layer);
+      if (live == nullptr) {
+        return discard();
+      }
+      out.coverage = {ctx.group.group_input, group_input_socket(group, **live)};
+      break;
+    }
+    case PaintLayerMaterialCoverageKind::SourceGroup: {
+      out.coverage = this->source_group_output_get(tree, ctx.layer, PAINT_MATERIAL_CHANNEL_ALPHA);
+      if (out.coverage.socket == nullptr && paint_layer_row_material_shown(ma_, ctx.layer) &&
+          ctx.layer.bake->coverage != nullptr)
+      {
+        /* The group has no Alpha output (its graph is reached through a Group node): the coverage
+         * map rendered from it stands in, read as the Baked kind reads it. */
+        bNode *map = this->image_map_node_add(tree, *ctx.layer.bake->coverage);
+        bNodeSocket *map_color = (map != nullptr) ? socket_out(*map, "Color") : nullptr;
+        if (map_color == nullptr) {
+          return discard();
+        }
+        source_nodes.append(map);
+        grid_.place(*map, layout::Column::Source, 2);
+        out.coverage = this->rgb_mean_nodes_add(tree, {map, map_color}, source_nodes);
+      }
+      if (out.coverage.socket == nullptr) {
+        return discard();
+      }
+      break;
+    }
+    case PaintLayerMaterialCoverageKind::LiveAlpha:
+    case PaintLayerMaterialCoverageKind::Baked: {
+      bNode *map = this->image_map_node_add(tree, *coverage.image);
+      if (map == nullptr) {
+        return discard();
+      }
+      source_nodes.append(map);
+      grid_.place(*map, layout::Column::Source, 2);
+      if (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha) {
+        live_image_settings_copy(*map, coverage.node);
+        bNodeSocket *alpha_out = socket_out(*map, "Alpha");
+        if (alpha_out == nullptr) {
+          return discard();
+        }
+        out.coverage = {map, alpha_out};
+      }
+      else {
+        /* The rendered coverage stores the scalar in grey RGB: its factor is the mean of the three
+         * channels, exactly as the CPU reads it. */
+        bNodeSocket *color_out = socket_out(*map, "Color");
+        if (color_out == nullptr) {
+          return discard();
+        }
+        out.coverage = this->rgb_mean_nodes_add(tree, {map, color_out}, source_nodes);
+        if (out.coverage.socket == nullptr) {
+          return discard();
+        }
+      }
+      break;
+    }
+    case PaintLayerMaterialCoverageKind::Pending:
+      return discard();
+  }
+  layout::frame_add(tree, "Source", source_nodes);
+  return out;
+}
+
 KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx)
 {
   bNodeTree &tree = ctx.tree;
@@ -1608,6 +1822,9 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     grid_.place(*no_coverage, layout::Column::Source, 1);
     out.coverage = {no_coverage, no_coverage_out};
     out.content_alpha = out.coverage;
+  }
+  else if (paint_layer_kind_has_flag(ctx.layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    out = this->material_source_emit(ctx);
   }
   else if (ctx.baked_color != nullptr) {
     /* The row's bake: its colour map, whose alpha is the content alpha the live row had, and the
@@ -1737,10 +1954,10 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
    * itself, so it is built like a leaf whatever it is, and none of its corrections or mask. */
   Image *baked_color = nullptr;
   const bool substituted = paint_layer_row_baked_channel(ma_, layer, channel, &baked_color);
-  /* A Material row is laid like a painted row whose map is the one rendered from its source: it
-   * keeps its corrections and its mask, which the bake of a subtree would have held. */
-  const bool material_baked = !substituted &&
-                              paint_layer_row_material_map(ma_, layer, channel, &baked_color);
+  /* A Material row is laid like a painted row whose content is what its source supplies in the
+   * channel: it keeps its corrections and its mask, which the bake of a subtree would have held.
+   */
+  const bool material_source = !substituted && paint_layer_row_reads_source(ma_, layer, channel);
   /* A folder owns no record: its source is the isolated result of what it holds. */
   const bool folder = BKE_paint_layers_is_folder(layer) && !substituted;
   /* A Paint row with no map and no value alpha takes part only for the corrections laid over it:
@@ -1754,7 +1971,7 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     return {};
   }
   if (record == nullptr && !folder && !empty_base && !adjustment && !substituted &&
-      !material_baked)
+      !material_source)
   {
     return {};
   }

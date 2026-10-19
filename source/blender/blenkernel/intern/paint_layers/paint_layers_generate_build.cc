@@ -661,6 +661,22 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
     }
 
+    if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+      /* A Material row has no record: a plain value of its source is an input, filled from the
+       * source and kept current by the value sync, so editing it in the source never rebuilds. */
+      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+          ma_, layer, channel);
+      if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+        SNPRINTF(base, "%s %s Source", layer_name, info.ui_name);
+        bNodeTreeInterfaceSocket *live = layer_group_value_input(
+            group, base, "NodeSocketColor", ROLE_LIVE_CONSTANT, layer.marker, channel);
+        if (live != nullptr) {
+          group_input_default_set(group, *live, source.constant);
+          live_constant_inputs_.lookup_or_add_default(&layer).add(channel, live);
+        }
+      }
+      continue;
+    }
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
     /* An empty base builds a flat zero instead of its record's value, so it has no fill input. */
     if (record == nullptr || record->image != nullptr ||
@@ -686,6 +702,26 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       if (fill_alpha != nullptr) {
         group_input_default_set(group, *fill_alpha, record->value[3]);
         fill_alpha_inputs_.lookup_or_add_default(&layer).add(channel, fill_alpha);
+      }
+    }
+  }
+
+  /* The coverage of a Material row: its source's Alpha, when that is a plain value, is an input of
+   * the group like the colour values are. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma_, layer);
+    bool any = false;
+    for (const int channel : wired_channels_) {
+      any |= row_participates(ma_, layer, channel);
+    }
+    if (any && coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+      char base[200];
+      SNPRINTF(base, "%s Source Coverage", layer_name);
+      bNodeTreeInterfaceSocket *live = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_LIVE_COVERAGE, layer.marker, -1);
+      if (live != nullptr) {
+        group_input_default_set(group, *live, coverage.constant);
+        live_coverage_inputs_.add(&layer, live);
       }
     }
   }

@@ -80,6 +80,12 @@ inline constexpr const char *TREE_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_topolog
  * When it matches the stored one the root is left alone and only its groups' values are synced. */
 inline constexpr const char *TREE_ROOT_TOPOLOGY_LOW_PROP = "pbr_paint_layers_root_topology";
 inline constexpr const char *TREE_ROOT_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_root_topology_hi";
+/** On a source group: the source's structure hash (#BKE_paint_layers_source_material_structure_hash)
+ * it was filled from. With it unchanged, a source edit only moved socket values, which the group
+ * takes in place (#source_group_values_sync). */
+inline constexpr const char *TREE_SOURCE_STRUCTURE_LOW_PROP = "pbr_paint_layers_source_structure";
+inline constexpr const char *TREE_SOURCE_STRUCTURE_HIGH_PROP =
+    "pbr_paint_layers_source_structure_hi";
 
 /** On a row's opacity input: set (to 1) when the row was built from its bake, so that input holds
  * the row's visibility alone -- the bake already holds its opacity -- and the value sync can tell a
@@ -266,9 +272,30 @@ void source_group_paths_prune(Main &bmain, const bUUID &owner_uid);
  */
 bNodeSocket *source_group_output(const bNodeTree &wrapper, bNode &instance, int channel);
 
+/**
+ * Take the socket values of \a source into the group \a wrapper filled from it, in place: the
+ * nodes of the copy and of the private group copies below it are found by name in the source and
+ * get its default values. Valid only while the source's structure hash is the one the group was
+ * filled from. \return false when a node or socket has no counterpart: the group must be refilled.
+ */
+bool source_group_values_sync(Main &bmain, bNodeTree &wrapper, const Material &source);
+
+/** The structure hash \a wrapper was filled from (see #TREE_SOURCE_STRUCTURE_LOW_PROP). */
+void source_group_structure_hash_set(bNodeTree &wrapper, uint64_t hash);
+bool source_group_structure_hash_get(bNodeTree &wrapper, uint64_t &r_hash);
+
+/**
+ * Whether the group of \a source exposes a Normal: only a Normal Map node feeds one, any other
+ * normal (a Bump) comes from screen-space derivatives and is read from the rendered map instead.
+ */
+bool source_group_normal_live(const Material &source);
+
 /** The hash the source group stores in its topology words: the source's content and the fill's
  * version. */
 uint64_t source_group_content_hash(const Material &source);
+
+/** The same without the socket values: what a group filled from the source keeps while they move. */
+uint64_t source_group_structure_hash(const Material &source);
 
 /** Remove every node of \a tree, leaving its interface untouched. */
 void tree_clear_nodes(Main &bmain, bNodeTree &tree);

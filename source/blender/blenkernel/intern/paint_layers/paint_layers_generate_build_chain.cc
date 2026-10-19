@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 
 #include "BKE_paint_layers_generate.hh"
 
@@ -1665,6 +1666,10 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
         shown = {map, map_color};
       }
       if (shown.socket == nullptr) {
+        /* Neither the group nor a render of the source feeds the channel: the row lays nothing. */
+        printf("[paint-layers source group] row '%s': channel %d has no output and no map\n",
+               ctx.layer.name,
+               ctx.channel);
         return discard();
       }
       bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);

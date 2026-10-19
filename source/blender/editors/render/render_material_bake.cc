@@ -2073,7 +2073,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma, const bool for
     Vector<BakeTargetSpec> targets;
     for (const int channel_index : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
       const eMaterialPaintChannel channel = eMaterialPaintChannel(channel_index);
-      if (!BKE_paint_layers_material_channel_needs_render(ma, *row, channel_index)) {
+      if (!BKE_paint_layers_material_channel_render_wanted(ma, *row, channel_index)) {
         continue;
       }
       Image *existing = (channel == PAINT_MATERIAL_CHANNEL_ALPHA) ?

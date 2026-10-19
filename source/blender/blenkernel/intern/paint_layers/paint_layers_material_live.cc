@@ -32,6 +32,7 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 
+#include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
 
@@ -79,6 +80,13 @@ bool paint_layer_material_source_group_channel(const Material &ma,
       row.material->nodetree == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
       (channel != PAINT_MATERIAL_CHANNEL_ALPHA && paint_layer_channel_filtered(ma, channel)) ||
       !BKE_paint_layers_source_group_wrappable(*row.material))
+  {
+    return false;
+  }
+  /* A normal not made by a Normal Map is not a property of the surface when evaluated live, so the
+   * row shows the map rendered from it. */
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+      !bke::paint_layers::source_group_normal_live(*row.material))
   {
     return false;
   }
@@ -229,6 +237,18 @@ bool BKE_paint_layers_material_row_needs_render(const Material &ma, const Materi
 {
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     if (BKE_paint_layers_material_channel_needs_render(ma, row, channel)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool paint_layer_material_row_needs_map(const Material &ma, const MaterialPaintLayer &row)
+{
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (BKE_paint_layers_material_channel_needs_render(ma, row, channel) &&
+        !paint_layer_material_source_group_channel(ma, row, channel))
+    {
       return true;
     }
   }

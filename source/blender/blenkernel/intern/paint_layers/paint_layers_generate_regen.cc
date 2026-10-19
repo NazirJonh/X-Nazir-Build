@@ -184,6 +184,7 @@ class LayerTreeFactory {
         return nullptr;
       }
       pending_hashes_.append({group, source_group_content_hash(*layer.material)});
+      source_group_structure_hash_set(*group, source_group_structure_hash(*layer.material));
     }
     source_handed_.add(&layer, group);
     return group;
@@ -421,9 +422,22 @@ static void source_groups_refresh(Main &bmain, Material &ma)
           if (tree_topology_hash_get(group, stored) && stored == content) {
             break;
           }
+          /* Only socket values moved (a slider dragged): the group takes them in place, with no
+           * rebuild of its nodes and no change of relations. */
+          const uint64_t structure = source_group_structure_hash(*layer.material);
+          uint64_t stored_structure = 0;
+          if (source_group_structure_hash_get(group, stored_structure) &&
+              stored_structure == structure &&
+              source_group_values_sync(bmain, group, *layer.material))
+          {
+            tree_topology_hash_set(group, content);
+            DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+            break;
+          }
           tree_hash_clear(group);
           if (source_group_fill(bmain, group, *layer.material)) {
             tree_topology_hash_set(group, content);
+            source_group_structure_hash_set(group, structure);
             /* The private copies of the groups on the source's path are new IDs. */
             DEG_relations_tag_update(&bmain);
           }

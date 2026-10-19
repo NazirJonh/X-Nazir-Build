@@ -17,6 +17,7 @@
  */
 
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 
 #include "BLI_map.hh"
@@ -37,6 +38,8 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_material_resolve.hh"
 
+#include "DEG_depsgraph.hh"
+
 #include "NOD_socket.hh"
 
 #include "DNA_ID.h"
@@ -51,11 +54,18 @@
 namespace blender::bke::paint_layers {
 
 /** Bumped when what a fill produces changes, so groups made by an older fill are rebuilt once. */
-static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 3;
+static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 5;
 
 uint64_t source_group_content_hash(const Material &source)
 {
   uint64_t hash = BKE_paint_layers_source_material_tree_hash_cached(source);
+  hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
+  return hash;
+}
+
+uint64_t source_group_structure_hash(const Material &source)
+{
+  uint64_t hash = BKE_paint_layers_source_structure_hash_cached(source);
   hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
   return hash;
 }
@@ -228,14 +238,10 @@ static bool source_group_outputs_wire(bNodeTree &tree, const Span<SourceGroupOut
 /**
  * Expose the Normal of \a principled the way the chain and the bake read it: as the encoded
  * tangent-space map. A Normal Map node contributes its Color input, which is already encoded (its
- * own output is the decoded vector); any other source, a Bump with relief for one, is encoded
- * through `0.5 * n + 0.5`, the single Vector Math the bake uses (`vector_encode_node_add` in
- * `render_material_bake.cc`), so a live row and its render see one source the same way. Nothing is
- * exposed when the Normal is not fed by a node of this tree or the Normal Map's colour is a
- * constant: the map rendered from the source stands in.
+ * own output is the decoded vector). Nothing is exposed for any other source or when the Normal
+ * Map's colour is a constant: the map rendered from the source stands in.
  */
-static void source_group_normal_output_add(bNodeTree &tree,
-                                           const bNode &principled,
+static void source_group_normal_output_add(const bNode &principled,
                                            const Map<const bNode *, bNode *> &node_map,
                                            const Map<const bNodeSocket *, bNodeSocket *> &socket_map,
                                            Vector<SourceGroupOutput> &r_outputs)
@@ -261,29 +267,9 @@ static void source_group_normal_output_add(bNodeTree &tree,
     }
     return;
   }
-  bNode *source_node = node_map.lookup_default(fed.node, nullptr);
-  bNodeSocket *source_socket = socket_map.lookup_default(fed.socket, nullptr);
-  bNode *encode = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_MATH);
-  if (source_node == nullptr || source_socket == nullptr || encode == nullptr) {
-    return;
-  }
-  encode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
-  bNodeSocket *encode_in = bke::node_find_socket(*encode, SOCK_IN, "Vector"_ustr);
-  bNodeSocket *multiplier = bke::node_find_socket(*encode, SOCK_IN, "Vector_001"_ustr);
-  bNodeSocket *addend = bke::node_find_socket(*encode, SOCK_IN, "Vector_002"_ustr);
-  bNodeSocket *encode_out = bke::node_find_socket(*encode, SOCK_OUT, "Vector"_ustr);
-  if (encode_in == nullptr || multiplier == nullptr || addend == nullptr ||
-      encode_out == nullptr)
-  {
-    return;
-  }
-  for (bNodeSocket *socket : {multiplier, addend}) {
-    if (socket->default_value != nullptr) {
-      copy_v3_fl(static_cast<bNodeSocketValueVector *>(socket->default_value)->value, 0.5f);
-    }
-  }
-  bke::node_add_link(tree, *source_node, *source_socket, *encode, *encode_in);
-  r_outputs.append({int(PAINT_MATERIAL_CHANNEL_NORMAL), encode, encode_out, name, type});
+  /* Any other source (a Bump for one) is left to the map rendered from it: such a normal comes
+   * from screen-space derivatives, so evaluated live it changes with the camera instead of being a
+   * property of the surface. */
 }
 
 /**
@@ -337,7 +323,7 @@ static bool source_group_level_build(const SourceGroupBuild &build,
                  info.is_color ? "NodeSocketColor" : "NodeSocketFloat");
     }
     output_add(int(PAINT_MATERIAL_CHANNEL_ALPHA), "Alpha", "Coverage", "NodeSocketFloat");
-    source_group_normal_output_add(tree, build.principled, node_map, socket_map, outputs);
+    source_group_normal_output_add(build.principled, node_map, socket_map, outputs);
   }
   else {
     const bNode *orig_group = build.path[depth];
@@ -380,6 +366,15 @@ static bool source_group_level_build(const SourceGroupBuild &build,
   if (outputs.is_empty()) {
     return false;
   }
+  if (depth == 0) {
+    /* Which channels the wrapper exposes: a channel missing here is read from its render, or not
+     * at all when none is shown. */
+    printf("[paint-layers source group] '%s' exposes channels:", build.source_name);
+    for (const SourceGroupOutput &output : outputs) {
+      printf(" %d", output.channel);
+    }
+    printf("\n");
+  }
   return source_group_outputs_wire(tree, outputs);
 }
 
@@ -408,6 +403,102 @@ bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source)
   }
   const SourceGroupBuild build{bmain, *principled, group_path, owner_uid, source.id.name + 2};
   return done(source_group_level_build(build, wrapper, *source.nodetree, 0));
+}
+
+void source_group_structure_hash_set(bNodeTree &wrapper, const uint64_t hash)
+{
+  tree_hash_set(wrapper, TREE_SOURCE_STRUCTURE_LOW_PROP, TREE_SOURCE_STRUCTURE_HIGH_PROP, hash);
+}
+
+bool source_group_structure_hash_get(bNodeTree &wrapper, uint64_t &r_hash)
+{
+  return tree_hash_get(
+      wrapper, TREE_SOURCE_STRUCTURE_LOW_PROP, TREE_SOURCE_STRUCTURE_HIGH_PROP, r_hash);
+}
+
+/** Give the sockets of \a copy the default values of the ones of \a src, found by identifier. */
+template<typename SocketList>
+static bool source_group_node_values_sync(bNodeTree &tree,
+                                          bNode &copy,
+                                          const SocketList &src_sockets,
+                                          const eNodeSocketInOut in_out)
+{
+  for (const bNodeSocket &src_socket : src_sockets) {
+    bNodeSocket *socket = bke::node_find_socket(
+        copy, in_out, UString::from_ptr_noinline(src_socket.identifier));
+    if (socket == nullptr || socket->type != src_socket.type) {
+      return false;
+    }
+    if (socket->default_value == nullptr || src_socket.default_value == nullptr) {
+      continue;
+    }
+    node_socket_copy_default_value_data(
+        eNodeSocketDatatype(socket->type), socket->default_value, src_socket.default_value);
+    BKE_ntree_update_tag_socket_property(&tree, socket);
+  }
+  return true;
+}
+
+/** The counterpart of #source_group_level_build: values only, along the same path of groups. */
+static bool source_group_level_sync(bNodeTree &tree,
+                                    const bNodeTree &orig,
+                                    const bNode &principled,
+                                    const Vector<const bNode *> &path,
+                                    const int depth,
+                                    Vector<bNodeTree *> &r_trees)
+{
+  const bool innermost = depth == int(path.size());
+  r_trees.append(&tree);
+  for (const bNode &node : orig.nodes) {
+    if (node.type_legacy == SH_NODE_OUTPUT_MATERIAL || (innermost && &node == &principled)) {
+      continue;
+    }
+    bNode *copy = bke::node_find_node_by_name(tree, node.name);
+    if (copy == nullptr || copy->type_legacy != node.type_legacy ||
+        !source_group_node_values_sync(tree, *copy, node.inputs, SOCK_IN) ||
+        !source_group_node_values_sync(tree, *copy, node.outputs, SOCK_OUT))
+    {
+      return false;
+    }
+  }
+  if (innermost) {
+    return true;
+  }
+  const bNode *orig_group = path[depth];
+  bNode *instance = bke::node_find_node_by_name(tree, orig_group->name);
+  if (instance == nullptr || instance->id == nullptr || orig_group->id == nullptr ||
+      GS(orig_group->id->name) != ID_NT)
+  {
+    return false;
+  }
+  return source_group_level_sync(*id_cast<bNodeTree *>(instance->id),
+                                 *id_cast<const bNodeTree *>(orig_group->id),
+                                 principled,
+                                 path,
+                                 depth + 1,
+                                 r_trees);
+}
+
+bool source_group_values_sync(Main &bmain, bNodeTree &wrapper, const Material &source)
+{
+  if (source.nodetree == nullptr) {
+    return false;
+  }
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  Vector<const bNode *> group_path;
+  const bNode *principled = BKE_paint_material_principled_find(source, reason, &group_path);
+  if (principled == nullptr || int(group_path.size()) > SOURCE_GROUP_MAX_DEPTH) {
+    return false;
+  }
+  Vector<bNodeTree *> trees;
+  if (!source_group_level_sync(wrapper, *source.nodetree, *principled, group_path, 0, trees)) {
+    return false;
+  }
+  for (bNodeTree *tree : trees) {
+    BKE_ntree_update_after_single_tree_change(bmain, *tree);
+    DEG_id_tag_update(&tree->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  return true;
 }
 
 void source_group_paths_prune(Main &bmain, const bUUID &owner_uid)
@@ -445,6 +536,26 @@ bNodeSocket *source_group_output(const bNodeTree &wrapper, bNode &instance, cons
     }
   }
   return nullptr;
+}
+
+bool source_group_normal_live(const Material &source)
+{
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  Vector<const bNode *> group_path;
+  const bNode *principled = BKE_paint_material_principled_find(source, reason, &group_path);
+  if (principled == nullptr) {
+    return false;
+  }
+  const bNodeSocket *input = bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr);
+  if (input == nullptr) {
+    return false;
+  }
+  const FedSocket fed = source_group_follow_source(*input);
+  if (fed.node == nullptr || fed.node->type_legacy != SH_NODE_NORMAL_MAP) {
+    return false;
+  }
+  const bNodeSocket *color = bke::node_find_socket(*fed.node, SOCK_IN, "Color"_ustr);
+  return color != nullptr && source_group_follow_source(*color).node != nullptr;
 }
 
 }  // namespace blender::bke::paint_layers

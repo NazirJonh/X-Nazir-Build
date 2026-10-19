@@ -145,6 +145,13 @@ bool paint_layer_material_source_group_channel(const Material &ma,
                                                int channel);
 
 /**
+ * Whether \a row has a channel that only a rendered map can show in Auto: it needs a render and
+ * the source group does not supply it. Such a row is rendered while it is edited, after the
+ * source-edit delay, since nothing live stands in for the map.
+ */
+bool paint_layer_material_row_needs_map(const Material &ma, const MaterialPaintLayer &row);
+
+/**
  * Compare the shape every Material row of \a ma gives its group with the one it gave when it was
  * last seen, and mark \a ma for regeneration when a source edit changed it. Main thread, at the
  * regeneration point. \return whether anything moved.

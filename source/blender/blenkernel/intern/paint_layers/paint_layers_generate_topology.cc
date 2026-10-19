@@ -94,7 +94,9 @@ void tree_hash_clear(bNodeTree &tree)
   for (const char *key : {TREE_TOPOLOGY_LOW_PROP,
                           TREE_TOPOLOGY_HIGH_PROP,
                           TREE_ROOT_TOPOLOGY_LOW_PROP,
-                          TREE_ROOT_TOPOLOGY_HIGH_PROP})
+                          TREE_ROOT_TOPOLOGY_HIGH_PROP,
+                          TREE_SOURCE_STRUCTURE_LOW_PROP,
+                          TREE_SOURCE_STRUCTURE_HIGH_PROP})
   {
     if (IDProperty *prop = IDP_GetPropertyFromGroup(props, key)) {
       IDP_FreeFromGroup(props, prop);

@@ -449,6 +449,28 @@ TEST_F(PaintLayersMaterialBakeTest, a_texture_of_the_source_painted_on_makes_the
       << "the old maps show until the new ones land";
 }
 
+TEST_F(PaintLayersMaterialBakeTest, a_stroke_on_the_mask_of_the_row_does_not_make_the_row_stale)
+{
+  MaterialPaintLayer *row = add_material_row(*source);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, row, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  Image *mask_image = add_image("MaskBase");
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_image));
+
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, base_color_roughness, hash, source_hash);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+  ASSERT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
+
+  /* The mask stays live over the maps: what the render reads is the source, not the row's mask. */
+  BKE_image_partial_update_mark_full_update(mask_image);
+  BKE_paint_layers_bake_notice_changes(*ma);
+  EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
+  EXPECT_FALSE(BKE_paint_layers_material_row_due(*ma, *row));
+}
+
 TEST_F(PaintLayersMaterialBakeTest, a_copy_of_the_owner_starts_without_the_maps_of_the_row)
 {
   MaterialPaintLayer *row = add_material_row(*source);
@@ -806,5 +828,249 @@ TEST_F(PaintLayersMaterialBakeTest, an_edit_of_a_source_concerns_the_materials_w
   BKE_paint_layers_source_material_consumers(*bmain, *other, consumers);
   EXPECT_TRUE(consumers.is_empty());
 }
+
+/* -------------------------------------------------------------------- */
+/** \name A Bump as the source's Normal
+ *
+ * A normal made by a Bump has no live form (it comes from screen-space derivatives), so the row
+ * shows the map rendered from it while every other channel stays the source's graph. Only what the
+ * Normal reads can make that map stale.
+ * \{ */
+
+/**
+ * A Value node feeding the Height of a Bump that feeds the Normal of the Principled of \a material.
+ * \return the Value node, the one input of the Normal that is a plain number to drag.
+ */
+static bNode *bump_normal_link(Material &material)
+{
+  bNodeTree &ntree = *material.nodetree;
+  bNode *principled = PaintLayersMaterialBakeTest::principled_of(material);
+  bNode *value = bke::node_add_static_node(nullptr, ntree, SH_NODE_VALUE);
+  bNode *bump = bke::node_add_static_node(nullptr, ntree, SH_NODE_BUMP);
+  bke::node_add_link(ntree,
+                     *value,
+                     *bke::node_find_socket(*value, SOCK_OUT, "Value"_ustr),
+                     *bump,
+                     *bke::node_find_socket(*bump, SOCK_IN, "Height"_ustr));
+  bke::node_add_link(ntree,
+                     *bump,
+                     *bke::node_find_socket(*bump, SOCK_OUT, "Normal"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr));
+  BKE_paint_layers_source_material_hash_forget(material);
+  return value;
+}
+
+/** Drag the number of \a value node, as the node tree update would report it. */
+static void value_node_set(Material &material, bNode &value, const float number)
+{
+  bNodeSocket *out = bke::node_find_socket(value, SOCK_OUT, "Value"_ustr);
+  static_cast<bNodeSocketValueFloat *>(out->default_value)->value = number;
+  BKE_paint_layers_source_material_hash_forget(material);
+}
+
+static constexpr int base_color_roughness_normal[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                                      PAINT_MATERIAL_CHANNEL_NORMAL};
+
+TEST_F(PaintLayersMaterialBakeTest, the_normal_hash_follows_what_the_normal_reads_and_nothing_else)
+{
+  bNode *height = bump_normal_link(*source);
+  const uint64_t before = BKE_paint_layers_source_normal_hash_cached(*source);
+  ASSERT_NE(before, 0u);
+
+  edit_source(0.7f);
+  EXPECT_EQ(BKE_paint_layers_source_normal_hash_cached(*source), before)
+      << "a Metallic the Normal does not read";
+
+  for (bNode &node : source->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_RGB) {
+      bNodeSocket *out = bke::node_find_socket(node, SOCK_OUT, "Color"_ustr);
+      static_cast<bNodeSocketValueRGBA *>(out->default_value)->value[0] = 0.9f;
+    }
+  }
+  BKE_paint_layers_source_material_hash_forget(*source);
+  EXPECT_EQ(BKE_paint_layers_source_normal_hash_cached(*source), before)
+      << "the colour feeds the Base Color, not the Normal";
+
+  value_node_set(*source, *height, 0.5f);
+  EXPECT_NE(BKE_paint_layers_source_normal_hash_cached(*source), before)
+      << "the Height of the Bump is what the Normal reads";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, the_structure_hash_holds_while_socket_values_move)
+{
+  const uint64_t structure = BKE_paint_layers_source_material_structure_hash(*source);
+  const uint64_t content = BKE_paint_layers_source_material_tree_hash(*source);
+  ASSERT_NE(structure, 0u);
+
+  edit_source(0.4f);
+  EXPECT_EQ(BKE_paint_layers_source_material_structure_hash(*source), structure);
+  EXPECT_EQ(BKE_paint_layers_source_structure_hash_cached(*source), structure);
+  EXPECT_NE(BKE_paint_layers_source_material_tree_hash(*source), content);
+
+  texture_link(*source, *add_image("Tex"), "Metallic");
+  EXPECT_NE(BKE_paint_layers_source_material_structure_hash(*source), structure)
+      << "a value that became a texture is other nodes";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_value_of_the_source_is_synced_into_its_group_in_place)
+{
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = source_group_of(*row);
+  ASSERT_NE(group, nullptr);
+
+  uint64_t stored = 0;
+  ASSERT_TRUE(paint_layers::source_group_structure_hash_get(*group, stored));
+  EXPECT_EQ(stored, paint_layers::source_group_structure_hash(*source));
+
+  bNode *rgb = nullptr;
+  for (bNode &node : source->nodetree->nodes) {
+    if (node.type_legacy == SH_NODE_RGB) {
+      rgb = &node;
+    }
+  }
+  ASSERT_NE(rgb, nullptr);
+  bNodeSocket *rgb_out = bke::node_find_socket(*rgb, SOCK_OUT, "Color"_ustr);
+  static_cast<bNodeSocketValueRGBA *>(rgb_out->default_value)->value[0] = 0.125f;
+  BKE_paint_layers_source_material_hash_forget(*source);
+
+  EXPECT_EQ(paint_layers::source_group_structure_hash(*source), stored)
+      << "a dragged value keeps the structure the group was filled from";
+  ASSERT_TRUE(paint_layers::source_group_values_sync(*bmain, *group, *source));
+  const bNode *copy = node_of_type(*group, SH_NODE_RGB);
+  ASSERT_NE(copy, nullptr);
+  const bNodeSocket *copy_out = bke::node_find_socket(
+      const_cast<bNode &>(*copy), SOCK_OUT, "Color"_ustr);
+  EXPECT_FLOAT_EQ(static_cast<const bNodeSocketValueRGBA *>(copy_out->default_value)->value[0],
+                  0.125f);
+
+  texture_link(*source, *add_image("Tex"), "Metallic");
+  EXPECT_NE(paint_layers::source_group_structure_hash(*source), stored)
+      << "other nodes are a refill, not a sync";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_bump_normal_is_shown_from_its_map_and_the_rest_live)
+{
+  bump_normal_link(*source);
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+
+  EXPECT_FALSE(paint_layers::source_group_normal_live(*source));
+  EXPECT_TRUE(BKE_paint_layers_material_channel_needs_render(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_FALSE(paint_layer_material_source_group_channel(*ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_TRUE(
+      paint_layer_material_source_group_channel(*ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_TRUE(paint_layer_material_row_needs_map(*ma, *row));
+
+  /* Without a Bump nothing is left to the render. */
+  Material *plain = BKE_material_add(bmain, "Plain");
+  principled_source_set_up(*plain, /*graphs=*/true);
+  MaterialPaintLayer *plain_row = add_material_row(*plain, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(plain_row, nullptr);
+  EXPECT_FALSE(paint_layer_material_row_needs_map(*ma, *plain_row));
+}
+
+TEST_F(PaintLayersMaterialBakeTest, an_edit_the_normal_does_not_read_renders_nothing)
+{
+  bNode *height = bump_normal_link(*source);
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(paint_layer_material_row_needs_map(*ma, *row));
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, base_color_roughness_normal, hash, source_hash);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+  ASSERT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
+
+  edit_source(0.9f);
+  EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row)) << "the Metallic is not the Normal";
+  EXPECT_FALSE(BKE_paint_layers_material_row_due(*ma, *row));
+
+  value_node_set(*source, *height, 0.75f);
+  EXPECT_TRUE(BKE_paint_layers_material_row_stale(*ma, *row)) << "the Height is";
+  EXPECT_TRUE(BKE_paint_layers_material_row_due(*ma, *row))
+      << "the row being edited renders a map nothing live stands in for";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, an_image_editor_closing_does_not_make_the_row_stale)
+{
+  bump_normal_link(*source);
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+
+  /* A render made while an Image Editor reads the maps, which then closes. */
+  BKE_paint_layers_preview_wanted_set(*ma, true);
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, base_color_roughness_normal, hash, source_hash);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+  EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
+
+  BKE_paint_layers_preview_wanted_set(*ma, false);
+  EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row))
+      << "the state of the editor is not an edit of the source";
+  EXPECT_FALSE(BKE_paint_layers_material_row_due(*ma, *row));
+
+  /* While one reads the maps, a colour edit has to reach them. */
+  BKE_paint_layers_preview_wanted_set(*ma, true);
+  edit_source(0.2f);
+  EXPECT_TRUE(BKE_paint_layers_material_row_stale(*ma, *row));
+}
+
+TEST_F(PaintLayersMaterialBakeTest, only_the_normal_is_rendered_until_something_reads_the_other_maps)
+{
+  bump_normal_link(*source);
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+
+  EXPECT_TRUE(BKE_paint_layers_material_channel_render_wanted(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_FALSE(BKE_paint_layers_material_channel_render_wanted(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+      << "the shader shows the colour live and nothing reads its map";
+  EXPECT_FALSE(BKE_paint_layers_material_channel_render_wanted(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_METALLIC))
+      << "a plain value needs no map at all";
+
+  const int normal_only[] = {PAINT_MATERIAL_CHANNEL_NORMAL};
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, normal_only, hash, source_hash);
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+  EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
+
+  /* An Image Editor opens: its composite reads every map, which this render did not make. */
+  BKE_paint_layers_preview_wanted_set(*ma, true);
+  EXPECT_TRUE(BKE_paint_layers_material_channel_render_wanted(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_TRUE(BKE_paint_layers_material_row_stale(*ma, *row));
+
+  /* The full render that follows is current for the editor and for it closing again. */
+  uint32_t full_hash[2], full_source_hash[2];
+  start_render(*row, base_color_roughness_normal, full_hash, full_source_hash);
+  ASSERT_TRUE(
+      BKE_paint_layers_material_bake_land(*ma, row->marker, full_hash, full_source_hash, true));
+  EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
+  BKE_paint_layers_preview_wanted_set(*ma, false);
+  EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
+}
+
+TEST_F(PaintLayersMaterialBakeTest, the_edited_row_waits_for_a_map_only_the_render_can_show)
+{
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_row_is_deferred(*ma, *row));
+  EXPECT_FLOAT_EQ(BKE_paint_layers_source_edit_delay(*ma, *source), 0.0f)
+      << "the graph is live: an edit has nothing to wait for";
+
+  bump_normal_link(*source);
+  const float delay = BKE_paint_layers_source_edit_delay(*ma, *source);
+  EXPECT_GT(delay, 0.0f) << "a Bump has no live form: its map is rendered after the hand stops";
+  EXPECT_LT(delay, 5.0f) << "shorter than the delay of the Image Editor's preview";
+}
+
+/** \} */
 
 }  // namespace blender::bke::tests

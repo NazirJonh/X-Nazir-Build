@@ -62,6 +62,13 @@
 
 namespace blender {
 
+/**
+ * Seconds without an edit of the source before the active row is rendered for a channel that no
+ * live form stands in for (the Normal of a Bump). Counted from the last edit, so dragging a value
+ * that moves it renders nothing until the hand stops.
+ */
+static constexpr float MAP_ONLY_EDIT_DELAY_SECONDS = 3.0f;
+
 static_assert(sizeof(MaterialPaintLayerBake::images) / sizeof(MaterialPaintLayerBake::images[0]) ==
                   PAINT_MATERIAL_CHANNEL_NUM,
               "MaterialPaintLayerBake::images is one map per channel");
@@ -123,6 +130,24 @@ struct BakeMaterialRuntime {
    * generator builds.
    */
   Map<UUID, uint64_t> live_signature;
+  /**
+   * What the Normal read in the source when the last landed render of each Material row started, by
+   * marker: a source edit that leaves it alone is no reason to render when only the Normal is.
+   * Runtime only; a row read from a file renders once on its first edit.
+   */
+  Map<UUID, uint64_t> normal_hash;
+  /**
+   * Material rows whose last landed render was partial (#bake_row_maps_partial): the maps of the
+   * channels the shader shows live were not rendered, so what reads them (an Image Editor) needs a
+   * full render before it can trust them.
+   */
+  Set<UUID> partial_rows;
+  /** What a started render recorded about itself, by the full source hash it started from. */
+  struct StartedRender {
+    uint64_t normal_hash = 0;
+    bool partial = false;
+  };
+  Map<uint64_t, StartedRender> started;
 };
 
 Map<uint32_t, BakeMaterialRuntime> &bake_runtime()
@@ -391,6 +416,11 @@ static void bake_collect_source_images(const Material &ma,
         !r_images.contains(coverage.image))
     {
       r_images.append(coverage.image);
+    }
+    /* What a Material row renders is its source alone: its mask, effects and children stay live
+     * over the maps, so a stroke on them is no edit of what the render reads. */
+    if (!is_child) {
+      return;
     }
   }
   paint_layer_dependencies(layer, [&](const PaintLayerDependency &dep) {
@@ -1528,21 +1558,81 @@ static void bake_source_hash_split(const uint64_t hash, uint32_t r_words[2])
   r_words[1] = uint32_t(hash >> 32);
 }
 
+/**
+ * Whether the render of \a layer is partial: Auto, no Image Editor reading the maps, and the source
+ * supplies everything but the Normal live. Then only the Normal is rendered, only what the Normal
+ * reads can make the map stale, and an edit of a colour or a roughness renders nothing. The maps
+ * of the channels shown live are left as they are until something reads them.
+ */
+static bool bake_row_maps_partial(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_ALWAYS ||
+      BKE_paint_layers_preview_wanted(ma))
+  {
+    return false;
+  }
+  bool normal_needs_map = false;
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (!BKE_paint_layers_material_channel_needs_render(ma, layer, channel) ||
+        paint_layer_material_source_group_channel(ma, layer, channel))
+    {
+      continue;
+    }
+    if (channel != PAINT_MATERIAL_CHANNEL_NORMAL) {
+      return false;
+    }
+    normal_needs_map = true;
+  }
+  return normal_needs_map;
+}
+
+bool BKE_paint_layers_material_channel_render_wanted(const Material &ma,
+                                                     const MaterialPaintLayer &layer,
+                                                     const int channel)
+{
+  if (!BKE_paint_layers_material_channel_needs_render(ma, layer, channel)) {
+    return false;
+  }
+  return !bake_row_maps_partial(ma, layer) ||
+         !paint_layer_material_source_group_channel(ma, layer, channel);
+}
+
 bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr || layer.material == nullptr) {
     return true;
   }
+  const uint64_t full = BKE_paint_layers_source_material_tree_hash_cached(*layer.material);
   uint32_t current[2];
-  bake_source_hash_split(BKE_paint_layers_source_material_tree_hash_cached(*layer.material),
-                         current);
-  if (current[0] != layer.bake->source_hash[0] || current[1] != layer.bake->source_hash[1] ||
-      (current[0] == 0 && current[1] == 0))
-  {
+  bake_source_hash_split(full, current);
+  if (current[0] == 0 && current[1] == 0) {
     return true;
   }
+  /* The stamp always holds the full hash, whatever state the editor is in, so closing an Image
+   * Editor does not make a row look edited. A full hash that moved is still no reason to render
+   * when the maps are only of the Normal and what the Normal reads is what the last render saw. */
+  const bool source_moved = current[0] != layer.bake->source_hash[0] ||
+                            current[1] != layer.bake->source_hash[1];
+  const bool partial = bake_row_maps_partial(ma, layer);
+  const bool normal_only = source_moved && partial;
+  const uint64_t normal = normal_only ?
+                              BKE_paint_layers_source_normal_hash_cached(*layer.material) :
+                              0;
   std::lock_guard lock(bake_runtime_mutex());
   const BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid);
+  if (runtime != nullptr && !partial && runtime->partial_rows.contains(UUID(layer.marker))) {
+    /* The last render left the maps of the live channels as they were, and something reads them now
+     * (an Image Editor opened, the Always mode). */
+    return true;
+  }
+  if (source_moved) {
+    const uint64_t *rendered = (normal_only && runtime != nullptr) ?
+                                   runtime->normal_hash.lookup_ptr(UUID(layer.marker)) :
+                                   nullptr;
+    if (rendered == nullptr || *rendered != normal) {
+      return true;
+    }
+  }
   if (runtime != nullptr) {
     for (const BakeLayerSubscription &entry : runtime->layers) {
       if (BLI_uuid_equal(entry.marker, layer.marker) && entry.changed) {
@@ -1559,10 +1649,25 @@ void BKE_paint_layers_material_bake_stamp_get(const Material &ma,
                                               uint32_t r_source_hash[2])
 {
   BKE_paint_layers_bake_hash(ma, layer, r_hash);
-  bake_source_hash_split(layer.material != nullptr ?
-                             BKE_paint_layers_source_material_tree_hash_cached(*layer.material) :
-                             0,
-                         r_source_hash);
+  const uint64_t full = layer.material != nullptr ?
+                            BKE_paint_layers_source_material_tree_hash_cached(*layer.material) :
+                            0;
+  bake_source_hash_split(full, r_source_hash);
+  if (full == 0) {
+    return;
+  }
+  /* What the Normal reads at the start of the render, kept against the full hash it goes with:
+   * the render that lands from this stamp makes it the one its maps reflect. */
+  const uint64_t normal = BKE_paint_layers_source_normal_hash_cached(*layer.material);
+  std::lock_guard lock(bake_runtime_mutex());
+  BakeMaterialRuntime &runtime = bake_runtime().lookup_or_add(ma.id.session_uid,
+                                                              BakeMaterialRuntime{});
+  runtime.owner = &ma;
+  if (runtime.started.size() > 16) {
+    runtime.started.clear();
+  }
+  runtime.started.add_overwrite(
+      full, BakeMaterialRuntime::StartedRender{normal, bake_row_maps_partial(ma, layer)});
 }
 
 bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer)
@@ -1585,7 +1690,9 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
    * shows), so it renders on every edit. */
   const bool editing = BKE_paint_layers_bake_row_is_deferred(ma, layer);
   const bool always = BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_ALWAYS;
-  if (editing && !always && !BKE_paint_layers_preview_wanted(ma)) {
+  if (editing && !always && !BKE_paint_layers_preview_wanted(ma) &&
+      !paint_layer_material_row_needs_map(ma, layer))
+  {
     return false;
   }
   /* Everything the source supplies is a value or a plain texture: there is nothing to render. */
@@ -1681,24 +1788,35 @@ int BKE_paint_layers_preview_size_get(const Material &ma, const int final_size)
 
 float BKE_paint_layers_source_edit_delay(const Material &consumer, const Material &source)
 {
-  if ((consumer.paint_layers_preview_flag & MA_PAINT_PREVIEW_DELAYED) == 0) {
-    return 0.0f;
-  }
+  const bool delayed_preview = (consumer.paint_layers_preview_flag & MA_PAINT_PREVIEW_DELAYED) != 0;
   /* Only an edit made through the active row waits: the row being edited is the one a preview is
-   * rendered for; any other consumer renders after the editor's short pause. */
+   * rendered for; any other consumer renders after the editor's short pause. A row with a channel
+   * that only a render can show (a Bump's Normal) waits whatever the Sync setting says: dragging
+   * a value that moves it would otherwise render at every pause of the hand. */
   bool active_reads_source = false;
+  bool preview_wait = false;
   BKE_paint_layers_foreach(
       consumer, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) {
-        if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) &&
-            row.material == &source && BKE_paint_layers_bake_row_is_deferred(consumer, row) &&
-            BKE_paint_layers_material_row_preview_active(consumer, row))
+        if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
+            row.material != &source || !BKE_paint_layers_bake_row_is_deferred(consumer, row))
         {
+          return true;
+        }
+        if (delayed_preview && BKE_paint_layers_material_row_preview_active(consumer, row)) {
+          preview_wait = true;
+        }
+        if (preview_wait || paint_layer_material_row_needs_map(consumer, row)) {
           active_reads_source = true;
         }
         return !active_reads_source;
       });
   if (!active_reads_source) {
     return 0.0f;
+  }
+  if (!preview_wait) {
+    /* Only a map no live form stands in for is waited on: short, since nothing shows its edit until
+     * it lands. */
+    return MAP_ONLY_EDIT_DELAY_SECONDS;
   }
   switch (consumer.paint_layers_preview_delay) {
     case MA_PAINT_PREVIEW_DELAY_10S:
@@ -1990,6 +2108,20 @@ bool BKE_paint_layers_material_bake_land(Material &ma,
     std::lock_guard lock(bake_runtime_mutex());
     if (BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid)) {
       runtime->failed.remove(UUID(marker));
+      const uint64_t full = (uint64_t(source_hash[1]) << 32) | uint64_t(source_hash[0]);
+      if (const BakeMaterialRuntime::StartedRender *started = runtime->started.lookup_ptr(full)) {
+        runtime->normal_hash.add_overwrite(UUID(marker), started->normal_hash);
+        if (started->partial) {
+          runtime->partial_rows.add(UUID(marker));
+        }
+        else {
+          runtime->partial_rows.remove(UUID(marker));
+        }
+      }
+      else {
+        runtime->normal_hash.remove(UUID(marker));
+        runtime->partial_rows.remove(UUID(marker));
+      }
     }
   }
   ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;

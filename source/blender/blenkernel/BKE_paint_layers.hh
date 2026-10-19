@@ -870,6 +870,23 @@ uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma);
 uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma);
 
 /**
+ * As #BKE_paint_layers_source_material_tree_hash but without the default values of the sockets
+ * (nodes' inputs and outputs, group interfaces): what stays the same while a value is dragged.
+ * Equal structure hashes with different content hashes mean that only socket values moved.
+ */
+uint64_t BKE_paint_layers_source_material_structure_hash(const Material &ma);
+
+/** The structure hash, remembered against the node tree update signal. Main thread only. */
+uint64_t BKE_paint_layers_source_structure_hash_cached(const Material &ma);
+
+/**
+ * The content hash of what a rendered Normal depends on in \a ma: the graph upstream of the
+ * Principled BSDF's Normal and of the Material Output's Displacement. Remembered as the hash above.
+ * Main thread only.
+ */
+uint64_t BKE_paint_layers_source_normal_hash_cached(const Material &ma);
+
+/**
  * What \a source supplies to every paint channel (#BKE_paint_material_source_resolve), remembered
  * against the node tree update signal so the generator and the CPU composite, which ask once per
  * row and channel, do not walk the source each time. The answer points into \a source's own node
@@ -901,6 +918,17 @@ void BKE_paint_layers_source_material_hash_forget(const Material &ma);
 bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
                                                     const MaterialPaintLayer &row,
                                                     int channel);
+
+/**
+ * Whether the render that is about to start for \a row should make the map of \a channel: it needs
+ * one, and the shader does not already show the channel live while nothing reads the map. A row
+ * whose only channel without a live form is the Normal renders just that, the cost of an edit of a
+ * Bump being one channel and not all of them. Called wherever the render's channels are chosen,
+ * with the state the stamp (#BKE_paint_layers_material_bake_stamp_get) was made in.
+ */
+bool BKE_paint_layers_material_channel_render_wanted(const Material &ma,
+                                                     const MaterialPaintLayer &row,
+                                                     int channel);
 
 /** Whether any channel of \a row needs a map (#BKE_paint_layers_material_channel_needs_render). */
 bool BKE_paint_layers_material_row_needs_render(const Material &ma, const MaterialPaintLayer &row);

@@ -18,9 +18,11 @@
 #include "BLI_map.hh"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_ustring.hh"
 #include "BLI_vector.hh"
 
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -188,7 +190,8 @@ static void source_tree_topology_hash_recursive(const bNodeTree &tree,
                                                 uint64_t &r_hash);
 static void source_tree_values_hash_recursive(const bNodeTree &tree,
                                               Set<const bNodeTree *> &visited,
-                                              uint64_t &r_hash);
+                                              uint64_t &r_hash,
+                                              bool include_sockets);
 
 /** The content hash of \a ma's node tree, or zero when it has none. */
 uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma)
@@ -202,7 +205,22 @@ uint64_t BKE_paint_layers_source_material_tree_hash(const Material &ma)
   source_tree_topology_hash_recursive(*ma.nodetree, visited, topology_hash);
   uint64_t hash = hash_mix(0, topology_hash);
   Set<const bNodeTree *> value_visited;
-  source_tree_values_hash_recursive(*ma.nodetree, value_visited, hash);
+  source_tree_values_hash_recursive(*ma.nodetree, value_visited, hash, true);
+  return hash;
+}
+
+uint64_t BKE_paint_layers_source_material_structure_hash(const Material &ma)
+{
+  if (ma.nodetree == nullptr) {
+    return 0;
+  }
+  ma.nodetree->ensure_topology_cache();
+  Set<const bNodeTree *> visited;
+  uint64_t topology_hash = 0;
+  source_tree_topology_hash_recursive(*ma.nodetree, visited, topology_hash);
+  uint64_t hash = hash_mix(0, topology_hash);
+  Set<const bNodeTree *> value_visited;
+  source_tree_values_hash_recursive(*ma.nodetree, value_visited, hash, false);
   return hash;
 }
 
@@ -289,17 +307,20 @@ static uint64_t source_hash_interface_socket(uint64_t h, const bNodeTreeInterfac
  */
 static void source_tree_values_hash_recursive(const bNodeTree &tree,
                                               Set<const bNodeTree *> &visited,
-                                              uint64_t &r_hash)
+                                              uint64_t &r_hash,
+                                              const bool include_sockets)
 {
   if (!visited.add(&tree)) {
     return;
   }
   tree.ensure_interface_cache();
-  for (const bNodeTreeInterfaceSocket *socket : tree.interface_inputs()) {
-    r_hash = source_hash_interface_socket(r_hash, *socket);
-  }
-  for (const bNodeTreeInterfaceSocket *socket : tree.interface_outputs()) {
-    r_hash = source_hash_interface_socket(r_hash, *socket);
+  if (include_sockets) {
+    for (const bNodeTreeInterfaceSocket *socket : tree.interface_inputs()) {
+      r_hash = source_hash_interface_socket(r_hash, *socket);
+    }
+    for (const bNodeTreeInterfaceSocket *socket : tree.interface_outputs()) {
+      r_hash = source_hash_interface_socket(r_hash, *socket);
+    }
   }
   for (const bNode *node : tree.all_nodes()) {
     r_hash = hash_mix(r_hash, uint16_t(node->custom1));
@@ -309,6 +330,9 @@ static void source_tree_values_hash_recursive(const bNodeTree &tree,
     r_hash = node->id != nullptr ? source_hash_string(r_hash, node->id->name) :
                                    hash_mix(r_hash, 0);
     r_hash = source_hash_node_storage(r_hash, *node);
+    if (!include_sockets) {
+      continue;
+    }
     for (const bNodeSocket &socket : node->inputs) {
       r_hash = source_hash_socket_value(r_hash, socket.type, socket.default_value);
     }
@@ -322,7 +346,7 @@ static void source_tree_values_hash_recursive(const bNodeTree &tree,
       continue;
     }
     if (const bNodeTree *group_tree = id_cast<const bNodeTree *>(node->id)) {
-      source_tree_values_hash_recursive(*group_tree, visited, r_hash);
+      source_tree_values_hash_recursive(*group_tree, visited, r_hash, include_sockets);
     }
   }
 }
@@ -430,11 +454,213 @@ uint64_t BKE_paint_layers_source_material_tree_hash_cached(const Material &ma)
   return content;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Normal hash
+ *
+ * The part of the source a rendered Normal map depends on: everything upstream of the Principled
+ * BSDF's Normal and of the Material Output's Displacement, followed through Group nodes (into
+ * their output, and back out through their Group Input to the instance's inputs). Moving a colour
+ * or a roughness value elsewhere in the source leaves it untouched, so such an edit renders nothing.
+ * \{ */
+
+struct NormalHashWalk {
+  Set<uint64_t> seen;
+  uint64_t hash = 0;
+};
+
+static void normal_hash_input(NormalHashWalk &walk,
+                              const bNodeSocket &input,
+                              Vector<const bNode *> &context);
+
+static void normal_hash_node(NormalHashWalk &walk, const bNode &node)
+{
+  uint64_t &h = walk.hash;
+  h = hash_mix(h, uint32_t(node.type_legacy));
+  h = source_hash_string(h, node.name);
+  h = hash_mix(h, uint16_t(node.custom1));
+  h = hash_mix(h, uint16_t(node.custom2));
+  h = hash_float(h, node.custom3);
+  h = hash_float(h, node.custom4);
+  h = node.id != nullptr ? source_hash_string(h, node.id->name) : hash_mix(h, 0);
+  h = source_hash_node_storage(h, node);
+  h = hash_mix(h, node.is_muted() ? 1 : 0);
+}
+
+static void normal_hash_output(NormalHashWalk &walk,
+                               const bNode &node,
+                               const bNodeSocket &output,
+                               Vector<const bNode *> &context)
+{
+  const uint64_t key = hash_mix(
+      hash_mix(hash_mix(uint64_t(intptr_t(&output)), context.size()),
+               uint64_t(intptr_t(context.is_empty() ? nullptr : context.last()))),
+      0x6e6f726du);
+  if (!walk.seen.add(key)) {
+    return;
+  }
+  walk.hash = source_hash_string(walk.hash, output.identifier);
+  if (node.type_legacy == NODE_GROUP_INPUT) {
+    if (context.is_empty()) {
+      return;
+    }
+    /* Out of the group: what the instance's input of the same identifier is fed by. */
+    const bNode *instance = context.pop_last();
+    if (const bNodeSocket *outer = bke::node_find_socket(
+            *instance, SOCK_IN, UString::from_ptr_noinline(output.identifier)))
+    {
+      normal_hash_input(walk, *outer, context);
+    }
+    context.append(instance);
+    return;
+  }
+  if (node.is_group() && node.id != nullptr) {
+    const bNodeTree *group_tree = id_cast<const bNodeTree *>(node.id);
+    if (group_tree == nullptr) {
+      return;
+    }
+    group_tree->ensure_topology_cache();
+    const bNode *group_output = group_tree->group_output_node();
+    if (group_output == nullptr) {
+      return;
+    }
+    /* Into the group: what its output of the same identifier is fed by. */
+    if (const bNodeSocket *inner = bke::node_find_socket(
+            *group_output, SOCK_IN, UString::from_ptr_noinline(output.identifier)))
+    {
+      context.append(&node);
+      normal_hash_input(walk, *inner, context);
+      context.pop_last();
+    }
+    return;
+  }
+  normal_hash_node(walk, node);
+  for (const bNodeSocket &input : node.inputs) {
+    normal_hash_input(walk, input, context);
+  }
+}
+
+static void normal_hash_input(NormalHashWalk &walk,
+                              const bNodeSocket &input,
+                              Vector<const bNode *> &context)
+{
+  walk.hash = source_hash_string(walk.hash, input.identifier);
+  if (!input.is_directly_linked()) {
+    walk.hash = source_hash_socket_value(walk.hash, input.type, input.default_value);
+    return;
+  }
+  for (const bNodeLink *link : input.directly_linked_links()) {
+    if (link->fromnode == nullptr || link->fromsock == nullptr) {
+      continue;
+    }
+    walk.hash = hash_mix(walk.hash, link->is_muted() ? 1 : 0);
+    normal_hash_output(walk, *link->fromnode, *link->fromsock, context);
+  }
+}
+
+static uint64_t source_normal_hash(const Material &ma)
+{
+  if (ma.nodetree == nullptr) {
+    return 0;
+  }
+  ma.nodetree->ensure_topology_cache();
+  NormalHashWalk walk;
+  Vector<const bNode *> context;
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  Vector<const bNode *> group_path;
+  const bNode *principled = BKE_paint_material_principled_find(ma, reason, &group_path);
+  if (principled != nullptr) {
+    principled->owner_tree().ensure_topology_cache();
+    for (const bNode *instance : group_path) {
+      instance->owner_tree().ensure_topology_cache();
+      context.append(instance);
+    }
+    if (const bNodeSocket *normal = bke::node_find_socket(*principled, SOCK_IN, "Normal"_ustr)) {
+      normal_hash_input(walk, *normal, context);
+    }
+  }
+  context.clear();
+  for (const bNode *node : ma.nodetree->all_nodes()) {
+    if (node->type_legacy != SH_NODE_OUTPUT_MATERIAL) {
+      continue;
+    }
+    if (const bNodeSocket *displacement = bke::node_find_socket(
+            *node, SOCK_IN, "Displacement"_ustr))
+    {
+      normal_hash_input(walk, *displacement, context);
+    }
+  }
+  return walk.hash == 0 ? 1 : walk.hash;
+}
+
+/** \} */
+
+/** Guarded by #source_hash_memo_mutex(), like the full hash's memo. */
+static Map<uint32_t, SourceHashMemo> &source_normal_hash_memo()
+{
+  static Map<uint32_t, SourceHashMemo> memo;
+  return memo;
+}
+
+/** Guarded by #source_hash_memo_mutex(), like the full hash's memo. */
+static Map<uint32_t, SourceHashMemo> &source_structure_hash_memo()
+{
+  static Map<uint32_t, SourceHashMemo> memo;
+  return memo;
+}
+
+uint64_t BKE_paint_layers_source_structure_hash_cached(const Material &ma)
+{
+  if (ma.nodetree == nullptr) {
+    return 0;
+  }
+  ma.nodetree->ensure_topology_cache();
+  Set<const bNodeTree *> visited;
+  uint64_t signal = 0;
+  source_signal_recursive(*ma.nodetree, visited, signal);
+  {
+    std::lock_guard lock(source_hash_memo_mutex());
+    if (const SourceHashMemo *entry = source_structure_hash_memo().lookup_ptr(ma.id.session_uid)) {
+      if (entry->signal == signal && entry->content != 0) {
+        return entry->content;
+      }
+    }
+  }
+  const uint64_t content = BKE_paint_layers_source_material_structure_hash(ma);
+  std::lock_guard lock(source_hash_memo_mutex());
+  source_structure_hash_memo().add_overwrite(ma.id.session_uid, SourceHashMemo{signal, content});
+  return content;
+}
+
+uint64_t BKE_paint_layers_source_normal_hash_cached(const Material &ma)
+{
+  if (ma.nodetree == nullptr) {
+    return 0;
+  }
+  ma.nodetree->ensure_topology_cache();
+  Set<const bNodeTree *> visited;
+  uint64_t signal = 0;
+  source_signal_recursive(*ma.nodetree, visited, signal);
+  {
+    std::lock_guard lock(source_hash_memo_mutex());
+    if (const SourceHashMemo *entry = source_normal_hash_memo().lookup_ptr(ma.id.session_uid)) {
+      if (entry->signal == signal && entry->content != 0) {
+        return entry->content;
+      }
+    }
+  }
+  const uint64_t content = source_normal_hash(ma);
+  std::lock_guard lock(source_hash_memo_mutex());
+  source_normal_hash_memo().add_overwrite(ma.id.session_uid, SourceHashMemo{signal, content});
+  return content;
+}
+
 void BKE_paint_layers_source_material_hash_forget(const Material &ma)
 {
   {
     std::lock_guard lock(source_hash_memo_mutex());
     source_hash_memo().remove(ma.id.session_uid);
+    source_normal_hash_memo().remove(ma.id.session_uid);
+    source_structure_hash_memo().remove(ma.id.session_uid);
   }
   if (ma.nodetree != nullptr) {
     std::lock_guard lock(source_resolve_memo_mutex());

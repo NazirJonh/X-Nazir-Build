@@ -94,6 +94,8 @@ struct BakeLayerSubscription {
 struct BakeFailure {
   uint32_t hash[2] = {};
   uint32_t source[2] = {};
+  /** The render that failed was a preview; the render at the row's own size is another one. */
+  bool preview = false;
 };
 
 struct BakeMaterialRuntime {
@@ -241,6 +243,21 @@ bool BKE_paint_layers_bake_stale_get(const Material &ma)
 void BKE_paint_layers_bake_stale_clear(Material &ma)
 {
   ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_STALE;
+}
+
+bool BKE_paint_layers_bake_scheduled_get(const Material &ma)
+{
+  return (ma.paint_layers_flag & MA_PAINT_LAYERS_BAKE_SCHEDULED) != 0;
+}
+
+void BKE_paint_layers_bake_scheduled_set(Material &ma, const bool scheduled)
+{
+  if (scheduled) {
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_SCHEDULED;
+  }
+  else {
+    ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_SCHEDULED;
+  }
 }
 
 /** Let go of the users \a layer's bake holds; the maps stay in `Main` as orphans if nothing else uses them. */
@@ -1561,19 +1578,31 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
   if (bake_row_is_hidden(ma, layer)) {
     return false;
   }
-  /* The active row is the one being edited: in Auto its graph is shown live and the render catches
-   * up once the active marker leaves it. Always has no live form (its maps are what the row
+  /* The active row is the one being edited. In Auto its graph is shown live in the shader, but the
+   * Image Editor's composite reads only the rendered maps, so while one shows this material the row
+   * is rendered as a preview; with none open there is nothing to keep current and the render waits
+   * for the active marker to leave the row. Always has no live form (its maps are what the row
    * shows), so it renders on every edit. */
-  if (BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_ALWAYS &&
-      BKE_paint_layers_bake_row_is_deferred(ma, layer))
-  {
+  const bool editing = BKE_paint_layers_bake_row_is_deferred(ma, layer);
+  const bool always = BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_ALWAYS;
+  if (editing && !always && !BKE_paint_layers_preview_wanted(ma)) {
     return false;
   }
   /* Everything the source supplies is a value or a plain texture: there is nothing to render. */
   if (!BKE_paint_layers_material_row_needs_render(ma, layer)) {
     return false;
   }
-  if (paint_layer_row_material_shown(ma, layer) && !BKE_paint_layers_material_row_stale(ma, layer))
+  /* Maps of preview quality are current for an edited row as long as they are of the side the
+   * material asks for now, and due to be replaced once it is left or that side changed. Maps of the
+   * row's own size are never replaced by a preview before an edit asks for one. */
+  const int preview_side = (layer.bake != nullptr) ? int(layer.bake->preview_side16) * 16 : 0;
+  const int wanted_side = (editing && !always) ?
+                              BKE_paint_layers_preview_size_get(
+                                  ma, BKE_paint_layers_material_row_size(ma, layer)) :
+                              0;
+  const bool preview_grade_left = preview_side != 0 && preview_side != wanted_side;
+  if (paint_layer_row_material_shown(ma, layer) && !BKE_paint_layers_material_row_stale(ma, layer) &&
+      !preview_grade_left)
   {
     return false;
   }
@@ -1585,13 +1614,117 @@ bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLa
   if (runtime != nullptr) {
     if (const BakeFailure *failure = runtime->failed.lookup_ptr(UUID(layer.marker))) {
       if (failure->hash[0] == hash[0] && failure->hash[1] == hash[1] &&
-          failure->source[0] == source_hash[0] && failure->source[1] == source_hash[1])
+          failure->source[0] == source_hash[0] && failure->source[1] == source_hash[1] &&
+          failure->preview == (editing && !always))
       {
         return false;
       }
     }
   }
   return true;
+}
+
+bool BKE_paint_layers_material_row_preview_active(const Material &ma,
+                                                  const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_bake_row_is_deferred(ma, layer) &&
+         BKE_paint_layers_bake_mode_get(layer) != MA_PAINT_LAYER_BAKE_ALWAYS &&
+         BKE_paint_layers_preview_wanted(ma);
+}
+
+int BKE_paint_layers_material_row_size(const Material &ma, const MaterialPaintLayer &layer)
+{
+  if (layer.bake != nullptr && layer.bake->size > 0) {
+    return layer.bake->size;
+  }
+  return ma.paint_layers_image_size > 0 ? int(ma.paint_layers_image_size) : 4096;
+}
+
+bool BKE_paint_layers_material_row_is_preview(const MaterialPaintLayer &layer)
+{
+  return layer.bake != nullptr && layer.bake->preview_side16 != 0;
+}
+
+int BKE_paint_layers_preview_size_get(const Material &ma, const int final_size)
+{
+  /* The side a preview is asked for, before it is capped. */
+  int side = 0;
+  switch (ma.paint_layers_preview_size) {
+    case MA_PAINT_PREVIEW_SIZE_256:
+      side = 256;
+      break;
+    case MA_PAINT_PREVIEW_SIZE_512:
+      side = 512;
+      break;
+    case MA_PAINT_PREVIEW_SIZE_1024:
+      side = 1024;
+      break;
+    case MA_PAINT_PREVIEW_SIZE_2048:
+      side = 2048;
+      break;
+    case MA_PAINT_PREVIEW_SIZE_4096:
+      side = 4096;
+      break;
+    default:
+      side = std::max(final_size / 4, 256);
+      break;
+  }
+  /* Never more than the row will be rendered at, nor than the size the material's layers are
+   * created with: a larger preview would cost more than the render it stands in for. */
+  if (ma.paint_layers_image_size > 0) {
+    side = std::min(side, int(ma.paint_layers_image_size));
+  }
+  /* A multiple of 16, which is what #MaterialPaintLayerBake::preview_side16 can record. */
+  side = std::clamp(side, 16, std::max(final_size, 16));
+  return std::max(side - side % 16, 16);
+}
+
+float BKE_paint_layers_source_edit_delay(const Material &consumer, const Material &source)
+{
+  if ((consumer.paint_layers_preview_flag & MA_PAINT_PREVIEW_DELAYED) == 0) {
+    return 0.0f;
+  }
+  /* Only an edit made through the active row waits: the row being edited is the one a preview is
+   * rendered for; any other consumer renders after the editor's short pause. */
+  bool active_reads_source = false;
+  BKE_paint_layers_foreach(
+      consumer, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) {
+        if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) &&
+            row.material == &source && BKE_paint_layers_bake_row_is_deferred(consumer, row) &&
+            BKE_paint_layers_material_row_preview_active(consumer, row))
+        {
+          active_reads_source = true;
+        }
+        return !active_reads_source;
+      });
+  if (!active_reads_source) {
+    return 0.0f;
+  }
+  switch (consumer.paint_layers_preview_delay) {
+    case MA_PAINT_PREVIEW_DELAY_10S:
+      return 10.0f;
+    case MA_PAINT_PREVIEW_DELAY_15S:
+      return 15.0f;
+    case MA_PAINT_PREVIEW_DELAY_25S:
+      return 25.0f;
+    default:
+      return 5.0f;
+  }
+}
+
+bool BKE_paint_layers_preview_wanted(const Material &ma)
+{
+  return (ma.paint_layers_flag & MA_PAINT_LAYERS_PREVIEW_WANTED) != 0;
+}
+
+void BKE_paint_layers_preview_wanted_set(Material &ma, const bool wanted)
+{
+  if (wanted) {
+    ma.paint_layers_flag |= MA_PAINT_LAYERS_PREVIEW_WANTED;
+  }
+  else {
+    ma.paint_layers_flag &= ~MA_PAINT_LAYERS_PREVIEW_WANTED;
+  }
 }
 
 void BKE_paint_layers_material_row_log(const Material &ma,
@@ -1707,6 +1840,67 @@ void BKE_paint_layers_material_bake_retry(Material &ma, MaterialPaintLayer &laye
   }
 }
 
+void BKE_paint_layers_source_material_consumers(Main &bmain,
+                                                const Material &source,
+                                                Vector<Material *> &r_consumers)
+{
+  const int copy_tags = ID_TAG_LOCALIZED | ID_TAG_COPIED_ON_EVAL | ID_TAG_NO_MAIN;
+  for (Material &ma : bmain.materials) {
+    if ((ma.id.tag & copy_tags) != 0 || !BKE_paint_layers_is_layered(ma)) {
+      continue;
+    }
+    bool reads = false;
+    BKE_paint_layers_foreach(static_cast<const Material &>(ma),
+                             [&](const MaterialPaintLayer &row, const MaterialPaintLayer *) {
+                               reads = paint_layer_kind_has_flag(row,
+                                                                 PAINT_LAYER_KIND_READS_SOURCE) &&
+                                       row.material == &source;
+                               return !reads;
+                             });
+    if (reads) {
+      r_consumers.append(&ma);
+    }
+  }
+}
+
+bool BKE_paint_layers_bake_outstanding(const Material &ma)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return false;
+  }
+  if (BKE_paint_layers_bake_heavy_pending(ma)) {
+    return true;
+  }
+  bool due = false;
+  BKE_paint_layers_foreach(ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer *) {
+    due = BKE_paint_layers_material_row_due(ma, row);
+    return !due;
+  });
+  return due;
+}
+
+bool BKE_paint_layers_is_stale(const Material &ma)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return false;
+  }
+  /* The editor's mark covers whatever it has queued or running that has not resolved into a flag
+   * or a pending render yet. */
+  return BKE_paint_layers_bake_stale_get(ma) || BKE_paint_layers_bake_scheduled_get(ma) ||
+         BKE_paint_layers_bake_outstanding(ma);
+}
+
+PaintLayersBakeGateAction BKE_paint_layers_bake_gate_decide(const bool stale,
+                                                            const bool is_invoke,
+                                                            const bool headless)
+{
+  /* Headless first: nothing there ever makes a stale result fresh by itself. */
+  if (headless || !stale) {
+    return PaintLayersBakeGateAction::Proceed;
+  }
+  return is_invoke ? PaintLayersBakeGateAction::Wait : PaintLayersBakeGateAction::Refuse;
+}
+
 void BKE_paint_layers_material_bake_apply(Main & /*bmain*/,
                                           Material &ma,
                                           MaterialPaintLayer &layer,
@@ -1758,7 +1952,8 @@ bool BKE_paint_layers_material_bake_land(Material &ma,
                                          const bUUID &marker,
                                          const uint32_t hash[2],
                                          const uint32_t source_hash[2],
-                                         const bool landed)
+                                         const bool landed,
+                                         const int preview_side)
 {
   MaterialPaintLayer *layer = BKE_paint_layers_find(ma, marker);
   if (layer == nullptr || layer->bake == nullptr ||
@@ -1776,6 +1971,7 @@ bool BKE_paint_layers_material_bake_land(Material &ma,
     failure.hash[1] = hash[1];
     failure.source[0] = source_hash[0];
     failure.source[1] = source_hash[1];
+    failure.preview = preview_side != 0;
     runtime.failed.add_overwrite(UUID(marker), failure);
     return false;
   }
@@ -1789,6 +1985,7 @@ bool BKE_paint_layers_material_bake_land(Material &ma,
    * stale against it, and the next scene update renders it again. */
   layer->bake->source_hash[0] = source_hash[0];
   layer->bake->source_hash[1] = source_hash[1];
+  layer->bake->preview_side16 = int16_t(std::clamp(preview_side / 16, 0, 512));
   {
     std::lock_guard lock(bake_runtime_mutex());
     if (BakeMaterialRuntime *runtime = bake_runtime().lookup_ptr(ma.id.session_uid)) {

@@ -799,6 +799,22 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
 
         layout.prop(layer, "bake_mode", text="Mode")
         layout.prop(layer, "bake_size_preset", text="Size")
+
+        # What an edited layer that reads another material renders for the Image Editor's composite
+        # while it is edited. The settings belong to the material, so they apply to every such layer.
+        # Leaving the layer renders its maps at their own size (Size above) either way.
+        col = layout.column(heading="Image Editor Preview")
+        col.context_pointer_set("material", owner)
+        row = col.row(align=True)
+        row.prop(owner, "paint_layers_preview_sync", text="Sync", toggle=True, icon='UV_SYNC_SELECT')
+        row.operator("material.paint_layers_bake_now", text="Update Now", icon='FILE_REFRESH')
+        sub = col.row(align=True)
+        sub.active = not owner.paint_layers_preview_sync
+        sub.prop(owner, "paint_layers_preview_delay", text="Delay")
+        col.prop(owner, "paint_layers_preview_size", text="Resolution")
+        if owner.paint_layers_is_stale:
+            col.label(text="Updating...", icon='TIME')
+
         if layer.source == 'MATERIAL':
             # A plain value and a plain texture of the source are shown as they are. What the
             # source supplies as a graph is shown through a copy of that graph (Auto and Never)

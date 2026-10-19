@@ -298,8 +298,12 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
 
 static void material_paint_layers_blend_read(BlendDataReader *reader, Material &material)
 {
-  /* The pending-bake and cancel marks are derived state; a file never carries them. */
-  material.paint_layers_flag &= ~(MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_BAKE_CANCELLED);
+  /* The pending-bake and cancel marks are derived state; a file never carries them. The scheduled
+   * mark belongs to the editor's debounce timer and `wmJob`s, which a file does not carry across a
+   * save either: a file saved while a bake was armed or running must not load back permanently
+   * stale with nothing left to clear the mark. */
+  material.paint_layers_flag &= ~(MA_PAINT_LAYERS_BAKE_STALE | MA_PAINT_LAYERS_BAKE_CANCELLED |
+                                  MA_PAINT_LAYERS_BAKE_SCHEDULED | MA_PAINT_LAYERS_PREVIEW_WANTED);
   BLO_read_struct_list(reader, MaterialPaintLayer, &material.paint_layers);
   for (MaterialPaintLayer &layer : material.paint_layers) {
     material_paint_layer_blend_read(reader, layer);

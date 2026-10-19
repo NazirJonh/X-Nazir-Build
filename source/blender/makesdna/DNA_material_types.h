@@ -111,8 +111,46 @@ enum eMaterialPaintLayersFlag : short {
    * the same stale rows would restart it right away. Runtime only: a file never carries it.
    */
   MA_PAINT_LAYERS_BAKE_CANCELLED = 1 << 5,
+  /**
+   * The editor has a bake outstanding for this material: a debounce timer armed after an edit, or
+   * a bake job started and not yet finished. BKE cannot see `wmJob` state, so this is the editor's
+   * hand-off to #BKE_paint_layers_is_stale, set and cleared by the editor's scheduling code alone.
+   * Runtime only: a file never carries it.
+   */
+  MA_PAINT_LAYERS_BAKE_SCHEDULED = 1 << 6,
+  /**
+   * An Image Editor shows this material's composite, so the maps of an edited Material row are
+   * wanted while it is edited. Set by the editor's scheduling code at every scene update. Runtime
+   * only: a file never carries it.
+   */
+  MA_PAINT_LAYERS_PREVIEW_WANTED = 1 << 7,
 };
 ENUM_OPERATORS(eMaterialPaintLayersFlag)
+
+/** #Material::paint_layers_preview_flag */
+enum eMaterialPaintPreviewFlag : char {
+  /** The preview renders after #Material::paint_layers_preview_delay, not right after an edit. */
+  MA_PAINT_PREVIEW_DELAYED = 1 << 0,
+};
+
+/** #Material::paint_layers_preview_size: the preview's side; capped by the row's own size. */
+enum eMaterialPaintPreviewSize : char {
+  /** Zero is 2048, so files saved before the setting read as the default. */
+  MA_PAINT_PREVIEW_SIZE_2048 = 0,
+  MA_PAINT_PREVIEW_SIZE_256 = 1,
+  MA_PAINT_PREVIEW_SIZE_512 = 2,
+  MA_PAINT_PREVIEW_SIZE_1024 = 3,
+  MA_PAINT_PREVIEW_SIZE_4096 = 4,
+  MA_PAINT_PREVIEW_SIZE_AUTO = 5,
+};
+
+/** #Material::paint_layers_preview_delay */
+enum eMaterialPaintPreviewDelay : char {
+  MA_PAINT_PREVIEW_DELAY_5S = 0,
+  MA_PAINT_PREVIEW_DELAY_10S = 1,
+  MA_PAINT_PREVIEW_DELAY_15S = 2,
+  MA_PAINT_PREVIEW_DELAY_25S = 3,
+};
 
 /** #Material::paint_layers_composite_device: what shades the Image Editor's 2D preview. */
 enum eMaterialPaintCompositeDevice : char {
@@ -721,7 +759,14 @@ struct MaterialPaintLayerBake {
   struct Image *coverage = nullptr;
   /** #eMaterialPaintLayerBakeMode. */
   int8_t mode = MA_PAINT_LAYER_BAKE_AUTO;
-  char _pad[3] = {};
+  char _pad_a[1] = {};
+  /**
+   * Of a Material row: the side divided by 16 of the preview its maps were last rendered as while
+   * the row was edited (scaled into the row's maps), or zero when they were rendered at the row's
+   * own size. A row left behind with a preview is due for the render at its own size, and one still
+   * edited is due for another when the material's preview size no longer matches.
+   */
+  int16_t preview_side16 = 0;
   /** Square side the maps were baked at. */
   int size = 0;
   /** The description hash at the last successful bake, low word first. */
@@ -959,7 +1004,17 @@ struct Material {
   int16_t paint_layers_image_size = 4096;
   /** #eMaterialPaintCompositeDevice. Zero is the GPU so that files saved before it read as GPU. */
   char paint_layers_composite_device = 0;
-  char _pad_paint_layers[1] = {};
+  /**
+   * The side the maps of a Material row are rendered at while the row is being edited, for the
+   * Image Editor's composite (#eMaterialPaintPreviewSize). Zero is 2048, so files saved before it
+   * read as the default.
+   */
+  char paint_layers_preview_size = 0;
+  /** How long after the last edit the preview renders when it is not immediate (#eMaterialPaintPreviewDelay). */
+  char paint_layers_preview_delay = 0;
+  /** #eMaterialPaintPreviewFlag. Zero is immediate, which is what files saved before it read as. */
+  char paint_layers_preview_flag = 0;
+  char _pad_paint_layers[6] = {};
 };
 
 }  // namespace blender

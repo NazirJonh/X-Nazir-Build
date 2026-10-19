@@ -25,7 +25,9 @@
  * Paint Channel Requests" section, and a second consumer of the bake would replace only that.
  */
 
+#include "ED_image.hh"
 #include "ED_material_bake.hh"
+#include "ED_paint_layers_bake.hh"
 
 #include <algorithm>
 #include <array>
@@ -73,6 +75,9 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "IMB_colormanagement.hh"
 #include "IMB_imbuf.hh"
@@ -1292,6 +1297,8 @@ struct MaterialBakeImagesJob {
   uint32_t material_session_uid = 0;
   /** The Material row of a layered material the maps are for, told how the render ended. */
   MaterialBakeRowLink row;
+  /** The owner the `wmJob` of this render is keyed on, excluded when its free callback settles. */
+  const void *wm_owner = nullptr;
 };
 
 /**
@@ -1303,11 +1310,14 @@ struct MaterialBakeImagesJob {
 struct RowRenderState {
   uint32_t hash[2] = {};
   uint32_t source_hash[2] = {};
+  /** A preview and the render at the row's own size are different renders of one state. */
+  int preview_side = 0;
 
   bool operator==(const RowRenderState &other) const
   {
     return hash[0] == other.hash[0] && hash[1] == other.hash[1] &&
-           source_hash[0] == other.source_hash[0] && source_hash[1] == other.source_hash[1];
+           source_hash[0] == other.source_hash[0] && source_hash[1] == other.source_hash[1] &&
+           preview_side == other.preview_side;
   }
 };
 
@@ -1324,6 +1334,7 @@ static RowRenderState row_render_state(const MaterialBakeRowLink &row)
   state.hash[1] = row.hash[1];
   state.source_hash[0] = row.source_hash[0];
   state.source_hash[1] = row.source_hash[1];
+  state.preview_side = row.preview_side;
   return state;
 }
 
@@ -1484,6 +1495,7 @@ void bake_target_image_write_back(Image &image, const ImBuf &rendered)
     const ImBuf *source = &rendered;
     ImBuf *scaled = nullptr;
     if (rendered.x != ibuf->x || rendered.y != ibuf->y) {
+      /* Box is bilinear when scaling up, which is what a preview smaller than its map needs. */
       scaled = IMB_scale_into_new(&rendered, ibuf->x, ibuf->y, IMBScaleFilter::Box, false);
       source = scaled;
     }
@@ -1520,11 +1532,13 @@ static bool bake_target_image_is_placeholder(const Image &image)
  * Give \a image the render buffer itself instead of copying it into the image's own buffer.
  * Takes over \a rendered (it is null afterwards) and returns true on success; on false nothing was
  * touched and the caller keeps ownership and falls back to #bake_target_image_write_back.
- * Only valid when the image is a 1x1 placeholder or already has the render's size. Main thread only.
+ * Only valid when the image is a 1x1 placeholder or already has the render's size, or when
+ * \a replace_size says the render's size is the one the image is to have. Main thread only.
  */
 static bool bake_target_image_adopt(Image &image,
                                     ImBuf *&rendered,
-                                    const eMaterialPaintChannel channel)
+                                    const eMaterialPaintChannel channel,
+                                    const bool replace_size)
 {
   if (rendered == nullptr || rendered->float_data() == nullptr) {
     return false;
@@ -1532,7 +1546,7 @@ static bool bake_target_image_adopt(Image &image,
   int image_w = 0;
   int image_h = 0;
   BKE_image_get_size(&image, nullptr, &image_w, &image_h);
-  if (!bake_target_image_is_placeholder(image) &&
+  if (!replace_size && !bake_target_image_is_placeholder(image) &&
       (image_w != rendered->x || image_h != rendered->y))
   {
     return false;
@@ -1708,7 +1722,10 @@ static void material_bake_images_endjob(void *customdata)
       all_landed = false;
       continue;
     }
-    if (!bake_target_image_adopt(*target, job.rendered[i], job.channels[i])) {
+    /* A render at the row's own size replaces the buffer of a map a preview left at another size;
+     * a preview is scaled into whatever the map is. */
+    const bool replace_size = job.row.active && job.row.preview_side == 0;
+    if (!bake_target_image_adopt(*target, job.rendered[i], job.channels[i], replace_size)) {
       bake_target_image_write_back(*target, *rendered);
     }
     /* #bake_target_image_write_back only notifies NC_IMAGE, which the Image Editor listens for --
@@ -1727,7 +1744,7 @@ static void material_bake_images_endjob(void *customdata)
     for (Material &owner : bmain->materials) {
       if (owner.id.session_uid == job.row.owner_session_uid) {
         const bool took = BKE_paint_layers_material_bake_land(
-            owner, job.row.marker, job.row.hash, job.row.source_hash, all_landed);
+            owner, job.row.marker, job.row.hash, job.row.source_hash, all_landed, job.row.preview_side);
         if (MaterialPaintLayer *row = BKE_paint_layers_find(owner, job.row.marker)) {
           printf("[paint-layers material row] render end: all_landed=%d took=%d\n",
                  int(all_landed),
@@ -1763,7 +1780,17 @@ static void material_bake_images_free(void *customdata)
       row_renders_in_flight().remove(UUID(job->row.marker));
     }
   }
+  const bool settle_owner = job->row.active;
+  const void *wm_owner = job->wm_owner;
   MEM_delete(job);
+  /* Always runs, success or cancel alike: the layered material this render was started for is only
+   * stale as long as the render is, and its `wmJob` still counts as running from in here, so it is
+   * excluded. #G_MAIN rather than a parameter, since a free callback takes only its customdata. */
+  if (settle_owner && wm_owner != nullptr && G_MAIN != nullptr) {
+    if (wmWindowManager *wm = static_cast<wmWindowManager *>(G_MAIN->wm.first)) {
+      paint_layers_bake_scheduled_settle(*G_MAIN, *wm, wm_owner, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE);
+    }
+  }
 }
 
 MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
@@ -1873,7 +1900,7 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
       for (Material &owner : bmain.materials) {
         if (owner.id.session_uid == params.row.owner_session_uid) {
           BKE_paint_layers_material_bake_land(
-              owner, params.row.marker, params.row.hash, params.row.source_hash, true);
+              owner, params.row.marker, params.row.hash, params.row.source_hash, true, params.row.preview_side);
           break;
         }
       }
@@ -1944,11 +1971,11 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
    * job type keeps it out of the brush source bake's slot for the same material, which would
    * replace this job's callbacks -- its write-back included; #WM_JOB_EXCL_RENDER queues the two
    * renders instead. */
+  job->wm_owner = params.job_owner != nullptr ? params.job_owner :
+                                                static_cast<const void *>(params.material);
   wmJob *wm_job = WM_jobs_get(wm,
                               win,
-                              params.job_owner != nullptr ?
-                                  params.job_owner :
-                                  static_cast<const void *>(params.material),
+                              job->wm_owner,
                               "Baking material to images...",
                               WM_JOB_EXCL_RENDER | WM_JOB_PROGRESS,
                               WM_JOB_TYPE_MATERIAL_IMAGES_BAKE);
@@ -1966,16 +1993,40 @@ MaterialBakeToImagesResult material_bake_to_images(Main &bmain,
 /** \name Material Rows
  * \{ */
 
-/** The side a Material row's maps are rendered at when the row has not been given one. */
-constexpr int MATERIAL_ROW_DEFAULT_SIZE = 1024;
+/** Whether an Image Editor in composite mode shows the composite of \a ma. */
+static bool material_composite_is_shown(Main &bmain, wmWindowManager &wm, const Material &ma)
+{
+  for (const wmWindow &window : wm.windows) {
+    const bScreen *screen = WM_window_get_active_screen(&window);
+    if (screen == nullptr) {
+      continue;
+    }
+    for (const ScrArea &area : screen->areabase) {
+      if (area.spacetype != SPACE_IMAGE) {
+        continue;
+      }
+      const SpaceImage *sima = static_cast<const SpaceImage *>(area.spacedata.first);
+      if (sima != nullptr && ED_space_image_has_composite(sima) &&
+          ED_space_image_composite_material_get(&bmain, sima->image) == &ma)
+      {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
-void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
+void material_bake_layered_rows_ensure(Main &bmain, Material &ma, const bool force_preview)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
   if (wm == nullptr || !BKE_paint_layers_is_layered(ma)) {
     return;
   }
   wmWindow *win = static_cast<wmWindow *>(wm->windows.first);
+  /* Asked at every update rather than kept: an Image Editor opened or closed sends nothing this
+   * could listen to, and the answer is a walk over a handful of areas. */
+  BKE_paint_layers_preview_wanted_set(ma,
+                                      force_preview || material_composite_is_shown(bmain, *wm, ma));
 
   Vector<MaterialPaintLayer *> rows;
   BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) {
@@ -1991,9 +2042,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
     }
     /* The side is the row's own choice; a fresh row takes the default. The structural hash covers
      * it, so it is set before the state the render starts from is read. */
-    const int size = bake_size_clamp(BKE_paint_layers_bake_size_get(*row) > 0 ?
-                                         BKE_paint_layers_bake_size_get(*row) :
-                                         MATERIAL_ROW_DEFAULT_SIZE);
+    const int size = bake_size_clamp(BKE_paint_layers_material_row_size(ma, *row));
     if (BKE_paint_layers_bake_size_get(*row) != size) {
       BKE_paint_layers_bake_size_set(ma, *row, size);
     }
@@ -2005,6 +2054,12 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
     link.active = true;
     link.owner_session_uid = ma.id.session_uid;
     link.marker = row->marker;
+    /* The row being edited is rendered small for the Image Editor and scaled into its maps; the
+     * render at the row's own size is for when it is left. */
+    const bool preview = BKE_paint_layers_material_row_preview_active(ma, *row);
+    const int render_size = preview ? bake_size_clamp(BKE_paint_layers_preview_size_get(ma, size)) :
+                                      size;
+    link.preview_side = preview ? render_size : 0;
     BKE_paint_layers_material_bake_stamp_get(ma, *row, link.hash, link.source_hash);
     if (const RowRenderState *running = row_renders_in_flight().lookup_ptr(UUID(row->marker));
         running != nullptr && *running == row_render_state(link))
@@ -2014,7 +2069,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
 
     /* Only what the source supplies as a graph is rendered: its plain values and plain textures
      * are shown as they are. Reuse the row's own maps so a re-render does not mint a new `.00N`
-     * set every time, as long as they are still renders of this source at this size. */
+     * set every time, as long as they are still renders of this source. */
     Vector<BakeTargetSpec> targets;
     for (const int channel_index : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
       const eMaterialPaintChannel channel = eMaterialPaintChannel(channel_index);
@@ -2025,13 +2080,11 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
                             row->bake->coverage :
                             row->bake->images[channel_index];
       if (existing != nullptr) {
+        /* Whatever its side: a preview is scaled into it and a render at the row's own size
+         * replaces its buffer. */
         ImageMaterialSource source;
-        int existing_w = 0;
-        int existing_h = 0;
-        BKE_image_get_size(existing, nullptr, &existing_w, &existing_h);
         if (!BKE_image_material_source_get(*existing, source) ||
-            source.material != row->material || source.channel != channel_index ||
-            existing_w != size || existing_h != size)
+            source.material != row->material || source.channel != channel_index)
         {
           existing = nullptr;
         }
@@ -2045,7 +2098,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
     /* The row belongs to \a ma: its channel set decides which channels are rendered. */
     params.set_material = &ma;
     params.targets = targets;
-    params.size = size;
+    params.size = render_size;
     params.blocking = false;
     params.job_owner = row;
     params.row = link;
@@ -2066,10 +2119,14 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma)
     if (!result.ok) {
       /* Nothing could be rendered (no Principled BSDF, no channel the source feeds): the same
        * state would only fail the same way, so the row waits for something to change. */
-      BKE_paint_layers_material_bake_land(ma, link.marker, link.hash, link.source_hash, false);
+      BKE_paint_layers_material_bake_land(ma, link.marker, link.hash, link.source_hash, false, link.preview_side);
     }
     else if (BKE_paint_layers_material_row_due(ma, *row)) {
       row_renders_in_flight().add_overwrite(UUID(link.marker), row_render_state(link));
+      /* A render is running for \a ma: stamp it before the worker can run, so
+       * Material.paint_layers_is_stale never reads fresh while the maps are being written. The
+       * job's free callback clears the mark again. */
+      BKE_paint_layers_bake_scheduled_set(ma, true);
     }
   }
 }

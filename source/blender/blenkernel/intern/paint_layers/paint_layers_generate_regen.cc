@@ -700,6 +700,10 @@ void BKE_paint_layers_generate_copy_data(Main *bmain,
     return;
   }
 
+  /* A copy has no debounce timer and no job of its own: a mark copied with the struct would stay.
+   */
+  ma_dst.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_SCHEDULED;
+
   /* The uid keys the generated tree, so sharing it would make two materials' generated groups
    * indistinguishable. */
   if (!BLI_uuid_is_nil(ma_src.paint_layers_owner_uid)) {

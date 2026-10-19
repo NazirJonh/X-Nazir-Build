@@ -134,6 +134,28 @@ const EnumPropertyItem rna_enum_material_paint_layers_image_size_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_material_paint_layers_preview_size_items[] = {
+    {MA_PAINT_PREVIEW_SIZE_AUTO,
+     "AUTO",
+     0,
+     "Auto",
+     "A quarter of the layer's size, 256 pixels at the least"},
+    {MA_PAINT_PREVIEW_SIZE_256, "256", 0, "256", ""},
+    {MA_PAINT_PREVIEW_SIZE_512, "512", 0, "512", ""},
+    {MA_PAINT_PREVIEW_SIZE_1024, "1024", 0, "1024", ""},
+    {MA_PAINT_PREVIEW_SIZE_2048, "2048", 0, "2048", ""},
+    {MA_PAINT_PREVIEW_SIZE_4096, "4096", 0, "4096", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+static const EnumPropertyItem rna_enum_material_paint_layers_preview_delay_items[] = {
+    {MA_PAINT_PREVIEW_DELAY_5S, "5", 0, "5 s", ""},
+    {MA_PAINT_PREVIEW_DELAY_10S, "10", 0, "10 s", ""},
+    {MA_PAINT_PREVIEW_DELAY_15S, "15", 0, "15 s", ""},
+    {MA_PAINT_PREVIEW_DELAY_25S, "25", 0, "25 s", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_items[] = {
     {MA_PAINT_COMPOSITE_GPU,
      "GPU",
@@ -172,6 +194,7 @@ static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_it
 #  include "BKE_colorband.hh"
 #  include "BKE_context.hh"
 #  include "BKE_editmesh.hh"
+#  include "BKE_global.hh"
 #  include "BKE_gpencil_legacy.h"
 #  include "BKE_idprop.hh"
 #  include "BKE_grease_pencil.hh"
@@ -183,6 +206,7 @@ static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_it
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_paint_layers.hh"
+#  include "BKE_paint_layers_composite.hh"
 #  include "BKE_paint_layers_edit.hh"
 #  include "BKE_paint_layers_target.hh"
 #  include "BKE_report.hh"
@@ -923,9 +947,48 @@ static MaterialPaintLayer *rna_Material_paint_layers_merge_down(Material *ma,
   return folder;
 }
 
+static bool rna_Material_paint_layers_composite(Material *ma,
+                                                ReportList *reports,
+                                                const int channel,
+                                                PointerRNA *image_ptr)
+{
+  Image *image = static_cast<Image *>(image_ptr->data);
+  if (image == nullptr) {
+    BKE_report(reports, RPT_ERROR, "No destination image");
+    return false;
+  }
+  /* An RNA function is always reached like `exec`: there is no modal loop it could go into, so a
+   * stale result is refused rather than waited out. A caller without a window manager (background
+   * mode) is never refused: nothing there ever makes the result fresh.
+   *
+   * The freshness test is the BKE-only #BKE_paint_layers_is_stale, deliberately: RNA may not reach
+   * into the editor for a window manager. That is enough because the editor stamps
+   * #MA_PAINT_LAYERS_BAKE_SCHEDULED before every render it starts for the material, so the mark,
+   * not a `WM_jobs_test`, keeps this answer in step with `ED_paint_layers_stale_or_pending`. */
+  const bool headless = G_MAIN == nullptr || G_MAIN->wm.first == nullptr;
+  if (BKE_paint_layers_bake_gate_decide(BKE_paint_layers_is_stale(*ma),
+                                        /*is_invoke=*/false,
+                                        headless) == PaintLayersBakeGateAction::Refuse)
+  {
+    BKE_report(reports,
+               RPT_ERROR,
+               "Paint layers bake is not up to date; wait until Material.paint_layers_is_stale is "
+               "False (see bpy.ops.material.paint_layers_bake_now)");
+    return false;
+  }
+  return BKE_paint_layers_composite_image(*ma, channel, *image, nullptr, reports);
+}
+
 static bool rna_Material_is_layered_get(PointerRNA *ptr)
 {
   return BKE_paint_layers_is_layered(*id_cast<Material *>(ptr->owner_id));
+}
+
+static bool rna_Material_paint_layers_is_stale_get(PointerRNA *ptr)
+{
+  /* BKE-only signal: it cannot see a render the editor has started but not yet marked, which an
+   * RNA getter could only learn from a window manager it may not reach. */
+  return BKE_paint_layers_is_stale(*id_cast<Material *>(ptr->owner_id));
 }
 
 /* The effective set, not the raw field: an unauthored field reads the derived set. */
@@ -1472,9 +1535,16 @@ static void rna_MaterialPaintLayer_bake_size_set(PointerRNA *ptr, int value)
  * #rna_enum_material_paint_layer_bake_size_preset_items. */
 static int rna_MaterialPaintLayer_bake_size_preset_get(PointerRNA *ptr)
 {
-  const int size = rna_MaterialPaintLayer_bake_size_get(ptr);
+  int size = rna_MaterialPaintLayer_bake_size_get(ptr);
   if (size <= 0) {
-    return 0;
+    /* A Material row is rendered at a size of its own from the first render on: it reads the size
+     * the material's layers are created with until it is given one. */
+    MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+    const Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+    if (ma == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      return 0;
+    }
+    size = BKE_paint_layers_material_row_size(*ma, *layer);
   }
   int best = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
   for (const int preset : {PAINT_NEW_CHANNEL_IMAGE_SIZE_256,
@@ -3752,6 +3822,23 @@ static void rna_def_material_paint_layers(BlenderRNA *brna, PropertyRNA *cprop)
       func, "layer", "MaterialPaintLayer", "", "The layer carrying the given marker");
   RNA_def_function_return(func, parm);
 
+  func = RNA_def_function(srna, "composite", "rna_Material_paint_layers_composite");
+  RNA_def_function_ui_description(func,
+                                  "Composite one channel of the stack into an image on the CPU");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  parm = RNA_def_enum(func,
+                      "channel",
+                      rna_enum_material_paint_channel_items,
+                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                      "Channel",
+                      "Channel to composite");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_pointer(func, "image", "Image", "Image", "Destination image");
+  RNA_def_parameter_flags(parm, PROP_NEVER_NULL, PARM_REQUIRED | PARM_RNAPTR);
+  RNA_def_parameter_clear_flags(parm, PROP_THICK_WRAP, ParameterFlag(0));
+  parm = RNA_def_boolean(func, "result", false, "", "Whether the channel was composited");
+  RNA_def_function_return(func, parm);
+
   func = RNA_def_function(srna, "move", "rna_Material_paint_layers_move");
   RNA_def_function_ui_description(func, "Move a paint layer relative to an anchor");
   RNA_def_function_flag(func, FUNC_USE_REPORTS);
@@ -4675,6 +4762,17 @@ void RNA_def_material(BlenderRNA *brna)
                            "active layer; reads as none");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_material_update");
 
+  prop = RNA_def_property(srna, "paint_layers_is_stale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_is_stale_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layers Bake Is Stale",
+      "The material's baked paint layer result (image maps, composites, exported passes) does not "
+      "match its current layer stack yet: an edit is waiting out its short pause, or a render is "
+      "queued or running. Wait for it to become False, or use MATERIAL_OT_paint_layers_bake_now, "
+      "before reading a baked result");
+
   prop = RNA_def_property(srna, "paint_layers_image_size", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_image_size");
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layers_image_size_items);
@@ -4692,6 +4790,34 @@ void RNA_def_material(BlenderRNA *brna)
                            "Image Editor Composite",
                            "What shades the Combined and channel previews in the Image Editor");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+
+  prop = RNA_def_property(srna, "paint_layers_preview_sync", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "paint_layers_preview_flag", MA_PAINT_PREVIEW_DELAYED);
+  RNA_def_property_ui_text(
+      prop,
+      "Sync to Image Editor",
+      "While a layer that reads another material is edited, render its maps for the Image "
+      "Editor's composite right after each edit. Off: wait for the chosen delay after the last "
+      "edit. Leaving the layer renders the maps at their own size either way");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "paint_layers_preview_delay", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_preview_delay");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layers_preview_delay_items);
+  RNA_def_property_ui_text(
+      prop, "Preview Delay", "How long after the last edit the Image Editor's maps are rendered");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "paint_layers_preview_size", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "paint_layers_preview_size");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layers_preview_size_items);
+  RNA_def_property_enum_default(prop, MA_PAINT_PREVIEW_SIZE_2048);
+  RNA_def_property_ui_text(prop,
+                           "Preview Size",
+                           "The side the maps are rendered at while a layer is edited. Never "
+                           "larger than the layer's own size or the size layers are created with");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "paint_layers_channels", PROP_ENUM, PROP_NONE);
   RNA_def_property_flag(prop, PROP_ENUM_FLAG);

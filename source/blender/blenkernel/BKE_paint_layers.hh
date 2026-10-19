@@ -916,8 +916,47 @@ bool BKE_paint_layers_material_row_stale(const Material &ma, const MaterialPaint
  * Whether the editor should render the maps of the Material row \a layer now: it reads a material
  * that has a node tree, is not set to Never, is not hidden, its maps are missing or stale, and the
  * last render started from this very state did not just fail. Main thread only.
+ *
+ * The row being edited (the active one) is only due while its maps are wanted as a preview
+ * (#BKE_paint_layers_material_row_preview_active); a row left behind with maps of preview quality
+ * is due for the render at its own size.
  */
 bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * Whether the render of the Material row \a layer now is a preview: the row is being edited, its
+ * graph is shown live in the shader (not Always, whose maps are what the row shows), and an Image
+ * Editor shows the material's composite so its maps are wanted.
+ */
+bool BKE_paint_layers_material_row_preview_active(const Material &ma,
+                                                  const MaterialPaintLayer &layer);
+
+/** Whether the maps of the Material row \a layer are of preview quality (see #MaterialPaintLayerBake). */
+bool BKE_paint_layers_material_row_is_preview(const MaterialPaintLayer &layer);
+
+/**
+ * The side the maps of the Material row \a layer are rendered at when it is not being edited: its
+ * own size, or the size the material's layers are created with while it has none (4096 by default).
+ */
+int BKE_paint_layers_material_row_size(const Material &ma, const MaterialPaintLayer &layer);
+
+/**
+ * The side a preview of a row of \a final_size renders at: the material's preview setting, never
+ * above \a final_size or the size layers of the material are created with, 16 pixels at the least.
+ */
+int BKE_paint_layers_preview_size_get(const Material &ma, int final_size);
+
+/**
+ * How long after the last edit of \a source the maps of the row that reads it are rendered when
+ * \a consumer is edited through its active row, in seconds: the material's delay, or zero when it
+ * syncs immediately or the edit is not made through the active row (the editor's short pause
+ * applies).
+ */
+float BKE_paint_layers_source_edit_delay(const Material &consumer, const Material &source);
+
+/** Whether an Image Editor shows the composite of \a ma, as the editor last found at an update. */
+bool BKE_paint_layers_preview_wanted(const Material &ma);
+void BKE_paint_layers_preview_wanted_set(Material &ma, bool wanted);
 
 /** Print the state that decides whether the render of the Material row \a layer is due. */
 void BKE_paint_layers_material_row_log(const Material &ma,
@@ -954,13 +993,17 @@ void BKE_paint_layers_material_bake_apply(Main &bmain,
  * meanwhile, and then they are not its own). Not landed (cancelled, failed), the state is
  * remembered so the same render is not started again by every scene update.
  *
+ * \a preview_side is the side the render was a preview at, or zero for a render at the row's own
+ * size: the maps of the row are of preview quality until one at its own size lands.
+ *
  * \return whether the row took the maps.
  */
 bool BKE_paint_layers_material_bake_land(Material &ma,
                                          const bUUID &marker,
                                          const uint32_t hash[2],
                                          const uint32_t source_hash[2],
-                                         bool landed);
+                                         bool landed,
+                                         int preview_side = 0);
 
 /** Forget that the last render of \a layer failed and mark its maps stale: it is rendered again. */
 void BKE_paint_layers_material_bake_retry(Material &ma, MaterialPaintLayer &layer);
@@ -1154,6 +1197,66 @@ bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer);
 bool BKE_paint_layers_bake_stale_get(const Material &ma);
 /** Clear \a ma's pending-bake mark; the planner calls this once the queue is drained. */
 void BKE_paint_layers_bake_stale_clear(Material &ma);
+
+/**
+ * Whether the editor has a bake outstanding for \a ma right now: a debounce timer armed after an
+ * edit, or a bake job started and not finished. BKE cannot see `wmJob` state, so this is the
+ * editor's hand-off, set and cleared by the editor's scheduling code alone, never derived here.
+ */
+bool BKE_paint_layers_bake_scheduled_get(const Material &ma);
+/** Set or clear \a ma's outstanding-bake mark; see #BKE_paint_layers_bake_scheduled_get. */
+void BKE_paint_layers_bake_scheduled_set(Material &ma, bool scheduled);
+
+/**
+ * Append every layered material of \a bmain that has a Material row reading \a source, once each.
+ *
+ * The render of a row is keyed on the row, not on its source, so an edit of the source reaches the
+ * editor as an edit of \a source alone; this is the list of materials whose renders it concerns.
+ * Localized and evaluated copies are skipped: they share the original's description.
+ */
+void BKE_paint_layers_source_material_consumers(Main &bmain,
+                                                const Material &source,
+                                                Vector<Material *> &r_consumers);
+
+/**
+ * Whether \a ma has a render nobody has started yet: a heavy row without a valid bake
+ * (#BKE_paint_layers_bake_heavy_pending) or a Material row whose maps are due
+ * (#BKE_paint_layers_material_row_due).
+ */
+bool BKE_paint_layers_bake_outstanding(const Material &ma);
+
+/**
+ * Whether \a ma's baked result (the maps the stack reads, the Image Editor's composite, exported
+ * passes) is not the one its current description would produce: a pending value or pixel edit, a
+ * render nobody has started (#BKE_paint_layers_bake_outstanding), or the editor's own mark of a
+ * timer armed or a job running (#BKE_paint_layers_bake_scheduled_get).
+ *
+ * This is the BKE half of "is the result fresh": it cannot see a job the editor has not yet
+ * marked, so a caller that has a window manager should ask `ED_paint_layers_stale_or_pending`.
+ */
+bool BKE_paint_layers_is_stale(const Material &ma);
+
+/** What a caller that wants a baked result should do about a stale one. */
+enum class PaintLayersBakeGateAction {
+  /** Nothing is stale, or nothing can be done about it here (headless): go ahead now. */
+  Proceed,
+  /** `invoke` reached a stale result: wait for the bake (go modal) and ask again. */
+  Wait,
+  /** `exec` or an RNA function reached a stale result and cannot wait: report and stop. */
+  Refuse,
+};
+
+/**
+ * The one rule every consumer of a baked result shares, from three things it knows about itself:
+ * whether the result it read is \a stale, whether it was reached through `invoke` (a person, who
+ * can wait a moment) rather than `exec` or an RNA function (a script, which cannot), and whether
+ * it runs \a headless (no window manager). Headless always proceeds: there is no timer, no job and
+ * no modal loop that would ever make the result fresh, so refusing it would only be a false
+ * refusal.
+ */
+PaintLayersBakeGateAction BKE_paint_layers_bake_gate_decide(bool stale,
+                                                            bool is_invoke,
+                                                            bool headless);
 
 /**
  * Hash of the subtree and parameters \a layer's bake depends on, the validity key: two 32-bit

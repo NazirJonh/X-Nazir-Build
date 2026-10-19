@@ -733,4 +733,78 @@ TEST_F(PaintLayersMaterialBakeTest, a_row_that_stops_showing_the_graph_leaves_no
   EXPECT_EQ(source_group_of(*row), nullptr) << "pruned with the layer group that held it";
 }
 
+TEST_F(PaintLayersMaterialBakeTest, the_editors_mark_makes_the_result_stale_until_it_is_cleared)
+{
+  ASSERT_NE(add_material_row(*source, MA_PAINT_LAYER_BAKE_NEVER), nullptr);
+  BKE_paint_layers_bake_stale_clear(*ma);
+  EXPECT_FALSE(BKE_paint_layers_bake_scheduled_get(*ma));
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma)) << "nothing is waiting and nothing is due";
+
+  BKE_paint_layers_bake_scheduled_set(*ma, true);
+  EXPECT_TRUE(BKE_paint_layers_bake_scheduled_get(*ma));
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma));
+
+  BKE_paint_layers_bake_scheduled_set(*ma, false);
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma));
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*source)) << "a plain material has no paint layer bake";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_render_nobody_started_makes_the_result_stale_until_it_lands)
+{
+  MaterialPaintLayer *row = add_material_row(*source);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_bake_stale_clear(*ma);
+  EXPECT_TRUE(BKE_paint_layers_bake_outstanding(*ma));
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma)) << "the maps of the graph are due";
+
+  uint32_t hash[2], source_hash[2];
+  start_render(*row, base_color_roughness, hash, source_hash);
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma)) << "handed over, not landed";
+
+  ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
+  EXPECT_FALSE(BKE_paint_layers_bake_outstanding(*ma));
+  EXPECT_FALSE(BKE_paint_layers_is_stale(*ma));
+
+  edit_source(0.9f);
+  EXPECT_TRUE(BKE_paint_layers_is_stale(*ma)) << "an edit of the source makes the maps due again";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, the_gate_waits_for_a_person_and_refuses_a_script)
+{
+  using Action = PaintLayersBakeGateAction;
+  /* stale, invoke, headless */
+  EXPECT_EQ(BKE_paint_layers_bake_gate_decide(false, false, false), Action::Proceed);
+  EXPECT_EQ(BKE_paint_layers_bake_gate_decide(false, true, false), Action::Proceed);
+  EXPECT_EQ(BKE_paint_layers_bake_gate_decide(true, true, false), Action::Wait);
+  EXPECT_EQ(BKE_paint_layers_bake_gate_decide(true, false, false), Action::Refuse);
+  EXPECT_EQ(BKE_paint_layers_bake_gate_decide(true, true, true), Action::Proceed)
+      << "nothing headless makes a stale result fresh";
+  EXPECT_EQ(BKE_paint_layers_bake_gate_decide(true, false, true), Action::Proceed);
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_copy_does_not_inherit_the_editors_mark)
+{
+  BKE_paint_layers_bake_scheduled_set(*ma, true);
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_bake_scheduled_get(*ma));
+  EXPECT_FALSE(BKE_paint_layers_bake_scheduled_get(*copy))
+      << "the copy has no timer and no job of its own";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, an_edit_of_a_source_concerns_the_materials_whose_rows_read_it)
+{
+  ASSERT_NE(add_material_row(*source), nullptr);
+  Material *other = BKE_material_add(bmain, "Other");
+
+  Vector<Material *> consumers;
+  BKE_paint_layers_source_material_consumers(*bmain, *source, consumers);
+  ASSERT_EQ(consumers.size(), 1);
+  EXPECT_EQ(consumers[0], ma);
+
+  consumers.clear();
+  BKE_paint_layers_source_material_consumers(*bmain, *other, consumers);
+  EXPECT_TRUE(consumers.is_empty());
+}
+
 }  // namespace blender::bke::tests

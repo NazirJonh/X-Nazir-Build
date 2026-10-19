@@ -76,6 +76,7 @@
 #include "ED_asset_menu_utils.hh"
 #include "ED_image.hh"
 #include "ED_paint.hh"
+#include "ED_paint_layers_bake.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
@@ -3113,6 +3114,11 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_canvas_cycle);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
+
+  /* Paint layers bake: start the pending renders now, and clean up after memfile undo. */
+  WM_operatortype_append(ed::material_bake::MATERIAL_OT_paint_layers_bake_now);
+  /* Once at startup, so the paint-layer bake undo cleanup is live before the first update. */
+  ed::material_bake::paint_layers_bake_undo_callback_init();
 
   /* texture assignment */
   WM_operatortype_append(BRUSH_OT_texture_slot_assign_image);

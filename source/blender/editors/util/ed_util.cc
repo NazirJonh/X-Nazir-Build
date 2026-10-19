@@ -44,6 +44,7 @@
 #include "ED_mesh.hh"
 #include "ED_object.hh"
 #include "ED_paint.hh"
+#include "ED_paint_layers_bake.hh"
 #include "ED_screen.hh"
 #include "ED_screen_types.hh"
 #include "ED_sculpt.hh"
@@ -254,6 +255,10 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     BKE_paint_material_composite_cache_free_all();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */
     BKE_paint_material_combined_cache_free_all();
+    /* The paint-layers bake debounce keeps its armed timer and pending set as process-static
+     * state: a timer left armed would tick against the next file's #Main, and a pending entry
+     * names a material of the file that is going away right here. */
+    material_bake::paint_layers_bake_debounce_reset();
   }
   else {
     /* Memfile undo, where the entries stay reachable but their pixels may not be current any

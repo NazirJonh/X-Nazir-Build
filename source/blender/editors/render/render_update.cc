@@ -29,6 +29,7 @@
 #include "BLI_listbase.h"
 #include "BLI_threads.h"
 #include "BLI_timer.h"
+#include "BLI_vector.hh"
 
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
@@ -40,6 +41,7 @@
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
@@ -277,6 +279,25 @@ static void material_changed(Main *bmain, Material *ma)
   /* The Combined preview reads every channel of this material, so a node-tree edit can change it
    * in ways no input hash is asked about. */
   BKE_paint_material_combined_cache_invalidate(ma);
+
+  /* The renders an edit makes due -- a Material row's maps, a heavy row's bake -- are started once
+   * the edits stop, not by the scene update of each one, so a burst (a slider held down, a node
+   * dragged) is one render pass instead of a render restarted on every update. The materials whose
+   * rows read \a ma are the ones its edit makes due. With no window manager there is no main loop
+   * to run the timer and no job to start either. */
+  if (bmain->wm.first != nullptr) {
+    if (BKE_paint_layers_is_layered(*ma)) {
+      ed::material_bake::paint_layers_bake_debounce_arm(*ma);
+    }
+    Vector<Material *> consumers;
+    BKE_paint_layers_source_material_consumers(*bmain, *ma, consumers);
+    for (Material *consumer : consumers) {
+      /* An edit made through the row being edited waits as long as the material's preview delay
+       * says; any other consumer renders after the short pause. */
+      ed::material_bake::paint_layers_bake_debounce_arm(
+          *consumer, double(BKE_paint_layers_source_edit_delay(*consumer, *ma)));
+    }
+  }
 
   /* Linking an image into this material is what turns "no material owns this image" into an
    * answer, and a remembered miss is the one thing the lookup cannot re-check for itself. */

@@ -233,6 +233,8 @@ struct MaterialBakeRowLink {
   /** The structural and source hashes at the start (#BKE_paint_layers_material_bake_stamp_get). */
   uint32_t hash[2] = {};
   uint32_t source_hash[2] = {};
+  /** The render is a preview: at the material's preview side, scaled into the row's maps. */
+  int preview_side = 0;
 };
 
 struct MaterialBakeToImagesParams {
@@ -328,9 +330,10 @@ void bake_target_image_normalize_colorspace(Image &image, eMaterialPaintChannel 
  * (#BKE_paint_layers_material_row_due): one job per row, from a copy of its source, into the row's
  * own maps. The maps are handed to the row before the render starts and the row is told when they
  * land. A row whose render for the current state is already running is left to it. Called on the
- * main thread after the depsgraph update, for every layered material of the file.
+ * main thread after the depsgraph update, for every layered material of the file.  force_preview
+ * asks for the maps of the row being edited as if an Image Editor showed the composite (Update Now).
  */
-void material_bake_layered_rows_ensure(Main &bmain, Material &ma);
+void material_bake_layered_rows_ensure(Main &bmain, Material &ma, bool force_preview = false);
 
 /** \} */
 

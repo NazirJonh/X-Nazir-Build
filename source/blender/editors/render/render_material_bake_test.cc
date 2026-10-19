@@ -7,19 +7,24 @@
 #include "BKE_gtest_base.hh"
 #include "BKE_global.hh"
 #include "BKE_image.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
+#include "BKE_paint_layers.hh"
 
 #include "ED_material_bake.hh"
+#include "ED_paint_layers_bake.hh"
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_span.hh"
 #include "BLI_string.h"
+#include "BLI_timer.h"
 #include "BLI_ustring.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -253,6 +258,60 @@ TEST_F(MaterialBakeTest, legacy_srgb_color_map_is_normalized)
   EXPECT_NEAR(ibuf->float_data()[1], 0.5f, 1e-3f);
   EXPECT_NEAR(ibuf->float_data()[2], 0.8f, 1e-3f);
   BKE_image_release_ibuf(image, ibuf, lock);
+}
+
+TEST_F(MaterialBakeTest, the_debounce_finds_the_materials_still_there_and_drops_the_others)
+{
+  Material *other = add_material_with_principled("Other");
+  Material *gone = add_material_with_principled("Gone");
+  const uint32_t gone_uid = gone->id.session_uid;
+  BKE_id_delete(bmain, gone);
+
+  const uint32_t pending[] = {material->id.session_uid, gone_uid};
+  Vector<Material *> found;
+  paint_layers_bake_debounce_resolve(*bmain, pending, found);
+  ASSERT_EQ(found.size(), 1);
+  EXPECT_EQ(found[0], material);
+  EXPECT_NE(found[0], other);
+
+  found.clear();
+  paint_layers_bake_debounce_resolve(*bmain, {}, found);
+  EXPECT_TRUE(found.is_empty());
+}
+
+TEST_F(MaterialBakeTest, arming_marks_the_material_and_restarts_a_running_timer)
+{
+  paint_layers_bake_debounce_reset();
+  EXPECT_FALSE(paint_layers_bake_debounce_should_replace_timer());
+
+  paint_layers_bake_debounce_arm(*material);
+  EXPECT_TRUE(BKE_paint_layers_bake_scheduled_get(*material));
+  EXPECT_TRUE(paint_layers_bake_debounce_should_replace_timer())
+      << "a second edit must restart the countdown, not let the first one fire";
+
+  /* Arming again keeps exactly one timer: it is removed and registered anew. */
+  paint_layers_bake_debounce_arm(*material);
+  EXPECT_TRUE(paint_layers_bake_debounce_should_replace_timer());
+
+  paint_layers_bake_debounce_reset();
+  EXPECT_FALSE(paint_layers_bake_debounce_should_replace_timer())
+      << "a file about to go away leaves no timer behind";
+  BKE_paint_layers_bake_scheduled_set(*material, false);
+}
+
+TEST_F(MaterialBakeTest, a_mark_settles_only_once_nothing_is_left_running)
+{
+  EXPECT_FALSE(paint_layers_bake_scheduled_settle_clears(true));
+  EXPECT_TRUE(paint_layers_bake_scheduled_settle_clears(false));
+
+  /* A job inside its own free callback still counts as running, so it is the one excluded. */
+  int owner = 0;
+  int other = 0;
+  constexpr int job_type = 7;
+  EXPECT_TRUE(paint_layers_bake_job_is_excluded(&owner, job_type, &owner, job_type));
+  EXPECT_FALSE(paint_layers_bake_job_is_excluded(&owner, job_type, &other, job_type));
+  EXPECT_FALSE(paint_layers_bake_job_is_excluded(&owner, job_type, &owner, job_type + 1));
+  EXPECT_FALSE(paint_layers_bake_job_is_excluded(&owner, job_type, nullptr, 0));
 }
 
 }  // namespace blender::ed::material_bake::tests

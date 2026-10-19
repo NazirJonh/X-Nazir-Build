@@ -8,7 +8,10 @@
 
 #include <algorithm>
 #include <climits>
+#include <optional>
 #include <string>
+
+#include "AS_asset_representation.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -18,6 +21,7 @@
 
 #include "BKE_context.hh"
 
+#include "BLI_listbase_iterator.hh"
 #include "BLI_span.hh"
 #include "BLI_uuid.h"
 
@@ -29,6 +33,7 @@
 #include "WM_types.hh"
 
 #include "../outliner_intern.hh"
+#include "../tree/tree_iterator.hh"
 #include "outliner_stack_drag.hh"
 #include "outliner_stack_source.hh"
 
@@ -268,6 +273,8 @@ static bool stack_drop_group_into_itself(const StackReadContext &ctx,
   return false;
 }
 
+static StackMovePlace stack_drop_place_from_insert_type(TreeElementInsertType insert_type);
+
 /** Write the drop target and the indicator for the zone the cursor is in, or refuse the drop. */
 static bool stack_layer_drop_init(bContext *C, const wmEvent *event, StackLayerDragData *drop_data)
 {
@@ -328,13 +335,7 @@ static bool stack_layer_drop_init(bContext *C, const wmEvent *event, StackLayerD
   /* The row aimed at is the anchor in every case, a group included: "into that folder" is a place
    * of its own, so an empty folder -- which has no row inside to aim at -- is a destination like
    * any other. The list is drawn top of stack first, so "before" on screen is "above". */
-  StackMovePlace place = StackMovePlace::Above;
-  if (insert_type == TE_INSERT_INTO) {
-    place = StackMovePlace::Into;
-  }
-  else if (insert_type == TE_INSERT_AFTER) {
-    place = StackMovePlace::Below;
-  }
+  const StackMovePlace place = stack_drop_place_from_insert_type(insert_type);
 
   drop_data->target = outliner_stack_identity_of(*space_outliner, target_row->ordinal);
   drop_data->target_place = place;
@@ -548,6 +549,404 @@ void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot)
   ot->poll = ED_operator_outliner_active;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Stack Layer ID Drop Operator
+ *
+ * A data-block dropped on a stack row or in empty space becomes something of the source's own
+ * making: a new layer, a channel's map, a Material layer made from a material. Which types are
+ * worth catching, how a drag that does not already carry a local data-block resolves into one, and
+ * the wording of the tooltip are the source's business, asked through #StackDropHandler; nothing
+ * below this point names a domain type.
+ * \{ */
+
+/**
+ * The stack row the mouse points at: the layer under the cursor, or the layer a sub-row belongs
+ * to, however deep the listing nests them. Null is empty space or the stack's owner breadcrumb,
+ * either of which reads as "the stack itself, no row" -- what that is worth is the source's call.
+ */
+static TreeElement *stack_drop_target_row(bContext *C,
+                                          const int xy[2],
+                                          TreeElementInsertType *r_insert_type = nullptr)
+{
+  StackDropZone zone;
+  if (!stack_layer_drop_zone_find(C, xy, zone)) {
+    return nullptr;
+  }
+  TreeElement *te = zone.te;
+  TreeElementInsertType insert_type = zone.insert_type;
+  bool climbed = false;
+  for (int step = 0; te != nullptr && TREESTORE(te)->type == TSE_STACK_ITEM &&
+                      step < STACK_ROW_PARENT_WALK_MAX;
+       step++)
+  {
+    /* A sub-row stands for its layer: the zone within the sub-row says nothing about where a
+     * data-block would go, so it reads as the middle of the layer it belongs to. */
+    te = te->parent;
+    climbed = true;
+  }
+  if (climbed) {
+    insert_type = TE_INSERT_INTO;
+  }
+  if (te == nullptr || TREESTORE(te)->type != TSE_STACK_LAYER) {
+    return nullptr;
+  }
+  if (r_insert_type != nullptr) {
+    *r_insert_type = insert_type;
+  }
+  return te;
+}
+
+/**
+ * Where a data-block dropped at \a insert_type would land, as the seam names places. The list is
+ * drawn top of stack first, so "before" on screen is the place above the row in the stack. The
+ * middle third of a row is #StackMovePlace::Into -- onto the row rather than beside it, which each
+ * source reads its own way (or, with no such reading, collapses to a place beside the row).
+ */
+static StackMovePlace stack_drop_place_from_insert_type(const TreeElementInsertType insert_type)
+{
+  switch (insert_type) {
+    case TE_INSERT_INTO:
+      return StackMovePlace::Into;
+    case TE_INSERT_AFTER:
+      return StackMovePlace::Below;
+    case TE_INSERT_BEFORE:
+      break;
+  }
+  return StackMovePlace::Above;
+}
+
+/**
+ * Record where the drop under way would land, for the operator that commits it to read back.
+ * \param target_row: null when the drop names no row, which leaves the anchor invalid.
+ */
+static void stack_drop_aim_set(SpaceOutliner &space_outliner,
+                               TreeElement *target_row,
+                               const StackMovePlace place)
+{
+  SpaceOutliner_Runtime::StackDropAim aim;
+  if (target_row != nullptr) {
+    aim.anchor = outliner_stack_identity_of(space_outliner, int(TREESTORE(target_row)->nr));
+    aim.place = place;
+  }
+  space_outliner.runtime->stack_drop_aim = aim;
+}
+
+/**
+ * The row a dropped data-block would land on and how, or null when the drop names no row.
+ * \param r_place: #StackMovePlace::Into for the middle of a row, otherwise the side the insertion
+ * line is drawn at.
+ */
+static TreeElement *stack_drop_aim_find(bContext *C, const int xy[2], StackMovePlace *r_place)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return nullptr;
+  }
+  TreeElementInsertType insert_type = TE_INSERT_INTO;
+  TreeElement *target_row = stack_drop_target_row(C, xy, &insert_type);
+  if (target_row == nullptr) {
+    return nullptr;
+  }
+  if (outliner_stack_row_find(*space_outliner, int(TREESTORE(target_row)->nr)) == nullptr) {
+    /* A row the tree lists but the model no longer holds: the rows were re-read since the tree was
+     * built, and there is nothing to aim at until the next build. */
+    return nullptr;
+  }
+  if (r_place != nullptr) {
+    *r_place = stack_drop_place_from_insert_type(insert_type);
+  }
+  return target_row;
+}
+
+/**
+ * Mark the row a dropped data-block would land on: a line above or below the row for an insertion,
+ * the row's own outline for a drop onto it (\a place empty).
+ */
+static void stack_drop_indicator_set(SpaceOutliner &space_outliner,
+                                     TreeElement *target_row,
+                                     const std::optional<StackMovePlace> place)
+{
+  SpaceOutliner_Runtime::StackDropIndicator &indicator =
+      space_outliner.runtime->stack_drop_indicator;
+  if (target_row == nullptr) {
+    indicator.ordinal = -1;
+    return;
+  }
+  indicator.ordinal = int(TREESTORE(target_row)->nr);
+  if (!place.has_value()) {
+    indicator.insert_type = TE_INSERT_INTO;
+  }
+  else {
+    indicator.insert_type = (*place == StackMovePlace::Below) ? TE_INSERT_AFTER : TE_INSERT_BEFORE;
+  }
+}
+
+/**
+ * The topmost visible row of the stack, or null when the tree lists none: where a drop that named
+ * no row lands, since a new layer goes on top. The list is built top of stack first, so the first
+ * row met is the top one; a collapsed group's contents are skipped.
+ */
+static TreeElement *stack_drop_top_row_get(SpaceOutliner &space_outliner)
+{
+  TreeElement *top_row = nullptr;
+  tree_iterator::all_open(space_outliner, [&](TreeElement *te) {
+    if (top_row == nullptr && TREESTORE(te)->type == TSE_STACK_LAYER) {
+      top_row = te;
+    }
+  });
+  return top_row;
+}
+
+/**
+ * The one type in \a types the drag already names -- a plain local data-block, a single asset, or
+ * (the first match) an item of a multi-asset drag -- or 0 when none does, which leaves the
+ * source's #StackDropHandler::drop_external_poll to say whether the drag might still resolve into
+ * something else, such as a file dropped from outside Blender.
+ */
+static short stack_drag_matched_id_type(const wmDrag &drag, const Span<short> types)
+{
+  if (drag.type == WM_DRAG_ASSET_LIST) {
+    const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
+    if (asset_drags == nullptr) {
+      return 0;
+    }
+    for (const wmDragAssetListItem &item : *asset_drags) {
+      const ID_Type item_idtype = item.is_external ?
+                                      item.asset_data.external_info->asset->get_id_type() :
+                                      (item.asset_data.local_id ?
+                                           GS(item.asset_data.local_id->name) :
+                                           ID_Type(0));
+      if (types.contains(short(item_idtype))) {
+        return short(item_idtype);
+      }
+    }
+    return 0;
+  }
+  for (const short id_type : types) {
+    if (WM_drag_is_ID_type(&drag, id_type)) {
+      return id_type;
+    }
+  }
+  return 0;
+}
+
+bool stack_id_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr || space_outliner->outlinevis != SO_STACK_LAYERS ||
+      space_outliner->stack_layers_view != SO_SL_VIEW_STACK)
+  {
+    return false;
+  }
+  const StackDropHandler *handler = stack_source_for_space(*space_outliner)->drop_handler();
+  ARegion *region = CTX_wm_region(C);
+  const bool changed = outliner_flag_set(
+      *space_outliner, TSE_HIGHLIGHTED_ANY | TSE_DRAG_ANY, false);
+  /* A refusal takes the line away with it: the poll is the pass that promises where the drop
+   * lands, and a refused one must not leave the previous row marked. */
+  const auto clear_indicator = [&]() {
+    const bool drawn = space_outliner->runtime->stack_drop_indicator.ordinal >= 0;
+    space_outliner->runtime->stack_drop_indicator.ordinal = -1;
+    if ((changed || drawn) && region != nullptr) {
+      ED_region_tag_redraw_no_rebuild(region);
+    }
+  };
+  const auto refuse = [&]() {
+    clear_indicator();
+    return false;
+  };
+  if (handler == nullptr) {
+    return refuse();
+  }
+  Vector<short> types;
+  handler->drop_id_types(types);
+  const short matched_type = stack_drag_matched_id_type(*drag, types);
+  if (matched_type == 0 && !handler->drop_external_poll(*drag)) {
+    return refuse();
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr) {
+    return refuse();
+  }
+
+  /* Show where the data-block is going: aimed at the middle of a row, the row is outlined, for a
+   * source that reads that as landing on the row itself rather than beside it; aimed between rows,
+   * or past either end, the line says where the new row would go. */
+  StackMovePlace place = StackMovePlace::Above;
+  TreeElement *target_row = stack_drop_aim_find(C, event->xy, &place);
+  if (place == StackMovePlace::Into && !handler->drop_supports_into(matched_type)) {
+    place = StackMovePlace::Above;
+  }
+  StackDropTarget target;
+  target.place = place;
+  if (target_row != nullptr) {
+    target.anchor = outliner_stack_identity_of(*space_outliner, int(TREESTORE(target_row)->nr));
+  }
+
+  /* A plain local data-block can be judged before the drop, the way the tooltip already does: a
+   * drop the handler would refuse must not be drawn as one it accepts. The box stays active so the
+   * tooltip can say why -- it is the one place a refusal is worth a word -- but no line is drawn
+   * and no aim is recorded. An asset or an external drag resolves only at drop time, so its
+   * refusals still come from the handler then. */
+  if (drag->type == WM_DRAG_ID && matched_type != 0) {
+    if (const ID *local = WM_drag_get_local_ID(drag, matched_type)) {
+      StackDropPayload payload;
+      payload.id_uid = local->session_uid;
+      payload.id_type = matched_type;
+      const char *hint = nullptr;
+      if (!handler->can_accept(ctx, *owner, payload, target, &hint)) {
+        stack_drop_aim_set(*space_outliner, nullptr, place);
+        clear_indicator();
+        return true;
+      }
+    }
+  }
+
+  stack_drop_aim_set(*space_outliner, target_row, place);
+  if (target_row != nullptr) {
+    stack_drop_indicator_set(*space_outliner,
+                             target_row,
+                             (place == StackMovePlace::Into) ? std::nullopt :
+                                                               std::optional(place));
+  }
+  else {
+    target_row = stack_drop_top_row_get(*space_outliner);
+    stack_drop_indicator_set(*space_outliner, target_row, StackMovePlace::Above);
+  }
+  if ((changed || target_row != nullptr) && region != nullptr) {
+    ED_region_tag_redraw_no_rebuild(region);
+  }
+  return true;
+}
+
+std::string stack_id_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox * /*drop*/)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return std::string();
+  }
+  const StackDropHandler *handler = stack_source_for_space(*space_outliner)->drop_handler();
+  if (handler == nullptr) {
+    return std::string();
+  }
+  Vector<short> types;
+  handler->drop_id_types(types);
+  const short matched_type = stack_drag_matched_id_type(*drag, types);
+
+  StackMovePlace place = StackMovePlace::Above;
+  TreeElement *target_row = stack_drop_aim_find(C, xy, &place);
+  if (place == StackMovePlace::Into && !handler->drop_supports_into(matched_type)) {
+    place = StackMovePlace::Above;
+  }
+  StackDropTarget target;
+  target.place = place;
+  if (target_row != nullptr) {
+    target.anchor = outliner_stack_identity_of(*space_outliner, int(TREESTORE(target_row)->nr));
+  }
+
+  /* A plain local data-block can be judged before the drop, and what the source would refuse is
+   * worth reading while dragging, not only after -- an asset or an external drag resolves only at
+   * drop time, so its refusals come from the handler then. */
+  if (drag->type == WM_DRAG_ID && matched_type != 0) {
+    if (const ID *local = WM_drag_get_local_ID(drag, matched_type)) {
+      StackDropPayload payload;
+      payload.id_uid = local->session_uid;
+      payload.id_type = matched_type;
+      const StackReadContext ctx = outliner_stack_read_context(*C);
+      const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+      const char *hint = nullptr;
+      if (owner != nullptr && !handler->can_accept(ctx, *owner, payload, target, &hint)) {
+        /* A refusal with no wording of its own keeps the generic tooltip out: the drop will not
+         * land, and saying where it would is worse than saying nothing. */
+        return (hint != nullptr) ? std::string(hint) : std::string();
+      }
+    }
+  }
+
+  std::string row_name;
+  if (target_row != nullptr) {
+    const StackRow *row = outliner_stack_row_find(*space_outliner, int(TREESTORE(target_row)->nr));
+    row_name = (row != nullptr) ? row->name : std::string("layer");
+  }
+  return handler->drop_tooltip(matched_type, WM_drag_get_item_name(drag), row_name, target);
+}
+
+static wmOperatorStatus stack_id_drop_invoke(bContext *C,
+                                             wmOperator * /*op*/,
+                                             const wmEvent *event)
+{
+  if (event->custom != EVT_DATA_DRAGDROP) {
+    return OPERATOR_CANCELLED;
+  }
+  ListBaseT<wmDrag> *drags = static_cast<ListBaseT<wmDrag> *>(event->customdata);
+  wmDrag *drag = static_cast<wmDrag *>(drags->first);
+
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackDropHandler *handler = stack_source_for_space(*space_outliner)->drop_handler();
+  if (handler == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Read first, resolve second: resolving an asset imports it, and an import remaps data-blocks,
+   * which is exactly the kind of event the editor answers by dropping what it has cached. */
+  const SpaceOutliner_Runtime::StackDropAim aim = space_outliner->runtime->stack_drop_aim;
+
+  ID *dropped = handler->drop_resolve(*C, *drag);
+  if (dropped == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  StackDropPayload payload;
+  payload.id_uid = dropped->session_uid;
+  payload.id_type = GS(dropped->name);
+  /* What the poll aimed at a moment ago on this very event -- see #stack_drop_aim_set. */
+  StackDropTarget target;
+  target.anchor = aim.anchor;
+  target.place = aim.place;
+
+  /* #StackDropHandler::execute refuses what #StackDropHandler::can_accept refuses, so the gate is
+   * not asked a second time here. The handler leaves the selection and the active row where the
+   * shared row helpers put them. */
+  if (!handler->execute(*C,
+                        space_outliner->runtime->stack_focus,
+                        *owner,
+                        payload,
+                        target,
+                        event,
+                        nullptr))
+  {
+    return OPERATOR_CANCELLED;
+  }
+  return OPERATOR_FINISHED;
+}
+
+void OUTLINER_OT_stack_layer_id_drop(wmOperatorType *ot)
+{
+  ot->name = "Drop Data-Block on Stack Layer";
+  ot->description =
+      "Assign a dropped data-block to a layer, or add it as a new layer or layer group";
+  ot->idname = "OUTLINER_OT_stack_layer_id_drop";
+
+  ot->invoke = stack_id_drop_invoke;
+  ot->poll = ED_operator_outliner_active;
+
+  /* No #OPTYPE_UNDO: a data-block that only hands off to another operator (a popup that picks a
+   * channel, say) has nothing of its own to push, and one that mutates directly pushes its own
+   * step explicitly -- the automatic push would land before a mutation that is still pending in a
+   * popup. */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
 }
 
 /** \} */

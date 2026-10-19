@@ -136,6 +136,23 @@ void stack_row_ui_state_edit_select(const StackReadContext &ctx,
   state.active = true;
 }
 
+void stack_row_edit_finished(bContext &C,
+                             SpaceOutliner &space_outliner,
+                             ID &owner,
+                             const int select_ordinal,
+                             const bool needs_renumber)
+{
+  const StackReadContext ctx = outliner_stack_read_context(C);
+  /* Invalidating captures the rows' UI state into the identity-keyed map before the rows go
+   * away; a renumbering edit then re-targets the selection on the map, which is what carries it
+   * across the rebuild. */
+  outliner_stack_rows_invalidate(space_outliner);
+  if (needs_renumber) {
+    stack_row_ui_state_edit_select(ctx, space_outliner, owner, select_ordinal);
+  }
+  WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+}
+
 void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner)
 {
   SpaceOutliner_Runtime &runtime = *space_outliner.runtime;

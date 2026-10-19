@@ -73,7 +73,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 18u);
+  ASSERT_EQ(kinds.size(), 19u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -109,6 +109,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[16].is_effect);
   EXPECT_EQ(kinds[17].identifier, "MASK_FILTER_UV_ISLAND");
   EXPECT_TRUE(kinds[17].is_effect);
+  /* Last, so no index above moves: the kind a dropped material is made into. */
+  EXPECT_EQ(kinds[18].identifier, "MATERIAL");
+  EXPECT_EQ(kinds[18].source_id_type, ID_MA);
   EXPECT_FALSE(kinds[15].takes_color);
 }
 
@@ -519,6 +522,125 @@ TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_a_fill_correction_
   const float color[4] = {0.2f, 0.6f, 0.9f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_set_fill_color(*material, effect, color));
   EXPECT_NE(source().state_hash(ctx, material->id), before);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest,
+       a_material_dropped_on_the_stack_cannot_read_itself_or_cycle)
+{
+  const StackDropHandler *handler = source().drop_handler();
+  ASSERT_NE(handler, nullptr);
+  Material *other = BKE_material_add(bmain, "Other");
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  StackDropTarget target;
+  StackDropPayload payload;
+  payload.id_type = ID_MA;
+  const char *hint = nullptr;
+
+  payload.id_uid = other->id.session_uid;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_EQ(hint, nullptr) << "an accepted drop has nothing to explain";
+
+  payload.id_uid = material->id.session_uid;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_NE(hint, nullptr) << "a refusal is worth a word while dragging";
+
+  /* The other material reads this one, so reading it back would be a cycle. */
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Material;
+  params.source = material;
+  ASSERT_NE(BKE_paint_layers_add_with_policy(*other, params), nullptr);
+  payload.id_uid = other->id.session_uid;
+  hint = nullptr;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_NE(hint, nullptr);
+
+  /* Anything that is not a material is not this drop's business. */
+  payload.id_type = ID_IM;
+  payload.id_uid = 1;
+  hint = nullptr;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_EQ(hint, nullptr);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, the_drop_catches_materials_and_words_where_they_land)
+{
+  const StackDropHandler *handler = source().drop_handler();
+  ASSERT_NE(handler, nullptr);
+  Vector<short> types;
+  handler->drop_id_types(types);
+  ASSERT_EQ(types.size(), 2);
+  EXPECT_TRUE(types.contains(ID_IM));
+  EXPECT_TRUE(types.contains(ID_MA));
+  EXPECT_FALSE(handler->drop_supports_into(ID_MA)) << "a material is always a row of its own";
+  EXPECT_TRUE(handler->drop_supports_into(ID_IM)) << "an image can be assigned to a row";
+
+  StackDropTarget target;
+  EXPECT_EQ(handler->drop_tooltip(ID_MA, "Wood", "", target),
+            "Add Wood as a Material layer on top");
+  target.place = StackMovePlace::Above;
+  EXPECT_EQ(handler->drop_tooltip(ID_MA, "Wood", "Base", target),
+            "Add Wood as a Material layer above Base");
+  target.place = StackMovePlace::Below;
+  EXPECT_EQ(handler->drop_tooltip(ID_MA, "Wood", "Base", target),
+            "Add Wood as a Material layer below Base");
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest,
+       an_image_is_assigned_to_a_fill_row_and_never_replaces_a_paint_map)
+{
+  const StackDropHandler *handler = source().drop_handler();
+  ASSERT_NE(handler, nullptr);
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      bmain, 4, 4, "Map", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_NE(image, nullptr);
+
+  MaterialPaintLayer *paint = add_layer("Paint");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(fill, nullptr);
+  params.kind = PaintLayerAddKind::Material;
+  Material *other = BKE_material_add(bmain, "Other");
+  params.source = other;
+  MaterialPaintLayer *material_row = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(material_row, nullptr);
+
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  StackDropPayload payload;
+  payload.id_type = ID_IM;
+  payload.id_uid = image->id.session_uid;
+  StackDropTarget target;
+  const char *hint = nullptr;
+
+  /* Beside a row, or over empty space, the image becomes a new Fill layer. */
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  target.anchor.row_id = paint->marker;
+  target.place = StackMovePlace::Below;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, target, &hint));
+
+  /* Onto a row, it is that row's map: a Fill row takes it. */
+  target.place = StackMovePlace::Into;
+  target.anchor.row_id = fill->marker;
+  EXPECT_TRUE(handler->can_accept(ctx, material->id, payload, target, &hint));
+
+  /* A Paint row owns the maps its brush writes into, and a Material row shows its source. */
+  target.anchor.row_id = paint->marker;
+  hint = nullptr;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_NE(hint, nullptr);
+  target.anchor.row_id = material_row->marker;
+  hint = nullptr;
+  EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
+  EXPECT_NE(hint, nullptr);
+
+  EXPECT_EQ(handler->drop_tooltip(ID_IM, "Map", "Fill 1", target), "Assign Map to Fill 1");
+  EXPECT_EQ(handler->drop_tooltip(ID_IM, "Map", "", target), "Add Map as a new Fill layer on top");
+  target.place = StackMovePlace::Below;
+  EXPECT_EQ(handler->drop_tooltip(ID_IM, "Map", "Fill 1", target),
+            "Add Map as a new Fill layer below Fill 1");
 }
 
 }  // namespace tests

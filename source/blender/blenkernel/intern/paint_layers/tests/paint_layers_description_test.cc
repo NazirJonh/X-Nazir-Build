@@ -1704,6 +1704,48 @@ TEST_F(PaintLayersDescription, add_onto_a_folder_goes_inside_it)
   EXPECT_EQ(BKE_paint_layers_parent(ma, *child), folder);
 }
 
+TEST_F(PaintLayersDescription, an_add_that_names_a_side_stays_beside_a_folder)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  PaintLayerAddParams folder_params;
+  folder_params.kind = PaintLayerAddKind::Folder;
+  MaterialPaintLayer *folder = BKE_paint_layers_add_with_policy(ma, folder_params);
+  ASSERT_NE(folder, nullptr);
+
+  PaintLayerAddParams params;
+  params.anchor = folder;
+  /* What a drop passes: its line names a side, and the folder does not swallow it. */
+  params.fill_folder = false;
+  MaterialPaintLayer *sibling = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(sibling, nullptr);
+  EXPECT_EQ(BKE_paint_layers_parent(ma, *sibling), nullptr);
+}
+
+TEST_F(PaintLayersDescription, a_dropped_image_is_taken_by_fill_rows_only)
+{
+  Material &ma = *BKE_material_add(bmain, "Mat");
+  PaintLayerAddParams params;
+  MaterialPaintLayer *paint = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(paint, nullptr);
+  params.kind = PaintLayerAddKind::Fill;
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(fill, nullptr);
+  params.kind = PaintLayerAddKind::CorrectionFill;
+  params.anchor = paint;
+  MaterialPaintLayer *fill_correction = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(fill_correction, nullptr);
+  params.kind = PaintLayerAddKind::Folder;
+  params.anchor = nullptr;
+  MaterialPaintLayer *folder = BKE_paint_layers_add_with_policy(ma, params);
+  ASSERT_NE(folder, nullptr);
+
+  EXPECT_EQ(BKE_paint_layers_row_image_map_issue(*paint),
+            PaintLayerImageMapIssue::PaintRowOwnsMaps);
+  EXPECT_EQ(BKE_paint_layers_row_image_map_issue(*fill), PaintLayerImageMapIssue::None);
+  EXPECT_EQ(BKE_paint_layers_row_image_map_issue(*fill_correction), PaintLayerImageMapIssue::None);
+  EXPECT_EQ(BKE_paint_layers_row_image_map_issue(*folder), PaintLayerImageMapIssue::TakesNoImage);
+}
+
 TEST_F(PaintLayersDescription, remove_and_duplicate_take_the_whole_branch)
 {
   Material &ma = *BKE_material_add(bmain, "Mat");

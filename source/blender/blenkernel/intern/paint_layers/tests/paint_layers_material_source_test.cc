@@ -140,6 +140,11 @@ TEST_F(PaintLayersMaterialSource, the_dependency_follows_rows_nested_in_folders)
   ASSERT_NE(material_row_add(*c, *a), nullptr);
   EXPECT_EQ(material_row_add(*b, *c), nullptr);
   EXPECT_TRUE(BKE_paint_layers_material_depends_on(*c, *b));
+
+  /* The refusal a UI explains is the same rule the Add applies, named. */
+  EXPECT_EQ(BKE_paint_layers_material_source_issue(*a, *a), PaintLayerMaterialSourceIssue::Self);
+  EXPECT_EQ(BKE_paint_layers_material_source_issue(*b, *a), PaintLayerMaterialSourceIssue::Cycle);
+  EXPECT_EQ(BKE_paint_layers_material_source_issue(*a, *b), PaintLayerMaterialSourceIssue::None);
 }
 
 TEST_F(PaintLayersMaterialSource, set_material_swaps_the_users_and_refuses_what_cannot_be_read)

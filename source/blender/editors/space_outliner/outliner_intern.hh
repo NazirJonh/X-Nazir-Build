@@ -180,6 +180,17 @@ struct SpaceOutliner_Runtime {
     int ordinal = -1;
     TreeElementInsertType insert_type = TE_INSERT_BEFORE;
   } stack_drop_indicator;
+  /**
+   * Where the drop of a data-block under way would land, for the operator that commits it to read
+   * back. The poll that drew the line is the pass that owns the question "where is the cursor";
+   * the operator asking the tree again would be the same question in a different place, and two
+   * answers to one question is how a drop lands somewhere other than where it was promised.
+   * An invalid anchor is a drop that named no row.
+   */
+  struct StackDropAim {
+    ed::outliner::StackItemIdentity anchor;
+    ed::outliner::StackMovePlace place = ed::outliner::StackMovePlace::Above;
+  } stack_drop_aim;
 
   SpaceOutliner_Runtime() = default;
   /** Copies focus for a duplicated space, not cached tree data. */
@@ -599,6 +610,8 @@ void OUTLINER_OT_scene_drop(wmOperatorType *ot);
 void OUTLINER_OT_material_drop(wmOperatorType *ot);
 void OUTLINER_OT_datastack_drop(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_id_drop(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot);
 void OUTLINER_OT_collection_drop(wmOperatorType *ot);
 
 /* ...................................................... */
@@ -894,6 +907,8 @@ void stack_layer_drop_data_init(SpaceOutliner &space_outliner,
                                 const TreeStoreElem &tselem);
 bool stack_layer_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
 std::string stack_layer_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);
+bool stack_id_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event);
+std::string stack_id_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wmDropBox *drop);
 
 /** The stack's owning data-block for the current focus, or null. */
 ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,

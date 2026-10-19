@@ -31,6 +31,23 @@ void stack_row_ui_state_edit_select(const StackReadContext &ctx,
 const char *stack_enum_string_intern(StringRefNull text);
 
 /**
+ * What an edit that changed which row sits at which ordinal owes the mode: the cached rows go so
+ * the next read sees the new ones, the UI state is re-targeted at \a select_ordinal (or cleared
+ * for -1), and the Outliner is told to rebuild.
+ *
+ * \param needs_renumber: false for an edit that changed no position, such as a rename or a
+ * visibility toggle; the selection then stays where it was.
+ *
+ * Shared by #stack_mutate and by an edit that adds or removes rows through the source itself, such
+ * as a dropped image becoming a layer, so both leave the mode in the same state.
+ */
+void stack_row_edit_finished(bContext &C,
+                             SpaceOutliner &space_outliner,
+                             ID &owner,
+                             int select_ordinal,
+                             bool needs_renumber);
+
+/**
  * The prologue and epilogue every mutating wrapper below shares: resolve the owner, get the
  * source's editor, run \a fn, invalidate the cached rows and notify on success.
  *
@@ -74,14 +91,7 @@ bool stack_mutate(bContext &C,
   if (r_ordinal != nullptr) {
     *r_ordinal = select_ordinal;
   }
-  /* Invalidating captures the rows' UI state into the identity-keyed map before the rows go
-   * away; a renumbering edit then re-targets the selection on the map, which is what carries it
-   * across the rebuild. */
-  outliner_stack_rows_invalidate(space_outliner);
-  if (needs_renumber) {
-    stack_row_ui_state_edit_select(ctx, space_outliner, *owner, select_ordinal);
-  }
-  WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  stack_row_edit_finished(C, space_outliner, *owner, select_ordinal, needs_renumber);
   return true;
 }
 

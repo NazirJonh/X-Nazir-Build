@@ -82,9 +82,16 @@ struct PaintLayerAddParams {
   MaterialPaintLayer *anchor = nullptr;
   /**
    * Where to put the new row relative to \a anchor. An \a anchor that is a folder takes the row
-   * `Into` regardless of an `Above`: an Add onto a folder means filling it.
+   * `Into` regardless of an `Above` when #fill_folder is set: an Add onto a folder means filling
+   * it.
    */
   PaintLayerPlace place = PaintLayerPlace::Above;
+  /**
+   * Whether an \a anchor folder turns `Above` into `Into`. The Add buttons leave it set; a drop
+   * clears it, because its line is drawn beside the folder and the row lands where the line was,
+   * not inside the folder.
+   */
+  bool fill_folder = true;
   /**
    * The name for the new row, or null to derive the unique default (a `"Layer N"` name one past
    * the highest N in use).

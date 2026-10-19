@@ -379,6 +379,25 @@ struct StackAddKindInfo {
 };
 
 /**
+ * Where a row, or a data-block dropped on the stack, lands relative to the row it was aimed at.
+ * A move reads #Into as "inside the group"; a drop reads it as "onto the row", which each source
+ * interprets for itself.
+ */
+enum class StackMovePlace : int8_t {
+  /** Directly above the anchor, among its siblings. */
+  Above = 0,
+  /** Directly below the anchor, among its siblings. */
+  Below,
+  /**
+   * Inside the anchor, which has to be a row that holds others: on top of what it holds.
+   *
+   * Named separately from "above its topmost row" because a row that holds nothing yet has no row
+   * to name, and an empty group is exactly what a folder is when it is made to be filled.
+   */
+  Into,
+};
+
+/**
  * What an Add is given besides its kind and its anchor row. Each field is meaningful only to a
  * kind that declared the matching need in #StackAddKindInfo; every other kind ignores it.
  */
@@ -392,21 +411,17 @@ struct StackAddArgs {
    * source whose kinds depend on what the user is looking at reads it; others ignore it.
    */
   std::string section_id;
-};
-
-/** Where a moved row lands relative to the row it was aimed at. */
-enum class StackMovePlace : int8_t {
-  /** Directly above the anchor, among its siblings. */
-  Above = 0,
-  /** Directly below the anchor, among its siblings. */
-  Below,
   /**
-   * Inside the anchor, which has to be a row that holds others: on top of what it holds.
-   *
-   * Named separately from "above its topmost row" because a row that holds nothing yet has no row
-   * to name, and an empty group is exactly what a folder is when it is made to be filled.
+   * Beside the anchor row, above it or below it; #StackMovePlace::Into reads as above. A drop of a
+   * data-block names the side its line was drawn at, where the Add buttons take the default.
    */
-  Into,
+  StackMovePlace place = StackMovePlace::Above;
+  /**
+   * Whether an anchor that is a folder takes the row inside for an `Above` place. The Add buttons
+   * leave it set, since an Add onto a folder means filling it; a drop clears it, since its line
+   * says the row lands beside the folder, not inside.
+   */
+  bool fill_folder = true;
 };
 
 /**
@@ -524,6 +539,18 @@ struct StackDropTarget {
  *
  * A source with nothing to accept leaves #StackSource::drop_handler at its default of null rather
  * than implementing this with every method refusing.
+ *
+ * All of it runs on the UI thread, inside the drop operator or its poll. #can_accept is asked
+ * while the drag moves and must only read; #execute resolves and mutates, and owns that edit: it
+ * pushes its own undo step when it changes data, because the drop operator carries no
+ * #OPTYPE_UNDO -- and it refuses what #can_accept refuses, since the operator does not ask twice.
+ * A handler may instead open a popup, whose own operator pushes the step, and an
+ * automatic push before it would capture nothing. A handler that adds or removes rows leaves the
+ * Stack Layers mode through #outliner_stack_row_add or #stack_row_edit_finished, never by
+ * reimplementing the invalidation and selection they do.
+ *
+ * Where the drop lands is recorded by the poll (#SpaceOutliner_Runtime::StackDropAim) and read
+ * back by #execute: the aim is not recomputed, since the poll is the pass that asked the mouse.
  */
 class StackDropHandler {
  public:

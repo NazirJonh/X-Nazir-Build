@@ -2196,12 +2196,41 @@ bool BKE_paint_layers_material_depends_on(const Material &from, const Material &
   return &from == &target || paint_layers_list_reads_material(from.paint_layers, target, visited);
 }
 
+PaintLayerMaterialSourceIssue BKE_paint_layers_material_source_issue(const Material &target,
+                                                                     const Material &source)
+{
+  /* Tested apart from the walk: the walk folds "itself" into "reads", and a UI that explains the
+   * refusal is worth the two words being different. */
+  if (&source == &target) {
+    return PaintLayerMaterialSourceIssue::Self;
+  }
+  if (BKE_paint_layers_material_depends_on(source, target)) {
+    return PaintLayerMaterialSourceIssue::Cycle;
+  }
+  return PaintLayerMaterialSourceIssue::None;
+}
+
+PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaintLayer &row)
+{
+  const bool is_fill = ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) &&
+                       row.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  if (is_fill) {
+    return PaintLayerImageMapIssue::None;
+  }
+  if (row.role == MA_PAINT_LAYER_ROLE_LAYER && row.source == MA_PAINT_LAYER_SOURCE_IMAGE) {
+    return PaintLayerImageMapIssue::PaintRowOwnsMaps;
+  }
+  return PaintLayerImageMapIssue::TakesNoImage;
+}
+
 bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source)
 {
   if (!paint_layer_in_stack(ma, layer) || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return false;
   }
-  if (source == nullptr || BKE_paint_layers_material_depends_on(*source, ma)) {
+  if (source == nullptr ||
+      BKE_paint_layers_material_source_issue(ma, *source) != PaintLayerMaterialSourceIssue::None)
+  {
     return false;
   }
   if (layer->material == source) {

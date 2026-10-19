@@ -242,7 +242,9 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     return item;
   }
   if (params.kind == PaintLayerAddKind::Material &&
-      (params.source == nullptr || BKE_paint_layers_material_depends_on(*params.source, ma)))
+      (params.source == nullptr ||
+       BKE_paint_layers_material_source_issue(ma, *params.source) !=
+           PaintLayerMaterialSourceIssue::None))
   {
     return nullptr;
   }
@@ -261,8 +263,8 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     name = BKE_paint_layers_unique_default_name(ma, name_base);
   }
   PaintLayerPlace place = params.place;
-  if (params.anchor != nullptr && BKE_paint_layers_is_folder(*params.anchor) &&
-      place == PaintLayerPlace::Above)
+  if (params.fill_folder && params.anchor != nullptr &&
+      BKE_paint_layers_is_folder(*params.anchor) && place == PaintLayerPlace::Above)
   {
     place = PaintLayerPlace::Into;
   }

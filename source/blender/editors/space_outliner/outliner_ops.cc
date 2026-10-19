@@ -70,6 +70,8 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_mask_paste);
   WM_operatortype_append(OUTLINER_OT_stack_focus_sub_index);
   WM_operatortype_append(OUTLINER_OT_stack_layer_drop);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_id_drop);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_channel_image_assign);
 
   WM_operatortype_append(OUTLINER_OT_show_one_level);
   WM_operatortype_append(OUTLINER_OT_show_active);

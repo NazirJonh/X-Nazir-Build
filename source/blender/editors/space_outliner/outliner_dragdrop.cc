@@ -1671,6 +1671,12 @@ void outliner_dropboxes()
                  nullptr,
                  stack_layer_drop_tooltip);
   WM_dropbox_add(lb,
+                 "OUTLINER_OT_stack_layer_id_drop",
+                 stack_id_drop_poll,
+                 nullptr,
+                 nullptr,
+                 stack_id_drop_tooltip);
+  WM_dropbox_add(lb,
                  "OUTLINER_OT_collection_drop",
                  collection_drop_poll,
                  nullptr,

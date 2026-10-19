@@ -836,6 +836,41 @@ bool BKE_paint_layers_set_source(Material &ma,
  */
 bool BKE_paint_layers_material_depends_on(const Material &from, const Material &target);
 
+/** Why a Material row of \a target cannot read \a source, if it cannot. */
+enum class PaintLayerMaterialSourceIssue : int8_t {
+  /** The source may be read. */
+  None,
+  /** The row would read the material that owns it. */
+  Self,
+  /** The source already reads the owner, so the two would read each other. */
+  Cycle,
+};
+
+/**
+ * The refusal #BKE_paint_layers_add_with_policy and #BKE_paint_layers_set_material share, named so
+ * a UI can explain the refusal without restating the rule. The walk is the one
+ * #BKE_paint_layers_material_depends_on makes.
+ */
+PaintLayerMaterialSourceIssue BKE_paint_layers_material_source_issue(const Material &target,
+                                                                     const Material &source);
+
+/** Why a row cannot take a dropped image as one of its maps, if it cannot. */
+enum class PaintLayerImageMapIssue : int8_t {
+  /** The row takes the image as a map of a channel. */
+  None,
+  /** A painted row's maps belong to its brush and are not replaced from outside. */
+  PaintRowOwnsMaps,
+  /** Only a Fill row, or a Fill correction, shows the user's own maps. */
+  TakesNoImage,
+};
+
+/**
+ * Whether \a row takes an image dropped onto it: a Fill row does, a painted row does not, and a
+ * row that composites or shows another material has no map of its own to take. Named so the drop
+ * and the popup it opens judge a row the same way.
+ */
+PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaintLayer &row);
+
 /**
  * Point the Material row \a layer at \a source, taking the user of the new material and letting go
  * of the old one. Refused (false) for a row that is not a Material row, for a null \a source, for

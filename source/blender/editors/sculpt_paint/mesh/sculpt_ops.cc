@@ -2226,6 +2226,8 @@ void operatortypes_sculpt()
   WM_operatortype_append(color::SCULPT_OT_color_gradient);
   WM_operatortype_append(color::SCULPT_OT_color_gradient_colors_flip);
   WM_operatortype_append(SCULPT_OT_paint_shape_draw);
+  WM_operatortype_append(SCULPT_OT_paint_shape_vector_apply);
+  WM_operatortype_append(SCULPT_OT_paint_shape_vector_cancel);
   WM_operatortype_append(SCULPT_OT_paint_shape_transform_toggle);
   WM_operatortype_append(SCULPT_OT_paint_shape_flush_preview);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_color);

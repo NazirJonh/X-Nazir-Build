@@ -1217,4 +1217,80 @@ void SCULPT_OT_paint_shape_draw(wmOperatorType *ot)
   shape::space_op_properties_register(ot);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Vector session confirm / cancel
+ *
+ * The idle-session counterpart of the modal map's Confirm / Cancel items: once the drawing modal
+ * has ended, the live Vector session stays on the surface and Enter / Esc have to resolve it from
+ * the tool key-map. The Image Editor tools do the same through #PAINT_OT_image_shape_vector_apply.
+ * \{ */
+
+static bool paint_shape_vector_session_poll(bContext *C)
+{
+  const Object *ob = CTX_data_active_object(C);
+  const shape::PaintShapeSession *session = ob != nullptr ? shape::paint_shape_session_get(*ob) :
+                                                            nullptr;
+  /* A running shape modal owns the session and its Confirm / Cancel; resolving it from under the
+   * modal would leave the modal holding a dead session. */
+  return session != nullptr && !shape::paint_shape_session_modal_active(*session);
+}
+
+static wmOperatorStatus paint_shape_vector_apply_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || shape::paint_shape_session_get(*ob) == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Bake the shape into the active canvas (material channel maps / image pixels / vertex
+   * attributes; the backend opens its own undo step and reports refusals itself). */
+  const bool applied = shape::paint_shape_session_commit(C, *ob);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+  return applied ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+}
+
+static wmOperatorStatus paint_shape_vector_cancel_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || shape::paint_shape_session_get(*ob) == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Restore the preview and drop the session: nothing is written, so no undo step. */
+  shape::paint_shape_session_cancel(C, *ob);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+  return OPERATOR_FINISHED;
+}
+
+/** \} */
+
+void SCULPT_OT_paint_shape_vector_apply(wmOperatorType *ot)
+{
+  ot->name = "Apply Shape";
+  ot->idname = "SCULPT_OT_paint_shape_vector_apply";
+  ot->description = "Bake the shape being edited into the texture";
+  ot->exec = paint_shape_vector_apply_exec;
+  ot->poll = paint_shape_vector_session_poll;
+  /* No OPTYPE_UNDO: the commit opens and closes its own undo step.
+   *
+   * OPTYPE_REGISTER is still needed: the commit must become the last registered operator, or an F9
+   * after it would replay the older #SCULPT_OT_paint_shape_draw and pop every undo step above its
+   * own -- erasing this commit. Registered, F9 resolves to this operator, whose poll fails once
+   * the session is gone, so the redo safely does nothing (see #PAINT_OT_image_shape_vector_apply). */
+  ot->flag = OPTYPE_REGISTER;
+}
+
+void SCULPT_OT_paint_shape_vector_cancel(wmOperatorType *ot)
+{
+  ot->name = "Cancel Shape";
+  ot->idname = "SCULPT_OT_paint_shape_vector_cancel";
+  ot->description = "Discard the shape being edited and restore the original texture";
+  ot->exec = paint_shape_vector_cancel_exec;
+  ot->poll = paint_shape_vector_session_poll;
+  /* Unregistered: a cancel records nothing, so it must not become the redo anchor either. */
+  ot->flag = 0;
+}
+
 }  // namespace blender::ed::sculpt_paint

@@ -3280,6 +3280,13 @@ class _defs_sculpt_paint_shape:
             layout.popover(panel="VIEW3D_PT_tools_shape_options", text="Options")
             draw_paint_shape_texture_preview_popover(
                 context, layout, panel="PAINT_PT_shape_texture_preview")
+            # Confirm / cancel of a live Vector session (Enter / Esc, mirrored here so the header
+            # shows the action next to the other shape controls).
+            if bpy.ops.sculpt.paint_shape_vector_apply.poll():
+                layout.separator()
+                row = layout.row(align=True)
+                row.operator("sculpt.paint_shape_vector_apply", text="Apply", icon='CHECKMARK')
+                row.operator("sculpt.paint_shape_vector_cancel", text="Cancel", icon='X')
         else:
             row = layout.row(align=True)
             row.use_property_split = False

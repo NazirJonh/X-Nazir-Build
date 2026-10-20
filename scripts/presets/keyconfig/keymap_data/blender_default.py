@@ -9256,6 +9256,12 @@ def _km_3d_view_tool_sculpt_paint_shape(keymap_name, shape_type, params):
                                        secondary_prop="use_unified_strength")),
             # X swaps the shape's own Stroke / Fill colors.
             ("paint.shape_colors_swap", {"type": 'X', "value": 'PRESS'}, None),
+            # Confirm / cancel of a live Vector session while no gesture is running (during a
+            # gesture the shape modal map handles the same keys itself). The operators are
+            # poll-gated on a live session, so Enter / Esc stay free for everything else.
+            ("sculpt.paint_shape_vector_apply", {"type": 'RET', "value": 'PRESS'}, None),
+            ("sculpt.paint_shape_vector_apply", {"type": 'NUMPAD_ENTER', "value": 'PRESS'}, None),
+            ("sculpt.paint_shape_vector_cancel", {"type": 'ESC', "value": 'PRESS'}, None),
         ]},
     )
 

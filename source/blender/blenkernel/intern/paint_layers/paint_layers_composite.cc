@@ -178,6 +178,18 @@ static bool composite_row_source_describe(const Material &ma,
     {
       return false;
     }
+    /* The source is read at the row's UV, the same transform the source wrapper and its coverage
+     * chain apply in the generated graph. The mapping is described for the colour map and reused
+     * for the source's separate coverage map; a constant colour still needs it when only the
+     * coverage is a map. */
+    composite_mapping_describe(ma, layer, channel, out.mapping);
+    /* A clipping wrap leaves the map transparent outside the unit square, but a Material row
+     * covers by its source's transparency rather than by the map's alpha, so the clip has to
+     * reach the coverage instead. The acquisition folds it in; a Fill or painted row keeps its
+     * usual clipping through the map's own alpha. */
+    out.mapping_clips_coverage = out.mapping.enabled &&
+                                 BKE_paint_layers_mapping_wrap_get(layer) !=
+                                     MA_PAINT_LAYER_MAPPING_WRAP_REPEAT;
     if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
       copy_v4_v4(out.constant_color, source.constant);
       out.has_constant_color = true;

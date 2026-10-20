@@ -297,6 +297,17 @@ class PaintLayersTreeBuilder {
                                      int channel);
 
   /**
+   * Wire the row group's mapping value inputs into \a instance, the source wrapper of \a layer:
+   * the wrapper carries a Vector Rotate and a Mapping inside, and their offset/scale/rotation read
+   * these three inputs. Idempotent, because every channel of the row shares the instance. A row
+   * without an applied mapping adds no link and leaves the wrapper's inputs at their identity
+   * defaults.
+   */
+  void source_group_mapping_wire(bNodeTree &tree,
+                                 const MaterialPaintLayer &layer,
+                                 bNode &instance);
+
+  /**
    * An Image Texture node of \a tree reading \a image, holding one user of it, so every map source
    * is made the same way. Null when the node cannot be created; the caller places it.
    */
@@ -334,10 +345,34 @@ class PaintLayersTreeBuilder {
    * and is removed with it when the caller rolls back.
    */
   bool mapping_apply(bNodeTree &tree,
-                     LayerGroup &group,
                      const MaterialPaintLayer &row,
                      bNode &map,
                      Vector<bNode *> &r_nodes);
+
+  /**
+   * The Mapping node of \a row in \a tree: a Vector Rotate (the row's rotation) followed by a
+   * `Point` Mapping (the row's scale and offset), fed by the object's UV and by the row group's
+   * mapping inputs. Built on first use and shared by every map of the row; \a r_nodes receives the
+   * nodes this call made, so a caller that rolls back removes them. Null while the row's mapping
+   * does not apply or a node cannot be made.
+   *
+   * A Material row whose source is shown through its wrapper does not read a map here: the wrapper
+   * carries its own Mapping, and #source_group_mapping_wire hands it the row's values. The clip
+   * factor still builds this node for such a row, so the factor sees the same transform.
+   */
+  bNode *mapping_node_ensure(bNodeTree &tree,
+                             const MaterialPaintLayer &row,
+                             Vector<bNode *> &r_nodes);
+
+  /**
+   * The clip factor of \a row's UV wrap: one inside the unit square, zero outside along every axis
+   * the wrap clips, or an empty output while both axes repeat or the mapping does not apply. The
+   * nodes made are appended to \a r_nodes. The factor is shared by every channel of the row.
+   */
+  NodeOutput mapping_clip_factor(bNodeTree &tree,
+                                 const MaterialPaintLayer &row,
+                                 Vector<bNode *> &r_nodes,
+                                 bool create_mapping = true);
 
   /**
    * Remove \a nodes from \a tree, forgetting any row Mapping among them. A Mapping made by an

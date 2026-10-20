@@ -1072,8 +1072,11 @@ static void rna_MaterialPaintLayer_enabled_set(PointerRNA *ptr, bool value)
 }
 
 /**
- * Whether the row may carry UV mapping: it is a Fill that reads a repeatable map. The one
- * predicate UI, RNA and the CPU share; the panel shows the Mapping block only while this is true.
+ * Whether the row may carry UV mapping: a Fill that reads a repeatable map, or a Material row
+ * whose source reads the active UVs where the source group can move them. A Material row remaps
+ * the UV at which its source is read: its live textures, its rendered channel maps and its
+ * source-group wrapper all use the same transform. The one predicate UI, RNA, the generator and
+ * the CPU share; the panel shows the Mapping block only while this is true.
  */
 static bool rna_MaterialPaintLayer_mapping_supported_get(PointerRNA *ptr)
 {

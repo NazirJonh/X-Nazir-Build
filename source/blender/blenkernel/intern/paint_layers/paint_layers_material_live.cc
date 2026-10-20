@@ -22,12 +22,15 @@
 #include "BLI_math_vector.h"
 #include "BLI_ustring.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_material_resolve.hh"
 
+#include "DNA_ID.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -37,6 +40,46 @@
 #include "paint_layers_kind.hh"
 
 namespace blender {
+
+/**
+ * Whether \a tree itself reads the object's active UVs: a Texture Coordinate whose UV output is
+ * used, a UV Map node with no layer named, or an Image Texture whose Vector input is open (it then
+ * samples the active UV). A named UV Map node is the source's own layer and is not what the row
+ * mapping moves; a texture driven by Generated/Object coordinates is not either. Groups are not
+ * entered: the caller walks the levels the source group copies.
+ */
+static bool source_level_reads_uv(bNodeTree &tree)
+{
+  return bke::paint_layers::uv_readers_find(tree).any();
+}
+
+bool paint_layer_source_reads_uv_compute(const Material &source)
+{
+  if (source.nodetree == nullptr) {
+    return false;
+  }
+  /* The levels the source group copies and maps: the root and the groups on the path to the
+   * Principled BSDF. A group beside the path is shared as is, so a UV read inside it never moves. */
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  Vector<const bNode *> group_path;
+  const bNode *principled = BKE_paint_material_principled_find(source, reason, &group_path);
+  if (principled == nullptr || int(group_path.size()) > SOURCE_GROUP_MAX_DEPTH) {
+    return false;
+  }
+  if (source_level_reads_uv(*source.nodetree)) {
+    return true;
+  }
+  for (const bNode *instance : group_path) {
+    if (instance->id == nullptr || GS(instance->id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree &level = *id_cast<bNodeTree *>(instance->id);
+    if (source_level_reads_uv(level)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Whether the Image Texture \a source can be shown without the graph around it: the map is a file

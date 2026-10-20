@@ -145,6 +145,14 @@ bool paint_layer_material_source_group_channel(const Material &ma,
                                                int channel);
 
 /**
+ * The uncached walk behind #BKE_paint_layers_source_reads_uv, which memoizes it with the rest of
+ * the source's resolve. Only the levels the source group copies are looked at (the root tree and
+ * the groups on the path to the Principled BSDF), since a group beside the path is shared, not
+ * mapped.
+ */
+bool paint_layer_source_reads_uv_compute(const Material &source);
+
+/**
  * Whether \a row has a channel that only a rendered map can show in Auto: it needs a render and
  * the source group does not supply it. Such a row is rendered while it is edited, after the
  * source-edit delay, since nothing live stands in for the map.

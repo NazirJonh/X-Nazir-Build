@@ -212,6 +212,41 @@ TEST_F(PaintMaterialCompositeEvalTest, linear_mask_modulates_opacity_per_pixel)
   EXPECT_NEAR(linear_pixel(stack, 1, 0)[0], 1.0f, 1e-5f);
 }
 
+/** A coverage kept as one float per texel reads as a grey: the other channels are its only one. */
+TEST_F(PaintMaterialCompositeEvalTest, linear_one_channel_mask_reads_as_grey)
+{
+  PaintMaterialCompositeStack stack;
+  stack.width = size;
+  stack.height = size;
+  PaintMaterialCompositeLayer bottom;
+  bottom.color_ibuf = add_buffer(0, 0, 0, 255);
+  stack.layers.append(bottom);
+
+  ImBuf *mask = IMB_allocImBuf(uint(size), uint(size), ImBufFlags::Zero);
+  ASSERT_TRUE(IMB_alloc_float_pixels(mask, 1, false));
+  owned_buffers.append(mask);
+  float *values = mask->float_data_for_write();
+  for (const int64_t i : IndexRange(int64_t(size) * size)) {
+    values[i] = 1.0f;
+  }
+  values[0] = 0.0f;
+  values[size + 1] = 0.5f;
+  IMB_colormanagement_assign_float_colorspace(
+      mask, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+
+  PaintMaterialCompositeLayer top;
+  top.color_ibuf = add_buffer(255, 255, 255, 255);
+  top.mask_ibuf = mask;
+  stack.layers.append(top);
+
+  EXPECT_NEAR(linear_pixel(stack, 0, 0)[0], 0.0f, 1e-5f) << "a zero covers nothing";
+  EXPECT_NEAR(linear_pixel(stack, 1, 1)[0], 0.5f, 1e-5f);
+  EXPECT_NEAR(linear_pixel(stack, 2, 1)[0], 1.0f, 1e-5f)
+      << "the texel after the half one is a full one, not a read past it";
+  EXPECT_NEAR(linear_pixel(stack, size - 1, size - 1)[0], 1.0f, 1e-5f)
+      << "the last texel reads inside the buffer";
+}
+
 TEST_F(PaintMaterialCompositeEvalTest, linear_top_alpha_is_not_coverage)
 {
   /* The Mix node interpolates by the factor alone. A fully transparent top layer at factor 1

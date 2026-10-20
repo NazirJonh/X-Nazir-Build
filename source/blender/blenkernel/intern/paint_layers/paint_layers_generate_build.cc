@@ -250,8 +250,67 @@ bNode *PaintLayersTreeBuilder::uv_coordinate_ensure(bNodeTree &tree)
   return coord;
 }
 
+/** The socket of \a group_input that stands for \a iface, or null. */
+static bNodeSocket *mapping_group_input_socket(bNode *group_input,
+                                               const bNodeTreeInterfaceSocket *const *iface)
+{
+  if (group_input == nullptr || iface == nullptr || *iface == nullptr ||
+      (*iface)->identifier == nullptr)
+  {
+    return nullptr;
+  }
+  return bke::node_find_socket(
+      *group_input, SOCK_OUT, UString::from_ptr_noinline((*iface)->identifier));
+}
+
+bNode *PaintLayersTreeBuilder::mapping_node_ensure(bNodeTree &tree,
+                                                   const MaterialPaintLayer &row,
+                                                   Vector<bNode *> &r_nodes)
+{
+  if (!BKE_paint_layers_mapping_applies(ma_, row)) {
+    return nullptr;
+  }
+  if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
+    return *found;
+  }
+  bNode *coord = this->uv_coordinate_ensure(tree);
+  bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
+  if (uv == nullptr) {
+    return nullptr;
+  }
+  /* The values ride the row group's inputs; an input missing here leaves the socket at its
+   * identity default instead. */
+  bNode *group_input = nullptr;
+  for (bNode &node : tree.nodes) {
+    if (node.is_group_input()) {
+      group_input = &node;
+      break;
+    }
+  }
+  const auto value_socket =
+      [&](Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &inputs) {
+        bNodeTreeInterfaceSocket *const *iface = inputs.lookup_ptr(&row);
+        return mapping_group_input_socket(group_input, iface);
+      };
+  const MappingChain chain = mapping_chain_add(tree,
+                                               *coord,
+                                               *uv,
+                                               group_input,
+                                               value_socket(mapping_offset_inputs_),
+                                               value_socket(mapping_scale_inputs_),
+                                               value_socket(mapping_rotation_inputs_));
+  if (chain.mapping == nullptr) {
+    return nullptr;
+  }
+  grid_.place_extra(*chain.mapping);
+  grid_.place_extra(*chain.rotate);
+  mapping_nodes_.add(&row, chain.mapping);
+  r_nodes.append(chain.mapping);
+  r_nodes.append(chain.rotate);
+  return chain.mapping;
+}
+
 bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
-                                           LayerGroup &group,
                                            const MaterialPaintLayer &row,
                                            bNode &map,
                                            Vector<bNode *> &r_nodes)
@@ -263,66 +322,9 @@ bool PaintLayersTreeBuilder::mapping_apply(bNodeTree &tree,
   if (vector == nullptr) {
     return false;
   }
-  bNode *mapping = nullptr;
-  if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
-    mapping = *found;
-  }
-  else {
-    bNode *coord = this->uv_coordinate_ensure(tree);
-    bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
-    mapping = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
-    /* A Vector Rotate in front of the Mapping node gives `offset + scale * (R * uv)`: the
-     * Mapping node alone would scale first and shear the pattern when the scale is not uniform.
-     * The rectangle the gizmo draws is this transform. */
-    bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
-    bNodeSocket *mapping_vector = (mapping != nullptr) ? socket_in(*mapping, "Vector") : nullptr;
-    bNodeSocket *rotate_vector = (rotate != nullptr) ? socket_in(*rotate, "Vector") : nullptr;
-    bNodeSocket *rotate_rotation = (rotate != nullptr) ? socket_in(*rotate, "Rotation") : nullptr;
-    bNodeSocket *rotate_out = (rotate != nullptr) ? socket_out(*rotate, "Vector") : nullptr;
-    if (uv == nullptr || mapping_vector == nullptr || socket_out(*mapping, "Vector") == nullptr ||
-        rotate_vector == nullptr || rotate_rotation == nullptr || rotate_out == nullptr)
-    {
-      if (mapping != nullptr) {
-        bke::node_remove_node(nullptr, tree, *mapping, true, false);
-      }
-      if (rotate != nullptr) {
-        bke::node_remove_node(nullptr, tree, *rotate, true, false);
-      }
-      return false;
-    }
-    /* Point mapping keeps only the scale and the offset; the rotation is the rotate node's. */
-    mapping->custom1 = NODE_MAPPING_TYPE_POINT;
-    rotate->custom1 = NODE_VECTOR_ROTATE_TYPE_EULER_XYZ;
-    grid_.place_extra(*mapping);
-    grid_.place_extra(*rotate);
-    bke::node_add_link(tree, *coord, *uv, *rotate, *rotate_vector);
-    bke::node_add_link(tree, *rotate, *rotate_out, *mapping, *mapping_vector);
-    /* The values ride the row group's inputs; an input missing here leaves the socket at its
-     * identity default instead. */
-    const auto link_value = [&](Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> &inputs,
-                                const char *socket_name) {
-      bNodeTreeInterfaceSocket **iface = inputs.lookup_ptr(&row);
-      bNodeSocket *source = (iface != nullptr && *iface != nullptr) ?
-                                this->group_input_socket(group, **iface) :
-                                nullptr;
-      bNodeSocket *target = socket_in(*mapping, socket_name);
-      if (source != nullptr && target != nullptr) {
-        bke::node_add_link(tree, *group.group_input, *source, *mapping, *target);
-      }
-    };
-    link_value(mapping_offset_inputs_, "Location");
-    link_value(mapping_scale_inputs_, "Scale");
-    if (bNodeTreeInterfaceSocket **iface = mapping_rotation_inputs_.lookup_ptr(&row)) {
-      bNodeSocket *source = (iface != nullptr && *iface != nullptr) ?
-                                this->group_input_socket(group, **iface) :
-                                nullptr;
-      if (source != nullptr) {
-        bke::node_add_link(tree, *group.group_input, *source, *rotate, *rotate_rotation);
-      }
-    }
-    mapping_nodes_.add(&row, mapping);
-    r_nodes.append(mapping);
-    r_nodes.append(rotate);
+  bNode *mapping = this->mapping_node_ensure(tree, row, r_nodes);
+  if (mapping == nullptr) {
+    return false;
   }
   bNodeSocket *mapping_out = socket_out(*mapping, "Vector");
   if (mapping_out == nullptr) {
@@ -346,109 +348,127 @@ static bNode *clip_math_add(bNodeTree &tree, layout::LayoutGrid &grid, const int
   return node;
 }
 
+NodeOutput PaintLayersTreeBuilder::mapping_clip_factor(bNodeTree &tree,
+                                                       const MaterialPaintLayer &row,
+                                                       Vector<bNode *> &r_nodes,
+                                                       const bool create_mapping)
+{
+  bool repeat_u = true;
+  bool repeat_v = true;
+  BKE_paint_layers_mapping_wrap_axes(BKE_paint_layers_mapping_wrap_get(row), repeat_u, repeat_v);
+  if ((repeat_u && repeat_v) || !BKE_paint_layers_mapping_applies(ma_, row)) {
+    return {};
+  }
+  if (const NodeOutput *cached = mapping_clip_masks_.lookup_ptr(&row)) {
+    return *cached;
+  }
+
+  /* An axis is inside the unit square exactly when `floor(a) == 0`; Compare with an epsilon of
+   * one half reads that without a pair of range tests, the CPU's `0 <= a < 1`. Everything made
+   * is kept apart until the factor is complete, so a failure leaves nothing behind. */
+  Vector<bNode *> made;
+  const auto fail = [&]() {
+    for (bNode *node : made) {
+      bke::node_remove_node(nullptr, tree, *node, true, false);
+    }
+    return NodeOutput{};
+  };
+  bNode *mapping = nullptr;
+  if (bNode **found = mapping_nodes_.lookup_ptr(&row)) {
+    mapping = *found;
+  }
+  else if (create_mapping) {
+    mapping = this->mapping_node_ensure(tree, row, r_nodes);
+  }
+  if (mapping == nullptr) {
+    return {};
+  }
+  bNodeSocket *mapping_out = socket_out(*mapping, "Vector");
+  bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
+  if (separate != nullptr) {
+    made.append(separate);
+  }
+  bNodeSocket *separate_in = (separate != nullptr) ? socket_in(*separate, "Vector") : nullptr;
+  if (mapping_out == nullptr || separate_in == nullptr) {
+    return fail();
+  }
+  grid_.place_extra(*separate);
+  bke::node_add_link(tree, *mapping, *mapping_out, *separate, *separate_in);
+  const bool clipped[2] = {!repeat_u, !repeat_v};
+  const char *axis_names[2] = {"X", "Y"};
+  NodeOutput inside;
+  for (const int axis : IndexRange(2)) {
+    if (!clipped[axis]) {
+      continue;
+    }
+    bNode *floor_node = clip_math_add(tree, grid_, NODE_MATH_FLOOR);
+    if (floor_node != nullptr) {
+      made.append(floor_node);
+    }
+    bNode *compare = clip_math_add(tree, grid_, NODE_MATH_COMPARE);
+    if (compare != nullptr) {
+      made.append(compare);
+    }
+    bNodeSocket *from = socket_out(*separate, axis_names[axis]);
+    bNodeSocket *floor_in = (floor_node != nullptr) ? socket_in(*floor_node, "Value") : nullptr;
+    bNodeSocket *floor_out = (floor_node != nullptr) ? socket_out(*floor_node, "Value") : nullptr;
+    bNodeSocket *compare_in = (compare != nullptr) ? socket_in(*compare, "Value") : nullptr;
+    bNodeSocket *compare_target = (compare != nullptr) ? socket_in(*compare, "Value_001") : nullptr;
+    bNodeSocket *compare_epsilon = (compare != nullptr) ? socket_in(*compare, "Value_002") :
+                                                          nullptr;
+    bNodeSocket *compare_out = (compare != nullptr) ? socket_out(*compare, "Value") : nullptr;
+    if (from == nullptr || floor_in == nullptr || floor_out == nullptr || compare_in == nullptr ||
+        compare_target == nullptr || compare_epsilon == nullptr || compare_out == nullptr ||
+        compare_target->default_value == nullptr || compare_epsilon->default_value == nullptr)
+    {
+      return fail();
+    }
+    static_cast<bNodeSocketValueFloat *>(compare_target->default_value)->value = 0.0f;
+    static_cast<bNodeSocketValueFloat *>(compare_epsilon->default_value)->value = 0.5f;
+    bke::node_add_link(tree, *separate, *from, *floor_node, *floor_in);
+    bke::node_add_link(tree, *floor_node, *floor_out, *compare, *compare_in);
+    if (inside.node == nullptr) {
+      inside = {compare, compare_out};
+      continue;
+    }
+    /* Both axes clip: inside is the product of the two tests. */
+    bNode *both = clip_math_add(tree, grid_, NODE_MATH_MULTIPLY);
+    if (both != nullptr) {
+      made.append(both);
+    }
+    bNodeSocket *both_a = (both != nullptr) ? socket_in(*both, "Value") : nullptr;
+    bNodeSocket *both_b = (both != nullptr) ? socket_in(*both, "Value_001") : nullptr;
+    bNodeSocket *both_out = (both != nullptr) ? socket_out(*both, "Value") : nullptr;
+    if (both_a == nullptr || both_b == nullptr || both_out == nullptr) {
+      return fail();
+    }
+    bke::node_add_link(tree, *inside.node, *inside.socket, *both, *both_a);
+    bke::node_add_link(tree, *compare, *compare_out, *both, *both_b);
+    inside = {both, both_out};
+  }
+  if (inside.node == nullptr) {
+    return fail();
+  }
+  mapping_clip_masks_.add(&row, inside);
+  for (bNode *node : made) {
+    r_nodes.append(node);
+  }
+  return inside;
+}
+
 NodeOutput PaintLayersTreeBuilder::mapping_clip_alpha(bNodeTree &tree,
                                                       const MaterialPaintLayer &row,
                                                       const NodeOutput alpha,
                                                       Vector<bNode *> &r_nodes)
 {
-  bool repeat_u = true;
-  bool repeat_v = true;
-  BKE_paint_layers_mapping_wrap_axes(BKE_paint_layers_mapping_wrap_get(row), repeat_u, repeat_v);
-  bNode **mapping = mapping_nodes_.lookup_ptr(&row);
-  if ((repeat_u && repeat_v) || mapping == nullptr || alpha.node == nullptr ||
-      alpha.socket == nullptr || !BKE_paint_layers_mapping_applies(ma_, row))
+  if (alpha.node == nullptr || alpha.socket == nullptr ||
+      !BKE_paint_layers_mapping_applies(ma_, row))
   {
     return alpha;
   }
-
-  NodeOutput mask;
-  if (const NodeOutput *cached = mapping_clip_masks_.lookup_ptr(&row)) {
-    mask = *cached;
-  }
-  else {
-    /* An axis is inside the unit square exactly when `floor(a) == 0`; Compare with an epsilon of
-     * one half reads that without a pair of range tests, the CPU's `0 <= a < 1`. Everything made
-     * is kept apart until the factor is complete, so a failure leaves nothing behind. */
-    Vector<bNode *> made;
-    const auto fail = [&]() {
-      for (bNode *node : made) {
-        bke::node_remove_node(nullptr, tree, *node, true, false);
-      }
-      return alpha;
-    };
-    bNodeSocket *mapping_out = socket_out(**mapping, "Vector");
-    bNode *separate = bke::node_add_node(nullptr, tree, "ShaderNodeSeparateXYZ"_ustr);
-    if (separate != nullptr) {
-      made.append(separate);
-    }
-    bNodeSocket *separate_in = (separate != nullptr) ? socket_in(*separate, "Vector") : nullptr;
-    if (mapping_out == nullptr || separate_in == nullptr) {
-      return fail();
-    }
-    grid_.place_extra(*separate);
-    bke::node_add_link(tree, **mapping, *mapping_out, *separate, *separate_in);
-    const bool clipped[2] = {!repeat_u, !repeat_v};
-    const char *axis_names[2] = {"X", "Y"};
-    NodeOutput inside;
-    for (const int axis : IndexRange(2)) {
-      if (!clipped[axis]) {
-        continue;
-      }
-      bNode *floor_node = clip_math_add(tree, grid_, NODE_MATH_FLOOR);
-      if (floor_node != nullptr) {
-        made.append(floor_node);
-      }
-      bNode *compare = clip_math_add(tree, grid_, NODE_MATH_COMPARE);
-      if (compare != nullptr) {
-        made.append(compare);
-      }
-      bNodeSocket *from = socket_out(*separate, axis_names[axis]);
-      bNodeSocket *floor_in = (floor_node != nullptr) ? socket_in(*floor_node, "Value") : nullptr;
-      bNodeSocket *floor_out = (floor_node != nullptr) ? socket_out(*floor_node, "Value") :
-                                                         nullptr;
-      bNodeSocket *compare_in = (compare != nullptr) ? socket_in(*compare, "Value") : nullptr;
-      bNodeSocket *compare_target = (compare != nullptr) ? socket_in(*compare, "Value_001") :
-                                                           nullptr;
-      bNodeSocket *compare_epsilon = (compare != nullptr) ? socket_in(*compare, "Value_002") :
-                                                            nullptr;
-      bNodeSocket *compare_out = (compare != nullptr) ? socket_out(*compare, "Value") : nullptr;
-      if (from == nullptr || floor_in == nullptr || floor_out == nullptr || compare_in == nullptr ||
-          compare_target == nullptr || compare_epsilon == nullptr || compare_out == nullptr ||
-          compare_target->default_value == nullptr || compare_epsilon->default_value == nullptr)
-      {
-        return fail();
-      }
-      static_cast<bNodeSocketValueFloat *>(compare_target->default_value)->value = 0.0f;
-      static_cast<bNodeSocketValueFloat *>(compare_epsilon->default_value)->value = 0.5f;
-      bke::node_add_link(tree, *separate, *from, *floor_node, *floor_in);
-      bke::node_add_link(tree, *floor_node, *floor_out, *compare, *compare_in);
-      if (inside.node == nullptr) {
-        inside = {compare, compare_out};
-        continue;
-      }
-      /* Both axes clip: inside is the product of the two tests. */
-      bNode *both = clip_math_add(tree, grid_, NODE_MATH_MULTIPLY);
-      if (both != nullptr) {
-        made.append(both);
-      }
-      bNodeSocket *both_a = (both != nullptr) ? socket_in(*both, "Value") : nullptr;
-      bNodeSocket *both_b = (both != nullptr) ? socket_in(*both, "Value_001") : nullptr;
-      bNodeSocket *both_out = (both != nullptr) ? socket_out(*both, "Value") : nullptr;
-      if (both_a == nullptr || both_b == nullptr || both_out == nullptr) {
-        return fail();
-      }
-      bke::node_add_link(tree, *inside.node, *inside.socket, *both, *both_a);
-      bke::node_add_link(tree, *compare, *compare_out, *both, *both_b);
-      inside = {both, both_out};
-    }
-    if (inside.node == nullptr) {
-      return fail();
-    }
-    mask = inside;
-    mapping_clip_masks_.add(&row, mask);
-    for (bNode *node : made) {
-      r_nodes.append(node);
-    }
+  const NodeOutput mask = this->mapping_clip_factor(tree, row, r_nodes, false);
+  if (mask.node == nullptr || mask.socket == nullptr) {
+    return alpha;
   }
 
   bNode *product = clip_math_add(tree, grid_, NODE_MATH_MULTIPLY);
@@ -529,88 +549,27 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
     }
   }
 
-  bNode *decode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-  bNode *sign = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-  bNode *flip = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-  bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
-  bNode *encode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
-  const std::array<bNode *, 5> created = {decode, sign, flip, rotate, encode};
-  const auto discard = [&]() {
-    for (bNode *node : created) {
-      if (node != nullptr) {
-        bke::node_remove_node(nullptr, tree, *node, true, false);
-      }
-    }
+  Vector<bNode *> made;
+  bNode *encode_node = nullptr;
+  bNodeSocket *encoded = normal_remap_nodes_add(tree,
+                                                *color.node,
+                                                *color.socket,
+                                                rotation.node,
+                                                rotation.socket,
+                                                scale.node,
+                                                scale.socket,
+                                                made,
+                                                encode_node);
+  if (encoded == nullptr) {
     return color;
-  };
-  if (decode == nullptr || sign == nullptr || flip == nullptr || rotate == nullptr ||
-      encode == nullptr)
-  {
-    return discard();
   }
-  decode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
-  encode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
-  sign->custom1 = NODE_VECTOR_MATH_SIGN;
-  flip->custom1 = NODE_VECTOR_MATH_MULTIPLY;
-  /* The UVs go through `S * R`, so a tangent normal needs its covariant counterpart
-   * `R^T * S`: flip by the sign of the scale (its magnitude does not turn a direction), then
-   * rotate back. */
-  rotate->custom1 = NODE_VECTOR_ROTATE_TYPE_EULER_XYZ;
-  rotate->custom2 = 1; /* Invert: rotation undone. */
-  const auto set_madd = [](bNode &node, const float multiplier, const float addend) {
-    const char *names[2] = {"Vector_001", "Vector_002"};
-    const float values[2] = {multiplier, addend};
-    for (const int i : IndexRange(2)) {
-      bNodeSocket *socket = socket_in(node, names[i]);
-      if (socket != nullptr && socket->default_value != nullptr) {
-        copy_v3_fl(static_cast<bNodeSocketValueVector *>(socket->default_value)->value, values[i]);
-      }
-    }
-  };
-  set_madd(*decode, 2.0f, -1.0f);
-  set_madd(*encode, 0.5f, 0.5f);
-
-  bNodeSocket *decode_in = socket_in(*decode, "Vector");
-  bNodeSocket *decode_out = socket_out(*decode, "Vector");
-  bNodeSocket *sign_in = socket_in(*sign, "Vector");
-  bNodeSocket *sign_out = socket_out(*sign, "Vector");
-  bNodeSocket *flip_a = socket_in(*flip, "Vector");
-  bNodeSocket *flip_b = socket_in(*flip, "Vector_001");
-  bNodeSocket *flip_out = socket_out(*flip, "Vector");
-  bNodeSocket *rotate_in = socket_in(*rotate, "Vector");
-  bNodeSocket *rotate_rotation = socket_in(*rotate, "Rotation");
-  bNodeSocket *rotate_out = socket_out(*rotate, "Vector");
-  bNodeSocket *encode_in = socket_in(*encode, "Vector");
-  bNodeSocket *encode_out = socket_out(*encode, "Vector");
-  if (decode_in == nullptr || decode_out == nullptr || sign_in == nullptr || sign_out == nullptr ||
-      flip_a == nullptr || flip_b == nullptr || flip_out == nullptr || rotate_in == nullptr ||
-      rotate_rotation == nullptr || rotate_out == nullptr || encode_in == nullptr ||
-      encode_out == nullptr)
-  {
-    return discard();
-  }
-  for (bNode *node : created) {
+  for (bNode *node : made) {
     grid_.place_extra(*node);
     if (r_nodes != nullptr) {
       r_nodes->append(node);
     }
   }
-  if (rotation.node != nullptr && rotation.socket != nullptr) {
-    bke::node_add_link(tree, *rotation.node, *rotation.socket, *rotate, *rotate_rotation);
-  }
-  if (scale.node != nullptr && scale.socket != nullptr) {
-    bke::node_add_link(tree, *scale.node, *scale.socket, *sign, *sign_in);
-  }
-  else if (sign_in->default_value != nullptr) {
-    /* An unlinked scale is the Mapping's identity default. */
-    copy_v3_fl(static_cast<bNodeSocketValueVector *>(sign_in->default_value)->value, 1.0f);
-  }
-  bke::node_add_link(tree, *color.node, *color.socket, *decode, *decode_in);
-  bke::node_add_link(tree, *decode, *decode_out, *flip, *flip_a);
-  bke::node_add_link(tree, *sign, *sign_out, *flip, *flip_b);
-  bke::node_add_link(tree, *flip, *flip_out, *rotate, *rotate_in);
-  bke::node_add_link(tree, *rotate, *rotate_out, *encode, *encode_in);
-  return {encode, encode_out};
+  return {encode_node, encoded};
 }
 
 void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer)

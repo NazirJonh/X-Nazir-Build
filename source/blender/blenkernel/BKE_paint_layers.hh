@@ -713,10 +713,13 @@ bool BKE_paint_layers_fill_reads_map(const Material &ma,
                                      int channel);
 
 /**
- * Whether \a layer may carry UV mapping: it is of a kind that lays a flat value (a Fill) and reads
- * a map, in at least one channel (Layer, correction) or through its mask image (mask item). A map
- * written by strokes (Paint) is addressed at the raw UV and never supports it; neither does a
- * filter, which owns no map. The one predicate UI, RNA and the CPU share.
+ * Whether \a layer may carry UV mapping: a Fill that reads a map in at least one channel (Layer,
+ * correction) or through its mask image (mask item), or a Material row whose source reads the
+ * object's active UVs in its root tree or in a group on the path to its Principled BSDF
+ * (#BKE_paint_layers_source_reads_uv). A Material row moves the UV at which its source is read --
+ * its live textures, its rendered channel maps and its source-group wrapper. A map written by
+ * strokes (Paint) is addressed at the raw UV and never supports it; neither does a filter, which
+ * owns no map. The one predicate UI, RNA, the generator and the CPU share.
  */
 bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer);
 
@@ -937,6 +940,15 @@ std::shared_ptr<const MaterialSourceResolve> BKE_paint_layers_source_resolve(
  * group of its own. Remembered with the resolve above.
  */
 bool BKE_paint_layers_source_group_wrappable(const Material &source);
+
+/**
+ * Whether \a source's shader graph reads the object's active UVs (a Texture Coordinate, an unnamed
+ * UV Map, or an Image Texture with an open Vector) in the root tree or in a group on the path to
+ * its Principled BSDF, the levels the source group copies and maps. A reader inside a group beside
+ * that path is shared as is and not counted. A Material row with no such reader has nothing for
+ * its UV mapping to move. Memoized with the source's resolve, so it is cheap to ask on a redraw.
+ */
+bool BKE_paint_layers_source_reads_uv(const Material &source);
 
 /** The most nested groups a source's graph is followed through to its Principled BSDF. */
 inline constexpr int SOURCE_GROUP_MAX_DEPTH = 8;

@@ -33,6 +33,8 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 
+#include "paint_layers_intern.hh"
+
 namespace blender {
 
 static uint64_t hash_mix(uint64_t h, const uint64_t value)
@@ -415,6 +417,9 @@ struct SourceResolveMemo {
   /** The Principled BSDF is reached through at most #SOURCE_GROUP_MAX_DEPTH groups, so its graph
    * can be copied into a group. */
   bool group_wrappable = false;
+  /** Some level the source group copies reads the active UVs (#paint_layer_source_reads_uv_compute),
+   * asked on every redraw by the mapping panel. */
+  bool reads_uv = false;
 };
 
 Map<const bNodeTree *, SourceResolveMemo> &source_resolve_memo()
@@ -698,6 +703,7 @@ static SourceResolveMemo source_resolve_entry(const Material &source)
   entry.group_wrappable = BKE_paint_material_principled_find(source, reason, &group_path) !=
                               nullptr &&
                           group_path.size() <= SOURCE_GROUP_MAX_DEPTH;
+  entry.reads_uv = paint_layer_source_reads_uv_compute(source);
   std::lock_guard lock(source_resolve_memo_mutex());
   source_resolve_memo().add_overwrite(source.nodetree, entry);
   return entry;
@@ -712,6 +718,11 @@ std::shared_ptr<const MaterialSourceResolve> BKE_paint_layers_source_resolve(
 bool BKE_paint_layers_source_group_wrappable(const Material &source)
 {
   return source_resolve_entry(source).group_wrappable;
+}
+
+bool BKE_paint_layers_source_reads_uv(const Material &source)
+{
+  return source_resolve_entry(source).reads_uv;
 }
 
 /** \} */

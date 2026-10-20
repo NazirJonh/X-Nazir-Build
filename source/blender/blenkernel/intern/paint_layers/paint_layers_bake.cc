@@ -683,8 +683,13 @@ static uint64_t bake_hash_layer(uint64_t h,
   h = bake_hash_mix(h, uint8_t(layer.role));
   h = bake_hash_float(h, layer.opacity);
   /* Only the fact that the mapping applies: such a row stays live and is never baked
-   * (#BKE_paint_layers_bake_blocked), so the slider values must not move the hash. */
-  h = bake_hash_mix(h, BKE_paint_layers_mapping_applies(ma, layer) ? 1 : 0);
+   * (#BKE_paint_layers_bake_blocked), so the slider values must not move the hash. A Material row
+   * is rendered and its mapping is applied when its maps are read, so toggling it must not move a
+   * parent folder's hash either; the folder is kept live by the same block while the mapping is
+   * on. */
+  if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    h = bake_hash_mix(h, BKE_paint_layers_mapping_applies(ma, layer) ? 1 : 0);
+  }
   for (int i = 0; i < layer.channels_num; i++) {
     const MaterialPaintLayerChannel &record = layer.channels[i];
     /* A channel outside the material's set is not part of the result, so its record must not move

@@ -12,6 +12,9 @@
 
 #include "paint_layers_generate_intern.hh"
 
+#include <array>
+
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
@@ -593,6 +596,242 @@ void wire_instance_to_material(Material &ma,
     }
     input_link_restore(ma, *target, instance, *instance_out, r_report);
   }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row UV mapping nodes
+ *
+ * The one place the row transform exists as nodes, shared by the row group and the source-group
+ * wrapper so the two cannot drift apart (nor from the CPU resample, which follows the same order).
+ * \{ */
+
+bool node_is_mapping_chain(const bNode &node)
+{
+  return prop_string_get(node.prop, MAPPING_CHAIN_PROP) != nullptr;
+}
+
+UvReaders uv_readers_find(bNodeTree &tree)
+{
+  UvReaders found;
+  /* Links are read from the list, not the per-socket caches: a tree under construction (a copy
+   * the source group is filling) has stale ones, and a source tree asked from the UI is the same
+   * list either way. */
+  const auto linked = [&](const bNodeSocket *socket) {
+    if (socket == nullptr) {
+      return false;
+    }
+    for (const bNodeLink &link : tree.links) {
+      if (link.tosock == socket || link.fromsock == socket) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (bNode &node : tree.nodes) {
+    switch (node.type_legacy) {
+      case SH_NODE_TEX_COORD:
+        if (linked(socket_out(node, "UV"))) {
+          found.sources.append(&node);
+        }
+        break;
+      case SH_NODE_UVMAP: {
+        /* A named layer is the source's own and is not what the row mapping moves. */
+        const NodeShaderUVMap *storage = static_cast<const NodeShaderUVMap *>(node.storage);
+        if (storage != nullptr && storage->uv_map[0] == '\0' && linked(socket_out(node, "UV"))) {
+          found.sources.append(&node);
+        }
+        break;
+      }
+      case SH_NODE_TEX_IMAGE:
+        /* An orphan texture is not part of the shader; an open Vector samples the active UV. */
+        if ((linked(socket_out(node, "Color")) || linked(socket_out(node, "Alpha"))) &&
+            !linked(socket_in(node, "Vector")))
+        {
+          found.open_images.append(&node);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return found;
+}
+
+MappingChain mapping_chain_add(bNodeTree &tree,
+                               bNode &uv_node,
+                               bNodeSocket &uv_out,
+                               bNode *values_node,
+                               bNodeSocket *offset,
+                               bNodeSocket *scale,
+                               bNodeSocket *rotation)
+{
+  bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
+  bNode *mapping = bke::node_add_static_node(nullptr, tree, SH_NODE_MAPPING);
+  bNodeSocket *rotate_vector = (rotate != nullptr) ? socket_in(*rotate, "Vector") : nullptr;
+  bNodeSocket *rotate_rotation = (rotate != nullptr) ? socket_in(*rotate, "Rotation") : nullptr;
+  bNodeSocket *rotate_out = (rotate != nullptr) ? socket_out(*rotate, "Vector") : nullptr;
+  bNodeSocket *map_vector = (mapping != nullptr) ? socket_in(*mapping, "Vector") : nullptr;
+  bNodeSocket *map_location = (mapping != nullptr) ? socket_in(*mapping, "Location") : nullptr;
+  bNodeSocket *map_scale = (mapping != nullptr) ? socket_in(*mapping, "Scale") : nullptr;
+  if (rotate_vector == nullptr || rotate_rotation == nullptr || rotate_out == nullptr ||
+      map_vector == nullptr || map_location == nullptr || map_scale == nullptr)
+  {
+    if (rotate != nullptr) {
+      bke::node_remove_node(nullptr, tree, *rotate, true, false);
+    }
+    if (mapping != nullptr) {
+      bke::node_remove_node(nullptr, tree, *mapping, true, false);
+    }
+    return {};
+  }
+  /* A Vector Rotate in front of the Mapping node gives `offset + scale * (R * uv)`: the Mapping
+   * node alone would scale first and shear the pattern when the scale is not uniform. Point
+   * mapping keeps only the scale and the offset; the rotation is the rotate node's. */
+  rotate->custom1 = NODE_VECTOR_ROTATE_TYPE_EULER_XYZ;
+  mapping->custom1 = NODE_MAPPING_TYPE_POINT;
+  prop_string_set(rotate->prop, MAPPING_CHAIN_PROP, "rotate");
+  prop_string_set(mapping->prop, MAPPING_CHAIN_PROP, "mapping");
+  bke::node_add_link(tree, uv_node, uv_out, *rotate, *rotate_vector);
+  bke::node_add_link(tree, *rotate, *rotate_out, *mapping, *map_vector);
+  if (values_node != nullptr) {
+    if (offset != nullptr) {
+      bke::node_add_link(tree, *values_node, *offset, *mapping, *map_location);
+    }
+    if (scale != nullptr) {
+      bke::node_add_link(tree, *values_node, *scale, *mapping, *map_scale);
+    }
+    if (rotation != nullptr) {
+      bke::node_add_link(tree, *values_node, *rotation, *rotate, *rotate_rotation);
+    }
+  }
+  return {rotate, mapping};
+}
+
+bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
+                                    bNode &color_node,
+                                    bNodeSocket &color_socket,
+                                    bNode *rotation_node,
+                                    bNodeSocket *rotation,
+                                    bNode *scale_node,
+                                    bNodeSocket *scale,
+                                    Vector<bNode *> &r_made,
+                                    bNode *&r_encode)
+{
+  bNode *decode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNode *sign = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNode *flip = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  bNode *rotate = bke::node_add_static_node(nullptr, tree, SH_NODE_VECTOR_ROTATE);
+  bNode *encode = bke::node_add_node(nullptr, tree, "ShaderNodeVectorMath"_ustr);
+  const std::array<bNode *, 5> created = {decode, sign, flip, rotate, encode};
+  const auto discard = [&]() -> bNodeSocket * {
+    for (bNode *node : created) {
+      if (node != nullptr) {
+        bke::node_remove_node(nullptr, tree, *node, true, false);
+      }
+    }
+    return nullptr;
+  };
+  if (decode == nullptr || sign == nullptr || flip == nullptr || rotate == nullptr ||
+      encode == nullptr)
+  {
+    return discard();
+  }
+  decode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
+  encode->custom1 = NODE_VECTOR_MATH_MULTIPLY_ADD;
+  sign->custom1 = NODE_VECTOR_MATH_SIGN;
+  flip->custom1 = NODE_VECTOR_MATH_MULTIPLY;
+  /* The UVs go through `S * R`, so a tangent normal needs its covariant counterpart
+   * `R^T * S`: flip by the sign of the scale (its magnitude does not turn a direction), then
+   * rotate back. */
+  rotate->custom1 = NODE_VECTOR_ROTATE_TYPE_EULER_XYZ;
+  rotate->custom2 = 1; /* Invert: rotation undone. */
+  const auto set_madd = [](bNode &node, const float multiplier, const float addend) {
+    const char *names[2] = {"Vector_001", "Vector_002"};
+    const float values[2] = {multiplier, addend};
+    for (const int i : IndexRange(2)) {
+      bNodeSocket *socket = socket_in(node, names[i]);
+      if (socket != nullptr && socket->default_value != nullptr) {
+        copy_v3_fl(static_cast<bNodeSocketValueVector *>(socket->default_value)->value, values[i]);
+      }
+    }
+  };
+  set_madd(*decode, 2.0f, -1.0f);
+  set_madd(*encode, 0.5f, 0.5f);
+
+  bNodeSocket *decode_in = socket_in(*decode, "Vector");
+  bNodeSocket *decode_out = socket_out(*decode, "Vector");
+  bNodeSocket *sign_in = socket_in(*sign, "Vector");
+  bNodeSocket *sign_out = socket_out(*sign, "Vector");
+  bNodeSocket *flip_a = socket_in(*flip, "Vector");
+  bNodeSocket *flip_b = socket_in(*flip, "Vector_001");
+  bNodeSocket *flip_out = socket_out(*flip, "Vector");
+  bNodeSocket *rotate_in = socket_in(*rotate, "Vector");
+  bNodeSocket *rotate_rotation = socket_in(*rotate, "Rotation");
+  bNodeSocket *rotate_out = socket_out(*rotate, "Vector");
+  bNodeSocket *encode_in = socket_in(*encode, "Vector");
+  bNodeSocket *encode_out = socket_out(*encode, "Vector");
+  if (decode_in == nullptr || decode_out == nullptr || sign_in == nullptr || sign_out == nullptr ||
+      flip_a == nullptr || flip_b == nullptr || flip_out == nullptr || rotate_in == nullptr ||
+      rotate_rotation == nullptr || rotate_out == nullptr || encode_in == nullptr ||
+      encode_out == nullptr)
+  {
+    return discard();
+  }
+  for (bNode *node : created) {
+    r_made.append(node);
+  }
+  /* The owner nodes come from the caller: a socket's own `owner_node()` needs a topology cache
+   * that a tree under construction does not have. */
+  if (rotation != nullptr && rotation_node != nullptr) {
+    bke::node_add_link(tree, *rotation_node, *rotation, *rotate, *rotate_rotation);
+  }
+  if (scale != nullptr && scale_node != nullptr) {
+    bke::node_add_link(tree, *scale_node, *scale, *sign, *sign_in);
+  }
+  else if (sign_in->default_value != nullptr) {
+    /* An unlinked scale is the Mapping's identity default. */
+    copy_v3_fl(static_cast<bNodeSocketValueVector *>(sign_in->default_value)->value, 1.0f);
+  }
+  bke::node_add_link(tree, color_node, color_socket, *decode, *decode_in);
+  bke::node_add_link(tree, *decode, *decode_out, *flip, *flip_a);
+  bke::node_add_link(tree, *sign, *sign_out, *flip, *flip_b);
+  bke::node_add_link(tree, *flip, *flip_out, *rotate, *rotate_in);
+  bke::node_add_link(tree, *rotate, *rotate_out, *encode, *encode_in);
+  r_encode = encode;
+  return encode_out;
+}
+
+void mapping_input_relay(bNodeTree &tree,
+                         bNode &group_input,
+                         const bNodeTreeInterfaceSocket *from_iface,
+                         bNode &instance,
+                         const char *role)
+{
+  if (from_iface == nullptr || from_iface->identifier == nullptr || instance.id == nullptr ||
+      GS(instance.id->name) != ID_NT)
+  {
+    return;
+  }
+  bNodeTree &child = *id_cast<bNodeTree *>(instance.id);
+  const bNodeTreeInterfaceSocket *child_iface = source_group_mapping_input_find(child, role);
+  if (child_iface == nullptr || child_iface->identifier == nullptr) {
+    return;
+  }
+  bNodeSocket *from = bke::node_find_socket(
+      group_input, SOCK_OUT, UString::from_ptr_noinline(from_iface->identifier));
+  bNodeSocket *to = bke::node_find_socket(
+      instance, SOCK_IN, UString::from_ptr_noinline(child_iface->identifier));
+  if (from == nullptr || to == nullptr) {
+    return;
+  }
+  for (const bNodeLink &link : tree.links) {
+    if (link.tosock == to) {
+      return;
+    }
+  }
+  bke::node_add_link(tree, group_input, *from, instance, *to);
 }
 
 /** \} */

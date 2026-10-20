@@ -278,7 +278,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     }
     nodes.append(map);
     grid_.place(*map, layout::Column::Mask, 0);
-    this->mapping_apply(tree, group, *mask, *map, nodes);
+    this->mapping_apply(tree, *mask, *map, nodes);
     bNodeSocket *map_color = socket_out(*map, "Color");
     bNodeSocket *map_alpha = socket_out(*map, "Alpha");
     if (map_color == nullptr || map_alpha == nullptr) {
@@ -453,7 +453,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       }
       nodes.append(item_map);
       grid_.place(*item_map, layout::Column::Mask, row++);
-      this->mapping_apply(tree, group, item, *item_map, nodes);
+      this->mapping_apply(tree, item, *item_map, nodes);
       bNodeSocket *item_color = socket_out(*item_map, "Color");
       bNodeSocket *item_map_alpha = socket_out(*item_map, "Alpha");
       if (item_color == nullptr || item_map_alpha == nullptr) {
@@ -738,7 +738,7 @@ NodeOutput PaintLayersTreeBuilder::map_coverage_match_add(bNodeTree &tree,
   }
   r_nodes.append(map);
   grid_.place_extra(*map);
-  this->mapping_apply(tree, group, item, *map, r_nodes);
+  this->mapping_apply(tree, item, *map, r_nodes);
   /* The ID map is a lookup, not a gradient: nearest texel, so a texel matches only its own colour,
    * as the picker and the CPU read it. */
   if (NodeTexImage *storage = static_cast<NodeTexImage *>(map->storage)) {
@@ -1400,7 +1400,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     nodes.append(map);
   }
   /* A Fill correction's own map reads through the correction's Mapping while it applies. */
-  const bool mapped = map != nullptr && this->mapping_apply(tree, group, effect, *map, nodes);
+  const bool mapped = map != nullptr && this->mapping_apply(tree, effect, *map, nodes);
   /* Nothing of the correction is linked to the chain until it is complete, so a failure removes
    * what was made and leaves the row as it was. */
   const auto discard = [&]() {
@@ -1576,6 +1576,41 @@ static void live_image_settings_copy(bNode &map, const bNode *source_node)
   }
 }
 
+void PaintLayersTreeBuilder::source_group_mapping_wire(bNodeTree &tree,
+                                                       const MaterialPaintLayer &layer,
+                                                       bNode &instance)
+{
+  if (!BKE_paint_layers_mapping_applies(ma_, layer)) {
+    return;
+  }
+  bNode *group_input = nullptr;
+  for (bNode &node : tree.nodes) {
+    if (node.is_group_input()) {
+      group_input = &node;
+      break;
+    }
+  }
+  if (group_input == nullptr || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+    return;
+  }
+  nodes::update_node_declaration_and_sockets(tree, *group_input);
+  nodes::update_node_declaration_and_sockets(tree, instance);
+  /* The instance's sockets carry the wrapper's identifiers, not the row group's: the same role
+   * names the socket on each side. */
+  const std::pair<Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *, const char *>
+      wires[3] = {
+          {&mapping_offset_inputs_, SOURCE_GROUP_ROLE_MAPPING_OFFSET},
+          {&mapping_scale_inputs_, SOURCE_GROUP_ROLE_MAPPING_SCALE},
+          {&mapping_rotation_inputs_, SOURCE_GROUP_ROLE_MAPPING_ROTATION},
+      };
+  for (const auto &[inputs, role] : wires) {
+    bNodeTreeInterfaceSocket *const *iface = inputs->lookup_ptr(&layer);
+    if (iface != nullptr) {
+      mapping_input_relay(tree, *group_input, *iface, instance, role);
+    }
+  }
+}
+
 NodeOutput PaintLayersTreeBuilder::source_group_output_get(bNodeTree &tree,
                                                            const MaterialPaintLayer &layer,
                                                            const int channel)
@@ -1592,6 +1627,9 @@ NodeOutput PaintLayersTreeBuilder::source_group_output_get(bNodeTree &tree,
         id_us_plus(&group->id);
         STRNCPY_UTF8(instance->label, layer.material->id.name + 2);
         nodes::update_node_declaration_and_sockets(tree, *instance);
+        /* The row's mapping values travel into the wrapper's own Mapping. Every channel of the
+         * row shares this instance, so the wiring is idempotent. */
+        this->source_group_mapping_wire(tree, layer, *instance);
         grid_.place(*instance, layout::Column::Source, 0);
         made = {instance, group};
       }
@@ -1663,7 +1701,11 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
         }
         source_nodes.append(map);
         grid_.place(*map, layout::Column::Source, 0);
+        const bool mapped = this->mapping_apply(tree, ctx.layer, *map, source_nodes);
         shown = {map, map_color};
+        if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+          shown = this->normal_remap_add(tree, ctx.layer, shown, &source_nodes);
+        }
       }
       if (shown.socket == nullptr) {
         /* Neither the group nor a render of the source feeds the channel: the row lays nothing. */
@@ -1700,7 +1742,13 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
         live_image_settings_copy(*map, source.node);
       }
       grid_.place(*map, layout::Column::Source, 0);
+      /* A Material row reads its source at the row's UV: a live Image Texture and a map rendered
+       * from the source both take the row Mapping. */
+      const bool mapped = this->mapping_apply(tree, ctx.layer, *map, source_nodes);
       out.color = {map, color_out};
+      if (mapped && ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+        out.color = this->normal_remap_add(tree, ctx.layer, out.color, &source_nodes);
+      }
       out.content_alpha = {map, alpha_out};
       break;
     }
@@ -1735,6 +1783,7 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
         }
         source_nodes.append(map);
         grid_.place(*map, layout::Column::Source, 2);
+        this->mapping_apply(tree, ctx.layer, *map, source_nodes);
         out.coverage = this->rgb_mean_nodes_add(tree, {map, map_color}, source_nodes);
       }
       if (out.coverage.socket == nullptr) {
@@ -1750,6 +1799,8 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
       }
       source_nodes.append(map);
       grid_.place(*map, layout::Column::Source, 2);
+      /* The source's transparency is read at the same UV as its colour. */
+      this->mapping_apply(tree, ctx.layer, *map, source_nodes);
       if (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha) {
         live_image_settings_copy(*map, coverage.node);
         bNodeSocket *alpha_out = socket_out(*map, "Alpha");
@@ -1774,6 +1825,49 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
     }
     case PaintLayerMaterialCoverageKind::Pending:
       return discard();
+  }
+
+  /* A clipped UV wrap leaves through the coverage factor for a Material row: its transparency is
+   * the source's Alpha, never the colour map's own alpha, so clipping the map's alpha would not
+   * hide the row. The same factor clips the content alpha, so a channel that tracks it agrees.
+   * The mapping applies only to a source that reads the UVs, and the CPU clips on that same
+   * condition (#composite_row_source_describe), so the two never disagree on the row. */
+  if (BKE_paint_layers_mapping_applies(ma_, ctx.layer)) {
+    const NodeOutput clip = this->mapping_clip_factor(tree, ctx.layer, source_nodes);
+    if (clip.node != nullptr && clip.socket != nullptr) {
+      const auto multiply = [&](const NodeOutput value) -> NodeOutput {
+        bNode *product = bke::node_add_static_node(nullptr, tree, SH_NODE_MATH);
+        bNodeSocket *a = (product != nullptr) ? socket_in(*product, "Value") : nullptr;
+        bNodeSocket *b = (product != nullptr) ? socket_in(*product, "Value_001") : nullptr;
+        bNodeSocket *result = (product != nullptr) ? socket_out(*product, "Value") : nullptr;
+        if (product == nullptr || a == nullptr || b == nullptr || result == nullptr ||
+            value.node == nullptr || value.socket == nullptr)
+        {
+          return {};
+        }
+        product->custom1 = NODE_MATH_MULTIPLY;
+        grid_.place_extra(*product);
+        source_nodes.append(product);
+        bke::node_add_link(tree, *value.node, *value.socket, *product, *a);
+        bke::node_add_link(tree, *clip.node, *clip.socket, *product, *b);
+        return {product, result};
+      };
+      if (out.coverage.socket != nullptr) {
+        const NodeOutput clipped = multiply(out.coverage);
+        if (clipped.socket != nullptr) {
+          out.coverage = clipped;
+        }
+      }
+      else {
+        out.coverage = clip;
+      }
+      if (out.content_alpha.socket != nullptr) {
+        const NodeOutput clipped = multiply(out.content_alpha);
+        if (clipped.socket != nullptr) {
+          out.content_alpha = clipped;
+        }
+      }
+    }
   }
   layout::frame_add(tree, "Source", source_nodes);
   return out;
@@ -1886,7 +1980,7 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     Vector<bNode *> source_nodes;
     source_nodes.append(map);
     out.color = {map, socket_out(*map, "Color")};
-    const bool mapped = this->mapping_apply(tree, group, ctx.layer, *map, source_nodes);
+    const bool mapped = this->mapping_apply(tree, ctx.layer, *map, source_nodes);
     if (ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL && out.color.socket != nullptr &&
         (ctx.record->flag & MA_PAINT_LAYER_CHANNEL_NORMAL_DIRECTX) != 0)
     {

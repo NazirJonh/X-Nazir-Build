@@ -722,6 +722,7 @@ static void composite_decode_tile(const ImBuf *ibuf,
   const bool is_float = ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr;
   const int channels = ibuf->channels == 0 ? 4 : ibuf->channels;
   const bool four = channels == 4;
+  const bool grey = channels == 1;
   for (int ty = 0; ty < th; ty++) {
     const int y = tile.ymin + ty;
     for (int tx = 0; tx < tw; tx++) {
@@ -737,8 +738,9 @@ static void composite_decode_tile(const ImBuf *ibuf,
       else {
         const float *pixel = ibuf->float_buffer.data + (int64_t(y) * ibuf->x + x) * channels;
         out[0] = pixel[0];
-        out[1] = pixel[1];
-        out[2] = pixel[2];
+        /* A one-channel buffer is a grey: the other channels read its only one, not the next texel. */
+        out[1] = grey ? pixel[0] : pixel[1];
+        out[2] = grey ? pixel[0] : pixel[2];
         out[3] = four ? pixel[3] : 1.0f;
       }
     }
@@ -1490,6 +1492,58 @@ static void composite_image_own(ImBuf *ibuf, Vector<CompositeImageLock> &r_locks
 }
 
 /**
+ * The canvas-UV transform of a row's mapping, the one both CPU passes (the resample of a map and
+ * the clip of a Material row's coverage) read through, so they cannot disagree on a texel: rotate
+ * around Z, then scale along the canvas axes, then offset. An axis that repeats wraps with floor;
+ * one that clips is range-tested.
+ */
+struct CompositeMappingTransform {
+  float scale_x;
+  float scale_y;
+  float cos_rot;
+  float sin_rot;
+  float offset_u;
+  float offset_v;
+  bool repeat_u = true;
+  bool repeat_v = true;
+
+  explicit CompositeMappingTransform(const PaintMaterialCompositeMapping &mapping)
+      : scale_x(BKE_paint_layers_mapping_scale_normalize(mapping.scale[0])),
+        scale_y(BKE_paint_layers_mapping_scale_normalize(mapping.scale[1])),
+        cos_rot(cosf(mapping.rotation)),
+        sin_rot(sinf(mapping.rotation)),
+        offset_u(mapping.offset[0]),
+        offset_v(mapping.offset[1])
+  {
+    BKE_paint_layers_mapping_wrap_axes(mapping.wrap, repeat_u, repeat_v);
+  }
+
+  /** Whether any axis clips, so a texel can fall outside the unit square. */
+  bool clips() const
+  {
+    return !(repeat_u && repeat_v);
+  }
+
+  /** The mapped coordinate of the canvas point (\a u, \a v). \return false outside the square on
+   * an axis that clips. Only a clipping axis is range-tested: a wrapped one can round to 1. */
+  bool apply(const float u, const float v, float &r_u, float &r_v) const
+  {
+    const float ru = u * cos_rot - v * sin_rot;
+    const float rv = u * sin_rot + v * cos_rot;
+    r_u = ru * scale_x + offset_u;
+    r_v = rv * scale_y + offset_v;
+    if (repeat_u) {
+      r_u -= floorf(r_u);
+    }
+    if (repeat_v) {
+      r_v -= floorf(r_v);
+    }
+    return !((!repeat_u && (r_u < 0.0f || r_u >= 1.0f)) ||
+             (!repeat_v && (r_v < 0.0f || r_v >= 1.0f)));
+  }
+};
+
+/**
  * Resample \a src onto a \a ref_width x \a ref_height grid through a row's UV mapping, as a float
  * RGBA premultiplied scene-linear ImBuf the caller owns.
  *
@@ -1541,14 +1595,12 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
   const bool decode_by_table = decode && !src_is_float && colorspace != nullptr &&
                                IMB_colormanagement_space_name_is_srgb(
                                    IMB_colormanagement_colorspace_get_name(colorspace));
-  /* One helper, shared by RNA and the CPU: zeroes read back as one. */
-  const float scale_x = BKE_paint_layers_mapping_scale_normalize(mapping.scale[0]);
-  const float scale_y = BKE_paint_layers_mapping_scale_normalize(mapping.scale[1]);
-  const float cos_rot = cosf(mapping.rotation);
-  const float sin_rot = sinf(mapping.rotation);
-  bool repeat_u = true;
-  bool repeat_v = true;
-  BKE_paint_layers_mapping_wrap_axes(mapping.wrap, repeat_u, repeat_v);
+  const CompositeMappingTransform transform(mapping);
+  /* The direction remap of a tangent normal below needs the parts of the transform. */
+  const float scale_x = transform.scale_x;
+  const float scale_y = transform.scale_y;
+  const float cos_rot = transform.cos_rot;
+  const float sin_rot = transform.sin_rot;
   /* One straight-linear tap at texel (tx, ty), re-premultiplied for the filter below: byte buffers
    * are straight-stored, float buffers premultiplied-stored, the convention the tile decode
    * assumes. */
@@ -1595,24 +1647,15 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
     const float v = (float(y) + 0.5f) / float(ref_height);
     for (int x = 0; x < ref_width; x++) {
       const float u = (float(x) + 0.5f) / float(ref_width);
-      /* Rotate the canvas UV first, then scale along the canvas axes: this is the transform the
-       * gizmo's rectangle shows, and it keeps a non-uniform scale from shearing the pattern. */
-      const float ru = u * cos_rot - v * sin_rot;
-      const float rv = u * sin_rot + v * cos_rot;
-      float uu = ru * scale_x + mapping.offset[0];
-      float vv = rv * scale_y + mapping.offset[1];
-      /* An axis that repeats wraps; one that clips reads transparent outside [0, 1). The row covers
-       * by the map's own alpha, so the transparent texel leaves the coverage there, which is what
-       * the generated graph's clip factor does to the map's Alpha. */
-      if (repeat_u) {
-        uu -= floorf(uu);
-      }
-      if (repeat_v) {
-        vv -= floorf(vv);
-      }
+      /* Rotate first, then scale along the canvas axes: the transform the gizmo's rectangle shows,
+       * which keeps a non-uniform scale from shearing the pattern. An axis that clips reads
+       * transparent outside [0, 1); the row covers by the map's own alpha, so the texel leaves the
+       * coverage there, which is what the generated graph's clip factor does to the map's Alpha. */
+      float uu;
+      float vv;
+      const bool inside = transform.apply(u, v, uu, vv);
       float *p = out + (int64_t(y) * ref_width + x) * 4;
-      /* Only an axis that does not repeat is range-tested: a wrapped one can round to exactly 1. */
-      if ((!repeat_u && (uu < 0.0f || uu >= 1.0f)) || (!repeat_v && (vv < 0.0f || vv >= 1.0f))) {
+      if (!inside) {
         p[0] = p[1] = p[2] = p[3] = 0.0f;
         continue;
       }
@@ -1741,6 +1784,91 @@ ImBuf *BKE_paint_material_mask_map_acquire(Image *image,
 }
 
 /**
+ * Fold a clipping UV wrap into a row's coverage.
+ *
+ * A map texel outside the unit square after the mapping is transparent, and a Fill or painted row
+ * drops it from the coverage through the map's own alpha. A Material row covers by its source's
+ * transparency instead, which the map's alpha does not carry, so the clip has to be multiplied into
+ * the coverage on its own -- the 0/1 factor the generated graph multiplies in.
+ *
+ * The row's existing coverage factor at each texel is kept inside the square and zeroed outside:
+ * the already mapped coverage map when there is one (read grey or alpha, scaled by the row's mask
+ * influence), one when the row covers fully, and one when it has no map at all. The result is one
+ * owned buffer read as a grey with full influence, which the evaluator multiplies exactly like any
+ * coverage map. The row's mask items still apply on top, in their usual order.
+ *
+ * The transform is the one #composite_resample_mapped applies: rotate around Z first, then scale,
+ * then offset; an axis that repeats wraps with floor, a clipping one range-tests.
+ */
+static void composite_clip_coverage_fold(PaintMaterialCompositeLayer &r_layer,
+                                         const PaintMaterialCompositeMapping &mapping,
+                                         const int ref_width,
+                                         const int ref_height,
+                                         Vector<CompositeImageLock> &r_locks)
+{
+  const CompositeMappingTransform transform(mapping);
+  if (ref_width <= 0 || ref_height <= 0 || !transform.clips()) {
+    return;
+  }
+  const bool has_map = r_layer.mask_ibuf != nullptr;
+  if (has_map && !composite_mask_ibuf_is_valid(r_layer.mask_ibuf, ref_width, ref_height)) {
+    /* A coverage of another size is rejected later with the rest; do not guess its texels. */
+    return;
+  }
+  /* One float per texel: the coverage is a grey, and the decode reads a one-channel buffer as one.
+   * At 4K this is 64 MB where four channels would hold 256 MB. Every texel is written below. */
+  ImBuf *clip = IMB_allocImBuf(uint(ref_width), uint(ref_height), ImBufFlags::Zero);
+  if (clip == nullptr) {
+    return;
+  }
+  if (!IMB_alloc_float_pixels(clip, 1, false) || clip->float_data() == nullptr) {
+    IMB_freeImBuf(clip);
+    return;
+  }
+  float *out = clip->float_data_for_write();
+  const PaintMaterialCompositeLayer &layer = r_layer;
+  /* Strips of rows, each decoding its own piece of the coverage so far the way the evaluator
+   * reads it (a float buffer is straightened here like it is there): the inside of the square is
+   * unchanged, and no second full-size buffer is held. */
+  threading::parallel_for(IndexRange(ref_height), 16, [&](const IndexRange rows) {
+    Vector<float> strip;
+    if (has_map) {
+      strip.resize(int64_t(ref_width) * rows.size() * 4);
+      rcti tile;
+      BLI_rcti_init(&tile, 0, ref_width, int(rows.first()), int(rows.one_after_last()));
+      composite_decode_tile(layer.mask_ibuf, layer.mask_colorspace_name, tile, strip.data());
+    }
+    for (const int64_t y : rows) {
+      const float v = (float(y) + 0.5f) / float(ref_height);
+      for (int x = 0; x < ref_width; x++) {
+        const float u = (float(x) + 0.5f) / float(ref_width);
+        float uu;
+        float vv;
+        const bool inside = transform.apply(u, v, uu, vv);
+        float value = 0.0f;
+        if (inside) {
+          value = 1.0f;
+          if (has_map) {
+            const float *m = strip.data() + ((y - rows.first()) * ref_width + x) * 4;
+            const float raw = layer.mask_from_alpha ? m[3] : (m[0] + m[1] + m[2]) / 3.0f;
+            value = (1.0f - layer.mask_influence) + layer.mask_influence * clamp_f(raw, 0.0f, 1.0f);
+          }
+        }
+        out[y * ref_width + x] = value;
+      }
+    }
+  });
+  IMB_colormanagement_assign_float_colorspace(
+      clip, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  composite_image_own(clip, r_locks);
+  r_layer.mask_ibuf = clip;
+  r_layer.mask_colorspace_name = composite_buffer_colorspace_name(clip);
+  /* Read as a grey with full influence: the value above already holds the mask's own. */
+  r_layer.mask_from_alpha = false;
+  r_layer.mask_influence = 1.0f;
+}
+
+/**
  * Acquire the buffers of \a image_layers into \a r_layers for the linear evaluator, which takes
  * float buffers and constant layers. A folder is acquired through its children, and left out when
  * nothing it holds paints.
@@ -1793,6 +1921,16 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
           image_layer.mask_image, image_layer.mask_iuser, r_locks);
       if (layer.mask_ibuf == nullptr) {
         return false;
+      }
+      /* A source coverage map reads through the row's mapping too, the same transform the
+       * generated graph applies to it. It is resampled on its own even when it shares the colour
+       * image: the colour pass may carry the covariant Normal remap, which would corrupt a
+       * coverage scalar. */
+      if (image_layer.mapping.enabled) {
+        PaintMaterialCompositeMapping coverage_mapping = image_layer.mapping;
+        coverage_mapping.tangent_normal = false;
+        composite_mapped_remap(
+            layer.mask_ibuf, coverage_mapping, ref_width, ref_height, r_locks);
       }
       layer.mask_colorspace_name = composite_buffer_colorspace_name(layer.mask_ibuf);
     }
@@ -1861,6 +1999,13 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       layer.content_corrections.append(buffer);
     }
     static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
+    /* A clipping wrap of a Material row reaches its coverage as a 0/1 factor, since the row does
+     * not cover through its map's alpha. Folded after the row's own coverage is acquired and
+     * before the mask items are read, which still multiply on top in the evaluator. */
+    if (image_layer.mapping_clips_coverage) {
+      composite_clip_coverage_fold(
+          layer, image_layer.mapping, ref_width, ref_height, r_locks);
+    }
     r_layers.append(std::move(layer));
   }
   return true;

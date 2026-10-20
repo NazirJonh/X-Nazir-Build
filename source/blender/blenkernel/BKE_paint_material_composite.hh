@@ -294,6 +294,15 @@ struct PaintMaterialCompositeMaskItem {
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
 struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
+  /**
+   * The row's UV mapping cuts away part of the canvas, and its coverage has to follow: a Material
+   * row covers by its source's transparency, not by the alpha of its map, so a map texel that a
+   * clipping wrap leaves transparent would still lay its black over the rows below. When set, the
+   * acquisition folds `inside(transformed_uv)` into the row's coverage (see #mapping), which is the
+   * same 0/1 factor the generated graph multiplies in. Only ever set for a Material row with a
+   * clipping wrap; a Fill or painted row already clips through its map's alpha.
+   */
+  bool mapping_clips_coverage = false;
   Image *color_image = nullptr;
   /**
    * The image node's own #ImageUser, or null. Owned by the material: copy it before acquiring a

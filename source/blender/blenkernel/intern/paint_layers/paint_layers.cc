@@ -1857,6 +1857,14 @@ bool BKE_paint_layers_fill_reads_map(const Material &ma,
 
 bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintLayer &layer)
 {
+  /* A Material row reads its source at the row's UV: a live Image Texture and a rendered channel
+   * map are read through the row's Mapping, and the source graph is wrapped with the same
+   * transform inside its wrapper. The source must exist; a material with no node tree has nothing
+   * for the mapping to move. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    return layer.material != nullptr && layer.material->nodetree != nullptr &&
+           BKE_paint_layers_source_reads_uv(*layer.material);
+  }
   /* Only a Fill's own map repeats under the remap: a painted map is written by strokes at the raw
    * UV, and a filter owns no map to move. */
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {

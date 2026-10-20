@@ -19,10 +19,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <optional>
+#include <utility>
 
+#include "BLI_index_range.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
@@ -54,19 +57,24 @@
 namespace blender::bke::paint_layers {
 
 /** Bumped when what a fill produces changes, so groups made by an older fill are rebuilt once. */
-static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 5;
+static constexpr uint64_t SOURCE_GROUP_FILL_VERSION = 6;
 
-uint64_t source_group_content_hash(const Material &source)
+uint64_t source_group_content_hash(const Material &source, const bool mapped)
 {
   uint64_t hash = BKE_paint_layers_source_material_tree_hash_cached(source);
   hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
+  /* Whether the wrapper carries the row mapping is structural, but it lives in the content hash
+   * (with the version) so toggling it refills the group once. Slider values do not enter here, so
+   * dragging a mapping value never refills. */
+  hash = hash * 1000003u ^ (mapped ? 1u : 0u);
   return hash;
 }
 
-uint64_t source_group_structure_hash(const Material &source)
+uint64_t source_group_structure_hash(const Material &source, const bool mapped)
 {
   uint64_t hash = BKE_paint_layers_source_structure_hash_cached(source);
   hash = hash * 1000003u ^ SOURCE_GROUP_FILL_VERSION;
+  hash = hash * 1000003u ^ (mapped ? 1u : 0u);
   return hash;
 }
 
@@ -138,6 +146,8 @@ struct SourceGroupBuild {
   const Vector<const bNode *> &path;
   const bUUID &owner_uid;
   const char *source_name;
+  /** Whether the row applies its UV mapping, so every level carries the mapping chain. */
+  bool mapped;
 };
 
 /** One channel a level hands up: the node of the level's copy that feeds it. */
@@ -242,8 +252,10 @@ static bool source_group_outputs_wire(bNodeTree &tree, const Span<SourceGroupOut
  * Map's colour is a constant: the map rendered from the source stands in.
  */
 static void source_group_normal_output_add(const bNode &principled,
+                                           bNodeTree &tree,
                                            const Map<const bNode *, bNode *> &node_map,
                                            const Map<const bNodeSocket *, bNodeSocket *> &socket_map,
+                                           const bool mapped,
                                            Vector<SourceGroupOutput> &r_outputs)
 {
   const bNodeSocket *input = bke::node_find_socket(principled, SOCK_IN, "Normal"_ustr);
@@ -262,9 +274,32 @@ static void source_group_normal_output_add(const bNode &principled,
                                                       FedSocket{};
     bNode *node = node_map.lookup_default(color_fed.node, nullptr);
     bNodeSocket *socket = socket_map.lookup_default(color_fed.socket, nullptr);
-    if (node != nullptr && socket != nullptr) {
-      r_outputs.append({int(PAINT_MATERIAL_CHANNEL_NORMAL), node, socket, name, type});
+    if (node == nullptr || socket == nullptr) {
+      return;
     }
+    if (mapped && source_group_color_reads_mapped_uv(tree, *node)) {
+      /* The row mapping moved the texture's read point, so the encoded vectors follow it: remap
+       * them with this level's mapping rotation and scale-sign before exposing the Color. A
+       * colour that does not read the moved UV (Generated coordinates, a named UV Map) stays. */
+      bNode *group_input = source_group_group_input_ensure(tree);
+      if (group_input != nullptr) {
+        bNodeSocket *rotation = source_group_mapping_input_socket(
+            tree, *group_input, SOURCE_GROUP_ROLE_MAPPING_ROTATION);
+        bNodeSocket *scale = source_group_mapping_input_socket(
+            tree, *group_input, SOURCE_GROUP_ROLE_MAPPING_SCALE);
+        Vector<bNode *> made;
+        bNode *encode_node = nullptr;
+        if (rotation != nullptr && scale != nullptr) {
+          if (bNodeSocket *remapped = normal_remap_nodes_add(
+                  tree, *node, *socket, group_input, rotation, group_input, scale, made, encode_node))
+          {
+            node = encode_node;
+            socket = remapped;
+          }
+        }
+      }
+    }
+    r_outputs.append({int(PAINT_MATERIAL_CHANNEL_NORMAL), node, socket, name, type});
     return;
   }
   /* Any other source (a Bump for one) is left to the map rendered from it: such a normal comes
@@ -290,6 +325,16 @@ static bool source_group_level_build(const SourceGroupBuild &build,
           tree, orig, innermost ? &build.principled : nullptr, node_map, socket_map))
   {
     return false;
+  }
+
+  if (build.mapped) {
+    /* Every level: the three mapping inputs, the implicit UV wiring and the chain in front of
+     * every UV output. Path copies are fresh, so a mapped build always starts from no inputs. */
+    source_group_mapping_prepare(tree);
+  }
+  else if (depth == 0) {
+    /* The root's interface survives a refill, so inputs left by an earlier mapped build go now. */
+    source_group_mapping_interface_remove(tree);
   }
 
   Vector<SourceGroupOutput> outputs;
@@ -323,7 +368,10 @@ static bool source_group_level_build(const SourceGroupBuild &build,
                  info.is_color ? "NodeSocketColor" : "NodeSocketFloat");
     }
     output_add(int(PAINT_MATERIAL_CHANNEL_ALPHA), "Alpha", "Coverage", "NodeSocketFloat");
-    source_group_normal_output_add(build.principled, node_map, socket_map, outputs);
+    /* A chain inserted at a parent level may feed this level's Normal through a group input, so
+     * the row's `mapped` flag (not only this level's local chain) decides the remap. */
+    source_group_normal_output_add(
+        build.principled, tree, node_map, socket_map, build.mapped, outputs);
   }
   else {
     const bNode *orig_group = build.path[depth];
@@ -350,6 +398,15 @@ static bool source_group_level_build(const SourceGroupBuild &build,
     BKE_ntree_update_after_single_tree_change(build.bmain, *child);
     /* The instance only sees the outputs the child gained after a declaration update. */
     nodes::update_node_declaration_and_sockets(tree, *instance);
+    if (build.mapped) {
+      /* Relay this level's mapping values into the child path instance, the way the row relays
+       * its values into the wrapper. */
+      bNode *group_input = source_group_group_input_ensure(tree);
+      if (group_input != nullptr) {
+        nodes::update_node_declaration_and_sockets(tree, *group_input);
+        source_group_mapping_instance_wire(tree, *group_input, *instance);
+      }
+    }
     child->ensure_interface_cache();
     for (const bNodeTreeInterfaceSocket *interface : child->interface_outputs()) {
       const int channel = prop_int_get(interface->properties, INPUT_CHANNEL_PROP, -1);
@@ -378,7 +435,7 @@ static bool source_group_level_build(const SourceGroupBuild &build,
   return source_group_outputs_wire(tree, outputs);
 }
 
-bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source)
+bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source, const bool mapped)
 {
   /* The interface stays: the instances of the group link into its outputs, and a refill that
    * changes no structure must not move them. */
@@ -401,7 +458,8 @@ bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source)
   if (principled == nullptr || int(group_path.size()) > SOURCE_GROUP_MAX_DEPTH) {
     return done(false);
   }
-  const SourceGroupBuild build{bmain, *principled, group_path, owner_uid, source.id.name + 2};
+  const SourceGroupBuild build{
+      bmain, *principled, group_path, owner_uid, source.id.name + 2, mapped};
   return done(source_group_level_build(build, wrapper, *source.nodetree, 0));
 }
 

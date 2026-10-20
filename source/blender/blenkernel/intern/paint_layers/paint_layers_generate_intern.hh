@@ -16,6 +16,10 @@
  *
  * Everything declared here is private to the generator's translation units and its tests; the
  * public entry points live in `BKE_paint_layers_generate.hh`.
+ *
+ * A tree under construction has no topology cache. Code here never asks a socket for its
+ * `owner_node()` or its `is_directly_linked()`: the owning node is passed along with the socket
+ * and links are read from `bNodeTree::links` (see #uv_readers_find, #normal_remap_nodes_add).
  */
 
 #include <cstddef>
@@ -35,6 +39,7 @@ struct bNode;
 struct bNodeSocket;
 struct bNodeTree;
 struct bNodeTreeInterface;
+struct bNodeTreeInterfaceSocket;
 struct IDProperty;
 struct Main;
 struct Material;
@@ -123,6 +128,17 @@ inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";
 inline constexpr const char *ROLE_MAPPING_SCALE = "mapping_scale";
 /** #INPUT_ROLE_PROP value of a row's UV mapping rotation (a Vector input holding 0, 0, angle). */
 inline constexpr const char *ROLE_MAPPING_ROTATION = "mapping_rotation";
+/**
+ * On a source-group wrapper's interface input: the row mapping value relayed into the wrapper.
+ * The same three roles travel from the row group into the wrapper instance and down every private
+ * group copy on the path to the source's Principled BSDF, so the Mapping nodes built inside the
+ * wrapper read the row's values without a rebuild when a slider moves.
+ */
+inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_OFFSET = "source_mapping_offset";
+inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_SCALE = "source_mapping_scale";
+inline constexpr const char *SOURCE_GROUP_ROLE_MAPPING_ROTATION = "source_mapping_rotation";
+/** Prefix of the wrapper's three row-mapping value inputs. */
+inline constexpr const char *SOURCE_GROUP_MAPPING_INPUT_PREFIX = "Mapping ";
 /** #INPUT_ROLE_PROP value of one Color ID colour's enable flag (the marker is the map-coverage
  * item's); the entry is named by #INPUT_ID_COLOR_PROP. */
 inline constexpr const char *ROLE_ID_COLOR_ENABLED = "id_color_enabled";
@@ -143,6 +159,79 @@ bNodeSocket *instance_output_find(bNodeTree &tree, bNode &instance, const char *
 bNodeSocket *principled_channel_socket(Material &ma, int channel);
 bNodeSocket *socket_in(bNode &node, const char *name);
 bNodeSocket *socket_out(bNode &node, StringRefNull name);
+
+/** #bNode::prop key of the Vector Rotate and Mapping nodes a row's UV mapping chain is made of.
+ * The marker, not the node name, tells a generated chain from a node of the source. */
+inline constexpr const char *MAPPING_CHAIN_PROP = "pbr_paint_layers_mapping_chain";
+
+/** Whether \a node is one of the nodes #mapping_chain_add made. */
+bool node_is_mapping_chain(const bNode &node);
+
+/** What of a shader tree reads the object's active UVs, one level only (groups are not entered). */
+struct UvReaders {
+  /** Texture Coordinate and unnamed UV Map nodes whose UV output feeds something. */
+  Vector<bNode *> sources;
+  /** Image Textures that feed the shader and have an open Vector input. */
+  Vector<bNode *> open_images;
+
+  bool any() const
+  {
+    return !sources.is_empty() || !open_images.is_empty();
+  }
+};
+
+/**
+ * The one rule for "reads the active UV": the predicate behind #BKE_paint_layers_source_reads_uv
+ * and the source group's chain insertion both ask it, so what the UI offers is what gets moved.
+ */
+UvReaders uv_readers_find(bNodeTree &tree);
+
+struct MappingChain {
+  bNode *rotate = nullptr;
+  bNode *mapping = nullptr;
+};
+
+/**
+ * Add the row transform in front of \a uv_out of \a uv_node: a Vector Rotate, then a `Point`
+ * Mapping. Rotation, offset and scale are linked from \a values_node's sockets, and any of them
+ * may be null (the node keeps its identity default). Neither node is placed. On failure nothing is
+ * left in \a tree and the result is empty.
+ */
+MappingChain mapping_chain_add(bNodeTree &tree,
+                               bNode &uv_node,
+                               bNodeSocket &uv_out,
+                               bNode *values_node,
+                               bNodeSocket *offset,
+                               bNodeSocket *scale,
+                               bNodeSocket *rotation);
+
+/**
+ * Add the covariant remap of an encoded tangent-space normal read from \a color_socket: decode,
+ * flip by the sign of the scale, rotate back, encode. \a rotation and \a scale are the sockets
+ * that drive the row transform (null scale is the identity). The nodes made are appended to
+ * \a r_made, unplaced. \return the encoded output, or null with nothing left in \a tree.
+ */
+bNodeSocket *normal_remap_nodes_add(bNodeTree &tree,
+                                    bNode &color_node,
+                                    bNodeSocket &color_socket,
+                                    bNode *rotation_node,
+                                    bNodeSocket *rotation,
+                                    bNode *scale_node,
+                                    bNodeSocket *scale,
+                                    Vector<bNode *> &r_made,
+                                    bNode *&r_encode);
+
+/**
+ * Link the row-mapping input of \a tree's Group Input that \a from_iface stands for into the input
+ * of \a instance (a group node whose tree carries the same \a role, see
+ * #source_group_mapping_input_find). Idempotent: an already linked input is left alone, and a
+ * missing side leaves the instance at its identity default.
+ */
+void mapping_input_relay(bNodeTree &tree,
+                         bNode &group_input,
+                         const bNodeTreeInterfaceSocket *from_iface,
+                         bNode &instance,
+                         const char *role);
 
 IDProperty *properties_ensure(IDProperty *&properties);
 void prop_int_set(IDProperty *&properties, const char *key, int value);
@@ -263,7 +352,10 @@ void source_group_row_set(bNodeTree &tree, const bUUID &marker);
  *
  * \return false when the source cannot be wrapped; the group is then left empty.
  */
-bool source_group_fill(Main &bmain, bNodeTree &wrapper, const Material &source);
+bool source_group_fill(Main &bmain,
+                       bNodeTree &wrapper,
+                       const Material &source,
+                       bool mapped = false);
 
 /** Delete the private group copies of \a owner_uid that no instance node uses any more. */
 void source_group_paths_prune(Main &bmain, const bUUID &owner_uid);
@@ -291,11 +383,47 @@ bool source_group_structure_hash_get(bNodeTree &wrapper, uint64_t &r_hash);
 bool source_group_normal_live(const Material &source);
 
 /** The hash the source group stores in its topology words: the source's content and the fill's
- * version. */
-uint64_t source_group_content_hash(const Material &source);
+ * version. \a mapped is part of it because a mapped wrapper carries Mapping nodes and their three
+ * interface inputs, so toggling the row's mapping has to refill the group once. */
+uint64_t source_group_content_hash(const Material &source, bool mapped = false);
 
-/** The same without the socket values: what a group filled from the source keeps while they move. */
-uint64_t source_group_structure_hash(const Material &source);
+/** The wrapper interface input whose #INPUT_ROLE_PROP is \a role, whatever its name. */
+bNodeTreeInterfaceSocket *source_group_mapping_input_find(bNodeTree &tree, const char *role);
+
+/** Whether \a tree actually carries a generated row-mapping chain (a source with no UV reader
+ * gets the interface inputs but no chain, and must not be treated as mapped). */
+bool source_group_mapping_present(const bNodeTree &tree);
+
+/* The mapping half of the fill (`paint_layers_generate_source_group_mapping.cc`). */
+
+/** The Group Input of \a tree, created when the copied tree has none. */
+bNode *source_group_group_input_ensure(bNodeTree &tree);
+
+/** The Group Input socket of \a tree's mapping input named by \a role, or null. */
+bNodeSocket *source_group_mapping_input_socket(bNodeTree &tree,
+                                               bNode &group_input,
+                                               const char *role);
+
+/**
+ * Make \a tree one mapped level: the value inputs, the implicit UV wiring and the chain in front
+ * of every UV reader. \return whether a chain was inserted, so a level without a UV reader is not
+ * treated as mapped.
+ */
+bool source_group_mapping_prepare(bNodeTree &tree);
+
+/** Drop the value inputs again once the row applies no mapping (the root keeps its interface). */
+void source_group_mapping_interface_remove(bNodeTree &tree);
+
+/** Relay \a tree's mapping inputs into the child path \a instance. */
+void source_group_mapping_instance_wire(bNodeTree &tree, bNode &group_input, bNode &instance);
+
+/** Whether the colour fed by \a node of \a tree follows the UV the row mapping moved. */
+bool source_group_color_reads_mapped_uv(const bNodeTree &tree, const bNode &node);
+
+/** The same without the socket values: what a group filled from the source keeps while they move.
+ * \a mapped is part of it too: a mapped wrapper carries Mapping nodes, so a toggle must not be
+ * mistaken for a value-only edit by the refresh's in-place sync. */
+uint64_t source_group_structure_hash(const Material &source, bool mapped = false);
 
 /** Remove every node of \a tree, leaving its interface untouched. */
 void tree_clear_nodes(Main &bmain, bNodeTree &tree);

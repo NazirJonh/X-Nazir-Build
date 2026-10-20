@@ -277,6 +277,7 @@ set(SRC
   intern/paint_layers/paint_layers_generate_layout.hh
   intern/paint_layers/paint_layers_generate_regen.cc
   intern/paint_layers/paint_layers_generate_source_group.cc
+  intern/paint_layers/paint_layers_generate_source_group_mapping.cc
   intern/paint_layers/paint_layers_generate_topology.cc
   intern/paint_layers/paint_layers_generate_values.cc
   intern/paint_layers/paint_layers_object_mask.cc

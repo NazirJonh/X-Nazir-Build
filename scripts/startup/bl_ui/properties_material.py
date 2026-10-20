@@ -685,12 +685,13 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
 
 
 class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
-    """UV mapping of the maps the shown row reads: a layer, a correction or a mask item.
+    """UV mapping of the maps and sources the shown row reads: a layer, a correction or a mask item.
 
-    Shown only while the row reads a repeatable map (RNA ``mapping_supported``, the one BKE
-    predicate the graph and the CPU share): a Fill with a map. The rotation turns the map lookup
-    around Z; the tangent-space vectors of a Normal map are rotated (and flipped by the scale sign)
-    to follow it.
+    Shown only while the row reads something the mapping can move (RNA ``mapping_supported``, the
+    one BKE predicate the graph and the CPU share): a Fill with a map, or a Material row with a
+    source material. The rotation turns the lookup around Z; the tangent-space vectors of a Normal
+    map are rotated (and flipped by the scale sign) to follow it. A Material row moves the UV at
+    which its whole source is read, including its live source graph.
     """
 
     bl_idname = "LAYER_MATERIAL_PT_mapping"
@@ -728,6 +729,15 @@ class LAYER_MATERIAL_PT_mapping(LayerMaterialButtonsPanel, Panel):
         sub.prop(row, "mapping_scale_lock", text="", icon_only=True)
         col.prop(row, "mapping_rotation", text="Rotation")
         col.prop(row, "mapping_wrap", text="UV Wrap")
+
+        if row.mapping_enabled and row.source == 'MATERIAL':
+            # The wrapper moves the active UV layer (TexCoord UV and open Image Textures) of the
+            # source tree and of the groups on the path to its Principled BSDF; a coordinate-driven
+            # procedural texture, a named UV Map node and a group beside that path keep their own input.
+            note = layout.column(align=True)
+            note.enabled = False
+            note.label(text="Only the active UV of the main shader path is mapped", icon='BLANK1')
+            note.label(text="Procedural, named-UV and side-group textures are not", icon='BLANK1')
 
 
 class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):

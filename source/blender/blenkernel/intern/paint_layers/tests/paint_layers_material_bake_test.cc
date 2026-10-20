@@ -14,10 +14,17 @@
 
 #include "paint_layers_generate_test_fixture.hh"
 
+#include <array>
+
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_node_tree_interface.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
+
+#include "NOD_socket.hh"
+
+#include "DNA_node_tree_interface_types.h"
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_intern.hh"
@@ -211,6 +218,44 @@ TEST_F(PaintLayersMaterialBakeTest, a_row_shows_the_plain_values_of_its_source_b
       BKE_paint_layers_material_channel_needs_render(*ma, *row, PAINT_MATERIAL_CHANNEL_METALLIC));
   EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
   EXPECT_TRUE(BKE_paint_layers_material_row_due(*ma, *row));
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_material_row_carries_its_mapping_into_the_source_wrapper)
+{
+  /* A UV reader: an Image Texture with an open Vector, so the row's mapping has something to move
+   * while the source stays wrappable through its Principled. */
+  texture_link(*source, *add_image("MappingSource"), "Metallic");
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+  EXPECT_TRUE(BKE_paint_layers_mapping_supported(*ma, *row));
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  EXPECT_TRUE(BKE_paint_layers_mapping_applies(*ma, *row));
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *wrapper = source_group_of(*row);
+  ASSERT_NE(wrapper, nullptr);
+  /* The wrapper carries the three values the row group relays into it, so a slider edit is a
+   * value edit and never a rebuild. */
+  EXPECT_NE(paint_layers::source_group_mapping_input_find(
+                *wrapper, paint_layers::SOURCE_GROUP_ROLE_MAPPING_OFFSET),
+            nullptr);
+  EXPECT_NE(paint_layers::source_group_mapping_input_find(
+                *wrapper, paint_layers::SOURCE_GROUP_ROLE_MAPPING_SCALE),
+            nullptr);
+  EXPECT_NE(paint_layers::source_group_mapping_input_find(
+                *wrapper, paint_layers::SOURCE_GROUP_ROLE_MAPPING_ROTATION),
+            nullptr);
+
+  /* Disabling it drops the inputs again and the next regeneration refills the wrapper unmapped. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, false));
+  EXPECT_FALSE(BKE_paint_layers_mapping_applies(*ma, *row));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  wrapper = source_group_of(*row);
+  ASSERT_NE(wrapper, nullptr);
+  EXPECT_EQ(paint_layers::source_group_mapping_input_find(
+                *wrapper, paint_layers::SOURCE_GROUP_ROLE_MAPPING_OFFSET),
+            nullptr);
+  EXPECT_FALSE(paint_layers::source_group_mapping_present(*wrapper));
 }
 
 TEST_F(PaintLayersMaterialBakeTest, the_maps_handed_over_are_what_the_row_takes_part_through)
@@ -1069,6 +1114,316 @@ TEST_F(PaintLayersMaterialBakeTest, the_edited_row_waits_for_a_map_only_the_rend
   const float delay = BKE_paint_layers_source_edit_delay(*ma, *source);
   EXPECT_GT(delay, 0.0f) << "a Bump has no live form: its map is rendered after the hand stops";
   EXPECT_LT(delay, 5.0f) << "shorter than the delay of the Image Editor's preview";
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row UV mapping
+ * \{ */
+
+/** A Texture Coordinate whose UV feeds the Vector input of \a tex. */
+static bNode *tex_coord_feed(bNodeTree &tree, bNode &tex)
+{
+  bNode *coord = bke::node_add_static_node(nullptr, tree, SH_NODE_TEX_COORD);
+  bke::node_add_link(tree,
+                     *coord,
+                     *bke::node_find_socket(*coord, SOCK_OUT, "UV"_ustr),
+                     tex,
+                     *bke::node_find_socket(tex, SOCK_IN, "Vector"_ustr));
+  return coord;
+}
+
+TEST_F(PaintLayersMaterialBakeTest, uv_readers_are_found_by_their_links_and_not_by_their_presence)
+{
+  /* A source of plain values reads no UV at all. */
+  EXPECT_FALSE(paint_layers::uv_readers_find(*source->nodetree).any());
+  EXPECT_FALSE(BKE_paint_layers_source_reads_uv(*source));
+
+  /* A texture feeding the shader with an open Vector samples the active UV. */
+  bNode *tex = texture_link(*source, *add_image("Reader"), "Metallic");
+  paint_layers::UvReaders readers = paint_layers::uv_readers_find(*source->nodetree);
+  EXPECT_TRUE(readers.sources.is_empty());
+  ASSERT_EQ(readers.open_images.size(), 1);
+  EXPECT_EQ(readers.open_images[0], tex);
+  EXPECT_TRUE(BKE_paint_layers_source_reads_uv(*source));
+
+  /* Fed from a Texture Coordinate it is no longer open: the coordinate is the reader. */
+  bNode *coord = tex_coord_feed(*source->nodetree, *tex);
+  BKE_paint_layers_source_material_hash_forget(*source);
+  readers = paint_layers::uv_readers_find(*source->nodetree);
+  EXPECT_TRUE(readers.open_images.is_empty());
+  ASSERT_EQ(readers.sources.size(), 1);
+  EXPECT_EQ(readers.sources[0], coord);
+  EXPECT_TRUE(BKE_paint_layers_source_reads_uv(*source));
+}
+
+TEST_F(PaintLayersMaterialBakeTest, an_orphan_texture_and_a_named_uv_map_read_nothing_the_row_moves)
+{
+  Material *other = BKE_material_add(bmain, "Other");
+  principled_source_set_up(*other, /*graphs=*/false);
+  bNodeTree &ntree = *other->nodetree;
+
+  /* Not connected to the shader: not part of it. */
+  bke::node_add_static_node(nullptr, ntree, SH_NODE_TEX_IMAGE);
+  EXPECT_FALSE(paint_layers::uv_readers_find(ntree).any());
+
+  /* A named layer is the source's own; the texture's Vector is not open either. */
+  bNode *tex = texture_link(*other, *add_image("Named"), "Metallic");
+  bNode *uv_map = bke::node_add_static_node(nullptr, ntree, SH_NODE_UVMAP);
+  STRNCPY(static_cast<NodeShaderUVMap *>(uv_map->storage)->uv_map, "Other UV");
+  bke::node_add_link(ntree,
+                     *uv_map,
+                     *bke::node_find_socket(*uv_map, SOCK_OUT, "UV"_ustr),
+                     *tex,
+                     *bke::node_find_socket(*tex, SOCK_IN, "Vector"_ustr));
+  BKE_paint_layers_source_material_hash_forget(*other);
+  EXPECT_FALSE(paint_layers::uv_readers_find(ntree).any());
+  EXPECT_FALSE(BKE_paint_layers_source_reads_uv(*other));
+
+  /* The same node with no layer named is the active UV. */
+  static_cast<NodeShaderUVMap *>(uv_map->storage)->uv_map[0] = '\0';
+  BKE_paint_layers_source_material_hash_forget(*other);
+  EXPECT_EQ(paint_layers::uv_readers_find(ntree).sources.size(), 1);
+  EXPECT_TRUE(BKE_paint_layers_source_reads_uv(*other));
+}
+
+TEST_F(PaintLayersMaterialBakeTest, the_mapped_flag_moves_both_source_group_hashes)
+{
+  EXPECT_NE(paint_layers::source_group_content_hash(*source, false),
+            paint_layers::source_group_content_hash(*source, true));
+  EXPECT_NE(paint_layers::source_group_structure_hash(*source, false),
+            paint_layers::source_group_structure_hash(*source, true));
+  EXPECT_EQ(paint_layers::source_group_content_hash(*source, true),
+            paint_layers::source_group_content_hash(*source, true))
+      << "the same flag over the same source is the same hash: a slider never refills";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, the_mapping_chain_is_marked_and_a_plain_node_is_not)
+{
+  bNodeTree *tree = bke::node_tree_add_tree(bmain, "MappingChain", "ShaderNodeTree");
+  ASSERT_NE(tree, nullptr);
+  bNode *coord = bke::node_add_static_node(nullptr, *tree, SH_NODE_TEX_COORD);
+  bNodeSocket *uv = bke::node_find_socket(*coord, SOCK_OUT, "UV"_ustr);
+  ASSERT_NE(uv, nullptr);
+
+  const paint_layers::MappingChain chain = paint_layers::mapping_chain_add(
+      *tree, *coord, *uv, nullptr, nullptr, nullptr, nullptr);
+  ASSERT_NE(chain.rotate, nullptr);
+  ASSERT_NE(chain.mapping, nullptr);
+  EXPECT_TRUE(paint_layers::node_is_mapping_chain(*chain.rotate));
+  EXPECT_TRUE(paint_layers::node_is_mapping_chain(*chain.mapping));
+  EXPECT_FALSE(paint_layers::node_is_mapping_chain(*coord))
+      << "the marker, not the name, tells a generated node from the source's own";
+
+  /* UV -> Rotate -> Mapping. */
+  int links_into_chain = 0;
+  for (const bNodeLink &link : tree->links) {
+    if (link.tonode == chain.rotate && link.fromnode == coord) {
+      links_into_chain++;
+    }
+    if (link.tonode == chain.mapping && link.fromnode == chain.rotate) {
+      links_into_chain++;
+    }
+  }
+  EXPECT_EQ(links_into_chain, 2);
+}
+
+TEST_F(PaintLayersMaterialBakeTest, the_normal_remap_builds_in_a_tree_with_no_topology_cache)
+{
+  /* The regression of a crash: nothing here may ask a socket for its owner node, the tree being
+   * built has no cache for it. */
+  bNodeTree *tree = bke::node_tree_add_tree(bmain, "NormalRemap", "ShaderNodeTree");
+  ASSERT_NE(tree, nullptr);
+  bNode *tex = bke::node_add_static_node(nullptr, *tree, SH_NODE_TEX_IMAGE);
+  bNodeSocket *color = bke::node_find_socket(*tex, SOCK_OUT, "Color"_ustr);
+  ASSERT_NE(color, nullptr);
+  bNode *coord = bke::node_add_static_node(nullptr, *tree, SH_NODE_TEX_COORD);
+  bNodeSocket *uv = bke::node_find_socket(*coord, SOCK_OUT, "UV"_ustr);
+
+  Vector<bNode *> made;
+  bNode *encode = nullptr;
+  bNodeSocket *encoded = paint_layers::normal_remap_nodes_add(
+      *tree, *tex, *color, coord, uv, coord, uv, made, encode);
+  ASSERT_NE(encoded, nullptr);
+  EXPECT_EQ(made.size(), 5);
+  ASSERT_NE(encode, nullptr);
+  EXPECT_EQ(made.last(), encode);
+
+  /* With no rotation and no scale it is still complete: the identity transform. */
+  Vector<bNode *> made_plain;
+  bNode *encode_plain = nullptr;
+  EXPECT_NE(paint_layers::normal_remap_nodes_add(
+                *tree, *tex, *color, nullptr, nullptr, nullptr, nullptr, made_plain, encode_plain),
+            nullptr);
+  EXPECT_EQ(made_plain.size(), 5);
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_mapped_wrapper_feeds_its_open_texture_through_the_chain)
+{
+  texture_link(*source, *add_image("MappedSource"), "Metallic");
+  MaterialPaintLayer *row = add_material_row(*source, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *wrapper = source_group_of(*row);
+  ASSERT_NE(wrapper, nullptr);
+  EXPECT_TRUE(paint_layers::source_group_mapping_present(*wrapper));
+  const bNode *tex = node_of_type(*wrapper, SH_NODE_TEX_IMAGE);
+  ASSERT_NE(tex, nullptr);
+  const bNodeSocket *vector = bke::node_find_socket(*tex, SOCK_IN, "Vector"_ustr);
+  ASSERT_NE(vector, nullptr);
+  bool fed_by_chain = false;
+  for (const bNodeLink &link : wrapper->links) {
+    if (link.tosock == vector && paint_layers::node_is_mapping_chain(*link.fromnode)) {
+      fed_by_chain = true;
+    }
+  }
+  EXPECT_TRUE(fed_by_chain) << "the texture's open Vector reads the UV the row mapping moved";
+}
+
+/**
+ * A material whose Principled BSDF sits inside a group: Group -> Material Output. The group's
+ * tree is \a r_group, which the caller may add nodes to.
+ */
+static Material *grouped_source_add(Main &bmain, bNodeTree *&r_group, bNode *&r_principled)
+{
+  Material *material = BKE_material_add(&bmain, "Grouped");
+  bNodeTree &root = *material->nodetree;
+  bNodeTree *group = bke::node_tree_add_tree(&bmain, "PathGroup", "ShaderNodeTree");
+  bNodeTreeInterfaceSocket *iface = group->tree_interface.add_socket(
+      "BSDF", "", "NodeSocketShader", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
+  bNode *principled = bke::node_add_static_node(nullptr, *group, SH_NODE_BSDF_PRINCIPLED);
+  bNode *group_out = bke::node_add_node(nullptr, *group, "NodeGroupOutput"_ustr);
+  nodes::update_node_declaration_and_sockets(*group, *group_out);
+  bke::node_add_link(*group,
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
+                     *group_out,
+                     *bke::node_find_socket(
+                         *group_out, SOCK_IN, UString::from_ptr_noinline(iface->identifier)));
+
+  bNode *instance = bke::node_add_node(nullptr, root, root.typeinfo->group_idname);
+  instance->id = &group->id;
+  id_us_plus(&group->id);
+  nodes::update_node_declaration_and_sockets(root, *instance);
+  bNode *output = bke::node_add_static_node(nullptr, root, SH_NODE_OUTPUT_MATERIAL);
+  bke::node_add_link(root,
+                     *instance,
+                     *bke::node_find_socket(
+                         *instance, SOCK_OUT, UString::from_ptr_noinline(iface->identifier)),
+                     *output,
+                     *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
+  r_group = group;
+  r_principled = principled;
+  return material;
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_group_on_the_path_to_the_principled_is_a_level_the_mapping_moves)
+{
+  bNodeTree *group = nullptr;
+  bNode *principled = nullptr;
+  Material *grouped = grouped_source_add(*bmain, group, principled);
+  ASSERT_NE(group, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_source_reads_uv(*grouped));
+
+  /* An image with an open Vector inside the group feeds the Principled: the fill copies that
+   * level privately and puts the chain in front of it. */
+  bNode *tex = bke::node_add_static_node(nullptr, *group, SH_NODE_TEX_IMAGE);
+  tex->id = &add_image("InGroup")->id;
+  bke::node_add_link(*group,
+                     *tex,
+                     *bke::node_find_socket(*tex, SOCK_OUT, "Color"_ustr),
+                     *principled,
+                     *bke::node_find_socket(*principled, SOCK_IN, "Metallic"_ustr));
+  BKE_paint_layers_source_material_hash_forget(*grouped);
+  EXPECT_TRUE(paint_layers::uv_readers_find(*group).any());
+  EXPECT_TRUE(BKE_paint_layers_source_reads_uv(*grouped));
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_group_beside_the_path_is_shared_and_its_uv_read_is_not_offered)
+{
+  Material *other = BKE_material_add(bmain, "Beside");
+  principled_source_set_up(*other, /*graphs=*/false);
+  bNodeTree &root = *other->nodetree;
+
+  /* A group that reads the UV, used by a node of the root that is not on the Principled's path. */
+  bNodeTree *side = bke::node_tree_add_tree(bmain, "SideGroup", "ShaderNodeTree");
+  bNode *tex = bke::node_add_static_node(nullptr, *side, SH_NODE_TEX_IMAGE);
+  tex->id = &add_image("InSide")->id;
+  bNode *math = bke::node_add_static_node(nullptr, *side, SH_NODE_MATH);
+  bke::node_add_link(*side,
+                     *tex,
+                     *bke::node_find_socket(*tex, SOCK_OUT, "Alpha"_ustr),
+                     *math,
+                     *bke::node_find_socket(*math, SOCK_IN, "Value"_ustr));
+  bNode *instance = bke::node_add_node(nullptr, root, root.typeinfo->group_idname);
+  instance->id = &side->id;
+  id_us_plus(&side->id);
+  BKE_paint_layers_source_material_hash_forget(*other);
+
+  EXPECT_TRUE(paint_layers::uv_readers_find(*side).any())
+      << "the group does read the UV: it is the walk, not the finder, that leaves it out";
+  EXPECT_FALSE(BKE_paint_layers_source_reads_uv(*other))
+      << "a group beside the path is shared as is, so its read is never moved";
+}
+
+TEST_F(PaintLayersMaterialBakeTest, a_clipping_wrap_reaches_the_cpu_coverage_and_the_graph_alike)
+{
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      bmain, 8, 8, "Red", 32, false, IMA_GENTYPE_BLANK, red, false, false, false);
+  Material *textured = BKE_material_add(bmain, "Textured");
+  principled_source_set_up(*textured, /*graphs=*/false);
+  texture_link(*textured, *image, "Base Color");
+
+  MaterialPaintLayer *row = add_material_row(*textured, MA_PAINT_LAYER_BAKE_AUTO);
+  ASSERT_NE(row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_enabled(*ma, row, true));
+  /* Scale two: the source covers the lower-left quarter of the canvas once. */
+  const float scale[2] = {2.0f, 2.0f};
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_scale(*ma, row, scale));
+
+  float bottom[4];
+  BKE_paint_layers_channel_bottom_color(PAINT_MATERIAL_CHANNEL_BASE_COLOR, bottom);
+  const auto composite_at = [&](const int x, const int y) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(
+        BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    EXPECT_FALSE(layers.is_empty());
+    int width = 0;
+    int height = 0;
+    EXPECT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+    Vector<float> linear(int64_t(width) * height * 4);
+    EXPECT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers, PaintMaterialCompositeLinearTarget::frame(linear, width), nullptr, nullptr, bottom));
+    const float *p = linear.data() + (int64_t(y) * width + x) * 4;
+    return std::array<float, 4>{p[0], p[1], p[2], p[3]};
+  };
+
+  /* Repeat: the pattern tiles, so the far corner is the source too. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT));
+  EXPECT_NEAR(composite_at(6, 6)[0], 1.0f, 1e-3f);
+  EXPECT_NEAR(composite_at(6, 6)[1], 0.0f, 1e-3f);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  ASSERT_NE(ma->paint_layers_tree, nullptr);
+  const int repeat_clip_nodes = count_type(*ma->paint_layers_tree, SH_NODE_SEPXYZ);
+
+  /* Clip: the CPU leaves the far corner to what is below, and the graph gains its clip factor. */
+  ASSERT_TRUE(BKE_paint_layers_mapping_set_wrap(*ma, row, MA_PAINT_LAYER_MAPPING_WRAP_CLIP));
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_FALSE(layers.is_empty());
+  EXPECT_TRUE(layers.last().mapping_clips_coverage);
+  EXPECT_NEAR(composite_at(1, 1)[0], 1.0f, 1e-3f) << "inside the square the source is shown";
+  EXPECT_NEAR(composite_at(1, 1)[1], 0.0f, 1e-3f);
+  EXPECT_NEAR(composite_at(6, 6)[0], bottom[0], 1e-3f) << "outside it the rows below show";
+  EXPECT_NEAR(composite_at(6, 6)[1], bottom[1], 1e-3f);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_GT(count_type(*ma->paint_layers_tree, SH_NODE_SEPXYZ), repeat_clip_nodes)
+      << "the same setting adds the generated graph's clip factor";
 }
 
 /** \} */

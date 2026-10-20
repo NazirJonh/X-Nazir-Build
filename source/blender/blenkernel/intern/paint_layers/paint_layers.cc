@@ -2253,6 +2253,47 @@ bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Mate
   return true;
 }
 
+bool BKE_paint_layers_material_source_can_make_local(const Material &ma,
+                                                     const MaterialPaintLayer *layer)
+{
+  if (!paint_layer_in_stack(ma, layer) || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return false;
+  }
+  /* A linked or overridden stack is not the user's to edit; localizing a source under it would
+   * also leave a linked ID reading a local one. */
+  if (!ID_IS_EDITABLE(&ma.id) || ID_IS_OVERRIDE_LIBRARY(&ma.id)) {
+    return false;
+  }
+  const Material *source = layer->material;
+  /* Only a directly linked source, the same rule the Outliner's Localize uses. */
+  return source != nullptr && ID_IS_LINKED(&source->id) && (source->id.tag & ID_TAG_EXTERN) != 0;
+}
+
+Material *BKE_paint_layers_material_source_make_local(Main &bmain,
+                                                      Material &ma,
+                                                      MaterialPaintLayer *layer)
+{
+  if (!BKE_paint_layers_material_source_can_make_local(ma, layer)) {
+    return nullptr;
+  }
+  ID &linked_id = layer->material->id;
+  if (!BKE_lib_id_make_local(&bmain, &linked_id, LIB_ID_MAKELOCAL_ASSET_DATA_CLEAR)) {
+    return nullptr;
+  }
+  /* A copy leaves its `newid` on the linked original; the remap is done, so drop it like the
+   * Outliner's Localize does. */
+  BKE_id_newptr_and_tag_clear(&linked_id);
+  /* Localizing either strips the library from the ID in place or copies it and remaps every user,
+   * including this row. Reading the row back is what tells which of the two happened. */
+  Material *local = layer->material;
+  if (local == nullptr || ID_IS_LINKED(&local->id)) {
+    return nullptr;
+  }
+  /* The generated tree may still name the linked ID, and the bake hash covers the source. */
+  BKE_paint_layers_tag_edited(ma);
+  return local;
+}
+
 void BKE_paint_layers_base_color_get(const MaterialPaintLayer &layer, float r_color[4])
 {
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(

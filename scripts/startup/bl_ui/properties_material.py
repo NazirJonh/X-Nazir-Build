@@ -769,6 +769,8 @@ class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
         source = layer.material
         if source.library is not None:
             layout.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
+            layout.operator("paint.layer_source_make_local",
+                            text="Make Local", icon='LIBRARY_DATA_DIRECT')
             return
         if source.node_tree is None:
             layout.label(text="The source has no nodes", icon='INFO')

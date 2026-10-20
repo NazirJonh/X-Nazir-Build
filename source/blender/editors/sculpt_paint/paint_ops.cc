@@ -961,6 +961,61 @@ void PAINT_OT_layer_target_mode_set(wmOperatorType *ot)
                           "Target to switch to");
 }
 
+/** The Material row whose source the properties editor wants to make editable. */
+static MaterialPaintLayer *paint_layer_source_make_local_layer(bContext *C, Material **r_ma)
+{
+  Object *ob = CTX_data_active_object(C);
+  Material *ma = BKE_paint_layers_active_material_get(ob);
+  MaterialPaintLayer *layer = (ma != nullptr) ? BKE_paint_layers_active_layer_get(*ma) : nullptr;
+  if (ma == nullptr || layer == nullptr ||
+      !BKE_paint_layers_material_source_can_make_local(*ma, layer))
+  {
+    return nullptr;
+  }
+  if (r_ma != nullptr) {
+    *r_ma = ma;
+  }
+  return layer;
+}
+
+static bool paint_layer_source_make_local_poll(bContext *C)
+{
+  return paint_layer_source_make_local_layer(C, nullptr) != nullptr;
+}
+
+static wmOperatorStatus paint_layer_source_make_local_exec(bContext *C, wmOperator *op)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *layer = paint_layer_source_make_local_layer(C, &ma);
+  if (layer == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "The active Material layer has no linked source to make local");
+    return OPERATOR_CANCELLED;
+  }
+  Material *local = BKE_paint_layers_material_source_make_local(*CTX_data_main(C), *ma, layer);
+  if (local == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "The source material could not be made local");
+    return OPERATOR_CANCELLED;
+  }
+  /* The row, the properties tab that shows the source's nodes and the source itself all changed. */
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, ma);
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, local);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_layer_source_make_local(wmOperatorType *ot)
+{
+  ot->name = "Make Source Material Local";
+  ot->idname = "PAINT_OT_layer_source_make_local";
+  ot->description =
+      "Make the material the active Material layer reads local to this file, so it can be edited";
+
+  ot->exec = paint_layer_source_make_local_exec;
+  ot->poll = paint_layer_source_make_local_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
 /** Toggle the scale lock of the row the Mapping panel and the gizmo edit. */
 static bool layer_mapping_scale_lock_toggle_poll(bContext *C)
 {
@@ -3105,6 +3160,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);
   WM_operatortype_append(PAINT_OT_layer_target_mode_set);
+  WM_operatortype_append(PAINT_OT_layer_source_make_local);
   WM_operatortype_append(PAINT_OT_layer_mapping_scale_lock_toggle);
   WM_operatortype_append(PAINT_OT_stack_layer_copy);
   WM_operatortype_append(PAINT_OT_stack_layer_paste);

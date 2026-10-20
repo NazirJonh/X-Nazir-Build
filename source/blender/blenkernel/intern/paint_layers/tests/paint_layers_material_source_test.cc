@@ -10,6 +10,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
+#include "BKE_main_namemap.hh"
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
@@ -28,6 +29,7 @@
 #include "BLO_writefile.hh"
 
 #include "DNA_ID.h"
+#include "DNA_library_types.h"
 #include "DNA_material_types.h"
 
 namespace blender::bke::tests {
@@ -67,6 +69,15 @@ class PaintLayersMaterialSource : public bke::BlenderGTestBase {
     params.anchor = anchor;
     return BKE_paint_layers_add_with_policy(owner, params);
   }
+
+  /** Move \a id into \a lib, keeping the name map consistent. */
+  void id_move_to_library(ID &id, Library *lib)
+  {
+    BKE_main_namemap_remove_id(*bmain, id);
+    id.lib = lib;
+    id.tag |= ID_TAG_EXTERN;
+    BKE_main_namemap_get_unique_name(*bmain, id, id.name + 2);
+  }
 };
 
 TEST_F(PaintLayersMaterialSource, a_material_row_reads_its_source_and_owns_no_record)
@@ -94,6 +105,28 @@ TEST_F(PaintLayersMaterialSource, a_material_row_reads_its_source_and_owns_no_re
   EXPECT_EQ(BKE_paint_layers_channel_add(*owner, row, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
   EXPECT_EQ(row->channels_num, 0);
   EXPECT_FALSE(BKE_paint_layers_row_is_paintable(*row));
+}
+
+TEST_F(PaintLayersMaterialSource, a_linked_source_can_be_made_local_and_the_row_follows)
+{
+  Material *owner = layered_material_add("Owner");
+  Material *source = BKE_material_add(bmain, "Rust");
+  MaterialPaintLayer *row = material_row_add(*owner, *source);
+  ASSERT_NE(row, nullptr);
+
+  Library *lib = BKE_id_new<Library>(bmain, "SourceLibrary");
+  id_move_to_library(source->id, lib);
+  ASSERT_TRUE(ID_IS_LINKED(&source->id));
+
+  Material *local = BKE_paint_layers_material_source_make_local(*bmain, *owner, row);
+  ASSERT_NE(local, nullptr);
+  EXPECT_FALSE(ID_IS_LINKED(&local->id));
+  EXPECT_EQ(local->lib, nullptr);
+  /* Localizing may strip the library in place or copy and remap; either way the row reads the
+   * local material, never the linked one. */
+  EXPECT_EQ(row->material, local);
+  EXPECT_EQ(BKE_paint_layers_material_source_make_local(*bmain, *owner, row), nullptr)
+      << "A source that is already local has nothing to localize";
 }
 
 TEST_F(PaintLayersMaterialSource, an_add_without_a_usable_source_is_refused)

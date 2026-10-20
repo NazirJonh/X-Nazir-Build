@@ -882,6 +882,30 @@ PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaint
  */
 bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source);
 
+/**
+ * Whether the material \a layer reads is a directly linked source that
+ * #BKE_paint_layers_material_source_make_local can take: \a layer is a Material row of an editable,
+ * non-override \a ma. A source that is merely an indirect dependency is not the user's to take.
+ */
+bool BKE_paint_layers_material_source_can_make_local(const Material &ma,
+                                                     const MaterialPaintLayer *layer);
+
+/**
+ * Make the material \a layer reads local to this file, so its nodes can be edited in place.
+ *
+ * A Material row can read a material that lives in another library, which the properties editor
+ * shows but cannot edit. Localizing it either strips the library from the ID in place or copies it
+ * and remaps its users -- this row included -- so \a layer is the authority on which material it
+ * now reads. Only a source #BKE_paint_layers_material_source_can_make_local accepts is taken, the
+ * same rule the Outliner's Localize uses.
+ *
+ * \return the local material the row now reads, or null when \a layer reads no such material or the
+ *         source could not be made local.
+ */
+Material *BKE_paint_layers_material_source_make_local(Main &bmain,
+                                                      Material &ma,
+                                                      MaterialPaintLayer *layer);
+
 /* -------------------------------------------------------------------- */
 /** \name Material rows: maps rendered from the source
  *

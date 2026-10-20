@@ -276,6 +276,29 @@ void paint_row_value_target_set(StackRow &row,
   row.value_inherited = (settings.opacity == 1.0f);
 }
 
+/**
+ * Point the mode column at the per-channel blend of \a layer for \a channel, so the header's
+ * channel cursor edits that channel alone. Inherit is the row's own blend, so the control dims
+ * until the user picks another mode; the Normal channel's Mix is its combine rather than an
+ * inherited value, so it stays bright.
+ */
+void paint_row_mode_target_set(StackRow &row,
+                               const Material &material,
+                               const MaterialPaintLayer &layer,
+                               const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return;
+  }
+  const MaterialPaintLayerChannelSettings &settings = layer.channel_settings[channel];
+  row.mode_ptr = RNA_pointer_create_discrete(
+      &const_cast<Material &>(material).id,
+      RNA_struct_find("MaterialPaintLayerChannelSettings"),
+      const_cast<MaterialPaintLayerChannelSettings *>(&settings));
+  row.mode_prop = "blend_type";
+  row.mode_inherited = settings.blend < 0 && channel != PAINT_MATERIAL_CHANNEL_NORMAL;
+}
+
 
 /** Whether \a layer is an adjustment: a filter that is a row of the stack. */
 static bool paint_layer_row_is_adjustment_view(const MaterialPaintLayer &layer)
@@ -370,9 +393,8 @@ StackRow paint_correction_row_build(const Material &material,
     paint_issue_slots_append(issues, owner_marker, effect.marker, row);
     return row;
   }
-  row.mode_ptr = effect_ptr;
-  row.mode_prop = "blend_type";
-  row.mode_inherited = (effect.blend == MA_PAINT_LAYER_BLEND_MIX);
+  /* The mode column edits the blend of this channel alone, like the value column above. */
+  paint_row_mode_target_set(row, material, effect, channel);
 
   /* The slot shows the correction's first map, blank or not, and switches the brush to content. A
    * Fill correction is its colour while it has no map: the swatch a Fill layer shows, with the same
@@ -544,11 +566,9 @@ void paint_stack_rows_append(const Material &material,
     row.value_inherited = (layer.opacity == 1.0f);
     paint_row_value_target_set(row, material, layer, channel);
 
-    /* The mode column edits how the row blends over what is below it; Mix is the inherited
-     * default, so the control dims until the user picks another mode. */
-    row.mode_ptr = layer_ptr;
-    row.mode_prop = "blend_type";
-    row.mode_inherited = (layer.blend == MA_PAINT_LAYER_BLEND_MIX);
+    /* The mode column edits how the row blends over what is below it in the selected channel;
+     * Inherit is the row's own blend, so the control dims until the user picks another mode. */
+    paint_row_mode_target_set(row, material, layer, channel);
 
     if (folder) {
       /* A folder is what it holds: it has no map, so no channel slot. Its content section is the
@@ -849,6 +869,7 @@ class PaintLayersStackSource final : public StackSource,
       hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(layer.opacity));
       for (const MaterialPaintLayerChannelSettings &settings : layer.channel_settings) {
         hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(settings.opacity));
+        hash = hash * 1000003u ^ uint64_t(uint8_t(settings.blend));
       }
       for (const char *ch = layer.name; *ch != '\0'; ch++) {
         hash = hash * 131u ^ uint64_t(uint8_t(*ch));
@@ -907,6 +928,7 @@ class PaintLayersStackSource final : public StackSource,
         hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(effect.opacity));
         for (const MaterialPaintLayerChannelSettings &settings : effect.channel_settings) {
           hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(settings.opacity));
+          hash = hash * 1000003u ^ uint64_t(uint8_t(settings.blend));
         }
         for (const char *ch = effect.name; *ch != '\0'; ch++) {
           hash = hash * 131u ^ uint64_t(uint8_t(*ch));

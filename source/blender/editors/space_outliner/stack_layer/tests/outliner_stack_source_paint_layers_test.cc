@@ -282,9 +282,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_fill_correction_row_is_its_colour_s
   EXPECT_FALSE(rows[1].preview_slots[0].is_color_swatch);
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, value_column_edits_the_row_opacity)
+TEST_F(OutlinerStackPaintLayersSourceTest, value_column_edits_the_selected_channels_opacity)
 {
-  add_layer("A");
+  MaterialPaintLayer *layer = add_layer("A");
   Vector<StackRow> rows;
   paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
   ASSERT_EQ(rows.size(), 1u);
@@ -294,11 +294,47 @@ TEST_F(OutlinerStackPaintLayersSourceTest, value_column_edits_the_row_opacity)
   /* A row left at its default reads as inherited rather than deliberately set. */
   EXPECT_TRUE(rows[0].value_inherited);
 
-  BKE_paint_layers_set_opacity(*material, BKE_paint_layers_find(*material, rows[0].stable_id), 0.5f);
+  ASSERT_TRUE(BKE_paint_layers_channel_opacity_set(
+      *material, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, 0.5f));
   rows.clear();
   paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
   ASSERT_EQ(rows.size(), 1u);
   EXPECT_FALSE(rows[0].value_inherited);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, mode_column_edits_the_selected_channels_blend)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  ASSERT_TRUE(rows[0].mode_ptr.has_value());
+  ASSERT_NE(rows[0].mode_prop, nullptr);
+  EXPECT_STREQ(rows[0].mode_prop, "blend_type");
+  EXPECT_EQ(static_cast<const MaterialPaintLayerChannelSettings *>(rows[0].mode_ptr->data),
+            &layer->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
+  /* Inherit is the row's own blend, so the control dims until the user picks another mode. */
+  EXPECT_TRUE(rows[0].mode_inherited);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *material, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_ADD));
+  /* The row's own blend is the base the other channels inherit, not what the column wrote. */
+  EXPECT_EQ(layer->blend, MA_PAINT_LAYER_BLEND_MIX);
+  EXPECT_EQ(layer->channel_settings[PAINT_MATERIAL_CHANNEL_BASE_COLOR].blend,
+            MA_PAINT_LAYER_BLEND_ADD);
+
+  /* The header's cursor moves the column to the other channel's own pair. */
+  rows.clear();
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_EQ(static_cast<const MaterialPaintLayerChannelSettings *>(rows[0].mode_ptr->data),
+            &layer->channel_settings[PAINT_MATERIAL_CHANNEL_ROUGHNESS]);
+  EXPECT_TRUE(rows[0].mode_inherited);
+
+  rows.clear();
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_FALSE(rows[0].mode_inherited);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, rows_follow_the_stack_order)
@@ -341,11 +377,11 @@ TEST_F(OutlinerStackPaintLayersSourceTest, disabled_row_reports_disabled)
   EXPECT_FALSE(rows[0].enabled);
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, columns_show_value_and_hide_mode)
+TEST_F(OutlinerStackPaintLayersSourceTest, columns_show_value_and_mode)
 {
   const StackColumnLayout layout = source().column_layout();
   EXPECT_GT(layout.value_width, 0.0f);
-  EXPECT_LE(layout.mode_width, 0.0f);
+  EXPECT_GT(layout.mode_width, 0.0f);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, rename_writes_the_row_name)
@@ -487,6 +523,17 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_slot_keeps_the_mask_icon_once_it
   EXPECT_FALSE(mask_slot->is_blank);
   EXPECT_EQ(mask_slot->id_uid, 0u);
   EXPECT_EQ(mask_slot->icon, int(ICON_MOD_MASK));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_a_channel_blend)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  StackReadContext ctx;
+  const uint64_t before = source().state_hash(ctx, material->id);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *material, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  EXPECT_NE(source().state_hash(ctx, material->id), before);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_the_mask)

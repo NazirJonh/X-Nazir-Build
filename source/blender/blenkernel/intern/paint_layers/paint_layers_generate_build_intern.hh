@@ -271,10 +271,14 @@ class PaintLayersTreeBuilder {
                       bool isolated);
 
   /**
-   * The blend node of a row in \a channel: a Normal Combine instance for Normal when the shared
-   * group exists, a Mix otherwise. Empty when its sockets cannot be found.
+   * The blend node of \a row in \a channel: a Normal Combine instance for Normal when the shared
+   * group exists and the channel has not been set to Replace, a Mix otherwise. Empty when its
+   * sockets cannot be found.
    */
-  BlendNode blend_node_add(bNodeTree &tree, int channel, int ramp_blend);
+  BlendNode blend_node_add(bNodeTree &tree,
+                           const MaterialPaintLayer &row,
+                           int channel,
+                           int ramp_blend);
 
   /** `a * b` as a Math node in \a tree; empty when it cannot be built. */
   NodeOutput multiply_nodes_add(bNodeTree &tree, NodeOutput a, NodeOutput b);

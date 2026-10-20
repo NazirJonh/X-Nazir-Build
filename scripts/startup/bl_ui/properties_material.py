@@ -652,6 +652,9 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             return
 
         layout.prop(layer, "opacity", text="Opacity")
+        # The row's own blend is the base a channel inherits; a channel's override is edited in the
+        # Outliner stack, beside its opacity.
+        layout.prop(layer, "blend_type", text="Blend")
         # A Material row owns no channel records: it lays what its source material shows.
         if layer.source == 'MATERIAL':
             layout.separator()
@@ -678,7 +681,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             draw_material_layer_channels(layout, context, owner, layer)
             return
         # A folder holds what its rows hold, so it has no channel records to add: its per-channel
-        # opacity is edited in the Outliner stack, and this tab keeps the overall one.
+        # blend and opacity are edited in the Outliner stack, and this tab keeps the overall ones.
         if layer.source != 'STACK':
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)

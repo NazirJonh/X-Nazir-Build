@@ -951,11 +951,13 @@ NodeOutput PaintLayersTreeBuilder::object_mask_visible_ensure(bNodeTree &tree,
   return visible;
 }
 BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
+                                                 const MaterialPaintLayer &row,
                                                  const int channel,
                                                  const int ramp_blend)
 {
-  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && ctx_.normal_combine_group != nullptr &&
-      tree.typeinfo != nullptr && tree.typeinfo->group_idname != nullptr)
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && !BKE_paint_layers_normal_replace(row) &&
+      ctx_.normal_combine_group != nullptr && tree.typeinfo != nullptr &&
+      tree.typeinfo->group_idname != nullptr)
   {
     bNode *combine = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
     if (combine != nullptr) {
@@ -1459,7 +1461,11 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   }
 
   const BlendNode blend = this->blend_node_add(
-      tree, channel, BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(effect.blend)));
+      tree,
+      effect,
+      channel,
+      BKE_paint_layers_blend_to_ramp(
+          eMaterialPaintLayerBlend(BKE_paint_layers_channel_blend_effective(effect, channel))));
   if (blend.node == nullptr) {
     return discard();
   }
@@ -1485,7 +1491,7 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
    * which is what the CPU composite computes per pixel, and equals the plain blend by f where
    * `a` is one. */
   NodeOutput below = content;
-  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && !BKE_paint_layers_normal_replace(effect)) {
     /* The Normal Combine decodes its first input as a tangent normal, and where the row has no
      * content its colour is the map's empty black, which decodes to `(-1, -1, -1)`: the flat normal
      * stands in by the coverage, as in the CPU. */
@@ -2313,9 +2319,13 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   }
 
   /* The blend over Below. Normal combines two tangent-space maps rather than interpolating their
-   * encoded values, which would flatten the relief; everything else uses the row's own blend. */
+   * encoded values, which would flatten the relief; everything else uses the channel's blend. */
   const BlendNode blend = this->blend_node_add(
-      tree, channel, BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(layer.blend)));
+      tree,
+      layer,
+      channel,
+      BKE_paint_layers_blend_to_ramp(
+          eMaterialPaintLayerBlend(BKE_paint_layers_channel_blend_effective(layer, channel))));
   if (blend.node == nullptr) {
     return {};
   }
@@ -2420,7 +2430,8 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
    * treats the fourth component. Inside a folder it is accumulated pre-multiplied like `P`, with
    * `S_a = P_a / a` where a blend other than Mix reads the straight alpha below. */
   if (track_alpha) {
-    const bool mix_alpha = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(layer.blend)) ==
+    const bool mix_alpha = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(
+                               BKE_paint_layers_channel_blend_effective(layer, channel))) ==
                            MA_RAMP_BLEND;
     Vector<bNode *> alpha_nodes;
     /* `mix(a, b, fac)` as a float Mix node; an empty \a fac covers fully. */

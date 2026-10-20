@@ -125,12 +125,15 @@ bool BKE_paint_layers_folder_is_pass_through(const MaterialPaintLayer &folder)
    * the same only for the Mix blend at full weight. Opacity below one breaks it for two or more
    * children, because scaling the whole isolated result is not scaling each child's own factor.
    * The raw opacity is read on purpose: the enabled flag must not change the mode. */
-  if (folder.blend != MA_PAINT_LAYER_BLEND_MIX || folder.opacity != 1.0f) {
+  if (folder.opacity != 1.0f) {
     return false;
   }
-  /* A channel's own opacity scales the isolated result of that channel for the same reason. */
-  for (const MaterialPaintLayerChannelSettings &settings : folder.channel_settings) {
-    if (settings.opacity != 1.0f) {
+  /* A channel's own blend or opacity recombines or scales the isolated result of that channel for
+   * the same reason. Read directly, not through the enabled flag, so hiding a row keeps the mode. */
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    if (BKE_paint_layers_channel_blend_effective(folder, channel) != MA_PAINT_LAYER_BLEND_MIX ||
+        folder.channel_settings[channel].opacity != 1.0f)
+    {
       return false;
     }
   }
@@ -1797,6 +1800,34 @@ bool BKE_paint_layers_channel_opacity_set(Material &ma,
   return true;
 }
 
+bool BKE_paint_layers_channel_blend_set(Material &ma,
+                                        MaterialPaintLayer &layer,
+                                        const int channel,
+                                        const int blend)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM || !paint_layer_owned(ma, &layer)) {
+    return false;
+  }
+  /* The Normal channel forces its combine in the generator and the CPU, and ignores the row's
+   * blend, so Replace (or inherit, back to the combine) is the only override that takes effect
+   * there. */
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    if (!ELEM(blend, -1, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE)) {
+      return false;
+    }
+  }
+  else if (blend < -1 || blend > MA_PAINT_LAYER_BLEND_VALUE ||
+           blend == MA_PAINT_LAYER_BLEND_NORMAL_COMBINE)
+  {
+    /* Inherit, or one of the user-facing blends; Normal Combine is the Normal channel's own doing. */
+    return false;
+  }
+  layer.channel_settings[channel].blend = int8_t(blend);
+  /* The blend is the type of the generated Mix node, so this is a structural edit. */
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, const float opacity)
 {
   if (!paint_layer_owned(ma, layer)) {
@@ -2098,6 +2129,9 @@ int BKE_paint_layers_blend_to_ramp(const eMaterialPaintLayerBlend blend)
       return MA_RAMP_VAL;
     case MA_PAINT_LAYER_BLEND_NORMAL_COMBINE:
       return MA_RAMP_BLEND;
+    case MA_PAINT_LAYER_BLEND_NORMAL_REPLACE:
+      /* The Normal channel builds a plain Mix for Replace; the code is never read there. */
+      return MA_RAMP_BLEND;
   }
   return MA_RAMP_BLEND;
 }
@@ -2110,8 +2144,9 @@ bool BKE_paint_layers_set_blend(Material &ma,
     return false;
   }
   /* The Normal channel forces the combine operation by itself, and no other channel can express
-   * it; a stored value would only ever be a switch the user cannot make effective. */
-  if (blend == MA_PAINT_LAYER_BLEND_NORMAL_COMBINE) {
+   * it; a stored value would only ever be a switch the user cannot make effective. Replace belongs
+   * to the Normal channel's per-channel setting alone. */
+  if (ELEM(blend, MA_PAINT_LAYER_BLEND_NORMAL_COMBINE, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE)) {
     return false;
   }
   layer->blend = blend;
@@ -2461,6 +2496,21 @@ float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer
     return row_opacity;
   }
   return row_opacity * layer.channel_settings[channel].opacity;
+}
+
+int BKE_paint_layers_channel_blend_effective(const MaterialPaintLayer &layer, const int channel)
+{
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return layer.blend;
+  }
+  const int blend = layer.channel_settings[channel].blend;
+  return (blend < 0) ? layer.blend : blend;
+}
+
+bool BKE_paint_layers_normal_replace(const MaterialPaintLayer &layer)
+{
+  return layer.channel_settings[PAINT_MATERIAL_CHANNEL_NORMAL].blend ==
+         MA_PAINT_LAYER_BLEND_NORMAL_REPLACE;
 }
 
 void BKE_paint_layers_channel_bottom_color(const eMaterialPaintChannel channel, float r_color[4])

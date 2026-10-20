@@ -117,6 +117,35 @@ static const EnumPropertyItem rna_enum_material_paint_layer_blend_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/**
+ * The per (row, channel) blend: -1 is the row's own, the rest are the user-facing blends. The
+ * Normal channel offers its own pair instead, through the item callback; the internal Normal
+ * Combine and Replace are never offered on the other channels.
+ */
+static const EnumPropertyItem rna_enum_material_paint_layer_channel_blend_items[] = {
+    {-1, "INHERIT", 0, "Inherit", "Use the row's blend mode"},
+    {MA_PAINT_LAYER_BLEND_MIX, "MIX", 0, "Mix", "Mix blend"},
+    {MA_PAINT_LAYER_BLEND_MULTIPLY, "MULTIPLY", 0, "Multiply", "Multiply blend"},
+    {MA_PAINT_LAYER_BLEND_OVERLAY, "OVERLAY", 0, "Overlay", "Overlay blend"},
+    {MA_PAINT_LAYER_BLEND_ADD, "ADD", 0, "Add", "Add blend"},
+    {MA_PAINT_LAYER_BLEND_DARKEN, "DARKEN", 0, "Darken", "Darken blend"},
+    {MA_PAINT_LAYER_BLEND_BURN, "BURN", 0, "Color Burn", "Color burn blend"},
+    {MA_PAINT_LAYER_BLEND_LIGHTEN, "LIGHTEN", 0, "Lighten", "Lighten blend"},
+    {MA_PAINT_LAYER_BLEND_SCREEN, "SCREEN", 0, "Screen", "Screen blend"},
+    {MA_PAINT_LAYER_BLEND_DODGE, "DODGE", 0, "Color Dodge", "Color dodge blend"},
+    {MA_PAINT_LAYER_BLEND_SUBTRACT, "SUBTRACT", 0, "Subtract", "Subtract blend"},
+    {MA_PAINT_LAYER_BLEND_DIVIDE, "DIVIDE", 0, "Divide", "Divide blend"},
+    {MA_PAINT_LAYER_BLEND_DIFFERENCE, "DIFFERENCE", 0, "Difference", "Difference blend"},
+    {MA_PAINT_LAYER_BLEND_EXCLUSION, "EXCLUSION", 0, "Exclusion", "Exclusion blend"},
+    {MA_PAINT_LAYER_BLEND_SOFT_LIGHT, "SOFT_LIGHT", 0, "Soft Light", "Soft light blend"},
+    {MA_PAINT_LAYER_BLEND_LINEAR_LIGHT, "LINEAR_LIGHT", 0, "Linear Light", "Linear light blend"},
+    {MA_PAINT_LAYER_BLEND_HUE, "HUE", 0, "Hue", "Hue blend"},
+    {MA_PAINT_LAYER_BLEND_SATURATION, "SATURATION", 0, "Saturation", "Saturation blend"},
+    {MA_PAINT_LAYER_BLEND_COLOR, "COLOR", 0, "Color", "Color blend"},
+    {MA_PAINT_LAYER_BLEND_VALUE, "VALUE", 0, "Value", "Value blend"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 /* Sizes a layered material's maps can take. 8K is left out for now: a stack creates one map per
  * channel per layer, so a size that large is not offered for a whole material. Shared by the
  * material's RNA and #MATERIAL_OT_new_layered's dialog. */
@@ -2664,6 +2693,77 @@ static void rna_MaterialPaintLayerChannelSettings_opacity_set(PointerRNA *ptr, f
   }
 }
 
+static int rna_MaterialPaintLayerChannelSettings_blend_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  return settings->blend;
+}
+
+static void rna_MaterialPaintLayerChannelSettings_blend_set(PointerRNA *ptr, int value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  if (ma == nullptr) {
+    return;
+  }
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (MaterialPaintLayer *row = rna_paint_layer_by_settings(*ma, settings)) {
+    BKE_paint_layers_channel_blend_set(*ma, *row, int(settings - row->channel_settings), value);
+  }
+}
+
+/**
+ * The Normal channel offers two blends of its own: Mix (the Normal Combine group, stored as the
+ * inherit value) and Replace. Every other channel offers the full per-channel list.
+ */
+static const EnumPropertyItem *rna_MaterialPaintLayerChannelSettings_blend_itemf(
+    bContext * /*C*/, PointerRNA *ptr, PropertyRNA * /*prop*/, bool * /*r_free*/)
+{
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  const MaterialPaintLayer *row = (ma != nullptr) ?
+                                      rna_paint_layer_by_settings(*ma, settings) :
+                                      nullptr;
+  if (row == nullptr || int(settings - row->channel_settings) != PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return rna_enum_material_paint_layer_channel_blend_items;
+  }
+  static const EnumPropertyItem normal_blend_items[] = {
+      /* Same identifier as the other channels' inherit item, so a script reads one name for "no
+       * override" on every channel; only the label differs, as the combine is the Normal Mix. */
+      {-1, "INHERIT", 0, "Mix", "Combine the normals (Whiteout)"},
+      {MA_PAINT_LAYER_BLEND_NORMAL_REPLACE,
+       "REPLACE",
+       0,
+       "Replace",
+       "The upper normal covers the lower one"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  return normal_blend_items;
+}
+
+/** Path of one (row, channel) entry below its material, so a property of it can be addressed. */
+static std::optional<std::string> rna_MaterialPaintLayerChannelSettings_path(const PointerRNA *ptr)
+{
+  const Material *ma = reinterpret_cast<const Material *>(ptr->owner_id);
+  const MaterialPaintLayerChannelSettings *settings =
+      static_cast<const MaterialPaintLayerChannelSettings *>(ptr->data);
+  if (ma == nullptr) {
+    return std::nullopt;
+  }
+  MaterialPaintLayer *row = rna_paint_layer_by_settings(const_cast<Material &>(*ma), settings);
+  if (row == nullptr) {
+    return std::nullopt;
+  }
+  std::string row_path;
+  if (!rna_paint_layer_path_find(ma->paint_layers, row, "paint_layers", row_path)) {
+    return std::nullopt;
+  }
+  return fmt::format(
+      "{}.channel_settings[{}]", row_path, int(settings - row->channel_settings));
+}
+
 static void rna_MaterialPaintLayer_channel_settings_begin(CollectionPropertyIterator *iter,
                                                           PointerRNA *ptr)
 {
@@ -3606,9 +3706,11 @@ static void rna_def_material_paint_layer_channel_settings(BlenderRNA *brna)
 {
   StructRNA *srna = RNA_def_struct(brna, "MaterialPaintLayerChannelSettings", nullptr);
   RNA_def_struct_sdna(srna, "MaterialPaintLayerChannelSettings");
+  RNA_def_struct_path_func(srna, "rna_MaterialPaintLayerChannelSettings_path");
   RNA_def_struct_ui_text(srna,
                          "Paint Layer Channel Settings",
-                         "The opacity a paint layer row is laid with in one paint channel");
+                         "The blend and opacity a paint layer row is laid with in one paint "
+                         "channel");
 
   PropertyRNA *prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_funcs(
@@ -3616,6 +3718,21 @@ static void rna_def_material_paint_layer_channel_settings(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Channel", "The paint channel these settings are for");
+
+  prop = RNA_def_property(srna, "blend_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayerChannelSettings_blend_get",
+                              "rna_MaterialPaintLayerChannelSettings_blend_set",
+                              "rna_MaterialPaintLayerChannelSettings_blend_itemf");
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_channel_blend_items);
+  /* Inherit, so "Reset to Default" clears the override instead of storing an explicit Mix (which
+   * on the Normal channel is not even an offered item). */
+  RNA_def_property_enum_default(prop, -1);
+  RNA_def_property_ui_text(prop,
+                           "Blend Mode",
+                           "The channel's own blend, or Inherit to use the row's; the Normal "
+                           "channel offers Mix (combine) or Replace");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_PERCENTAGE);
   RNA_def_property_float_funcs(prop,

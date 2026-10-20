@@ -142,6 +142,55 @@ TEST_F(PaintLayersDescription, channel_opacity_multiplies_the_rows_own_for_every
   EXPECT_FALSE(BKE_paint_layers_channel_opacity_set(*ma, *layer, PAINT_MATERIAL_CHANNEL_NUM, 0.5f));
 }
 
+TEST_F(PaintLayersDescription, channel_blend_overrides_the_rows_own_per_channel)
+{
+  Material *ma = BKE_material_add(bmain, "ChannelBlendMat");
+  ma->paint_layers_flag = MA_PAINT_LAYERED;
+  MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
+  ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_MULTIPLY));
+
+  /* No override reads as the row's own blend. */
+  EXPECT_EQ(BKE_paint_layers_channel_blend_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            MA_PAINT_LAYER_BLEND_MULTIPLY);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_ADD));
+  EXPECT_EQ(BKE_paint_layers_channel_blend_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            MA_PAINT_LAYER_BLEND_ADD);
+  /* The row's own blend and the other channels are untouched. */
+  EXPECT_EQ(layer->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
+  EXPECT_EQ(BKE_paint_layers_channel_blend_effective(*layer, PAINT_MATERIAL_CHANNEL_METALLIC),
+            MA_PAINT_LAYER_BLEND_MULTIPLY);
+
+  /* Inherit puts the channel back on the row's blend. */
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, -1));
+  EXPECT_EQ(BKE_paint_layers_channel_blend_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            MA_PAINT_LAYER_BLEND_MULTIPLY);
+
+  /* The Normal channel has its own two choices: the combine (inherit) and Replace. */
+  EXPECT_FALSE(BKE_paint_layers_channel_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  EXPECT_FALSE(BKE_paint_layers_normal_replace(*layer));
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
+  EXPECT_TRUE(BKE_paint_layers_normal_replace(*layer));
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(*ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, -1));
+  EXPECT_FALSE(BKE_paint_layers_normal_replace(*layer));
+
+  /* A folder holds no channel records and takes the override the same way; it stops inlining. */
+  MaterialPaintLayer *folder = paint_layer_add(*ma, "Folder");
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  EXPECT_TRUE(BKE_paint_layers_folder_is_pass_through(*folder));
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *folder, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
+
+  /* Replace belongs to the Normal channel's per-channel setting alone. */
+  EXPECT_FALSE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
+  EXPECT_FALSE(BKE_paint_layers_channel_blend_set(*ma, *layer, PAINT_MATERIAL_CHANNEL_NUM, 0));
+}
+
 TEST_F(PaintLayersDescription, blend_round_trip_keeps_layers)
 {
   Material *ma = BKE_material_add(bmain, "RoundTripMat");

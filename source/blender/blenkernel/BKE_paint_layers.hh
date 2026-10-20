@@ -683,6 +683,23 @@ bool BKE_paint_layers_channel_opacity_set(Material &ma,
                                           int channel,
                                           float opacity);
 
+/**
+ * Set the blend \a layer's \a channel is laid with, or `-1` to inherit the row's own. Any row may
+ * carry one, a folder or a correction included, whether or not it has a record for the channel.
+ *
+ * The Normal channel has its own two choices: `-1` for the combine and
+ * #MA_PAINT_LAYER_BLEND_NORMAL_REPLACE for Replace; every other mode is refused there. On the
+ * other channels #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is refused, as it is for the row.
+ *
+ * A structural edit: the blend is the type of the generated Mix node, so the tree is marked stale.
+ *
+ * \return false when \a layer is not part of \a ma or \a channel is out of range.
+ */
+bool BKE_paint_layers_channel_blend_set(Material &ma,
+                                        MaterialPaintLayer &layer,
+                                        int channel,
+                                        int blend);
+
 /** Set the opacity of \a layer. */
 bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, float opacity);
 
@@ -814,8 +831,9 @@ bool BKE_paint_layers_rename(Material &ma, MaterialPaintLayer *layer, const char
 /**
  * Set how \a layer combines with what is below it; see #eMaterialPaintLayerBlend.
  *
- * #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE is refused: the Normal channel forces its operation on its
- * own, so a stored value would only ever be a switch the user cannot make effective.
+ * #MA_PAINT_LAYER_BLEND_NORMAL_COMBINE and #MA_PAINT_LAYER_BLEND_NORMAL_REPLACE are refused: the
+ * Normal channel forces its operation on its own, so a stored row value would only ever be a
+ * switch the user cannot make effective.
  */
 bool BKE_paint_layers_set_blend(Material &ma,
                                 MaterialPaintLayer *layer,
@@ -1225,6 +1243,18 @@ float BKE_paint_layers_effective_opacity(const MaterialPaintLayer &layer);
  * has no record for  channel. What every evaluator uses for a channel's stack.
  */
 float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer, int channel);
+
+/**
+ * The blend \a layer is laid with in \a channel: the channel's own override, or the row's blend
+ * while it inherits. What every evaluator uses for a channel's stack.
+ */
+int BKE_paint_layers_channel_blend_effective(const MaterialPaintLayer &layer, int channel);
+
+/**
+ * Whether the row's Normal channel is set to Replace: the upper normal covers the lower one with a
+ * plain Mix instead of the Normal Combine.
+ */
+bool BKE_paint_layers_normal_replace(const MaterialPaintLayer &layer);
 
 /**
  * The value \a channel's stack starts from, before any row is laid over it: the shader-space RGBA

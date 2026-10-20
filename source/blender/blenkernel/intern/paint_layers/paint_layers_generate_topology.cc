@@ -180,6 +180,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, 0x400);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, uint64_t(channel));
+      /* The row's blend node is built around the bake, so its type is structure here too. */
+      hash = topology_hash_mix(
+          hash, uint64_t(uint8_t(BKE_paint_layers_channel_blend_effective(layer, channel))));
       Image *baked = nullptr;
       if (paint_layer_row_baked_channel(ma, layer, channel, &baked)) {
         topology_hash_string(hash, baked->id.name);
@@ -196,6 +199,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, row_participates(ma, layer, channel) ? 1 : 0);
+    /* The channel's own blend, or the row's while it inherits, picks the Mix node's type. */
+    hash = topology_hash_mix(
+        hash, uint64_t(uint8_t(BKE_paint_layers_channel_blend_effective(layer, channel))));
     /* A map and a flat value are different nodes (an Image Texture against a value input), and the
      * texture node names its image: assigning, swapping or removing a map is structure, even when
      * the channel took part before and after. */
@@ -233,6 +239,9 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     mapping_wrap_hash_mix(hash, ma, effect);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
+      /* The correction's own blend in this channel, or the row's while it inherits. */
+      hash = topology_hash_mix(
+          hash, uint64_t(uint8_t(BKE_paint_layers_channel_blend_effective(effect, channel))));
       if (paint_layer_effect_lays(ma, effect, channel)) {
         const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
         if (record->image != nullptr) {

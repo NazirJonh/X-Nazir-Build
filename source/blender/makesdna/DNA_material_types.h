@@ -532,6 +532,12 @@ enum eMaterialPaintLayerBlend : int8_t {
   MA_PAINT_LAYER_BLEND_SATURATION = 17,
   MA_PAINT_LAYER_BLEND_COLOR = 18,
   MA_PAINT_LAYER_BLEND_VALUE = 19,
+  /**
+   * The Normal channel only, as a per-channel override: the upper normal replaces the lower one
+   * instead of being combined with it (#MA_PAINT_LAYER_BLEND_NORMAL_COMBINE). Never offered as a
+   * row-level choice, and never on another channel.
+   */
+  MA_PAINT_LAYER_BLEND_NORMAL_REPLACE = 20,
 };
 
 /** #MaterialPaintLayer::source -- what the row paints with. */
@@ -658,7 +664,11 @@ struct MaterialPaintLayerChannel {
 struct MaterialPaintLayerChannelSettings {
   DNA_DEFINE_CXX_METHODS(MaterialPaintLayerChannelSettings)
 
-  /** Reserved for a per-channel #eMaterialPaintLayerBlend override, -1 to inherit; not read yet. */
+  /**
+   * A per-channel #eMaterialPaintLayerBlend override, -1 to inherit the row's own blend. The Normal
+   * channel reads it as the combine (#MA_PAINT_LAYER_BLEND_NORMAL_COMBINE) when it inherits and
+   * accepts #MA_PAINT_LAYER_BLEND_NORMAL_REPLACE alone.
+   */
   int8_t blend = -1;
   char _pad[3] = {};
   /** Multiplied by the row's opacity; 1.0 when the channel has no override. */

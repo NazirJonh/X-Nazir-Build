@@ -118,6 +118,78 @@ TEST_F(PaintLayersGraphEvalTest, every_blend_mode_matches_the_cpu)
   }
 }
 
+TEST_F(PaintLayersGraphEvalTest, channel_blend_overrides_the_rows_own_for_that_channel)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top, 0.7f));
+
+  /* The row mixes; the Base Color channel multiplies over that. */
+  ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, top, MA_PAINT_LAYER_BLEND_MIX));
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA multiplied = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+
+  /* Inherit puts the channel back on the row's Mix, so the pixel has to change: the override is
+   * read by the CPU and the graph alike, not silently ignored by both. */
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, -1));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  const RGBA mixed = cpu_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(std::fabs(mixed.r - multiplied.r) + std::fabs(mixed.g - multiplied.g) +
+                std::fabs(mixed.b - multiplied.b),
+            1e-3f);
+}
+
+TEST_F(PaintLayersGraphEvalTest, every_channel_blend_mode_matches_the_cpu)
+{
+  add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));
+  MaterialPaintLayer *top = add_layer("Top", add_solid_image("Top", 30, 160, 220, 255));
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, top, 0.7f));
+
+  const eMaterialPaintLayerBlend blends[] = {
+      MA_PAINT_LAYER_BLEND_MIX,        MA_PAINT_LAYER_BLEND_MULTIPLY,
+      MA_PAINT_LAYER_BLEND_OVERLAY,    MA_PAINT_LAYER_BLEND_ADD,
+      MA_PAINT_LAYER_BLEND_SUBTRACT,   MA_PAINT_LAYER_BLEND_SCREEN,
+      MA_PAINT_LAYER_BLEND_DIFFERENCE, MA_PAINT_LAYER_BLEND_DARKEN,
+      MA_PAINT_LAYER_BLEND_LIGHTEN,    MA_PAINT_LAYER_BLEND_BURN,
+      MA_PAINT_LAYER_BLEND_DODGE,      MA_PAINT_LAYER_BLEND_EXCLUSION,
+      MA_PAINT_LAYER_BLEND_SOFT_LIGHT, MA_PAINT_LAYER_BLEND_LINEAR_LIGHT,
+      MA_PAINT_LAYER_BLEND_HUE,        MA_PAINT_LAYER_BLEND_SATURATION,
+      MA_PAINT_LAYER_BLEND_COLOR,      MA_PAINT_LAYER_BLEND_VALUE,
+  };
+  for (const eMaterialPaintLayerBlend blend : blends) {
+    ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+        *ma, *top, PAINT_MATERIAL_CHANNEL_BASE_COLOR, blend));
+    expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
+}
+
+TEST_F(PaintLayersGraphEvalTest, normal_replace_covers_the_lower_normal_like_the_cpu)
+{
+  Image *base = add_solid_image("Base", 160, 128, 230, 255);
+  Image *detail = add_solid_image("Detail", 100, 150, 220, 255);
+  make_image_data(base);
+  make_image_data(detail);
+  add_layer("Base", base, PAINT_MATERIAL_CHANNEL_NORMAL);
+  MaterialPaintLayer *detail_layer = add_layer("Detail", detail, PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, detail_layer, 0.5f));
+
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *detail_layer, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL);
+  const RGBA replaced = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *detail_layer, PAINT_MATERIAL_CHANNEL_NORMAL, -1));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_NORMAL);
+  const RGBA combined = cpu_pixel(PAINT_MATERIAL_CHANNEL_NORMAL);
+  EXPECT_GT(std::fabs(combined.r - replaced.r) + std::fabs(combined.g - replaced.g) +
+                std::fabs(combined.b - replaced.b),
+            1e-3f);
+}
+
 TEST_F(PaintLayersGraphEvalTest, constant_mask_matches_the_cpu)
 {
   add_layer("Bottom", add_solid_image("Bottom", 200, 100, 50, 255));

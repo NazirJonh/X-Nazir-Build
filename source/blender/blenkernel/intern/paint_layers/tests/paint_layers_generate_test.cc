@@ -1099,6 +1099,23 @@ TEST_F(PaintLayersGenerateTest, toggling_the_mapping_changes_the_shape_and_dragg
   EXPECT_FALSE(interface_has_socket(*group, "Fill Mapping Offset", false));
 }
 
+TEST_F(PaintLayersGenerateTest, a_channel_blend_changes_the_layer_hash)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_ROUGHNESS};
+  const uint64_t plain = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
+
+  /* The channel's own blend picks the Mix node's type, so the row has to be rebuilt. */
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), plain);
+
+  /* Back to inherit, the row builds the same shape again. */
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(*ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, -1));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), plain);
+}
+
 TEST_F(PaintLayersGenerateTest, a_mapped_correction_and_mask_item_build_their_own_mapping)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));

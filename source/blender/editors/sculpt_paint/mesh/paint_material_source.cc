@@ -36,10 +36,12 @@
 #include "BLI_utildefines.h"
 
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <type_traits>
 
 #include "ED_material_bake.hh"
 #include "ED_view3d.hh"
@@ -190,7 +192,7 @@ float mask_source_coverage_at_uv(const ChannelUvSampler &sampler,
     const float alpha = sampler.alpha_at_uv(*channel, uv, thread);
     if (alpha < 0.999f) {
       const bool invert = brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert != 0;
-      return math::clamp(invert ? 1.0f - alpha : alpha, 0.0f, 1.0f);
+      return BKE_paint_material_mask_texel_coverage(float4(0.0f, 0.0f, 0.0f, alpha), true, invert);
     }
   }
   return math::clamp(sampler.scalar_at_uv(*channel, uv, thread), 0.0f, 1.0f);
@@ -1809,3 +1811,139 @@ void ChannelSourceSampler::gather_tangent_normals_packed(const eMaterialPaintCha
 }
 
 }  // namespace blender::ed::sculpt_paint::material
+
+namespace blender::ed::sculpt_paint::shape {
+
+namespace {
+
+/** FNV-1a over the values that decide what a Mask Source resolves to. */
+class IdentityHasher {
+  uint64_t hash_ = 0xcbf29ce484222325ULL;
+
+ public:
+  template<typename T> void mix(const T &value)
+  {
+    uint64_t bits;
+    if constexpr (std::is_floating_point_v<T>) {
+      bits = std::bit_cast<uint32_t>(float(value));
+    }
+    else if constexpr (std::is_pointer_v<T>) {
+      bits = uintptr_t(value);
+    }
+    else {
+      bits = uint64_t(value);
+    }
+    hash_ = (hash_ ^ bits) * 0x100000001b3ULL;
+  }
+
+  void mix(const ShapeMaskMapping &mapping)
+  {
+    this->mix(mapping.scale.x);
+    this->mix(mapping.scale.y);
+    this->mix(mapping.angle);
+    this->mix(mapping.rotation_random);
+    this->mix(mapping.scale_random);
+    this->mix(mapping.seed);
+  }
+
+  /** Never zero: zero means "no identity" to the callers. */
+  uint64_t get() const
+  {
+    return hash_ | 1;
+  }
+};
+
+/**
+ * Image Transform Settings. A Mask Source is placed in the shape's own frame, so only the size,
+ * angle and their random terms are meaningful; Mapping mode is hidden for Shape tools.
+ */
+ShapeMaskMapping mask_mapping_get(const BrushMaterialPaint &brush_paint, const Brush &brush)
+{
+  const MTex &shared = brush_paint.shared_source_mapping;
+  ShapeMaskMapping mapping;
+  mapping.scale = math::max(float2(shared.size[0], shared.size[1]), float2(1e-3f));
+  mapping.angle = shared.rot;
+  mapping.rotation_random = (shared.brush_angle_mode & MTEX_ANGLE_RANDOM) ? shared.random_angle :
+                                                                           0.0f;
+  mapping.scale_random = brush_paint.size_random;
+  /* Stable base for the per-shape sequence: the same brush always produces the same layout, so a
+   * preview and its commit agree. It also ties a cached source to its brush (see
+   * #mask_source_key). */
+  mapping.seed = (uint32_t(reinterpret_cast<uintptr_t>(&brush) >> 4) ^ 0x9e3779b9u) | 1u;
+  return mapping;
+}
+
+uint64_t mask_source_signature(const material::ChannelSourceSet &sources,
+                               const BrushMaterialPaint &brush_paint,
+                               const ShapeMaskMapping &mapping)
+{
+  const std::optional<eMaterialPaintChannel> channel = material::mask_source_channel_get(
+      brush_paint);
+  if (!channel) {
+    return 1;
+  }
+  const material::ChannelSourceSet::ChannelSource &source = sources.source(*channel);
+  IdentityHasher hasher;
+  /* The channel decides the coverage rule (alpha versus luminance) even over the same image. */
+  hasher.mix(int(*channel));
+  hasher.mix(brush_paint.channels[*channel].source_invert);
+  hasher.mix(int(source.kind));
+  hasher.mix(source.usable);
+  hasher.mix(source.image);
+  hasher.mix(source.ibuf);
+  for (const int i : IndexRange(4)) {
+    hasher.mix(source.constant_value[i]);
+  }
+  /* Size / Angle / Random decide the sampled UV, so a live preview must rebuild when they change
+   * even though the source image stayed the same. */
+  hasher.mix(mapping);
+  return hasher.get();
+}
+
+}  // namespace
+
+uint64_t mask_source_key(const BrushMaterialPaint &brush_paint,
+                         const Brush &brush,
+                         const PaintModeSettings &mode_settings,
+                         const Paint &paint)
+{
+  const std::optional<eMaterialPaintChannel> channel = material::mask_source_channel_get(
+      brush_paint);
+  if (!channel || brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    return 0;
+  }
+  const BrushMaterialPaintChannel &source = brush_paint.channels[*channel];
+  IdentityHasher hasher;
+  hasher.mix(int(*channel));
+  hasher.mix(brush_paint.source_mode);
+  hasher.mix(source.source_mtex.tex);
+  hasher.mix(source.source_mtex.tex ? source.source_mtex.tex->ima : nullptr);
+  hasher.mix(source.source_invert);
+  hasher.mix(mode_settings.layer_target_mode);
+  hasher.mix(paint.visible_material_channels);
+  /* Size / Angle / Random are baked into the resolved source's mapping, so a cached source must be
+   * reopened when they change or the live preview would keep the old placement. The mapping's seed
+   * carries the brush identity: another brush with identical settings must not reuse a source
+   * that points at the first one. */
+  hasher.mix(mask_mapping_get(brush_paint, brush));
+  return hasher.get();
+}
+
+ShapeMaskSource::ShapeMaskSource(const BrushMaterialPaint &brush_paint,
+                                 const PaintModeSettings &settings,
+                                 const Paint &paint,
+                                 const Brush &brush,
+                                 const int visible_material_channels)
+    : sources(brush_paint, settings, visible_material_channels, true),
+      brush_paint(&brush_paint),
+      sampler(sources, brush_paint, settings, paint, brush)
+{
+  /* The shape places the texture itself (#shape_mask_source_uv_matrix), so the sampler must read
+   * its UV as a position over the whole image; the brush-local frame would only reach one
+   * quarter of it and apply Size a second time. */
+  sampler.set_unit_uv_space(true);
+  mapping = mask_mapping_get(brush_paint, brush);
+  signature = mask_source_signature(sources, brush_paint, mapping);
+}
+
+}  // namespace blender::ed::sculpt_paint::shape

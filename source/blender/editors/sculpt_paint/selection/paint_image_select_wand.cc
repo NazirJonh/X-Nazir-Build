@@ -991,7 +991,9 @@ void PAINT_OT_image_select_wand(wmOperatorType *ot)
   /* The operator opens and closes its own image undo step. */
   ot->flag = OPTYPE_REGISTER;
 
-  WM_operator_properties_select_operation_simple(ot);
+  /* The full set: the tool keymap maps Shift+Ctrl to Intersect, and #mask_combine handles every
+   * operation, like the box and lasso gestures do. */
+  WM_operator_properties_select_operation(ot);
   PropertyRNA *prop = RNA_def_float(
       ot->srna, "tolerance", -1.0f, -1.0f, 255.0f, "Tolerance", "", -1.0f, 255.0f);
   RNA_def_property_flag(prop, PROP_HIDDEN);

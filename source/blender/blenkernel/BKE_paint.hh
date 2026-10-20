@@ -1688,6 +1688,17 @@ float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
 float BKE_paint_material_mask_luminance(const float3 &linear_rgb);
 
 /**
+ * Coverage of one Mask Source texel, shared by every preview that shows the scalar a Mask stroke
+ * would write. An Alpha source uses the texel's alpha while it is not opaque, and falls back to
+ * luminance for an opaque image (a greyscale mask stored in RGB); \a use_alpha selects that rule.
+ * Base Color always uses luminance. \a invert applies the Alpha channel's Source Invert.
+ *
+ * \a rgba is expected in the same space the stroke samples in: scene linear for a color source,
+ * with the raw alpha channel untouched.
+ */
+float BKE_paint_material_mask_texel_coverage(const float4 &rgba, bool use_alpha, bool invert);
+
+/**
  * Clears per-material Principled-socket image resolution cache entries.
  * Call after node-tree or material slot changes that can alter resolved targets.
  */

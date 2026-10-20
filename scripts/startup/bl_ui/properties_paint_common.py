@@ -2359,7 +2359,7 @@ def _draw_material_paint_source_texture(panel, context, channel, *, enabled=True
     # #PAINT_MT_material_paint_channel_socket.
 
 
-def _draw_material_paint_shared_mapping(layout, material_paint):
+def _draw_material_paint_shared_mapping(layout, material_paint, *, show_map_mode=True):
     """Mapping shared by every channel's source texture: Mapping mode, Size (X/Y only), Angle.
 
     Drawn once, in the Image Transform Settings panel above the channel toggles, instead of once per
@@ -2369,12 +2369,19 @@ def _draw_material_paint_shared_mapping(layout, material_paint):
     per-channel override and no Offset control.
     Below the texture mapping, Size Random varies the brush dab size itself per stroke step; the
     value is shared by every channel, since the dab geometry is shared too.
+
+    \a show_map_mode is false for the Shape tools: their Mask Source texture is placed in the
+    shape's own frame, where Area/View projection has no meaning. Size, Angle and the random
+    controls still apply.
     """
     slot = material_paint.shared_texture_slot
     col = layout.column(align=True)
-    col.prop(slot, "map_mode", text="Mapping")
-    col.prop(material_paint, "shared_mapping_size_x", text="Size X", slider=True)
-    col.prop(material_paint, "shared_mapping_size_y", text="Size Y", slider=True)
+    if show_map_mode:
+        col.prop(slot, "map_mode", text="Mapping")
+    row = col.row(align=True)
+    row.prop(material_paint, "shared_mapping_size_x", text="Size X", slider=True)
+    row.prop(material_paint, "shared_mapping_size_y", text="Size Y", slider=True)
+    row.prop(material_paint, "shared_mapping_scale_lock", text="", icon_only=True)
     if slot.has_texture_angle:
         col.prop(slot, "angle", text="Angle")
         if slot.has_texture_angle_source:
@@ -2561,6 +2568,22 @@ def _draw_mask_alpha_pair(layout, channel):
     row.template_material_paint_value_slider(channel, "value_secondary", index=0)
 
 
+def _mask_value_target(context, brush):
+    """Where a Mask stroke reads its value pair from, as ``(owner, primary, secondary, is_alpha)``.
+
+    ``owner`` is the Alpha channel record for an Alpha Mask Source, otherwise the brush, whose
+    colors Base Color / Coverage read. ``primary`` and ``secondary`` name its color properties (the
+    ones a palette or a color swatch edits). ``None`` outside Mask mode, so every UI that swaps
+    between "the shape/brush colors" and "the Mask value" decides it in one place.
+    """
+    if brush is None or context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+        return None
+    channel = _mask_alpha_channel(context, brush)
+    if channel is not None:
+        return channel, "value_color", "value_secondary_color", True
+    return brush, "color", "secondary_color", False
+
+
 def draw_mask_alpha_source(layout, context, brush, *, channel=None):
     """Mask Source and the Alpha source inversion that select what the Mask stroke reads.
 
@@ -2726,17 +2749,38 @@ def draw_material_paint_channels(
 
     # Shared source-texture mapping is drawn before the channel toggles so it reads as a setup step
     # rather than being buried under whichever channel panels happen to be open.
-    has_source_mapping = any(
-        channels[channel_id].use and _material_paint_channel_source_active(
-            channels[channel_id], source_enabled=source_maps_enabled,
+    #
+    # A Mask stroke is configured by #BrushMaterialPaint::mask_source, and the default Mask brush
+    # owns the Alpha record without enabling it as a painted channel. Requiring `use` here would
+    # leave Image Transform Settings permanently greyed in Mask mode, so the selected Mask Source
+    # channel counts on its own.
+    mask_channel_id = None
+    if (is_mask_target and
+            material_paint.mask_source in {'ALPHA', 'BASE_COLOR'} and
+            material_paint.mask_source in channels):
+        mask_channel_id = material_paint.mask_source
+    if mask_channel_id is not None:
+        has_source_mapping = _material_paint_channel_source_active(
+            channels[mask_channel_id], source_enabled=source_maps_enabled,
         )
-        for channel_id in toggle_ids if channel_id != 'CUSTOM'
-    )
+    else:
+        has_source_mapping = any(
+            channels[channel_id].use and _material_paint_channel_source_active(
+                channels[channel_id], source_enabled=source_maps_enabled,
+            )
+            for channel_id in toggle_ids if channel_id != 'CUSTOM'
+        )
     # Material mode still needs mapping for direct Images and brush-mapped Baked channels. An
     # explicit Baked Target UV source does not use it, but it stays useful when channels resolve
     # differently or the layout is switched back to Brush Mapping. A material that only yields
-    # constants has nothing to place, so the panel is hidden entirely.
-    show_source_mapping = source_maps_enabled or any(
+    # constants has nothing to place, so the panel is hidden entirely. In Mask mode the Mask
+    # Source channel decides whether there is anything to place.
+    show_source_mapping = source_maps_enabled or (
+        mask_channel_id is not None and
+        _material_paint_channel_source_active(
+            channels[mask_channel_id], source_enabled=source_maps_enabled,
+        )
+    ) or any(
         channels[channel_id].use and
         channels[channel_id].material_source_resolution in {'IMAGE', 'BAKED'}
         for channel_id in toggle_ids if channel_id != 'CUSTOM'
@@ -2749,7 +2793,9 @@ def draw_material_paint_channels(
         header.label(text="Image Transform Settings")
         if panel:
             panel.active = has_source_mapping
-            _draw_material_paint_shared_mapping(panel, material_paint)
+            _draw_material_paint_shared_mapping(
+                panel, material_paint, show_map_mode=not paint_shape_tool_active(context),
+            )
         layout.separator()
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
@@ -3434,16 +3480,50 @@ def paint_shape_color_props(_shape):
     return "stroke_color", "fill_color"
 
 
-def draw_shape_color_row(layout, shape, *, header=False, show_swap=False):
-    """Draw the shape tool's own colors in the ``paint_shape_color_props`` order, optionally
-    followed by a compact swap button (``paint.shape_colors_swap``, also bound to X).
+def draw_shape_color_row(
+        layout, shape, *, context=None, brush=None, header=False, show_swap=False):
+    """Draw the value the shape writes, optionally followed by a compact swap button.
+
+    Outside Mask mode these are the shape's own stroke and fill colors, in the
+    ``paint_shape_color_props`` order, swapped by ``paint.shape_colors_swap``. In Mask mode the
+    Mask owns the written value, so the same row shows the Alpha value pair and the swap button
+    flips that pair instead.
 
     ``header`` keeps the swatches in a fixed-width row so they match the brush color swatch
     width (a little wider when the swap button is shown)."""
-    primary, secondary = paint_shape_color_props(shape)
+    mask_target = None
+    if context is not None:
+        if brush is None:
+            paint = UnifiedPaintPanel.paint_settings(context)
+            brush = paint.brush if paint is not None else None
+        mask_target = _mask_value_target(context, brush)
+
     row = layout.row(align=True)
     if header:
         row.ui_units_x = 5 if show_swap else 4
+
+    if mask_target is not None:
+        # The shape's own colors never reach the mask. The Alpha pair is edited through grayscale
+        # swatches; Base Color / Coverage read the brush colors.
+        if mask_target[3]:
+            row.template_material_paint_value_swatch(
+                mask_target[0], "value", index=0, panel="PAINT_PT_material_mask_value_primary")
+            row.template_material_paint_value_swatch(
+                mask_target[0], "value_secondary", index=0,
+                panel="PAINT_PT_material_mask_value_secondary")
+        else:
+            UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
+            UnifiedPaintPanel.prop_unified_color(
+                row, context, brush, "secondary_color", text="")
+        if show_swap:
+            # The same operator as the X key, so the button and the shortcut cannot diverge, and
+            # without the Draw/Fill brush-type poll of ``paint.brush_colors_flip`` that a shape
+            # tool's brush may not satisfy.
+            row.operator("paint.shape_colors_swap", text="", icon='ARROW_LEFTRIGHT')
+        row.separator()
+        return row
+
+    primary, secondary = paint_shape_color_props(shape)
     row.prop(shape, primary, text="")
     row.prop(shape, secondary, text="")
     if show_swap:
@@ -3479,12 +3559,48 @@ def paint_shape_linked_3d_object(context):
     return ob
 
 
+def _paint_shape_tool_id(context):
+    """Identifier of the active tool, or an empty string when there is none."""
+    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
+    tool = ToolSelectPanelHelper.tool_active_from_context(context)
+    return tool.idname if tool else ""
+
+
+def paint_shape_tool_active(context):
+    """True when one of the Shape tools is the active tool in this context."""
+    return _paint_shape_tool_id(context).startswith("builtin.paint_shape_")
+
+
+def paint_shape_texture_preview_visible(context):
+    """Whether the Mask Source texture preview is meaningful for the active tool.
+
+    Only a Mask target uses the Mask Source, and only the Rectangle/Ellipse tools have a frame
+    (#ShapeSample::shape_uv) the texture can be placed in. The textured Vector/spline shapes keep
+    their own texture fills.
+    """
+    if context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+        return False
+    is_line, _is_rect, is_sized = paint_shape_tool_flags(context)
+    return is_sized and not is_line
+
+
+def draw_paint_shape_texture_preview_popover(context, layout, *, panel):
+    """Header button opening the texture preview controls, shown for Rect/Ellipse in Mask mode."""
+    if not paint_shape_texture_preview_visible(context):
+        return False
+    shape = paint_shape_settings(context)
+    layout.popover(
+        panel=panel,
+        text="",
+        icon='IMAGE_RGB_ALPHA' if shape.use_texture_preview else 'IMAGE_DATA',
+    )
+    return True
+
+
 def paint_shape_tool_flags(context):
     """(is_line, is_rect, is_sized) for the active Shape tool, derived from the active tool so the
     settings UI does not read the operator-only ``shape.type``."""
-    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
-    tool = ToolSelectPanelHelper.tool_active_from_context(context)
-    tool_id = tool.idname if tool else ""
+    tool_id = _paint_shape_tool_id(context)
     is_line = tool_id == "builtin.paint_shape_line"
     is_rect = tool_id in ("", "builtin.paint_shape_rect")
     is_sized = tool_id in ("", "builtin.paint_shape_rect", "builtin.paint_shape_ellipse")
@@ -3494,10 +3610,7 @@ def paint_shape_tool_flags(context):
 def paint_shape_tool_has_angle(context):
     """Whether the active Shape tool has a meaningful Angle: the drawn-by-points tools (Line,
     Polyline, Curve Patch) carry their orientation in the points."""
-    from bl_ui.space_toolsystem_common import ToolSelectPanelHelper
-    tool = ToolSelectPanelHelper.tool_active_from_context(context)
-    tool_id = tool.idname if tool else ""
-    return tool_id not in (
+    return _paint_shape_tool_id(context) not in (
         "builtin.paint_shape_line",
         "builtin.paint_shape_polyline",
         "builtin.paint_shape_curve",
@@ -4171,12 +4284,26 @@ class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
 
 class _MaterialMaskValuePopover:
     # Not a registered type itself: subclassing a registered Panel would unregister its `draw`.
-    bl_space_type = 'VIEW_3D'
+    # TOPBAR/HEADER is the space popover-only panels use so they resolve from every editor's
+    # header: with a concrete space type the panel's poll fails elsewhere and `Layout::popover`
+    # then draws the swatch button disabled (see #Layout::popover's !ok branch).
+    bl_space_type = 'TOPBAR'
     bl_region_type = 'HEADER'
     bl_ui_units_x = 10
 
     def draw(self, context):
-        brush = UnifiedPaintPanel.paint_settings(context).brush
+        paint = UnifiedPaintPanel.paint_settings(context)
+        brush = paint.brush if paint is not None else None
+        if brush is None:
+            # A popover opened from the tool header can lose the paint-mode resolution that
+            # #UnifiedPaintPanel.paint_settings relies on. Fall back to the active paint mode's
+            # brush instead of dereferencing None.
+            tool_settings = context.tool_settings
+            for attr in ("sculpt", "image_paint", "vertex_paint", "weight_paint"):
+                paint = getattr(tool_settings, attr, None)
+                brush = getattr(paint, "brush", None) if paint is not None else None
+                if brush is not None:
+                    break
         channel = _mask_alpha_channel(context, brush)
         if channel is None:
             return
@@ -4193,10 +4320,36 @@ class PAINT_PT_material_mask_value_secondary(_MaterialMaskValuePopover, bpy.type
     _prop_name = "value_secondary"
 
 
+class PAINT_PT_shape_texture_preview(bpy.types.Panel):
+    """Popover of the Mask Source texture preview drawn inside the Rectangle/Ellipse gizmo."""
+    bl_label = "Mask Texture Preview"
+    # TOPBAR/HEADER resolves from every editor's header, so the Image Editor and the 3D Viewport
+    # share this one panel (see #_MaterialMaskValuePopover).
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 8
+
+    @classmethod
+    def poll(cls, context):
+        return paint_shape_texture_preview_visible(context)
+
+    def draw(self, context):
+        shape = paint_shape_settings(context)
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        col = layout.column()
+        col.prop(shape, "use_texture_preview", text="Show Texture")
+        sub = col.column(align=True)
+        sub.active = shape.use_texture_preview
+        sub.prop(shape, "texture_preview_opacity", text="Opacity", slider=True)
+
+
 classes = (
     PAINT_GT_mp_source,
     PAINT_PT_material_mask_value_primary,
     PAINT_PT_material_mask_value_secondary,
+    PAINT_PT_shape_texture_preview,
     PAINT_MT_material_paint_channel_socket,
     PAINT_MT_material_layer_channel_socket,
     PAINT_MT_material_paint_brush_sync,

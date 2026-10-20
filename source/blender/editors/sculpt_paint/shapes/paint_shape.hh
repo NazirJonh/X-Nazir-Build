@@ -48,6 +48,9 @@ struct BezierInputPoint;
 
 namespace blender::ed::sculpt_paint::shape {
 
+/** Resolved Mask Source texture for the shape tools; see `paint_material_source.hh`. */
+struct ShapeMaskSource;
+
 /**
  * The UDIM tile (and its pixel resolution) the pixel coordinates of a set of 2D shapes refer to.
  * It belongs to the canvas the shapes live in, not to each shape, so every consumer takes it next
@@ -319,6 +322,20 @@ struct ShapeStyle {
   std::array<PaintShapeChannelValue, PAINT_MATERIAL_CHANNEL_NUM> stroke_channels{};
   std::array<PaintShapeChannelValue, PAINT_MATERIAL_CHANNEL_NUM> fill_channels{};
 
+  /**
+   * Mask target values: stroke writes #mask_primary and fill writes #mask_secondary, both as
+   * grayscale RGB. Resolved by #style_textures_resolve and only read for a
+   * #ShapeTargetKind::Mask target, never for the shape's own colors.
+   */
+  float mask_primary = 0.0f;
+  float mask_secondary = 0.0f;
+  /** Mask Source texture coverage, shared by preview and commit. Null when there is no usable
+   * source, in which case the shape's coverage is not modulated. */
+  std::shared_ptr<const ShapeMaskSource> mask_source;
+  /** Identity of the brush inputs #mask_source was resolved from, 0 when it must not be reused
+   * (see #style_mask_source_carry). */
+  uint64_t mask_source_key = 0;
+
   bool use_fill() const
   {
     return (flag & PAINT_SHAPE_USE_FILL) != 0;
@@ -368,8 +385,11 @@ struct ShapeStyle {
    * stroke-only. */
   bool fill_uses_shape_uv() const
   {
-    return use_fill() && fill_source == ShapeFillSource::Texture &&
-           fill_tex_map.mapping == PAINT_SHAPE_TEX_MAP_FIT;
+    /* A Mask Source texture is stretched over the shape's frame, so it needs the same
+     * coordinates whichever part (fill or stroke) is written. */
+    return mask_source != nullptr ||
+           (use_fill() && fill_source == ShapeFillSource::Texture &&
+            fill_tex_map.mapping == PAINT_SHAPE_TEX_MAP_FIT);
   }
   /** The stroke's texture needs the along-stroke arc length and the signed across-stroke
    * coordinate (#ShapeRasterOutputs::StrokeS | #ShapeRasterOutputs::StrokeV). */

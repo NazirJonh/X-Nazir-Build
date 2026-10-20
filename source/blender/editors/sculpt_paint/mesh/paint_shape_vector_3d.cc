@@ -1023,6 +1023,7 @@ bool paint_shape_brush_update_3d(const Main *bmain, const Scene *scene, const Br
       Paint &paint = ts.sculpt != nullptr ? ts.sculpt->paint : ts.imapaint.paint;
       style_brush_values_from_brush(paint, candidate);
       style_channels_from_brush(paint, candidate);
+      style_mask_source_carry(session.style, candidate);
       /* The session style carries resolved textures, so the candidate must too. */
       Vector<const Image *> protected_images;
       if (session.backend) {

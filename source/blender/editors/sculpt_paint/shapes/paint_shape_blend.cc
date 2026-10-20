@@ -70,6 +70,35 @@ void shape_blend_pixel(float4 &dst,
   BLI_assert(ctx.style != nullptr);
   const ShapeStyle &style = *ctx.style;
 
+  if (ctx.is_mask_target) {
+    /* The mask value pair replaces the shape's colors entirely: stroke -> primary, fill ->
+     * secondary, written as grayscale RGBA. The backend already folded the Mask Source texture
+     * and its own selection / sculpt masks into \a factor. */
+    const bool fill_pass = style.use_fill();
+    const bool stroke_pass = style.use_stroke() && style.stroke_width > 0.0f;
+    for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
+      if (part == ShapePart::Fill && !fill_pass) {
+        continue;
+      }
+      if (part == ShapePart::Stroke && !stroke_pass) {
+        continue;
+      }
+      const float coverage = shape_part_coverage(style, sample, part);
+      if (coverage <= 0.0f) {
+        continue;
+      }
+      const float value = part == ShapePart::Stroke ? style.mask_primary : style.mask_secondary;
+      const float alpha = shape_part_opacity(style, part) * coverage * factor;
+      if (alpha <= 0.0f) {
+        continue;
+      }
+      const short blend = part == ShapePart::Stroke ? style.stroke_blend : style.fill_blend;
+      const float4 mix(value * alpha, value * alpha, value * alpha, alpha);
+      dst = material::composite_coverage(dst, mix, IMB_BlendMode(blend));
+    }
+    return;
+  }
+
   if (ctx.channel < 0) {
     /* Plain Image canvas: the same colors #shade_canvas yields for the color attribute / ImBuf
      * compositor. */
@@ -119,13 +148,26 @@ void shape_blend_pixel(float4 &dst,
   }
 
   if (pbr_channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
-    float3 result = math::normalize(float3(dst.x, dst.y, dst.z) * 2.0f - float3(1.0f));
+    /* A layer's Normal map is empty black where nothing was painted, which decodes to the
+     * tangent `(-1, -1, -1)`: the flat normal stands in by the map's coverage (its alpha), like the
+     * layer composite and the brush's #mix_normal_over_scene do, and the write raises that
+     * coverage with an "over" so a first stroke on a fresh layer becomes visible. */
+    float map_alpha = math::clamp(dst.w, 0.0f, 1.0f);
+    float3 stored(dst.x, dst.y, dst.z);
+    if (ctx.dst_premultiplied && map_alpha > 0.0f) {
+      stored /= map_alpha;
+    }
+    const float3 flat(0.0f, 0.0f, 1.0f);
+    float3 result = math::interpolate(flat, stored * 2.0f - float3(1.0f), map_alpha);
+    const float result_length = math::length(result);
+    result = result_length > 1e-6f ? result / result_length : flat;
     for (const ShapePart part : {ShapePart::Fill, ShapePart::Stroke}) {
       const ChannelWrite write = shade_channel(style, sample, part, pbr_channel, p_shape, ctx.tex_frame);
       const float alpha = write.alpha * shape_part_opacity(style, part) * factor * alpha_cov;
       if (alpha <= 0.0f) {
         continue;
       }
+      map_alpha += alpha * (1.0f - map_alpha);
       float3 detail = float3(write.value.x, write.value.y, write.value.z);
       if (ctx.normal_basis != nullptr) {
         const NormalWriteBasis &basis = *ctx.normal_basis;
@@ -134,8 +176,9 @@ void shape_blend_pixel(float4 &dst,
       }
       result = material::blend_normal_rnm(result, detail, alpha);
     }
-    const float3 encoded = result * 0.5f + float3(0.5f);
-    dst = float4(encoded.x, encoded.y, encoded.z, dst.w);
+    const float3 encoded = (result * 0.5f + float3(0.5f)) *
+                           (ctx.dst_premultiplied ? map_alpha : 1.0f);
+    dst = float4(encoded.x, encoded.y, encoded.z, map_alpha);
     return;
   }
 

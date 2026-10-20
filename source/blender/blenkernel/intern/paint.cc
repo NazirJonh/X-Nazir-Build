@@ -4448,6 +4448,23 @@ bool BKE_paint_material_mask_alpha_active(const BrushMaterialPaint &brush_paint)
          (brush_paint.mask_flag & BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH) != 0;
 }
 
+float BKE_paint_material_mask_texel_coverage(const float4 &rgba,
+                                             const bool use_alpha,
+                                             const bool invert)
+{
+  float value;
+  if (use_alpha && rgba.w < 0.999f) {
+    /* An alpha mask commonly stores its coverage in alpha while RGB is black; luminance would
+     * be zero over the whole image. */
+    value = rgba.w;
+  }
+  else {
+    value = BKE_paint_material_mask_luminance(float3(rgba.x, rgba.y, rgba.z));
+  }
+  value = math::clamp(value, 0.0f, 1.0f);
+  return invert ? 1.0f - value : value;
+}
+
 float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
                                         const Paint &paint,
                                         const Brush &brush,

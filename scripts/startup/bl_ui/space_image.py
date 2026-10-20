@@ -2573,6 +2573,7 @@ class IMAGE_PT_paint_shape_context_menu(Panel):
 
     def draw(self, context):
         from bl_ui.properties_paint_common import (
+            _mask_value_target,
             draw_shape_color_row,
             paint_shape_color_props,
             paint_shape_settings,
@@ -2586,7 +2587,7 @@ class IMAGE_PT_paint_shape_context_menu(Panel):
         brush = imapaint.brush
         is_line = paint_shape_tool_flags(context)[0]
 
-        draw_shape_color_row(layout, shape, show_swap=not is_line)
+        draw_shape_color_row(layout, shape, context=context, brush=brush, show_swap=not is_line)
 
         if brush is not None:
             blend_row = layout.row()
@@ -2605,12 +2606,20 @@ class IMAGE_PT_paint_shape_context_menu(Panel):
         layout.separator()
         layout.template_ID(imapaint, "palette", new="palette.new")
         if imapaint.palette:
-            # A swatch sets the shape color (Shift: the fill one) instead of the brush color.
-            # `shape` is the live session copy in Vector mode, so the preview follows.
-            primary, alternative = paint_shape_color_props(shape)
+            # In Mask mode the Alpha pair sets the painted value; the shape's own colors never
+            # reach the mask. Outside it, a swatch sets the shape color (Shift: the fill one)
+            # instead of the brush color. `shape` is the live session copy in Vector mode, so the
+            # preview follows.
+            mask_target = _mask_value_target(context, brush)
+            if mask_target is not None:
+                target_data, primary, alternative, _is_alpha = mask_target
+            else:
+                target_data = shape
+                primary, alternative = paint_shape_color_props(shape)
             layout.template_palette(
                 imapaint, "palette", show_empty_message=True, show_sort_buttons=True,
-                target_data=shape, target_property=primary, target_alt_property=alternative,
+                target_data=target_data, target_property=primary,
+                target_alt_property=alternative,
             )
 
 

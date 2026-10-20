@@ -20,6 +20,7 @@
 #include <array>
 #include <memory>
 
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
 
 #include "DNA_scene_types.h"
@@ -30,6 +31,9 @@
 struct ImagePool;
 
 namespace blender::ed::sculpt_paint::shape {
+
+/** Placement of the Mask Source texture; defined in `mesh/paint_material_source.hh`. */
+struct ShapeMaskMapping;
 
 /** One resolved texel source of a #ShapeTexture (one PBR channel, or the canvas color). */
 struct ShapeTextureChannel {
@@ -159,6 +163,33 @@ ShapeTexCoord shape_texture_coord_fit(const ShapeTextureMapping &map,
 ShapeTexCoord shape_texture_coord_along(const ShapeTextureMapping &map,
                                         const ShapeSample &sample,
                                         const ShapeTexFrame &frame);
+
+/**
+ * One Mask Source lookup: the texture UV and whether it lands inside the texture at all. With a
+ * scale below 1 (or a rotation that turns the frame's corners off the texture) the outside pixels
+ * must not be painted, so the caller multiplies coverage by zero there instead of sampling the
+ * clamped edge texel.
+ */
+struct ShapeMaskSample {
+  float2 uv = float2(0.0f);
+  bool inside = false;
+};
+
+/**
+ * Texture UV matrix of a Mask Source texture: maps the shape's local frame coordinates (0..1,
+ * #ShapeSample::shape_uv) to the source texture's UV space. The single source of truth for both
+ * the painted coverage and the gizmo preview.
+ * \a shape_index selects the deterministic per-shape random rotation / scale.
+ */
+float4x4 shape_mask_source_uv_matrix(const ShapeMaskMapping &mapping, int shape_index);
+
+/**
+ * Mask Source lookup of one shaded point, with the texture UV matrix resolved once per pass by
+ * #shape_mask_source_uv_matrix (the per-shape random terms and the rotation are not worth
+ * recomputing per texel). The texture is placed in the shape's own frame, so it moves, scales and
+ * rotates with the shape and never reads the destination's object UV.
+ */
+ShapeMaskSample shape_mask_source_sample(const ShapeSample &sample, const float4x4 &uv_matrix);
 
 /** Dispatch on the mapping (the per-part entry point of the shader). */
 ShapeTexCoord shape_texture_coord(const ShapeTextureMapping &map,

@@ -94,6 +94,7 @@
 #include "../shapes/paint_shape_space.hh"
 #include "../shapes/paint_vector_editor.hh"
 #include "paint_image_shape_composite.hh"
+#include "paint_shape_texture_preview.hh"
 #include "paint_shape_vector_3d.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_paint_shape.hh"
@@ -204,6 +205,10 @@ struct ShapeState {
   bool vector_edit = false;
   /** Shared gesture state machine of the live session. */
   shape::ShapeVectorEditor vector_editor;
+
+  /** Mask Source texture shown inside the Rectangle / Ellipse while it is dragged out; mutable
+   * because the draw callback only sees the state as const. */
+  mutable shape::ShapeTexturePreview texture_preview;
 };
 
 static void shape_state_free(bContext *C, wmOperator *op)
@@ -241,7 +246,7 @@ static void shape_state_free(bContext *C, wmOperator *op)
 /** \name Drawing
  * \{ */
 
-static void shape_draw_drag(const bContext * /*C*/, ARegion *region, void *arg)
+static void shape_draw_drag(const bContext *C, ARegion *region, void *arg)
 {
   const ShapeState *state = static_cast<const ShapeState *>(arg);
   /* Every 3D view shares the region type: only the invoking view shows the outline. */
@@ -255,6 +260,12 @@ static void shape_draw_drag(const bContext * /*C*/, ARegion *region, void *arg)
   /* While F adjusts the width, the stroke edges are drawn too, so the band is visible. */
   const bool show_width = state->create->value_drag_active() &&
                           state->create->value_drag_is_width();
+  /* Under the outline, so the Mask Source texture is visible inside the shape while dragging. */
+  state->texture_preview.draw_pixel_shape(
+      C,
+      state->create->shape(),
+      [state, region](const float2 &p) { return state->mapping.to_region(*region, p); },
+      /*is_3d=*/true);
   shape::shape_draw_creation_preview(
       state->create->shape(),
       SHAPE_PREVIEW_ERROR_PX,

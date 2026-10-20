@@ -4082,6 +4082,21 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Use Profile", "Apply the stroke/fill profiles to the shape");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
+  prop = RNA_def_property(srna, "use_texture_preview", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_TEXTURE_PREVIEW);
+  RNA_def_property_ui_text(
+      prop,
+      "Texture Preview",
+      "Show the Mask Source texture inside the Rectangle/Ellipse gizmo");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "texture_preview_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "texture_preview_opacity");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(
+      prop, "Preview Opacity", "Opacity of the Mask Source texture preview");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
   prop = RNA_def_property(srna, "normal_flip_y", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_NORMAL_FLIP_Y);
   RNA_def_property_ui_text(

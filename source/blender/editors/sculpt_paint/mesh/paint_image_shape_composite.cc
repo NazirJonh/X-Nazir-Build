@@ -16,6 +16,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 
 #include "MEM_guardedalloc.h"
@@ -24,10 +25,12 @@
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_color.h"
+#include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
+#include "BLI_task.h"
 #include "BLI_task.hh"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
@@ -46,6 +49,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_report.hh"
 
 #include "BLT_translation.hh"
@@ -84,9 +88,8 @@ ShapeTarget shape_target_from_material_target(const PaintMaterialImageTarget &ta
   shape_target.image = target.image;
   shape_target.iuser = target.iuser;
   shape_target.channel = int(target.channel);
-  /* Today the resolver only returns channel maps. Stack Layers add is_mask_target /
-   * is_correction_target to #PaintMaterialImageTarget; switch on them here, and fill
-   * #uv_map_name from the layer's UV. */
+  /* This adapter is the content path only. A Mask target is resolved directly from the layers
+   * target in #composite_targets_get, where its kind is known explicitly. */
   shape_target.kind = ShapeTargetKind::Channel;
   shape_target.uv_map_name = "";
   shape_target.image_session_uid = target.image ? target.image->id.session_uid : 0;
@@ -116,6 +119,34 @@ Vector<ShapeTarget> composite_targets_get(bContext *C,
       if (ob == nullptr) {
         /* Material canvas with no active object: nothing to resolve, and no fallback to the
          * editor image. The refusal text says so. */
+        return targets;
+      }
+      if (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+        /* Mask mode paints one grey map: the active row's base mask. It is not Base Color
+         * content, so the channel target resolver below must not be used for it. */
+        Material *material = BKE_paint_layers_active_material_get(ob);
+        if (material == nullptr) {
+          return targets;
+        }
+        PaintLayersTarget layer_target;
+        if (!BKE_paint_layers_target_get(*material,
+                                         int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                                         PaintLayersTargetMode::Mask,
+                                         layer_target))
+        {
+          return targets;
+        }
+        Image *image = BKE_paint_layers_target_image(layer_target);
+        if (image == nullptr) {
+          return targets;
+        }
+        ShapeTarget target;
+        target.image = image;
+        target.iuser = nullptr;
+        target.channel = -1;
+        target.kind = ShapeTargetKind::Mask;
+        target.image_session_uid = image->id.session_uid;
+        targets.append(target);
         return targets;
       }
       /* The channel set comes from the shared resolver, and the maps from the shared target
@@ -164,6 +195,9 @@ const char *shape_targets_refusal_message(bContext *C, Object *ob)
   if (ob == nullptr) {
     return RPT_("Paint Shape: no active object for the Material canvas");
   }
+  if (scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    return RPT_("Paint Shape: Active layer has no writable mask map");
+  }
   /* Stack Layers replace this with their specific reason; the generic text matches the
    * operator's existing "no enabled image channel to paint" wording. */
   return RPT_("Paint Shape: the active material has no writable PBR channel map");
@@ -181,6 +215,12 @@ void composite_targets_ensure_writable(bContext *C,
   }
   PaintModeSettings &mode_settings = toolsettings->paint_mode;
   if (mode_settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+    return;
+  }
+  if (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    /* A mask is one map, and only a layered material has one. Never grow a Principled Base
+     * Color map for a material that has no mask. */
+    ed::sculpt_paint::material::mask_target_image_ensure(CTX_data_main(C), *ob, mode_settings);
     return;
   }
   if (Main *bmain = CTX_data_main(C)) {
@@ -440,9 +480,17 @@ std::shared_ptr<const ShapeTexture> texture_from_channel_sources(
       continue;
     }
     if (source.ibuf == nullptr || !source.usable) {
+      /* The shape samples pinned pixel buffers only; a texture the stroke engine would still
+       * evaluate (procedural, cropped, filtered, repeated, ...) leaves the channel on its own
+       * value. */
       continue;
     }
     const ImBuf *ibuf = source.ibuf;
+    /* Only color channels hold display-referred pixels. A Normal or scalar map is data and must
+     * never be gamma-decoded, exactly like the stroke sampler (#finish_color_sample): decoding an
+     * sRGB-tagged normal map would tilt every texel and leave the channel with a wrong normal. */
+    const bool decode_to_linear = ELEM(
+        i, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_EMISSION);
     out.size = int2(ibuf->x, ibuf->y);
     if (ibuf->float_buffer.data != nullptr) {
       /* Float map buffers are already scene linear (or non-color data). */
@@ -452,7 +500,7 @@ std::shared_ptr<const ShapeTexture> texture_from_channel_sources(
     }
     else if (ibuf->byte_buffer.data != nullptr) {
       out.kind = ShapeTextureChannel::Kind::Buffer;
-      if (source.do_linear_conversion && source.colorspace != nullptr) {
+      if (decode_to_linear && source.do_linear_conversion && source.colorspace != nullptr) {
         /* Decode once (and reuse it while the pixels stay), so the sampling stays
          * colorspace-free. */
         std::shared_ptr<const float[]> linear = linear_pixels_get(*ibuf, source.colorspace, true);
@@ -597,6 +645,12 @@ std::shared_ptr<const ShapeTexture> texture_from_image(Image *image,
 
 }  // namespace
 
+void style_mask_source_carry(const ShapeStyle &previous, ShapeStyle &next)
+{
+  next.mask_source = previous.mask_source;
+  next.mask_source_key = previous.mask_source_key;
+}
+
 void style_textures_resolve(bContext *C,
                             Paint &paint,
                             const PaintModeSettings &mode_settings,
@@ -669,6 +723,53 @@ void style_textures_resolve(bContext *C,
                stroke_force_pattern,
                style.stroke_tex_map,
                style.stroke_texture);
+
+  /* Mask mode takes its values from the brush's mask source, not from the shape's own colors,
+   * and its source texture modulates every pixel's coverage. Resolve both here so the bake and
+   * the live preview share one snapshot. */
+  style.mask_primary = 0.0f;
+  style.mask_secondary = 0.0f;
+  const std::shared_ptr<const ShapeMaskSource> carried_source = std::move(style.mask_source);
+  const uint64_t carried_key = style.mask_source_key;
+  style.mask_source = nullptr;
+  style.mask_source_key = 0;
+  if (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    const Brush *brush = BKE_paint_brush_for_read(&paint);
+    const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
+    if (brush != nullptr && brush_paint != nullptr) {
+      const material::MaskValuePair values = material::mask_value_pair_get(
+          *brush_paint, paint, *brush);
+      style.mask_primary = values.primary;
+      style.mask_secondary = values.secondary;
+      /* Reopening the source images is the expensive part of a refresh and the values above are
+       * all the preview needs when nothing else changed. */
+      const uint64_t key = mask_source_key(*brush_paint, *brush, mode_settings, paint);
+      if (key != 0 && key == carried_key) {
+        style.mask_source = carried_source;
+        style.mask_source_key = key;
+        return;
+      }
+      style.mask_source_key = key;
+      /* The Mask Source may be a material-backed channel; request its bake exactly as the
+       * brush-texture resolve does, or the sampler would stay on the flat value. */
+      if (C != nullptr && brush_paint->source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL &&
+          brush_paint->source_material != nullptr)
+      {
+        ed::material_bake::material_source_bake_ensure(
+            *C, *brush_paint->source_material, brush_paint->source_bake_size);
+      }
+      style.mask_source = std::make_shared<ShapeMaskSource>(*brush_paint,
+                                                            mode_settings,
+                                                            paint,
+                                                            *brush,
+                                                            paint.visible_material_channels);
+      /* A flat source never changes the coverage; dropping it keeps the shape-space UV outputs
+       * and the per-shape passes off for the common untextured mask. */
+      if (!style.mask_source->has_texture()) {
+        style.mask_source = nullptr;
+      }
+    }
+  }
 }
 
 /** Same texture: the same handle, or equal content signatures (a re-resolve of unchanged sources
@@ -696,6 +797,14 @@ bool shape_brush_style_equal(const ShapeStyle &a, const ShapeStyle &b)
   if (a.stroke_opacity != b.stroke_opacity || a.fill_opacity != b.fill_opacity ||
       a.stroke_blend != b.stroke_blend || a.fill_blend != b.fill_blend)
   {
+    return false;
+  }
+  if (a.mask_primary != b.mask_primary || a.mask_secondary != b.mask_secondary) {
+    return false;
+  }
+  const uint64_t mask_signature_a = a.mask_source ? a.mask_source->signature : 0;
+  const uint64_t mask_signature_b = b.mask_source ? b.mask_source->signature : 0;
+  if (mask_signature_a != mask_signature_b) {
     return false;
   }
   /* The texture mappings and handles are preview-relevant too: a changed texture (or its
@@ -1148,19 +1257,27 @@ static void tile_composite_pixels(CompositeTile &tile,
   const bool has_stroke_s = !cov.stroke_s.is_empty();
   const bool has_stroke_v = !cov.stroke_v.is_empty();
   const bool has_shape_uv = !cov.shape_uv.is_empty();
+  /* A Mask target's coverage is additionally modulated by the Mask Source texture. The sampler
+   * lives on the style, so the preview and the commit read the same resolved pixels. */
+  const ShapeMaskSource *mask_source = ctx.is_mask_target ? ctx.style->mask_source.get() : nullptr;
+  const float4x4 mask_uv_matrix = mask_source != nullptr ?
+                                      shape_mask_source_uv_matrix(mask_source->mapping,
+                                                                  ctx.mask_shape_index) :
+                                      float4x4::identity();
 
   threading::parallel_for(
       IndexRange(cov.rect.ymin, cov.rect.ymax - cov.rect.ymin),
       32,
       [&](const IndexRange rows) {
+        const int thread = mask_source != nullptr ? BLI_task_parallel_thread_id(nullptr) : 0;
         for (const int y : rows) {
           for (const int px : IndexRange(cov.rect.xmin, cov.rect.xmax - cov.rect.xmin)) {
             const int64_t idx = cov.index(px, y);
 
-            float sel_w = 1.0f;
+            float factor = 1.0f;
             if (use_selection_mask) {
-              sel_w = selection_sampler.sample_bilinear(float(px) + 0.5f, float(y) + 0.5f);
-              if (sel_w <= 0.0f) {
+              factor = selection_sampler.sample_bilinear(float(px) + 0.5f, float(y) + 0.5f);
+              if (factor <= 0.0f) {
                 continue;
               }
             }
@@ -1182,8 +1299,23 @@ static void tile_composite_pixels(CompositeTile &tile,
 
             const float2 p = tile_offset_px + float2(float(px) + 0.5f, float(y) + 0.5f);
 
+            if (mask_source != nullptr) {
+              /* Sample in the shape's own frame, not through the destination image's object UV,
+               * so the texture follows the shape. */
+              const ShapeMaskSample mask_sample = shape_mask_source_sample(sample,
+                                                                           mask_uv_matrix);
+              if (!mask_sample.inside) {
+                /* Outside a shrunk / rotated source texture: nothing is painted (no tiling). */
+                continue;
+              }
+              factor *= mask_source->coverage_at_uv(mask_sample.uv, thread);
+              if (factor <= 0.0f) {
+                continue;
+              }
+            }
+
             float4 dst = composite_pixel_load(tile, px, y);
-            shape_blend_pixel(dst, ctx, sample, sel_w, p);
+            shape_blend_pixel(dst, ctx, sample, factor, p);
             composite_pixel_store(tile, px, y, dst);
           }
         }
@@ -1359,6 +1491,7 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
      * material may differ from each other and from the canvas): scale the geometry and the
      * pixel-based style widths when the tile differs from the reference tile. A scaled reference
      * tile is exactly this tile's size, so the offset below maps whole tiles into target pixels. */
+    /* Captured before the inner `CompositeTile &tile` shadows the CanvasTile parameter below. */
     const float2 scale = float2(write.tile_size) / float2(tile.ref_tile_size);
     const bool needs_scale = (scale.x != 1.0f) || (scale.y != 1.0f);
     Vector<PaintShape> scaled_shapes;
@@ -1380,20 +1513,34 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
      * entry. */
     for (AcquiredWrite &member : acquired) {
       member.work_style = raster_style;
-      member.work_style.stroke_color = part_color(style, true, member.tile);
-      member.work_style.fill_color = part_color(style, false, member.tile);
-      if (member.tile.byte_data && member.tile.byte_colorspace && !member.tile.byte_is_data) {
-        /* The sampled textures are scene linear too; they are converted per pixel. */
-        member.work_style.texture_colorspace = member.tile.byte_colorspace;
-        member.work_style.texture_colorspace_is_srgb = IMB_colormanagement_space_is_srgb(
-            member.tile.byte_colorspace);
-        IMB_colormanagement_scene_linear_to_colorspace_v3(member.work_style.stroke_color,
-                                                          member.tile.byte_colorspace);
-        IMB_colormanagement_scene_linear_to_colorspace_v3(member.work_style.fill_color,
-                                                          member.tile.byte_colorspace);
-        for (float4 &ramp_color : member.work_style.stroke_ramp_table) {
-          IMB_colormanagement_scene_linear_to_colorspace_v3(ramp_color,
+      const bool is_mask = member.write->target.kind == ShapeTargetKind::Mask;
+      if (is_mask) {
+        /* A mask writes its greys directly; the shape colors, ramp and textures are not read. */
+        member.work_style.stroke_color = float4(style.mask_primary,
+                                                style.mask_primary,
+                                                style.mask_primary,
+                                                1.0f);
+        member.work_style.fill_color = float4(style.mask_secondary,
+                                              style.mask_secondary,
+                                              style.mask_secondary,
+                                              1.0f);
+      }
+      else {
+        member.work_style.stroke_color = part_color(style, true, member.tile);
+        member.work_style.fill_color = part_color(style, false, member.tile);
+        if (member.tile.byte_data && member.tile.byte_colorspace && !member.tile.byte_is_data) {
+          /* The sampled textures are scene linear too; they are converted per pixel. */
+          member.work_style.texture_colorspace = member.tile.byte_colorspace;
+          member.work_style.texture_colorspace_is_srgb = IMB_colormanagement_space_is_srgb(
+              member.tile.byte_colorspace);
+          IMB_colormanagement_scene_linear_to_colorspace_v3(member.work_style.stroke_color,
                                                             member.tile.byte_colorspace);
+          IMB_colormanagement_scene_linear_to_colorspace_v3(member.work_style.fill_color,
+                                                            member.tile.byte_colorspace);
+          for (float4 &ramp_color : member.work_style.stroke_ramp_table) {
+            IMB_colormanagement_scene_linear_to_colorspace_v3(ramp_color,
+                                                              member.tile.byte_colorspace);
+          }
         }
       }
     }
@@ -1421,6 +1568,7 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
       member.ctx.style = &member.work_style;
       member.ctx.channel = member.write->target.channel;
       member.ctx.alpha_active = alpha_active;
+      member.ctx.is_mask_target = member.write->target.kind == ShapeTargetKind::Mask;
     }
 
     CompositeTile &tile = acquired[0].tile;
@@ -1447,9 +1595,11 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
       }
       auto composite_pbr_strips = [&](const Span<PaintShape> pass_shapes,
                                       const rcti &pass_region,
-                                      const ShapeTexFrame *tex_frame) {
+                                      const ShapeTexFrame *tex_frame,
+                                      const int shape_index) {
         for (AcquiredWrite &member : acquired) {
           member.ctx.tex_frame = tex_frame;
+          member.ctx.mask_shape_index = shape_index;
         }
         ShapeRasterizer rasterizer(pass_shapes, raster_style, pass_region, tile_offset_px, outputs);
         for (int y0 = pass_region.ymin; y0 < pass_region.ymax; y0 += STRIP_ROWS) {
@@ -1462,13 +1612,17 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
           const ShapeCoverage coverage = rasterizer.rasterize(strip);
           for (AcquiredWrite &member : acquired) {
             member.tile.region = strip;
-            tile_composite_pixels(
-                member.tile, coverage, member.ctx, tile_offset_px, member.write->target.image);
+            tile_composite_pixels(member.tile,
+                                  coverage,
+                                  member.ctx,
+                                  tile_offset_px,
+                                  member.write->target.image);
           }
         }
       };
       if (per_shape_passes) {
-        for (const PaintShape &shape : raster_shapes) {
+        for (const int i : raster_shapes.index_range()) {
+          const PaintShape &shape = raster_shapes[i];
           /* Each pass only walks its own shape's pixels, never the union of all of them. */
           const rcti pass_region = shape_pass_region(
               shape, raster_style, tile_offset_px, write.region);
@@ -1476,11 +1630,11 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
             continue;
           }
           const ShapeTexFrame frame = shape_tex_frame_calc(shape);
-          composite_pbr_strips(Span<PaintShape>(&shape, 1), pass_region, &frame);
+          composite_pbr_strips(Span<PaintShape>(&shape, 1), pass_region, &frame, i);
         }
       }
       else {
-        composite_pbr_strips(raster_shapes, write.region, nullptr);
+        composite_pbr_strips(raster_shapes, write.region, nullptr, 0);
       }
     }
     else if (tile.float_data || tile.byte_data) {
@@ -1494,8 +1648,10 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
       }
       auto composite_strips = [&](const Span<PaintShape> pass_shapes,
                                   const rcti &pass_region,
-                                  const ShapeTexFrame *tex_frame) {
+                                  const ShapeTexFrame *tex_frame,
+                                  const int shape_index) {
         acquired[0].ctx.tex_frame = tex_frame;
+        acquired[0].ctx.mask_shape_index = shape_index;
         ShapeRasterizer rasterizer(
             pass_shapes, raster_style, pass_region, tile_offset_px, canvas_outputs);
         for (int y0 = pass_region.ymin; y0 < pass_region.ymax; y0 += STRIP_ROWS) {
@@ -1507,23 +1663,28 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
                         std::min(y0 + STRIP_ROWS, pass_region.ymax));
           const ShapeCoverage coverage = rasterizer.rasterize(strip);
           tile.region = strip;
-          tile_composite_pixels(tile, coverage, acquired[0].ctx, tile_offset_px, write.target.image);
+          tile_composite_pixels(tile,
+                                coverage,
+                                acquired[0].ctx,
+                                tile_offset_px,
+                                write.target.image);
         }
       };
 
       if (per_shape_passes) {
-        for (const PaintShape &shape : raster_shapes) {
+        for (const int i : raster_shapes.index_range()) {
+          const PaintShape &shape = raster_shapes[i];
           const rcti pass_region = shape_pass_region(
               shape, raster_style, tile_offset_px, write.region);
           if (BLI_rcti_is_empty(&pass_region)) {
             continue;
           }
           const ShapeTexFrame frame = shape_tex_frame_calc(shape);
-          composite_strips(Span<PaintShape>(&shape, 1), pass_region, &frame);
+          composite_strips(Span<PaintShape>(&shape, 1), pass_region, &frame, i);
         }
       }
       else {
-        composite_strips(raster_shapes, write.region, nullptr);
+        composite_strips(raster_shapes, write.region, nullptr, 0);
       }
     }
 
@@ -1583,10 +1744,11 @@ bool shape_composite_into(const Span<ShapeTarget> targets,
     if (push_undo) {
       BKE_image_free_gputextures(target.image);
     }
-    if (target.channel >= 0) {
-      /* Material maps feed the 3D Viewport shading. The committed bake tags the shading graph
-       * here; the Vector preview tags its images with a throttle of its own (see the Vector
-       * session's refresh), so a drag does not re-evaluate the shading per mouse move. */
+    if (target.channel >= 0 || target.kind == ShapeTargetKind::Mask) {
+      /* Material maps, the mask included, feed the 3D Viewport shading. The committed bake tags
+       * the shading graph here; the Vector preview tags its images with a throttle of its own
+       * (see the Vector session's refresh), so a drag does not re-evaluate the shading per mouse
+       * move. */
       if (push_undo) {
         DEG_id_tag_update(&target.image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
       }
@@ -1827,7 +1989,7 @@ bool ImageTilesBackend::preview(bContext * /*C*/,
   if (now - last_shading_tag_ >= SHAPE_PREVIEW_SHADING_TAG_INTERVAL) {
     last_shading_tag_ = now;
     for (const ShapeTarget &target : targets_) {
-      if (target.channel >= 0 && target.image) {
+      if ((target.channel >= 0 || target.kind == ShapeTargetKind::Mask) && target.image) {
         DEG_id_tag_update(&target.image->id, ID_RECALC_SHADING | ID_RECALC_PARAMETERS);
       }
     }

@@ -73,22 +73,22 @@ constexpr double SHAPE_PREVIEW_SHADING_TAG_INTERVAL = 0.1;
  */
 bool shape_brush_style_equal(const ShapeStyle &a, const ShapeStyle &b);
 
-/** What a target map holds: a painted channel (color/scalar/normal), or a layer mask coverage
- * Only #Channel exists in this tree; #Mask arrives with the layers merge and
- * is switched on in the adapter #shape_target_from_material_target. */
+/** What a target map holds: a painted channel (color/scalar/normal), or a layer mask coverage. */
 enum class ShapeTargetKind : int8_t {
   Channel,
   Mask,
 };
 
-/** One image a shape bakes into: the canvas image (#channel < 0) or a PBR channel image. */
+/** One image a shape bakes into: the canvas image, a PBR channel image, or the active layer's
+ * mask map. */
 struct ShapeTarget {
   Image *image = nullptr;
   /** Owner's ImageUser; may be null (a local default is used for the tile lookups). */
   ImageUser *iuser = nullptr;
-  /** #eMaterialPaintChannel when >= 0, -1 for the plain canvas. */
+  /** #eMaterialPaintChannel when >= 0, -1 for the canvas or a mask map. */
   int channel = -1;
-  /** Channel data or layer mask. */
+  /** Channel data or layer mask; a #Mask target is resolved from the layers target, never from
+   * the channel alone. */
   ShapeTargetKind kind = ShapeTargetKind::Channel;
   /** Name of the UV map the target projects through; empty means the object's active UV.
    * Always empty until the Stack Layers merge fills it through the adapter. */
@@ -99,9 +99,9 @@ struct ShapeTarget {
 };
 
 /**
- * Adapt one resolver target to a shape target. The single place the mask / UV fields of
- * a #PaintMaterialImageTarget are mapped onto #ShapeTarget; today always a channel with an empty
- * UV, matching the current resolution.
+ * Adapt one channel resolver target to a shape target. The content path's single mapping point;
+ * a Mask target is built directly by #composite_targets_get from the layers resolver, so it never
+ * passes through this adapter.
  */
 ShapeTarget shape_target_from_material_target(const PaintMaterialImageTarget &target);
 
@@ -129,7 +129,9 @@ void composite_targets_ensure_writable(bContext *C,
  * \param paint: the channel source for this context (see #composite_targets_ensure_writable).
  *
  * \note The channel set is resolved by #BKE_paint_shape_target_channels, the same rule the 3D
- * attribute backend and the tool UI (`PaintShapeSettings.target_channels`) use.
+ * attribute backend and the tool UI (`PaintShapeSettings.target_channels`) use. When
+ * #PaintModeSettings::layer_target_mode is #PAINT_LAYER_TARGET_MASK, the single target is instead
+ * the active layered row's mask map.
  */
 Vector<ShapeTarget> composite_targets_get(bContext *C,
                                           Object *ob,
@@ -142,9 +144,8 @@ Vector<ShapeTarget> composite_targets_get(bContext *C,
  *
  * The shape tools call this to report a refusal instead of silently drawing somewhere else:
  * in Material mode #composite_targets_get never falls back to the Image Editor image, so an empty
- * result here means the bake must not run. When Stack Layers merge this returns their specific
- * refusal (frozen bake target, missing UV map, active row is a folder, ...); today it is the
- * generic "no writable material channel map" text.
+ * result here means the bake must not run. This returns the Mask-specific text in
+ * #PAINT_LAYER_TARGET_MASK mode and the generic "no writable material channel map" text otherwise.
  */
 const char *shape_targets_refusal_message(bContext *C, Object *ob);
 
@@ -162,7 +163,8 @@ void style_channels_from_brush(Paint &paint, ShapeStyle &style);
 /**
  * Resolve the fill/stroke texture parts of \a settings into \a style's immutable
  * #ShapeTexture handles (brush maps, a standalone material, a single image or the Curve Pattern
- * tile) and fill each mapping's native texture size. Call once per style refresh / bake, after
+ * tile) and fill each mapping's native texture size. In Mask mode it also resolves the brush's
+ * mask value pair and Mask Source sampler. Call once per style refresh / bake, after
  * #style_from_settings; main thread only (it pins buffers and may start a material bake job).
  *
  * \param paint: the brush the Brush sources resolve from.
@@ -175,6 +177,13 @@ void style_textures_resolve(bContext *C,
                             const PaintShapeSettings &settings,
                             Span<const Image *> protected_images,
                             ShapeStyle &style);
+
+/**
+ * Hand the resolved Mask Source of \a previous to the freshly built \a next, before
+ * #style_textures_resolve. The resolve keeps it when the brush inputs are unchanged, so a
+ * live-preview refresh triggered by an unrelated brush edit does not reopen the source images.
+ */
+void style_mask_source_carry(const ShapeStyle &previous, ShapeStyle &next);
 
 /** Set the overall opacity and canvas blend from the active brush: the brush/unified Strength as
  * both stroke and fill opacity, and the brush's blend mode for both parts. The shape colors are

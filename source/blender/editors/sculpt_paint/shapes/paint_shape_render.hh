@@ -387,6 +387,12 @@ struct ShapeBlendContext {
   const ShapeStyle *style = nullptr;
   /** -1 = Canvas (the image's own pixel colors), otherwise an #eMaterialPaintChannel. */
   int channel = -1;
+  /** The destination pixels carry pre-multiplied RGB (a byte map read through the paint pixel
+   * readers). A Normal write has to un-multiply them before decoding the tangent normal. */
+  bool dst_premultiplied = false;
+  /** The target is the active layer's mask: stroke writes #ShapeStyle::mask_primary and fill
+   * writes #ShapeStyle::mask_secondary, both as grayscale, and #channel is ignored. */
+  bool is_mask_target = false;
   /** Whether the Alpha channel masks the other channels this bake. Computed once per bake, never
    * per pixel. */
   bool alpha_active = false;
@@ -396,6 +402,9 @@ struct ShapeBlendContext {
    * the combined passes, where the Mask mappings anchor to the space origin and the Fit fill is
    * not active. */
   const ShapeTexFrame *tex_frame = nullptr;
+  /** Shape index of the single-shape pass, selecting the deterministic per-shape Mask Source
+   * random rotation / scale. Zero in the combined passes (which cannot identify one shape). */
+  int mask_shape_index = 0;
 };
 
 /**

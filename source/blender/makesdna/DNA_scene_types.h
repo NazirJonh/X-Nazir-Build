@@ -1545,6 +1545,8 @@ enum ePaintShapeFlag : int {
    * mode), instead of profiling independently of the height settings.
    */
   PAINT_SHAPE_HEIGHT_NORMAL_LINK = (1 << 11),
+  /** Show the Mask Source texture inside the Rect/Ellipse gizmo while editing the shape. */
+  PAINT_SHAPE_TEXTURE_PREVIEW = (1 << 12),
 };
 ENUM_OPERATORS(ePaintShapeFlag)
 
@@ -1822,7 +1824,7 @@ struct PaintShapeSettings {
   char _pad[2] = {};
 
   /** #ePaintShapeFlag */
-  int flag = PAINT_SHAPE_USE_FILL | PAINT_SHAPE_CORNER_UNIFORM;
+  int flag = PAINT_SHAPE_USE_FILL | PAINT_SHAPE_CORNER_UNIFORM | PAINT_SHAPE_TEXTURE_PREVIEW;
 
   /** Stroke width, reference-tile pixels. */
   float stroke_width = 8.0f;
@@ -1911,6 +1913,10 @@ struct PaintShapeSettings {
    * this field existed (it only takes priority for values >= 2). */
   char stroke_type = PAINT_SHAPE_STROKE_SOLID;
   char _pad6[7] = {};
+  /** Opacity of the Mask Source texture preview drawn inside the Rect/Ellipse gizmo. */
+  float texture_preview_opacity = 0.5f;
+  /* Keep the struct's size a multiple of 8: it holds pointers and is embedded in #ToolSettings. */
+  char _pad7[4] = {};
 };
 
 /** #ImagePaintSettings::select_component */

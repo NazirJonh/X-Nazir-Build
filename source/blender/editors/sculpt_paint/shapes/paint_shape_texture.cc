@@ -16,8 +16,11 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_math_base.hh"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_utildefines.h"
+
+#include "../mesh/paint_material_source.hh"
 
 namespace blender::ed::sculpt_paint::shape {
 
@@ -252,6 +255,73 @@ ShapeTexCoord shape_texture_coord_along(const ShapeTextureMapping &map,
   coord.axis_flip = float2(shape_texture_axis_sign(map.flip_x, reflected_x),
                            handedness * shape_texture_axis_sign(map.flip_y, false));
   return coord;
+}
+
+namespace {
+
+/** Stable 32-bit avalanche; avoids any dependency on the stroke RNG, so preview and commit agree. */
+uint32_t mask_random_hash(const uint32_t seed, const uint32_t shape_index, const uint32_t salt)
+{
+  uint32_t h = seed ^ (shape_index * 0x9e3779b9u) ^ salt;
+  h ^= h >> 16;
+  h *= 0x7feb352du;
+  h ^= h >> 15;
+  h *= 0x846ca68bu;
+  h ^= h >> 16;
+  return h;
+}
+
+float mask_random_unit(const uint32_t seed, const uint32_t shape_index, const uint32_t salt)
+{
+  /* Top 24 bits give a [0, 1) value without the bias of the low bits. */
+  return float(mask_random_hash(seed, shape_index, salt) >> 8) * (1.0f / 16777216.0f);
+}
+
+}  // namespace
+
+float4x4 shape_mask_source_uv_matrix(const ShapeMaskMapping &mapping, const int shape_index)
+{
+  /* The random terms are resolved once per shape, never per pixel, and use a hash of the shape
+   * index so the live preview and the commit produce the same layout. */
+  const float angle_random = mapping.rotation_random > 0.0f ?
+                                 (mask_random_unit(mapping.seed, shape_index, 1) - 0.5f) *
+                                     mapping.rotation_random :
+                                 0.0f;
+  const float scale_random = mapping.scale_random > 0.0f ?
+                                 1.0f + (mask_random_unit(mapping.seed, shape_index, 2) - 0.5f) *
+                                            mapping.scale_random :
+                                 1.0f;
+  const float angle = mapping.angle + angle_random;
+  const float2 size = math::max(mapping.scale * scale_random, float2(1e-4f));
+
+  const float c = math::cos(angle);
+  const float s = math::sin(angle);
+  /* uv = (R(angle) * (shape_uv - 0.5)) / size + 0.5. A size below 1 shrinks the texture inside
+   * the frame (the callers treat the outside as empty, no tiling); above 1 crops it. */
+  const float2 ax = float2(c, s) / size;
+  const float2 ay = float2(-s, c) / size;
+
+  float4x4 matrix = float4x4::identity();
+  matrix[0][0] = ax.x;
+  matrix[0][1] = ax.y;
+  matrix[1][0] = ay.x;
+  matrix[1][1] = ay.y;
+  matrix[3][0] = 0.5f - 0.5f * (ax.x + ay.x);
+  matrix[3][1] = 0.5f - 0.5f * (ax.y + ay.y);
+  return matrix;
+}
+
+ShapeMaskSample shape_mask_source_sample(const ShapeSample &sample, const float4x4 &uv_matrix)
+{
+  ShapeMaskSample result;
+  /* #ShapeSample::shape_uv is the shape's local frame (already turned by the shape's own
+   * rotation), so the texture follows the shape without reading its destination UV. */
+  const float2 shape_uv = math::clamp(sample.shape_uv, float2(0.0f), float2(1.0f));
+  const float3 uv = math::transform_point(uv_matrix, float3(shape_uv.x, shape_uv.y, 0.0f));
+  result.uv = float2(uv.x, uv.y);
+  result.inside = result.uv.x >= 0.0f && result.uv.x <= 1.0f && result.uv.y >= 0.0f &&
+                  result.uv.y <= 1.0f;
+  return result;
 }
 
 ShapeTexCoord shape_texture_coord(const ShapeTextureMapping &map,

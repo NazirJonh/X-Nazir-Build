@@ -17,6 +17,8 @@
 
 #include "BLT_translation.hh"
 
+#include "BLI_math_matrix_types.hh"
+#include "BLI_task.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 
@@ -28,7 +30,7 @@ struct ShapeImageTarget {
   std::unique_ptr<paint::image::ImageData> data;
   int channel = -1;
   bool is_normal = false;
-  /** Channel data or layer mask; only #Channel exists here today. */
+  /** Channel data or the active layer's mask. */
   ShapeTargetKind kind = ShapeTargetKind::Channel;
   /** UV map to project through; empty means the canvas UV (see the TODO below). */
   StringRef uv_map_name;
@@ -336,6 +338,14 @@ static bool shape_write_image(bContext *C,
               continue;
             }
             const bool premul_storage = image_data.image->alpha_mode == IMA_ALPHA_PREMUL;
+            /* Mask Source texture coverage is part of the shape's per-pixel alpha, applied here
+             * so the preview and the commit below share one path. The sampler lives on the
+             * style, resolved once per bake. */
+            const ShapeMaskSource *mask_source =
+                target.kind == ShapeTargetKind::Mask ? style.mask_source.get() : nullptr;
+            const float4x4 mask_uv_matrix = mask_source != nullptr ?
+                                                shape_mask_source_uv_matrix(mask_source->mapping, 0) :
+                                                float4x4::identity();
 
             MutableSpan<float4> float_buffer;
             MutableSpan<uchar4> byte_buffer;
@@ -368,6 +378,9 @@ static bool shape_write_image(bContext *C,
             Array<bool> rows_changed(tile.pixel_rows.size(), false);
             threading::parallel_for(
                 tile.pixel_rows.index_range(), 64, [&](const IndexRange rows) {
+                  const int thread = mask_source != nullptr ?
+                                         BLI_task_parallel_thread_id(nullptr) :
+                                         0;
                   Vector<float3> positions;
                   Vector<float4> byte_storage;
                   for (const int r : rows) {
@@ -423,6 +436,9 @@ static bool shape_write_image(bContext *C,
                     }
                     ShapeBlendContext row_ctx = base_ctx;
                     row_ctx.channel = target.channel;
+                    row_ctx.is_mask_target = target.kind == ShapeTargetKind::Mask;
+                    /* #read_image_pixels hands a byte map over pre-multiplied; a float one as is. */
+                    row_ctx.dst_premultiplied = float_buffer.is_empty();
                     row_ctx.normal_basis = target.is_normal ? &basis : nullptr;
 
                     const IndexRange range(0, pixel_row.num_pixels);
@@ -504,6 +520,19 @@ static bool shape_write_image(bContext *C,
                       }
                       if (best_score <= 0.0f) {
                         continue;
+                      }
+                      if (mask_source != nullptr) {
+                        /* The Mask Source texture is mapped onto the shape's own frame instead of
+                         * being looked up through the object's UV, so it follows the shape. */
+                        const ShapeMaskSample mask_sample = shape_mask_source_sample(
+                            best, mask_uv_matrix);
+                        if (!mask_sample.inside) {
+                          continue;
+                        }
+                        factor *= mask_source->coverage_at_uv(mask_sample.uv, thread);
+                        if (factor <= 0.0f) {
+                          continue;
+                        }
                       }
                       if (has_camera && vertex_is_occluded(depsgraph, ob, camera, best_position, false)) {
                         continue;

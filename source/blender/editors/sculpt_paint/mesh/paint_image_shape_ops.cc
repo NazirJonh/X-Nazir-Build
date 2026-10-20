@@ -40,6 +40,7 @@
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
@@ -79,6 +80,8 @@
 #include "../shapes/paint_shape_op_props.hh"
 #include "../selection/paint_image_select_intern.hh"
 #include "paint_image_shape_composite.hh"
+#include "paint_material_source.hh"
+#include "paint_shape_texture_preview.hh"
 #include "../shapes/paint_shape_render.hh"
 
 namespace blender {
@@ -160,6 +163,9 @@ struct ImageShapeState {
   bool vector_edit = false;
   /** The shared gesture state machine; the modal forwards `vector_edit` events to it. */
   shape::ShapeVectorEditor vector_editor;
+
+  /** Mask Source texture shown inside the Rectangle / Ellipse while it is dragged out. */
+  shape::ShapeTexturePreview texture_preview;
 };
 
 static void image_shape_state_free(bContext *C, wmOperator *op)
@@ -212,6 +218,12 @@ static void image_shape_draw_drag(const bContext *C, ARegion *region, void *arg)
 
   const shape::PaintShape &shape = state->create->shape();
   const shape::CanvasTile tile = state->canvas_tile();
+  /* Under the outline, so the Mask Source texture is visible inside the shape while dragging. */
+  state->texture_preview.draw_pixel_shape(
+      C,
+      shape,
+      [&](const float2 &p) { return shape::shape_px_to_region(*region, tile, p); },
+      /*is_3d=*/false);
   /* While F adjusts the width, the stroke edges are drawn too, so the band is visible. */
   const bool show_width = state->create->value_drag_active() &&
                           state->create->value_drag_is_width();
@@ -849,6 +861,19 @@ static wmOperatorStatus shape_colors_swap_exec(bContext *C, wmOperator * /*op*/)
   Scene *scene = CTX_data_scene(C);
   if (scene == nullptr || scene->toolsettings == nullptr) {
     return OPERATOR_CANCELLED;
+  }
+  if (scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    /* Mask mode reads the brush's Alpha value pair, not the shape colors: swap that pair exactly
+     * like `PAINT_OT_brush_colors_flip` so the shortcut still does something. */
+    Paint *paint = BKE_paint_get_active_from_context(C);
+    Brush *brush = paint != nullptr ? BKE_paint_brush(paint) : nullptr;
+    if (brush == nullptr) {
+      return OPERATOR_CANCELLED;
+    }
+    ed::sculpt_paint::material::mask_values_flip(*paint, *brush);
+    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+    WM_main_add_notifier(NC_IMAGE | NA_EDITED, nullptr);
+    return OPERATOR_FINISHED;
   }
   /* The live Vector session owns its own settings copy: swapping colors in the owning Image
    * Editor edits that copy and must not touch the shared global block. */

@@ -316,9 +316,16 @@ struct BrushMaterialPaint {
   char mask_source = 0;
   /** Bit flags, see #BRUSH_MATERIAL_PAINT_MASK_DEFAULT_BRUSH. */
   char mask_flag = 0;
-  /* #source_material is pointer-aligned: 4 (size_random) + 2 (modes) + 2 (mask) + this padding keep
-   * the int + pointer pair below on their natural boundaries without hidden compiler padding. */
-  char _pad2[4] = {};
+  /**
+   * Image Transform Settings: edit #shared_source_mapping's Size X and Size Y together, keeping
+   * them equal. Lives in former padding, so the struct layout is unchanged; files that predate it
+   * are switched to the locked default by `versioning_520.cc`.
+   */
+  char shared_mapping_scale_lock = 1;
+  /* #source_material is pointer-aligned: 4 (size_random) + 2 (modes) + 2 (mask flag) + 1 (scale
+   * lock) + these 3 bytes of padding keep the int + pointer pair below on their natural boundaries
+   * without hidden compiler padding. */
+  char _pad2[3] = {};
   /**
    * Side of the square bake buffer in pixels. Deliberately smaller than
    * #PaintModeSettings.new_channel_image_size: this is a scratch buffer several channels of which

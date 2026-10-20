@@ -1884,6 +1884,9 @@ static void rna_BrushMaterialPaint_shared_mapping_size_x_set(PointerRNA *ptr, fl
 {
   BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
   brush_paint->shared_source_mapping.size[0] = value;
+  if (brush_paint->shared_mapping_scale_lock) {
+    brush_paint->shared_source_mapping.size[1] = value;
+  }
 }
 
 static float rna_BrushMaterialPaint_shared_mapping_size_y_get(PointerRNA *ptr)
@@ -1896,6 +1899,26 @@ static void rna_BrushMaterialPaint_shared_mapping_size_y_set(PointerRNA *ptr, fl
 {
   BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
   brush_paint->shared_source_mapping.size[1] = value;
+  if (brush_paint->shared_mapping_scale_lock) {
+    brush_paint->shared_source_mapping.size[0] = value;
+  }
+}
+
+static bool rna_BrushMaterialPaint_shared_mapping_scale_lock_get(PointerRNA *ptr)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  return brush_paint->shared_mapping_scale_lock != 0;
+}
+
+static void rna_BrushMaterialPaint_shared_mapping_scale_lock_set(PointerRNA *ptr, bool value)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  brush_paint->shared_mapping_scale_lock = value ? 1 : 0;
+  if (value) {
+    /* Locking joins the axes at X, like the layer mapping's lock does, so the value the user
+     * already sees on the first axis is the one that stays. */
+    brush_paint->shared_source_mapping.size[1] = brush_paint->shared_source_mapping.size[0];
+  }
 }
 
 /* The shared mapping's #MTex.tex is always null (see #BrushMaterialPaint.shared_source_mapping),
@@ -4511,7 +4534,9 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
                                "rna_BrushMaterialPaint_shared_mapping_size_x_get",
                                "rna_BrushMaterialPaint_shared_mapping_size_x_set",
                                nullptr);
-  RNA_def_property_range(prop, 0.0f, 1.0f);
+  /* Above 1 enlarges the texture: a shape crops it to the part inside its frame. */
+  RNA_def_property_range(prop, 0.0f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.1f, 3);
   RNA_def_property_ui_text(
       prop, "Size X", "Horizontal scale of every channel's shared source-texture mapping");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_shared_mapping_update");
@@ -4521,9 +4546,19 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
                                "rna_BrushMaterialPaint_shared_mapping_size_y_get",
                                "rna_BrushMaterialPaint_shared_mapping_size_y_set",
                                nullptr);
-  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_range(prop, 0.0f, 10.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.1f, 3);
   RNA_def_property_ui_text(
       prop, "Size Y", "Vertical scale of every channel's shared source-texture mapping");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_shared_mapping_update");
+
+  prop = RNA_def_property(srna, "shared_mapping_scale_lock", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_BrushMaterialPaint_shared_mapping_scale_lock_get",
+                                 "rna_BrushMaterialPaint_shared_mapping_scale_lock_set");
+  RNA_def_property_ui_text(
+      prop, "Lock Scale", "Edit both scale axes together, keeping them equal");
+  RNA_def_property_ui_icon(prop, ICON_UNLOCKED, 1);
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_shared_mapping_update");
 
   prop = RNA_def_property(srna, "size_random", PROP_FLOAT, PROP_FACTOR);

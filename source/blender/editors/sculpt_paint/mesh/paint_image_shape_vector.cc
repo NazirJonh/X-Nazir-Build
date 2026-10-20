@@ -1234,6 +1234,9 @@ void ED_paint_shape_brush_update(const Main *bmain, const Scene *scene, const Br
     shape::ShapeStyle candidate = shape::style_from_settings(state->settings);
     shape::style_brush_values_from_brush(ts.imapaint.paint, candidate);
     shape::style_channels_from_brush(ts.imapaint.paint, candidate);
+    /* Unchanged Mask Source inputs keep the session's resolved source instead of reopening it on
+     * every unrelated brush edit. */
+    shape::style_mask_source_carry(state->style, candidate);
     /* The session style carries resolved textures, so the candidate must too; a texture that
      * did not change resolves to the same signature. */
     Vector<const Image *> protected_images;

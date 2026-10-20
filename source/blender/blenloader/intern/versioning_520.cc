@@ -1102,6 +1102,33 @@ static void version_material_paint_source_defaults(Main &bmain)
   }
 }
 
+/* #BrushMaterialPaint.shared_mapping_scale_lock is new and defaults to locked. It occupies bytes
+ * that were padding before, so files written by an earlier build read zero there (unlocked)
+ * instead of the DNA default; restore the intended default for every stored brush. */
+static void version_material_paint_scale_lock_defaults_one(BrushMaterialPaint *material_paint)
+{
+  if (material_paint != nullptr) {
+    material_paint->shared_mapping_scale_lock = 1;
+  }
+}
+
+static void version_material_paint_scale_lock_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    version_material_paint_scale_lock_defaults_one(brush.material_paint);
+  }
+  for (Scene &scene : bmain.scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    for (PaintMaterialBrushPreset &preset :
+         scene.toolsettings->paint_mode.material_paint_brush_presets)
+    {
+      version_material_paint_scale_lock_defaults_one(preset.material_paint);
+    }
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -2214,6 +2241,23 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The Mask Source texture preview is new: a file written before it zero-fills the opacity (an
+   * invisible preview) and leaves the flag clear, while the DNA default is enabled. Restore both.
+   *
+   * NOTE: Keyed on the member existence like the block above. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "PaintShapeSettings", "float", "texture_preview_opacity"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (!scene.toolsettings) {
+        continue;
+      }
+      PaintShapeSettings &shape = scene.toolsettings->imapaint.shape;
+      shape.flag |= PAINT_SHAPE_TEXTURE_PREVIEW;
+      shape.texture_preview_opacity = 0.5f;
+    }
+  }
+
   /* The Magic Wand / Quick Select settings are new; a file written before them has the block
    * zero-filled, which is not a usable default (tolerance 0 would select nothing). Restore the
    * DNA defaults.
@@ -2269,6 +2313,18 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
       settings.curve_pattern = defaults.curve_pattern;
       settings.stroke_type = defaults.stroke_type;
     }
+  }
+
+  /* The Image Transform Settings' Lock Scale flag is new and defaults to locked. It lives in
+   * bytes that were padding in earlier files, so those read zero (unlocked) instead of the DNA
+   * default.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "BrushMaterialPaint", "char", "shared_mapping_scale_lock"))
+  {
+    version_material_paint_scale_lock_defaults(*bmain);
   }
 
   /**

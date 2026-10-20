@@ -216,6 +216,7 @@ set(SRC
   mesh/paint_shape_session_confirm.cc
   mesh/paint_shape_vector_3d.cc
   mesh/paint_shape_gizmo.cc
+  mesh/paint_shape_texture_preview.cc
   mesh/paint_shape_gizmo_view3d.cc
   mesh/paint_shape_image_3d.cc
   mesh/sculpt_pose.cc
@@ -313,6 +314,7 @@ paint_intern.hh
   mesh/sculpt_paint_shape_intern.hh
   mesh/paint_shape_vector_3d.hh
   mesh/paint_shape_gizmo.hh
+  mesh/paint_shape_texture_preview.hh
   mesh/sculpt_pose.hh
   mesh/sculpt_smooth.hh
   mesh/sculpt_undo.hh

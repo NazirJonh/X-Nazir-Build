@@ -42,6 +42,7 @@ from bl_ui.properties_paint_common import (
     _mask_alpha_channel,
     draw_mask_alpha_source,
     draw_paint_shape_options_subpanel,
+    draw_paint_shape_texture_preview_popover,
     draw_shape_color_row,
     paint_shape_settings,
     paint_shape_tool_has_angle,
@@ -3149,7 +3150,8 @@ class _defs_image_paint_shape:
             row = layout.row(align=True)
             row.prop(shape, "draw_mode", text="", expand=True)
             layout.separator()
-            draw_shape_color_row(layout, shape, header=True, show_swap=not is_line)
+            draw_shape_color_row(
+                layout, shape, context=context, brush=brush, header=True, show_swap=not is_line)
             layout.separator()
             if brush is not None:
                 blend_row = layout.row(align=True)
@@ -3181,6 +3183,8 @@ class _defs_image_paint_shape:
                 layout.prop(shape, "rotation", text="Angle")
             layout.separator()
             layout.popover(panel="IMAGE_PT_tools_shape_options", text="Options")
+            draw_paint_shape_texture_preview_popover(
+                context, layout, panel="PAINT_PT_shape_texture_preview")
             # Confirm / cancel while the Image Editor owns a live Vector session.
             if bpy.ops.paint.image_shape_vector_apply.poll():
                 layout.separator()
@@ -3194,7 +3198,7 @@ class _defs_image_paint_shape:
         row = layout.row(align=True)
         row.use_property_split = False
         row.prop(shape, "draw_mode", text="", expand=True)
-        draw_shape_color_row(layout, shape, show_swap=not is_line)
+        draw_shape_color_row(layout, shape, context=context, brush=brush, show_swap=not is_line)
         layout.prop(shape, "stroke_width", text="Width", slider=True)
         if not is_line:
             row = layout.row(align=True)
@@ -3238,7 +3242,8 @@ class _defs_sculpt_paint_shape:
             if shape.draw_mode == 'PIXEL':
                 layout.prop(props, "space", text="Projection")
                 layout.separator()
-            draw_shape_color_row(layout, shape, header=True, show_swap=not is_line)
+            draw_shape_color_row(
+                layout, shape, context=context, brush=brush, header=True, show_swap=not is_line)
             layout.separator()
             if brush is not None:
                 blend_row = layout.row(align=True)
@@ -3271,13 +3276,16 @@ class _defs_sculpt_paint_shape:
                 layout.prop(shape, "rotation", text="Angle")
             layout.separator()
             layout.popover(panel="VIEW3D_PT_tools_shape_options", text="Options")
+            draw_paint_shape_texture_preview_popover(
+                context, layout, panel="PAINT_PT_shape_texture_preview")
         else:
             row = layout.row(align=True)
             row.use_property_split = False
             row.prop(shape, "draw_mode", text="", expand=True)
             if shape.draw_mode == 'PIXEL':
                 layout.prop(props, "space", text="Projection")
-            draw_shape_color_row(layout, shape, show_swap=not is_line)
+            draw_shape_color_row(
+                layout, shape, context=context, brush=brush, show_swap=not is_line)
             layout.prop(shape, "stroke_width", text="Width", slider=True)
             if not is_line:
                 row = layout.row(align=True)

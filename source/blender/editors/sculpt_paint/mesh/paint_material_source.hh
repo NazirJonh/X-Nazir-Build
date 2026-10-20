@@ -712,3 +712,84 @@ void build_normal_write_basis(const float3 &tri_tangent,
  * the shape blend core). */
 
 }  // namespace blender::ed::sculpt_paint::material
+
+namespace blender::ed::sculpt_paint::shape {
+
+/**
+ * Placement of the Mask Source texture inside a shape's own frame.
+ *
+ * #scale is the texture size relative to the frame (1 = Fit/Stretch, the whole texture exactly
+ * fills the frame), #angle is an extra rotation around the frame center on top of the shape's own
+ * rotation, and the two random terms vary those per shape. \a seed is the fixed base of the
+ * deterministic per-shape random sequence: preview and commit build it from the same inputs, so
+ * they always agree.
+ */
+struct ShapeMaskMapping {
+  float2 scale = float2(1.0f);
+  /** Radians, on top of the shape's own rotation. */
+  float angle = 0.0f;
+  /** Maximum random extra rotation (radians), applied as +-rotation_random / 2. */
+  float rotation_random = 0.0f;
+  /** Random scale variation, applied as `1 + scale_random * (rand - 0.5)`. */
+  float scale_random = 0.0f;
+  uint32_t seed = 0x9e3779b9u;
+
+  friend bool operator==(const ShapeMaskMapping &a, const ShapeMaskMapping &b)
+  {
+    return a.scale == b.scale && a.angle == b.angle &&
+           a.rotation_random == b.rotation_random && a.scale_random == b.scale_random &&
+           a.seed == b.seed;
+  }
+};
+
+/**
+ * Identity of everything that decides which images a Mask Source opens and how they are placed,
+ * without opening them, the brush included. Zero for a material-backed source (its bake finishes later and swaps the
+ * buffers, so a cached resolve would go stale) and when the brush selects no source.
+ */
+uint64_t mask_source_key(const BrushMaterialPaint &brush_paint,
+                         const Brush &brush,
+                         const PaintModeSettings &mode_settings,
+                         const Paint &paint);
+
+/**
+ * Resolved Mask Source texture for the shape tools: the one brush channel
+ * #mask_source_channel_get selects, the sampler that reads it at a target UV, and the channel set
+ * that pins its image buffer. Shared by every copy of a #ShapeStyle, so a live preview and its
+ * commit sample exactly the same pixels.
+ */
+struct ShapeMaskSource {
+  material::ChannelSourceSet sources;
+  /** Borrowed from the brush the source was resolved for; #mask_source_key includes that brush, so
+   * a cached source is never reused for another one. */
+  const BrushMaterialPaint *brush_paint = nullptr;
+  material::ChannelUvSampler sampler;
+  /** How the texture is placed inside the shape's frame (Image Transform Settings). */
+  ShapeMaskMapping mapping;
+  /** Identity of the resolved source, for the live-preview equality check. */
+  uint64_t signature = 0;
+
+  ShapeMaskSource(const BrushMaterialPaint &brush_paint,
+                  const PaintModeSettings &settings,
+                  const Paint &paint,
+                  const Brush &brush,
+                  int visible_material_channels);
+
+  float coverage_at_uv(const float2 &uv, const int thread) const
+  {
+    return material::mask_source_coverage_at_uv(sampler, *brush_paint, uv, thread);
+  }
+
+  /**
+   * Whether the selected source is a texture. A flat value does not modulate the coverage, so the
+   * shape backends skip the shape-space UV outputs for it.
+   */
+  bool has_texture() const
+  {
+    const std::optional<eMaterialPaintChannel> channel = material::mask_source_channel_get(
+        *brush_paint);
+    return channel && sampler.has_texture_source(*channel);
+  }
+};
+
+}  // namespace blender::ed::sculpt_paint::shape

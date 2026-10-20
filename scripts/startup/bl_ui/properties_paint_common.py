@@ -1622,11 +1622,12 @@ def brush_settings(layout, context, brush, popover=False):
         capabilities = brush.image_paint_capabilities
 
         if brush.image_brush_type == 'FILL':
-            if brush.color_type == 'COLOR':
+            is_mask_target = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
+            if brush.color_type == 'COLOR' or is_mask_target:
                 draw_image_paint_fill_expand(layout, context, brush)
                 if brush.fill_expand == 'PIXELS' and mode == 'PAINT_2D':
                     layout.prop(brush, "fill_threshold", text="Fill Threshold", slider=True)
-            elif brush.color_type == 'GRADIENT':
+            if brush.color_type == 'GRADIENT' and not is_mask_target:
                 layout.row().prop(brush, "gradient_fill_mode", expand=True)
 
     elif mode == 'SCULPT_CURVES':
@@ -2560,12 +2561,45 @@ def _draw_mask_alpha_pair(layout, channel):
     row.template_material_paint_value_slider(channel, "value_secondary", index=0)
 
 
+def draw_mask_alpha_source(layout, context, brush, *, channel=None):
+    """Mask Source and the Alpha source inversion that select what the Mask stroke reads.
+
+    Drawn beside the value pair so switching between Alpha and a color-based source does not
+    require opening the Brush Material panel. The source choice is shown even when a color-based
+    source currently owns the value. Returns ``True`` when the Alpha pair is the value source.
+    """
+    if channel is None:
+        channel = _mask_alpha_channel(context, brush)
+    material_paint = brush.material_paint if brush is not None else None
+    if material_paint is None:
+        return False
+    layout.prop(material_paint, "mask_source")
+    if channel is not None and "use_source_invert" in channel.bl_rna.properties:
+        layout.prop(channel, "use_source_invert", text="Invert Source")
+    return channel is not None
+
+
+def mask_target_suppresses_color(context, brush):
+    """True when the active tool has no brush color value to show while painting a Mask.
+
+    The Clone tools copy pixels from a source, so neither the Mask pair nor a color picker
+    describes what they write. Their own source/reset settings stay visible elsewhere.
+    """
+    if brush is None or context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+        return False
+    return (getattr(brush, "image_brush_type", None) == 'CLONE' or
+            getattr(brush, "sculpt_brush_type", None) == 'CLONE')
+
+
 def draw_mask_alpha_swatches(layout, context, brush):
     """Header stand-in for the color swatches while the Mask takes its value from the Alpha pair.
 
     Each button opens a grayscale popup instead of a color picker. Returns ``False`` when the
     regular color swatches apply.
     """
+    if mask_target_suppresses_color(context, brush):
+        # Clone tools have no value to show; claiming the row keeps the normal swatches out too.
+        return True
     channel = _mask_alpha_channel(context, brush)
     if channel is None:
         return False
@@ -3242,10 +3276,14 @@ def draw_auto_masking_panel(layout, brush):
 def _image_paint_fill_canvas(context, is_sculpt_texture_fill):
     """Image the Fill brush writes to, or None when the settings alone cannot tell."""
     space_data = context.space_data
-    if getattr(space_data, "type", None) == 'IMAGE_EDITOR':
-        # The Image Editor paints the image it displays, not the projection-paint canvas.
-        return space_data.image
     tool_settings = context.tool_settings
+    if getattr(space_data, "type", None) == 'IMAGE_EDITOR':
+        # A Material/Stack Layer canvas is multi-channel and uses brush colors, even though one
+        # of its maps may be displayed in the editor. Only a plain Image canvas has one known
+        # data/color target whose scalar UI can be decided here.
+        if tool_settings.paint_mode.canvas_source == 'MATERIAL':
+            return None
+        return space_data.image
     if is_sculpt_texture_fill:
         paint_mode = tool_settings.paint_mode
         if paint_mode.canvas_source == 'IMAGE':
@@ -3261,7 +3299,10 @@ def draw_image_paint_fill_expand(layout, context, brush):
     """Horizontal Face / Island / Mesh / Pixels buttons for Image/Texture Paint Fill."""
     is_sculpt_texture_fill = getattr(brush, 'sculpt_brush_type', None) == 'TEXTURE_FILL'
     is_image_fill = brush.image_brush_type == 'FILL'
-    if (not is_image_fill and not is_sculpt_texture_fill) or brush.color_type != 'COLOR':
+    if not is_image_fill and not is_sculpt_texture_fill:
+        return False
+    is_mask_target = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
+    if not is_mask_target and brush.color_type != 'COLOR':
         return False
     row = layout.row(align=True)
     row.use_property_split = False
@@ -3281,23 +3322,49 @@ def draw_image_paint_fill_expand(layout, context, brush):
             sub.prop(ob, "use_mesh_mirror_y", text="Y", toggle=True)
             sub.prop(ob, "use_mesh_mirror_z", text="Z", toggle=True)
 
-    # The fixed scalar only reaches non-color data canvases. Hide the controls only when the
-    # canvas is known to be a color image: with a Material canvas source the target depends on
-    # the face being painted, so guessing there would hide the controls for the main workflow.
-    canvas_image = _image_paint_fill_canvas(context, is_sculpt_texture_fill)
-    if canvas_image is not None and not canvas_image.colorspace_settings.is_data:
+    # The header already draws the value swatches (the Mask pair or the brush colors); a second
+    # set of wide sliders there would duplicate them and push the swatches out of view. The
+    # panel keeps the sliders next to the fill options.
+    if context.region is not None and context.region.type == 'TOOL_HEADER':
         return True
 
-    col = layout.column(align=True)
-    row = col.row(align=True)
-    row.prop(brush, "data_fill_value_color", text="")
-    row.prop(brush, "data_fill_value", slider=True)
-    col.prop(brush, "data_fill_signed")
+    if is_mask_target:
+        channel = _mask_alpha_channel(context, brush)
+        if channel is not None:
+            _draw_mask_alpha_pair(layout, channel)
+        # Fill is a solid coverage by Fill Mode only: the Mask Source texture deliberately does
+        # not modulate it, so neither the source selector nor its invert belongs here.
+        return True
+
+    # The fixed scalar only reaches non-color data images. A Material/Stack Layer canvas uses the
+    # regular brush color and secondary color, so it must not show the grayscale value sliders;
+    # the target channel there is not a single known data image.
+    canvas_image = _image_paint_fill_canvas(context, is_sculpt_texture_fill)
+    if canvas_image is None or not canvas_image.colorspace_settings.is_data:
+        return True
+
+    # A non-color canvas stores one scalar; two grayscale sliders describe the primary and
+    # inverted fill without pretending either is an RGB color. The properties derive from the
+    # active color owner (unified settings or the brush), so the sliders and the fill read the
+    # same values.
+    paint_panel = UnifiedPaintPanel.paint_settings(context)
+    ups = paint_panel.unified_paint_settings if paint_panel is not None else None
+    owner = ups if ups is not None and ups.use_unified_color else brush
+    if (not hasattr(owner, "fill_value") or
+            not hasattr(owner, "fill_value_secondary")):
+        return True
+    row = layout.row(align=True)
+    row.template_material_paint_value_slider(owner, "fill_value", index=0)
+    row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
+    row.template_material_paint_value_slider(owner, "fill_value_secondary", index=0)
     return True
 
 
 def draw_color_settings(context, layout, brush, color_type=False):
     """Draw color wheel and gradient settings."""
+    if mask_target_suppresses_color(context, brush):
+        return
+
     ups = UnifiedPaintPanel.paint_settings(context).unified_paint_settings
 
     if color_type:
@@ -3307,7 +3374,7 @@ def draw_color_settings(context, layout, brush, color_type=False):
             row.prop(brush, "color_type", expand=True)
 
     # Color wheel
-    mask_alpha = _mask_alpha_channel(context, brush) if brush.color_type == 'COLOR' else None
+    mask_alpha = _mask_alpha_channel(context, brush)
     if mask_alpha is not None:
         # Same reason as in the sculpt brush settings: the Mask value is not a color.
         _draw_mask_alpha_pair(layout, mask_alpha)
@@ -3772,11 +3839,15 @@ def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
 
     draw_image_paint_fill_expand(layout, context, brush)
 
-    if capabilities.has_color:
+    if capabilities.has_color and not mask_target_suppresses_color(context, brush):
         if not draw_mask_alpha_swatches(layout, context, brush):
             material_paint = brush.material_paint
             row = layout.row(align=True)
-            row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
+            # Mask Source Base Color / Coverage reads the brush colors even when the brush paints
+            # material channels that are not synced to them, so keep the swatches editable there.
+            if context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+                row.active = (material_paint is None or
+                              material_paint.use_sync_base_color_with_brush)
             row.ui_units_x = 4
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")

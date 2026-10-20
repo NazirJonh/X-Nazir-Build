@@ -1206,6 +1206,32 @@ static void rna_UnifiedPaintSettings_update(bContext *C, PointerRNA *ptr)
   WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS, scene);
 }
 
+static float rna_UnifiedPaintSettings_fill_value_get(PointerRNA *ptr)
+{
+  const UnifiedPaintSettings *ups = static_cast<const UnifiedPaintSettings *>(ptr->data);
+  return (ups->color[0] + ups->color[1] + ups->color[2]) / 3.0f;
+}
+
+static void rna_UnifiedPaintSettings_fill_value_set(PointerRNA *ptr, const float value)
+{
+  UnifiedPaintSettings *ups = static_cast<UnifiedPaintSettings *>(ptr->data);
+  copy_v3_fl(ups->color, value);
+  BKE_brush_color_sync_legacy(ups);
+}
+
+static float rna_UnifiedPaintSettings_fill_value_secondary_get(PointerRNA *ptr)
+{
+  const UnifiedPaintSettings *ups = static_cast<const UnifiedPaintSettings *>(ptr->data);
+  return (ups->secondary_color[0] + ups->secondary_color[1] + ups->secondary_color[2]) / 3.0f;
+}
+
+static void rna_UnifiedPaintSettings_fill_value_secondary_set(PointerRNA *ptr, const float value)
+{
+  UnifiedPaintSettings *ups = static_cast<UnifiedPaintSettings *>(ptr->data);
+  copy_v3_fl(ups->secondary_color, value);
+  BKE_brush_color_sync_legacy(ups);
+}
+
 static void rna_UnifiedPaintSettings_color_update(bContext *C, PointerRNA *ptr)
 {
   UnifiedPaintSettings *ups = static_cast<UnifiedPaintSettings *>(ptr->data);
@@ -2280,6 +2306,38 @@ static void rna_def_unified_paint_settings(BlenderRNA *brna)
   RNA_def_property_range(prop, 0.0, 1.0);
   RNA_def_property_float_sdna(prop, nullptr, "secondary_color");
   RNA_def_property_ui_text(prop, "Secondary Color", "");
+  RNA_def_property_update(prop, 0, "rna_UnifiedPaintSettings_color_update");
+
+  prop = RNA_def_property(srna, "fill_value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_UnifiedPaintSettings_fill_value_get",
+                               "rna_UnifiedPaintSettings_fill_value_set",
+                               nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_range(prop, 0.0, 1.0);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.001, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Fill Value",
+      "Grayscale value written by the Fill brush to non-color images; derived from the unified "
+      "brush color");
+  RNA_def_property_update(prop, 0, "rna_UnifiedPaintSettings_color_update");
+
+  prop = RNA_def_property(srna, "fill_value_secondary", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_UnifiedPaintSettings_fill_value_secondary_get",
+                               "rna_UnifiedPaintSettings_fill_value_secondary_set",
+                               nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_range(prop, 0.0, 1.0);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.001, 3);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Secondary Fill Value",
+      "Grayscale value written by the Fill brush to non-color images when using the secondary "
+      "color; derived from the unified secondary color");
   RNA_def_property_update(prop, 0, "rna_UnifiedPaintSettings_color_update");
 
   prop = RNA_def_property(srna, "use_color_jitter", PROP_BOOLEAN, PROP_NONE);

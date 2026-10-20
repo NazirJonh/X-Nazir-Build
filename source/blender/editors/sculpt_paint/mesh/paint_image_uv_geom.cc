@@ -22,7 +22,6 @@
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
-#include "BKE_brush.hh"
 #include "BKE_image_paint_selection.hh"
 
 #include "IMB_colormanagement.hh"
@@ -364,8 +363,7 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
                                          const float color[3],
                                          float strength,
                                          IMB_BlendMode blend,
-                                         const float data_fill_value,
-                                         const bool data_fill_signed)
+                                         const float data_fill_value)
 {
   if (bm == nullptr || ibuf == nullptr || face_indices.is_empty()) {
     return;
@@ -380,8 +378,9 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
   float data_value = 0.0f;
   uchar data_byte_value = 0;
   if (is_data) {
-    /* Signed mode maps onto the bipolar float range only; byte buffers cannot hold negatives. */
-    data_value = brush_data_fill_value_resolve(data_fill_value, do_float && data_fill_signed);
+    /* The value is already resolved into the target channel's range by the caller. Byte buffers
+     * clamp it to their representable 0..1 range below. */
+    data_value = data_fill_value;
     color_f[0] = data_value;
     color_f[1] = data_value;
     color_f[2] = data_value;

@@ -9,6 +9,7 @@
 #include "BKE_brush.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_resolve.hh"
 #include "BKE_paint_types.hh"
 
@@ -157,6 +158,85 @@ float scalar_source_finish(const BrushMaterialPaint &brush_paint,
     return BKE_paint_material_value_invert(range.x, range.y, sampled);
   }
   return math::clamp(sampled, range.x, range.y);
+}
+
+MaskValuePair mask_value_pair_get(const BrushMaterialPaint &brush_paint,
+                                  const Paint &paint,
+                                  const Brush &brush)
+{
+  MaskValuePair values;
+  values.primary = BKE_paint_material_mask_value_get(brush_paint, paint, brush, false);
+  values.secondary = BKE_paint_material_mask_value_get(brush_paint, paint, brush, true);
+  return values;
+}
+
+float mask_source_coverage_at_uv(const ChannelUvSampler &sampler,
+                                 const BrushMaterialPaint &brush_paint,
+                                 const float2 &uv,
+                                 const int thread)
+{
+  const std::optional<eMaterialPaintChannel> channel = mask_source_channel_get(brush_paint);
+  if (!channel || !sampler.has_texture_source(*channel)) {
+    return 1.0f;
+  }
+  if (*channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    return math::clamp(
+        BKE_paint_material_mask_luminance(sampler.color_at_uv(*channel, uv, thread)), 0.0f, 1.0f);
+  }
+  if (*channel == PAINT_MATERIAL_CHANNEL_ALPHA) {
+    /* An alpha mask commonly stores its coverage in the image's alpha while RGB is black.
+     * Luminance would then be zero over the whole mask. Opaque images (alpha == 1) keep the
+     * long-standing intensity path, so grayscale mask images still work. */
+    const float alpha = sampler.alpha_at_uv(*channel, uv, thread);
+    if (alpha < 0.999f) {
+      const bool invert = brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].source_invert != 0;
+      return math::clamp(invert ? 1.0f - alpha : alpha, 0.0f, 1.0f);
+    }
+  }
+  return math::clamp(sampler.scalar_at_uv(*channel, uv, thread), 0.0f, 1.0f);
+}
+
+void mask_values_flip(Paint &paint, Brush &brush)
+{
+  /* Alpha reads the channel pair directly, while Base Color and Coverage read the brush colors.
+   * Swap both so X does something useful for every Mask Source, and mirror
+   * `PAINT_OT_brush_colors_flip`'s unified-color handling. */
+  if (BKE_paint_use_unified_color(&paint)) {
+    UnifiedPaintSettings &ups = paint.unified_paint_settings;
+    swap_v3_v3(ups.color, ups.secondary_color);
+    BKE_brush_color_sync_legacy(&ups);
+  }
+  else {
+    swap_v3_v3(brush.color, brush.secondary_color);
+    BKE_brush_color_sync_legacy(&brush);
+  }
+  BKE_brush_material_paint_base_color_sync_to_channel(&paint, &brush);
+
+  if (brush.material_paint != nullptr) {
+    BrushMaterialPaintChannel &alpha =
+        brush.material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA];
+    SWAP(float, alpha.value[0], alpha.value_secondary);
+  }
+  BKE_brush_tag_unsaved_changes(&brush);
+}
+
+Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings)
+{
+  /* Only Base Color names a mask row (see #BKE_paint_layers_target_get). The object resolver also
+   * carries object-mask state, so a hidden row is not painted. */
+  PaintLayersTarget target;
+  if (!BKE_paint_layers_target_get(
+          ob, -1, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), PaintLayersTargetMode::Mask, target) ||
+      target.object_masked)
+  {
+    return nullptr;
+  }
+  Image *image = BKE_paint_layers_target_image(target);
+  if (image == nullptr && bmain != nullptr) {
+    image = BKE_paint_layers_target_ensure_writable(
+        *bmain, target, settings.new_channel_image_size);
+  }
+  return image;
 }
 
 ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
@@ -822,6 +902,36 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
   return true;
 }
 
+bool ChannelSourceSet::sample_image_unit(const ChannelSource &source,
+                                         const float u,
+                                         const float v,
+                                         float *r_value,
+                                         float4 &r_rgba) const
+{
+  if (!source.image_direct_sample || source.ibuf == nullptr || source.mtex == nullptr) {
+    return false;
+  }
+  const ImBuf *ibuf = source.ibuf;
+  if (ibuf->x <= 0 || ibuf->y <= 0) {
+    return false;
+  }
+  /* Same pixel convention as #sample_image_direct (`u * width`), but over [0, 1] and clamped, so
+   * the edge texel does not blend with the opposite side of the image. */
+  const float px = math::clamp(u, 0.0f, 1.0f) * float(ibuf->x);
+  const float py = math::clamp(v, 0.0f, 1.0f) * float(ibuf->y);
+  if (ibuf->float_data() != nullptr) {
+    r_rgba = imbuf::interpolate_bilinear_fl(ibuf, px, py);
+  }
+  else {
+    const uchar4 col = imbuf::interpolate_bilinear_byte(ibuf, px, py);
+    rgba_uchar_to_float(r_rgba, col);
+  }
+  if (r_value != nullptr) {
+    *r_value = IMB_colormanagement_get_luminance(r_rgba);
+  }
+  return true;
+}
+
 bool ChannelSourceSet::sample_baked(const ChannelSource &source,
                                     const float u,
                                     const float v,
@@ -1080,11 +1190,28 @@ static bool sample_channel_source_at_uv(const ChannelSourceSet &sources,
                                         const float2 &uv,
                                         const int thread,
                                         float *r_value,
-                                        float4 &r_rgba)
+                                        float4 &r_rgba,
+                                        const bool unit_space = false)
 {
   const MTex *mtex = source.mtex;
   if (mtex == nullptr) {
     return false;
+  }
+  if (unit_space) {
+    /* The caller already placed the texture: \a uv is a position over the whole image. A baked
+     * image is stored in the same [0, 1] frame; anything else (a procedural texture) is
+     * evaluated in the brush-local [-1, 1] frame, so map the position into it. */
+    if (source.kind == ChannelSourceKind::Baked) {
+      return sources.sample_baked(source, uv.x, uv.y, r_value, r_rgba);
+    }
+    float unit_value = 0.0f;
+    float *unit_value_ptr = r_value != nullptr ? r_value : &unit_value;
+    if (sources.sample_image_unit(source, uv.x, uv.y, unit_value_ptr, r_rgba)) {
+      return true;
+    }
+    paint_get_tex_pixel(
+        mtex, uv.x * 2.0f - 1.0f, uv.y * 2.0f - 1.0f, sources.pool(), thread, unit_value_ptr, r_rgba);
+    return true;
   }
   const float tex_x = uv.x * mtex->size[0] + mtex->ofs[0];
   const float tex_y = uv.y * mtex->size[1] + mtex->ofs[1];
@@ -1108,6 +1235,12 @@ bool ChannelUvSampler::has_usable_source(const eMaterialPaintChannel channel) co
   return sources_.source(channel).usable;
 }
 
+bool ChannelUvSampler::has_texture_source(const eMaterialPaintChannel channel) const
+{
+  const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  return source.usable && source.kind != ChannelSourceKind::Constant;
+}
+
 float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
                                      const float2 &uv,
                                      const int thread) const
@@ -1124,11 +1257,29 @@ float ChannelUvSampler::scalar_at_uv(const eMaterialPaintChannel channel,
   }
   float value = fallback;
   float4 rgba;
-  if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba)) {
+  if (!sample_channel_source_at_uv(sources_, source, uv, thread, &value, rgba, unit_uv_space_)) {
     return fallback;
   }
   const float2 range = BKE_paint_material_channel_range(settings_, channel);
   return scalar_source_finish(brush_paint_, channel, range, value);
+}
+
+float ChannelUvSampler::alpha_at_uv(const eMaterialPaintChannel channel,
+                                    const float2 &uv,
+                                    const int thread) const
+{
+  const ChannelSourceSet::ChannelSource &source = sources_.source(channel);
+  if (source.kind == ChannelSourceKind::Constant) {
+    return source.constant_value.w;
+  }
+  if (!source.usable) {
+    return 1.0f;
+  }
+  float4 rgba;
+  if (!sample_channel_source_at_uv(sources_, source, uv, thread, nullptr, rgba, unit_uv_space_)) {
+    return 1.0f;
+  }
+  return rgba.w;
 }
 
 bool ChannelUvSampler::needs_linear_conversion(const eMaterialPaintChannel channel) const
@@ -1159,7 +1310,7 @@ float3 ChannelUvSampler::color_at_uv(const eMaterialPaintChannel channel,
     return fallback;
   }
   float4 rgba;
-  if (!sample_channel_source_at_uv(sources_, source, uv, thread, nullptr, rgba)) {
+  if (!sample_channel_source_at_uv(sources_, source, uv, thread, nullptr, rgba, unit_uv_space_)) {
     return fallback;
   }
   return finish_color_sample(is_normal,

@@ -74,6 +74,7 @@
 #include "IMB_colormanagement.hh"
 
 #include "../paint_intern.hh"
+#include "paint_material_source.hh"
 
 namespace blender {
 
@@ -895,6 +896,18 @@ static wmOperatorStatus brush_colors_flip_exec(bContext *C, wmOperator * /*op*/)
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *br = BKE_paint_brush(paint);
 
+  /* In Mask mode the Alpha pair is the value pair, independent of the brush colors, so X has to
+   * swap it as well or the key would silently do nothing for the default Mask brush. The shared
+   * helper keeps this, the shape swap and the gradient flip identical. */
+  const Scene *scene = CTX_data_scene(C);
+  if (br != nullptr && br->material_paint != nullptr && scene != nullptr &&
+      scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+  {
+    ed::sculpt_paint::material::mask_values_flip(*paint, *br);
+    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, br);
+    return OPERATOR_FINISHED;
+  }
+
   if (BKE_paint_use_unified_color(paint)) {
     UnifiedPaintSettings &ups = paint->unified_paint_settings;
     swap_v3_v3(ups.color, ups.secondary_color);
@@ -913,17 +926,6 @@ static wmOperatorStatus brush_colors_flip_exec(bContext *C, wmOperator * /*op*/)
    * #rna_Brush_color_update / #rna_UnifiedPaintSettings_color_update path that keeps Base Color
    * in sync with the brush color never runs; do it explicitly here. */
   BKE_brush_material_paint_base_color_sync_to_channel(paint, br);
-
-  /* In Mask mode the Alpha pair is the value pair, independent of the brush colors, so X has to
-   * swap it as well or the key would silently do nothing for the default Mask brush. */
-  const Scene *scene = CTX_data_scene(C);
-  if (br != nullptr && br->material_paint != nullptr && scene != nullptr &&
-      scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK)
-  {
-    BrushMaterialPaintChannel &alpha = br->material_paint->channels[PAINT_MATERIAL_CHANNEL_ALPHA];
-    SWAP(float, alpha.value[0], alpha.value_secondary);
-    BKE_brush_tag_unsaved_changes(br);
-  }
 
   WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, br);
 

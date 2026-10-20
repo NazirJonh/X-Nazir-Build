@@ -2217,26 +2217,37 @@ static float rna_BrushMaterialPaintChannel_t_from_value_color(const float value_
   return t_best;
 }
 
-static void rna_Brush_data_fill_value_color_get(PointerRNA *ptr, float *values)
+/**
+ * UI-only grayscale views of the brush color, used by non-color Fill. They have no DNA storage;
+ * the value lives in the regular RGB color so the fill and the color picker cannot disagree.
+ */
+static float rna_Brush_fill_value_get(PointerRNA *ptr)
 {
   const Brush *brush = static_cast<const Brush *>(ptr->data);
-  const float value_min = brush->data_fill_signed ? -1.0f : 0.0f;
-  const float value_max = 1.0f;
-  const float value = brush_data_fill_value_resolve(brush->data_fill_value,
-                                                    brush->data_fill_signed != 0);
-  const float t = BKE_paint_material_t_from_value(value_min, value_max, value);
-  BKE_paint_material_value_gradient_color(value_min, value_max, t, values);
+  return (brush->color[0] + brush->color[1] + brush->color[2]) / 3.0f;
 }
 
-static void rna_Brush_data_fill_value_color_set(PointerRNA *ptr, const float *values)
+static void rna_Brush_fill_value_set(PointerRNA *ptr, const float value)
 {
   Brush *brush = static_cast<Brush *>(ptr->data);
-  const float value_min = brush->data_fill_signed ? -1.0f : 0.0f;
-  const float value_max = 1.0f;
-  const float gray = (values[0] + values[1] + values[2]) / 3.0f;
-  const float t = rna_BrushMaterialPaintChannel_t_from_value_color(value_min, value_max, gray);
-  const float value = BKE_paint_material_value_from_t(value_min, value_max, t);
-  brush->data_fill_value = brush->data_fill_signed ? (value + 1.0f) * 0.5f : value;
+  copy_v3_fl(brush->color, value);
+  BKE_brush_color_sync_legacy(brush);
+  BKE_brush_tag_unsaved_changes(brush);
+}
+
+static float rna_Brush_fill_value_secondary_get(PointerRNA *ptr)
+{
+  const Brush *brush = static_cast<const Brush *>(ptr->data);
+  return (brush->secondary_color[0] + brush->secondary_color[1] + brush->secondary_color[2]) /
+         3.0f;
+}
+
+static void rna_Brush_fill_value_secondary_set(PointerRNA *ptr, const float value)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  copy_v3_fl(brush->secondary_color, value);
+  BKE_brush_color_sync_legacy(brush);
+  BKE_brush_tag_unsaved_changes(brush);
 }
 
 /**
@@ -2246,10 +2257,10 @@ static void rna_Brush_data_fill_value_color_set(PointerRNA *ptr, const float *va
  * Declared on #BrushMaterialPaintChannel for scalar entries in #BrushMaterialPaint.channels;
  * color channels (Base Color, Normal, Emission) read as black and ignore writes.
  */
-static void rna_BrushMaterialPaintChannel_value_color_get(PointerRNA *ptr, float *values)
+static void rna_BrushMaterialPaintChannel_scalar_color_get(PointerRNA *ptr,
+                                                           const float value,
+                                                           float *values)
 {
-  const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
-      ptr->data);
   const std::optional<eMaterialPaintChannel> channel_id =
       rna_BrushMaterialPaintChannel_channel_get(ptr);
   if (!channel_id || !rna_BrushMaterialPaintChannel_is_scalar_channel(*channel_id)) {
@@ -2259,13 +2270,14 @@ static void rna_BrushMaterialPaintChannel_value_color_get(PointerRNA *ptr, float
   float value_min;
   float value_max;
   rna_BrushMaterialPaintChannel_scalar_value_range(*channel_id, &value_min, &value_max);
-  const float t = BKE_paint_material_t_from_value(value_min, value_max, channel->value[0]);
+  const float t = BKE_paint_material_t_from_value(value_min, value_max, value);
   BKE_paint_material_value_gradient_color(value_min, value_max, t, values);
 }
 
-static void rna_BrushMaterialPaintChannel_value_color_set(PointerRNA *ptr, const float *values)
+static void rna_BrushMaterialPaintChannel_scalar_color_set(PointerRNA *ptr,
+                                                           const float *values,
+                                                           float &r_value)
 {
-  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
   const std::optional<eMaterialPaintChannel> channel_id =
       rna_BrushMaterialPaintChannel_channel_get(ptr);
   if (!channel_id || !rna_BrushMaterialPaintChannel_is_scalar_channel(*channel_id)) {
@@ -2276,7 +2288,35 @@ static void rna_BrushMaterialPaintChannel_value_color_set(PointerRNA *ptr, const
   rna_BrushMaterialPaintChannel_scalar_value_range(*channel_id, &value_min, &value_max);
   const float gray = (values[0] + values[1] + values[2]) / 3.0f;
   const float t = rna_BrushMaterialPaintChannel_t_from_value_color(value_min, value_max, gray);
-  channel->value[0] = BKE_paint_material_value_from_t(value_min, value_max, t);
+  r_value = BKE_paint_material_value_from_t(value_min, value_max, t);
+}
+
+static void rna_BrushMaterialPaintChannel_value_color_get(PointerRNA *ptr, float *values)
+{
+  const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
+      ptr->data);
+  rna_BrushMaterialPaintChannel_scalar_color_get(ptr, channel->value[0], values);
+}
+
+static void rna_BrushMaterialPaintChannel_value_color_set(PointerRNA *ptr, const float *values)
+{
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  rna_BrushMaterialPaintChannel_scalar_color_set(ptr, values, channel->value[0]);
+}
+
+static void rna_BrushMaterialPaintChannel_value_secondary_color_get(PointerRNA *ptr,
+                                                                    float *values)
+{
+  const BrushMaterialPaintChannel *channel = static_cast<const BrushMaterialPaintChannel *>(
+      ptr->data);
+  rna_BrushMaterialPaintChannel_scalar_color_get(ptr, channel->value_secondary, values);
+}
+
+static void rna_BrushMaterialPaintChannel_value_secondary_color_set(PointerRNA *ptr,
+                                                                    const float *values)
+{
+  BrushMaterialPaintChannel *channel = static_cast<BrushMaterialPaintChannel *>(ptr->data);
+  rna_BrushMaterialPaintChannel_scalar_color_set(ptr, values, channel->value_secondary);
 }
 
 static PointerRNA rna_BrushMaterialPaintChannel_source_image_get(PointerRNA *ptr)
@@ -4315,6 +4355,20 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       "elsewhere");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
 
+  prop = RNA_def_property(srna, "value_secondary_color", PROP_FLOAT, PROP_COLOR);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_BrushMaterialPaintChannel_value_secondary_color_get",
+                               "rna_BrushMaterialPaintChannel_value_secondary_color_set",
+                               nullptr);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(prop,
+                           "Secondary Value Color",
+                           "Secondary scalar paint value as a grayscale color; the counterpart of "
+                           "Value Color for palette swatches");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_update");
+
   /* Stored per channel, but only ever read for Base Color: the blend modes are color operations,
    * and applying them to the scalar channels would compute a photometric result for a quantity
    * that has none. See #BKE_paint_material_channel_blend_mode. */
@@ -6069,38 +6123,31 @@ static void rna_def_brush(BlenderRNA *brna)
       prop, "Fill Threshold", "Threshold above which filling is not propagated");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
-  prop = RNA_def_property(srna, "data_fill_value", PROP_FLOAT, PROP_FACTOR);
-  RNA_def_property_float_sdna(prop, nullptr, "data_fill_value");
+  prop = RNA_def_property(srna, "fill_value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(
+      prop, "rna_Brush_fill_value_get", "rna_Brush_fill_value_set", nullptr);
   RNA_def_property_range(prop, 0.0, 1.0);
-  RNA_def_property_ui_text(
-      prop,
-      "Data Fill Value",
-      "Fixed value written to non-color data images by the Fill (Texture Paint) and Texture "
-      "Fill (Sculpt Mode) brushes; color images are unaffected");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
-
-  prop = RNA_def_property(srna, "data_fill_value_color", PROP_FLOAT, PROP_COLOR);
-  RNA_def_property_array(prop, 3);
-  RNA_def_property_float_funcs(prop,
-                               "rna_Brush_data_fill_value_color_get",
-                               "rna_Brush_data_fill_value_color_set",
-                               nullptr);
-  /* Derived view of #data_fill_value: there is nothing to store or animate. */
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.001, 3);
+  /* Derived from #Brush.color: there is nothing to store or animate. */
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(prop,
-                           "Data Fill Value Color",
-                           "Grayscale swatch of Data Fill Value on the value-range gradient; "
-                           "derived, editing it writes back to Data Fill Value");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+                           "Fill Value",
+                           "Grayscale value written by the Fill brush to non-color images; "
+                           "derived from the brush color");
+  RNA_def_property_update(prop, 0, "rna_Brush_color_update");
 
-  prop = RNA_def_property(srna, "data_fill_signed", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "data_fill_signed", 1);
+  prop = RNA_def_property(srna, "fill_value_secondary", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(
+      prop, "rna_Brush_fill_value_secondary_get", "rna_Brush_fill_value_secondary_set", nullptr);
+  RNA_def_property_range(prop, 0.0, 1.0);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.001, 3);
+  /* Derived from #Brush.secondary_color: there is nothing to store or animate. */
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(prop,
-                           "Signed Data Range",
-                           "Map Data Fill Value from the 0 to 1 range to -1 to 1. Only float "
-                           "data images can hold negative values; byte buffers receive the raw "
-                           "factor");
-  RNA_def_property_update(prop, 0, "rna_Brush_update");
+                           "Secondary Fill Value",
+                           "Grayscale value written by the Fill brush to non-color images when "
+                           "using the secondary color; derived from the secondary color");
+  RNA_def_property_update(prop, 0, "rna_Brush_color_update");
 
   prop = RNA_def_property(srna, "fill_expand", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "fill_expand");

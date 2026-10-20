@@ -22,6 +22,8 @@
 
 namespace blender {
 struct ARegion;
+struct Image;
+struct Main;
 struct Brush;
 struct BrushMaterialPaint;
 struct ImagePool;
@@ -47,6 +49,7 @@ class MaterialSourceBake;
 namespace blender::ed::sculpt_paint::material {
 
 struct TexelSampleContext;
+class ChannelUvSampler;
 
 /** Which #MTex::brush_map_mode a #DirectSampleLayout was built for. */
 enum class DirectSampleKind : int8_t {
@@ -149,6 +152,48 @@ float scalar_source_finish(const BrushMaterialPaint &brush_paint,
                            eMaterialPaintChannel channel,
                            const float2 &range,
                            float sampled);
+
+/** The two flat values a Mask operation writes for a primary and an inverted stroke. */
+struct MaskValuePair {
+  float primary = 0.0f;
+  float secondary = 0.0f;
+};
+
+/**
+ * Resolve both Mask values through #BKE_paint_material_mask_value_get, so every tool applies the
+ * same `mask_source` rule (Alpha pair, Base Color luminance, Coverage grey) as the Mask brush.
+ */
+MaskValuePair mask_value_pair_get(const BrushMaterialPaint &brush_paint,
+                                  const Paint &paint,
+                                  const Brush &brush);
+
+/**
+ * Coverage multiplier a Mask Source texture contributes at \a uv. One is returned when the
+ * selected source has no usable texture (Coverage, a missing image, or no source at all). A Base
+ * Color sample is reduced to its scene-linear luminance, exactly as in the Mask stroke path.
+ */
+float mask_source_coverage_at_uv(const ChannelUvSampler &sampler,
+                                 const BrushMaterialPaint &brush_paint,
+                                 const float2 &uv,
+                                 int thread);
+
+/**
+ * Swap the values the active Mask Source reads: the Alpha value pair for `Alpha`, otherwise the
+ * brush primary/secondary colors. The single place a Mask-mode X keeps Fill, Gradient, Shapes and
+ * the Mask brush consistent when the source is Base Color or Coverage.
+ */
+void mask_values_flip(Paint &paint, Brush &brush);
+
+/**
+ * The map a Mask-mode write (Fill, Gradient, Shape) paints into: the active layer's mask map,
+ * created on the first call so the first gesture is not a silent no-op. The single resolution all
+ * Mask writers share, so none of them can pick a different map or grow a content channel instead.
+ * Runs on the main thread, inside the gesture's undo group.
+ *
+ * \return null when the object has no layered material, the mask row is hidden or switched off
+ * (object-masked), or the mask has no writable record.
+ */
+Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings);
 
 /**
  * Which #MTex each material paint channel samples from, and whether it is usable.
@@ -256,6 +301,17 @@ class ChannelSourceSet {
                            float tex_y,
                            float *r_value,
                            float4 &r_rgba) const;
+
+  /**
+   * Sample a plain image source at \a u, \a v in [0, 1] over the whole image, ignoring the
+   * channel's Size / Offset (see #ChannelUvSampler::set_unit_uv_space). Edges clamp.
+   * \return false when this source is not a directly sampleable image.
+   */
+  bool sample_image_unit(const ChannelSource &source,
+                         float u,
+                         float v,
+                         float *r_value,
+                         float4 &r_rgba) const;
 
   /** Sample a baked UV image without applying brush mapping or color management. */
   bool sample_baked(const ChannelSource &source,
@@ -494,8 +550,21 @@ class ChannelUvSampler {
   const PaintModeSettings &settings_;
   const Paint &paint_;
   const Brush &brush_;
+  bool unit_uv_space_ = false;
 
  public:
+  /**
+   * Read \a uv as a position over the whole source image, (0, 0) at its lower-left corner and
+   * (1, 1) at the upper-right one, without the channel's own Size / Offset. The default is the
+   * brush-local frame of #RE_texture_evaluate ([-1, 1] across the image, Size and Offset applied),
+   * which is what the position-based paths feed; a canvas or a shape that already places the
+   * texture itself must not use it, or only a quarter of the image would be sampled.
+   */
+  void set_unit_uv_space(const bool enable)
+  {
+    unit_uv_space_ = enable;
+  }
+
   ChannelUvSampler(const ChannelSourceSet &sources,
                    const BrushMaterialPaint &brush_paint,
                    const PaintModeSettings &settings,
@@ -512,6 +581,12 @@ class ChannelUvSampler {
   /** True when \a channel has a source that can be sampled. */
   bool has_usable_source(eMaterialPaintChannel channel) const;
 
+  /**
+   * True when \a channel has a source with texels to sample. A constant source is usable but has
+   * no coverage pattern, so Mask Source coverage must treat it as full coverage.
+   */
+  bool has_texture_source(eMaterialPaintChannel channel) const;
+
   /** True when a color sample of \a channel is converted to scene linear on every read, which a
    * caller can instead do in batches by passing `decode_linear = false` to #color_at_uv and
    * decoding the raw values itself with #colorspace. */
@@ -522,6 +597,13 @@ class ChannelUvSampler {
 
   /** See #ChannelSourceSampler::scalar_at_uv. */
   float scalar_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;
+
+  /**
+   * Alpha channel of the source texel at \a uv, or 1.0 when the source has no texels. Mask Source
+   * coverage uses it for Alpha textures so a transparent alpha mask is not reduced to the
+   * luminance of its (often black) RGB.
+   */
+  float alpha_at_uv(eMaterialPaintChannel channel, const float2 &uv, int thread) const;
 
   /** See #ChannelSourceSampler::color_at_uv. */
   float3 color_at_uv(eMaterialPaintChannel channel,

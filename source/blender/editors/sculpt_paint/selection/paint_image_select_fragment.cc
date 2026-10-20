@@ -705,6 +705,10 @@ static ImageSelectClipboard *g_clipboard = nullptr;
 static void image_select_clipboard_atexit(void * /*user_data*/)
 {
   image_select_clipboard_clear();
+  /* Clearing only drops the contents; the struct itself was allocated by #image_select_clipboard_get
+   * and is reported as a leak on exit if it is not freed here. */
+  MEM_delete(g_clipboard);
+  g_clipboard = nullptr;
 }
 
 ImageSelectClipboard *image_select_clipboard_get()

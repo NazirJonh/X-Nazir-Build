@@ -515,8 +515,7 @@ static bool capture_write(bContext *C,
                                           white,
                                           1.0f,
                                           IMB_BLEND_MIX,
-                                          fill,
-                                          false);
+                                          fill);
     }
     /* Same refresh as every other code that rewrites a map in place. */
     ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;

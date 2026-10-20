@@ -17,6 +17,7 @@
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
+#include "BLI_task.h"
 #include "BLI_task.hh"
 #include "BLI_time.h"
 
@@ -36,6 +37,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_unit.hh"
@@ -67,6 +69,7 @@
 #include "../selection/paint_image_select_intern.hh"
 
 #include "mesh_brush_common.hh"
+#include "paint_material_source.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
 #include "sculpt_filter.hh"
@@ -833,6 +836,9 @@ void SCULPT_OT_color_filter(wmOperatorType *ot)
  * #GradientGeometry); curve gradients follow a hand-drawn polyline raycast onto the surface
  * (see #gradient_curve::GradientCurve3D and the Curve gesture section below). Painting honors
  * the face selection mask.
+ * In Mask target mode the same gesture paints the mask image map only, ramping between the
+ * brush's Mask primary and secondary values; color attributes are skipped (a mask map is not a
+ * color attribute). Mask Source texture coverage scales the gradient per pixel.
  * `SCULPT_use_image_paint_brush` decides, per object, which of the two applies (see
  * #sculpt_color_gradient_apply and #sculpt_color_gradient_apply_image_object).
  *
@@ -876,6 +882,13 @@ struct GradientColoring {
 static GradientColoring sculpt_color_gradient_coloring_get(const bContext *C, wmOperator *op)
 {
   const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  const Scene *scene = CTX_data_scene(C);
+  const PaintModeSettings *paint_mode_settings = (scene != nullptr && scene->toolsettings) ?
+                                                     &scene->toolsettings->paint_mode :
+                                                     nullptr;
+  const bool mask_mode = paint_mode_settings != nullptr &&
+                         paint_mode_settings->layer_target_mode == PAINT_LAYER_TARGET_MASK;
+
   GradientColoring coloring;
   coloring.source = eSculptGradientColorSource(sd.gradient_color_source);
   coloring.colorband = &sd.gradient_colorband;
@@ -889,14 +902,38 @@ static GradientColoring sculpt_color_gradient_coloring_get(const bContext *C, wm
   band.color_mode = sd.gradient_colorband.color_mode;
   band.ipotype = sd.gradient_colorband.ipotype;
   band.ipotype_hue = sd.gradient_colorband.ipotype_hue;
-  const float *stop_colors[2] = {sd.gradient_color, sd.gradient_secondary_color};
-  for (const int i : IndexRange(2)) {
-    CBData &stop = band.data[i];
-    stop.r = stop_colors[i][0];
-    stop.g = stop_colors[i][1];
-    stop.b = stop_colors[i][2];
-    stop.a = stop_colors[i][3];
-    stop.pos = float(i);
+
+  const Paint &paint = sd.paint;
+  const Brush *brush = BKE_paint_brush_for_read(&paint);
+  const BrushMaterialPaint *brush_paint = (brush != nullptr) ? brush->material_paint : nullptr;
+  if (mask_mode && brush_paint != nullptr) {
+    /* A Mask target stores a single grey level, so the gradient ramps between the brush's Mask
+     * primary and secondary values instead of the user's colors. The two ends are built locally
+     * and the Sculpt ramp settings are left untouched, so leaving Mask mode restores the exact
+     * gradient the user had configured. */
+    coloring.source = SCULPT_GRADIENT_COLOR_SOURCE_COLORS;
+    const material::MaskValuePair values = material::mask_value_pair_get(
+        *brush_paint, paint, *brush);
+    const float stop_values[2] = {values.primary, values.secondary};
+    for (const int i : IndexRange(2)) {
+      CBData &stop = band.data[i];
+      stop.r = stop_values[i];
+      stop.g = stop_values[i];
+      stop.b = stop_values[i];
+      stop.a = 1.0f;
+      stop.pos = float(i);
+    }
+  }
+  else {
+    const float *stop_colors[2] = {sd.gradient_color, sd.gradient_secondary_color};
+    for (const int i : IndexRange(2)) {
+      CBData &stop = band.data[i];
+      stop.r = stop_colors[i][0];
+      stop.g = stop_colors[i][1];
+      stop.b = stop_colors[i][2];
+      stop.a = stop_colors[i][3];
+      stop.pos = float(i);
+    }
   }
   coloring.repeat = eImagePaint_GradientRepeat(sd.gradient_repeat);
   coloring.blend_mode = IMB_BlendMode(sd.gradient_blend_mode);
@@ -1667,6 +1704,30 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
     return false;
   }
 
+  /* A Mask target is a scalar map, so its Mask Source texture only contributes coverage. The
+   * sampler is built once per apply call: constructing it opens the source images and is far too
+   * heavy to repeat per pixel. There is no StrokeCache on this path, so the position-based
+   * #material::ChannelSourceSampler (which reads the stroke cache for its mapping state) cannot be
+   * used; sampling at the pixel's own UV needs none of that state and is what a full-canvas
+   * gradient actually wants, since the gradient has no brush center to map a texture around. */
+  const bool mask_mode = paint_mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK;
+  const BrushMaterialPaint *mask_brush_paint = (brush != nullptr) ? brush->material_paint : nullptr;
+  std::unique_ptr<material::ChannelSourceSet> mask_sources;
+  std::unique_ptr<material::ChannelUvSampler> mask_sampler;
+  if (mask_mode && mask_brush_paint != nullptr) {
+    mask_sources = std::make_unique<material::ChannelSourceSet>(
+        *mask_brush_paint,
+        paint_mode_settings,
+        sd.paint.visible_material_channels,
+        /*resolve_mask_source=*/true);
+    if (mask_sources->is_active()) {
+      mask_sampler = std::make_unique<material::ChannelUvSampler>(
+          *mask_sources, *mask_brush_paint, paint_mode_settings, sd.paint, *brush);
+      /* The pixel's own UV is a position over the image, not a brush-local coordinate. */
+      mask_sampler->set_unit_uv_space(true);
+    }
+  }
+
   const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
   const StringRef uv_map_name = BKE_paint_canvas_uvmap_name_get(&paint_mode_settings, &ob)
                                     .value_or("");
@@ -1698,6 +1759,10 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
 
   for (ImagePaintTarget &target : targets) {
     ImageData &image_data = *target.data;
+    if (mask_mode && !target.is_mask_target) {
+      /* Mask mode writes the mask map alone; enabled PBR channels are not part of this stroke. */
+      continue;
+    }
     if (!bke::pbvh::build_pixels(
             *depsgraph, ob, *image_data.image, *image_data.image_user, uv_map_name))
     {
@@ -1709,6 +1774,9 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
     const bool paints_colors = !target.is_material_channel || target.is_color_channel ||
                                !target.color_override.has_value();
     const float4 channel_value = target.color_override.value_or(float4(1.0f));
+    /* Mask Source coverage exists only for the mask map itself; every other target of this object
+     * is a plain material channel and must stay unchanged. */
+    const bool apply_mask_coverage = mask_sampler != nullptr && target.is_mask_target;
 
     /* Sequential (default #exec_mode::serial): #fetch_image_buffers inserts into
      * #ImageData::buffers / #processors, which are plain, non-thread-safe maps -- exactly the
@@ -1822,6 +1890,7 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
             const bool use_selection_mask = !selection_sampler.is_unrestricted();
             threading::parallel_for(pixel_rows.index_range(), 256, [&](const IndexRange rows) {
               Vector<float4> byte_storage;
+              const int thread_id = BLI_task_parallel_thread_id(nullptr);
               for (const int r : rows) {
                 const PackedPixelRow &pixel_row = pixel_rows[r];
                 const IndexRange range(0, pixel_row.num_pixels);
@@ -1831,6 +1900,21 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
                     }))
                 {
                   continue;
+                }
+
+                /* Per-pixel UV of this row's UV primitive, used to sample a Mask Source texture.
+                 * `triangle_uvs` is stored tile-local, matching one row's tile. */
+                float2 bary_delta(0.0f);
+                float2 uv_a(0.0f);
+                float2 uv_b(0.0f);
+                float2 uv_c(0.0f);
+                if (apply_mask_coverage) {
+                  const int uv_primitive = pixel_row.uv_primitive_index;
+                  const Span<float2> triangle_uvs = pixel_node.uv_primitives.triangle_uvs;
+                  bary_delta = pixel_node.uv_primitives.delta_barycentric_coords[uv_primitive];
+                  uv_a = triangle_uvs[uv_primitive * 3 + 0];
+                  uv_b = triangle_uvs[uv_primitive * 3 + 1];
+                  uv_c = triangle_uvs[uv_primitive * 3 + 2];
                 }
 
                 const MutableSpan<float4> scene_linear =
@@ -1856,6 +1940,19 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
                     weight = selection_sampler.sample(
                         pixel_row.start_image_coordinate.x + px,
                         pixel_row.start_image_coordinate.y);
+                    if (weight <= 0.0f) {
+                      continue;
+                    }
+                  }
+                  if (apply_mask_coverage) {
+                    /* The Mask Source texture scales how much of the gradient lands on this pixel;
+                     * no usable source (Coverage, missing image) means full coverage. */
+                    const float2 bary = pixel_row.start_barycentric_coord + bary_delta * float(px);
+                    const float2 uv = BKE_image_get_tile_uv_origin(tile.tile_number) +
+                                      uv_a * bary.x + uv_b * bary.y +
+                                      uv_c * (1.0f - bary.x - bary.y);
+                    weight *= material::mask_source_coverage_at_uv(
+                        *mask_sampler, *mask_brush_paint, uv, thread_id);
                     if (weight <= 0.0f) {
                       continue;
                     }
@@ -2015,9 +2112,12 @@ static bool sculpt_color_gradient_apply(bContext *C, wmOperator *op)
   /* Decided once for the whole gesture in #sculpt_color_gradient_init; recomputed identically
    * here since canvas/material configuration does not change mid-drag. */
   const bool use_image_undo = sculpt_color_gradient_uses_image_undo(C, objects);
+  const bool mask_mode = paint_mode_settings != nullptr &&
+                         paint_mode_settings->layer_target_mode == PAINT_LAYER_TARGET_MASK;
 
   bool any_painted = false;
   bool mismatched_canvas_skipped = false;
+  bool mask_target_skipped = false;
   for (Object *ob : objects) {
     if (ob == nullptr || ob->type != OB_MESH) {
       continue;
@@ -2029,6 +2129,12 @@ static bool sculpt_color_gradient_apply(bContext *C, wmOperator *op)
                                             brush,
                                             sd->paint.visible_material_channels);
     if (object_is_image_canvas) {
+      continue;
+    }
+    if (mask_mode) {
+      /* A Mask target is an image map, never a color attribute: painting the active color
+       * attribute here would write somewhere the user is not looking. */
+      mask_target_skipped = true;
       continue;
     }
     if (use_image_undo) {
@@ -2049,6 +2155,12 @@ static bool sculpt_color_gradient_apply(bContext *C, wmOperator *op)
                RPT_WARNING,
                "Color Gradient: objects using a different paint canvas than the rest of the "
                "selection were skipped (mixed canvases are not supported in one gesture)");
+  }
+  if (!any_painted && mask_target_skipped) {
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "Color Gradient: Mask mode paints the mask image map, not a color attribute; "
+               "this object was skipped");
   }
   return any_painted;
 }
@@ -2198,6 +2310,7 @@ static bool sculpt_color_gradient_canvases_prepare(bContext *C,
   }
   PaintModeSettings &paint_mode_settings = scene.toolsettings->paint_mode;
   const Brush *brush = BKE_paint_brush_for_read(&sd->paint);
+  const bool mask_mode = paint_mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK;
 
   Vector<Image *> images;
   for (Object *ob : objects) {
@@ -2207,9 +2320,17 @@ static bool sculpt_color_gradient_canvases_prepare(bContext *C,
     {
       continue;
     }
+    if (mask_mode && BKE_paint_layers_active_material_get(ob) != nullptr) {
+      /* A fresh Mask row has no map yet. The gradient itself cannot create one, and a missing
+       * map would otherwise make the first gesture a silent no-op. */
+      material::mask_target_image_ensure(CTX_data_main(C), *ob, paint_mode_settings);
+    }
     for (paint::image::ImagePaintTarget &target : paint::image::init_image_paint_targets(
              *ob, paint_mode_settings, brush, sd->paint.visible_material_channels))
     {
+      if (mask_mode && !target.is_mask_target) {
+        continue;
+      }
       Image *image = target.data->image;
       if (image == nullptr) {
         continue;
@@ -2258,6 +2379,19 @@ static int sculpt_color_gradient_init(bContext *C, wmOperator *op)
   for (Object *object : objects) {
     bke::object::pbvh_ensure(*depsgraph, *object);
     BKE_sculpt_update_object_for_edit(depsgraph, object, true);
+  }
+
+  if (scene.toolsettings != nullptr &&
+      scene.toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+  {
+    /* Mask strokes lazily get their BrushMaterialPaint in #init_material_canvas_for_object;
+     * this gesture has no stroke setup, so do the same here. Without it the Mask map cannot
+     * even be resolved as an image target. */
+    Sculpt *sd = CTX_data_tool_settings(C)->sculpt;
+    Brush *brush = (sd != nullptr) ? BKE_paint_brush(&sd->paint) : nullptr;
+    if (brush != nullptr) {
+      BKE_brush_material_paint_ensure(brush);
+    }
   }
 
   if (!sculpt_color_gradient_canvases_prepare(C, op, objects)) {
@@ -3194,6 +3328,24 @@ static void sculpt_color_gradient_cancel(bContext *C, wmOperator *op)
 
 static wmOperatorStatus sculpt_color_gradient_colors_flip_exec(bContext *C, wmOperator * /*op*/)
 {
+  const Scene *scene = CTX_data_scene(C);
+  if (scene != nullptr && scene->toolsettings != nullptr &&
+      scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+  {
+    /* A Mask gradient ramps between the brush's Alpha value pair. Swapping the Sculpt colors
+     * here would visibly change nothing, so X has to flip the pair that actually reaches the
+     * mask map. */
+    Paint *paint = BKE_paint_get_active_from_context(C);
+    Brush *brush = paint != nullptr ? BKE_paint_brush(paint) : nullptr;
+    if (brush == nullptr) {
+      return OPERATOR_CANCELLED;
+    }
+    material::mask_values_flip(*paint, *brush);
+    WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+    WM_event_add_notifier(C, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+    return OPERATOR_FINISHED;
+  }
+
   Sculpt *sd = CTX_data_tool_settings(C)->sculpt;
   if (sd == nullptr) {
     return OPERATOR_CANCELLED;

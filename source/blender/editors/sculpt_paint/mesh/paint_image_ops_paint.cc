@@ -178,6 +178,12 @@ static bool texture_fill_canvas_has_texture(const bContext *C, const Object *ob)
 
   const Scene *scene = CTX_data_scene(C);
   const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    /* A mask fill writes the active layer's mask map, which is not the texpaint canvas image this
+     * check is about. A layered row can create its missing map on the first fill; a material with
+     * no mask row must still report that there is no target. */
+    return BKE_paint_layers_active_material_get(CTX_data_active_object(C)) != nullptr;
+  }
   switch (ePaintCanvasSource(paint_mode.canvas_source)) {
     case PAINT_CANVAS_SOURCE_IMAGE:
       return paint_mode.canvas_image != nullptr;
@@ -249,7 +255,7 @@ static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2]
   ED_image_undo_push_begin(op->type->name, texture_fill_paint_mode_get(C));
   bool did_fill;
   if (CTX_wm_space_image(C) != nullptr) {
-    paint_2d_bucket_fill(C, color, brush, mouse, mouse, nullptr);
+    paint_2d_bucket_fill(C, color, brush, mouse, mouse, nullptr, invert);
     did_fill = true;
   }
   else {
@@ -279,16 +285,18 @@ static wmOperatorStatus texture_fill_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  const bool invert = RNA_boolean_get(op->ptr, "invert");
   float color[3];
-  texture_fill_color_get(paint, brush, RNA_boolean_get(op->ptr, "invert"), color);
+  texture_fill_color_get(paint, brush, invert, color);
 
   ED_image_undo_push_begin(op->type->name, texture_fill_paint_mode_get(C));
   bool did_fill;
   if (CTX_wm_space_image(C) != nullptr) {
-    did_fill = paint_image_2d_geometry_fill_rect(C, color, brush, rect);
+    did_fill = paint_image_2d_geometry_fill_rect(C, color, brush, rect, invert);
   }
   else {
-    did_fill = paint_image_proj_geometry_fill_rect(C, color, brush, CTX_data_active_object(C), rect);
+    did_fill = paint_image_proj_geometry_fill_rect(
+        C, color, brush, CTX_data_active_object(C), rect, invert);
   }
   ED_image_undo_push_end();
 
@@ -472,7 +480,7 @@ bool paint_image_viewport_fill_at_mouse(const bContext *C,
            IMAGE_PAINT_SELECT_EXPAND_ISLAND,
            IMAGE_PAINT_SELECT_EXPAND_MESH))
   {
-    return paint_image_proj_geometry_fill(C, color, brush, ob, mouse);
+    return paint_image_proj_geometry_fill(C, color, brush, ob, mouse, stroke_inverted);
   }
 
   /* Pixel flood — minimal projection stroke session */
@@ -647,14 +655,15 @@ class ImagePaintMode : public AbstractPaintMode {
                          float mouse_start[2],
                          float mouse_end[2]) override
   {
+    const bool invert = stroke->stroke_inverted();
     float color[3];
-    if (stroke->stroke_inverted()) {
+    if (invert) {
       copy_v3_v3(color, BKE_brush_secondary_color_get(paint, brush));
     }
     else {
       copy_v3_v3(color, BKE_brush_color_get(paint, brush));
     }
-    paint_2d_bucket_fill(C, color, brush, mouse_start, mouse_end, stroke_handle);
+    paint_2d_bucket_fill(C, color, brush, mouse_start, mouse_end, stroke_handle, invert);
   }
 };
 

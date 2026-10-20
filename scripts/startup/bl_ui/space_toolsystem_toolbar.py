@@ -38,6 +38,9 @@ from bl_ui.space_toolsystem_common import (
 from bl_ui.properties_paint_common import (
     BrushAssetShelf,
     UnifiedPaintPanel,
+    _draw_mask_alpha_pair,
+    _mask_alpha_channel,
+    draw_mask_alpha_source,
     draw_paint_shape_options_subpanel,
     draw_shape_color_row,
     paint_shape_settings,
@@ -2243,22 +2246,42 @@ class _defs_sculpt:
                     col.prop(settings, "gradient_curve_width")
                     col.prop(settings, "gradient_curve_smooth", slider=True)
                     col.prop(settings, "gradient_curve_distance", text="Distance")
-            row = layout.row(align=True)
-            row.prop(settings, "gradient_color_source", expand=True)
-            if settings.gradient_color_source == 'COLORS':
-                row = layout.row(align=True)
-                if region_is_header:
-                    row.ui_units_x = 4
-                row.prop(settings, "gradient_color", text="")
-                row.prop(settings, "gradient_secondary_color", text="")
-                row.operator("sculpt.color_gradient_colors_flip", icon='FILE_REFRESH', text="")
+            is_mask_target = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
+            if is_mask_target:
+                # A Mask stroke writes one grayscale value; the gradient colors and ramp do not
+                # reach it, so the Alpha pair replaces them in place.
+                brush = settings.brush
+                channel = _mask_alpha_channel(context, brush)
+                if channel is not None:
+                    _draw_mask_alpha_pair(layout, channel)
+                elif brush is not None:
+                    # Base Color / Coverage take their value from the brush colors; keep those
+                    # editable instead of leaving the Mask branch without any value control.
+                    row = layout.row(align=True)
+                    UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
+                    UnifiedPaintPanel.prop_unified_color(
+                        row, context, brush, "secondary_color", text="")
+                    row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="")
+                draw_mask_alpha_source(layout, context, brush, channel=channel)
             else:
-                layout.template_color_ramp(
-                    settings, "gradient_color_ramp", expand=True, compact=region_is_header,
-                )
-                layout.operator("sculpt.color_gradient_colors_flip", icon='ARROW_LEFTRIGHT', text="Flip")
-            # Color Mode / Interpolation live on the ramp but drive the Colors source as well.
-            layout.popover("VIEW3D_PT_sculpt_color_gradient_ramp_advanced", text="Color Ramp Advanced")
+                row = layout.row(align=True)
+                row.prop(settings, "gradient_color_source", expand=True)
+                if settings.gradient_color_source == 'COLORS':
+                    row = layout.row(align=True)
+                    if region_is_header:
+                        row.ui_units_x = 4
+                    row.prop(settings, "gradient_color", text="")
+                    row.prop(settings, "gradient_secondary_color", text="")
+                    row.operator("sculpt.color_gradient_colors_flip", icon='FILE_REFRESH', text="")
+                else:
+                    layout.template_color_ramp(
+                        settings, "gradient_color_ramp", expand=True, compact=region_is_header,
+                    )
+                    layout.operator(
+                        "sculpt.color_gradient_colors_flip", icon='ARROW_LEFTRIGHT', text="Flip")
+                # Color Mode / Interpolation live on the ramp but drive the Colors source as well.
+                layout.popover(
+                    "VIEW3D_PT_sculpt_color_gradient_ramp_advanced", text="Color Ramp Advanced")
             layout.prop(settings, "gradient_opacity", text="Opacity", slider=True)
             layout.prop(settings, "gradient_blend_mode", text="Blend")
             layout.prop(settings, "gradient_repeat", text="Repeat")

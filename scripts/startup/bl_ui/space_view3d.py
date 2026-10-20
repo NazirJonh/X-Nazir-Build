@@ -26,6 +26,7 @@ from bl_ui.properties_paint_common import (
     material_paint_has_any_map,
     draw_material_mask_brush_reset,
     draw_mask_alpha_swatches,
+    mask_target_suppresses_color,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -453,11 +454,16 @@ class _draw_tool_settings_context_mode:
         if brush.sculpt_brush_type == 'TEXTURE_FILL':
             draw_image_paint_fill_expand(layout, context, brush)
 
-        if capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL':
+        if ((capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL') and
+                not mask_target_suppresses_color(context, brush)):
             if not draw_mask_alpha_swatches(layout, context, brush):
                 material_paint = brush.material_paint
                 row = layout.row(align=True)
-                row.active = material_paint is None or material_paint.use_sync_base_color_with_brush
+                # See #brush_basic_texpaint_settings: a Mask target reads the brush colors for
+                # its Base Color / Coverage source regardless of the material-channel sync.
+                if context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+                    row.active = (material_paint is None or
+                                  material_paint.use_sync_base_color_with_brush)
                 row.ui_units_x = 4
                 UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
                 UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")

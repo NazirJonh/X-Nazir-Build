@@ -907,7 +907,8 @@ void paint_2d_bucket_fill(const bContext *C,
                           Brush *br,
                           const float mouse_init[2],
                           const float mouse_final[2],
-                          void *ps);
+                          void *ps,
+                          bool invert = false);
 /**
  * 3D Texture Paint Face/Island/Mesh fill.
  *
@@ -921,8 +922,12 @@ void paint_2d_bucket_fill(const bContext *C,
  *
  * \return true if any tile was written.
  */
-bool paint_image_proj_geometry_fill(
-    const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2]);
+bool paint_image_proj_geometry_fill(const bContext *C,
+                                    const float color[3],
+                                    Brush *br,
+                                    Object *ob,
+                                    const float mouse[2],
+                                    bool invert = false);
 /**
  * Geometry fill from original mesh face indices. The indices must belong to \a ob's original mesh
  * or Edit BMesh, rather than an evaluated mesh with potentially different topology.
@@ -931,18 +936,23 @@ bool paint_image_proj_geometry_fill_faces(const bContext *C,
                                           const float color[3],
                                           Brush *br,
                                           Object *ob,
-                                          Span<int> seed_faces);
+                                          Span<int> seed_faces,
+                                          bool invert = false);
 /**
  * Fill faces whose original-mesh screen-space polygons intersect \a rect.
  *
  * In Sculpt Mode multi-object editing, \a ob is only the context object: every participating
  * mesh is filled, not just \a ob (see #texture_fill_target_objects).
  */
-bool paint_image_proj_geometry_fill_rect(
-    const bContext *C, const float color[3], Brush *br, Object *ob, const rcti &rect);
+bool paint_image_proj_geometry_fill_rect(const bContext *C,
+                                         const float color[3],
+                                         Brush *br,
+                                         Object *ob,
+                                         const rcti &rect,
+                                         bool invert = false);
 /** Fill faces whose UV polygons intersect the Image Editor rectangle. */
 bool paint_image_2d_geometry_fill_rect(
-    const bContext *C, const float color[3], Brush *br, const rcti &rect);
+    const bContext *C, const float color[3], Brush *br, const rcti &rect, bool invert = false);
 
 /**
  * Project candidate faces into region pixel space and register the highlight overlay for the

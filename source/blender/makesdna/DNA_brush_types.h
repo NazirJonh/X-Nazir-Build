@@ -744,11 +744,6 @@ struct Brush {
 
   /* fill tool */
   float fill_threshold = 0.2f;
-  /** Fixed scalar written by Geometry Fill to non-color data images. */
-  float data_fill_value = 1.0f;
-  /** Map #data_fill_value from [0..1] to [-1..1] for float data images. */
-  char data_fill_signed = 0;
-  char _pad_fill_data[3] = {};
 
   float add_col[4] = {1.0, 0.39, 0.39, 0.9};
   float sub_col[4] = {0.39, 0.39, 1.0, 0.9};

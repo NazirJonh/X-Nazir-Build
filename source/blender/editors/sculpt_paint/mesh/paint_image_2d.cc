@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "MEM_guardedalloc.h"
@@ -5428,16 +5429,123 @@ static void paint_image_geometry_fill_seed_add_symmetry_uv(Object *ob,
   }
 }
 
+/** True when a fill operator is writing the active layer's mask instead of channel content. */
+static bool paint_image_fill_mask_mode_get(const bContext *C)
+{
+  const Scene *scene = CTX_data_scene(C);
+  return scene != nullptr && scene->toolsettings != nullptr &&
+         scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK;
+}
+
+/**
+ * Image a Mask-mode fill writes: the active layer's mask map.
+ *
+ * A fill must never fall back to the image the editor happens to display, or a mask stroke could
+ * overwrite a color channel the user is looking at. Null means there is no mask target, and the
+ * caller writes nothing.
+ */
+static Image *paint_image_fill_mask_image_get(const bContext *C)
+{
+  Scene *scene = CTX_data_scene(C);
+  Object *ob = CTX_data_active_object(C);
+  if (scene == nullptr || scene->toolsettings == nullptr || ob == nullptr) {
+    return nullptr;
+  }
+  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.layer_target_mode != PAINT_LAYER_TARGET_MASK) {
+    return nullptr;
+  }
+  return ed::sculpt_paint::material::mask_target_image_ensure(CTX_data_main(C), *ob, paint_mode);
+}
+
+/** The material channel the active texpaint slot writes, when it is known. */
+static std::optional<eMaterialPaintChannel> paint_image_fill_channel_get(const bContext *C)
+{
+  const Scene *scene = CTX_data_scene(C);
+  const Object *ob = CTX_data_active_object(C);
+  if (scene == nullptr || scene->toolsettings == nullptr || ob == nullptr ||
+      scene->toolsettings->paint_mode.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL)
+  {
+    return std::nullopt;
+  }
+  Material *ma = BKE_object_material_get(const_cast<Object *>(ob), ob->actcol);
+  if (ma == nullptr || ma->texpaintslot == nullptr || ma->paint_active_slot < 0 ||
+      ma->paint_active_slot >= ma->tot_slots)
+  {
+    return std::nullopt;
+  }
+  const int channel = BKE_paint_layers_texpaint_slot_channel(ma->paint_active_slot);
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return std::nullopt;
+  }
+  return eMaterialPaintChannel(channel);
+}
+
+/**
+ * Scalar a non-color content fill writes: the mean of the fill color, mapped from 0..1 into the
+ * target channel's value range. With no known channel (the Image Editor has no material slot to
+ * read a slot from) the range stays 0..1.
+ */
+static float paint_image_fill_data_value_get(const bContext *C, const float color[3])
+{
+  const float mean = (color[0] + color[1] + color[2]) / 3.0f;
+  float2 range(0.0f, 1.0f);
+  const std::optional<eMaterialPaintChannel> channel = paint_image_fill_channel_get(C);
+  if (channel) {
+    range = BKE_paint_material_channel_range(CTX_data_scene(C)->toolsettings->paint_mode,
+                                             *channel);
+  }
+  return range.x + mean * (range.y - range.x);
+}
+
+/**
+ * The flat Mask value one fill invocation writes: the primary Mask value, or the secondary one
+ * when the fill was invoked inverted. Empty when the fill does not target a mask or no value
+ * can be resolved, in which case a Mask fill must write nothing.
+ *
+ * A fill is a solid coverage by Fill Mode only; a Mask Source texture deliberately does not
+ * modulate it (that is the Gradient/Shape/brush behaviour).
+ */
+static std::optional<float> paint_image_fill_mask_value_get(const bContext *C,
+                                                            Brush *br,
+                                                            const bool invert)
+{
+  if (br == nullptr || !paint_image_fill_mask_mode_get(C)) {
+    return std::nullopt;
+  }
+  if (br->material_paint == nullptr) {
+    BKE_brush_material_paint_ensure(br);
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (br->material_paint == nullptr || paint == nullptr) {
+    return std::nullopt;
+  }
+  const ed::sculpt_paint::material::MaskValuePair values =
+      ed::sculpt_paint::material::mask_value_pair_get(*br->material_paint, *paint, *br);
+  return invert ? values.secondary : values.primary;
+}
+
 static bool paint_2d_geometry_fill_commit(const bContext *C,
                                           const float color[3],
                                           Brush *br,
                                           Image *ima,
                                           SpaceImage *sima,
                                           MutableSpan<ImagePaintUVObjectFaces> items,
-                                          const bool texpaint)
+                                          const bool texpaint,
+                                          const bool invert)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);
   const float strength = BKE_brush_alpha_get(paint, br);
+  const bool mask_mode = paint_image_fill_mask_mode_get(C);
+  const std::optional<float> mask_value = paint_image_fill_mask_value_get(C, br, invert);
+  if (mask_mode && !mask_value) {
+    /* A mask fill with no resolvable Mask value must not fall through to painting color into
+     * whatever image the caller handed us. */
+    paint_2d_geometry_fill_free_items(items);
+    return false;
+  }
+  const float data_fill_value = mask_mode ? *mask_value :
+                                            paint_image_fill_data_value_get(C, color);
 
   Set<int> tile_numbers;
   for (const ImagePaintUVObjectFaces &item : items) {
@@ -5490,8 +5598,7 @@ static bool paint_2d_geometry_fill_commit(const bContext *C,
                                            color,
                                            strength,
                                            IMB_BlendMode(br->blend),
-                                           br->data_fill_value,
-                                           br->data_fill_signed != 0);
+                                           data_fill_value);
     }
   }
 
@@ -5533,7 +5640,8 @@ static void paint_2d_geometry_fill(const bContext *C,
                                    Image *ima,
                                    SpaceImage *sima,
                                    Scene *scene,
-                                   const float2 &uv_abs)
+                                   const float2 &uv_abs,
+                                   const bool invert)
 {
   Vector<ImagePaintUVObjectFaces> items;
   const Vector<Object *> objects = image_paint_selection_canvas_objects_get(
@@ -5586,7 +5694,7 @@ static void paint_2d_geometry_fill(const bContext *C,
     return;
   }
 
-  paint_2d_geometry_fill_commit(C, color, br, ima, sima, items, false);
+  paint_2d_geometry_fill_commit(C, color, br, ima, sima, items, false, invert);
 }
 
 /**
@@ -5752,9 +5860,18 @@ static bool paint_image_geometry_fill_raycast_orig_face_multi(const bContext *C,
 
 static Image *paint_image_geometry_fill_canvas_image(const Scene *scene,
                                                      Object *ob,
-                                                     const short mat_nr)
+                                                     const short mat_nr,
+                                                     Main *bmain)
 {
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  if (paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    /* The mask map belongs to the active layer, independent of the face's material slot. Only a
+     * layered material has one; the Principled fallback would resolve the Base Color map. */
+    if (!BKE_paint_material_face_matches_active_slot(*ob, mat_nr)) {
+      return nullptr;
+    }
+    return ed::sculpt_paint::material::mask_target_image_ensure(bmain, *ob, paint_mode);
+  }
   if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE) {
     return paint_mode.canvas_image;
   }
@@ -5957,6 +6074,7 @@ static bool paint_image_proj_geometry_fill_faces_impl(
     Object *ob,
     ImagePaintUVObjectFaces &item,
     const Span<int> seed,
+    const bool invert,
     const ImagePaintGeometryFillVisibleFaces *visible = nullptr)
 {
   if (br == nullptr || ob == nullptr || item.bm == nullptr || seed.is_empty()) {
@@ -6004,7 +6122,8 @@ static bool paint_image_proj_geometry_fill_faces_impl(
   const auto material_target_get = [&](const short mat_nr) -> const FillMaterialTarget & {
     return material_targets.lookup_or_add_cb(mat_nr, [&] {
       FillMaterialTarget target;
-      target.image = paint_image_geometry_fill_canvas_image(scene, ob, mat_nr);
+      target.image = paint_image_geometry_fill_canvas_image(
+          scene, ob, mat_nr, CTX_data_main(C));
       target.offsets = paint_image_geometry_fill_uv_offsets(item.bm, ob, scene, mat_nr);
       return target;
     });
@@ -6096,7 +6215,8 @@ static bool paint_image_proj_geometry_fill_faces_impl(
 
     Vector<ImagePaintUVObjectFaces> target_items;
     target_items.append(std::move(target_item));
-    did_fill |= paint_2d_geometry_fill_commit(C, color, br, group.image, nullptr, target_items, true);
+    did_fill |= paint_2d_geometry_fill_commit(
+        C, color, br, group.image, nullptr, target_items, true, invert);
   }
 
   return did_fill;
@@ -6106,7 +6226,8 @@ bool paint_image_proj_geometry_fill_faces(const bContext *C,
                                           const float color[3],
                                           Brush *br,
                                           Object *ob,
-                                          const Span<int> seed)
+                                          const Span<int> seed,
+                                          const bool invert)
 {
   if (br == nullptr || ob == nullptr) {
     return false;
@@ -6116,7 +6237,8 @@ bool paint_image_proj_geometry_fill_faces(const bContext *C,
   if (!paint_2d_geometry_fill_init_bm(ob, item)) {
     return false;
   }
-  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(C, color, br, ob, item, seed);
+  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
+      C, color, br, ob, item, seed, invert);
   paint_2d_geometry_fill_item_discard(item);
   return did_fill;
 }
@@ -6186,7 +6308,8 @@ static bool paint_image_proj_geometry_fill_rect_object(
     const ARegion &region,
     RegionView3D &rv3d,
     const rctf &rectf,
-    const ImagePaintGeometryFillVisibleFaces &visible)
+    const ImagePaintGeometryFillVisibleFaces &visible,
+    const bool invert)
 {
   if (ob == nullptr || ob->type != OB_MESH) {
     return false;
@@ -6220,7 +6343,7 @@ static bool paint_image_proj_geometry_fill_rect_object(
     paint_image_geometry_fill_seed_add_symmetry(ob, item.bm, *mesh, seed);
   }
   const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
-      C, color, br, ob, item, seed, &visible);
+      C, color, br, ob, item, seed, invert, &visible);
   paint_2d_geometry_fill_item_discard(item);
   return did_fill;
 }
@@ -6229,7 +6352,8 @@ static bool paint_image_proj_geometry_fill_rect_impl(const bContext *C,
                                                      const float color[3],
                                                      Brush *br,
                                                      Object *ob,
-                                                     const rcti &rect)
+                                                     const rcti &rect,
+                                                     const bool invert)
 {
   if (br == nullptr || ob == nullptr || ob->type != OB_MESH) {
     return false;
@@ -6255,19 +6379,27 @@ static bool paint_image_proj_geometry_fill_rect_impl(const bContext *C,
   bool did_fill = false;
   for (Object *target_ob : objects) {
     did_fill |= paint_image_proj_geometry_fill_rect_object(
-        C, color, br, target_ob, *region, *rv3d, rectf, visible);
+        C, color, br, target_ob, *region, *rv3d, rectf, visible, invert);
   }
   return did_fill;
 }
 
-bool paint_image_proj_geometry_fill_rect(
-    const bContext *C, const float color[3], Brush *br, Object *ob, const rcti &rect)
+bool paint_image_proj_geometry_fill_rect(const bContext *C,
+                                         const float color[3],
+                                         Brush *br,
+                                         Object *ob,
+                                         const rcti &rect,
+                                         const bool invert)
 {
-  return paint_image_proj_geometry_fill_rect_impl(C, color, br, ob, rect);
+  return paint_image_proj_geometry_fill_rect_impl(C, color, br, ob, rect, invert);
 }
 
-bool paint_image_proj_geometry_fill(
-    const bContext *C, const float color[3], Brush *br, Object *ob, const float mouse[2])
+bool paint_image_proj_geometry_fill(const bContext *C,
+                                    const float color[3],
+                                    Brush *br,
+                                    Object *ob,
+                                    const float mouse[2],
+                                    const bool invert)
 {
   if (br == nullptr || ob == nullptr) {
     return false;
@@ -6296,7 +6428,8 @@ bool paint_image_proj_geometry_fill(
     BM_mesh_elem_table_ensure(item.bm, BM_FACE);
     image_paint_symmetry_mirror_faces(ob, item.bm, hit_position, mesh->symmetry, seed);
   }
-  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(C, color, br, ob, item, seed);
+  const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
+      C, color, br, ob, item, seed, invert);
   paint_2d_geometry_fill_item_discard(item);
   return did_fill;
 }
@@ -6304,12 +6437,21 @@ bool paint_image_proj_geometry_fill(
 static bool paint_image_2d_geometry_fill_rect_impl(const bContext *C,
                                                    const float color[3],
                                                    Brush *br,
-                                                   const rcti &rect)
+                                                   const rcti &rect,
+                                                   const bool invert)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
   ARegion *region = CTX_wm_region(C);
   Scene *scene = CTX_data_scene(C);
+  /* The displayed image still identifies the participating canvas objects even when Mask mode
+   * redirects the write to the layer's mask map. */
   if (sima == nullptr || sima->image == nullptr || region == nullptr || br == nullptr) {
+    return false;
+  }
+  /* Mask mode writes the active layer's mask map, never the canvas image currently displayed. */
+  const bool mask_mode = paint_image_fill_mask_mode_get(C);
+  Image *target_image = mask_mode ? paint_image_fill_mask_image_get(C) : sima->image;
+  if (target_image == nullptr) {
     return false;
   }
 
@@ -6348,6 +6490,9 @@ static bool paint_image_2d_geometry_fill_rect_impl(const bContext *C,
       if (BM_elem_flag_test(efa, BM_ELEM_HIDDEN)) {
         continue;
       }
+      if (mask_mode && !BKE_paint_material_face_matches_active_slot(*ob, efa->mat_nr)) {
+        continue;
+      }
       Vector<float2> uv_coords;
       uv_coords.reserve(efa->len);
       BMIter liter;
@@ -6381,7 +6526,7 @@ static bool paint_image_2d_geometry_fill_rect_impl(const bContext *C,
     return false;
   }
   const bool did_fill = paint_2d_geometry_fill_commit(
-      C, color, br, sima->image, sima, items, false);
+      C, color, br, target_image, sima, items, false, invert);
   /* Every item owns a BMesh built from the original mesh outside Edit Mode. */
   for (ImagePaintUVObjectFaces &item : items) {
     paint_2d_geometry_fill_item_discard(item);
@@ -6390,9 +6535,9 @@ static bool paint_image_2d_geometry_fill_rect_impl(const bContext *C,
 }
 
 bool paint_image_2d_geometry_fill_rect(
-    const bContext *C, const float color[3], Brush *br, const rcti &rect)
+    const bContext *C, const float color[3], Brush *br, const rcti &rect, const bool invert)
 {
-  return paint_image_2d_geometry_fill_rect_impl(C, color, br, rect);
+  return paint_image_2d_geometry_fill_rect_impl(C, color, br, rect, invert);
 }
 
 /* -------------------------------------------------------------------- */
@@ -6697,11 +6842,14 @@ void paint_2d_bucket_fill(const bContext *C,
                           Brush *br,
                           const float mouse_init[2],
                           const float mouse_final[2],
-                          void *ps)
+                          void *ps,
+                          const bool invert)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
   Paint *paint = BKE_paint_get_active_from_context(C);
-  Image *ima = sima->image;
+  const bool mask_mode = paint_image_fill_mask_mode_get(C);
+  /* Mask mode writes the active layer's mask map, never the image the editor displays. */
+  Image *ima = mask_mode ? paint_image_fill_mask_image_get(C) : sima->image;
 
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
   Scene *scene = CTX_data_scene(C);
@@ -6715,6 +6863,16 @@ void paint_2d_bucket_fill(const bContext *C,
   bool do_float;
 
   if (!ima) {
+    return;
+  }
+  /* The legacy whole-image bucket operator passes no brush; a Mask fill still needs the active
+   * one to resolve its Mask value. */
+  Brush *mask_brush = br;
+  if (mask_mode && mask_brush == nullptr && paint != nullptr) {
+    mask_brush = BKE_paint_brush(paint);
+  }
+  const std::optional<float> mask_value = paint_image_fill_mask_value_get(C, mask_brush, invert);
+  if (mask_mode && !mask_value) {
     return;
   }
 
@@ -6747,12 +6905,14 @@ void paint_2d_bucket_fill(const bContext *C,
            IMAGE_PAINT_SELECT_EXPAND_ISLAND,
            IMAGE_PAINT_SELECT_EXPAND_MESH))
   {
-    paint_2d_geometry_fill(C, color, br, ima, sima, scene, float2(uv_abs[0], uv_abs[1]));
+    paint_2d_geometry_fill(
+        C, color, br, ima, sima, scene, float2(uv_abs[0], uv_abs[1]), invert);
     return;
   }
 
   ImageUser local_iuser, *iuser;
-  if (s != nullptr) {
+  /* A mask map is not part of the 2D stroke's tile records, so use a plain per-tile user. */
+  if (s != nullptr && !mask_mode) {
     iuser = paint_2d_get_tile_iuser(s, tile_number);
     if (iuser == nullptr) {
       return;
@@ -6770,13 +6930,34 @@ void paint_2d_bucket_fill(const bContext *C,
   }
 
   do_float = (ibuf->float_data() != nullptr);
+  /* A mask map is a scalar even when its image was not tagged Non-Color; writing the brush color
+   * there would put an RGB value into it. */
+  const bool is_data = mask_mode || ibuf->colorspace_is_data();
+  /* A non-color target takes one grey value, not RGB: the Mask value in Mask mode, otherwise the
+   * mean of the fill color mapped into the channel's own range. */
+  const float data_fill_value = mask_mode ? *mask_value :
+                                            paint_image_fill_data_value_get(C, color);
+
   /* First check if our image is float. If it is we should correct the color to be in linear space.
    */
-  if (!do_float) {
+  if (is_data) {
+    if (!do_float) {
+      rgb_float_to_uchar(reinterpret_cast<uchar *>(&color_b),
+                         float3(data_fill_value, data_fill_value, data_fill_value));
+      *((reinterpret_cast<char *>(&color_b)) + 3) = char(strength * 255);
+    }
+    else {
+      color_f[0] = data_fill_value;
+      color_f[1] = data_fill_value;
+      color_f[2] = data_fill_value;
+      color_f[3] = strength;
+    }
+  }
+  else if (!do_float) {
     float3 ibuf_color = color;
     IMB_colormanagement_scene_linear_to_colorspace_v3(ibuf_color, ibuf->byte_buffer.colorspace);
     rgb_float_to_uchar(reinterpret_cast<uchar *>(&color_b), ibuf_color);
-    *((reinterpret_cast<char *>(&color_b)) + 3) = strength * 255;
+    *((reinterpret_cast<char *>(&color_b)) + 3) = char(strength * 255);
   }
   else {
     copy_v3_v3(color_f, color);

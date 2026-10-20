@@ -16,10 +16,12 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "BLT_translation.hh"
 
 #include "BKE_context.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_span.hh"
@@ -734,6 +736,30 @@ static short stack_drag_matched_id_type(const wmDrag &drag, const Span<short> ty
   return 0;
 }
 
+/**
+ * Whether \a drag is the selected-assets list the Asset Browser starts next to the drag of the
+ * item under the cursor.
+ *
+ * Both drags are polled against this drop box, and both write the one indicator of the space. The
+ * list can name nothing this source takes -- it only carries the selected entries, so a dragged
+ * item outside the selection is one way -- and its refusal must not erase the line the presentation
+ * drag just placed. A list drag with no such sibling is a gesture of its own and keeps the ordinary
+ * refusal behavior.
+ */
+static bool stack_drag_is_asset_list_with_presentation_drag(const wmDrag &drag,
+                                                           const wmWindowManager &wm)
+{
+  if (drag.type != WM_DRAG_ASSET_LIST) {
+    return false;
+  }
+  for (const wmDrag &other : wm.runtime->drags) {
+    if (&other != &drag && ELEM(other.type, WM_DRAG_ID, WM_DRAG_ASSET)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool stack_id_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
@@ -756,7 +782,12 @@ bool stack_id_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
     }
   };
   const auto refuse = [&]() {
-    clear_indicator();
+    /* The list half of an asset gesture can name nothing this source takes, while the item drag
+     * under the cursor does. The item drag is polled first, so its line has to survive the list's
+     * refusal. */
+    if (!stack_drag_is_asset_list_with_presentation_drag(*drag, *CTX_wm_manager(C))) {
+      clear_indicator();
+    }
     return false;
   };
   if (handler == nullptr) {

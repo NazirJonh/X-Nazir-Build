@@ -220,6 +220,7 @@ static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_it
 #  include "ED_gpencil_legacy.hh"
 #  include "ED_image.hh"
 #  include "ED_node.hh"
+#  include "ED_outliner_stack.hh"
 #  include "ED_screen.hh"
 #  include "ED_undo.hh"
 
@@ -816,6 +817,10 @@ static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA
     return;
   }
   BKE_paint_layers_active_set(*ma, layer->marker);
+  /* This path adds the row without going through the Stack Layers Add operator, so the Outliner
+   * has to be told the row it now has is the active one -- otherwise the rows it cached before the
+   * Add keep the old row lit. */
+  ed::outliner::outliner_stack_row_added_sync(*C, ma->id, layer->marker);
   ED_undo_push(C, "Add Material Layer");
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ptr->owner_id);
 }

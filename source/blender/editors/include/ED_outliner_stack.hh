@@ -13,8 +13,11 @@
 
 #pragma once
 
+#include "BLI_uuid.h"
+
 struct bContext;
 struct EnumPropertyItem;
+struct ID;
 struct ScrArea;
 struct SpaceOutliner;
 
@@ -57,5 +60,15 @@ bool outliner_stack_focus_sub_index_apply(bContext &C, SpaceOutliner &space_outl
 const EnumPropertyItem *outliner_stack_focus_sub_index_itemf(bContext *C,
                                                              SpaceOutliner &space_outliner,
                                                              bool *r_free);
+
+/**
+ * Tell the Stack Layers displays that \a owner gained the row identified by \a row_id outside their
+ * own operators -- the Add popover's Material layer is created by an RNA property update, not by
+ * the stack's Add operator.
+ *
+ * Every Outliner currently showing that owner re-reads its rows and reads the named one as the
+ * active, selected row, which is what #outliner_stack_row_add leaves behind for a row it made.
+ */
+void outliner_stack_row_added_sync(bContext &C, ID &owner, const bUUID &row_id);
 
 }  // namespace blender::ed::outliner

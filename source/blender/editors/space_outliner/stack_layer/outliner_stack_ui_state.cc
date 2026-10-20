@@ -153,6 +153,57 @@ void stack_row_edit_finished(bContext &C,
   WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
 }
 
+void outliner_stack_row_added_sync(bContext &C, ID &owner, const bUUID &row_id)
+{
+  Main *bmain = CTX_data_main(&C);
+  if (bmain == nullptr) {
+    return;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(C);
+  bool synced = false;
+  /* The row was added outside this editor, so every Outliner showing the owner has to be told --
+   * not only the one the Add was called from. */
+  for (bScreen *screen = static_cast<bScreen *>(bmain->screens.first); screen != nullptr;
+       screen = static_cast<bScreen *>(screen->id.next))
+  {
+    for (ScrArea &area : screen->areabase) {
+      for (SpaceLink &sl : area.spacedata) {
+        if (sl.spacetype != SPACE_OUTLINER) {
+          continue;
+        }
+        SpaceOutliner &space_outliner = reinterpret_cast<SpaceOutliner &>(sl);
+        if (space_outliner.outlinevis != SO_STACK_LAYERS ||
+            space_outliner.runtime == nullptr)
+        {
+          continue;
+        }
+        if (outliner_stack_owner_get(ctx, space_outliner) != &owner) {
+          continue;
+        }
+        outliner_stack_rows_ensure(ctx, space_outliner, owner);
+        int ordinal = -1;
+        for (const StackRow &row : space_outliner.runtime->stack_rows) {
+          if (BLI_uuid_equal(row.stable_id, row_id)) {
+            ordinal = row.ordinal;
+            break;
+          }
+        }
+        if (ordinal < 0) {
+          continue;
+        }
+        stack_row_ui_state_edit_select(ctx, space_outliner, owner, ordinal);
+        /* The same follow-up the Add wrapper gives a row it made: the target mode, the mask and the
+         * texture-paint slots all resolve through the active row. */
+        outliner_stack_row_activate(&C, space_outliner, ordinal);
+        synced = true;
+      }
+    }
+  }
+  if (synced) {
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  }
+}
+
 void outliner_stack_rows_invalidate(SpaceOutliner &space_outliner)
 {
   SpaceOutliner_Runtime &runtime = *space_outliner.runtime;

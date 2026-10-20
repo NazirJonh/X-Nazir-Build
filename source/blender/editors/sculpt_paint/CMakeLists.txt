@@ -28,6 +28,7 @@ set(SRC
   paint_clone_source.cc
   paint_clone_stroke.cc
   paint_cursor.cc
+  paint_cursor_preview.cc
   paint_curve.cc
   paint_curve_convert.cc
   paint_curve_geometry.cc

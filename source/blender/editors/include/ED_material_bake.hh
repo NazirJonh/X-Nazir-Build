@@ -23,6 +23,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
@@ -168,6 +169,9 @@ struct MaterialSourcePreview {
  * both modes show the same channel; only usability is decided differently, from the bake rather
  * than from a #Tex.
  *
+ * \param only_channel: when set, preview exactly this channel and ignore the enable/visibility
+ *                      gates. A Mask stroke reads one channel regardless of them, so its preview
+ *                      must be able to ask for that channel too.
  * \param r_bake: keeps the bake alive for as long as #MaterialSourcePreview.ibuf points into it.
  *                The bake job may replace the cache entry from another thread at any point.
  * \return false when there is nothing to preview, leaving the caller on the brush's own texture.
@@ -176,7 +180,8 @@ bool material_source_preview_get(const BrushMaterialPaint &brush_paint,
                                  const PaintModeSettings &mode_settings,
                                  int visible_material_channels,
                                  MaterialSourcePreview &r_preview,
-                                 std::shared_ptr<const MaterialSourceBake> &r_bake);
+                                 std::shared_ptr<const MaterialSourceBake> &r_bake,
+                                 std::optional<eMaterialPaintChannel> only_channel = std::nullopt);
 
 
 /* -------------------------------------------------------------------- */

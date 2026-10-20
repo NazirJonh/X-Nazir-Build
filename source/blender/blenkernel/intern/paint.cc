@@ -4328,6 +4328,25 @@ bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
   return false;
 }
 
+bool BKE_paint_material_mask_preview_mtex_get(const BrushMaterialPaint &brush_paint,
+                                              const eMaterialPaintChannel channel,
+                                              MTex &r_mtex)
+{
+  const BrushMaterialPaintChannel &paint_channel = brush_paint.channels[channel];
+  if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    /* The bake supplies the pixels; only its placement is taken from the channel. */
+    BKE_paint_material_channel_effective_mtex(brush_paint, paint_channel, r_mtex);
+    r_mtex.tex = nullptr;
+    return brush_paint.source_material != nullptr;
+  }
+  if (!BKE_paint_material_channel_has_source(paint_channel)) {
+    r_mtex = dna::shallow_copy(MTex());
+    return false;
+  }
+  BKE_paint_material_channel_effective_mtex(brush_paint, paint_channel, r_mtex);
+  return true;
+}
+
 std::optional<eMaterialPaintChannel> BKE_paint_material_channel_from_attribute_name(
     const StringRef attribute_name)
 {

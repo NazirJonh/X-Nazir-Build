@@ -1514,6 +1514,20 @@ bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
                                          MTex &r_mtex);
 
 /**
+ * Mask-mode counterpart of #BKE_paint_material_preview_mtex_get: fills \a r_mtex with the source of
+ * \a channel, the one a Mask stroke reads (`mask_source_channel_get`), ignoring the channel enable
+ * and visibility gates an ordinary PBR stroke uses. Previewing what the enabled channels happen to
+ * offer would show a different image or none at all.
+ *
+ * When the channel has no source \a r_mtex is zeroed and false is returned. In Source Mode:
+ * Material the returned #MTex only carries the placement (its `tex` is null): the pixels come from
+ * the bake preview, which must be asked for the same channel.
+ */
+bool BKE_paint_material_mask_preview_mtex_get(const BrushMaterialPaint &brush_paint,
+                                              eMaterialPaintChannel channel,
+                                              MTex &r_mtex);
+
+/**
  * Returns the valid value range for \a channel: the descriptor range for the fixed channels and
  * #PaintModeSettings.channel_custom_range for Custom.
  */

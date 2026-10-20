@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 
 #include "MEM_guardedalloc.h"
 
@@ -433,11 +434,13 @@ bool material_bake_source_is_stale(const Image &image)
   return material_bake_source_node_tree_hash(*source.material) != source.node_tree_hash;
 }
 
-bool material_source_preview_get(const BrushMaterialPaint &brush_paint,
-                                 const PaintModeSettings &mode_settings,
-                                 const int visible_material_channels,
-                                 MaterialSourcePreview &r_preview,
-                                 std::shared_ptr<const MaterialSourceBake> &r_bake)
+bool material_source_preview_get(
+    const BrushMaterialPaint &brush_paint,
+    const PaintModeSettings &mode_settings,
+    const int visible_material_channels,
+    MaterialSourcePreview &r_preview,
+    std::shared_ptr<const MaterialSourceBake> &r_bake,
+    const std::optional<eMaterialPaintChannel> only_channel)
 {
   /* Reset field by field: #MTex deletes its copy assignment (#DNA_DEFINE_CXX_METHODS), so the
    * struct as a whole cannot be assigned from a temporary. */
@@ -456,8 +459,14 @@ bool material_source_preview_get(const BrushMaterialPaint &brush_paint,
   }
 
   for (const eMaterialPaintChannel channel : BKE_paint_material_channel_preview_order()) {
-    if (!BKE_paint_material_channel_is_enabled(
-            brush_paint, mode_settings, visible_material_channels, channel))
+    if (only_channel) {
+      /* A Mask stroke reads its channel whether or not the PBR channel is enabled or visible. */
+      if (channel != *only_channel) {
+        continue;
+      }
+    }
+    else if (!BKE_paint_material_channel_is_enabled(
+                 brush_paint, mode_settings, visible_material_channels, channel))
     {
       continue;
     }

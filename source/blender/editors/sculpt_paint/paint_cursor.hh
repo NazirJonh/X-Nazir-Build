@@ -32,6 +32,27 @@ enum class PaintCursorDrawingType {
   Cursor3D,
 };
 
+/** How the texels of a previewed texture become pixels of the cursor overlay. */
+struct OverlayTexelMode {
+  enum class Kind : uint8_t {
+    /** The texture's own colors, with the brush falloff baked into alpha. */
+    Color,
+    /** Erase brush: the texture is a strength mask, drawn as white alpha. */
+    EraseStrength,
+    /** Mask stroke: the scalar the Mask Source writes, drawn as grayscale. */
+    MaskCoverage,
+  };
+  Kind kind = Kind::Color;
+  /** #Kind::MaskCoverage: the selected source is the Alpha channel, so use its alpha while the
+   * texel is not opaque and luminance otherwise (see #BKE_paint_material_mask_texel_coverage). */
+  bool use_alpha = false;
+  /** #Kind::MaskCoverage: the Alpha channel's Source Invert. */
+  bool invert = false;
+
+  /** Part of the cached overlay's identity: a change must rebuild the texture. */
+  bool operator==(const OverlayTexelMode &other) const = default;
+};
+
 struct PaintCursorContext {
   ARegion *region = nullptr;
   wmWindow *win = nullptr;
@@ -65,6 +86,8 @@ struct PaintCursorContext {
   /** Pixels for #material_preview_mtex in Source Mode: Material, where the channel has no #Tex.
    * Unused (and #MaterialSourcePreview.usable false) in Source Mode: Maps. */
   ed::material_bake::MaterialSourcePreview material_preview_source;
+  /** How the texels of #material_preview_mtex become overlay pixels. */
+  OverlayTexelMode material_preview_texel;
   /** Keeps the bake #material_preview_source reads alive for the whole cursor draw: the job that
    * produced it can replace the cache entry from another thread meanwhile. */
   std::shared_ptr<const ed::material_bake::MaterialSourceBake> material_preview_bake;
@@ -139,6 +162,14 @@ float brush_rotation_to_cursor_space(const ViewContext &vc,
  * brush's own texture.
  */
 const MTex &paint_cursor_placement_mtex(const PaintCursorContext &pcontext);
+
+/**
+ * Fill `material_preview_*` of \a pcontext with the texture the active brush's overlay should show
+ * (PBR channel, baked Material source, Mask Source, Erase strength). Leaves them untouched when
+ * there is nothing to preview. Implemented in `paint_cursor_preview.cc`, one provider per kind.
+ */
+void paint_cursor_material_preview_init(const PaintModeSettings &mode_settings,
+                                        PaintCursorContext &pcontext);
 
 void grease_pencil_cursor_draw(PaintCursorContext &pcontext);
 

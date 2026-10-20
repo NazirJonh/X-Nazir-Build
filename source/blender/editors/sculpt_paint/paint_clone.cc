@@ -8,6 +8,7 @@
  */
 
 #include <algorithm>
+#include <optional>
 
 #include "paint_clone.hh"
 
@@ -40,6 +41,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "ED_paint.hh"
@@ -122,11 +124,99 @@ static bool clone_layer_id_exists(const Vector<bUUID> &ids, const bUUID &id)
   return false;
 }
 
+/**
+ * Acquire one writable map for the stroke and take its pristine source snapshot.
+ *
+ * Returns nothing for a map the stroke cannot write: a tiled canvas, an empty buffer, or a
+ * read-only format. Used by both builders so a mask target follows exactly the same ImBuf
+ * contract as a content channel.
+ */
+static std::optional<CloneChannelTarget> clone_channel_target_build(
+    Image &image, const eMaterialPaintChannel channel, const bool is_data)
+{
+  if (image.source == IMA_SRC_TILED) {
+    /* Multi-tile UDIM is unsupported. Skip tiled targets cleanly. */
+    return std::nullopt;
+  }
+  ImageUser iuser{};
+  BKE_imageuser_default(&iuser);
+  iuser.framenr = image.lastframe;
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, &iuser, &lock);
+  if (ibuf == nullptr || (ibuf->byte_data() == nullptr && ibuf->float_data() == nullptr)) {
+    if (ibuf != nullptr) {
+      BKE_image_release_ibuf(&image, ibuf, lock);
+    }
+    return std::nullopt;
+  }
+  if (!BKE_image_buffer_format_writable(ibuf)) {
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return std::nullopt;
+  }
+  /* Source and destination are the same image; the clone must read pixels as they were when
+   * the stroke began, never its own output (see #CloneChannelTarget.source_ibuf). */
+  ImBuf *source_ibuf = IMB_dupImBuf(ibuf);
+  if (source_ibuf == nullptr) {
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return std::nullopt;
+  }
+  CloneChannelTarget target;
+  target.channel = channel;
+  target.image = &image;
+  target.iuser = iuser;
+  target.ibuf = ibuf;
+  target.lock = lock;
+  target.source_ibuf = source_ibuf;
+  target.is_data = is_data;
+  return target;
+}
+
+int clone_channels_get(const PaintLayersTargetMode layer_target_mode,
+                       const int visible_material_channels)
+{
+  /* A Mask-mode stroke writes the one mask map, resolved as Base Color. Reading the material's
+   * visible content channels here would either add content maps to the stamp or, when Base Color
+   * is hidden as content, drop the mask target entirely. */
+  return (layer_target_mode == PaintLayersTargetMode::Mask) ?
+             (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
+             visible_material_channels;
+}
+
 CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
+                                              Object &ob,
                                               const Material &material,
-                                              const int visible_material_channels)
+                                              const int visible_material_channels,
+                                              const PaintLayersTargetMode layer_target_mode)
 {
   CloneStrokeTargets targets;
+
+  if (layer_target_mode == PaintLayersTargetMode::Mask) {
+    /* Mask mode has exactly one destination: the active layer's writable mask map. It is the map
+     * the mask stroke itself writes, so cloning into it copies mask pixels over mask pixels. The
+     * shared Mask resolver names it, not a texpaint slot (slot contents depend on which mode
+     * filled them), and it refuses a row hidden on the object like every other Mask writer. It
+     * never creates the map: a missing one has no pixels to clone. */
+    PaintLayersTarget mask_target;
+    if (!material::mask_target_get(ob, mask_target)) {
+      return targets;
+    }
+    Image *image = BKE_paint_layers_target_image(mask_target);
+    if (image == nullptr) {
+      return targets;
+    }
+    std::optional<CloneChannelTarget> target = clone_channel_target_build(
+        *image, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true);
+    if (!target.has_value()) {
+      return targets;
+    }
+    CloneLayerTarget layer;
+    if (mask_target.layer != nullptr) {
+      layer.layer_id = mask_target.layer->marker;
+    }
+    layer.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = std::move(*target);
+    targets.layers.append(std::move(layer));
+    return targets;
+  }
 
   /* The layers of a layered material are the rows of its description; their maps are read from it
    * directly, so no layer id tag and no graph walk is involved. */
@@ -225,42 +315,14 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
       if (image == nullptr) {
         continue; /* Missing channel map: skip without aborting whole stroke. */
       }
-      if (image->source == IMA_SRC_TILED) {
-        /* Multi-tile UDIM is unsupported. Skip tiled targets cleanly. */
+      const bool is_data = (ch != PAINT_MATERIAL_CHANNEL_BASE_COLOR) &&
+                           (ch != PAINT_MATERIAL_CHANNEL_EMISSION);
+      std::optional<CloneChannelTarget> target = clone_channel_target_build(
+          *image, eMaterialPaintChannel(ch), is_data);
+      if (!target.has_value()) {
         continue;
       }
-      ImageUser iuser{};
-      BKE_imageuser_default(&iuser);
-      iuser.framenr = image->lastframe;
-      void *lock = nullptr;
-      ImBuf *ibuf = BKE_image_acquire_ibuf(image, &iuser, &lock);
-      if (ibuf == nullptr || (ibuf->byte_data() == nullptr && ibuf->float_data() == nullptr)) {
-        if (ibuf != nullptr) {
-          BKE_image_release_ibuf(image, ibuf, lock);
-        }
-        continue;
-      }
-      if (!BKE_image_buffer_format_writable(ibuf)) {
-        BKE_image_release_ibuf(image, ibuf, lock);
-        continue;
-      }
-      /* Source and destination are the same image; the clone must read pixels as they were when
-       * the stroke began, never its own output (see #CloneChannelTarget.source_ibuf). */
-      ImBuf *source_ibuf = IMB_dupImBuf(ibuf);
-      if (source_ibuf == nullptr) {
-        BKE_image_release_ibuf(image, ibuf, lock);
-        continue;
-      }
-      CloneChannelTarget target;
-      target.channel = eMaterialPaintChannel(ch);
-      target.image = image;
-      target.iuser = iuser;
-      target.ibuf = ibuf;
-      target.lock = lock;
-      target.source_ibuf = source_ibuf;
-      target.is_data = (ch != PAINT_MATERIAL_CHANNEL_BASE_COLOR) &&
-                       (ch != PAINT_MATERIAL_CHANNEL_EMISSION);
-      layer_target.channels[ch] = std::move(target);
+      layer_target.channels[ch] = std::move(*target);
       has_any = true;
     }
     if (has_any) {
@@ -540,7 +602,26 @@ static bool clone_remap_normal_to_dest_tangent(const float4 &packed_source,
 /** \name CPU sampler.
  * \{ */
 
-bool sample_channel_at_uv_cpu(const ImBuf &ibuf, const float2 &uv, float4 &r_color)
+/** One texel of \a ibuf with its coordinates wrapped, as RGBA in the buffer's own encoding. */
+static float4 clone_texel_wrapped(const ImBuf &ibuf, const int x, const int y)
+{
+  const int wx = ((x % ibuf.x) + ibuf.x) % ibuf.x;
+  const int wy = ((y % ibuf.y) + ibuf.y) % ibuf.y;
+  const int64_t offset = (int64_t(wy) * int64_t(ibuf.x) + int64_t(wx)) * 4;
+  if (ibuf.float_data() != nullptr) {
+    const float *px = ibuf.float_data() + offset;
+    return float4(px[0], px[1], px[2], px[3]);
+  }
+  const uchar *px = ibuf.byte_data() + offset;
+  float rgba[4];
+  rgba_uchar_to_float(rgba, px);
+  return float4(rgba[0], rgba[1], rgba[2], rgba[3]);
+}
+
+bool sample_channel_at_uv_cpu(const ImBuf &ibuf,
+                              const float2 &uv,
+                              float4 &r_color,
+                              const bool alpha_weighted)
 {
   if (ibuf.x <= 0 || ibuf.y <= 0) {
     return false;
@@ -548,6 +629,30 @@ bool sample_channel_at_uv_cpu(const ImBuf &ibuf, const float2 &uv, float4 &r_col
   /* Half-texel shift: UV 1.0 must land on the last texel center, not one past it. */
   const float u = uv[0] * float(ibuf.x) - 0.5f;
   const float v = uv[1] * float(ibuf.y) - 0.5f;
+
+  if (alpha_weighted && (ibuf.float_data() != nullptr || ibuf.byte_data() != nullptr)) {
+    const int x0 = int(math::floor(u));
+    const int y0 = int(math::floor(v));
+    const float tx = u - float(x0);
+    const float ty = v - float(y0);
+    const float4 texels[4] = {clone_texel_wrapped(ibuf, x0, y0),
+                              clone_texel_wrapped(ibuf, x0 + 1, y0),
+                              clone_texel_wrapped(ibuf, x0, y0 + 1),
+                              clone_texel_wrapped(ibuf, x0 + 1, y0 + 1)};
+    const float weights[4] = {(1.0f - tx) * (1.0f - ty),
+                              tx * (1.0f - ty),
+                              (1.0f - tx) * ty,
+                              tx * ty};
+    float3 rgb_weighted(0.0f);
+    float alpha = 0.0f;
+    for (const int i : IndexRange(4)) {
+      rgb_weighted += float3(texels[i].x, texels[i].y, texels[i].z) * (texels[i].w * weights[i]);
+      alpha += texels[i].w * weights[i];
+    }
+    const float3 rgb = alpha > 1e-6f ? rgb_weighted / alpha : float3(0.0f);
+    r_color = float4(rgb.x, rgb.y, rgb.z, alpha);
+    return true;
+  }
 
   if (ibuf.float_data() != nullptr) {
     r_color = imbuf::interpolate_bilinear_wrap_fl(&ibuf, u, v);
@@ -598,6 +703,31 @@ void clone_blend_channel_values(const float4 &src,
   interp_v3_v3v3(mixed, dst_linear, src_linear, s);
   linearrgb_to_srgb_v3_v3(r_result, mixed);
   r_result[3] = dst[3] + (src[3] - dst[3]) * s;
+}
+
+bool clone_blend_texel(const eCloneBlend blend,
+                       const float src_alpha,
+                       const float dst_alpha,
+                       const float strength,
+                       float &r_weight,
+                       float &r_alpha)
+{
+  if (blend == CLONE_BLEND_REPLACE) {
+    /* A hard stamp: everything the footprint reaches becomes the source texel, whatever the brush
+     * falloff or strength says, and its alpha with it. */
+    r_weight = 1.0f;
+    r_alpha = src_alpha;
+    return strength > 0.0f;
+  }
+  const float coverage = std::clamp(strength, 0.0f, 1.0f) * std::clamp(src_alpha, 0.0f, 1.0f);
+  if (coverage <= 0.0f) {
+    return false;
+  }
+  const float dst = std::clamp(dst_alpha, 0.0f, 1.0f);
+  r_alpha = dst + coverage * (1.0f - dst);
+  /* Straight-alpha over, the same weight #mix_normal_over_scene gives the brush's Normal write. */
+  r_weight = r_alpha > 0.0f ? coverage / r_alpha : 0.0f;
+  return true;
 }
 
 static void clone_write_pixel_to_ibuf(ImBuf &ibuf, const int x, const int y, const float4 &color)
@@ -669,7 +799,8 @@ void clone_stroke_apply_dab(CloneStrokeRuntime *runtime,
                             const CloneDabTransform &transform,
                             const float uv_radius,
                             const int channel_mask,
-                            const float strength)
+                            const float strength,
+                            const eCloneBlend blend)
 {
   if (runtime == nullptr || !runtime->targets.is_valid()) {
     return;
@@ -807,12 +938,22 @@ void clone_stroke_apply_dab(CloneStrokeRuntime *runtime,
           CloneChannelTarget &target = *active[target_i];
           ImBuf &ibuf = *target.ibuf;
 
+          const bool blend_over = blend == CLONE_BLEND_OVER;
           float4 src_color;
-          if (!sample_channel_at_uv_cpu(*target.source_ibuf, source_uv, src_color)) {
+          if (!sample_channel_at_uv_cpu(
+                  *target.source_ibuf, source_uv, src_color, blend_over))
+          {
             continue;
           }
           float4 dst_color;
           if (!clone_read_pixel_from_ibuf(ibuf, px, py, dst_color)) {
+            continue;
+          }
+          /* Each channel map carries its own alpha, so a transparent texel of one map never
+           * touches another's, and the Normal and data maps follow the same rule as the color. */
+          float weight;
+          float alpha_out;
+          if (!clone_blend_texel(blend, src_color[3], dst_color[3], factor, weight, alpha_out)) {
             continue;
           }
           /* A Normal map is only meaningful in the tangent frame it was authored in, so it can be
@@ -836,16 +977,20 @@ void clone_stroke_apply_dab(CloneStrokeRuntime *runtime,
              * the unpacked normals and renormalizes, which is what every other Normal writer
              * does. */
             float packed[3];
-            BKE_pbr_normal_blend_mix(dst_color, target_normal, factor, is_float_buffer, packed);
-            blended = float4(packed[0], packed[1], packed[2], 1.0f);
+            BKE_pbr_normal_blend_mix(dst_color, target_normal, weight, is_float_buffer, packed);
+            /* A replaced encoded map keeps full alpha; an "over" carries the coverage instead. */
+            blended = float4(packed[0], packed[1], packed[2], blend_over ? alpha_out : 1.0f);
           }
           else {
             /* A float buffer is linear already; only byte pixels carry an sRGB encoding to undo. */
             const bool blend_as_data = target.is_data || is_float_buffer;
             clone_blend_channel_values(
-                src_color, dst_color, factor, target.channel, blend_as_data, blended);
-            /* Normal channel: keep alpha at 1 for encoded maps. */
-            if (target.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+                src_color, dst_color, weight, target.channel, blend_as_data, blended);
+            if (blend_over) {
+              blended[3] = alpha_out;
+            }
+            else if (target.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+              /* Normal channel: keep alpha at 1 for encoded maps. */
               blended[3] = 1.0f;
             }
           }

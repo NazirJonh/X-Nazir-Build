@@ -37,6 +37,7 @@
 #include "BKE_image.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_report.hh"
 
 #include "ED_image.hh"
@@ -52,6 +53,8 @@
 #include "paint_clone.hh"
 #include "paint_clone_source.hh"
 #include "paint_clone_stroke.hh"
+
+#include "mesh/paint_material_source.hh"
 
 namespace blender::ed::sculpt_paint::clone {
 
@@ -94,11 +97,29 @@ bool clone_2d_stroke_gate(bContext *C, wmOperator *op, Clone2DStrokeContext &r_c
   /* Mirror #paint_2d_new_stroke's canvas resolution so the dab path builds targets for the same
    * image the stroke state was created for. */
   const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  const PaintLayersTargetMode layer_target_mode = BKE_paint_layers_target_mode(&paint_mode);
   Image *canvas_image = (sima != nullptr) ? sima->image : nullptr;
   if (ePaintCanvasSource(paint_mode.canvas_source) == PAINT_CANVAS_SOURCE_IMAGE &&
       paint_mode.canvas_image != nullptr)
   {
     canvas_image = paint_mode.canvas_image;
+  }
+
+  if (ePaintCanvasSource(paint_mode.canvas_source) == PAINT_CANVAS_SOURCE_IMAGE &&
+      layer_target_mode == PaintLayersTargetMode::Mask)
+  {
+    /* A Mask-mode stroke writes the active layer's mask map. The Image canvas has no material
+     * target resolver of its own, so it may only clone when the displayed image is that exact
+     * map; otherwise the stamp would write mask pixels into an unrelated image. */
+    Object *ob = CTX_data_active_object(C);
+    const Image *mask_image = (ob != nullptr) ? material::mask_target_image_get(*ob) : nullptr;
+    if (mask_image == nullptr || mask_image != canvas_image) {
+      BKE_report(op->reports,
+                 RPT_WARNING,
+                 "Clone Stamp: in Mask mode the displayed image must be the active layer's mask "
+                 "map");
+      return false;
+    }
   }
 
   if (clone_2d_source_get(scene->toolsettings->imapaint).has_value() == false) {
@@ -116,6 +137,7 @@ bool clone_2d_stroke_gate(bContext *C, wmOperator *op, Clone2DStrokeContext &r_c
   r_context.object = CTX_data_active_object(C);
   r_context.image_paint = &scene->toolsettings->imapaint;
   r_context.canvas_source = ePaintCanvasSource(paint_mode.canvas_source);
+  r_context.layer_target_mode = layer_target_mode;
   r_context.canvas_image = canvas_image;
   /* Borrowed, like every other pointer here: the space outlives the stroke. */
   r_context.canvas_iuser = (sima != nullptr) ? &sima->iuser : nullptr;
@@ -207,8 +229,14 @@ static CloneStrokeRuntime *clone_2d_stroke_runtime_ensure(CloneStrokeRuntime *&o
     if (ma == nullptr) {
       return nullptr;
     }
-    return clone_stroke_runtime_ensure(
-        owner, context.bmain, source_3d, *ma, &brush, paint.visible_material_channels);
+    return clone_stroke_runtime_ensure(owner,
+                                       context.bmain,
+                                       source_3d,
+                                       *context.object,
+                                       *ma,
+                                       &brush,
+                                       paint.visible_material_channels,
+                                       context.layer_target_mode);
   }
 
   if (context.canvas_image == nullptr) {
@@ -311,12 +339,21 @@ void clone_2d_stroke_dab(CloneStrokeRuntime *&owner,
 
   const float clamped_strength = std::clamp(strength, 0.0f, 1.0f);
 
-  /* An Image canvas has exactly one target, filed under Base Color by the single-image builder. */
+  /* An Image canvas has exactly one target, filed under Base Color by the single-image builder.
+   * A Material canvas in Mask mode has the same shape: the one mask map, also filed as Base
+   * Color. */
   const int channel_mask = (context.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL) ?
-                               paint.visible_material_channels :
+                               clone_channels_get(context.layer_target_mode,
+                                                  paint.visible_material_channels) :
                                (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-  clone_stroke_apply_dab(
-      runtime, dest_uv, dab_center_uv, transform, uv_radius, channel_mask, clamped_strength);
+  clone_stroke_apply_dab(runtime,
+                         dest_uv,
+                         dab_center_uv,
+                         transform,
+                         uv_radius,
+                         channel_mask,
+                         clamped_strength,
+                         eCloneBlend(paint.clone_blend));
 
   /* Publish every target's written rectangle to the 2D redraw pipeline. The undo tiles were
    * captured inside #clone_stroke_apply_dab; this merge is what feeds the Image Editor's partial

@@ -24,6 +24,7 @@ namespace blender {
 struct ARegion;
 struct Image;
 struct Main;
+struct PaintLayersTarget;
 struct Brush;
 struct BrushMaterialPaint;
 struct ImagePool;
@@ -183,6 +184,16 @@ float mask_source_coverage_at_uv(const ChannelUvSampler &sampler,
  * the Mask brush consistent when the source is Base Color or Coverage.
  */
 void mask_values_flip(Paint &paint, Brush &brush);
+
+/**
+ * Resolve the active layer's mask row on \a ob, the single resolution every Mask writer shares.
+ * \return false when the object has no layered material, the row has no mask, or the row is hidden
+ * on the object (object-masked), which a stroke must not paint.
+ */
+bool mask_target_get(Object &ob, PaintLayersTarget &r_target);
+
+/** The mask map #mask_target_get resolves, or null. Never creates one (see #mask_target_image_ensure). */
+Image *mask_target_image_get(Object &ob);
 
 /**
  * The map a Mask-mode write (Fill, Gradient, Shape) paints into: the active layer's mask map,

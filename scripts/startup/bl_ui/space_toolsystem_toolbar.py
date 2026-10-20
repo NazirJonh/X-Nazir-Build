@@ -2350,6 +2350,7 @@ class _defs_sculpt:
         def draw_settings(context, layout, _tool):
             paint = context.tool_settings.sculpt
             layout.prop(paint, "clone_mode", text="Mode")
+            layout.prop(paint, "clone_blend", text="Blend", expand=True)
             layout.operator("paint.clone_source_reset", text="Reset Source")
 
         return dict(
@@ -2608,6 +2609,7 @@ class _defs_texture_paint:
         def draw_settings(context, layout, _tool):
             paint = context.tool_settings.image_paint
             layout.prop(paint, "clone_mode", text="Mode")
+            layout.prop(paint, "clone_blend", text="Blend", expand=True)
             layout.operator("paint.clone_source_reset", text="Reset Source")
 
         return dict(

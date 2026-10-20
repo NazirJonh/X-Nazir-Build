@@ -39,6 +39,7 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 
 #include "DEG_depsgraph_query.hh"
 
@@ -91,16 +92,19 @@ static float clone_tri_uv_scale(const Mesh *mesh_eval,
 CloneStrokeRuntime *clone_stroke_runtime_ensure(CloneStrokeRuntime *&owner,
                                                 Main *bmain,
                                                 const CloneSourcePoint &source,
+                                                Object &ob,
                                                 const Material &ma,
                                                 const Brush *brush,
-                                                const int visible_material_channels)
+                                                const int visible_material_channels,
+                                                const PaintLayersTargetMode layer_target_mode)
 {
   if (owner == nullptr) {
     CloneStrokeRuntime *runtime = MEM_new<CloneStrokeRuntime>(__func__);
     runtime->source = source;
     runtime->material = &ma;
     runtime->brush = brush;
-    runtime->targets = clone_stroke_targets_build(*bmain, ma, visible_material_channels);
+    runtime->targets = clone_stroke_targets_build(
+        *bmain, ob, ma, visible_material_channels, layer_target_mode);
     if (!runtime->targets.is_valid()) {
       MEM_delete(runtime);
       return nullptr;
@@ -110,7 +114,7 @@ CloneStrokeRuntime *clone_stroke_runtime_ensure(CloneStrokeRuntime *&owner,
   }
   if (owner->material != &ma) {
     CloneStrokeTargets rebuilt = clone_stroke_targets_build(
-        *bmain, ma, visible_material_channels);
+        *bmain, ob, ma, visible_material_channels, layer_target_mode);
     if (!rebuilt.is_valid()) {
       return nullptr;
     }
@@ -242,10 +246,18 @@ void clone_pbr_proj_dab(const bContext *C,
     return;
   }
 
+  const PaintLayersTargetMode layer_target_mode = BKE_paint_layers_target_mode(
+      &scene->toolsettings->paint_mode);
   /* NOTE: undo is owned by the outer ImagePaintStroke (push_begin at stroke start,
    * push_end at done). We must NOT open a nested transaction here. */
-  CloneStrokeRuntime *runtime = clone_stroke_runtime_ensure(
-      owner, bmain, *source, *ma, brush, paint->visible_material_channels);
+  CloneStrokeRuntime *runtime = clone_stroke_runtime_ensure(owner,
+                                                            bmain,
+                                                            *source,
+                                                            *ob,
+                                                            *ma,
+                                                            brush,
+                                                            paint->visible_material_channels,
+                                                            layer_target_mode);
   if (runtime == nullptr) {
     return;
   }
@@ -277,8 +289,9 @@ void clone_pbr_proj_dab(const bContext *C,
                          dab_center_uv,
                          transform,
                          uv_radius,
-                         paint->visible_material_channels,
-                         strength);
+                         clone_channels_get(layer_target_mode, paint->visible_material_channels),
+                         strength,
+                         eCloneBlend(paint->clone_blend));
 }
 
 /** \} */
@@ -388,10 +401,17 @@ void sculpt_clone_dab_apply(const Depsgraph &depsgraph,
   }
   const float uv_radius = cache.radius * uv_scale;
 
+  const PaintLayersTargetMode layer_target_mode = BKE_paint_layers_target_mode(&settings);
   /* NOTE: undo is owned by the outer sculpt stroke (image-undo when
    * sculpt_brush_uses_image_canvas(); CLONE is registered there). Never nest. */
-  CloneStrokeRuntime *runtime = clone_stroke_runtime_ensure(
-      owner, bmain, *source, *ma, &brush, sd.paint.visible_material_channels);
+  CloneStrokeRuntime *runtime = clone_stroke_runtime_ensure(owner,
+                                                            bmain,
+                                                            *source,
+                                                            ob,
+                                                            *ma,
+                                                            &brush,
+                                                            sd.paint.visible_material_channels,
+                                                            layer_target_mode);
   if (runtime == nullptr) {
     return;
   }
@@ -476,8 +496,9 @@ void sculpt_clone_dab_apply(const Depsgraph &depsgraph,
                          dab_center_uv,
                          transform,
                          uv_radius,
-                         sd.paint.visible_material_channels,
-                         strength);
+                         clone_channels_get(layer_target_mode, sd.paint.visible_material_channels),
+                         strength,
+                         eCloneBlend(sd.paint.clone_blend));
 }
 
 /** \} */

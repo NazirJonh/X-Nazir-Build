@@ -1349,7 +1349,13 @@ struct Paint {
   int visible_material_channels = PAINT_MATERIAL_CHANNELS_VISIBLE_DEFAULT;
   /** #eCloneMode: how the Clone Stamp source follows the brush. */
   int8_t clone_mode = CLONE_MODE_ABSOLUTE;
-  char _pad_clone[3] = {};
+  /**
+   * #eCloneBlend: how a texture Clone Stamp dab composites onto the target. Carved out of the
+   * former #_pad_clone bytes, so #Paint keeps its size; files written before it read 0, which is
+   * the default #CLONE_BLEND_OVER.
+   */
+  int8_t clone_blend = CLONE_BLEND_OVER;
+  char _pad_clone[2] = {};
   struct UnifiedPaintSettings unified_paint_settings;
   struct MeshAutomaskingSettings *mesh_automasking_settings = nullptr;
 

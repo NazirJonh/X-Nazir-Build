@@ -1927,7 +1927,9 @@ static void rna_def_paint_visible_material_channels(StructRNA *srna,
  * Define PBR Clone v1 props on Sculpt/ImagePaint (reached through paint.*),
  * mirroring #rna_def_paint_visible_material_channels.
  */
-static void rna_def_paint_clone_props(StructRNA *srna, const char *mode_sdna_path)
+static void rna_def_paint_clone_props(StructRNA *srna,
+                                      const char *mode_sdna_path,
+                                      const char *blend_sdna_path)
 {
   static const EnumPropertyItem clone_mode_items[] = {
       {CLONE_MODE_ABSOLUTE,
@@ -1947,6 +1949,28 @@ static void rna_def_paint_clone_props(StructRNA *srna, const char *mode_sdna_pat
   RNA_def_property_enum_sdna(prop, nullptr, mode_sdna_path);
   RNA_def_property_enum_items(prop, clone_mode_items);
   RNA_def_property_ui_text(prop, "Clone Mode", "How the clone source follows the brush");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  static const EnumPropertyItem clone_blend_items[] = {
+      {CLONE_BLEND_OVER,
+       "OVER",
+       0,
+       "Blend",
+       "Mix the source in softly, by the brush falloff and strength and by its own alpha, so "
+       "transparent source texels keep what is already painted"},
+      {CLONE_BLEND_REPLACE,
+       "REPLACE",
+       0,
+       "Replace",
+       "Overwrite the target completely inside the brush shape, ignoring falloff and strength, "
+       "transparent texels included"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "clone_blend", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, blend_sdna_path);
+  RNA_def_property_enum_items(prop, clone_blend_items);
+  RNA_def_property_ui_text(
+      prop, "Clone Blend", "How the cloned texels composite onto the pixels already there");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 }
 
@@ -2742,7 +2766,7 @@ static void rna_def_sculpt(BlenderRNA *brna)
   rna_def_paint_visible_material_channels(
       srna, "paint.visible_material_channels", "rna_Sculpt_visible_material_channels_set");
 
-  rna_def_paint_clone_props(srna, "paint.clone_mode");
+  rna_def_paint_clone_props(srna, "paint.clone_mode", "paint.clone_blend");
 
   prop = RNA_def_property(srna, "lock_x", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flags", SCULPT_LOCK_X);
@@ -4522,7 +4546,7 @@ static void rna_def_image_paint(BlenderRNA *brna)
   rna_def_paint_visible_material_channels(
       srna, "paint.visible_material_channels", "rna_ImaPaint_visible_material_channels_set");
 
-  rna_def_paint_clone_props(srna, "paint.clone_mode");
+  rna_def_paint_clone_props(srna, "paint.clone_mode", "paint.clone_blend");
 
   /* functions */
   func = RNA_def_function(srna, "detect_data", "rna_ImaPaint_detect_data");

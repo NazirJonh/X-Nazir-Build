@@ -18,6 +18,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -46,6 +47,7 @@ struct Main;
 struct Material;
 struct Mesh;
 struct Object;
+enum class PaintLayersTargetMode : int8_t;
 struct RegionView3D;
 struct ViewContext;
 struct bContext;
@@ -140,14 +142,26 @@ struct CloneStrokeTargets {
 
 /**
  * Build frozen target map once at stroke start.
- * - Enumerates layer IDs from material images' paint_layer_id tags.
+ * - In Mask mode, resolves \a ob's active layer mask map (#material::mask_target_get, so a row
+ *   hidden on the object is not written) and makes it the only target, ignoring
+ *   \a visible_material_channels: a mask stroke writes that one map, not the layer's content.
+ * - In Content mode, enumerates layer IDs from material images' paint_layer_id tags.
  * - Resolves each (layer, channel) via BKE_paint_material_layer_maps_get.
  * - Acquires each ImBuf once; released in destructor (also on failure paths).
  * Returns empty (invalid) targets when nothing writable is found.
  */
 CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
+                                              Object &ob,
                                               const Material &material,
-                                              int visible_material_channels);
+                                              int visible_material_channels,
+                                              PaintLayersTargetMode layer_target_mode);
+
+/**
+ * The channel bits one Clone dab stamps. Mask mode has a single Base Color target (the active
+ * layer's mask map), so it must not be widened by #Paint::visible_material_channels, which
+ * describes the layer's content channels instead.
+ */
+int clone_channels_get(PaintLayersTargetMode layer_target_mode, int visible_material_channels);
 
 /** \} */
 
@@ -274,8 +288,15 @@ CloneDabTransform clone_dab_transform_build(const Mesh &mesh_eval,
 /**
  * Bilinear sample of \a ibuf at \a uv. Out-of-range UVs wrap, matching the paint sampler.
  * False when the buffer carries neither byte nor float pixels.
+ *
+ * \param alpha_weighted: interpolate the colors weighted by their alpha and un-weight the result.
+ * Without it a transparent texel's (usually black) RGB leaks into every opaque neighbor it is
+ * blended with, which shows as a dark fringe along a stamped edge.
  */
-bool sample_channel_at_uv_cpu(const ImBuf &ibuf, const float2 &uv, float4 &r_color);
+bool sample_channel_at_uv_cpu(const ImBuf &ibuf,
+                              const float2 &uv,
+                              float4 &r_color,
+                              bool alpha_weighted = false);
 
 /** \} */
 
@@ -301,6 +322,23 @@ void clone_blend_channel_values(const float4 &src,
                                 bool is_data,
                                 float4 &r_result);
 
+/**
+ * How much of a source texel reaches the target under \a blend, and the alpha the target ends up
+ * with. #CLONE_BLEND_OVER makes the coverage `strength * source alpha`, takes the target alpha to
+ * `dst + coverage * (1 - dst)` and returns the straight-alpha weight `coverage / alpha_out` to mix
+ * the colors with (a texel on an empty, transparent target is copied as is, whatever RGB the target
+ * stored). #CLONE_BLEND_REPLACE is a hard stamp: weight one and the source's alpha, whatever the
+ * falloff or strength.
+ *
+ * \return false when nothing is stamped (zero coverage), so the caller skips the texel.
+ */
+bool clone_blend_texel(eCloneBlend blend,
+                       float src_alpha,
+                       float dst_alpha,
+                       float strength,
+                       float &r_weight,
+                       float &r_alpha);
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -324,6 +362,9 @@ struct CloneStrokeRuntime;
  *                      is resolved once per texel rather than once per channel.
  * \param strength: brush strength at this dab (falloff * pressure * opacity already applied by
  *                  caller); the per-pixel brush falloff curve is applied here on top.
+ * \param blend: #CLONE_BLEND_OVER mixes softly by falloff, strength and the source's own alpha and
+ *               raises the target's alpha with an "over"; #CLONE_BLEND_REPLACE overwrites the
+ *               target inside the footprint, alpha included (see #clone_blend_texel).
  * Every destination pixel samples source_uv = source_center + (dest_pixel - dab_center) so the
  * stamp copies image detail, not a flat color. The pristine undo tile is captured through
  * #ED_image_paint_tile_push before a tile is first modified, so one stroke-level image undo
@@ -335,7 +376,8 @@ void clone_stroke_apply_dab(CloneStrokeRuntime *runtime,
                             const CloneDabTransform &transform,
                             float uv_radius,
                             int channel_mask,
-                            float strength);
+                            float strength,
+                            eCloneBlend blend);
 
 /** \} */
 

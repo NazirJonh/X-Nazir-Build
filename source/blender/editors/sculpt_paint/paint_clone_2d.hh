@@ -64,6 +64,8 @@ struct Clone2DStrokeContext {
   /** The scene's image-paint settings, so the dab can fix the Relative anchor on the source. */
   ImagePaintSettings *image_paint;
   ePaintCanvasSource canvas_source;
+  /** Mask mode redirects a Material canvas to the active layer's single mask map. */
+  PaintLayersTargetMode layer_target_mode;
   Image *canvas_image;
   /**
    * Borrowed tile/frame selector for the single-image target build, normally the space's own.

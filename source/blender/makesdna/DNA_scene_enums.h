@@ -108,6 +108,18 @@ enum eCloneMode : int8_t {
   CLONE_MODE_RELATIVE = 1,
 };
 
+/** #Paint.clone_blend */
+enum eCloneBlend : int8_t {
+  /**
+   * Soft, like a brush: the source is mixed in by the brush falloff and strength, and by its own
+   * alpha, so transparent source texels leave what is already on the target untouched. Zero: the
+   * default of files that predate the property.
+   */
+  CLONE_BLEND_OVER = 0,
+  /** Hard stamp: every texel inside the footprint becomes the source texel, alpha included. */
+  CLONE_BLEND_REPLACE = 1,
+};
+
 /** #Brush.clone_stamp_mesh.apply_mode */
 enum eCloneStampMeshApplyMode : int8_t {
   /** Converge the target surface onto the stamped source form: the dab displaces by

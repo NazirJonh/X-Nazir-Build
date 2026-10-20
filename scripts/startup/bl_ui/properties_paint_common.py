@@ -624,6 +624,7 @@ class PBRClonePanel(BrushPanel):
         settings = self.paint_settings(context)
         col = layout.column(align=True)
         col.prop(settings, "clone_mode", text="Mode")
+        col.prop(settings, "clone_blend", text="Blend", expand=True)
         # No "Set Source" button: the source is picked with Shift+LMB on the mesh, which the
         # status bar spells out while the tool is active. A button cannot pick a point anyway.
         col.operator("paint.clone_source_reset", text="Reset Source")

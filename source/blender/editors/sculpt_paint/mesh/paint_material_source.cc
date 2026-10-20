@@ -222,15 +222,25 @@ void mask_values_flip(Paint &paint, Brush &brush)
   BKE_brush_tag_unsaved_changes(&brush);
 }
 
-Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings)
+bool mask_target_get(Object &ob, PaintLayersTarget &r_target)
 {
   /* Only Base Color names a mask row (see #BKE_paint_layers_target_get). The object resolver also
    * carries object-mask state, so a hidden row is not painted. */
+  return BKE_paint_layers_target_get(
+             ob, -1, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), PaintLayersTargetMode::Mask, r_target) &&
+         !r_target.object_masked;
+}
+
+Image *mask_target_image_get(Object &ob)
+{
   PaintLayersTarget target;
-  if (!BKE_paint_layers_target_get(
-          ob, -1, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR), PaintLayersTargetMode::Mask, target) ||
-      target.object_masked)
-  {
+  return mask_target_get(ob, target) ? BKE_paint_layers_target_image(target) : nullptr;
+}
+
+Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings)
+{
+  PaintLayersTarget target;
+  if (!mask_target_get(ob, target)) {
     return nullptr;
   }
   Image *image = BKE_paint_layers_target_image(target);

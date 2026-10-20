@@ -76,17 +76,21 @@ bool clone_dab_is_symmetry_duplicate(const CloneStrokeRuntime &runtime,
  * exist at once, and what makes each owner responsible for its own release.
  *
  * Keyed on the material: when the active object's material differs from the one the targets were
- * built for, the target map is rebuilt so each layer/channel keeps its exact pairing. Undo is
- * owned by the outer stroke in every path, so the runtime never opens one of its own.
+ * built for, the target map is rebuilt so each layer/channel keeps its exact pairing.
+ * \a layer_target_mode selects \a ob's single mask map in Mask mode instead of the content
+ * channels.
+ * Undo is owned by the outer stroke in every path, so the runtime never opens one of its own.
  *
  * Returns null (leaving \a owner untouched) when no writable target could be built.
  */
 CloneStrokeRuntime *clone_stroke_runtime_ensure(CloneStrokeRuntime *&owner,
                                                 Main *bmain,
                                                 const CloneSourcePoint &source,
+                                                Object &ob,
                                                 const Material &ma,
                                                 const Brush *brush,
-                                                int visible_material_channels);
+                                                int visible_material_channels,
+                                                PaintLayersTargetMode layer_target_mode);
 
 /** Release a stroke runtime and its ImBuf locks, clearing \a owner. No-op when already null. */
 void clone_stroke_runtime_free(CloneStrokeRuntime *&owner);

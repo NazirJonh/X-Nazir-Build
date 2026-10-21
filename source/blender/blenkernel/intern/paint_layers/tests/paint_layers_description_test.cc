@@ -148,6 +148,10 @@ TEST_F(PaintLayersDescription, channel_blend_overrides_the_rows_own_per_channel)
   ma->paint_layers_flag = MA_PAINT_LAYERED;
   MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
   ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  /* A row blend on a leaf is a node property: it asks for the sync, not a rebuild. */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC, 0);
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
 
   /* No override reads as the row's own blend. */
   EXPECT_EQ(BKE_paint_layers_channel_blend_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
@@ -155,6 +159,8 @@ TEST_F(PaintLayersDescription, channel_blend_overrides_the_rows_own_per_channel)
 
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
       *ma, *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_ADD));
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC, 0);
   EXPECT_EQ(BKE_paint_layers_channel_blend_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
             MA_PAINT_LAYER_BLEND_ADD);
   /* The row's own blend and the other channels are untouched. */
@@ -168,13 +174,16 @@ TEST_F(PaintLayersDescription, channel_blend_overrides_the_rows_own_per_channel)
   EXPECT_EQ(BKE_paint_layers_channel_blend_effective(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
             MA_PAINT_LAYER_BLEND_MULTIPLY);
 
-  /* The Normal channel has its own two choices: the combine (inherit) and Replace. */
+  /* The Normal channel has its own two choices: the combine (inherit) and Replace. Replace is a
+   * different node, so this one is a rebuild. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
   EXPECT_FALSE(BKE_paint_layers_channel_blend_set(
       *ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_MULTIPLY));
   EXPECT_FALSE(BKE_paint_layers_normal_replace(*layer));
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
       *ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
   EXPECT_TRUE(BKE_paint_layers_normal_replace(*layer));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(*ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL, -1));
   EXPECT_FALSE(BKE_paint_layers_normal_replace(*layer));
 
@@ -182,9 +191,11 @@ TEST_F(PaintLayersDescription, channel_blend_overrides_the_rows_own_per_channel)
   MaterialPaintLayer *folder = paint_layer_add(*ma, "Folder");
   folder->source = MA_PAINT_LAYER_SOURCE_STACK;
   EXPECT_TRUE(BKE_paint_layers_folder_is_pass_through(*folder));
+  /* A channel blend that takes the folder out of Pass Through changes the graph. */
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
       *ma, *folder, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_BLEND_MULTIPLY));
   EXPECT_FALSE(BKE_paint_layers_folder_is_pass_through(*folder));
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 
   /* Replace belongs to the Normal channel's per-channel setting alone. */
   EXPECT_FALSE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));

@@ -599,6 +599,13 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
         opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
       }
     }
+    /* The alpha model input follows the row's participation, not only its baked channels: a channel
+     * the bake has no map for still builds a row from the live description. */
+    for (const int channel : wired_channels_) {
+      if (row_participates(ma_, layer, channel)) {
+        this->blend_mix_input_create(group, layer, channel, layer_name);
+      }
+    }
     return;
   }
   this->mapping_inputs_create(group, layer, layer_name);
@@ -619,6 +626,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
                                   forms_.lookup_default(&layer, {}).pass_through_scale);
       opacity_inputs_.lookup_or_add_default(&layer).add(channel, opacity);
     }
+    /* The alpha model of the channel: a value, so a blend edit never rewires the alpha chain. */
+    this->blend_mix_input_create(group, layer, channel, layer_name);
 
     if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
       /* A Material row has no record: a plain value of its source is an input, filled from the
@@ -972,6 +981,30 @@ bool PaintLayersTreeBuilder::result_interface_create()
   }
   group_output_->location[0] = 600;
   return true;
+}
+
+void PaintLayersTreeBuilder::blend_mix_input_create(LayerGroup &group,
+                                                    const MaterialPaintLayer &layer,
+                                                    const int channel,
+                                                    const char *layer_name)
+{
+  if (!BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel))) {
+    return;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  char base[200];
+  SNPRINTF(base, "%s %s Is Mix", layer_name, info.ui_name);
+  bNodeTreeInterfaceSocket *input = layer_group_value_input(
+      group, base, "NodeSocketFloat", ROLE_BLEND_IS_MIX, layer.marker, channel);
+  if (input == nullptr) {
+    return;
+  }
+  const int blend = BKE_paint_layers_channel_blend_effective(layer, channel);
+  const bool is_mix = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(blend)) ==
+                      MA_RAMP_BLEND;
+  group_input_default_set(group, *input, is_mix ? 1.0f : 0.0f);
+  blend_mix_inputs_.lookup_or_add_default(&layer).add(channel, input);
 }
 
 NodeOutput PaintLayersTreeBuilder::channel_bottom_add(const int channel, const float location_y)

@@ -34,9 +34,10 @@ TEST_F(PaintLayersGenerateTest, color_chain_builds_one_mix_over_two_maps)
   build_into(*tree);
 
   /* One Color channel is wired here (Base Color). The two maps are two Image Textures, each over
-   * what is below through one Mix of its own. */
+   * what is below through one Mix of its own, plus the two alpha-model Mix nodes of the channel
+   * (the mixed alpha and the selector). */
   EXPECT_EQ(count_type(*tree, SH_NODE_TEX_IMAGE), 2);
-  EXPECT_EQ(count_type(*tree, SH_NODE_MIX), 2);
+  EXPECT_EQ(count_type(*tree, SH_NODE_MIX), 6);
   EXPECT_TRUE(interface_has_socket(*tree, "Result Base Color", true));
 }
 
@@ -248,9 +249,10 @@ TEST_F(PaintLayersGenerateTest, mask_constant_and_opacity_are_inputs_of_the_row_
                                                                        "Paint Mask Opacity");
   ASSERT_NE(value_iface, nullptr);
   ASSERT_NE(opacity_iface, nullptr);
-  /* The map of the row and the Mix of its blend, plus one Mix for the mask and no second map. */
+  /* The map of the row, the Mix of its blend and its two alpha-model Mix nodes, plus one Mix
+   * for the mask and no second map. */
   EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
-  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 2);
+  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 4);
 
   bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
   ASSERT_NE(instance, nullptr);
@@ -320,8 +322,8 @@ TEST_F(PaintLayersGenerateTest, removing_the_mask_drops_its_inputs)
   ASSERT_NE(group, nullptr);
   EXPECT_EQ(interface_input_find(*group, "Paint Mask"), nullptr);
   EXPECT_EQ(interface_input_find(*group, "Paint Mask Opacity"), nullptr);
-  /* The row is back to its one map and one blend. */
-  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 1);
+  /* The row is back to its one map, its blend and its two alpha-model Mix nodes. */
+  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 3);
 }
 
 TEST_F(PaintLayersGenerateTest, leaf_group_has_the_layer_contract)
@@ -1099,21 +1101,52 @@ TEST_F(PaintLayersGenerateTest, toggling_the_mapping_changes_the_shape_and_dragg
   EXPECT_FALSE(interface_has_socket(*group, "Fill Mapping Offset", false));
 }
 
-TEST_F(PaintLayersGenerateTest, a_channel_blend_changes_the_layer_hash)
+TEST_F(PaintLayersGenerateTest, a_channel_blend_is_a_node_property_not_a_new_shape)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
   const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
   const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_ROUGHNESS};
   const uint64_t plain = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
 
-  /* The channel's own blend picks the Mix node's type, so the row has to be rebuilt. */
+  /* A plain mode change is the blend_type of the existing Mix nodes: the shape does not move. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
-      *ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, MA_PAINT_LAYER_BLEND_MULTIPLY));
-  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), plain);
-
-  /* Back to inherit, the row builds the same shape again. */
-  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(*ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS, -1));
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
   EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), plain);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC, 0);
+
+  /* Replace swaps the Normal node for a Mix: that is structure. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
+  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), plain);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+}
+
+TEST_F(PaintLayersGenerateTest, a_channel_blend_edit_keeps_the_row_group)
+{
+  MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = layer_tree_find(*bmain, "Row");
+  ASSERT_NE(group, nullptr);
+  bNode *blend = nullptr;
+  for (bNode &node : group->nodes) {
+    if (paint_layers::prop_string_get(node.system_properties, paint_layers::BLEND_NODE_KEY_PROP)) {
+      blend = &node;
+      break;
+    }
+  }
+  ASSERT_NE(blend, nullptr);
+  ASSERT_NE(blend->storage, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  /* The edit only asks for the sync: no group is rebuilt. */
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  EXPECT_EQ(layer_tree_find(*bmain, "Row"), group);
+  EXPECT_EQ(static_cast<NodeShaderMix *>(blend->storage)->blend_type, MA_RAMP_MULT);
 }
 
 TEST_F(PaintLayersGenerateTest, a_mapped_correction_and_mask_item_build_their_own_mapping)

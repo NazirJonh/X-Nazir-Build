@@ -151,11 +151,12 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   uint64_t hash = 0;
   hash = topology_hash_mix(hash, uint64_t(layout::kLayoutVersion));
   /* Source and blend decide the nodes; the enabled flag and every value are inputs, so they are
-   * deliberately absent. */
+   * deliberately absent. A blend mode is structure only through #paint_layer_blend_shape: the
+   * mode itself is the `blend_type` of an existing Mix node, kept current by the blend sync. */
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
   /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
-  hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.blend)));
+  hash = topology_hash_mix(hash, paint_layer_blend_shape(layer));
   topology_hash_string(hash, layer.name);
   /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
    * applies is structure. The same answer builds the interface, so the two cannot disagree. */
@@ -180,9 +181,6 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, 0x400);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, uint64_t(channel));
-      /* The row's blend node is built around the bake, so its type is structure here too. */
-      hash = topology_hash_mix(
-          hash, uint64_t(uint8_t(BKE_paint_layers_channel_blend_effective(layer, channel))));
       Image *baked = nullptr;
       if (paint_layer_row_baked_channel(ma, layer, channel, &baked)) {
         topology_hash_string(hash, baked->id.name);
@@ -199,9 +197,6 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   for (const int channel : wired_channels) {
     hash = topology_hash_mix(hash, uint64_t(channel));
     hash = topology_hash_mix(hash, row_participates(ma, layer, channel) ? 1 : 0);
-    /* The channel's own blend, or the row's while it inherits, picks the Mix node's type. */
-    hash = topology_hash_mix(
-        hash, uint64_t(uint8_t(BKE_paint_layers_channel_blend_effective(layer, channel))));
     /* A map and a flat value are different nodes (an Image Texture against a value input), and the
      * texture node names its image: assigning, swapping or removing a map is structure, even when
      * the channel took part before and after. */
@@ -230,7 +225,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
    * marker names those inputs, so a removed and re-added correction is a different shape. */
   for (const MaterialPaintLayer &effect : layer.effects) {
     topology_hash_uid(hash, effect.marker);
-    hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.blend)));
+    /* The correction's own mode is a node property; only Replace changes the node. */
+    hash = topology_hash_mix(hash, paint_layer_blend_shape(effect));
     /* A flat colour and a map are different nodes, so the source is structure. */
     hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.source)));
     /* Which filter it is decides its nodes; its parameters are inputs. */
@@ -239,9 +235,6 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     mapping_wrap_hash_mix(hash, ma, effect);
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
-      /* The correction's own blend in this channel, or the row's while it inherits. */
-      hash = topology_hash_mix(
-          hash, uint64_t(uint8_t(BKE_paint_layers_channel_blend_effective(effect, channel))));
       if (paint_layer_effect_lays(ma, effect, channel)) {
         const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
         if (record->image != nullptr) {
@@ -280,8 +273,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, 0);
   }
   /* A mask correction is nodes of its own (a map and its grey chain against a value input, and a
-   * Mix of its blend), so its place, blend and whether it has a map are structure; its constant,
-   * opacity and enabled flag are inputs. One that lays nothing yet has no nodes. */
+   * Mix whose mode is a node property), so its place and whether it has a map are structure; its
+   * constant, blend, opacity and enabled flag are inputs. One that lays nothing yet has no nodes. */
   for (const MaterialPaintLayer &item : layer.mask_stack) {
     if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
       continue;
@@ -297,7 +290,6 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
       /* Advanced Color ID grows one tolerance input per colour. */
       hash = topology_hash_mix(hash, paint_layer_mask_item_color_id_advanced(item) ? 1 : 0);
     }
-    hash = topology_hash_mix(hash, uint64_t(uint8_t(item.blend)));
     /* The inversion is a node of its own. */
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, item) ? 1 : 0);
@@ -315,6 +307,21 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     }
   }
   return hash;
+}
+
+uint64_t paint_layer_blend_shape(const MaterialPaintLayer &layer)
+{
+  /* A mask item's blend is the type of its coverage Mix, which its row always builds. */
+  if (layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return 0;
+  }
+  /* Replace is a Mix where the Normal channel otherwise builds the combine group. */
+  uint64_t shape = BKE_paint_layers_normal_replace(layer) ? 1 : 0;
+  /* An inlined folder has no group of its own, so its own blend has nowhere to live. */
+  if (BKE_paint_layers_is_folder(layer)) {
+    shape = shape * 2 + (BKE_paint_layers_folder_is_pass_through(layer) ? 1 : 0);
+  }
+  return shape;
 }
 
 uint64_t paint_layers_root_topology_hash(const Material &ma, const Span<int> wired_channels)

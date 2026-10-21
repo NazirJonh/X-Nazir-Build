@@ -229,6 +229,8 @@ class LayerTreeFactory {
          * that failed half way is never taken for a finished group. */
         tree_clear(bmain_, *candidate);
         tree_hash_clear(*candidate);
+        /* The keyed blend nodes are gone with the nodes; the commit after the build recounts. */
+        prop_int_set(candidate->id.properties, BLEND_NODE_COUNT_PROP, -1);
         pending_hashes_.append({candidate, topology});
         if (!STREQ(candidate->id.name + 2, name)) {
           BKE_id_rename(bmain_, candidate->id, name);
@@ -535,9 +537,12 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                          kept_instance->id == &tree->id;
 
   bool relations_changed = report.replaced_foreign_tree;
-  /* A failed sync means a value input has no socket on its instance (a hand-edited tree): the kept
-   * root cannot be trusted, so the full rebuild below takes over. */
-  const bool kept = keep_root && BKE_paint_layers_values_sync(ma);
+  /* A failed sync means a value input has no socket on its instance (a hand-edited tree) or a
+   * keyed blend node no longer matches the description: the kept root cannot be trusted, so the
+   * full rebuild below takes over. Nodes are synced before values, so a tree update cannot reset a
+   * value written in the same pass. */
+  const bool kept = keep_root && paint_layers_blend_sync(ma, bmain) &&
+                    BKE_paint_layers_values_sync(ma);
   if (kept) {
     source_groups_refresh(bmain, ma);
     regenerate_tags(bmain, ma, *tree, false);
@@ -571,6 +576,9 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     generated.extend(factory.used());
     generated_trees_update(bmain, generated, *tree);
     factory.prune_unused();
+    /* The groups are built and instantiated: record how many keyed blend nodes each holds, so a
+     * later blend edit can tell a whole tree from a hand-edited one. */
+    paint_layers_blend_nodes_commit(ma);
 
     bNode *instance = instance_ensure(ma, *tree);
     if (instance == nullptr) {
@@ -602,7 +610,7 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     regenerate_tags(bmain, ma, *tree, relations_changed);
   }
 
-  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_REGEN;
+  ma.paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
 
   report.relations_changed = relations_changed;
   report_out();
@@ -637,8 +645,9 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain)
      * texture) marks the rebuild too; one that only moved a value is the evaluation's sync. */
     BKE_paint_layers_material_sources_notice(ma);
     BKE_paint_layers_bake_plan_run(bmain, ma);
-    const bool needs_regen = (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0 ||
-                             ma.paint_layers_tree == nullptr;
+    const bool needs_regen =
+        (ma.paint_layers_flag & (MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC)) != 0 ||
+        ma.paint_layers_tree == nullptr;
     if (needs_regen) {
       BKE_paint_layers_regenerate(bmain, ma);
     }

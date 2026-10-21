@@ -177,6 +177,15 @@ class PaintLayersTreeBuilder {
   void create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer);
 
   /**
+   * The float input that picks the content alpha model of \a layer in \a channel: 1 for a Mix row,
+   * 0 otherwise. A value, so a blend edit never rewires the alpha chain.
+   */
+  void blend_mix_input_create(LayerGroup &group,
+                              const MaterialPaintLayer &layer,
+                              int channel,
+                              const char *layer_name);
+
+  /**
    * The factor of \a layer's base mask, built once in the row's group and shared by every channel
    * chain: `mix(1, C, A * opacity)`, with `C` the grey of the mask map (or the constant input) and
    * `A` the map's alpha. Empty when the row has no mask, or its inputs are not there.
@@ -442,6 +451,8 @@ class PaintLayersTreeBuilder {
 
   /** A row's opacity input per channel, keyed by the row. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> opacity_inputs_;
+  /** A row's "is Mix" input per channel, keyed by the row. */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> blend_mix_inputs_;
   /** A content correction's opacity input per channel, keyed by the correction. */
   Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> effect_opacity_inputs_;
   /** A filter correction's parameter inputs in its kind's schema order, keyed by the correction. */

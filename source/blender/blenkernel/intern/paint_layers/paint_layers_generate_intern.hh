@@ -100,6 +100,22 @@ inline constexpr const char *INPUT_SUBSTITUTED_PROP = "pbr_paint_layers_baked";
 /** #INPUT_ROLE_PROP value of a layer's opacity (enabled already folded in). A content correction's
  * opacity input carries the same role with the correction's own marker. */
 inline constexpr const char *ROLE_OPACITY = "opacity";
+/**
+ * #INPUT_ROLE_PROP value of the float input that picks the content alpha model of a (row, channel):
+ * 1 for a Mix row, whose alpha is mixed by the row's factor, and 0 for every other mode, which
+ * keeps the alpha below. A value, so changing the blend never rewires the alpha chain.
+ */
+inline constexpr const char *ROLE_BLEND_IS_MIX = "blend_is_mix";
+/**
+ * On a generated Mix node whose blend_type follows the description: `B:<marker>:<channel>` for a
+ * row or a content correction, `M:<marker>` for a mask item's coverage. The sync updates these
+ * nodes in place, so a blend edit rebuilds no group.
+ */
+inline constexpr const char *BLEND_NODE_KEY_PROP = "pbr_paint_layers_blend_key";
+/** On a layer group: how many nodes carry #BLEND_NODE_KEY_PROP. A mismatch means a node was
+ * deleted or duplicated (a hand-edited tree), and the group is rebuilt rather than left without a
+ * blend. */
+inline constexpr const char *BLEND_NODE_COUNT_PROP = "pbr_paint_layers_blend_nodes";
 /** #INPUT_ROLE_PROP value of the constant of a channel that carries no map. */
 inline constexpr const char *ROLE_FILL = "fill";
 /** #INPUT_ROLE_PROP value of that constant's alpha: the content alpha a map-less row lays, which
@@ -303,6 +319,16 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
  * per-channel participation. A reorder or a structural edit moves it; a value edit does not.
  */
 uint64_t paint_layers_root_topology_hash(const Material &ma, Span<int> wired_channels);
+
+/**
+ * Bring the `blend_type` of every generated blend node in line with the description, in place.
+ * \return false when the tree no longer carries the nodes the description expects (a hand-edited
+ * tree, or one built before the nodes were keyed), so the caller falls back to a full rebuild.
+ */
+bool paint_layers_blend_sync(Material &ma, Main &bmain);
+
+/** Record how many keyed blend nodes each layer group holds, after a build. */
+void paint_layers_blend_nodes_commit(Material &ma);
 
 /** \} */
 

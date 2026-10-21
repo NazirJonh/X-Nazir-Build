@@ -676,7 +676,11 @@ static uint64_t bake_hash_layer(uint64_t h,
   h = bake_hash_mix(h, uint64_t(0x9e3779b97f4a7c15ull));
   h = bake_hash_mix(h, uint8_t(layer.source));
   h = bake_hash_mix(h, uint16_t(layer.kind_subtype));
-  h = bake_hash_mix(h, uint8_t(layer.blend));
+  /* A row's own blend is applied over its cache, so it moves no hash of that cache. A child's is
+   * inside the result its parent bakes, so it does. */
+  if (is_child) {
+    h = bake_hash_mix(h, uint8_t(layer.blend));
+  }
   /* The non-visibility flags of the row itself. Visibility is appended only for a child, so the
    * row's own cache does not depend on its own on/off state. */
   h = bake_hash_mix(h, uint16_t(layer.flag & ~MA_PAINT_LAYER_ENABLED));
@@ -705,10 +709,13 @@ static uint64_t bake_hash_layer(uint64_t h,
       h = bake_hash_float(h, value);
     }
   }
-  /* The per (row, channel) blend and opacity overrides are baked into the row's result too, and
-   * exist whether or not the pair has a record. */
+  /* The per (row, channel) opacity overrides are baked into the row's result too, and exist whether
+   * or not the pair has a record. The blend follows the same rule as the row's own: a child's is
+   * inside the parent's result, the row's own is applied over its cache. */
   for (const MaterialPaintLayerChannelSettings &settings : layer.channel_settings) {
-    h = bake_hash_mix(h, uint8_t(settings.blend));
+    if (is_child) {
+      h = bake_hash_mix(h, uint8_t(settings.blend));
+    }
     h = bake_hash_float(h, settings.opacity);
   }
   /* The Color ID colours of a map-coverage item decide its match. */

@@ -82,6 +82,19 @@ void BKE_paint_layers_tag_value_edited(Material &ma)
   }
 }
 
+/**
+ * A blend edit that changes no graph shape: the generated Mix nodes take the new `blend_type` in
+ * place. Never MA_PAINT_LAYERS_REGEN -- the regeneration point syncs the nodes
+ * (#paint_layers_blend_sync) and falls back to a rebuild only when the tree no longer matches the
+ * description. A parent folder's bake holds its children's blends, so the bake planner is asked to
+ * check as well; the row's own cache does not depend on its own blend. */
+static void paint_layers_tag_blend_edited(Material &ma)
+{
+  ma.paint_layers_flag &= ~MA_PAINT_LAYERS_BAKE_CANCELLED;
+  ma.paint_layers_flag |= MA_PAINT_LAYERS_BLEND_SYNC | MA_PAINT_LAYERS_BAKE_STALE;
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+}
+
 bool BKE_paint_layers_is_layered(const Material &ma)
 {
   return (ma.paint_layers_flag & MA_PAINT_LAYERED) != 0;
@@ -1822,9 +1835,19 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
     /* Inherit, or one of the user-facing blends; Normal Combine is the Normal channel's own doing. */
     return false;
   }
+  if (layer.channel_settings[channel].blend == blend) {
+    return true;
+  }
+  const uint64_t shape = bke::paint_layers::paint_layer_blend_shape(layer);
   layer.channel_settings[channel].blend = int8_t(blend);
-  /* The blend is the type of the generated Mix node, so this is a structural edit. */
-  BKE_paint_layers_tag_edited(ma);
+  /* Replace swaps the Normal node and a folder's blend can move it across Pass Through: only then
+   * is the graph a different shape. Every other mode is the same Mix node with another type. */
+  if (bke::paint_layers::paint_layer_blend_shape(layer) != shape) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  else {
+    paint_layers_tag_blend_edited(ma);
+  }
   return true;
 }
 
@@ -2149,8 +2172,17 @@ bool BKE_paint_layers_set_blend(Material &ma,
   if (ELEM(blend, MA_PAINT_LAYER_BLEND_NORMAL_COMBINE, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE)) {
     return false;
   }
+  if (layer->blend == blend) {
+    return true;
+  }
+  const uint64_t shape = bke::paint_layers::paint_layer_blend_shape(*layer);
   layer->blend = blend;
-  BKE_paint_layers_tag_edited(ma);
+  if (bke::paint_layers::paint_layer_blend_shape(*layer) != shape) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  else {
+    paint_layers_tag_blend_edited(ma);
+  }
   return true;
 }
 

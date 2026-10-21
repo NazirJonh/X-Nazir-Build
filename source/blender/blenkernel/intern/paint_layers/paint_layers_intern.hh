@@ -495,6 +495,17 @@ inline bool paint_layer_mask_item_alpha_background(const MaterialPaintLayer &ite
  */
 int BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend blend);
 
+namespace bke::paint_layers {
+
+/**
+ * How much of a row's blend mode is graph shape rather than a node property: the Normal channel's
+ * Replace (a different node) and, for a folder, whether it still inlines. Everything else is the
+ * `blend_type` of an existing Mix node, kept current by the generator's blend sync.
+ */
+uint64_t paint_layer_blend_shape(const MaterialPaintLayer &layer);
+
+}  // namespace bke::paint_layers
+
 /* -------------------------------------------------------------------- */
 /** \name Row bake
  *

@@ -100,6 +100,12 @@ enum eMaterialPaintLayersFlag : short {
   /** The description changed; whatever is derived from it is out of date. */
   MA_PAINT_LAYERS_REGEN = 1 << 2,
   /**
+   * A blend mode changed without changing the graph's shape: the generated Mix nodes take the new
+   * mode in place, through the sync at the regeneration point. Carried in the file like
+   * #MA_PAINT_LAYERS_REGEN, so a file saved between the edit and the sync catches up on load.
+   */
+  MA_PAINT_LAYERS_BLEND_SYNC = 1 << 3,
+  /**
    * Some row with a bake had a value-only edit (`opacity`, `fill`, a mask value, `enabled`), or a
    * pixel edit arrived; the planner at the regeneration point re-bakes the rows whose stored hash no
    * longer matches. Set by the edit paths that cannot rebuild the tree the way

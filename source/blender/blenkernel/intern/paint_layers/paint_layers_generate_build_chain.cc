@@ -20,6 +20,7 @@
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_ustring.hh"
+#include "BLI_uuid.h"
 
 #include "BKE_lib_id.hh"
 #include "BKE_node.hh"
@@ -499,6 +500,11 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       discard();
       return {};
     }
+    char mask_marker[UUID_STRING_SIZE];
+    BLI_uuid_format(mask_marker, item.marker);
+    char blend_key[128];
+    SNPRINTF(blend_key, "M:%s", mask_marker);
+    prop_string_set(blend->system_properties, BLEND_NODE_KEY_PROP, blend_key);
     nodes.append(blend);
     grid_.place(*blend, layout::Column::Mask, row++);
     bNodeSocket *blend_a = socket_in(*blend, "A_Color");
@@ -995,6 +1001,13 @@ BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
   if (mix == nullptr) {
     return {};
   }
+  /* The sync finds this node by its key and updates the mode in place, so a blend edit never
+   * rebuilds the group. */
+  char marker[UUID_STRING_SIZE];
+  BLI_uuid_format(marker, row.marker);
+  char blend_key[128];
+  SNPRINTF(blend_key, "B:%s:%d", marker, channel);
+  prop_string_set(mix->system_properties, BLEND_NODE_KEY_PROP, blend_key);
   /* Why grid: the row's own Mix sits in the free Output rows. */
   grid_.place(*mix, layout::Column::Output, 6);
   BlendNode blend;
@@ -2428,11 +2441,18 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
   /* The content alpha follows the colour by the same model, as a scalar: a Mix row lays its alpha
    * by the row's factor, every other blend keeps the alpha below, exactly as the CPU's `ramp_blend`
    * treats the fourth component. Inside a folder it is accumulated pre-multiplied like `P`, with
-   * `S_a = P_a / a` where a blend other than Mix reads the straight alpha below. */
+   * `S_a = P_a / a` where a blend other than Mix reads the straight alpha below. Both models are
+   * built and the row's Is Mix input picks one, so a blend edit is a value, not a new shape. */
+  bNodeSocket *blend_is_mix_socket = nullptr;
   if (track_alpha) {
-    const bool mix_alpha = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(
-                               BKE_paint_layers_channel_blend_effective(layer, channel))) ==
-                           MA_RAMP_BLEND;
+    if (Map<int, bNodeTreeInterfaceSocket *> *by_channel = blend_mix_inputs_.lookup_ptr(&layer)) {
+      if (bNodeTreeInterfaceSocket **input = by_channel->lookup_ptr(channel)) {
+        blend_is_mix_socket = group_input_socket(group, **input);
+      }
+    }
+    if (blend_is_mix_socket == nullptr) {
+      return {};
+    }
     Vector<bNode *> alpha_nodes;
     /* `mix(a, b, fac)` as a float Mix node; an empty \a fac covers fully. */
     const auto alpha_mix = [&](const NodeOutput a,
@@ -2465,19 +2485,20 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     };
     const NodeOutput below_a = {group_input, below_alpha};
     const NodeOutput row_factor = {factor_node, factor};
+    const NodeOutput is_mix = {group_input, blend_is_mix_socket};
     NodeOutput result_a;
     if (!isolated) {
-      result_a = mix_alpha ? alpha_mix(below_a, content_alpha, row_factor) : below_a;
+      /* Mix lays the row's alpha by the row's factor; every other mode keeps the alpha below. */
+      const NodeOutput mixed_a = alpha_mix(below_a, content_alpha, row_factor);
+      result_a = alpha_mix(below_a, mixed_a, is_mix);
     }
     else {
       const NodeOutput below_cov = {group_input, below_coverage};
-      NodeOutput lay_a = content_alpha;
-      if (!mix_alpha) {
-        /* c_eff_a = lerp(c_a, S_a, a): the straight alpha below shows where the row covers. */
-        const NodeOutput straight_a = math_node_add(
-            tree, grid_, alpha_nodes, NODE_MATH_DIVIDE, below_a, below_cov);
-        lay_a = alpha_mix(content_alpha, straight_a, below_cov);
-      }
+      /* c_eff_a = lerp(c_a, S_a, a): the straight alpha below shows where the row covers. */
+      const NodeOutput straight_a = math_node_add(
+          tree, grid_, alpha_nodes, NODE_MATH_DIVIDE, below_a, below_cov);
+      const NodeOutput kept_a = alpha_mix(content_alpha, straight_a, below_cov);
+      const NodeOutput lay_a = alpha_mix(kept_a, content_alpha, is_mix);
       result_a = alpha_mix(below_a, lay_a, row_factor);
     }
     if (result_a.socket == nullptr) {

@@ -17,14 +17,19 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include <cstdlib>
+#include <cstring>
+
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.h"
 #include "BLI_ustring.hh"
 #include "BLI_uuid.h"
 
 #include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_node_tree_interface.hh"
+#include "BKE_node_tree_update.hh"
 #include "BKE_paint_layers.hh"
 
 #include "DEG_depsgraph.hh"
@@ -85,6 +90,21 @@ bool values_sync_socket(Material &ma,
     const float value = built_baked ?
                             ((layer->flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) * scale :
                             BKE_paint_layers_channel_opacity_effective(*layer, channel) * scale;
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_BLEND_IS_MIX)) {
+    if (socket.default_value == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+      return false;
+    }
+    /* The alpha model follows the channel's mode: Mix lays the row's alpha by its factor, every
+     * other mode keeps the alpha below. Both are built; this input picks one. */
+    const int ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(
+        BKE_paint_layers_channel_blend_effective(*layer, channel)));
+    const float value = (ramp == MA_RAMP_BLEND) ? 1.0f : 0.0f;
     static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
     if (iface.socket_data != nullptr) {
       static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
@@ -310,6 +330,181 @@ bool BKE_paint_layers_values_sync(Material &ma)
   }
   return ok;
 }
+
+namespace {
+
+/** Parse the key of #BLEND_NODE_KEY_PROP into its row marker, channel and mask-item flag. */
+bool blend_node_key_parse(const char *key, bUUID &r_marker, int &r_channel, bool &r_mask)
+{
+  if (key == nullptr || key[0] == '\0' || key[1] != ':') {
+    return false;
+  }
+  if (key[0] == 'M') {
+    r_mask = true;
+    r_channel = -1;
+    return BLI_uuid_parse_string(&r_marker, key + 2);
+  }
+  if (key[0] != 'B') {
+    return false;
+  }
+  r_mask = false;
+  const char *rest = key + 2;
+  const char *sep = std::strrchr(rest, ':');
+  if (sep == nullptr || sep == rest || sep[1] == '\0') {
+    return false;
+  }
+  const size_t marker_len = size_t(sep - rest);
+  if (marker_len >= UUID_STRING_SIZE) {
+    return false;
+  }
+  char marker[UUID_STRING_SIZE];
+  std::memcpy(marker, rest, marker_len);
+  marker[marker_len] = '\0';
+  if (!BLI_uuid_parse_string(&r_marker, marker)) {
+    return false;
+  }
+  r_channel = std::atoi(sep + 1);
+  return true;
+}
+
+int blend_nodes_count(bNodeTree &group)
+{
+  int count = 0;
+  for (bNode &node : group.nodes) {
+    if (prop_string_get(node.system_properties, BLEND_NODE_KEY_PROP) != nullptr) {
+      count++;
+    }
+  }
+  return count;
+}
+
+}  // namespace
+
+namespace bke::paint_layers {
+
+void paint_layers_blend_nodes_commit(Material &ma)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return;
+  }
+  for (bNode &instance : root->nodes) {
+    if (!instance.is_group() || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(instance.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, marker)) {
+      continue;
+    }
+    if (BKE_paint_layers_find(ma, marker) == nullptr) {
+      continue;
+    }
+    /* A kept group keeps its count: recounting it would hide a node the user deleted from it. Only
+     * a group this pass cleared (marked -1) or made fresh gets a new one. */
+    if (prop_int_get(group->id.properties, BLEND_NODE_COUNT_PROP, -1) >= 0) {
+      continue;
+    }
+    prop_int_set(group->id.properties, BLEND_NODE_COUNT_PROP, blend_nodes_count(*group));
+  }
+}
+
+bool paint_layers_blend_sync(Material &ma, Main &bmain)
+{
+  bNodeTree *root = ma.paint_layers_tree;
+  if (root == nullptr) {
+    return true;
+  }
+  bool ok = true;
+  Vector<bNodeTree *> changed_groups;
+  for (bNode &instance : root->nodes) {
+    if (!instance.is_group() || instance.id == nullptr || GS(instance.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(instance.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID group_marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, group_marker)) {
+      continue;
+    }
+    if (BKE_paint_layers_find(ma, group_marker) == nullptr) {
+      continue;
+    }
+    /* A tree without the count was built before the nodes were keyed (or by a hand edit that
+     * removed the property): it cannot be trusted to carry every blend, so the caller rebuilds. */
+    const int expected = prop_int_get(group->id.properties, BLEND_NODE_COUNT_PROP, -1);
+    if (expected < 0) {
+      /* Drop the stored shape too, so the rebuild below cannot keep this group as it is. */
+      tree_hash_clear(*group);
+      ok = false;
+      continue;
+    }
+    int found = 0;
+    bool group_ok = true;
+    bool group_changed = false;
+    for (bNode &node : group->nodes) {
+      const char *key = prop_string_get(node.system_properties, BLEND_NODE_KEY_PROP);
+      if (key == nullptr) {
+        continue;
+      }
+      found++;
+      bUUID marker = BLI_uuid_nil();
+      int channel = -1;
+      bool mask = false;
+      if (!blend_node_key_parse(key, marker, channel, mask)) {
+        group_ok = false;
+        continue;
+      }
+      MaterialPaintLayer *row = BKE_paint_layers_find(ma, marker);
+      if (row == nullptr) {
+        group_ok = false;
+        continue;
+      }
+      if (!mask && (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM)) {
+        group_ok = false;
+        continue;
+      }
+      const int blend = mask ? row->blend :
+                               BKE_paint_layers_channel_blend_effective(*row, channel);
+      if (node.type_legacy != SH_NODE_MIX || node.storage == nullptr) {
+        group_ok = false;
+        continue;
+      }
+      NodeShaderMix *storage = static_cast<NodeShaderMix *>(node.storage);
+      const int ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(blend));
+      if (storage->blend_type != ramp) {
+        storage->blend_type = ramp;
+        BKE_ntree_update_tag_node_property(group, &node);
+        group_changed = true;
+      }
+    }
+    if (!group_ok || found != expected) {
+      /* The group carries an incomplete or foreign set of blend nodes: drop its stored shape so
+       * the rebuild that follows clears and builds it again, rather than keeping it by its hash. */
+      tree_hash_clear(*group);
+      ok = false;
+    }
+    if (group_changed) {
+      changed_groups.append(group);
+    }
+  }
+  /* The updates run after the walk: a tree update can touch the instances the loop is reading. */
+  for (bNodeTree *group : changed_groups) {
+    BKE_ntree_update_after_single_tree_change(bmain, *group);
+    DEG_id_tag_update(&group->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  if (!changed_groups.is_empty()) {
+    BKE_paint_layers_values_tag_trees(ma);
+  }
+  return ok;
+}
+
+}  // namespace bke::paint_layers
 
 void BKE_paint_layers_values_tag_trees(Material &ma)
 {

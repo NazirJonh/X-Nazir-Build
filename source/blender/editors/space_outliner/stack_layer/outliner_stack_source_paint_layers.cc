@@ -1453,9 +1453,9 @@ class PaintLayersStackSource final : public StackSource,
       }
     }
     /* The other channels of a Paint layer are not made here: every paint entry point makes the
-     * maps its stroke writes before the stroke starts (inside the stroke's own undo group), so a
-     * layer nothing is painted into holds one map instead of one per channel of the set. A 4K map
-     * is 64 MiB of RAM and ~85 MiB of GPU memory each. */
+     * maps its stroke writes before the stroke starts (as a persistent side effect, not part of
+     * that stroke's undo step), so a layer nothing is painted into holds one map instead of one
+     * per channel of the set. A 4K map is 64 MiB of RAM and ~85 MiB of GPU memory each. */
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, created);
   }

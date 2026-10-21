@@ -281,7 +281,7 @@ static void scene_init_data(ID *id)
   scene->toolsettings->autokey_mode = U.autokey_mode;
 
   /* Image paint gradient tool color ramp (embedded by value, needs runtime init). */
-  BKE_colorband_init(&scene->toolsettings->imapaint.gradient_colorband, true);
+  BKE_colorband_init_gradient_default(&scene->toolsettings->imapaint.gradient_colorband);
 
   /* Shape tools (owned profiles and color ramps need runtime init). */
   BKE_paint_shape_settings_init(&scene->toolsettings->imapaint.shape);

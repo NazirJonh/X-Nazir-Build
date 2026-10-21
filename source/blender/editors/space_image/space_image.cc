@@ -877,6 +877,11 @@ static void image_main_region_init(wmWindowManager *wm, ARegion *region)
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Paint Curve", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler(&region->runtime->handlers, keymap);
 
+  /* Canvas switching works with every paint tool, unlike the brush-only "Image Paint" keymap. */
+  keymap = WM_keymap_ensure(
+      wm->runtime->defaultconf, "Image Paint Canvas", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
+
   keymap = WM_keymap_ensure(wm->runtime->defaultconf, "Image Paint", SPACE_EMPTY, RGN_TYPE_WINDOW);
   WM_event_add_keymap_handler_v2d_mask(&region->runtime->handlers, keymap);
 

@@ -1831,7 +1831,7 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
       imapaint.gradient_opacity = 1.0f;
       imapaint.warp_grid_size = 4;
       imapaint.warp_interpolation = IMAGE_PAINT_WARP_INTERP_SMOOTH;
-      BKE_colorband_init(&imapaint.gradient_colorband, true);
+      BKE_colorband_init_gradient_default(&imapaint.gradient_colorband);
     }
   }
 
@@ -2046,7 +2046,7 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
         sd->gradient_color_source = defaults.gradient_color_source;
         sd->gradient_blend_mode = defaults.gradient_blend_mode;
         sd->gradient_opacity = defaults.gradient_opacity;
-        BKE_colorband_init(&sd->gradient_colorband, true);
+        BKE_colorband_init_gradient_default(&sd->gradient_colorband);
       }
     }
   }

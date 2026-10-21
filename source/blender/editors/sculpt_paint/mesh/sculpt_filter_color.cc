@@ -16,6 +16,7 @@
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.hh"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_task.h"
 #include "BLI_task.hh"
@@ -840,7 +841,11 @@ void SCULPT_OT_color_filter(wmOperatorType *ot)
  * brush's Mask primary and secondary values; color attributes are skipped (a mask map is not a
  * color attribute). Mask Source texture coverage scales the gradient per pixel.
  * `SCULPT_use_image_paint_brush` decides, per object, which of the two applies (see
- * #sculpt_color_gradient_apply and #sculpt_color_gradient_apply_image_object).
+ * #sculpt_color_gradient_apply and #sculpt_color_gradient_apply_image_object). A layered
+ * material's active row grows the maps of the channels this gesture writes before the gesture
+ * starts (see #sculpt_color_gradient_canvas_maps_ensure), so the gradient paints a fresh Paint row
+ * exactly like the brush does. The created maps are a persistent side effect: cancelling the
+ * gesture or undoing its paint keeps them, so a retry does not recreate them.
  *
  * Lifetime (driven by `WM_gesture_straightline_*`, or by the Curve gesture's own modal):
  * - `invoke`: opens exactly one undo step for the whole gesture -- sculpt-undo
@@ -979,26 +984,51 @@ static float4 gradient_color_at(const GradientColoring &coloring, const float t)
   return color;
 }
 
-/** Composite the gradient color at \a t over \a orig, keeping the original alpha. */
+/**
+ * Composite the gradient color at \a t over \a orig.
+ *
+ * \a map_canvas selects the image semantics: a painted map is a layer that can be, or start,
+ * fully transparent (a fresh Paint row's first map is), so there the gradient gains coverage
+ * where it paints and shows as itself on an empty texel. A color attribute keeps its own alpha --
+ * #sculpt_color_gradient_apply_object re-applies it -- because the gradient does not own it.
+ */
 static float4 gradient_blend_color(const GradientColoring &coloring,
                                    const float4 &orig,
-                                   const float t)
+                                   const float t,
+                                   const bool map_canvas)
 {
-  float4 color = gradient_color_at(coloring, t);
+  const float4 straight = gradient_color_at(coloring, t);
   /* The blend functions expect a premultiplied source: with a straight color the full color would
    * be added at any non-zero alpha, turning a fade to transparent into a hard step. */
-  color.x *= color.w;
-  color.y *= color.w;
-  color.z *= color.w;
+  const float4 color(straight.x * straight.w,
+                     straight.y * straight.w,
+                     straight.z * straight.w,
+                     straight.w);
   float4 result;
   IMB_blend_color_float(result, orig, color, coloring.blend_mode);
-  result.w = orig.w;
+  if (!map_canvas) {
+    result.w = orig.w;
+    return result;
+  }
+  /* An empty texel has no color for the blend mode to act on: a fresh Paint row's map is fully
+   * transparent, and every mode but Mix reads that zero backdrop as black (or keeps the zero
+   * alpha, showing nothing). Show the gradient itself there, with its straight color because the
+   * map stores straight alpha; the blend takes over as the map gains coverage. The alpha is the
+   * straight-alpha "over" the brush paints with, which also keeps the destination alpha defined
+   * for the Overlay/Screen family (it writes only RGB). */
+  if (orig.w <= 0.0f) {
+    result = straight;
+  }
+  result.w = orig.w + color.w * (1.0f - orig.w);
   return result;
 }
 
 /**
  * Scalar and normal material channels have no meaningful mapping from a color ramp: they get the
  * channel's own value at the gradient start, fading back to the original at the end.
+ *
+ * The same straight-alpha "over" as #gradient_blend_color gains the map its coverage where the
+ * value is painted, otherwise a scalar write into a fresh transparent map stays invisible.
  */
 static float4 gradient_blend_value(const GradientColoring &coloring,
                                    const float4 &orig,
@@ -1010,22 +1040,32 @@ static float4 gradient_blend_value(const GradientColoring &coloring,
   result.x = orig.x + (value.x - orig.x) * weight;
   result.y = orig.y + (value.y - orig.y) * weight;
   result.z = orig.z + (value.z - orig.z) * weight;
+  result.w = orig.w + weight * (1.0f - orig.w);
   return result;
 }
 
 /**
- * The gesture's shape. Linear is a screen-space line; Radial is a world-space disc on the surface:
- * centered on the point under the drag start, lying in the plane of its sampled normal (like a
- * brush), with the radius reaching the point of that plane under the cursor. Curve is a
- * world-space polyline projected onto the surface while it is drawn (see
- * #GradientCurve3D), reused by both apply paths through the shared pointer.
+ * The gesture's shape. Linear is a screen-space line during the drag; the interactive session
+ * re-anchors its ends to the surface as a world-space line (#linear_world), so the gradient stays
+ * on the mesh when the camera orbits. Radial is a world-space disc on the surface: centered on
+ * the point under the drag start, lying in the plane of its sampled normal (like a brush), with
+ * the radius reaching the point of that plane under the cursor. Curve is a world-space polyline
+ * projected onto the surface while it is drawn (see #GradientCurve3D), reused by both apply paths
+ * through the shared pointer.
  */
 struct GradientGeometry {
   eSculptGradientType type = SCULPT_GRADIENT_LINEAR;
 
+  /** Screen-space line, used while the straight-line gesture runs. */
   float2 start_ss = float2(0.0f);
   float2 axis_ss = float2(0.0f);
   float inv_axis_len_sq = 0.0f;
+
+  /** Linear line anchored to the surface in world space (see the structure comment). */
+  bool linear_world = false;
+  float3 line_start = float3(0.0f);
+  float3 axis_world = float3(0.0f);
+  float inv_axis_world_len_sq = 0.0f;
 
   float3 center = float3(0.0f);
   float3 normal = float3(0.0f, 0.0f, 1.0f);
@@ -1045,7 +1085,7 @@ struct GradientGeometry {
   {
     switch (type) {
       case SCULPT_GRADIENT_LINEAR:
-        return inv_axis_len_sq > 0.0f;
+        return linear_world ? inv_axis_world_len_sq > 0.0f : inv_axis_len_sq > 0.0f;
       case SCULPT_GRADIENT_RADIAL:
         return radius > 1e-6f;
       case SCULPT_GRADIENT_CURVE:
@@ -1194,6 +1234,23 @@ static GradientGeometry sculpt_color_gradient_geometry_get(const bContext *C, wm
   GradientGeometry geometry;
   geometry.type = eSculptGradientType(sd.gradient_type);
   if (geometry.type == SCULPT_GRADIENT_LINEAR) {
+    if (RNA_boolean_get(op->ptr, "use_world_line")) {
+      float start_co[3];
+      float end_co[3];
+      RNA_float_get_array(op->ptr, "line_start", start_co);
+      RNA_float_get_array(op->ptr, "line_end", end_co);
+      const float3 axis = float3(end_co[0], end_co[1], end_co[2]) -
+                          float3(start_co[0], start_co[1], start_co[2]);
+      const float len_sq = math::length_squared(axis);
+      if (len_sq > 1e-12f) {
+        geometry.linear_world = true;
+        geometry.line_start = float3(start_co[0], start_co[1], start_co[2]);
+        geometry.axis_world = axis;
+        geometry.inv_axis_world_len_sq = 1.0f / len_sq;
+        return geometry;
+      }
+      /* A zeroed anchor pair (a property set without points) falls back to the screen line. */
+    }
     geometry.start_ss = start;
     geometry.axis_ss = end - start;
     const float len_sq = math::length_squared(geometry.axis_ss);
@@ -1278,7 +1335,9 @@ class GradientEvaluator {
     if (!geometry_.is_valid()) {
       return false;
     }
-    return geometry_.type != SCULPT_GRADIENT_LINEAR ||
+    /* An anchored linear line needs no view projection at all, so it also works with a region
+     * that went away. */
+    return geometry_.type != SCULPT_GRADIENT_LINEAR || geometry_.linear_world ||
            (region_ != nullptr && region_->regiondata != nullptr);
   }
 
@@ -1296,16 +1355,25 @@ class GradientEvaluator {
       const float3 flipped = symmetry_flip(position, pass);
       float t;
       if (geometry_.type == SCULPT_GRADIENT_LINEAR) {
-        float2 co_ss;
-        if (ED_view3d_project_float_object(region_,
-                                           flipped,
-                                           co_ss,
-                                           V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR) !=
-            V3D_PROJ_RET_OK)
-        {
-          continue;
+        if (geometry_.linear_world) {
+          /* World-space line: the parameter does not depend on the view, so the gradient stays
+           * on the surface while the camera moves. */
+          const float3 world = math::transform_point(object_to_world_, flipped);
+          t = math::dot(world - geometry_.line_start, geometry_.axis_world) *
+              geometry_.inv_axis_world_len_sq;
         }
-        t = math::dot(co_ss - geometry_.start_ss, geometry_.axis_ss) * geometry_.inv_axis_len_sq;
+        else {
+          float2 co_ss;
+          if (ED_view3d_project_float_object(region_,
+                                             flipped,
+                                             co_ss,
+                                             V3D_PROJ_TEST_CLIP_BB | V3D_PROJ_TEST_CLIP_NEAR) !=
+              V3D_PROJ_RET_OK)
+          {
+            continue;
+          }
+          t = math::dot(co_ss - geometry_.start_ss, geometry_.axis_ss) * geometry_.inv_axis_len_sq;
+        }
       }
       else {
         float3 offset = math::transform_point(object_to_world_, flipped) - geometry_.center;
@@ -1638,7 +1706,9 @@ static bool sculpt_color_gradient_apply_object(bContext *C,
             const float t = use_geodesic ? evaluator.t_at_vert(vert) :
                                            evaluator.t_at(vert_positions[vert]);
             if (!std::isnan(t)) {
-              new_color = math::clamp(gradient_blend_color(coloring, orig_color, t), 0.0f, 1.0f);
+              new_color = math::clamp(gradient_blend_color(coloring, orig_color, t, false),
+                                      0.0f,
+                                      1.0f);
               new_color.w = orig_color.w;
             }
           }
@@ -1959,7 +2029,7 @@ static bool sculpt_color_gradient_apply_image_object(bContext *C,
                   }
                   float4 &pixel = scene_linear[px];
                   const float4 blended = paints_colors ?
-                                             gradient_blend_color(coloring, pixel, t) :
+                                             gradient_blend_color(coloring, pixel, t, true) :
                                              gradient_blend_value(
                                                  coloring, pixel, channel_value, t);
                   /* Linear mix by weight (not a threshold) so a feathered selection edge stays
@@ -2118,6 +2188,7 @@ static bool sculpt_color_gradient_apply(bContext *C, wmOperator *op)
   bool any_painted = false;
   bool mismatched_canvas_skipped = false;
   bool mask_target_skipped = false;
+  bool layered_no_target_skipped = false;
   for (Object *ob : objects) {
     if (ob == nullptr || ob->type != OB_MESH) {
       continue;
@@ -2135,6 +2206,17 @@ static bool sculpt_color_gradient_apply(bContext *C, wmOperator *op)
       /* A Mask target is an image map, never a color attribute: painting the active color
        * attribute here would write somewhere the user is not looking. */
       mask_target_skipped = true;
+      continue;
+    }
+    if (paint_mode_settings != nullptr &&
+        paint_mode_settings->canvas_source == PAINT_CANVAS_SOURCE_MATERIAL &&
+        BKE_paint_layers_active_material_get(ob) != nullptr)
+    {
+      /* A layered material's target is its channel maps, never the color attribute. With no
+       * channel resolving to an enabled map (every channel switched off in the tool's channel
+       * list, or a Fill row, which takes no stroke), painting the attribute here would silently
+       * write somewhere the user is not looking. */
+      layered_no_target_skipped = true;
       continue;
     }
     if (use_image_undo) {
@@ -2161,6 +2243,12 @@ static bool sculpt_color_gradient_apply(bContext *C, wmOperator *op)
                RPT_WARNING,
                "Color Gradient: Mask mode paints the mask image map, not a color attribute; "
                "this object was skipped");
+  }
+  if (!any_painted && layered_no_target_skipped) {
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "Color Gradient: the active layer has no enabled channel with a writable map; "
+               "enable a channel in the gradient's channel list");
   }
   return any_painted;
 }
@@ -2257,12 +2345,15 @@ static bool sculpt_color_gradient_apply_image_canvases(bContext *C, wmOperator *
   return any_painted;
 }
 
-/** Show the midpoint (and the radial gradient's radius) in the area header while dragging. */
+/**
+ * Show the midpoint (and the radial gradient's radius) in the status bar while dragging. The
+ * status bar, not #ED_area_status_text: that one replaces the tool header, which hides the
+ * gradient's settings for the whole gesture.
+ */
 static void sculpt_color_gradient_status_update(bContext *C, wmOperator *op)
 {
-  ScrArea *area = CTX_wm_area(C);
   const Sculpt *sd = CTX_data_tool_settings(C)->sculpt;
-  if (area == nullptr || sd == nullptr) {
+  if (sd == nullptr) {
     return;
   }
   std::string text = fmt::format(
@@ -2282,22 +2373,86 @@ static void sculpt_color_gradient_status_update(bContext *C, wmOperator *op)
     text = fmt::format("{}: {}    {}", IFACE_("Radius"), radius_str, text);
   }
   text += fmt::format("    ({})", IFACE_("Wheel: move midpoint"));
-  ED_area_status_text(area, text.c_str());
+  ED_workspace_status_text(C, text.c_str());
 }
 
 static void sculpt_color_gradient_status_clear(bContext *C)
 {
-  if (ScrArea *area = CTX_wm_area(C)) {
-    ED_area_status_text(area, nullptr);
-  }
+  ED_workspace_status_text(C, nullptr);
 }
 
 /**
- * Prepare the selection mask of every image canvas the gradient will paint. Returns false (after
- * reporting) when a canvas is borrowed by a floating selection session: its lifted fragments leave
- * holes that the gradient would fill. Otherwise refreshes the face-selection-derived masks the same
- * way the brush does at stroke start (#sculpt_brush_stroke_invoke), so the sampler never reads a
- * stale mask. Runs before any undo step is opened so a refusal leaves nothing behind.
+ * Make the channel maps this gesture writes exist before any target is resolved.
+ *
+ * A Paint row is born with one map (its active slot's, see the Outliner's Add) and grows the
+ * others on the first stroke, exactly like the brush: #BKE_paint_material_images_ensure_writable
+ * creates a map for every channel the brush currently writes and the row has an enabled record
+ * for, and nothing for a channel the row lacks or has switched off. Without this the gesture would
+ * find no image target at all on a fresh row (and paint the color attribute instead), or write
+ * only the one map that already exists.
+ *
+ * Runs on the main thread before the gesture opens its undo step, like
+ * #init_material_canvas_for_object and the shape tools' #shape::composite_targets_ensure_writable.
+ * The created maps are a persistent side effect and deliberately get no undo step of their own:
+ * cancelling the gesture (Esc) or undoing its painted result keeps them, so retrying the gradient
+ * on the same layer does not recreate them. In Mask mode only the row's mask map is made; a mask is
+ * Base Color's alone, so the brush's channel set does not apply.
+ */
+static bool sculpt_color_gradient_canvas_maps_ensure(bContext *C,
+                                                     const Span<Object *> objects,
+                                                     const Sculpt &sd,
+                                                     PaintModeSettings &paint_mode_settings)
+{
+  if (paint_mode_settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+    return false;
+  }
+  Main *bmain = CTX_data_main(C);
+  if (bmain == nullptr) {
+    return false;
+  }
+  bool created = false;
+  if (paint_mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
+    /* A fresh Mask row has no map yet; a missing map would make the first gesture a silent
+     * no-op. The helper tags the file itself, so nothing is reported to the caller. */
+    for (Object *ob : objects) {
+      if (ob != nullptr && ob->type == OB_MESH) {
+        material::mask_target_image_create_if_missing(bmain, *ob, paint_mode_settings);
+      }
+    }
+    return false;
+  }
+  const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    /* No material paint settings: no channel is enabled, and the brush path resolves no target
+     * either (see #BKE_paint_material_image_targets_get). */
+    return false;
+  }
+  for (Object *ob : objects) {
+    if (ob == nullptr || ob->type != OB_MESH) {
+      continue;
+    }
+    if (BKE_paint_material_images_ensure_writable(*bmain,
+                                                  *ob,
+                                                  *brush->material_paint,
+                                                  paint_mode_settings,
+                                                  sd.paint.visible_material_channels)
+            .created > 0)
+    {
+      created = true;
+    }
+  }
+  return created;
+}
+
+/**
+ * Prepare the selection mask of every image canvas the gradient will paint. First makes the
+ * channels' maps exist (see #sculpt_color_gradient_canvas_maps_ensure), so a fresh Paint row is a
+ * canvas at all. Returns false (after reporting) when a canvas is borrowed by a floating selection
+ * session: its lifted fragments leave holes that the gradient would fill. Otherwise refreshes the
+ * face-selection-derived masks the same way the brush does at stroke start
+ * (#sculpt_brush_stroke_invoke), so the sampler never reads a stale mask. Runs before any undo
+ * step is opened so a refusal leaves no stroke to roll back; the maps it creates stay on purpose
+ * (see #sculpt_color_gradient_canvas_maps_ensure).
  */
 static bool sculpt_color_gradient_canvases_prepare(bContext *C,
                                                    wmOperator *op,
@@ -2312,6 +2467,12 @@ static bool sculpt_color_gradient_canvases_prepare(bContext *C,
   const Brush *brush = BKE_paint_brush_for_read(&sd->paint);
   const bool mask_mode = paint_mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK;
 
+  if (sculpt_color_gradient_canvas_maps_ensure(C, objects, *sd, paint_mode_settings)) {
+    /* The maps live outside the gesture's undo step (see the function above), so nothing else
+     * tags the creation for saving when the gesture is refused or cancelled before opening one. */
+    material::layer_maps_created_tag();
+  }
+
   Vector<Image *> images;
   for (Object *ob : objects) {
     if (ob == nullptr || ob->type != OB_MESH ||
@@ -2319,11 +2480,6 @@ static bool sculpt_color_gradient_canvases_prepare(bContext *C,
             paint_mode_settings, *ob, brush, sd->paint.visible_material_channels))
     {
       continue;
-    }
-    if (mask_mode && BKE_paint_layers_active_material_get(ob) != nullptr) {
-      /* A fresh Mask row has no map yet. The gradient itself cannot create one, and a missing
-       * map would otherwise make the first gesture a silent no-op. */
-      material::mask_target_image_ensure(CTX_data_main(C), *ob, paint_mode_settings);
     }
     for (paint::image::ImagePaintTarget &target : paint::image::init_image_paint_targets(
              *ob, paint_mode_settings, brush, sd->paint.visible_material_channels))
@@ -2642,10 +2798,6 @@ static void sculpt_color_gradient_curve_preview(bContext *C,
 
 static void sculpt_color_gradient_curve_status_update(bContext *C, wmOperator *op)
 {
-  ScrArea *area = CTX_wm_area(C);
-  if (area == nullptr) {
-    return;
-  }
   const Sculpt *sd = CTX_data_tool_settings(C)->sculpt;
   std::string text = fmt::format("{}: {}    ({})",
                                  IFACE_("Curve points"),
@@ -2656,7 +2808,7 @@ static void sculpt_color_gradient_curve_status_update(bContext *C, wmOperator *o
   {
     text += fmt::format("    ({})", IFACE_("Geodesic distances are computed on release"));
   }
-  ED_area_status_text(area, text.c_str());
+  ED_workspace_status_text(C, text.c_str());
 }
 
 /** Release the gesture's resources, then either commit or roll back the whole undo step. */
@@ -2871,6 +3023,76 @@ static bool sculpt_color_gradient_radial_center_set(bContext *C,
   return true;
 }
 
+/** World-space surface point under \a mval, for anchoring a gradient handle to the mesh. */
+static bool gradient_surface_point_at_screen(bContext *C, const float2 &mval, float3 &r_point)
+{
+  Object *hit_ob = nullptr;
+  const std::optional<CursorGeometryInfo> hit = cursor_geometry_info_update(C, mval, true, &hit_ob);
+  if (!hit || hit_ob == nullptr) {
+    return false;
+  }
+  r_point = math::transform_point(hit_ob->object_to_world(), hit->location);
+  return true;
+}
+
+/**
+ * Anchor the screen-space line of a finished Linear drag to the surface: both ends become points
+ * on the mesh in world space, so the gradient and its overlay stay on the surface while the
+ * camera moves. An end that missed the mesh is unprojected onto the view plane through the other
+ * one; returns false when neither end is over the mesh (the screen-space line is kept).
+ */
+static bool gradient_linear_anchors_set(bContext *C,
+                                        wmOperator *op,
+                                        const float2 &start_ss,
+                                        const float2 &end_ss)
+{
+  float3 anchor_start;
+  float3 anchor_end;
+  const bool start_hit = gradient_surface_point_at_screen(C, start_ss, anchor_start);
+  const bool end_hit = gradient_surface_point_at_screen(C, end_ss, anchor_end);
+  if (!start_hit && !end_hit) {
+    return false;
+  }
+
+  if (!start_hit || !end_hit) {
+    const ARegion *region = CTX_wm_region(C);
+    const View3D *v3d = CTX_wm_view3d(C);
+    if (region == nullptr || v3d == nullptr) {
+      return false;
+    }
+    /* One end off the mesh: put it on the view plane through the other end, so the line still
+     * has an anchor in space instead of snapping back to the screen. */
+    if (!start_hit) {
+      ED_view3d_win_to_3d(v3d, region, anchor_end, start_ss, anchor_start);
+    }
+    else {
+      ED_view3d_win_to_3d(v3d, region, anchor_start, end_ss, anchor_end);
+    }
+  }
+
+  RNA_boolean_set(op->ptr, "use_world_line", true);
+  RNA_float_set_array(op->ptr, "line_start", anchor_start);
+  RNA_float_set_array(op->ptr, "line_end", anchor_end);
+  return true;
+}
+
+/** Move one end of an anchored Linear line to the surface point under \a mval. */
+static bool gradient_linear_anchor_move(bContext *C,
+                                        wmOperator *op,
+                                        const bool is_start,
+                                        const float2 &mval)
+{
+  float3 point;
+  if (!gradient_surface_point_at_screen(C, mval, point)) {
+    return false;
+  }
+  RNA_float_set_array(op->ptr, is_start ? "line_start" : "line_end", point);
+  /* Keep the RNA screen coordinates in step so the fallback marker follows the same end. */
+  RNA_int_set(op->ptr, is_start ? "xstart" : "xend", int(mval.x));
+  RNA_int_set(op->ptr, is_start ? "ystart" : "yend", int(mval.y));
+  return true;
+}
+
 /* -------------------------------------------------------------------- */
 /** \name Color Gradient interactive editing
  *
@@ -2879,6 +3101,10 @@ static bool sculpt_color_gradient_radial_center_set(bContext *C,
  * (Radial: radius) handles, and the midpoint marker, stay draggable; Enter applies, Esc (or RMB)
  * rolls the whole step back. This reuses the drag gesture's machinery — the geometry is derived
  * from the same RNA coordinates the gesture writes — so one undo step covers the whole session.
+ * The viewport stays navigable while the session is live: the modal runs the 3D View navigation
+ * operators itself, because a modal handler never passes events on to them. A Linear line is
+ * re-anchored to the surface in world space on entry (see #gradient_linear_anchors_set), so both
+ * the paint and the overlay stay on the mesh instead of moving with the viewport.
  * \{ */
 
 /** Which handle the mouse drag moves (see #ColorGradientInteractiveData::dragging). */
@@ -2897,16 +3123,90 @@ enum GradientInteractiveHandle {
  */
 static constexpr int GRADIENT_INTERACTIVE_DATA_TAG = 0;
 
+/**
+ * The tool settings the live preview depends on (everything but the handle positions). The
+ * session compares this to the current settings to repaint after a change in the header or a
+ * popover: a ramp's interpolation or stops live in a #ColorBand whose RNA update has no hook into
+ * this operator, so a copy of the values is the one place that sees every change.
+ */
+struct GradientSettingsSnapshot {
+  /* The gradient type is left out on purpose: the session's handles belong to the type it started
+   * with, so switching it mid-session must not repaint with another type's geometry. */
+  int color_source = 0;
+  int repeat = 0;
+  int blend_mode = 0;
+  float opacity = 0.0f;
+  float color[4] = {};
+  float secondary_color[4] = {};
+  ColorBand band = {};
+
+  static GradientSettingsSnapshot from(const Sculpt &sd)
+  {
+    GradientSettingsSnapshot snapshot;
+    snapshot.color_source = sd.gradient_color_source;
+    snapshot.repeat = sd.gradient_repeat;
+    snapshot.blend_mode = sd.gradient_blend_mode;
+    snapshot.opacity = sd.gradient_opacity;
+    copy_v4_v4(snapshot.color, sd.gradient_color);
+    copy_v4_v4(snapshot.secondary_color, sd.gradient_secondary_color);
+    snapshot.band = sd.gradient_colorband;
+    return snapshot;
+  }
+
+  bool operator==(const GradientSettingsSnapshot &other) const
+  {
+    if (color_source != other.color_source || repeat != other.repeat ||
+        blend_mode != other.blend_mode || opacity != other.opacity ||
+        !equals_v4v4(color, other.color) || !equals_v4v4(secondary_color, other.secondary_color))
+    {
+      return false;
+    }
+    /* Field by field: the struct's padding is not copied reliably, so a byte compare could report
+     * a change on every tick. */
+    if (band.tot != other.band.tot || band.ipotype != other.band.ipotype ||
+        band.ipotype_hue != other.band.ipotype_hue || band.color_mode != other.band.color_mode)
+    {
+      return false;
+    }
+    for (const int i : IndexRange(std::min<int>(band.tot, ARRAY_SIZE(band.data)))) {
+      const CBData &a = band.data[i];
+      const CBData &b = other.band.data[i];
+      if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a || a.pos != b.pos) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
 struct ColorGradientInteractiveData {
   /** First member, see #GRADIENT_INTERACTIVE_DATA_TAG. */
   const int *tag = &GRADIENT_INTERACTIVE_DATA_TAG;
+  /** Ticks while the session runs so a settings change repaints without a mouse event. */
+  wmTimer *timer = nullptr;
+  GradientSettingsSnapshot applied_settings;
   /** #GradientInteractiveHandle currently under the mouse drag. */
   int dragging = GRADIENT_HANDLE_NONE;
   /** Region type the draw callback is registered with; static, stays valid if the area closes. */
   ARegionType *region_type = nullptr;
   void *draw_handle = nullptr;
-  /** Last accepted handle positions (region pixels), mirrored from the RNA by the modal so the
-   * draw callback never has to touch the operator. */
+  /** Drives 3D view navigation (orbit/pan/zoom) while the handles stay live. A modal handler
+   * consumes the events it returns `RUNNING_MODAL` for, so navigation must be run from inside
+   * the modal, like transform and the Grease Pencil primitive tool do. */
+  ViewOpsData *vod = nullptr;
+  /** World-space anchors mirrored from the RNA. The draw callback projects them on every draw,
+   * so the overlay stays on the surface while the camera navigates: the modal does not run in
+   * between navigation events. */
+  bool linear_world = false;
+  float3 line_start = float3(0.0f);
+  float3 line_end = float3(0.0f);
+  bool radial = false;
+  float3 radial_center = float3(0.0f);
+  /** Handle positions from the RNA's screen coordinates, used when a world anchor is missing or
+   * cannot be projected. */
+  float2 fallback_start_px = float2(0.0f);
+  float2 fallback_end_px = float2(0.0f);
+  /** Last projected handle positions (region pixels); the hit test reads them. */
   float2 start_px = float2(0.0f);
   float2 end_px = float2(0.0f);
   float midpoint = 0.5f;
@@ -2925,31 +3225,46 @@ static ColorGradientInteractiveData *interactive_data_get(wmOperator *op)
   return data;
 }
 
-/** The gradient line's screen-space start (Radial: projected center) and end, region pixels. */
-static void interactive_handles_screen(const bContext *C,
-                                       wmOperator *op,
-                                       float2 &r_start,
-                                       float2 &r_end)
+/**
+ * Project the session's world-space anchors to region pixels. Linear uses the anchored line when
+ * there is one; Radial always uses its world-space center. The RNA screen coordinates are the
+ * fallback for anchors that are unavailable or off-screen.
+ */
+static void interactive_handles_project(const ColorGradientInteractiveData &data,
+                                        const ARegion *region,
+                                        float2 &r_start,
+                                        float2 &r_end)
 {
-  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
-  r_end = float2(float(RNA_int_get(op->ptr, "xend")), float(RNA_int_get(op->ptr, "yend")));
-  if (eSculptGradientType(sd.gradient_type) == SCULPT_GRADIENT_RADIAL) {
-    const ARegion *region = CTX_wm_region(C);
-    float center_co[3];
-    RNA_float_get_array(op->ptr, "center", center_co);
-    float projected[3];
-    if (region != nullptr && region->regiondata != nullptr &&
-        ED_view3d_project_float_global(
-            region, center_co, projected, V3D_PROJ_TEST_CLIP_DEFAULT) == V3D_PROJ_RET_OK)
-    {
-      r_start = float2(projected[0], projected[1]);
-      return;
+  if (region != nullptr && region->regiondata != nullptr) {
+    if (data.radial) {
+      float projected[2];
+      if (ED_view3d_project_float_global(
+              region, data.radial_center, projected, V3D_PROJ_TEST_CLIP_DEFAULT) ==
+          V3D_PROJ_RET_OK)
+      {
+        r_start = float2(projected[0], projected[1]);
+        r_end = data.fallback_end_px;
+        return;
+      }
     }
-    /* Fall back to the drag start if the center is off-screen. */
-    r_start = float2(float(RNA_int_get(op->ptr, "xstart")), float(RNA_int_get(op->ptr, "ystart")));
-    return;
+    else if (data.linear_world) {
+      float start_projected[2];
+      float end_projected[2];
+      if (ED_view3d_project_float_global(
+              region, data.line_start, start_projected, V3D_PROJ_TEST_CLIP_DEFAULT) ==
+              V3D_PROJ_RET_OK &&
+          ED_view3d_project_float_global(
+              region, data.line_end, end_projected, V3D_PROJ_TEST_CLIP_DEFAULT) ==
+              V3D_PROJ_RET_OK)
+      {
+        r_start = float2(start_projected[0], start_projected[1]);
+        r_end = float2(end_projected[0], end_projected[1]);
+        return;
+      }
+    }
   }
-  r_start = float2(float(RNA_int_get(op->ptr, "xstart")), float(RNA_int_get(op->ptr, "ystart")));
+  r_start = data.fallback_start_px;
+  r_end = data.fallback_end_px;
 }
 
 /** Screen position of the midpoint marker: along the handle line, at the halfway color point. */
@@ -2963,27 +3278,47 @@ static constexpr float GRADIENT_INTERACTIVE_HANDLE_RADIUS = 10.0f;
 
 static int interactive_hit_test(const ColorGradientInteractiveData &data, const float2 &mval)
 {
-  const float2 mid = interactive_mid_point(data);
-  if (math::distance(mid, mval) <= GRADIENT_INTERACTIVE_HANDLE_RADIUS) {
-    return GRADIENT_HANDLE_MID;
+  /* Nearest marker wins, with each marker's drawn size as its hit radius. Picking the midpoint
+   * first, as this used to, made the start handle unreachable on a short gradient: the midpoint
+   * marker sits on top of it and every press near the start moved the midpoint instead. */
+  struct Handle {
+    int id;
+    float2 point;
+    float radius;
+  };
+  const Handle handles[3] = {
+      {GRADIENT_HANDLE_START, data.start_px, GRADIENT_INTERACTIVE_HANDLE_RADIUS},
+      {GRADIENT_HANDLE_END, data.end_px, GRADIENT_INTERACTIVE_HANDLE_RADIUS},
+      {GRADIENT_HANDLE_MID,
+       interactive_mid_point(data),
+       GRADIENT_INTERACTIVE_HANDLE_RADIUS * 0.75f},
+  };
+  int best = GRADIENT_HANDLE_NONE;
+  float best_dist = GRADIENT_INTERACTIVE_HANDLE_RADIUS;
+  for (const Handle &handle : handles) {
+    const float dist = math::distance(handle.point, mval);
+    if (dist <= handle.radius && dist <= best_dist) {
+      best = handle.id;
+      best_dist = dist;
+    }
   }
-  if (math::distance(data.start_px, mval) <= GRADIENT_INTERACTIVE_HANDLE_RADIUS) {
-    return GRADIENT_HANDLE_START;
-  }
-  if (math::distance(data.end_px, mval) <= GRADIENT_INTERACTIVE_HANDLE_RADIUS) {
-    return GRADIENT_HANDLE_END;
-  }
-  return GRADIENT_HANDLE_NONE;
+  return best;
 }
 
 /** Segment count of the interactive gradient's handle discs. */
 static constexpr int GRADIENT_INTERACTIVE_HANDLE_SEGMENTS = 16;
 
 static void sculpt_color_gradient_interactive_draw(const bContext * /*C*/,
-                                                   ARegion * /*region*/,
+                                                   ARegion *region,
                                                    void *arg)
 {
   const ColorGradientInteractiveData *data = static_cast<ColorGradientInteractiveData *>(arg);
+  /* Project on every draw rather than reusing #ColorGradientInteractiveData::start_px: while the
+   * camera navigates, the region redraws without the modal running, and the line has to follow
+   * the surface anchors instead of the viewport. */
+  float2 start_px;
+  float2 end_px;
+  interactive_handles_project(*data, region, start_px, end_px);
 
   GPU_blend(GPU_BLEND_ALPHA);
   GPU_line_smooth(true);
@@ -2998,7 +3333,7 @@ static void sculpt_color_gradient_interactive_draw(const bContext * /*C*/,
   immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
   /* Dark under-stroke then light core, matching the curve gradient's overlay. */
-  const float2 mid = interactive_mid_point(*data);
+  const float2 mid = math::interpolate(start_px, end_px, data->midpoint);
   for (const int pass : IndexRange(2)) {
     GPU_line_width((pass == 0) ? 3.0f : 1.5f);
     immUniformColor4f(0.0f, 0.0f, 0.0f, 0.55f);
@@ -3006,24 +3341,24 @@ static void sculpt_color_gradient_interactive_draw(const bContext * /*C*/,
       immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
     }
     immBegin(GPU_PRIM_LINE_STRIP, 3);
-    immVertex3f(pos, data->start_px.x, data->start_px.y, 0.0f);
+    immVertex3f(pos, start_px.x, start_px.y, 0.0f);
     immVertex3f(pos, mid.x, mid.y, 0.0f);
-    immVertex3f(pos, data->end_px.x, data->end_px.y, 0.0f);
+    immVertex3f(pos, end_px.x, end_px.y, 0.0f);
     immEnd();
   }
 
-  /* Handles: filled discs with a contrasting outline; the active one is slightly larger. */
+  /* Handles: filled discs with a contrasting outline. */
   const float radius = GRADIENT_INTERACTIVE_HANDLE_RADIUS;
   immUniformColor4f(0.9f, 0.9f, 0.9f, 0.9f);
   imm_draw_circle_fill_3d(
-      pos, data->start_px.x, data->start_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
+      pos, start_px.x, start_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
   imm_draw_circle_fill_3d(
-      pos, data->end_px.x, data->end_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
+      pos, end_px.x, end_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
   imm_draw_circle_fill_3d(
       pos, mid.x, mid.y, radius * 0.45f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
   immUniformColor4f(0.0f, 0.0f, 0.0f, 0.8f);
   GPU_line_width(1.0f);
-  for (const float2 &center : {data->start_px, data->end_px, mid}) {
+  for (const float2 &center : {start_px, end_px, mid}) {
     imm_draw_circle_wire_3d(
         pos, center.x, center.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
   }
@@ -3034,23 +3369,65 @@ static void sculpt_color_gradient_interactive_draw(const bContext * /*C*/,
   GPU_line_smooth(false);
 }
 
-/** Sync the draw overlay's mirrored state and tag the region. */
+/** Sync the draw overlay's mirrored state (world anchors + screen fallbacks) and tag the region. */
 static void interactive_overlay_refresh(bContext *C,
                                         wmOperator *op,
                                         ColorGradientInteractiveData &data)
 {
-  interactive_handles_screen(C, op, data.start_px, data.end_px);
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
+  data.radial = eSculptGradientType(sd.gradient_type) == SCULPT_GRADIENT_RADIAL;
+  if (data.radial) {
+    float center_co[3];
+    RNA_float_get_array(op->ptr, "center", center_co);
+    data.radial_center = float3(center_co[0], center_co[1], center_co[2]);
+  }
+  data.linear_world = !data.radial && RNA_boolean_get(op->ptr, "use_world_line");
+  if (data.linear_world) {
+    float start_co[3];
+    float end_co[3];
+    RNA_float_get_array(op->ptr, "line_start", start_co);
+    RNA_float_get_array(op->ptr, "line_end", end_co);
+    data.line_start = float3(start_co[0], start_co[1], start_co[2]);
+    data.line_end = float3(end_co[0], end_co[1], end_co[2]);
+  }
+  data.fallback_start_px = float2(float(RNA_int_get(op->ptr, "xstart")),
+                                  float(RNA_int_get(op->ptr, "ystart")));
+  data.fallback_end_px = float2(float(RNA_int_get(op->ptr, "xend")),
+                                float(RNA_int_get(op->ptr, "yend")));
   data.midpoint = RNA_float_get(op->ptr, "midpoint");
-  if (ARegion *region = CTX_wm_region(C)) {
+
+  ARegion *region = CTX_wm_region(C);
+  float2 start_px;
+  float2 end_px;
+  interactive_handles_project(data, region, start_px, end_px);
+  data.start_px = start_px;
+  data.end_px = end_px;
+  if (region != nullptr) {
     ED_region_tag_redraw(region);
   }
 }
 
+/** Status bar, not the area header: that would replace the tool header's settings. */
 static void sculpt_color_gradient_interactive_status(bContext *C)
 {
-  if (ScrArea *area = CTX_wm_area(C)) {
-    ED_area_status_text(area, IFACE_("Drag handles: move gradient  Wheel: midpoint  Enter: "
-                                    "apply  Esc: cancel"));
+  ED_workspace_status_text(
+      C,
+      IFACE_("Drag handles: move gradient  Alt+Wheel: midpoint  MMB: orbit/pan, Wheel: "
+             "zoom  Enter: apply, Esc: cancel"));
+}
+
+/** Repaint the preview when a setting of the tool changed since the last paint. */
+static void interactive_settings_sync(bContext *C, wmOperator *op, ColorGradientInteractiveData &data)
+{
+  const GradientSettingsSnapshot current = GradientSettingsSnapshot::from(
+      *CTX_data_tool_settings(C)->sculpt);
+  if (current == data.applied_settings) {
+    return;
+  }
+  data.applied_settings = current;
+  sculpt_color_gradient_exec(C, op);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
   }
 }
 
@@ -3066,6 +3443,14 @@ static void sculpt_color_gradient_interactive_end(bContext *C,
   BLI_assert(data->tag == &GRADIENT_INTERACTIVE_DATA_TAG);
   if (data->region_type != nullptr && data->draw_handle != nullptr) {
     ED_region_draw_cb_exit(data->region_type, data->draw_handle);
+  }
+  if (data->vod != nullptr) {
+    ED_view3d_navigation_free(C, data->vod);
+    data->vod = nullptr;
+  }
+  if (data->timer != nullptr) {
+    WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data->timer);
+    data->timer = nullptr;
   }
   MEM_delete(data);
   op->customdata = nullptr;
@@ -3099,6 +3484,23 @@ static wmOperatorStatus sculpt_color_gradient_interactive_enter(bContext *C, wmO
                                                    REGION_DRAW_POST_PIXEL);
   }
   op->customdata = data;
+  data->vod = ED_view3d_navigation_init(C, nullptr);
+  data->applied_settings = GradientSettingsSnapshot::from(*CTX_data_tool_settings(C)->sculpt);
+  data->timer = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, 1.0 / 30.0);
+  /* A Linear drag writes only screen coordinates, and a line left that way stays glued to the
+   * viewport when the camera orbits. Anchor its ends to the surface now, before the session is
+   * editable, and repaint once so the preview matches the anchored line. Radial already stores
+   * its center in world space. */
+  if (eSculptGradientType(CTX_data_tool_settings(C)->sculpt->gradient_type) ==
+      SCULPT_GRADIENT_LINEAR)
+  {
+    const float2 start_ss(float(RNA_int_get(op->ptr, "xstart")),
+                          float(RNA_int_get(op->ptr, "ystart")));
+    const float2 end_ss(float(RNA_int_get(op->ptr, "xend")), float(RNA_int_get(op->ptr, "yend")));
+    if (gradient_linear_anchors_set(C, op, start_ss, end_ss)) {
+      sculpt_color_gradient_exec(C, op);
+    }
+  }
   interactive_overlay_refresh(C, op, *data);
   WM_cursor_modal_set(CTX_wm_window(C), WM_CURSOR_CROSS);
   sculpt_color_gradient_interactive_status(C);
@@ -3114,11 +3516,42 @@ static wmOperatorStatus sculpt_color_gradient_interactive_modal(bContext *C,
   ColorGradientInteractiveData &data = *static_cast<ColorGradientInteractiveData *>(
       op->customdata);
   BLI_assert(data.tag == &GRADIENT_INTERACTIVE_DATA_TAG);
+  const Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   ARegion *region = CTX_wm_region(C);
   const float2 mval = region != nullptr ?
                           float2(float(event->xy[0] - region->winrct.xmin),
                                  float(event->xy[1] - region->winrct.ymin)) :
                           float2(0.0f);
+
+  const RegionView3D *navigating_rv3d = CTX_wm_region_view3d(C);
+  if (navigating_rv3d == nullptr || (navigating_rv3d->rflag & RV3D_NAVIGATING) == 0) {
+    interactive_settings_sync(C, op, data);
+  }
+
+  /* The context region is always this operator's viewport, wherever the pointer is. A press over
+   * the header, the tool settings, a sidebar or a popover belongs to that UI, so it is handed
+   * back instead of grabbing a handle. A drag in progress keeps control until it is released. */
+  const ScrArea *area = CTX_wm_area(C);
+  const ARegion *region_under_cursor = area != nullptr ?
+                                           ED_area_find_region_xy_visual(
+                                               area, RGN_TYPE_ANY, event->xy) :
+                                           nullptr;
+  const bool over_viewport = region_under_cursor != nullptr &&
+                             region_under_cursor->regiontype == RGN_TYPE_WINDOW;
+  if (event->type == TIMER) {
+    return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
+  }
+  if (!over_viewport && data.dragging == GRADIENT_HANDLE_NONE &&
+      (event->type == EVT_MODAL_MAP ? event->val == GESTURE_MODAL_BEGIN :
+                                      ELEM(event->type,
+                                           LEFTMOUSE,
+                                           MOUSEMOVE,
+                                           WHEELUPMOUSE,
+                                           WHEELDOWNMOUSE,
+                                           INBETWEEN_MOUSEMOVE)))
+  {
+    return OPERATOR_PASS_THROUGH;
+  }
 
   if (event->type == EVT_MODAL_MAP) {
     switch (event->val) {
@@ -3127,8 +3560,7 @@ static wmOperatorStatus sculpt_color_gradient_interactive_modal(bContext *C,
          * gradient on the surface point under the cursor. */
         data.dragging = interactive_hit_test(data, mval);
         if (data.dragging == GRADIENT_HANDLE_NONE &&
-            eSculptGradientType(CTX_data_tool_settings(C)->sculpt->gradient_type) ==
-                SCULPT_GRADIENT_RADIAL)
+            eSculptGradientType(sd.gradient_type) == SCULPT_GRADIENT_RADIAL)
         {
           if (sculpt_color_gradient_radial_center_set(C, op, event)) {
             sculpt_color_gradient_exec(C, op);
@@ -3153,19 +3585,56 @@ static wmOperatorStatus sculpt_color_gradient_interactive_modal(bContext *C,
     }
   }
 
+  /* A modal handler consumes every event it keeps (`PASS_THROUGH | RUNNING_MODAL` is a break in
+   * #wm_handler_operator_call), so the 3D View navigation operators never see the mouse and
+   * orbit/pan/zoom did nothing. Drive navigation from inside the modal, as transform does. */
+  if (ED_view3d_navigation_do(C, data.vod, event, nullptr)) {
+    const RegionView3D *rv3d = CTX_wm_region_view3d(C);
+    if (rv3d != nullptr && (rv3d->rflag & RV3D_NAVIGATING)) {
+      /* Orbiting/panning/zooming: keep the preview untouched while the camera moves. */
+      return OPERATOR_RUNNING_MODAL;
+    }
+    /* The camera settled: a radial gradient's world-space center has to be projected again for
+     * the overlay. The painted result stays as the last preview left it -- Enter commits it. */
+    interactive_overlay_refresh(C, op, data);
+    return OPERATOR_RUNNING_MODAL;
+  }
+
   switch (event->type) {
     case MOUSEMOVE: {
       if (data.dragging == GRADIENT_HANDLE_NONE) {
         return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
       }
+      bool changed = true;
       switch (data.dragging) {
         case GRADIENT_HANDLE_START:
-          RNA_int_set(op->ptr, "xstart", int(mval.x));
-          RNA_int_set(op->ptr, "ystart", int(mval.y));
+          if (eSculptGradientType(sd.gradient_type) == SCULPT_GRADIENT_RADIAL) {
+            /* A radial gradient's start is its world-space center (#GradientGeometry::center);
+             * writing xstart alone moved only the marker and the paint never followed. */
+            changed = sculpt_color_gradient_radial_center_set(C, op, event);
+            if (!changed) {
+              break;
+            }
+            RNA_int_set(op->ptr, "xstart", int(mval.x));
+            RNA_int_set(op->ptr, "ystart", int(mval.y));
+          }
+          else if (RNA_boolean_get(op->ptr, "use_world_line")) {
+            /* Anchored line: the start follows the surface point under the cursor. */
+            changed = gradient_linear_anchor_move(C, op, true, mval);
+          }
+          else {
+            RNA_int_set(op->ptr, "xstart", int(mval.x));
+            RNA_int_set(op->ptr, "ystart", int(mval.y));
+          }
           break;
         case GRADIENT_HANDLE_END:
-          RNA_int_set(op->ptr, "xend", int(mval.x));
-          RNA_int_set(op->ptr, "yend", int(mval.y));
+          if (RNA_boolean_get(op->ptr, "use_world_line")) {
+            changed = gradient_linear_anchor_move(C, op, false, mval);
+          }
+          else {
+            RNA_int_set(op->ptr, "xend", int(mval.x));
+            RNA_int_set(op->ptr, "yend", int(mval.y));
+          }
           break;
         case GRADIENT_HANDLE_MID: {
           const float2 start = data.start_px;
@@ -3182,12 +3651,20 @@ static wmOperatorStatus sculpt_color_gradient_interactive_modal(bContext *C,
         default:
           break;
       }
+      if (!changed) {
+        return OPERATOR_RUNNING_MODAL;
+      }
       sculpt_color_gradient_exec(C, op);
       interactive_overlay_refresh(C, op, data);
       return OPERATOR_RUNNING_MODAL;
     }
     case WHEELUPMOUSE:
     case WHEELDOWNMOUSE: {
+      /* Only with Alt: the plain wheel is the viewport's zoom and is consumed by the navigation
+       * helper above. */
+      if ((event->modifier & KM_ALT) == 0) {
+        return OPERATOR_RUNNING_MODAL;
+      }
       const float step = (event->type == WHEELUPMOUSE) ? GRADIENT_MIDPOINT_STEP :
                                                          -GRADIENT_MIDPOINT_STEP;
       const float midpoint = math::clamp(RNA_float_get(op->ptr, "midpoint") + step,
@@ -3211,9 +3688,7 @@ static wmOperatorStatus sculpt_color_gradient_interactive_modal(bContext *C,
       return OPERATOR_RUNNING_MODAL;
     }
     default:
-      /* Navigation (orbit, pan, zoom) and other unhandled events pass through, so the session
-       * survives camera moves. */
-      return OPERATOR_PASS_THROUGH | OPERATOR_RUNNING_MODAL;
+      return OPERATOR_RUNNING_MODAL;
   }
 }
 
@@ -3392,7 +3867,11 @@ void SCULPT_OT_color_gradient(wmOperatorType *ot)
   ot->cancel = sculpt_color_gradient_cancel;
   ot->poll = sculpt_mode_poll;
 
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+  /* The gesture owns its undo step (sculpt- or image-undo, see #sculpt_color_gradient_init), like
+   * #SCULPT_OT_brush_stroke. A WM-level memfile push here would capture the maps created at
+   * invoke, so the first Ctrl+Z after a successful gradient would remove them again; the maps are
+   * meant to survive an undo of the paint (see #sculpt_color_gradient_canvas_maps_ensure). */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_DEPENDS_ON_CURSOR;
 
   /* rna */
   PropertyRNA *prop = RNA_def_float_vector_xyz(ot->srna,
@@ -3423,10 +3902,38 @@ void SCULPT_OT_color_gradient(wmOperatorType *ot)
                        0.0f,
                        1.0f,
                        "Midpoint",
-                       "Position along the gradient where the halfway color lands (changed with "
-                       "the mouse wheel while dragging)",
+                       "Position along the gradient where the halfway color lands (mouse wheel "
+                       "while dragging, Alt+Wheel in the interactive mode)",
                        GRADIENT_MIDPOINT_MIN,
                        GRADIENT_MIDPOINT_MAX);
+
+  /* Interactive Linear anchoring: the drag only knows screen coordinates, but the line must stay
+   * on the mesh when the camera moves, so the interactive session stores both ends as world-space
+   * surface points here. Hidden and kept over redo, like the radial center. */
+  prop = RNA_def_float_vector_xyz(ot->srna,
+                                  "line_start",
+                                  3,
+                                  nullptr,
+                                  -FLT_MAX,
+                                  FLT_MAX,
+                                  "Line Start",
+                                  "World-space start of the anchored linear gradient",
+                                  -FLT_MAX,
+                                  FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  prop = RNA_def_float_vector_xyz(ot->srna,
+                                  "line_end",
+                                  3,
+                                  nullptr,
+                                  -FLT_MAX,
+                                  FLT_MAX,
+                                  "Line End",
+                                  "World-space end of the anchored linear gradient",
+                                  -FLT_MAX,
+                                  FLT_MAX);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  prop = RNA_def_boolean(ot->srna, "use_world_line", false, "World Line", "");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 
   /* World-space samples of the Curve gradient's drag; stored the moment each point is accepted so
    * the live preview and the redo panel share one source of truth (kept over redo, unlike the

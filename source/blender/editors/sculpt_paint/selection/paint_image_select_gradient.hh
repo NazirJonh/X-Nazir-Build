@@ -81,6 +81,25 @@ struct ImagePaintGradientParams {
   float2 curve_bounds_max = float2(0.0f);
 };
 
+/** How a gradient writes into one canvas image. */
+enum class ImagePaintGradientTargetKind {
+  /** A plain image: the ramp color is blended in with the tool's blend mode. */
+  Image = 0,
+  /**
+   * A color channel map of a material (Base Color, Emission): straight alpha, so the gradient also
+   * gains coverage and shows as itself on an empty texel.
+   */
+  MapColor = 1,
+  /** A scalar or normal channel map: the channel's own value fades in along the gradient. */
+  MapValue = 2,
+};
+
+struct ImagePaintGradientTarget {
+  ImagePaintGradientTargetKind kind = ImagePaintGradientTargetKind::Image;
+  /** #ImagePaintGradientTargetKind::MapValue only: the value written (packed, Non-Color). */
+  float4 value = float4(1.0f);
+};
+
 /** Evaluate gradient parameter t at pixel (tile-local coordinates). */
 float image_paint_gradient_eval_t(const ImagePaintGradientParams &params,
                                   const float2 &start_px,
@@ -140,7 +159,8 @@ void image_paint_gradient_apply_region(const Scene *scene,
                                        const float2 &start_px,
                                        const float2 &end_px,
                                        float midpoint,
-                                       const rcti &work_region);
+                                       const rcti &work_region,
+                                       const ImagePaintGradientTarget &target = {});
 
 struct ImageSelectGradientState;
 

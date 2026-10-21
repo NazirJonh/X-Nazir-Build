@@ -5304,11 +5304,6 @@ def km_image_paint(params):
         ("paint.image_select_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         # Paste selection.
         ("paint.image_select_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
-        # Cycle the shown canvas through the active material's texture paint slots (PBR paint).
-        ("paint.material_canvas_cycle", {"type": 'C', "value": 'PRESS'},
-         {"properties": [("reverse", False), ("keep_view", True)]}),
-        ("paint.material_canvas_cycle", {"type": 'C', "value": 'PRESS', "shift": True},
-         {"properties": [("reverse", True), ("keep_view", True)]}),
         *_template_items_context_panel("VIEW3D_PT_paint_texture_context_menu", params.context_menu_event),
         *_template_asset_shelf_popup("VIEW3D_AST_brush_texture_paint", params.spacebar_action),
         *_template_asset_shelf_popup("IMAGE_AST_brush_paint", params.spacebar_action),
@@ -5316,6 +5311,28 @@ def km_image_paint(params):
 
     if params.legacy:
         items.extend(_template_items_legacy_tools_from_numbers())
+
+    return keymap
+
+
+def km_image_paint_canvas(params):
+    # Separate from "Image Paint": that keymap is only alive while a brush tool is active, but the
+    # shown canvas has to be switchable with every Image Editor paint tool (Gradient, Shapes,
+    # selection tools, ...). The operator's own poll limits it to material paint.
+    items = []
+    keymap = (
+        "Image Paint Canvas",
+        {"space_type": 'EMPTY', "region_type": 'WINDOW'},
+        {"items": items},
+    )
+
+    items.extend([
+        # Cycle the shown canvas through the active material's texture paint slots (PBR paint).
+        ("paint.material_canvas_cycle", {"type": 'C', "value": 'PRESS'},
+         {"properties": [("reverse", False), ("keep_view", True)]}),
+        ("paint.material_canvas_cycle", {"type": 'C', "value": 'PRESS', "shift": True},
+         {"properties": [("reverse", True), ("keep_view", True)]}),
+    ])
 
     return keymap
 
@@ -9965,6 +9982,7 @@ def generate_keymaps(params=None):
         km_paint_curve(params),
         km_image_paint_selection_floating_3d(params),
         km_image_paint(params),
+        km_image_paint_canvas(params),
         km_vertex_paint(params),
         km_weight_paint(params),
         km_paint_face_mask(params),

@@ -354,11 +354,13 @@ class VIEW3D_PT_paint_canvas_npanel(Panel):
         ob = context.active_object
         if ob is None or ob.mode != 'SCULPT':
             return False
-        # The Color Gradient and shape tools write into the same material channels as the Paint
-        # brush.
+        # The Color Gradient tool picks the channels it writes in its own header popover, so the
+        # PBR Paint panel would only duplicate that choice for it; the panel stays out of the way.
+        # Shape tools do write the same material channels as the Paint brush.
         tool = context.workspace.tools.from_space_view3d_mode('SCULPT', create=False)
-        if tool is not None and (tool.idname == "builtin.color_gradient" or
-                                 tool.idname.startswith("builtin.paint_shape_")):
+        if tool is not None and tool.idname == "builtin.color_gradient":
+            return False
+        if tool is not None and tool.idname.startswith("builtin.paint_shape_"):
             return True
         # Material Paint channels only work with the Paint brush type; deformation brushes
         # (Grab, Smooth, etc.) have no material-channel sampling/blending behind them.
@@ -421,6 +423,32 @@ class VIEW3D_PT_sculpt_color_gradient_ramp_advanced(Panel):
             layout.prop(coba, "hue_interpolation", text="Interpolation")
         else:
             layout.prop(coba, "interpolation", text="Interpolation")
+
+
+class VIEW3D_PT_sculpt_color_gradient_channels(Panel):
+    # Popover only, shown from the Color Gradient tool's header. The toggles are the gesture's one
+    # channel selector: the PBR Paint panel stays hidden for this tool, so its channel list is not
+    # a second place to change the same brush flags. A channel switched off here neither gets a
+    # map created nor painted.
+    bl_label = "Channels"
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        sculpt = context.tool_settings.sculpt
+        brush = sculpt.brush if sculpt is not None else None
+        return brush is not None and brush.material_paint is not None
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.tool_settings.sculpt
+        from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+        draw_material_paint_channel_toggles(
+            layout, settings.brush, settings,
+            show_custom=(context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT'),
+        )
 
 
 class VIEW3D_PT_sculpt_color_gradient_curve_advanced(Panel):
@@ -3103,6 +3131,7 @@ classes = (
     VIEW3D_PT_tools_brush_select,
     VIEW3D_PT_paint_canvas_npanel,
     VIEW3D_PT_sculpt_color_gradient_ramp_advanced,
+    VIEW3D_PT_sculpt_color_gradient_channels,
     VIEW3D_PT_sculpt_color_gradient_curve_advanced,
     VIEW3D_PT_tools_brush_settings,
     VIEW3D_PT_tools_brush_color,

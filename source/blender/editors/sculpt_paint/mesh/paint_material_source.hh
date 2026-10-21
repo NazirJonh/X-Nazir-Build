@@ -199,12 +199,27 @@ Image *mask_target_image_get(Object &ob);
  * The map a Mask-mode write (Fill, Gradient, Shape) paints into: the active layer's mask map,
  * created on the first call so the first gesture is not a silent no-op. The single resolution all
  * Mask writers share, so none of them can pick a different map or grow a content channel instead.
- * Runs on the main thread, inside the gesture's undo group.
+ * Runs on the main thread before the gesture opens its undo step. The created map is a persistent
+ * side effect and is not part of that step, so cancelling or undoing the gesture keeps it.
  *
  * \return null when the object has no layered material, the mask row is hidden or switched off
  * (object-masked), or the mask has no writable record.
  */
 Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings);
+
+/**
+ * Like #mask_target_image_ensure, for callers that only need the map to exist. Tags the file as
+ * modified when this call created the map (see #layer_maps_created_tag).
+ *
+ * \return true when a map was created.
+ */
+bool mask_target_image_create_if_missing(Main *bmain, Object &ob, const PaintModeSettings &settings);
+
+/**
+ * Map creation is deliberately not part of any stroke's undo step, so nothing else marks the file
+ * dirty when the stroke is cancelled afterwards: callers that created layer maps call this once.
+ */
+void layer_maps_created_tag();
 
 /**
  * Which #MTex each material paint channel samples from, and whether it is usable.

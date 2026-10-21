@@ -1579,6 +1579,25 @@ class IMAGE_PT_paint_select_gradient_advanced(Panel):
             layout.prop(coba, "interpolation", text="Interpolation")
 
 
+class IMAGE_PT_paint_select_gradient_channels(Panel):
+    # Popover only, shown from the gradient tool's header: the channel toggles are the gesture's one
+    # channel selector, the same brush flags the Paint brush uses.
+    bl_label = "Channels"
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    @classmethod
+    def poll(cls, context):
+        imapaint = context.tool_settings.image_paint
+        return imapaint is not None and imapaint.brush is not None and imapaint.brush.material_paint is not None
+
+    def draw(self, context):
+        from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+        imapaint = context.tool_settings.image_paint
+        draw_material_paint_channel_toggles(self.layout, imapaint.brush, imapaint, show_custom=False)
+
+
 class IMAGE_PT_material_paint_channel_visibility(Panel):
     bl_label = "Visible Channels"
     bl_space_type = 'IMAGE_EDITOR'
@@ -2672,6 +2691,7 @@ classes = (
     IMAGE_PT_paint_select_transform,
     IMAGE_PT_paint_select_move_props,
     IMAGE_PT_paint_select_gradient_advanced,
+    IMAGE_PT_paint_select_gradient_channels,
     IMAGE_PT_material_paint_channel_visibility,
     IMAGE_PT_paint_canvas,
     IMAGE_PT_paint_settings,

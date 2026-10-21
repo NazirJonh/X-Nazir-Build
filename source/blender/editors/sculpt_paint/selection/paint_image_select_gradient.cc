@@ -42,6 +42,7 @@
 #include "BKE_image_paint_selection.hh"
 #include "BKE_library.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_generate.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_undo_system.hh"
@@ -74,6 +75,7 @@
 
 #include "../../space_image/image_runtime.hh"
 #include "../paint_gradient_curve.hh"
+#include "../mesh/paint_material_source.hh"
 #include "../paint_intern.hh"
 #include "paint_image_select_gradient.hh"
 #include "paint_image_select_intern.hh"
@@ -328,7 +330,7 @@ void image_paint_gradient_ensure_colorband(ImagePaintSettings &imapaint)
    * default two-stop black -> white ramp on first use so the widget and evaluation always have a
    * valid color band. */
   if (imapaint.gradient_colorband.tot == 0) {
-    BKE_colorband_init(&imapaint.gradient_colorband, true);
+    BKE_colorband_init_gradient_default(&imapaint.gradient_colorband);
   }
 }
 
@@ -549,6 +551,7 @@ struct GradientRowTaskData {
   float2 start_px;
   float2 end_px;
   float midpoint;
+  ImagePaintGradientTarget target;
   /**
    * Curve type: shift from this tile's local pixel space into the curve's own space (the canvas
    * pixels of the tile it was drawn on), see #image_paint_gradient_apply_region.
@@ -667,10 +670,30 @@ static void image_paint_gradient_composite_pixel_float(const GradientRowTaskData
     }
   }
 
+  if (data.target.kind == ImagePaintGradientTargetKind::MapValue) {
+    /* Same fade as the sculpt gradient: the channel value at the start, the original at the end. */
+    const float weight = (1.0f - t) * data.params.opacity * sel_w;
+    for (int i = 0; i < 3; i++) {
+      dst_px[i] += (data.target.value[i] - dst_px[i]) * weight;
+    }
+    dst_px[3] += weight * (1.0f - dst_px[3]);
+    return;
+  }
+
   float brush_col[4] = {grad_col[0], grad_col[1], grad_col[2], grad_col[3]};
   brush_col[3] *= sel_w;
+  const float straight_col[3] = {brush_col[0], brush_col[1], brush_col[2]};
   mul_v3_fl(brush_col, brush_col[3]);
+  const float dst_alpha = dst_px[3];
   IMB_blend_color_float(dst_px, dst_px, brush_col, data.params.blend_mode);
+  if (data.target.kind == ImagePaintGradientTargetKind::MapColor) {
+    /* A map is a straight-alpha layer. An empty texel has no color for the blend mode to act on
+     * (a fresh Paint row's map is fully transparent), so the gradient shows as itself there. */
+    if (dst_alpha <= 0.0f) {
+      copy_v3_v3(dst_px, straight_col);
+    }
+    dst_px[3] = dst_alpha + brush_col[3] * (1.0f - dst_alpha);
+  }
 }
 
 static void image_paint_gradient_composite_pixel_byte(const GradientRowTaskData &data,
@@ -695,11 +718,34 @@ static void image_paint_gradient_composite_pixel_byte(const GradientRowTaskData 
     }
   }
 
+  if (data.target.kind == ImagePaintGradientTargetKind::MapValue) {
+    /* Scalar and normal maps are Non-Color, so the packed value is written as is. */
+    const float weight = (1.0f - t) * data.params.opacity * sel_w;
+    float dst_f[4];
+    rgba_uchar_to_float(dst_f, dst_px);
+    for (int i = 0; i < 3; i++) {
+      dst_f[i] += (data.target.value[i] - dst_f[i]) * weight;
+    }
+    dst_f[3] += weight * (1.0f - dst_f[3]);
+    rgba_float_to_uchar(dst_px, dst_f);
+    return;
+  }
+
   float brush_col[4] = {grad_col[0], grad_col[1], grad_col[2], grad_col[3]};
   brush_col[3] *= sel_w;
   uchar brush_byte[4];
   rgba_float_to_uchar(brush_byte, brush_col);
+  const float dst_alpha = float(dst_px[3]) / 255.0f;
   IMB_blend_color_byte(dst_px, dst_px, brush_byte, data.params.blend_mode);
+  if (data.target.kind == ImagePaintGradientTargetKind::MapColor) {
+    /* See the float variant: straight-alpha layer, the gradient shows as itself on an empty
+     * texel. */
+    if (dst_alpha <= 0.0f) {
+      copy_v3_v3_uchar(dst_px, brush_byte);
+    }
+    const float alpha = dst_alpha + brush_col[3] * (1.0f - dst_alpha);
+    dst_px[3] = uchar(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+  }
 }
 
 static void image_paint_gradient_row_task(void *__restrict userdata,
@@ -764,9 +810,11 @@ void image_paint_gradient_apply_region(const Scene *scene,
                                        const float2 &start_px,
                                        const float2 &end_px,
                                        const float midpoint,
-                                       const rcti &work_region)
+                                       const rcti &work_region,
+                                       const ImagePaintGradientTarget &target)
 {
   GradientRowTaskData task_data{};
+  task_data.target = target;
   task_data.scene = scene;
   task_data.image = image;
   task_data.tile_number = tile_number;
@@ -847,6 +895,7 @@ static void image_paint_gradient_apply_preview_uv(const Scene *scene,
                                                   const float2 &start_uv,
                                                   const float2 &end_uv,
                                                   const float midpoint,
+                                                  const ImagePaintGradientTarget &target,
                                                   const rcti *viewport_clip,
                                                   rcti &painted_region,
                                                   rcti &r_work_region)
@@ -912,8 +961,16 @@ static void image_paint_gradient_apply_preview_uv(const Scene *scene,
                           (start_uv.y - tile_origin.y) * canvas_ibuf->y);
     const float2 end_px((end_uv.x - tile_origin.x) * canvas_ibuf->x,
                         (end_uv.y - tile_origin.y) * canvas_ibuf->y);
-    image_paint_gradient_apply_region(
-        scene, image, tile_number, canvas_ibuf, params, start_px, end_px, midpoint, work_region);
+    image_paint_gradient_apply_region(scene,
+                                      image,
+                                      tile_number,
+                                      canvas_ibuf,
+                                      params,
+                                      start_px,
+                                      end_px,
+                                      midpoint,
+                                      work_region,
+                                      target);
   }
 
   /* Track what is left dirty. A full pass repaints everything it restored, so the dirty set is
@@ -941,6 +998,13 @@ static void image_paint_gradient_apply_preview_uv(const Scene *scene,
  * \{ */
 
 struct ImageSelectGradientTileData {
+  /**
+   * The image this tile belongs to. A gradient on a material canvas writes several channel maps
+   * at once, so a session holds the tiles of every target image side by side.
+   */
+  Image *image = nullptr;
+  /** How the gradient writes into #image; refreshed on every sync (the channel value can change). */
+  ImagePaintGradientTarget target;
   int tile_number = 1001;
   ImageUser iuser = {};
   /** Full-tile, pixel-identical copy of the canvas at session start. Doubles as the preview
@@ -993,6 +1057,8 @@ struct ImageSelectGradientState : public PaintSelectFloatingSession {
   double last_preview_time = 0.0;
   bool preview_pending = false;
   uint64_t applied_settings_revision = 0;
+  /** #image_select_gradient_canvases_key of the last preview pass. */
+  uint64_t applied_canvases_key = 0;
 
   /** #bToolRef.idname of the tool that owned the session at start (empty if it could not be
    * resolved). The modal commits and tears down once the active tool no longer matches this, so
@@ -1001,10 +1067,10 @@ struct ImageSelectGradientState : public PaintSelectFloatingSession {
 };
 
 static ImageSelectGradientTileData *image_select_gradient_find_tile(
-    ImageSelectGradientState *state, const int tile_number)
+    ImageSelectGradientState *state, const Image *image, const int tile_number)
 {
   for (ImageSelectGradientTileData &tile : state->tiles) {
-    if (tile.tile_number == tile_number) {
+    if (tile.image == image && tile.tile_number == tile_number) {
       return &tile;
     }
   }
@@ -1425,14 +1491,155 @@ static void image_select_gradient_collect_affected_tiles(
   }
 }
 
+/** One image the gradient writes into, with how it writes. */
+struct GradientCanvasSpec {
+  Image *image = nullptr;
+  ImageUser iuser = {};
+  ImagePaintGradientTarget target;
+};
+
+/** Whether the gradient paints the active material's channel maps instead of the shown image. */
+static bool image_select_gradient_uses_material_maps(const Scene *scene)
+{
+  const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+  /* A Mask gesture keeps writing the image the editor shows: the mask map is that image. */
+  return paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL &&
+         paint_mode.layer_target_mode != PAINT_LAYER_TARGET_MASK;
+}
+
+/**
+ * The images the gradient writes into right now. The shown image for a plain canvas; for a
+ * material canvas the maps of every channel the tool's channel toggles enable, so toggling a
+ * channel while the gradient floats adds or drops that map from the preview. A material canvas
+ * never falls back to the shown image: a missing map is a refusal, not a write somewhere else.
+ */
+static Vector<GradientCanvasSpec> image_select_gradient_canvases_get(bContext *C,
+                                                                     const SpaceImage *sima)
+{
+  Vector<GradientCanvasSpec> specs;
+  Scene *scene = CTX_data_scene(C);
+  if (!image_select_gradient_uses_material_maps(scene)) {
+    if (sima->image != nullptr) {
+      GradientCanvasSpec spec;
+      spec.image = sima->image;
+      spec.iuser = sima->iuser;
+      specs.append(spec);
+    }
+    return specs;
+  }
+
+  Object *ob = CTX_data_active_object(C);
+  ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
+  const Brush *brush = BKE_paint_brush_for_read(&imapaint.paint);
+  if (ob == nullptr || brush == nullptr || brush->material_paint == nullptr) {
+    return specs;
+  }
+  for (const PaintMaterialImageTarget &target : BKE_paint_material_image_targets_get(
+           *ob, scene->toolsettings->paint_mode, brush->material_paint, imapaint.paint.visible_material_channels))
+  {
+    GradientCanvasSpec spec;
+    spec.image = target.image;
+    if (target.iuser != nullptr) {
+      spec.iuser = *target.iuser;
+    }
+    else {
+      BKE_imageuser_default(&spec.iuser);
+    }
+    if (target.is_color_channel) {
+      spec.target.kind = ImagePaintGradientTargetKind::MapColor;
+    }
+    else {
+      spec.target.kind = ImagePaintGradientTargetKind::MapValue;
+      if (target.is_normal_channel) {
+        /* Packed into 0..1 like the brush does, so byte and float maps share one value. */
+        float packed[3];
+        BKE_pbr_normal_pack(target.color, false, packed);
+        spec.target.value = float4(packed[0], packed[1], packed[2], 1.0f);
+      }
+      else {
+        spec.target.value = float4(target.value, target.value, target.value, 1.0f);
+      }
+    }
+    specs.append(spec);
+  }
+  return specs;
+}
+
+/**
+ * Make the channel maps the gradient is about to write exist, like a brush stroke does at its
+ * start. Runs in invoke, on the main thread, before the session opens its undo step: the created
+ * maps are a persistent side effect and are not part of that step. Reports and returns false when
+ * a material canvas has no writable map, so the gesture refuses instead of painting elsewhere.
+ */
+static bool image_select_gradient_canvases_prepare(bContext *C,
+                                                   wmOperator *op,
+                                                   const SpaceImage *sima)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (!image_select_gradient_uses_material_maps(scene)) {
+    return true;
+  }
+  Object *ob = CTX_data_active_object(C);
+  Main *bmain = CTX_data_main(C);
+  ImagePaintSettings &imapaint = scene->toolsettings->imapaint;
+  Brush *brush = BKE_paint_brush(&imapaint.paint);
+  if (ob != nullptr && brush != nullptr) {
+    BKE_brush_material_paint_ensure(brush);
+    if (brush->material_paint != nullptr &&
+        BKE_paint_material_images_ensure_writable(*bmain,
+                                                  *ob,
+                                                  *brush->material_paint,
+                                                  scene->toolsettings->paint_mode,
+                                                  imapaint.paint.visible_material_channels)
+                .created > 0)
+    {
+      ed::sculpt_paint::material::layer_maps_created_tag();
+      /* The new map has no image node yet: regenerate before the session captures its backups. */
+      BKE_paint_layers_regenerate_tagged(*bmain);
+      CTX_data_ensure_evaluated_depsgraph(C);
+    }
+  }
+  if (image_select_gradient_canvases_get(C, sima).is_empty()) {
+    BKE_report(op->reports,
+               RPT_WARNING,
+               "Gradient: the active material has no enabled channel with a writable map; "
+               "enable a channel in the tool settings");
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Fingerprint of what the gradient writes right now (images, how, and the channel values). The
+ * channel toggles are brush flags, so no RNA update reaches the gradient's settings revision when
+ * one is switched; the session compares this key instead to repaint the preview.
+ */
+static uint64_t image_select_gradient_canvases_key(bContext *C, const SpaceImage *sima)
+{
+  uint64_t key = 1469598103934665603ull;
+  const auto mix = [&key](const uint64_t value) { key = (key ^ value) * 1099511628211ull; };
+  for (const GradientCanvasSpec &spec : image_select_gradient_canvases_get(C, sima)) {
+    mix(uint64_t(reinterpret_cast<uintptr_t>(spec.image)));
+    mix(uint64_t(spec.target.kind));
+    for (int i = 0; i < 3; i++) {
+      uint32_t bits;
+      std::memcpy(&bits, &spec.target.value[i], sizeof(bits));
+      mix(bits);
+    }
+  }
+  return key;
+}
+
 static bool image_select_gradient_init_tile_backup(bContext * /*C*/,
-                                                   Image *ima,
-                                                   SpaceImage *sima,
+                                                   const GradientCanvasSpec &spec,
                                                    const int tile_number,
                                                    ImageSelectGradientTileData &tile)
 {
+  Image *ima = spec.image;
+  tile.image = ima;
+  tile.target = spec.target;
   tile.tile_number = tile_number;
-  tile.iuser = sima->iuser;
+  tile.iuser = spec.iuser;
   tile.iuser.tile = tile_number;
   /* The fresh backup equals the canvas, so nothing is dirty yet. */
   BLI_rcti_init(&tile.painted_region, 0, 0, 0, 0);
@@ -1485,31 +1692,48 @@ static void image_select_gradient_sync_tile_backups(bContext *C,
                                                     ImageSelectGradientState *state,
                                                     const ImagePaintGradientParams &params)
 {
-  Image *ima = state->owner_sima->image;
   Scene *scene = CTX_data_scene(C);
-  SpaceImage *sima = state->owner_sima;
+  const Vector<GradientCanvasSpec> specs = image_select_gradient_canvases_get(C,
+                                                                              state->owner_sima);
 
-  Vector<int> needed_tiles;
-  image_select_gradient_collect_affected_tiles(
-      ima, scene, params, state->start_tile_number, state->end_uv, needed_tiles);
+  /* Every (image, tile) pair the gradient touches now. */
+  Vector<std::pair<const Image *, int>> needed;
+  Vector<Vector<int>> needed_tiles_per_spec;
+  for (const GradientCanvasSpec &spec : specs) {
+    Vector<int> tile_numbers;
+    image_select_gradient_collect_affected_tiles(
+        spec.image, scene, params, state->start_tile_number, state->end_uv, tile_numbers);
+    for (const int tile_number : tile_numbers) {
+      needed.append({spec.image, tile_number});
+    }
+    needed_tiles_per_spec.append(std::move(tile_numbers));
+  }
 
+  /* A channel switched off, or a tile no longer reached, is rolled back to its backup. */
   for (int i = state->tiles.size() - 1; i >= 0; i--) {
     ImageSelectGradientTileData &tile = state->tiles[i];
-    if (needed_tiles.contains(tile.tile_number)) {
+    if (needed.contains({tile.image, tile.tile_number})) {
       continue;
     }
-    image_select_gradient_restore_tile_backup(C, ima, tile);
+    image_select_gradient_restore_tile_backup(C, tile.image, tile);
     image_select_gradient_free_tile_data(tile);
     state->tiles.remove_and_reorder(i);
   }
 
-  for (const int tile_number : needed_tiles) {
-    if (image_select_gradient_find_tile(state, tile_number)) {
-      continue;
-    }
-    ImageSelectGradientTileData tile;
-    if (image_select_gradient_init_tile_backup(C, ima, sima, tile_number, tile)) {
-      state->tiles.append(tile);
+  for (const int spec_i : specs.index_range()) {
+    const GradientCanvasSpec &spec = specs[spec_i];
+    for (const int tile_number : needed_tiles_per_spec[spec_i]) {
+      if (ImageSelectGradientTileData *existing = image_select_gradient_find_tile(
+              state, spec.image, tile_number))
+      {
+        /* The channel value (or its kind) can change while the session floats. */
+        existing->target = spec.target;
+        continue;
+      }
+      ImageSelectGradientTileData tile;
+      if (image_select_gradient_init_tile_backup(C, spec, tile_number, tile)) {
+        state->tiles.append(tile);
+      }
     }
   }
 }
@@ -1538,16 +1762,19 @@ static void image_select_gradient_run_preview(bContext *C,
                                               const bool commit_to_image,
                                               const bool use_viewport_clip)
 {
-  Image *ima = state->owner_sima->image;
   Scene *scene = CTX_data_scene(C);
 
   image_select_gradient_sync_tile_backups(C, state, params);
 
   /* Obtain the viewport region once; nullptr disables clipping (full-tile update). */
   const ARegion *vp_region = (use_viewport_clip && !commit_to_image) ? CTX_wm_region(C) : nullptr;
-  bool gpu_textures_changed = false;
+  /* Every image of the session, and whether any of its tiles changed on screen. */
+  Vector<Image *> session_images;
+  Vector<Image *> gpu_changed_images;
 
   for (ImageSelectGradientTileData &tile : state->tiles) {
+    Image *ima = tile.image;
+    session_images.append_non_duplicates(ima);
     void *lock = nullptr;
     ImBuf *ibuf = BKE_image_acquire_ibuf(ima, &tile.iuser, &lock);
     if (!ibuf) {
@@ -1578,6 +1805,7 @@ static void image_select_gradient_run_preview(bContext *C,
                                           state->start_uv,
                                           state->end_uv,
                                           state->midpoint,
+                                          tile.target,
                                           viewport_clip_ptr,
                                           tile.painted_region,
                                           work_region);
@@ -1593,29 +1821,31 @@ static void image_select_gradient_run_preview(bContext *C,
     if (!BLI_rcti_is_empty(&work_region)) {
       const ImageTile *itile = BKE_image_get_tile(ima, tile.tile_number);
       BKE_image_partial_update_mark_region(ima, itile, ibuf, &work_region);
-      gpu_textures_changed = true;
+      gpu_changed_images.append_non_duplicates(ima);
     }
 
     BKE_image_release_ibuf(ima, ibuf, lock);
   }
 
-  if (gpu_textures_changed) {
+  for (Image *ima : gpu_changed_images) {
     /* Partial-update registration is consumed asynchronously and does not itself upload pixels.
      * Releasing the cached texture forces the Image Editor to recreate its UDIM texture array from
      * the preview ImBufs on the following redraw. */
     BKE_image_free_gputextures(ima);
   }
 
-  if (commit_to_image) {
-    DEG_id_tag_update(&ima->id, 0);
-    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
-  }
-  else {
-    /* Preview: use NC_IMAGE | NA_EDITED to trigger GPU texture cache refresh.
-     * BKE_image_mark_dirty is NOT called, so the image will not be flagged as modified.
-     * ID_RECALC_EDITORS is sufficient (lighter than full DEG recalc). */
-    DEG_id_tag_update(&ima->id, ID_RECALC_EDITORS);
-    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+  for (Image *ima : session_images) {
+    if (commit_to_image) {
+      DEG_id_tag_update(&ima->id, 0);
+      WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+    }
+    else {
+      /* Preview: use NC_IMAGE | NA_EDITED to trigger GPU texture cache refresh.
+       * BKE_image_mark_dirty is NOT called, so the image will not be flagged as modified.
+       * ID_RECALC_EDITORS is sufficient (lighter than full DEG recalc). */
+      DEG_id_tag_update(&ima->id, ID_RECALC_EDITORS);
+      WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+    }
   }
   ARegion *region = CTX_wm_region(C);
   if (region) {
@@ -1844,7 +2074,7 @@ static void draw_gradient_vector_overlay(const bContext *C, ARegion *region, voi
 
 static void image_select_gradient_begin_session(bContext *C,
                                                 wmOperator * /*op*/,
-                                                Image *ima,
+                                                Image * /*ima*/,
                                                 SpaceImage *sima,
                                                 const int tile_number,
                                                 const float2 &start_uv)
@@ -1862,6 +2092,7 @@ static void image_select_gradient_begin_session(bContext *C,
   state->end_uv = start_uv;
   state->midpoint = 0.5f;
   state->applied_settings_revision = image_paint_gradient_settings_revision;
+  state->applied_canvases_key = image_select_gradient_canvases_key(C, sima);
   /* Remember the owning tool so the modal can commit when the user switches to another one. */
   if (const bToolRef *tref = WM_toolsystem_ref_from_context(C)) {
     STRNCPY(state->owner_tool_idname, tref->idname);
@@ -1870,14 +2101,17 @@ static void image_select_gradient_begin_session(bContext *C,
   Scene *scene = CTX_data_scene(C);
   /* Refresh the derived face-selection masks before the session collects its tiles and starts
    * previewing: otherwise a face-selection-only mask would be ignored until the commit, so the
-   * drag preview would neither show nor clip by it. */
-  image_paint_selection_mask_from_face_selection(C, scene, ima);
+   * drag preview would neither show nor clip by it. Every written image has its own. */
+  const Vector<GradientCanvasSpec> specs = image_select_gradient_canvases_get(C, sima);
+  for (const GradientCanvasSpec &spec : specs) {
+    image_paint_selection_mask_from_face_selection(C, scene, spec.image);
+  }
   const ImagePaintGradientParams params = image_select_gradient_current_params(scene, state);
   image_select_gradient_sync_tile_backups(C, state, params);
 
-  if (state->tiles.is_empty()) {
+  if (state->tiles.is_empty() && !specs.is_empty()) {
     ImageSelectGradientTileData tile;
-    if (image_select_gradient_init_tile_backup(C, ima, sima, tile_number, tile)) {
+    if (image_select_gradient_init_tile_backup(C, specs.first(), tile_number, tile)) {
       state->tiles.append(tile);
     }
   }
@@ -1887,9 +2121,10 @@ static void image_select_gradient_begin_session(bContext *C,
     return;
   }
 
-  /* Pixel dimensions of the originating tile define the curve's pixel-space conversions. */
+  /* Pixel dimensions of the originating tile define the curve's pixel-space conversions. The
+   * maps of one material share a resolution, so the first image stands for all of them. */
   if (ImageSelectGradientTileData *start_tile = image_select_gradient_find_tile(
-          state, state->start_tile_number))
+          state, specs.first().image, state->start_tile_number))
   {
     if (start_tile->undo_ibuf != nullptr) {
       state->tile_size = int2(start_tile->undo_ibuf->x, start_tile->undo_ibuf->y);
@@ -1909,12 +2144,8 @@ static void image_select_gradient_begin_session(bContext *C,
 static void image_select_gradient_restore_session_backup(bContext *C,
                                                          ImageSelectGradientState *state)
 {
-  Image *ima = state->owner_sima ? state->owner_sima->image : nullptr;
-  if (!ima) {
-    return;
-  }
   for (const ImageSelectGradientTileData &tile : state->tiles) {
-    image_select_gradient_restore_tile_backup(C, ima, tile);
+    image_select_gradient_restore_tile_backup(C, tile.image, tile);
   }
 }
 
@@ -1950,13 +2181,14 @@ void image_select_gradient_session_cancel(bContext *C, SpaceImage *sima)
 
 static void image_select_gradient_apply_session(bContext *C, ImageSelectGradientState *state)
 {
-  Image *ima = state->owner_sima->image;
   Scene *scene = CTX_data_scene(C);
-  /* Face selection masking: rebuild the image's derived 2D selection masks from the canvas
-   * objects' face selections before the mask state is read below. The derived state is Active only
-   * when at least one object has an active selection; with no active selection the masks are freed
-   * and painting is unrestricted (a no-op with the flag off). */
-  image_paint_selection_mask_from_face_selection(C, scene, ima);
+  /* Face selection masking: rebuild each written image's derived 2D selection masks from the
+   * canvas objects' face selections before the mask state is read below. The derived state is
+   * Active only when at least one object has an active selection; with no active selection the
+   * masks are freed and painting is unrestricted (a no-op with the flag off). */
+  for (const GradientCanvasSpec &spec : image_select_gradient_canvases_get(C, state->owner_sima)) {
+    image_paint_selection_mask_from_face_selection(C, scene, spec.image);
+  }
   const ImagePaintGradientParams params = image_select_gradient_current_params(scene, state);
 
   image_select_gradient_run_preview(C, state, params, true, /*use_viewport_clip=*/false);
@@ -1965,25 +2197,30 @@ static void image_select_gradient_apply_session(bContext *C, ImageSelectGradient
     return;
   }
 
+  /* One undo step for the whole gradient, however many channel maps it wrote. */
   ImageUndoStep *us_open = nullptr;
   bool first_undo = true;
+  Vector<Image *> images;
 
   for (const ImageSelectGradientTileData &tile : state->tiles) {
     ImageUser iuser = tile.iuser;
+    images.append_non_duplicates(tile.image);
     if (first_undo) {
-      ED_image_undo_push_begin_with_image("Gradient", ima, tile.undo_ibuf, &iuser);
+      ED_image_undo_push_begin_with_image("Gradient", tile.image, tile.undo_ibuf, &iuser);
       us_open = image_select_undo_session_step_get();
       first_undo = false;
     }
     else if (us_open) {
-      ED_image_undo_push(ima, tile.undo_ibuf, &iuser, us_open);
+      ED_image_undo_push(tile.image, tile.undo_ibuf, &iuser, us_open);
     }
-    ED_image_undo_capture_selection_mask(ima, tile.tile_number);
+    ED_image_undo_capture_selection_mask(tile.image, tile.tile_number);
   }
   ED_image_undo_push_end();
 
-  DEG_id_tag_update(&ima->id, 0);
-  WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+  for (Image *ima : images) {
+    DEG_id_tag_update(&ima->id, 0);
+    WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
+  }
 }
 
 /** \} */
@@ -2254,6 +2491,9 @@ static wmOperatorStatus image_select_gradient_invoke(bContext *C,
   }
 
   if (drag_mode == GradientDragMode::New && !existing) {
+    if (!image_select_gradient_canvases_prepare(C, op, sima)) {
+      return OPERATOR_CANCELLED;
+    }
     image_select_gradient_begin_session(C, op, ima, sima, tile_number, start_uv);
     existing = image_select_gradient_state_get(sima);
     if (!existing) {
@@ -2394,7 +2634,11 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
 
   /* Timer tick: refresh preview if settings changed in the panel without mouse movement. */
   if (event->type == TIMER) {
-    if (state->applied_settings_revision != image_paint_gradient_settings_revision ||
+    /* A channel toggle is a brush flag and bumps no revision: compare what is written instead. */
+    const uint64_t canvases_key = image_select_gradient_canvases_key(C, sima);
+    const bool canvases_changed = canvases_key != state->applied_canvases_key;
+    state->applied_canvases_key = canvases_key;
+    if (canvases_changed || state->applied_settings_revision != image_paint_gradient_settings_revision ||
         state->preview_pending)
     {
       image_select_gradient_update_preview(C, state, true);

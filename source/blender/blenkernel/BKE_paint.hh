@@ -1826,7 +1826,9 @@ struct PaintMaterialImagesEnsureResult {
  * A layered material grows its description instead: the active row gets a map for every channel
  * the brush writes and the row has a record for (a record that is switched off, or a channel the row
  * lacks, is left alone). No #Image::paint_layer_id is written: the map's owner is the description.
- * This is an ID creation, so it runs in a stroke's invoke, inside the stroke's undo group.
+ * This is an ID creation and a persistent side effect, deliberately not part of the stroke's undo
+ * step: callers run it in the stroke's invoke, before that step opens. Cancelling the stroke or
+ * undoing its paint keeps the maps, so a retry does not recreate them.
  */
 PaintMaterialImagesEnsureResult BKE_paint_material_images_ensure_writable(
     Main &bmain,

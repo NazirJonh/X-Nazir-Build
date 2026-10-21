@@ -220,16 +220,23 @@ void composite_targets_ensure_writable(bContext *C,
   if (mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK) {
     /* A mask is one map, and only a layered material has one. Never grow a Principled Base
      * Color map for a material that has no mask. */
-    ed::sculpt_paint::material::mask_target_image_ensure(CTX_data_main(C), *ob, mode_settings);
+    ed::sculpt_paint::material::mask_target_image_create_if_missing(
+        CTX_data_main(C), *ob, mode_settings);
     return;
   }
   if (Main *bmain = CTX_data_main(C)) {
     /* Pass the shape's channel mask (brush channels OR override channels), so override
-     * channels get their maps created too. Must stay on the main thread inside the stroke's
-     * undo group; the write paths never allocate. */
+     * channels get their maps created too. Must stay on the main thread before the bake opens its
+     * undo step; the maps are a persistent side effect and are not part of that step, so cancelling
+     * or undoing the bake keeps them. The write paths never allocate. */
     const uint32_t channels = BKE_paint_shape_target_channels(
         paint, mode_settings, settings, eShapeTargetKind::ImageMaps);
-    BKE_paint_material_images_ensure_writable_for_channels(*bmain, *ob, mode_settings, channels);
+    if (BKE_paint_material_images_ensure_writable_for_channels(
+            *bmain, *ob, mode_settings, channels)
+            .created > 0)
+    {
+      ed::sculpt_paint::material::layer_maps_created_tag();
+    }
   }
 }
 

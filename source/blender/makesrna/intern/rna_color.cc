@@ -47,6 +47,7 @@ const EnumPropertyItem rna_enum_color_space_convert_default_items[] = {
 #  include "DNA_node_types.h"
 #  include "DNA_object_types.h"
 #  include "DNA_particle_types.h"
+#  include "DNA_scene_types.h"
 #  include "DNA_sequence_types.h"
 
 #  include "MEM_guardedalloc.h"
@@ -65,6 +66,8 @@ const EnumPropertyItem rna_enum_color_space_convert_default_items[] = {
 #  include "BKE_node_tree_update.hh"
 
 #  include "DEG_depsgraph.hh"
+
+#  include "ED_paint.hh"
 
 #  include "IMB_colormanagement.hh"
 
@@ -365,6 +368,21 @@ static void rna_ColorRamp_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr
             BKE_ntree_update_tag_node_property(ntree, node);
             BKE_main_ensure_invariants(*bmain, ntree->id);
           }
+        }
+        break;
+      }
+      case ID_SCE: {
+        /* The Image Editor's gradient tool keeps its ramp in the tool settings. The ramp's own
+         * properties (interpolation, color mode, stops) are not properties of the tool settings,
+         * so the live preview's revision has to be bumped from here. */
+        const Scene *scene = id_cast<Scene *>(id);
+        if (scene->toolsettings != nullptr &&
+            ptr->data == &scene->toolsettings->imapaint.gradient_colorband)
+        {
+          ED_image_paint_select_gradient_settings_revision_bump();
+          /* Only the Image Editor's area listener redraws the window region that shows the
+           * preview (see #rna_ImagePaintSettings_warp_update). */
+          WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
         }
         break;
       }

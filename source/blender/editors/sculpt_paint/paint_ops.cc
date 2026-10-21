@@ -2312,6 +2312,13 @@ static bool material_canvas_cycle_poll(bContext *C)
           ED_space_image_composite_material_get(CTX_data_main(C), sima->image) != nullptr);
 }
 
+/** Keymap poll: any tool of the Image Editor's paint mode (the operator polls the rest). */
+static bool image_paint_canvas_keymap_poll(bContext *C)
+{
+  const SpaceImage *sima = CTX_wm_space_image(C);
+  return sima != nullptr && sima->mode == SI_MODE_PAINT;
+}
+
 static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
 {
   SpaceImage *sima = CTX_wm_space_image(C);
@@ -3376,6 +3383,10 @@ void ED_keymap_paint(wmKeyConfig *keyconf)
   /* Image/Texture Paint mode */
   keymap = WM_keymap_ensure(keyconf, "Image Paint", SPACE_EMPTY, RGN_TYPE_WINDOW);
   keymap->poll = image_texture_paint_poll;
+
+  /* Not tied to the active tool, see "Image Paint Canvas" in `blender_default.py`. */
+  keymap = WM_keymap_ensure(keyconf, "Image Paint Canvas", SPACE_EMPTY, RGN_TYPE_WINDOW);
+  keymap->poll = image_paint_canvas_keymap_poll;
 
   /* face-mask mode */
   keymap = WM_keymap_ensure(

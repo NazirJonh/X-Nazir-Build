@@ -526,7 +526,7 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
     ts->sculpt->gradient_curve_distance = defaults.gradient_curve_distance;
     ts->sculpt->gradient_curve_width = defaults.gradient_curve_width;
     ts->sculpt->gradient_curve_smooth = defaults.gradient_curve_smooth;
-    BKE_colorband_init(&ts->sculpt->gradient_colorband, true);
+    BKE_colorband_init_gradient_default(&ts->sculpt->gradient_colorband);
   }
 
   /* Correct default startup UVs. */
@@ -597,7 +597,7 @@ static void blo_update_defaults_scene(Main *bmain, Scene *scene)
     imapaint.gradient_curve_mode = defaults.gradient_curve_mode;
     imapaint.gradient_curve_width = defaults.gradient_curve_width;
     imapaint.gradient_curve_smooth = defaults.gradient_curve_smooth;
-    BKE_colorband_init(&imapaint.gradient_colorband, true);
+    BKE_colorband_init_gradient_default(&imapaint.gradient_colorband);
 
     /* Magic Wand / Quick Select defaults (a zero-filled block would select nothing). */
     imapaint.select_tolerance = defaults.select_tolerance;

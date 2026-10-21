@@ -71,6 +71,7 @@
 #include "../paint_image_curve_patch_anchor.hh"
 #include "../paint_image_stroke_hook.hh"
 #include "../paint_intern.hh"
+#include "paint_material_source.hh"
 
 namespace blender {
 
@@ -816,10 +817,10 @@ static void gradient_draw_line(bContext * /*C*/,
 }
 
 /**
- * Grow a layered material's description for the stroke about to start, wrapped in one undo group:
- * the map creation is a memfile step and the stroke itself an image undo step, and both have to
- * collapse into one Ctrl+Z. The group is left open for the stroke and closed in
- * #ImagePaintStroke::done.
+ * Grow a layered material's description for the stroke about to start, before the stroke opens its
+ * image undo step. The created maps are a persistent side effect and deliberately get no undo step
+ * of their own: the first Ctrl+Z after the stroke reverts only the paint, and cancelling the stroke
+ * keeps the maps for a retry instead of recreating them.
  *
  * Projection paint writes the channel of the active texture slot of every layered material the
  * object has; the Image Editor writes the channels its brush enables on the active material, like
@@ -854,7 +855,6 @@ static void texture_paint_prepare_layered_maps(bContext *C,
   Scene *scene = CTX_data_scene(C);
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
 
-  ED_undo_group_begin(C);
   int created = 0;
   if (is_projection) {
     for (Material *ma : materials) {
@@ -893,17 +893,11 @@ static void texture_paint_prepare_layered_maps(bContext *C,
     }
   }
   if (created > 0) {
-    /* Its own memfile step, and the group closed here: a group left open across the modal stroke
-     * is an invalid state for the event loop (#ED_undo_is_state_valid). */
-    ED_undo_push(C, RPT_("Add Layer Maps"));
-    ED_undo_group_end(C);
+    sculpt_paint::material::layer_maps_created_tag();
     /* The new map has no image node yet. Regenerating here, before the stroke captures the
      * evaluated material, keeps the first dab from landing on a graph that lacks its target. */
     BKE_paint_layers_regenerate_tagged(*bmain);
     CTX_data_ensure_evaluated_depsgraph(C);
-  }
-  else {
-    ED_undo_group_end(C);
   }
   /* The slots mirror the active rows' maps. Switching a row only moves a marker, and a map that
    * already exists creates nothing here, so they are rebuilt for every stroke -- otherwise the

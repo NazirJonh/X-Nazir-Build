@@ -1957,7 +1957,7 @@ bool BKE_paint_ensure(ToolSettings *ts, Paint **r_paint)
   else if (reinterpret_cast<Sculpt **>(r_paint) == &ts->sculpt) {
     Sculpt *data = MEM_new<Sculpt>(__func__);
     /* Embedded by value, so the DNA default leaves it without stops. */
-    BKE_colorband_init(&data->gradient_colorband, true);
+    BKE_colorband_init_gradient_default(&data->gradient_colorband);
 
     paint = &data->paint;
     paint_init_data(*paint);

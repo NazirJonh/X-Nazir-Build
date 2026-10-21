@@ -152,6 +152,8 @@ _km_hierarchy = [
             _km_expand_from_toolsystem('IMAGE_EDITOR', 'UV'),
         ]),
         ('UV Sculpt', 'EMPTY', 'WINDOW', []),
+        # Canvas switching, active with every paint tool (before "Image Paint" in the handler order).
+        ('Image Paint Canvas', 'EMPTY', 'WINDOW', []),
         # Image and view3d.
         ('Image Paint', 'EMPTY', 'WINDOW', [
             _km_expand_from_toolsystem('IMAGE_EDITOR', 'PAINT'),

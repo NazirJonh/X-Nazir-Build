@@ -19,8 +19,9 @@
  * The first stroke into a channel the row has no map for is where the description grows:
  * #BKE_paint_layers_target_ensure_writable adds the record, if the row has none, and its map.
  * Creating the map is an ID creation plus a description edit, so it belongs in the stroke's invoke
- * on the main thread, wrapped in one undo group together with the stroke itself; this API never
- * opens undo and never runs from a sample.
+ * on the main thread, before the stroke's undo step opens. It is a persistent side effect and is
+ * deliberately not wrapped into that step, so cancelling or undoing the stroke keeps the map; this
+ * API never opens undo and never runs from a sample.
  */
 
 #include <cstdint>
@@ -183,8 +184,9 @@ Image *BKE_paint_layers_target_image(const PaintLayersTarget &target);
  * record carries (a fresh record, one the row did not have, starts from the channel's neutral:
  * opaque black, or the flat tangent for Normal). New maps are straight-alpha RGBA in the channel's
  * colorspace (sRGB for colour, Non-Color for the scalar and normal channels). This is an ID
- * creation plus a description edit, so it runs on the main thread, inside the stroke's undo group;
- * it never opens undo itself.
+ * creation plus a description edit, so it runs on the main thread before the stroke opens its undo
+ * step. The created map is a persistent side effect and is not part of that step, so cancelling or
+ * undoing the stroke keeps it. It never opens undo itself.
  *
  * \param image_size: the fallback width and height, used only when the material has no size of
  * its own (#Material::paint_layers_image_size is zero).

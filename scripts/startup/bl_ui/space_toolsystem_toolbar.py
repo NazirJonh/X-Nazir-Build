@@ -2291,15 +2291,22 @@ class _defs_sculpt:
                 # drag ends; confirmed with Enter, cancelled with Esc.
                 props = tool.operator_properties("sculpt.color_gradient")
                 layout.prop(props, "interactive")
-            if (
-                    not region_is_header and
-                    context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
-            ):
-                from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
-                draw_material_paint_channel_toggles(
-                    layout, settings.brush, settings,
-                    show_custom=(context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT'),
-                )
+            if (not is_mask_target and
+                    context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}):
+                if region_is_header:
+                    # The header has no room for the toggle strip; the popover keeps the
+                    # channel choice (the only selector this tool has) one click away.
+                    brush = settings.brush
+                    if brush is not None and brush.material_paint is not None:
+                        layout.popover(
+                            "VIEW3D_PT_sculpt_color_gradient_channels", text="Channels")
+                else:
+                    from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+                    draw_material_paint_channel_toggles(
+                        layout, settings.brush, settings,
+                        show_custom=(
+                            context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT'),
+                    )
 
         return dict(
             idname="builtin.color_gradient",
@@ -2649,6 +2656,19 @@ class _defs_texture_paint:
             sima = context.space_data
             if sima.image and sima.image.source == 'TILED':
                 layout.prop(imapaint, "use_gradient_multi_udim", text="All UDIM Tiles")
+            # On a material canvas the gradient writes the maps of the enabled channels (the same
+            # toggles the brush uses), not just the image the editor shows. A Mask gesture writes
+            # the one mask map, so it has no channels to choose.
+            paint_mode = context.tool_settings.paint_mode
+            if (paint_mode.canvas_source == 'MATERIAL' and
+                    paint_mode.layer_target_mode != 'MASK' and
+                    imapaint.brush is not None and imapaint.brush.material_paint is not None):
+                if context.region.type == 'TOOL_HEADER':
+                    layout.popover("IMAGE_PT_paint_select_gradient_channels", text="Channels")
+                else:
+                    from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+                    draw_material_paint_channel_toggles(
+                        layout, imapaint.brush, imapaint, show_custom=False)
 
         return dict(
             idname="builtin.select_gradient",

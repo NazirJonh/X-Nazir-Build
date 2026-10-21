@@ -7887,10 +7887,10 @@ struct SculptPaintStroke final : public PaintStroke {
   Map<Object *, int> layer_recording_saved_active_uid_;
 
   /**
-   * Grow the active layered material's maps before the stroke's own undo step opens, as a memfile
-   * step of their own: an undo group cannot stay open while the modal stroke runs, because the
-   * event loop requires every group closed (#ED_undo_is_state_valid). Does nothing for any other
-   * material or brush.
+   * Grow the active layered material's maps before the stroke's own undo step opens. The created
+   * maps are a persistent side effect and get no undo step of their own: the first undo after the
+   * stroke only reverts its paint, and a cancelled stroke keeps the maps for a retry instead of
+   * recreating them. Does nothing for any other material or brush.
    */
   void layered_maps_ensure(bContext *C);
 
@@ -7942,16 +7942,17 @@ void SculptPaintStroke::layered_maps_ensure(bContext *C)
   {
     return;
   }
-  /* Every object of the stroke grows its maps here, inside the one undo group: a secondary object
-   * of a multi-object stroke would otherwise get its maps later, in #test_start, outside the
-   * memfile step and so outside the Ctrl+Z that removes the stroke. */
+  /* Every object of the stroke grows its maps here, before the stroke's own undo step opens: a
+   * secondary object of a multi-object stroke would otherwise get its maps later, in #test_start.
+   * The creation is deliberately not recorded as an undo step (see the class comment): the first
+   * undo after the stroke reverts only its paint, and a cancelled stroke leaves the maps in place
+   * so retrying does not recreate them. */
   const ViewContext vc = ED_view3d_viewcontext_init(C, CTX_data_depsgraph_pointer(C));
   Vector<Object *> objects = sculpt_mode_objects(vc);
   if (!objects.contains(ob)) {
     objects.append(ob);
   }
 
-  ED_undo_group_begin(C);
   int created = 0;
   for (Object *object : objects) {
     if (object->type != OB_MESH || BKE_paint_layers_active_material_get(object) == nullptr ||
@@ -7968,8 +7969,7 @@ void SculptPaintStroke::layered_maps_ensure(bContext *C)
                    .created;
   }
   if (created > 0) {
-    ED_undo_push(C, RPT_("Add Layer Maps"));
-    ED_undo_group_end(C);
+    material::layer_maps_created_tag();
     /* The slots mirror the active row's maps, which this just grew: a classic Texture Paint
      * stroke reads them, so they are rebuilt now rather than left to the next mode switch. */
     for (Object *object : objects) {
@@ -7977,9 +7977,6 @@ void SculptPaintStroke::layered_maps_ensure(bContext *C)
         BKE_texpaint_slots_refresh_object(CTX_data_scene(C), object);
       }
     }
-  }
-  else {
-    ED_undo_group_end(C);
   }
 }
 
@@ -10986,8 +10983,9 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_PASS_THROUGH;
   }
 
-  /* Every early refusal is behind us; only now may the first stroke grow the description and open
-   * the undo group -- a click that misses the mesh must leave no maps and no undo step. */
+  /* Every early refusal is behind us; only now may the first stroke grow the description. A click
+   * that misses the mesh must leave no maps. The creation itself carries no undo step (see
+   * #layered_maps_ensure), so cancelling the stroke keeps it. */
   stroke->layered_maps_ensure(C);
 
   const wmOperatorStatus retval = op->type->modal(C, op, event);

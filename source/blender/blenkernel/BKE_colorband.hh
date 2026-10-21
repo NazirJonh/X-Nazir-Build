@@ -17,6 +17,11 @@ struct IDTypeForeachColorFunctionCallback;
 #define MAXCOLORBAND 32
 
 void BKE_colorband_init(ColorBand *coba, bool rangetype);
+/**
+ * Default ramp of the paint gradient tools (Image Editor and Sculpt): black to white with
+ * B-Spline interpolation, the black stop moved to the middle of the gradient.
+ */
+void BKE_colorband_init_gradient_default(ColorBand *coba);
 void BKE_colorband_init_from_table_rgba(ColorBand *coba,
                                         const float (*array)[4],
                                         int array_len,

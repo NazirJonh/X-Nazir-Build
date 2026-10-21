@@ -66,6 +66,15 @@ void BKE_colorband_init(ColorBand *coba, bool rangetype)
   coba->ipotype = COLBAND_INTERP_LINEAR;
 }
 
+void BKE_colorband_init_gradient_default(ColorBand *coba)
+{
+  BKE_colorband_init(coba, true);
+  coba->ipotype = COLBAND_INTERP_B_SPLINE;
+  /* The first stop is the black one: starting the ramp at the middle leaves the first half of the
+   * gradient solid black, which is the usual way a mask-like gradient is wanted. */
+  coba->data[0].pos = 0.5f;
+}
+
 static void colorband_init_from_table_rgba_simple(ColorBand *coba,
                                                   const float (*array)[4],
                                                   const int array_len)

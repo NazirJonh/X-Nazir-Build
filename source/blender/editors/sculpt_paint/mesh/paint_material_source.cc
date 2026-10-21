@@ -43,6 +43,8 @@
 #include <cstring>
 #include <type_traits>
 
+#include "WM_api.hh"
+
 #include "ED_material_bake.hh"
 #include "ED_view3d.hh"
 
@@ -249,6 +251,21 @@ Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings
         *bmain, target, settings.new_channel_image_size);
   }
   return image;
+}
+
+bool mask_target_image_create_if_missing(Main *bmain, Object &ob, const PaintModeSettings &settings)
+{
+  if (mask_target_image_get(ob) != nullptr || mask_target_image_ensure(bmain, ob, settings) == nullptr)
+  {
+    return false;
+  }
+  layer_maps_created_tag();
+  return true;
+}
+
+void layer_maps_created_tag()
+{
+  WM_file_tag_modified();
 }
 
 ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,

@@ -541,6 +541,7 @@ void paint_stack_rows_append(const Material &material,
     row.supported = true;
     row.name = layer.name[0] != '\0' ? layer.name : (folder ? "Folder" : "Layer");
     row.name_buffer = const_cast<char *>(layer.name);
+    row.color_tag = layer.color_tag;
     /* An adjustment is a filter of the stack below it: no map, no channel slot, only its settings. */
     const bool adjustment = paint_layer_row_is_adjustment_view(layer);
     row.icon = folder                                         ? ICON_FILE_FOLDER :
@@ -799,6 +800,21 @@ int paint_layers_edit_duplicate(Main &bmain, Material &material, const int ordin
   return (copy != nullptr) ? paint_layers_ordinal_of(material, copy) : -1;
 }
 
+bool paint_layers_edit_color_tag(Material &material, const int ordinal, const int color_tag)
+{
+  MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+  return layer != nullptr && BKE_paint_layers_set_color_tag(material, layer, color_tag);
+}
+
+bool paint_layers_edit_target_clear(Material &material)
+{
+  if (BLI_uuid_is_nil(material.active_layer_marker)) {
+    return false;
+  }
+  BKE_paint_layers_active_set(material, bUUID{});
+  return true;
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -865,6 +881,9 @@ class PaintLayersStackSource final : public StackSource,
       /* Mixed, not shifted into the flag bits: `flag` is 16 bits wide and would overlap. */
       hash = hash * 1000003u ^ uint64_t(layer.blend);
       hash ^= uint64_t(layer.source) << 16;
+      /* The group's folder icon and hierarchy line are drawn from the tag, so a change to it has
+       * to reach the rows even though nothing evaluated reads it. */
+      hash = hash * 1000003u ^ uint64_t(uint8_t(layer.color_tag));
       /* The swatch and the columns show these, so a change to them has to reach the rows. */
       hash = hash * 1000003u ^ uint64_t(std::hash<float>{}(layer.opacity));
       for (const MaterialPaintLayerChannelSettings &settings : layer.channel_settings) {
@@ -1144,6 +1163,48 @@ class PaintLayersStackSource final : public StackSource,
   const StackEditor *editor() const override
   {
     return this;
+  }
+
+  /**
+   * Stop aiming strokes at the row the stack was activated to. The target is
+   * #Material::active_layer_marker, so dropping the marker is the whole edit; the mask-edit cursor
+   * goes back to content because a mask belonging to a row that is no longer the target is not
+   * something a stroke should keep writing into.
+   */
+  bool target_clear(bContext &C) const override
+  {
+    /* The owner the Outliner is focused on, not the active object: the operator acts on the stack
+     * being shown. */
+    SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+    if (space_outliner == nullptr) {
+      return false;
+    }
+    ID *owner = outliner_stack_owner_get(outliner_stack_read_context(C), *space_outliner);
+    if (owner == nullptr || GS(owner->name) != ID_MA) {
+      return false;
+    }
+    Material &material = layers_owner(*owner);
+    if (!paint_layers_edit_target_clear(material)) {
+      return false;
+    }
+    /* Back to the neutral target: #row_activate may have put the mode in Mask, and an armed
+     * object-mask edit belongs to the row that is no longer the target. This also ends Mask mode
+     * and restores the content brush when it does. */
+    layers_target_mode_set(C, PAINT_LAYER_TARGET_CONTENT);
+    /* Even when the mode already was Content, the slots held the dropped row's maps. */
+    layers_texpaint_slots_refresh(C);
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  std::optional<eObjectMode> focus_object_mode() const override
+  {
+    return OB_MODE_SCULPT;
+  }
+
+  const char *focus_tool_idname() const override
+  {
+    return "builtin_brush.paint";
   }
 
   const StackDropHandler *drop_handler() const override
@@ -1734,6 +1795,23 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  bool row_color_tag_set(bContext &C,
+                         const StackFocus & /*focus*/,
+                         ID &owner,
+                         const int ordinal,
+                         const int color_tag) const override
+  {
+    Material &material = layers_owner(owner);
+    if (!paint_layers_edit_color_tag(material, ordinal, color_tag)) {
+      return false;
+    }
+    /* A list-drawing change only: the Outliner is the one view that shows it, and nothing
+     * evaluated reads the tag. #stack_mutate sends the same notifier for the row edit; this keeps
+     * the seam honest for a caller that reaches it another way. */
+    WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
     return true;
   }
 

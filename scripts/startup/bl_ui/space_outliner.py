@@ -298,6 +298,9 @@ class OUTLINER_MT_context_menu(Menu):
                     props = layout.operator(
                         "outliner.stack_layer_mask", text="Remove Mask", icon='X')
                     props.add = False
+                # Activating a row aims the brush at it; this is the way back to no target.
+                if bpy.ops.outliner.stack_layer_clear_target.poll():
+                    layout.operator("outliner.stack_layer_clear_target", icon='RESTRICT_SELECT_ON')
                 layout.separator()
                 # Copy and paste act on the active row, whatever it is: a layer, a fill or a
                 # correction. The mask has verbs of its own, listed while its slot is the one showing
@@ -316,6 +319,13 @@ class OUTLINER_MT_context_menu(Menu):
                 # Only a folder can be unwrapped; the operator's poll answers for the row.
                 if bpy.ops.outliner.stack_layer_ungroup.poll():
                     layout.operator("outliner.stack_layer_ungroup", text="Ungroup")
+                layout.separator()
+            # A tag belongs to a group, not to a particular source: the poll answers for the row
+            # the operator would tag, so a source that grows groups gets the swatches too.
+            if bpy.ops.outliner.stack_layer_color_tag_set.poll():
+                row = layout.row(align=True)
+                row.operator_enum(
+                    "outliner.stack_layer_color_tag_set", "color", icon_only=True)
                 layout.separator()
             layout.menu("OUTLINER_MT_context_menu_view")
             layout.separator()

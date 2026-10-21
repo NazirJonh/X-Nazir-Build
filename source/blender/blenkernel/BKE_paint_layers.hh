@@ -706,6 +706,13 @@ bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, float
 /** Set whether \a layer takes part in the stack. */
 bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, bool enabled);
 
+/**
+ * Set the display color tag of the folder \a layer; #MA_PAINT_LAYER_COLOR_NONE clears it.
+ * Interpreted by the UI only, so nothing evaluated is tagged. A tag on a row that is not a folder
+ * is refused: only a group can be colored. Out-of-range values are refused too.
+ */
+bool BKE_paint_layers_set_color_tag(Material &ma, MaterialPaintLayer *layer, int color_tag);
+
 /* -------------------------------------------------------------------- */
 /** \name Row UV mapping (a Fill layer, Fill correction or Fill mask)
  * \{ */

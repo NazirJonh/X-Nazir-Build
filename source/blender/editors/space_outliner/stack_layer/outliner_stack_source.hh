@@ -63,6 +63,9 @@ struct wmRegionMessageSubscribeParams;
 
 namespace blender::ed::outliner {
 
+/** Number of group colors a #StackRow::color_tag can name; the theme's collection palette size. */
+constexpr int STACK_ROW_COLOR_NUM = 8;
+
 /**
  * A data-block a row is made of: a channel's map for a paint layer, and whatever plays the same
  * part for another source. Sources with nothing to show below a row simply leave this empty.
@@ -255,11 +258,25 @@ struct StackRow {
   int icon = 0;
 
   /**
-   * Color tag for folders, same as collections use. -1 = no color, 0-7 = color index.
-   * Only meaningful when #can_hold_children is true. The mode guarantees 8 colors (matching
-   * Grease Pencil layer groups), but the contract lives here, not in the source.
+   * Color tag for folders, drawn with the collection palette. Zero means no tag; 1 to
+   * #STACK_ROW_COLOR_NUM are the colors. Only meaningful when #can_hold_children is true. The
+   * contract lives here, not in a source: a source maps its own storage onto it. Zero rather than
+   * -1 makes "no tag" the value-initialized default, which is also what padding carved out for a
+   * stored tag reads back as in files written before it existed.
    */
-  int8_t color_tag = -1;
+  int8_t color_tag = 0;
+
+  /**
+   * Index into the theme's collection palette for #color_tag, or -1 when the row draws no color.
+   * Only a row that can hold children is a group, so only it ever has one.
+   */
+  int color_theme_index() const
+  {
+    if (!can_hold_children || color_tag < 1 || color_tag > STACK_ROW_COLOR_NUM) {
+      return -1;
+    }
+    return color_tag - 1;
+  }
 
   /**
    * Keep the row at the usual single-unit height, with a plain icon and no preview slots, even
@@ -786,10 +803,12 @@ class StackGroupingEditor {
    * Set the color tag of the group row at \a ordinal.
    *
    * Color tags are a visual aid for organizing folders, the same as collections use. The mode
-   * guarantees 8 colors (0-7), matching Grease Pencil layer groups. -1 clears the color.
-   * Sources that do not support color tags or cannot store them leave the default.
+   * guarantees 8 colors (1-8), matching Grease Pencil layer groups; zero clears the tag. Only a
+   * row that can hold children (#StackRow::can_hold_children) is a group, and a source that
+   * enforces the mode's contract refuses a tag on anything else. Nothing evaluated reads the tag.
    *
-   * \return true when the color was set, false when the source does not support it.
+   * \return true when the color was set, false when the source does not support it or the row is
+   *         not a group.
    */
   virtual bool row_color_tag_set(bContext & /*C*/,
                                  const StackFocus & /*focus*/,

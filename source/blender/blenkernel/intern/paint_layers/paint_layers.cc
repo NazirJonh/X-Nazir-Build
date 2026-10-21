@@ -560,6 +560,8 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   item_copy->blend = item.blend;
   item_copy->flag = item.flag;
   item_copy->opacity = item.opacity;
+  /* Display data, copied like the rest of the row's own state. */
+  item_copy->color_tag = item.color_tag;
   /* The row's UV mapping is part of its state, not of its kind: a pasted fill or fill
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
@@ -585,6 +587,9 @@ static void paint_layer_branch_duplicate(Main &bmain,
   dst.blend = src.blend;
   dst.source = src.source;
   dst.kind_subtype = src.kind_subtype;
+  /* A display tag travels with the row: a duplicated group has to read like the one it came from,
+   * the way a duplicated collection keeps its color. */
+  dst.color_tag = src.color_tag;
   memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
   /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
   dst.mapping = dna::shallow_copy(src.mapping);
@@ -1878,6 +1883,31 @@ bool BKE_paint_layers_set_enabled(Material &ma, MaterialPaintLayer *layer, const
   /* The enabled flag is folded into the row's opacity input (see BKE_paint_layers_effective_opacity),
    * so switching a row off is a value, not a different shape of graph. */
   BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_set_color_tag(Material &ma, MaterialPaintLayer *layer, const int color_tag)
+{
+  /* A display tag, but stored on the row and copied with it: a pointer outside the description is
+   * refused like every other setter. */
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  /* Only a group is offered a tag, and only the values the UI can draw are accepted. Clearing is
+   * always allowed: a row that stopped being a folder must not keep carrying an invisible tag. */
+  if (color_tag < MA_PAINT_LAYER_COLOR_NONE || color_tag >= MA_PAINT_LAYER_COLOR_TOT) {
+    return false;
+  }
+  if (color_tag != MA_PAINT_LAYER_COLOR_NONE && !BKE_paint_layers_is_folder(*layer)) {
+    return false;
+  }
+  if (layer->color_tag == color_tag) {
+    return true;
+  }
+  layer->color_tag = int8_t(color_tag);
+  /* Nothing evaluated reads the tag: it is a list-drawing concern like a collection's color, so no
+   * graph regeneration and no depsgraph tag. The callers (RNA's update callback, the Outliner's
+   * row edit) notify the views that draw it. */
   return true;
 }
 

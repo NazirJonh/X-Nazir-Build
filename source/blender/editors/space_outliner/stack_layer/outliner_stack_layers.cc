@@ -561,6 +561,30 @@ bool outliner_stack_row_set_enabled(bContext *C,
                       });
 }
 
+bool outliner_stack_row_color_tag_set(bContext *C,
+                                      SpaceOutliner &space_outliner,
+                                      const int ordinal,
+                                      const int color_tag)
+{
+  if (ordinal < 0) {
+    return false;
+  }
+  /* A tag is not a stack mutation: it renumbers nothing, so the selection stays put. */
+  return stack_mutate(
+      *C,
+      space_outliner,
+      false,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int & /*r_select_ordinal*/) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        return grouping != nullptr &&
+               grouping->row_color_tag_set(*C, focus, owner, ordinal, color_tag);
+      });
+}
+
 wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);

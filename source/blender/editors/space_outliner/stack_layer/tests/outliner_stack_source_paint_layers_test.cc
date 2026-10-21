@@ -394,6 +394,102 @@ TEST_F(OutlinerStackPaintLayersSourceTest, rename_writes_the_row_name)
   EXPECT_STREQ(renamed->name, "Renamed");
 }
 
+TEST_F(OutlinerStackPaintLayersSourceTest, color_tag_round_trips_to_a_folder_row)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  MaterialPaintLayer *members[1] = {layer};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *material, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  /* A fresh folder carries no tag, which is zero rather than a "none" color: the field is carved
+   * out of padding and old files read it as zero. */
+  EXPECT_EQ(folder->color_tag, MA_PAINT_LAYER_COLOR_NONE);
+  const int folder_ordinal = paint_layers_ordinal_of(*material, folder);
+  ASSERT_GE(folder_ordinal, 0);
+
+  const auto row_tag = [&]() {
+    Vector<StackRow> rows;
+    paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+    for (const StackRow &row : rows) {
+      if (row.ordinal == folder_ordinal) {
+        return int(row.color_tag);
+      }
+    }
+    return -1;
+  };
+  EXPECT_EQ(row_tag(), MA_PAINT_LAYER_COLOR_NONE);
+
+  ASSERT_TRUE(paint_layers_edit_color_tag(*material, folder_ordinal, 3));
+  EXPECT_EQ(folder->color_tag, 3);
+  EXPECT_EQ(row_tag(), 3);
+
+  /* Zero clears it. */
+  ASSERT_TRUE(paint_layers_edit_color_tag(*material, folder_ordinal, MA_PAINT_LAYER_COLOR_NONE));
+  EXPECT_EQ(folder->color_tag, MA_PAINT_LAYER_COLOR_NONE);
+  EXPECT_EQ(row_tag(), MA_PAINT_LAYER_COLOR_NONE);
+
+  /* A plain layer is not a group: a color is refused, clearing it is allowed. */
+  const int layer_ordinal = paint_layers_ordinal_of(*material, layer);
+  ASSERT_GE(layer_ordinal, 0);
+  EXPECT_FALSE(paint_layers_edit_color_tag(*material, layer_ordinal, 2));
+  EXPECT_EQ(layer->color_tag, MA_PAINT_LAYER_COLOR_NONE);
+  EXPECT_TRUE(paint_layers_edit_color_tag(*material, layer_ordinal, MA_PAINT_LAYER_COLOR_NONE));
+
+  /* An unknown ordinal, an out-of-range color and the old -1 sentinel are all refused. */
+  EXPECT_FALSE(paint_layers_edit_color_tag(*material, 99, 2));
+  EXPECT_FALSE(
+      paint_layers_edit_color_tag(*material, folder_ordinal, MA_PAINT_LAYER_COLOR_TOT));
+  EXPECT_FALSE(paint_layers_edit_color_tag(*material, folder_ordinal, -1));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, target_clear_drops_the_active_row)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  BKE_paint_layers_active_set(*material, layer->marker);
+  ASSERT_FALSE(BLI_uuid_is_nil(material->active_layer_marker));
+
+  EXPECT_TRUE(paint_layers_edit_target_clear(*material));
+  EXPECT_TRUE(BLI_uuid_is_nil(material->active_layer_marker));
+  /* The row itself stays; only the aim goes. */
+  EXPECT_NE(BKE_paint_layers_find(*material, layer->marker), nullptr);
+
+  /* Nothing to clear the second time, so the operator cancels instead of pushing an undo step. */
+  EXPECT_FALSE(paint_layers_edit_target_clear(*material));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, duplicate_keeps_a_folders_color_tag)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  MaterialPaintLayer *members[1] = {layer};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *material, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  ASSERT_TRUE(paint_layers_edit_color_tag(
+      *material, paint_layers_ordinal_of(*material, folder), MA_PAINT_LAYER_COLOR_05));
+
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *material, folder);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(copy->color_tag, MA_PAINT_LAYER_COLOR_05);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_the_color_tag)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  MaterialPaintLayer *members[1] = {layer};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(
+      *material, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  const int folder_ordinal = paint_layers_ordinal_of(*material, folder);
+  ASSERT_GE(folder_ordinal, 0);
+
+  StackReadContext ctx;
+  const uint64_t before = source().state_hash(ctx, material->id);
+  ASSERT_TRUE(paint_layers_edit_color_tag(*material, folder_ordinal, 4));
+  /* The folder icon and the hierarchy line are drawn from the tag, so a change has to reach the
+   * rows even though nothing evaluated reads it. */
+  EXPECT_NE(source().state_hash(ctx, material->id), before);
+}
+
 TEST_F(OutlinerStackPaintLayersSourceTest, duplicate_copies_the_row_and_its_map)
 {
   MaterialPaintLayer *layer = add_layer("A");

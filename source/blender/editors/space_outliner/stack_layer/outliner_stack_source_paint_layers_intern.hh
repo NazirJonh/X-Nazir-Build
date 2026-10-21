@@ -46,6 +46,10 @@ int paint_layers_ordinal_of(const Material &material, const MaterialPaintLayer *
 /** The description edits behind the source's rename and duplicate verbs, free of a #bContext. */
 bool paint_layers_edit_rename(Material &material, int ordinal, const char *name);
 int paint_layers_edit_duplicate(Main &bmain, Material &material, int ordinal);
+/** Set the row's display color tag; zero clears it. Only a folder row accepts one. */
+bool paint_layers_edit_color_tag(Material &material, int ordinal, int color_tag);
+/** Drop the paint target (the active row); false when there was none. */
+bool paint_layers_edit_target_clear(Material &material);
 
 }  // namespace ed::outliner
 }  // namespace blender

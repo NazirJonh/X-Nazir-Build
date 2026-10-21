@@ -196,6 +196,23 @@ static const EnumPropertyItem rna_enum_material_paint_layers_composite_device_it
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The display tags of a layer group. Outside the #RNA_RUNTIME split, unlike the property definition
+ * that uses it: the `#else` branch below is compiled only into the makesrna generator, so a
+ * definition placed there never reaches bf_rna -- and #OUTLINER_OT_stack_layer_color_tag_set links
+ * against this table too. Values are #eMaterialPaintLayerColorTag. */
+const EnumPropertyItem rna_enum_material_paint_layer_color_items[] = {
+    {MA_PAINT_LAYER_COLOR_NONE, "NONE", ICON_X, "None", "Remove the group's color tag"},
+    {MA_PAINT_LAYER_COLOR_01, "COLOR_01", ICON_COLLECTION_COLOR_01, "Color 01", ""},
+    {MA_PAINT_LAYER_COLOR_02, "COLOR_02", ICON_COLLECTION_COLOR_02, "Color 02", ""},
+    {MA_PAINT_LAYER_COLOR_03, "COLOR_03", ICON_COLLECTION_COLOR_03, "Color 03", ""},
+    {MA_PAINT_LAYER_COLOR_04, "COLOR_04", ICON_COLLECTION_COLOR_04, "Color 04", ""},
+    {MA_PAINT_LAYER_COLOR_05, "COLOR_05", ICON_COLLECTION_COLOR_05, "Color 05", ""},
+    {MA_PAINT_LAYER_COLOR_06, "COLOR_06", ICON_COLLECTION_COLOR_06, "Color 06", ""},
+    {MA_PAINT_LAYER_COLOR_07, "COLOR_07", ICON_COLLECTION_COLOR_07, "Color 07", ""},
+    {MA_PAINT_LAYER_COLOR_08, "COLOR_08", ICON_COLLECTION_COLOR_08, "Color 08", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }
 
 #ifdef RNA_RUNTIME
@@ -1102,6 +1119,27 @@ static void rna_MaterialPaintLayer_enabled_set(PointerRNA *ptr, bool value)
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
   if (Material *ma = rna_paint_layer_material(ptr, layer)) {
     BKE_paint_layers_set_enabled(*ma, layer, value);
+  }
+}
+
+static int rna_MaterialPaintLayer_color_tag_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  /* A file written by a build that knew fewer values, or garbage in what used to be padding,
+   * reads as "no tag" rather than as an enum value RNA cannot name. */
+  if (layer->color_tag < MA_PAINT_LAYER_COLOR_NONE ||
+      layer->color_tag >= MA_PAINT_LAYER_COLOR_TOT)
+  {
+    return MA_PAINT_LAYER_COLOR_NONE;
+  }
+  return layer->color_tag;
+}
+
+static void rna_MaterialPaintLayer_color_tag_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_color_tag(*ma, layer, value);
   }
 }
 
@@ -3150,6 +3188,20 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayer_enabled_get", "rna_MaterialPaintLayer_enabled_set");
   RNA_def_property_ui_text(prop, "Enabled", "Whether the layer takes part in the stack");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "color_tag", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_color_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_color_tag_get",
+                              "rna_MaterialPaintLayer_color_tag_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Color Tag",
+                           "Display color tag of a layer group; interpreted by the UI only");
+  /* Notifier only. Deliberately *not* #rna_Material_update, which tags #ID_RECALC_SHADING: a color
+   * tag changes nothing evaluated, and recompiling the stack for it would be the same mistake the
+   * sibling #SculptLayerGroup.color_tag documents against. */
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
   /* Read-only: the one predicate UI, RNA and the CPU share. The panel shows the Mapping block only
    * while this is true, instead of inspecting channel records itself. */

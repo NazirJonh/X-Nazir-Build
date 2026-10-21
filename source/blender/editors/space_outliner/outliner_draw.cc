@@ -3059,9 +3059,21 @@ TreeElementIcon tree_element_get_icon(TreeStoreElem *tselem, TreeElement *te)
 }
 
 /**
+ * The collection palette index of a stack folder's tag, or #COLLECTION_COLOR_NONE when the row is
+ * not a tagged group. Folder-ness is the contract, not the icon: a source may draw a group with an
+ * icon of its own, and the tag has to follow the group either way.
+ */
+static short stack_row_color_theme_index(const StackRow *row)
+{
+  const int index = (row != nullptr) ? row->color_theme_index() : -1;
+  return (index < 0) ? short(COLLECTION_COLOR_NONE) : short(index);
+}
+
+/**
  * \return true if the element has an icon that was drawn, false if it doesn't have an icon.
  */
 static bool tselem_draw_icon(ui::Block *block,
+                             const SpaceOutliner &space_outliner,
                              int xmax,
                              float x,
                              float y,
@@ -3077,11 +3089,16 @@ static bool tselem_draw_icon(ui::Block *block,
   }
 
   const bool is_collection = outliner_is_collection_tree_element(te);
+  const StackRow *stack_row = (tselem->type == TSE_STACK_LAYER) ?
+                                  outliner_stack_row_find(space_outliner, tselem->nr) :
+                                  nullptr;
+  const short stack_tag_index = stack_row_color_theme_index(stack_row);
+  const bool is_colored_stack_folder = stack_tag_index != COLLECTION_COLOR_NONE;
   ui::IconTextOverlay text_overlay;
   icon_text_overlay_init_from_count(&text_overlay, num_elements);
 
   /* Collection colors and icons covered by restrict buttons. */
-  if (!is_clickable || x >= xmax || is_collection) {
+  if (!is_clickable || x >= xmax || is_collection || is_colored_stack_folder) {
     /* Placement of icons, copied from `interface_widgets.cc`. */
     float aspect = (0.8f * UI_UNIT_Y) / ICON_DEFAULT_HEIGHT;
     x += 2.0f * aspect;
@@ -3100,6 +3117,19 @@ static bool tselem_draw_icon(ui::Block *block,
                            &text_overlay);
         return true;
       }
+    }
+
+    if (is_colored_stack_folder) {
+      /* A tagged layer group is read like a tagged collection: the icon carries the color the
+       * group's hierarchy line does. */
+      outliner_icon_draw(x,
+                         y,
+                         data.icon,
+                         alpha,
+                         btheme->collection_color[stack_tag_index].color,
+                         btheme->tui.icon_border_intensity > 0.0f,
+                         &text_overlay);
+      return true;
     }
 
     /* Reduce alpha to match icon buttons */
@@ -3170,6 +3200,7 @@ static void outliner_draw_active_indicator(const float minx,
 }
 
 static void outliner_draw_iconrow_doit(ui::Block *block,
+                                       const SpaceOutliner &space_outliner,
                                        TreeElement *te,
                                        int xmax,
                                        int *offsx,
@@ -3199,8 +3230,16 @@ static void outliner_draw_iconrow_doit(ui::Block *block,
   if (tselem->flag & TSE_HIGHLIGHTED_ICON) {
     alpha_fac += 0.5;
   }
-  tselem_draw_icon(
-      block, xmax, float(*offsx), float(ys), tselem, te, alpha_fac, false, num_elements);
+  tselem_draw_icon(block,
+                   space_outliner,
+                   xmax,
+                   float(*offsx),
+                   float(ys),
+                   tselem,
+                   te,
+                   alpha_fac,
+                   false,
+                   num_elements);
   te->xs = *offsx;
   te->ys = ys;
   te->xend = short(*offsx) + UI_UNIT_X;
@@ -3317,7 +3356,8 @@ static void outliner_draw_iconrow(ui::Block *block,
                 TSE_NLA_TRACK) &&
           tselem->type != TSE_SHAPE_KEY_BLOCK)
       {
-        outliner_draw_iconrow_doit(block, &te, xmax, offsx, ys, alpha_fac, active, 1);
+        outliner_draw_iconrow_doit(
+            block, *space_outliner, &te, xmax, offsx, ys, alpha_fac, active, 1);
       }
       else if (tselem->type == TSE_GREASE_PENCIL_NODE &&
                tree_element_cast<TreeElementGreasePencilNode>(&te)->node().is_group())
@@ -3376,6 +3416,7 @@ static void outliner_draw_iconrow(ui::Block *block,
         const int index = index_base + j;
         if (merged->num_elements[index] != 0) {
           outliner_draw_iconrow_doit(block,
+                                     *space_outliner,
                                      merged->tree_element[index],
                                      xmax,
                                      offsx,
@@ -3785,6 +3826,7 @@ static void outliner_draw_tree_element(ui::Block *block,
         !(tselem->type == TSE_STACK_LAYER && stack_big_rows && !stack_row_is_group &&
           !stack_row_compact) &&
         tselem_draw_icon(block,
+                         *space_outliner,
                          xmax,
                          float(startx) + offsx,
                          float(*starty),
@@ -4034,6 +4076,18 @@ static void outliner_draw_hierarchy_lines_recursive(uint pos,
         draw_hierarchy_line = true;
         use_dashed_line = true;
         y = *starty;
+      }
+      else if (tselem->type == TSE_STACK_LAYER) {
+        /* A layer group holds rows the way a collection holds objects, so it is read the same
+         * way: the line is what says where the group's contents end, and a tag the user gave
+         * the group colors the line the way a collection's colors its own. Only a group draws
+         * it: a row attached to a parent's content section is not a container. */
+        const StackRow *row = outliner_stack_row_find(*space_outliner, tselem->nr);
+        if (row != nullptr && row->can_hold_children) {
+          draw_hierarchy_line = true;
+          y = *starty;
+          color_tag = stack_row_color_theme_index(row);
+        }
       }
 
       outliner_draw_hierarchy_lines_recursive(

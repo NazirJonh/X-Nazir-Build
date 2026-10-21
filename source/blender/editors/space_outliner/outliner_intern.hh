@@ -967,6 +967,11 @@ bool outliner_stack_row_set_enabled(bContext *C,
                                     SpaceOutliner &space_outliner,
                                     int ordinal,
                                     bool enable);
+/** Set a row's display color tag; zero clears it. See #StackGroupingEditor::row_color_tag_set. */
+bool outliner_stack_row_color_tag_set(bContext *C,
+                                      SpaceOutliner &space_outliner,
+                                      int ordinal,
+                                      int color_tag);
 /** Remove a row and everything it carries; see #StackEditor::row_remove. */
 bool outliner_stack_row_remove(bContext *C, SpaceOutliner &space_outliner, int ordinal);
 /**
@@ -999,6 +1004,8 @@ void outliner_stack_sources_undo_reset();
 
 void OUTLINER_OT_stack_layer_focus(wmOperatorType *ot);
 void OUTLINER_OT_stack_row_action(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_clear_target(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_color_tag_set(wmOperatorType *ot);
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
 void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);

@@ -501,6 +501,30 @@ enum eMaterialPaintLayerObjectMaskFlag : int8_t {
 };
 
 /**
+ * #MaterialPaintLayer::color_tag: the display tag of a layer group (a folder).
+ *
+ * Zero means "no tag" rather than Grease Pencil's -1, because the field is carved out of
+ * #MaterialPaintLayer's existing padding and therefore reads back as zero from every file written
+ * before it existed. #eSculptLayerColorTag makes the same choice for the same reason. The eight
+ * colors are drawn with the collection palette, so the tag maps to `btheme->collection_color` by
+ * subtracting #MA_PAINT_LAYER_COLOR_01.
+ */
+enum eMaterialPaintLayerColorTag : int8_t {
+  MA_PAINT_LAYER_COLOR_NONE = 0,
+  MA_PAINT_LAYER_COLOR_01 = 1,
+  MA_PAINT_LAYER_COLOR_02 = 2,
+  MA_PAINT_LAYER_COLOR_03 = 3,
+  MA_PAINT_LAYER_COLOR_04 = 4,
+  MA_PAINT_LAYER_COLOR_05 = 5,
+  MA_PAINT_LAYER_COLOR_06 = 6,
+  MA_PAINT_LAYER_COLOR_07 = 7,
+  MA_PAINT_LAYER_COLOR_08 = 8,
+
+  /** Not a tag: the number of values the field accepts, "none" included. */
+  MA_PAINT_LAYER_COLOR_TOT = 9,
+};
+
+/**
  * #MaterialPaintLayer::role. Numerically matches the reference's role table.
  */
 enum eMaterialPaintLayerRole : int8_t {
@@ -865,7 +889,9 @@ struct MaterialPaintLayer {
   int8_t object_mask_type = MA_PAINT_LAYER_OBJECT_MASK_MESH;
   /** #eMaterialPaintLayerObjectMaskFlag. */
   int8_t object_mask_flag = 0;
-  char _pad_object_mask[6] = {};
+  /** #eMaterialPaintLayerColorTag: the row's display tag, read by the UI only. */
+  int8_t color_tag = MA_PAINT_LAYER_COLOR_NONE;
+  char _pad_object_mask[5] = {};
   /**
    * Per (row, channel) overrides, indexed by #eMaterialPaintChannel. A fixed array so every pair has
    * a value and an RNA path whether or not the row has a #channels record for it; a folder, which

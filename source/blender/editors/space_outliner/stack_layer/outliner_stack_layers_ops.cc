@@ -33,6 +33,8 @@
 #include "RNA_define.hh"
 #include "RNA_enum_types.hh"
 
+#include "UI_resources.hh"
+
 #include "WM_api.hh"
 #include "WM_types.hh"
 
@@ -200,6 +202,109 @@ void OUTLINER_OT_stack_row_action(wmOperatorType *ot)
   /* No undo: the action is UI state, not data. */
   ot->flag = OPTYPE_INTERNAL;
   RNA_def_int(ot->srna, "ordinal", -1, -1, SHRT_MAX, "Ordinal", "", -1, SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+static wmOperatorStatus stack_target_clear_exec(bContext *C, wmOperator * /*op*/)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  return stack_source_for_space(*space_outliner)->target_clear(*C) ? OPERATOR_FINISHED :
+                                                                    OPERATOR_CANCELLED;
+}
+
+/** Whether there is an activated row to stop aiming at; the menu entry leans on this. */
+static bool stack_target_clear_poll(bContext *C)
+{
+  if (!stack_row_add_poll(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  return outliner_stack_active_ordinal_get(outliner_stack_read_context(*C), *space_outliner) >= 0;
+}
+
+void OUTLINER_OT_stack_layer_clear_target(wmOperatorType *ot)
+{
+  ot->name = "Clear Target";
+  ot->idname = "OUTLINER_OT_stack_layer_clear_target";
+  ot->description = "Stop directing edits at the activated stack layer";
+  ot->exec = stack_target_clear_exec;
+  ot->poll = stack_target_clear_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/**
+ * The tags #StackRow::color_tag names. Values are the row contract (zero clears, 1 to
+ * #STACK_ROW_COLOR_NUM are the palette), so the operator stays independent of any source's storage;
+ * a source maps these onto its own.
+ */
+static const EnumPropertyItem stack_row_color_items[] = {
+    {0, "NONE", ICON_X, "None", "Remove the group's color tag"},
+    {1, "COLOR_01", ICON_COLLECTION_COLOR_01, "Color 01", ""},
+    {2, "COLOR_02", ICON_COLLECTION_COLOR_02, "Color 02", ""},
+    {3, "COLOR_03", ICON_COLLECTION_COLOR_03, "Color 03", ""},
+    {4, "COLOR_04", ICON_COLLECTION_COLOR_04, "Color 04", ""},
+    {5, "COLOR_05", ICON_COLLECTION_COLOR_05, "Color 05", ""},
+    {6, "COLOR_06", ICON_COLLECTION_COLOR_06, "Color 06", ""},
+    {7, "COLOR_07", ICON_COLLECTION_COLOR_07, "Color 07", ""},
+    {8, "COLOR_08", ICON_COLLECTION_COLOR_08, "Color 08", ""},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/**
+ * Whether the row a color tag would land on is a group.
+ *
+ * Color tags belong to group folders, and the UI that offers them -- the context menu's color
+ * swatches -- leans on this poll to appear only where they apply. The poll cannot read the
+ * operator's marker, so it answers for the row the operator would pick without one: the first
+ * selected row if there is one, the active row otherwise. A caller that does pass a marker or an
+ * ordinal is not checked here; the source refuses a tag for any row that is not a group, so such a
+ * call cancels instead of tagging something the mode would not draw.
+ */
+static bool stack_row_color_tag_poll(bContext *C)
+{
+  if (!stack_row_add_poll(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  Vector<int> selected;
+  stack_selected_ordinals_get(*space_outliner, selected);
+  const int ordinal = !selected.is_empty() ?
+                          selected.first() :
+                          outliner_stack_active_ordinal_get(outliner_stack_read_context(*C),
+                                                            *space_outliner);
+  const StackRow *row = (ordinal < 0) ?
+                            nullptr :
+                            outliner_stack_row_find(*space_outliner, ordinal);
+  return row != nullptr && row->can_hold_children;
+}
+
+static wmOperatorStatus stack_row_color_tag_set_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const int color_tag = RNA_enum_get(op->ptr, "color");
+  return outliner_stack_row_color_tag_set(C, *space_outliner, ordinal, color_tag) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
+void OUTLINER_OT_stack_layer_color_tag_set(wmOperatorType *ot)
+{
+  ot->name = "Set Layer Group Color";
+  ot->idname = "OUTLINER_OT_stack_layer_color_tag_set";
+  ot->description = "Set the color tag of a layer group folder";
+  ot->exec = stack_row_color_tag_set_exec;
+  ot->poll = stack_row_color_tag_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_enum(ot->srna, "color", stack_row_color_items, 0, "Color", "Color tag for the group");
+  rna_def_stack_row_ordinal(ot, "Group to set color for; -1 uses the selected or active row");
   rna_def_stack_row_marker(ot);
 }
 

@@ -61,6 +61,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_screen.hh"
 #include "BKE_undo_system.hh"
@@ -136,30 +137,12 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_targets_get(const bConte
 
   const Brush *brush = BKE_paint_brush(&scene->toolsettings->imapaint.paint);
   const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
-  PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
-  const Vector<PaintMaterialImageTarget> material_targets = BKE_paint_material_image_targets_get(
+  targets = image_paint_selection_material_targets_get(
       *ob,
-      paint_mode,
+      scene->toolsettings->paint_mode,
       brush_paint,
-      scene->toolsettings->imapaint.paint.visible_material_channels);
-
-  for (const PaintMaterialImageTarget &material_target : material_targets) {
-    if (!material_target.image || !ID_IS_EDITABLE(material_target.image) ||
-        ID_IS_OVERRIDE_LIBRARY(material_target.image))
-    {
-      continue;
-    }
-    if (std::any_of(targets.begin(), targets.end(), [&](const ImagePaintSelectionTarget &target) {
-          return target.image == material_target.image;
-        }))
-    {
-      continue;
-    }
-    targets.append({material_target.image,
-                    material_target.iuser ? *material_target.iuser : sima->iuser,
-                    material_target.is_color_channel,
-                    material_target.channel});
-  }
+      scene->toolsettings->imapaint.paint.visible_material_channels,
+      sima->iuser);
 
   /* A temporarily unresolved Material canvas must not make selection tools unusable. It retains
    * the single-image behavior until the configured PBR targets become available again. */
@@ -173,6 +156,52 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_targets_get(const bConte
         break;
       }
     }
+  }
+  return targets;
+}
+
+Vector<ImagePaintSelectionTarget> image_paint_selection_material_targets_get(
+    Object &ob,
+    PaintModeSettings &paint_mode,
+    const BrushMaterialPaint *brush_paint,
+    const int visible_material_channels,
+    const ImageUser &fallback_iuser)
+{
+  Vector<ImagePaintSelectionTarget> targets;
+  const auto append_targets = [&](const Span<PaintMaterialImageTarget> material_targets) {
+    for (const PaintMaterialImageTarget &material_target : material_targets) {
+      if (material_target.image == nullptr || !ID_IS_EDITABLE(material_target.image) ||
+          ID_IS_OVERRIDE_LIBRARY(material_target.image))
+      {
+        continue;
+      }
+      if (std::any_of(targets.begin(),
+                      targets.end(),
+                      [&](const ImagePaintSelectionTarget &target) {
+                        return target.image == material_target.image;
+                      }))
+      {
+        continue;
+      }
+      targets.append({material_target.image,
+                      material_target.iuser ? *material_target.iuser : fallback_iuser,
+                      material_target.is_color_channel,
+                      material_target.channel});
+    }
+  };
+
+  append_targets(BKE_paint_material_image_targets_get(
+      ob, paint_mode, brush_paint, visible_material_channels));
+
+  /* The brush list covers the channels the current stroke writes, but a selection constrains the
+   * whole canvas: another stroke (or a Paint Shape with channel overrides) may later write a
+   * channel map that the brush has switched off right now. Add every existing image channel so its
+   * map receives the same mask and stays clipped when it is painted. Mask mode is skipped: there
+   * only the row's mask map exists. */
+  if (BKE_paint_layers_target_mode(&paint_mode) != PaintLayersTargetMode::Mask) {
+    const uint32_t all_image_channels = uint32_t((uint64_t(1) << PAINT_MATERIAL_CHANNEL_NUM) - 1);
+    append_targets(BKE_paint_material_image_targets_get_for_channels(
+        ob, paint_mode, all_image_channels, /*mask_stroke_value=*/1.0f));
   }
   return targets;
 }
@@ -207,6 +236,79 @@ void image_paint_selection_targets_update(bContext *C,
     DEG_id_tag_update(&scene->id, ID_RECALC_SYNC_TO_EVAL);
   }
   WM_event_add_notifier(C, NC_WINDOW, nullptr);
+}
+
+void image_paint_selection_masks_copy(Image &dest, const Image &src, const ImageUser &dest_iuser)
+{
+  for (const ImageTile *tile : ConstListBaseWrapper<ImageTile>(src.tiles)) {
+    const ImBuf *src_mask = BKE_image_paint_selection_mask_lookup(&src, tile->tile_number);
+    if (src_mask == nullptr || src_mask->float_data() == nullptr) {
+      continue;
+    }
+    /* The destination mask keeps matching its own image: reuse its size when it exists, otherwise
+     * take the destination tile buffer's. Never the source's size. */
+    int dst_w = 0;
+    int dst_h = 0;
+    const ImBuf *dst_existing = BKE_image_paint_selection_mask_lookup(&dest, tile->tile_number);
+    if (dst_existing != nullptr && dst_existing->float_data() != nullptr) {
+      dst_w = dst_existing->x;
+      dst_h = dst_existing->y;
+    }
+    else {
+      ImageUser iuser = dest_iuser;
+      iuser.tile = tile->tile_number;
+      ImBuf *ibuf = BKE_image_acquire_ibuf(&dest, &iuser, nullptr);
+      if (ibuf == nullptr) {
+        continue;
+      }
+      dst_w = ibuf->x;
+      dst_h = ibuf->y;
+      BKE_image_release_ibuf(&dest, ibuf, nullptr);
+    }
+    ImBuf *dst = BKE_image_paint_selection_mask_get(&dest, tile->tile_number, dst_w, dst_h);
+    if (dst == nullptr || dst->float_data_for_write() == nullptr) {
+      continue;
+    }
+    const float *src_data = src_mask->float_data();
+    float *dst_data = dst->float_data_for_write();
+    if (src_mask->x == dst->x && src_mask->y == dst->y) {
+      memcpy(dst_data, src_data, sizeof(float) * size_t(src_mask->x) * size_t(src_mask->y));
+      continue;
+    }
+    /* Nearest resample: the masks are binary (feathering derives from them later), so a point
+     * lookup preserves the boundary better than a smoothed filter. */
+    for (const int y : IndexRange(dst->y)) {
+      const int sy = std::clamp(int(int64_t(y) * src_mask->y / dst->y), 0, src_mask->y - 1);
+      for (const int x : IndexRange(dst->x)) {
+        const int sx = std::clamp(int(int64_t(x) * src_mask->x / dst->x), 0, src_mask->x - 1);
+        dst_data[int64_t(y) * dst->x + x] = src_data[int64_t(sy) * src_mask->x + sx];
+      }
+    }
+  }
+}
+
+void image_paint_selection_masks_share(const Span<ImagePaintSelectionTarget> targets)
+{
+  const ImagePaintSelectionTarget *source = nullptr;
+  for (const ImagePaintSelectionTarget &target : targets) {
+    if (target.image != nullptr && BKE_image_paint_selection_mask_has_any(target.image)) {
+      source = &target;
+      break;
+    }
+  }
+  if (source == nullptr) {
+    /* A deselected canvas has nothing to share. */
+    return;
+  }
+  for (const ImagePaintSelectionTarget &target : targets) {
+    if (target.image == nullptr || target.image == source->image) {
+      continue;
+    }
+    if (BKE_image_paint_selection_mask_has_any(target.image)) {
+      continue;
+    }
+    image_paint_selection_masks_copy(*target.image, *source->image, target.iuser);
+  }
 }
 
 /* -------------------------------------------------------------------- */

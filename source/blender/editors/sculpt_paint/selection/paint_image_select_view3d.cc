@@ -68,6 +68,7 @@
 #include "BKE_library.hh"
 #include "BKE_mesh.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_paint_types.hh"
@@ -292,27 +293,19 @@ Vector<ImagePaintSelectionTarget> image_paint_selection_view3d_targets_get(bCont
     return targets;
   }
 
-  const Brush *brush = BKE_paint_brush(&scene->toolsettings->imapaint.paint);
+  /* Resolve the brush and the channel visibility through the ACTIVE paint mode. These tools run in
+   * Sculpt Mode, whose brush and `visible_material_channels` are their own: reading Image Paint's
+   * pair here made the selection target only the maps that happened to be enabled/visible there
+   * (in the common case `imapaint`'s brush has no Material Paint settings at all, so the resolver
+   * fell back to the single legacy canvas image -- Base Color). Every other channel map the
+   * Sculpt brush and the shape tools write then never received a mask, so painting was only
+   * clipped on Base Color. */
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  const Brush *brush = paint != nullptr ? BKE_paint_brush_for_read(paint) : nullptr;
   const BrushMaterialPaint *brush_paint = brush ? brush->material_paint : nullptr;
-  const Vector<PaintMaterialImageTarget> material_targets = BKE_paint_material_image_targets_get(
-      ob, paint_mode, brush_paint, scene->toolsettings->imapaint.paint.visible_material_channels);
-  for (const PaintMaterialImageTarget &material_target : material_targets) {
-    if (material_target.image == nullptr || !ID_IS_EDITABLE(material_target.image) ||
-        ID_IS_OVERRIDE_LIBRARY(material_target.image))
-    {
-      continue;
-    }
-    if (std::any_of(targets.begin(), targets.end(), [&](const ImagePaintSelectionTarget &target) {
-          return target.image == material_target.image;
-        }))
-    {
-      continue;
-    }
-    targets.append({material_target.image,
-                    material_target.iuser ? *material_target.iuser : canvas_iuser,
-                    material_target.is_color_channel,
-                    material_target.channel});
-  }
+  const int visible_material_channels = paint != nullptr ? paint->visible_material_channels : 0;
+  targets = image_paint_selection_material_targets_get(
+      ob, paint_mode, brush_paint, visible_material_channels, canvas_iuser);
   /* A temporarily unresolved Material canvas keeps the single-canvas behavior. */
   if (targets.is_empty() && canvas_image != nullptr) {
     targets.append({canvas_image, canvas_iuser});
@@ -1003,62 +996,6 @@ bool image_select_view3d_plane_px_to_surface_uv(bContext *C,
 /** \name Mask rasterization through the mesh
  * \{ */
 
-/**
- * Copy the rasterized selection masks of \a source into \a dest. Both images belong to targets of
- * the same mesh, so tile numbers and mask contents correspond 1:1; tiles whose resolutions differ
- * (e.g. PBR maps of different sizes) are resampled instead of copied. Skips tiles whose buffer is
- * missing on \a dest, so masks are never created where nothing can be painted.
- */
-static void rasterized_masks_copy(const Image &source,
-                                  Image &dest,
-                                  const ImageUser &dest_iuser)
-{
-  for (const ImageTile *tile : ConstListBaseWrapper<ImageTile>(source.tiles)) {
-    const ImBuf *src = BKE_image_paint_selection_mask_lookup(&source, tile->tile_number);
-    if (src == nullptr || src->float_data() == nullptr) {
-      continue;
-    }
-    /* Resolve the destination tile's size: from its existing mask, or from the tile buffer when
-     * the mask does not exist yet. */
-    int dst_w = 0;
-    int dst_h = 0;
-    const ImBuf *dst_existing = BKE_image_paint_selection_mask_lookup(&dest, tile->tile_number);
-    if (dst_existing != nullptr && dst_existing->float_data() != nullptr) {
-      dst_w = dst_existing->x;
-      dst_h = dst_existing->y;
-    }
-    else {
-      ImBuf *ibuf = image_select_v3d::tile_ibuf_get(&dest, dest_iuser, tile->tile_number);
-      if (ibuf == nullptr) {
-        continue;
-      }
-      dst_w = ibuf->x;
-      dst_h = ibuf->y;
-    }
-    /* Same size as the existing mask keeps it (and bumps the revision); a size change reallocates
-     * it. Never pass the source size here: the mask must keep matching its own image. */
-    ImBuf *dst = BKE_image_paint_selection_mask_get(&dest, tile->tile_number, dst_w, dst_h);
-    if (dst == nullptr || dst->float_data_for_write() == nullptr) {
-      continue;
-    }
-    const float *src_data = src->float_data();
-    float *dst_data = dst->float_data_for_write();
-    if (src->x == dst->x && src->y == dst->y) {
-      memcpy(dst_data, src_data, sizeof(float) * size_t(src->x) * size_t(src->y));
-      continue;
-    }
-    /* Nearest resample: the masks are binary (feathering derives from them later), so a plain
-     * point lookup preserves the boundary better than a smoothed filter. */
-    for (const int y : IndexRange(dst->y)) {
-      const int sy = std::clamp(int(int64_t(y) * src->y / dst->y), 0, src->y - 1);
-      for (const int x : IndexRange(dst->x)) {
-        const int sx = std::clamp(int(int64_t(x) * src->x / dst->x), 0, src->x - 1);
-        dst_data[int64_t(y) * dst->x + x] = src_data[int64_t(sy) * src->x + sx];
-      }
-    }
-  }
-}
-
 bool image_select_view3d_rasterize_masks(bContext *C,
                                          Object &ob,
                                          const Depsgraph &depsgraph,
@@ -1140,7 +1077,7 @@ bool image_select_view3d_rasterize_masks(bContext *C,
   Vector<ImagePaintSelectionTarget> targets_mutable(targets.begin(), targets.end());
   threading::EnumerableThreadSpecific<image_select_v3d::RasterTLS> all_tls;
   /* The first target whose buffers resolve: its masks are rasterized geometrically, the others
-   * get exact copies (see #rasterized_masks_copy). */
+   * get exact copies (see #image_paint_selection_masks_copy). */
   Image *source_image = nullptr;
   for (const int target_i : targets_mutable.index_range()) {
     ImagePaintSelectionTarget &target = targets_mutable[target_i];
@@ -1149,7 +1086,7 @@ bool image_select_view3d_rasterize_masks(bContext *C,
       /* Copying avoids re-running the geometric rasterization and #build_pixels (which rebuilds
        * the PBVH pixel data and invalidates the paint cache once per image) for every Material
        * target; the masks are identical by construction. */
-      rasterized_masks_copy(*source_image, *image, target.iuser);
+      image_paint_selection_masks_copy(*image, *source_image, target.iuser);
       continue;
     }
     std::unique_ptr<paint::image::ImageData> image_data = paint::image::ImageData::from_image(
@@ -1191,7 +1128,6 @@ bool image_select_view3d_rasterize_masks(bContext *C,
           if (pixel_node.tiles.is_empty()) {
             return;
           }
-          image_select_v3d::RasterTLS &tls = all_tls.local();
           for (bke::pbvh::pixels::UDIMTilePixels &tile : pixel_node.tiles) {
             const ImBuf *ibuf = image_data->buffers.lookup_default(tile.tile_number, nullptr);
             if (ibuf == nullptr) {
@@ -1207,6 +1143,10 @@ bool image_select_view3d_rasterize_masks(bContext *C,
 
             threading::parallel_for(
                 tile.pixel_rows.index_range(), 64, [&](const IndexRange rows) {
+                  /* Looked up here, not in the outer per-node lambda: this nested #parallel_for
+                   * runs on other worker threads, and sharing the outer thread's TLS between them
+                   * raced on `touched_faces` (heap corruption / double free). */
+                  image_select_v3d::RasterTLS &tls = all_tls.local();
                   Vector<float3> positions;
                   for (const int r : rows) {
                     const bke::pbvh::pixels::PackedPixelRow &pixel_row = tile.pixel_rows[r];
@@ -1381,6 +1321,9 @@ void expand_faces_to_masks(const bContext *C,
         }
         ImBuf *mask = BKE_image_paint_selection_mask_get(
             image, tile->tile_number, ibuf->x, ibuf->y);
+        if (mask == nullptr) {
+          continue;
+        }
         float *mask_px = mask->float_data_for_write();
         for (const int tri_i : bke::mesh::face_triangles_range(faces_offsets, face)) {
           const int3 tri = corner_tris[tri_i];

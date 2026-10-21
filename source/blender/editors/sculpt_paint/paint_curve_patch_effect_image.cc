@@ -41,6 +41,7 @@
 #include "BKE_colortools.hh"
 #include "BKE_context.hh"
 #include "BKE_image.hh"
+#include "BKE_image_paint_selection.hh"
 #include "BKE_image_wrappers.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
@@ -566,6 +567,20 @@ static Map<const Image *, paint::image::ImageData *> curve_patch_image_data_by_i
 }
 
 /**
+ * Whether \a image's runtime paint selection masks constrain this pass.
+ *
+ * Mirrors the stroke engine's rule (`image_paint_selection_mask_active()` in
+ * `mesh/sculpt_paint_image.cc`): a canvas borrowed by a floating selection session paints
+ * unmasked, because its lifted holes are being edited elsewhere.
+ */
+static bool curve_patch_image_selection_active(const Image *image)
+{
+  return image != nullptr && image->runtime != nullptr &&
+         image->runtime->paint_selection_borrowed_by == nullptr &&
+         BKE_image_paint_selection_is_active(image);
+}
+
+/**
  * Whether \a image_data's tile layout is the one the PBVH pixel encoding currently describes.
  *
  * The encoding (resolution, UDIM set, seam margin, UV map) is built ONCE per restamp, from the
@@ -1060,6 +1075,10 @@ struct AcceptedPixel {
   /** The Alpha channel sampled at this texel, or 1 when Alpha masking is off or does not apply
    * to this channel (Alpha never masks its own write -- #channel_uses_alpha_mask). */
   float alpha_factor;
+  /** Selection-mask weight at this texel: the user-authored and face-derived masks combined, or 1
+   * when neither constrains the canvas. Scales the final COVERAGE, not #weight: #weight only shapes
+   * the cross-pass average, where a uniform factor would cancel out. */
+  float selection;
 };
 
 /** One chunk of a `PackedPixelRow` that PHASE 1 accepted at least one pixel in.
@@ -1219,6 +1238,27 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
   if (!curve_patch_layout_matches(pbvh, image_data, uv_map_name)) {
     continue;
   }
+  /* Selection masks are a property of the IMAGE, not of a PBVH node, and resolving a tile's
+   * sampler may lazily build its cached blend mask. Do that here on the serial per-canvas path, so
+   * the parallel pixel wave below only ever READS the masks. A tile the pass never visits needs no
+   * sampler: the lookup in the tile loop is allowed to miss.
+   *
+   * The canvas-wide active test gates the scan; `is_unrestricted()` then decides per tile, because
+   * a feathered policy leaves tiles without a user mask unmasked while a hard one blocks them. */
+  Map<bke::image::TileNumber, ImagePaintSelectionTileSampler> selection_samplers;
+  if (curve_patch_image_selection_active(image_data.image)) {
+    node_mask.foreach_index(
+        [&](const int i) {
+          for (const bke::pbvh::pixels::UDIMTilePixels &tile : pixel_nodes[i].tiles) {
+            if (!selection_samplers.contains(tile.tile_number)) {
+              selection_samplers.add(tile.tile_number,
+                                     BKE_image_paint_selection_tile_sampler_get(image_data.image,
+                                                                                tile.tile_number));
+            }
+          }
+        },
+        exec_mode::serial);
+  }
   /* Whether the RIBBON's own texture may supply this canvas's paint color. Normal packs a
    * direction and a scalar channel carries a single value, so neither can take an RGB from it.
    * The channel's own SOURCE is a separate mechanism and does reach Normal -- see
@@ -1322,6 +1362,9 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * for an oversight. */
   struct LocalData {
     Vector<ChunkWrite> chunks;
+    /** One chunk's selection weights, sampled after the patch's broad-phase cull so rows the patch
+     * never reaches are not scanned. Reused across chunks by the owning task. */
+    Vector<float> selection_chunk;
 #if CURVE_PATCH_PROFILING
     /* DEBUG-cpatch-image: per-thread CPU-time split of PHASE 1. `interp` is the barycentric
      * position/normal/mask interpolation, `sample` the `sampler.sample()` loop it feeds -- split
@@ -1384,6 +1427,13 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
           if (processors == nullptr) {
             continue;
           }
+          /* Resolved once per tile: a miss means this canvas has no selection at all, and an
+           * unrestricted sampler (no user mask and no derived face mask anywhere) means every
+           * weight is 1 without sampling anything. */
+          const ImagePaintSelectionTileSampler *selection_sampler =
+              selection_samplers.lookup_ptr(tile_data.tile_number);
+          const bool apply_selection = selection_sampler != nullptr &&
+                                       !selection_sampler->is_unrestricted();
 
           const int64_t buffer_size = int64_t(image_buffer->x) * image_buffer->y;
           MutableSpan<float4> float_buffer;
@@ -1445,6 +1495,23 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               local.culled += range.size();
 #endif
               return;
+            }
+            /* Selection mask: resolve this chunk's weights now, after the cheap patch cull but
+             * before the per-pixel interpolation and ribbon sampling below. A chunk fully outside
+             * the selection contributes nothing, so reject it here. Doing this per chunk rather
+             * than per row keeps rows the patch never reaches from being scanned at all. */
+            Span<float> selection;
+            if (apply_selection) {
+              const int selection_x = int(pixel_row.start_image_coordinate.x) + int(range.start());
+              const int selection_y = int(pixel_row.start_image_coordinate.y);
+              local.selection_chunk.resize(range.size());
+              if (!selection_sampler->sample_row(selection_x,
+                                                 selection_y,
+                                                 local.selection_chunk.as_mutable_span()))
+              {
+                return;
+              }
+              selection = local.selection_chunk.as_span();
             }
 #if CURVE_PATCH_PROFILING
             local.candidates += range.size();
@@ -1586,6 +1653,14 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               if (!span_live) {
                 continue;
               }
+              /* Selection mask, fine phase: a zero weight contributes nothing, so skip the
+               * ribbon/source sampling entirely. The weight is carried to PHASE 2 and scales the
+               * final coverage there; folding it into `sample->weight` would cancel out in the
+               * cross-pass average and leave the pixel unpainted-by-mask but fully painted. */
+              const float selection_weight = selection.is_empty() ? 1.0f : selection[li];
+              if (selection_weight <= 0.0f) {
+                continue;
+              }
               const std::optional<CurvePatchSample> sample = sampler.sample(li, thread_id);
               if (!sample) {
                 continue;
@@ -1690,7 +1765,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                sample->value,
                                sample->weight,
                                source_color,
-                               alpha_factor});
+                               alpha_factor,
+                               selection_weight});
             }
             if (batch_decode_color && !accepted.is_empty()) {
               /* Gathered into a contiguous span because the decode entry point takes one. Every
@@ -1936,11 +2012,15 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
         accum.x += pixel.weight;
         accum.y += pixel.weight * pixel.value;
         const float blended = accum.y / accum.x;
-        /* The Alpha channel scales every other channel's write, exactly as it does for a dab. */
+        /* The Alpha channel scales every other channel's write, exactly as it does for a dab. The
+         * selection mask scales the resulting COVERAGE the same way the stroke engine folds its
+         * weight into the brush factor: zero outside the selection, partial on a feathered edge.
+         * Applying it here rather than to `pixel.weight` is what keeps a selected-out pixel blank
+         * -- a uniform factor on the accumulated weights would cancel in `blended`. */
         const float factor = curve_patch_color_mix_factor(
                                  blended, pixel.tex_color, pixel.tex_valid, strength) *
                              pixel.alpha_factor;
-
+        const float coverage = std::clamp(factor * pixel.selection, 0.0f, 1.0f);
         /* The color a patch paints is a `float3` (`BKE_brush_color_get()`, or a channel color), so
          * the only alpha it contributes is its own coverage. That coverage accumulates onto the
          * destination alpha with the straight-alpha "over", in every branch below. On an opaque map
@@ -1948,7 +2028,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
          * paint-layer map, whose alpha IS the coverage and starts transparent, carrying the
          * destination alpha through would leave the painted color invisible to the layer composite.
          * Normal was the only channel that did this before. */
-        const float coverage = std::clamp(factor, 0.0f, 1.0f);
         const float alpha_out = orig.w + coverage * (1.0f - orig.w);
         /* Precedence, matching the stroke engine: the CHANNEL's own source wins (that is the
          * image assigned to Base Color in the channel panel); failing that the ribbon's own
@@ -2005,12 +2084,13 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               math::interpolate(float3(orig), paint_rgb, weight), alpha_out);
         }
         else {
-          /* `orig` is the frozen pre-patch value and `factor` this restamp's total coverage of
+          /* `orig` is the frozen pre-patch value and `coverage` this restamp's total coverage of
            * the texel, which is exactly the (pre-stroke value, accumulated coverage) pair
            * #composite_coverage expects -- the patch snapshot plays the role the raster
            * engine's #MaterialStrokeAccum plays for a stroke. Pre-multiplied, as that contract
-           * requires. */
-          const float4 mix(paint_rgb * factor, factor);
+           * requires. `coverage` rather than `factor`: the selection weight must scale the RGB a
+           * non-Mix mode contributes too, not only the alpha written below it. */
+          const float4 mix(paint_rgb * coverage, coverage);
           float4 composited = material::composite_coverage(orig, mix, blend_mode);
           composited.w = alpha_out;
           chunk.values[pixel.local] = composited;

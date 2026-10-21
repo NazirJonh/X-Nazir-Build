@@ -65,6 +65,8 @@
 struct ImBuf;
 struct ARegion;
 struct BMesh;
+struct BrushMaterialPaint;
+struct PaintModeSettings;
 struct Image;
 struct Object;
 struct Scene;
@@ -101,11 +103,30 @@ struct ImagePaintSelectionTarget {
 /**
  * Images affected by an Image Paint selection operation.
  *
- * Material canvas mode uses the same resolved writable PBR targets as a paint stroke. All other
- * canvas modes deliberately retain the traditional single active-image behavior.
+ * Material canvas mode returns every channel map the canvas can paint into, not only the channels
+ * the current brush writes: the selection is canvas-wide, and a later stroke or Paint Shape may
+ * write a map that is switched off right now. All other canvas modes deliberately retain the
+ * traditional single active-image behavior.
  */
 Vector<ImagePaintSelectionTarget> image_paint_selection_targets_get(const bContext *C,
                                                                      const SpaceImage *sima);
+
+/**
+ * Selection targets of a Material canvas: the maps \a brush_paint writes, plus every other image
+ * channel map the canvas resolves (Content target mode only; a Mask row has just its one map).
+ *
+ * Single place that decides which maps carry the canvas-wide selection, shared by the 2D, 3D and
+ * stroke-start paths so they cannot disagree. Which channels exist is left to the BKE target
+ * resolvers, so a channel the material's channel set leaves out never shows up here. Images that
+ * are linked, overridden or already listed are skipped. \a fallback_iuser is used for maps that
+ * carry no #ImageUser of their own (a layered material's).
+ */
+Vector<ImagePaintSelectionTarget> image_paint_selection_material_targets_get(
+    Object &ob,
+    PaintModeSettings &paint_mode,
+    const BrushMaterialPaint *brush_paint,
+    int visible_material_channels,
+    const ImageUser &fallback_iuser);
 
 /** Begin one image undo step and snapshot the masks of every target image. */
 void image_paint_selection_undo_begin(const char *name,
@@ -113,6 +134,27 @@ void image_paint_selection_undo_begin(const char *name,
 
 /** Invalidate derived mask data and notify all target images after a selection edit. */
 void image_paint_selection_targets_update(bContext *C, Span<ImagePaintSelectionTarget> targets);
+
+/**
+ * Copy every selection-mask tile of \a src into \a dest, nearest-resampling the tiles whose
+ * resolutions differ. Tiles whose destination buffer cannot be resolved are skipped, so a mask is
+ * never created where nothing can be painted.
+ *
+ * Used to give a canvas channel map created AFTER a selection was made the same mask the other
+ * channels already carry -- the selection is UV-space and identical for every map of the canvas.
+ */
+void image_paint_selection_masks_copy(Image &dest, const Image &src, const ImageUser &dest_iuser);
+
+/**
+ * Make the canvas selection consistent across every target image: the first target that carries a
+ * selection becomes the source, and every other target without a selection receives a copy.
+ *
+ * Called at stroke start, after the writable channel maps were ensured: a map created at that point
+ * has no mask yet and would otherwise paint outside the selection while Base Color stayed clipped.
+ * Does nothing when no target has a selection (deselected canvas) or when every target already has
+ * one.
+ */
+void image_paint_selection_masks_share(Span<ImagePaintSelectionTarget> targets);
 
 /* -------------------------------------------------------------------- */
 /** \name Selection-mask snapshots (interactive previews)

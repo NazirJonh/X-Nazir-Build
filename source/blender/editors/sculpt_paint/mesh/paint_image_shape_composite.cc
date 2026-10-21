@@ -73,6 +73,7 @@
 #include "paint_material_source.hh"
 /* #image_select_undo_session_step_get only. */
 #include "../selection/paint_image_select_fragment.hh"
+#include "../selection/paint_image_select_intern.hh"
 /* Curve Pattern tile resolution (the tile texture source). */
 #include "../shapes/paint_shape_pattern.hh"
 
@@ -236,6 +237,10 @@ void composite_targets_ensure_writable(bContext *C,
             .created > 0)
     {
       ed::sculpt_paint::material::layer_maps_created_tag();
+      /* A map created now did not exist when the canvas selection was made. The shape has no brush
+       * list: every existing channel map is a target, which is what a donor mask needs. */
+      image_paint_selection_masks_share(image_paint_selection_material_targets_get(
+          *ob, mode_settings, nullptr, 0, ImageUser{}));
     }
   }
 }

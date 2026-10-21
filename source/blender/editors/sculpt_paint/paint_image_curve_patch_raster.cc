@@ -417,6 +417,13 @@ static void blend_tile_region(const TileRegion &region,
   /* Any gating source (user mask or the derived face-selection masks); the blend sample combines
    * both and reports zero weight where an *active* face selection doesn't cover. */
   const bool has_selection_mask = BKE_image_paint_selection_is_active(&image);
+  /* Resolved before the parallel row loop: building the sampler may lazily create the tile's
+   * cached blend mask, which must not race between workers. The sampler itself is then read-only
+   * and safe to use from every row task. */
+  ImagePaintSelectionTileSampler selection_sampler;
+  if (has_selection_mask) {
+    selection_sampler = BKE_image_paint_selection_tile_sampler_get(&image, tile_number);
+  }
   const bool is_float = ibuf.float_data() != nullptr;
   float *float_data = is_float ? ibuf.float_data_for_write() : nullptr;
   uchar *byte_data = is_float ? nullptr : ibuf.byte_data_for_write();
@@ -456,6 +463,8 @@ static void blend_tile_region(const TileRegion &region,
     Vector<float> pending_alpha;
     Vector<int> decode_slots;
     Vector<float3> decode_buf;
+    /* One row's selection weights, reused across the rows this task owns. */
+    Vector<float> row_selection_storage;
     if (defer_encode) {
       pending_i.reserve(width);
       pending_rgb.reserve(width);
@@ -464,10 +473,31 @@ static void blend_tile_region(const TileRegion &region,
     for (const int row_offset : row_range) {
       const int y_px = region.y0 + row_offset;
 
+      /* Selection mask, row phase: resolve the weights once per row, before the UV projection
+       * below, so a row wholly outside the selection costs one scan instead of a full ribbon
+       * evaluation. `sample_row` is the same nearest-pixel arithmetic the scalar
+       * `BKE_image_paint_selection_blend_sample` used to perform per painted pixel. */
+      if (has_selection_mask) {
+        row_selection_storage.resize(width);
+        if (!selection_sampler.sample_row(
+                region.x0, y_px, row_selection_storage.as_mutable_span()))
+        {
+          continue;
+        }
+      }
+      const Span<float> row_selection = has_selection_mask ?
+                                            row_selection_storage.as_span() :
+                                            Span<float>();
+
       Array<float3> positions(width);
       Array<float3> normals(width, float3(0.0f, 0.0f, 1.0f));
       for (const int i : IndexRange(width)) {
         const int x_px = region.x0 + i;
+        /* A pixel with no selection weight cannot paint; leave its slot at the array's zero
+         * default and never hand it to the sampler below. */
+        if (!row_selection.is_empty() && row_selection[i] <= 0.0f) {
+          continue;
+        }
         /* This tile's own pixel -> UV -> reference-tile pixel space, since the patch geometry
          * was built in the REFERENCE tile's pixel space (spec §4.2, §9) -- for any tile other
          * than the reference one, or one with a different resolution, skipping this two-step
@@ -500,6 +530,10 @@ static void blend_tile_region(const TileRegion &region,
       CurvePatchSampler sampler(patch, texture, ctx, brush, source, /*mask=*/{}, tex_pool);
 
       for (const int i : IndexRange(width)) {
+        const float selection_weight = row_selection.is_empty() ? 1.0f : row_selection[i];
+        if (selection_weight <= 0.0f) {
+          continue;
+        }
         const std::optional<CurvePatchSample> sample = sampler.sample(i, thread_id);
         if (!sample) {
           continue;
@@ -523,9 +557,7 @@ static void blend_tile_region(const TileRegion &region,
             0.0f,
             1.0f);
         const int x_px = region.x0 + i;
-        if (has_selection_mask) {
-          alpha *= BKE_image_paint_selection_blend_sample(&image, tile_number, x_px, y_px);
-        }
+        alpha *= selection_weight;
         if (alpha <= 0.0f) {
           continue;
         }

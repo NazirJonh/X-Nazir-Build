@@ -71,6 +71,7 @@
 #include "../paint_image_curve_patch_anchor.hh"
 #include "../paint_image_stroke_hook.hh"
 #include "../paint_intern.hh"
+#include "../selection/paint_image_select_intern.hh"
 #include "paint_material_source.hh"
 
 namespace blender {
@@ -890,6 +891,16 @@ static void texture_paint_prepare_layered_maps(bContext *C,
                     paint_mode,
                     scene->toolsettings->imapaint.paint.visible_material_channels)
                     .created;
+      /* A map created now did not exist when the canvas selection was made; give it the mask the
+       * other channel maps carry so this stroke is clipped on every channel. */
+      if (created > 0) {
+        image_paint_selection_masks_share(image_paint_selection_material_targets_get(
+            *ob,
+            paint_mode,
+            brush->material_paint,
+            scene->toolsettings->imapaint.paint.visible_material_channels,
+            ImageUser{}));
+      }
     }
   }
   if (created > 0) {

@@ -4825,6 +4825,15 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
         *bmain, *ob, brush_paint, paint_mode, settings->imapaint.paint.visible_material_channels);
     ED_space_image_paint_auto_select_material_canvas(bmain, ob);
 
+    /* A channel map created by the ensure above may not have existed when the selection was made.
+     * Share the canvas-wide selection masks so every map the stroke can write is clipped. */
+    image_paint_selection_masks_share(image_paint_selection_material_targets_get(
+        *ob,
+        paint_mode,
+        &brush_paint,
+        settings->imapaint.paint.visible_material_channels,
+        sima != nullptr ? sima->iuser : ImageUser{}));
+
     /* A Mask stroke writes the mask map only, so the brush's PBR channel toggles (Normal and the
      * like) are no reason to warn about missing channel textures. */
     const bool mask_target_mode = paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK;

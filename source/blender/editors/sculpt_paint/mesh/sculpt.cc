@@ -8218,6 +8218,14 @@ static void init_material_canvas_for_object(Main &bmain,
   const BrushMaterialPaint &brush_paint = *brush.material_paint;
   BKE_paint_material_images_ensure_writable(
       bmain, ob, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
+
+  /* The ensure above can create a channel map that did not exist when the selection was made.
+   * The selection is canvas-wide and lives in UV space, so share the masks the other channel maps
+   * already carry; otherwise the new map paints outside the selection while Base Color, whose map
+   * existed at selection time, stays clipped. Cheap when there is no selection or every map is
+   * already covered. */
+  image_paint_selection_masks_share(image_paint_selection_material_targets_get(
+      ob, paint_mode_init, &brush_paint, sd.paint.visible_material_channels, ImageUser{}));
   /* A Mask stroke writes the mask map only, so the brush's PBR channel toggles are no reason to
    * warn about missing channel textures. */
   const bool mask_target_mode = paint_mode_init.layer_target_mode == PAINT_LAYER_TARGET_MASK;

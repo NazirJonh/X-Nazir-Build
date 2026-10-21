@@ -10,6 +10,7 @@
 
 #include <algorithm>
 
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_vector.hh"
 
@@ -161,9 +162,16 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     created->source = MA_PAINT_LAYER_SOURCE_FILTER;
     created->kind_subtype = params.filter;
     paint_layer_kind_params_init(*created);
-    /* The channels a filter works in are records like a layer's, without a map; it starts in Base
-     * Color. */
-    BKE_paint_layers_channel_add(ma, created, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    /* The channels a filter works in are records like a layer's, without a map. It starts in the
+     * first channel of the material's set, which is Base Color unless the user removed it: adding
+     * Base Color unconditionally would make the adjustment inert in a material without it. */
+    const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if ((set & (uint16_t(1) << channel)) != 0) {
+        BKE_paint_layers_channel_add(ma, created, eMaterialPaintChannel(channel));
+        break;
+      }
+    }
     /* The kind decides which nodes the row builds, so the add's own tag was too early. */
     BKE_paint_layers_tag_edited(ma);
     return created;

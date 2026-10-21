@@ -4006,6 +4006,13 @@ bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint
   return !BKE_paint_material_channel_attribute_name(mode_settings, channel).is_empty();
 }
 
+bool BKE_paint_material_channel_in_active_set(Object &ob, const eMaterialPaintChannel channel)
+{
+  /* A material without a stack has no channel set: every channel it supports takes part. */
+  Material *layered = BKE_paint_layers_active_material_get(&ob);
+  return layered == nullptr || BKE_paint_layers_channel_in_set(*layered, channel);
+}
+
 bool BKE_paint_material_channel_writes_to_target(const BrushMaterialPaint &brush_paint,
                                                   const PaintModeSettings &mode_settings,
                                                   const int visible_material_channels,
@@ -4970,13 +4977,18 @@ static PaintMaterialImagesEnsureResult paint_layers_images_ensure_writable_for_m
       continue;
     }
     PaintLayersTarget target;
-    if (!BKE_paint_layers_target_get(ob, -1, info.channel, mode, target)) {
-      if (mode == PaintLayersTargetMode::Mask) {
-        /* A mask is Base Color's alone: the stroke's other channels have no target, which is not
-         * the absence of a row. */
-        continue;
-      }
-      /* No active row: nothing to paint into. */
+    const PaintLayersTargetStatus status = BKE_paint_layers_target_resolve(
+        ob, -1, info.channel, mode, target);
+    if (status == PaintLayersTargetStatus::OutsideChannelSet ||
+        status == PaintLayersTargetStatus::ChannelNotInMode)
+    {
+      /* Refusals that concern this channel alone: it is outside the set (the user's choice, no map
+       * by design) or, in Mask mode, not Base Color. Base Color comes first, so giving up here would
+       * leave every channel after it without its map too. */
+      continue;
+    }
+    if (status != PaintLayersTargetStatus::Ok) {
+      /* No active row, or one that takes no strokes: nothing to paint into. */
       return result;
     }
     /* Only a record the row already has takes the stroke. A row that lacks the channel, or has

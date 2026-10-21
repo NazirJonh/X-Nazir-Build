@@ -1035,8 +1035,9 @@ struct Material {
    * #eMaterialPaintChannel bitmask of the material's global paint channel set, one bit per channel
    * (`1 << channel`). Zero means "not set": BKE then derives the set from the union of every layer's
    * channel records plus the build default, so an existing file needs no versioning. Base Color is
-   * always part of the set. Leaving a channel out of the set never removes a layer's record or map;
-   * adding one never creates them (a record is created lazily).
+   * an ordinary channel and may be left out of a stored set; an empty stored set is refused by the
+   * setters (the derived one is never empty). Leaving a channel out of the set never removes a
+   * layer's record or map; adding one never creates them (a record is created lazily).
    */
   uint16_t paint_layers_channels = 0;
   /**

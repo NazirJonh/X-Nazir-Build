@@ -290,9 +290,12 @@ CloneStrokeTargets clone_stroke_targets_build(const Main &bmain,
             }
             for (int i = 0; i < row.channels_num; i++) {
               const MaterialPaintLayerChannel &record = row.channels[i];
-              /* A switched-off record keeps its map in the file but is not a paint target. */
+              /* A switched-off record keeps its map in the file but is not a paint target; neither
+               * is the map of a channel the material's set leaves out (this walks the records
+               * directly, so the target resolver's set filter does not reach it). */
               if (record.state == MA_PAINT_LAYER_CHANNEL_ENABLED && record.channel >= 0 &&
-                  record.channel < PAINT_MATERIAL_CHANNEL_NUM)
+                  record.channel < PAINT_MATERIAL_CHANNEL_NUM &&
+                  BKE_paint_layers_channel_in_set(material, eMaterialPaintChannel(record.channel)))
               {
                 maps[record.channel] = record.image;
               }

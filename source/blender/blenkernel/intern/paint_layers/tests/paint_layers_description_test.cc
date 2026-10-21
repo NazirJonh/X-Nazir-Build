@@ -1266,9 +1266,9 @@ TEST_F(PaintLayersDescription, material_channel_set_preserves_layer_data)
   BKE_paint_layers_default_channels_apply(*ma, *layer);
   ASSERT_EQ(layer->channels_num, 5);
 
-  /* Base Color is the material's constant and cannot be switched off. */
-  EXPECT_FALSE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
-  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  /* Base Color can be switched off as long as there are other channels in the set. */
+  EXPECT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  EXPECT_FALSE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
 
   const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   Image *map = BKE_image_add_generated(
@@ -1291,6 +1291,55 @@ TEST_F(PaintLayersDescription, material_channel_set_preserves_layer_data)
   ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, true));
   EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
   EXPECT_FALSE(paint_layer_channel_filtered(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
+}
+
+TEST_F(PaintLayersDescription, material_channel_set_keeps_at_least_one_channel)
+{
+  Material *ma = BKE_material_add(bmain, "ChannelSetNeverEmpty");
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_BASE_COLOR)));
+
+  /* The last channel of the set cannot be removed. */
+  EXPECT_FALSE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+
+  /* A whole-mask write of zero is refused and leaves the stored set alone. */
+  EXPECT_FALSE(BKE_paint_layers_channel_set_mask_set(*ma, 0));
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+}
+
+TEST_F(PaintLayersDescription, channel_add_does_not_widen_the_set)
+{
+  Material *ma = BKE_material_add(bmain, "ChannelAddKeepsSet");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
+
+  /* A record outside the set is legal: it stays on the row and becomes visible again when the
+   * channel is put back into the set. It must not silently widen the set itself. */
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  EXPECT_FALSE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_NE(paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+}
+
+TEST_F(PaintLayersDescription, filter_starts_in_the_first_channel_of_the_set)
+{
+  Material *ma = BKE_material_add(bmain, "FilterFirstChannel");
+  MaterialPaintLayer *bottom = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(bottom, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
+
+  /* An adjustment used to start in Base Color, which would leave it inert in a material whose set
+   * does not contain Base Color. */
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Adjustment;
+  params.filter = MA_PAINT_LAYER_FILTER_INVERT;
+  MaterialPaintLayer *adjustment = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(adjustment, nullptr);
+  EXPECT_NE(paint_layer_channel_find(*adjustment, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*adjustment, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
 }
 
 TEST_F(PaintLayersDescription, default_channels_apply_follows_the_set)
@@ -1319,11 +1368,11 @@ TEST_F(PaintLayersDescription, material_channel_set_round_trip)
   EXPECT_TRUE((set & (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR)) != 0);
   EXPECT_TRUE((set & (1 << PAINT_MATERIAL_CHANNEL_AO)) != 0);
 
-  /* Writing routes through BKE_paint_layers_channel_set_mask_set; Base Color is forced back in. */
+  /* Writing routes through BKE_paint_layers_channel_set_mask_set; Base Color is not forced back in. */
   RNA_property_enum_set(&ptr, prop, 1 << PAINT_MATERIAL_CHANNEL_METALLIC);
   const int after = RNA_property_enum_get(&ptr, prop);
   EXPECT_TRUE((after & (1 << PAINT_MATERIAL_CHANNEL_METALLIC)) != 0);
-  EXPECT_TRUE((after & (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR)) != 0);
+  EXPECT_FALSE((after & (1 << PAINT_MATERIAL_CHANNEL_BASE_COLOR)) != 0);
 
   /* The RNA helper answers from the same set. */
   EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, PAINT_MATERIAL_CHANNEL_METALLIC));
@@ -1933,6 +1982,45 @@ TEST_F(PaintLayersDescription, issues_report_a_fill_correction_that_has_no_effec
       bmain, 4, 4, "NormalMap", 32, false, IMA_GENTYPE_BLANK, flat, false, true, false);
   ASSERT_TRUE(BKE_paint_layers_channel_set_image(
       ma, fill, PAINT_MATERIAL_CHANNEL_NORMAL, &map));
+  issues.clear();
+  BKE_paint_layers_issues_get(ma, issues);
+  EXPECT_TRUE(issues.is_empty());
+}
+
+TEST_F(PaintLayersDescription, issues_report_a_fill_without_base_color_in_the_set)
+{
+  Material &ma = *BKE_material_add(bmain, "IssueFillNoBase");
+  MaterialPaintLayer *paint_row = BKE_paint_layers_add(
+      ma, "Paint", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *fill = BKE_paint_layers_add(ma, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_source(ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  MaterialPaintLayer *fill_correction = BKE_paint_layers_correction_add(
+      ma, paint_row, "Fill", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(fill_correction, nullptr);
+
+  /* Base Color outside the set: both Fill shapes have nothing to lay their colour through. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)));
+  Vector<PaintLayersIssue> issues;
+  BKE_paint_layers_issues_get(ma, issues);
+  ASSERT_EQ(issues.size(), 2);
+  bool fill_issue = false;
+  bool correction_issue = false;
+  for (const PaintLayersIssue &issue : issues) {
+    EXPECT_EQ(issue.code, PaintLayersIssueCode::FillWithoutBaseColor);
+    EXPECT_EQ(issue.channel, int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+    EXPECT_NE(issue.text, nullptr);
+    fill_issue |= BLI_uuid_equal(issue.layer, fill->marker) &&
+                  BLI_uuid_is_nil(issue.correction);
+    correction_issue |= BLI_uuid_equal(issue.layer, paint_row->marker) &&
+                        BLI_uuid_equal(issue.correction, fill_correction->marker);
+  }
+  EXPECT_TRUE(fill_issue);
+  EXPECT_TRUE(correction_issue);
+
+  /* Base Color back in the set makes both meaningful again: nothing to report. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true));
   issues.clear();
   BKE_paint_layers_issues_get(ma, issues);
   EXPECT_TRUE(issues.is_empty());

@@ -709,9 +709,8 @@ uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma)
           }
           return true;
         });
+    /* The build default is never empty, so neither is the derived union above. */
   }
-  /* Base Color is the material's constant and can never leave the set. */
-  mask |= uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   return mask;
 }
 
@@ -721,7 +720,7 @@ void BKE_paint_layers_channels_materialize(Material &ma)
     return;
   }
   /* Read the derived view while the field is still zero, so it carries the union of the rows and
-   * the build default; the write then freezes it. The getter forces Base Color in, so the stored
+   * the build default; the write then freezes it. The build default is never empty, so the stored
    * mask is never zero and every later read takes the cheap branch. */
   ma.paint_layers_channels = BKE_paint_layers_channel_set_mask_get(ma);
 }
@@ -734,6 +733,21 @@ bool BKE_paint_layers_channel_in_set(const Material &ma, const eMaterialPaintCha
   return (BKE_paint_layers_channel_set_mask_get(ma) & (uint16_t(1) << int(channel))) != 0;
 }
 
+int BKE_paint_layers_channel_clamp_to_set(const Material &ma, const int channel)
+{
+  const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+  if (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM && (set & (uint16_t(1) << channel)) != 0)
+  {
+    return channel;
+  }
+  for (const int candidate : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if ((set & (uint16_t(1) << candidate)) != 0) {
+      return candidate;
+    }
+  }
+  return channel;
+}
+
 bool BKE_paint_layers_channel_set_enable(Material &ma,
                                          const eMaterialPaintChannel channel,
                                          const bool enabled)
@@ -741,31 +755,35 @@ bool BKE_paint_layers_channel_set_enable(Material &ma,
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
-  /* Base Color is the material's constant, so switching it off would leave a set with no colour. */
-  if (!enabled && channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
-    return false;
-  }
+
   uint16_t mask = BKE_paint_layers_channel_set_mask_get(ma);
   if (enabled) {
     mask |= uint16_t(1) << int(channel);
   }
   else {
-    mask &= uint16_t(~(uint16_t(1) << int(channel)));
+    /* Cannot remove the last channel in the set. */
+    const uint16_t new_mask = mask & uint16_t(~(uint16_t(1) << int(channel)));
+    if (new_mask == 0) {
+      return false;
+    }
+    mask = new_mask;
   }
-  BKE_paint_layers_channel_set_mask_set(ma, mask);
-  return true;
+  return BKE_paint_layers_channel_set_mask_set(ma, mask);
 }
 
-void BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask)
+bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask)
 {
-  /* Base Color is the material's constant and can never leave the set. */
-  mask |= uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  /* A set cannot be empty: there must be at least one channel. */
+  if (mask == 0) {
+    return false;
+  }
   if (ma.paint_layers_channels == mask) {
-    return;
+    return true;
   }
   ma.paint_layers_channels = mask;
   /* A material setting, not a row: the layers keep every record and map they had. */
   BKE_paint_layers_tag_edited(ma);
+  return true;
 }
 
 /**
@@ -873,9 +891,16 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
   effect->kind_subtype = filter;
   paint_layer_kind_params_init(*effect);
   BLI_addtail(&owner->effects, effect);
-  /* Linked first, as the record is added through the ownership check. Base Color is the channel a
-   * filter starts out working in; the others are switched on like a layer's. */
-  BKE_paint_layers_channel_add(ma, effect, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  /* Linked first, as the record is added through the ownership check. The filter starts working in
+   * the first channel of the material's set (Base Color unless the user removed it); the others are
+   * switched on like a layer's. */
+  const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if ((set & (uint16_t(1) << channel)) != 0) {
+      BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(channel));
+      break;
+    }
+  }
   BKE_paint_layers_tag_edited(ma);
   return effect;
 }
@@ -1698,12 +1723,9 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
   MEM_delete(layer->channels);
   layer->channels = channels;
   layer->channels_num++;
-  /* A new record is an explicit participation. Once the set is materialized a channel a record
-   * names must enter it, otherwise the stored mask would disagree with the derived union a zero
-   * field computes. A zero field stays derived, so this is skipped until something materializes. */
-  if (ma.paint_layers_channels != 0 && channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) {
-    ma.paint_layers_channels |= uint16_t(uint16_t(1) << int(channel));
-  }
+  /* A record does not widen the material's global set: the set is a filter over the records, not a
+   * list of the ones authored. Adding a record for a channel outside the set is legal and stays
+   * invisible until the user puts the channel back into the set. */
   BKE_paint_layers_tag_edited(ma);
   return &layer->channels[layer->channels_num - 1];
 }
@@ -2513,6 +2535,36 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
           issue.code = PaintLayersIssueCode::NonFolderHasChildren;
           issue.text = TIP_("Only a folder holds other layers; this row's nested rows are ignored");
           r_issues.append(issue);
+        }
+        /* A Fill's colour lives in its Base Color record. With Base Color outside the set that
+         * record takes part nowhere, so an enabled Fill would silently lay nothing. */
+        if (paint_layer_channel_filtered(ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR)) {
+          if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT &&
+              layer.role == MA_PAINT_LAYER_ROLE_LAYER &&
+              (layer.flag & MA_PAINT_LAYER_ENABLED) != 0)
+          {
+            PaintLayersIssue issue;
+            issue.layer = layer.marker;
+            issue.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+            issue.code = PaintLayersIssueCode::FillWithoutBaseColor;
+            issue.text = TIP_("This Fill's colour has no channel: Base Color is not in the set");
+            r_issues.append(issue);
+          }
+          for (const MaterialPaintLayer &effect : layer.effects) {
+            if (effect.source != MA_PAINT_LAYER_SOURCE_CONSTANT ||
+                (effect.flag & MA_PAINT_LAYER_ENABLED) == 0)
+            {
+              continue;
+            }
+            PaintLayersIssue issue;
+            issue.layer = layer.marker;
+            issue.correction = effect.marker;
+            issue.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+            issue.code = PaintLayersIssueCode::FillWithoutBaseColor;
+            issue.text = TIP_(
+                "This Fill correction's colour has no channel: Base Color is not in the set");
+            r_issues.append(issue);
+          }
         }
         /* A Fill correction that was given the Normal channel and holds no map in it: a flat value
          * is not a tangent normal, so it lays nothing there. One that was never given Normal says

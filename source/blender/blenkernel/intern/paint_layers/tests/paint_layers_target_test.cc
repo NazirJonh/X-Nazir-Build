@@ -832,13 +832,148 @@ TEST_F(PaintLayersTargetTest, active_maps_ensure_covers_the_channel_set_and_spar
   EXPECT_EQ(BKE_paint_layers_target_image(metallic), nullptr);
   EXPECT_FALSE(BKE_paint_layers_target_is_live(metallic));
 
-  /* A channel outside the set takes no part. */
+  /* A channel outside the set is not a valid paint target. */
   PaintLayersTarget normal;
-  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, normal));
-  EXPECT_EQ(BKE_paint_layers_target_image(normal), nullptr);
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, normal));
 
   /* Idempotent: nothing is left to create. */
   EXPECT_EQ(BKE_paint_layers_active_maps_ensure(*bmain, *ma, 4), 0);
+}
+
+TEST_F(PaintLayersTargetTest, resolve_reports_why_a_target_is_refused)
+{
+  using Status = PaintLayersTargetStatus;
+  PaintLayersTarget target;
+  constexpr PaintLayersTargetMode content = PaintLayersTargetMode::Content;
+  constexpr PaintLayersTargetMode mask = PaintLayersTargetMode::Mask;
+
+  /* No active row yet. */
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, content, target),
+            Status::NoActiveRow);
+
+  MaterialPaintLayer *layer = add_active_row("L");
+  ASSERT_NE(layer, nullptr);
+  BKE_paint_layers_channel_set_mask_set(
+      *ma,
+      (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)) |
+          (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
+
+  /* Channel indices outside the table. */
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, -1, content, target), Status::InvalidChannel);
+  EXPECT_EQ(
+      BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_NUM, content, target),
+      Status::InvalidChannel);
+
+  /* Ok means "resolvable", not "has a record": the record appears on the first stroke. */
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, content, target),
+            Status::Ok);
+  EXPECT_EQ(target.channel, int(PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+
+  /* A channel the set leaves out concerns that channel alone. */
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, content, target),
+            Status::OutsideChannelSet);
+  EXPECT_EQ(
+      BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, content, target),
+      Status::OutsideChannelSet);
+
+  /* Mask: a row without a mask, then a mask that only Base Color names, whatever the set says. */
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask, target),
+            Status::NoMask);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, layer, 1.0f), nullptr);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask, target),
+            Status::Ok);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, mask, target),
+            Status::ChannelNotInMode);
+
+  /* The bool overload is the same answer. */
+  EXPECT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, content, target));
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_NORMAL, content, target));
+
+  /* An adjustment owns no map a stroke could write into, whatever the set says. */
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Adjustment;
+  params.filter = MA_PAINT_LAYER_FILTER_INVERT;
+  MaterialPaintLayer *adjustment = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(adjustment, nullptr);
+  BKE_paint_layers_active_set(*ma, adjustment->marker);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(*ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, content, target),
+            Status::RowTakesNoStrokes);
+}
+
+TEST_F(PaintLayersTargetTest, resolve_through_an_object_applies_the_object_mask_only_on_ok)
+{
+  add_active_row("L");
+  BKE_paint_layers_channel_set_mask_set(*ma,
+                                        uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  Object *ob = add_object_with({ma});
+
+  PaintLayersTarget target;
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ob, -1, PAINT_MATERIAL_CHANNEL_ROUGHNESS, PaintLayersTargetMode::Content, target),
+            PaintLayersTargetStatus::Ok);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ob, -1, PAINT_MATERIAL_CHANNEL_NORMAL, PaintLayersTargetMode::Content, target),
+            PaintLayersTargetStatus::OutsideChannelSet);
+
+  /* An object without the layered material has nothing to resolve. */
+  Object *plain = add_object_with({});
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *plain, -1, PAINT_MATERIAL_CHANNEL_ROUGHNESS, PaintLayersTargetMode::Content, target),
+            PaintLayersTargetStatus::NotLayered);
+}
+
+TEST_F(PaintLayersTargetTest, active_slot_leaves_a_channel_outside_the_set)
+{
+  add_active_row("L");
+  /* No Base Color: the first slot, where the active slot starts, is not a target. */
+  BKE_paint_layers_channel_set_mask_set(
+      *ma,
+      (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)) |
+          (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
+  Object *ob = add_object_with({ma});
+  Scene *scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "NoBaseSlotScene"));
+  ASSERT_NE(scene, nullptr);
+
+  const auto active_channel = [&]() {
+    return BKE_paint_layers_texpaint_slot_channel(ma->paint_active_slot);
+  };
+  const auto slot_of = [&](const eMaterialPaintChannel channel) {
+    for (const int slot : IndexRange(ma->tot_slots)) {
+      if (BKE_paint_layers_texpaint_slot_channel(slot) == int(channel)) {
+        return slot;
+      }
+    }
+    return -1;
+  };
+
+  ma->paint_active_slot = 0;
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, eMaterialPaintChannel(active_channel())));
+
+  /* A slot the user picked inside the set is kept. */
+  const int metallic_slot = slot_of(PAINT_MATERIAL_CHANNEL_METALLIC);
+  ASSERT_NE(metallic_slot, -1);
+  ma->paint_active_slot = short(metallic_slot);
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_EQ(ma->paint_active_slot, metallic_slot);
+
+  /* One outside the set is not a target any more and moves to a channel of the set. */
+  const int normal_slot = slot_of(PAINT_MATERIAL_CHANNEL_NORMAL);
+  ASSERT_NE(normal_slot, -1);
+  ma->paint_active_slot = short(normal_slot);
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, eMaterialPaintChannel(active_channel())));
+
+  /* Mask mode still uses Base Color's slot although the set leaves it out, and leaving it gives a
+   * channel of the set back, not the held Base Color slot. */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, BKE_paint_layers_active_layer_get(*ma), 1.0f), nullptr);
+  scene->toolsettings->paint_mode.layer_target_mode = PAINT_LAYER_TARGET_MASK;
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_EQ(active_channel(), int(PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  scene->toolsettings->paint_mode.layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
+  BKE_texpaint_slot_refresh_cache(scene, ma, ob);
+  EXPECT_TRUE(BKE_paint_layers_channel_in_set(*ma, eMaterialPaintChannel(active_channel())));
+  EXPECT_EQ(ma->paint_content_slot, 0);
 }
 
 /** \} */

@@ -22,6 +22,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
@@ -718,6 +719,54 @@ TEST_F(PaintMaterialChannelTest, layered_material_ensure_grows_the_row_not_the_n
   const PaintMaterialImagesEnsureResult again = BKE_paint_material_images_ensure_writable(
       *bmain, *ob, brush_paint, mode_settings, visible_channels);
   EXPECT_EQ(again.created, 0);
+}
+
+TEST_F(PaintMaterialChannelTest, layered_ensure_without_base_color_still_grows_the_other_channels)
+{
+  Object *ob = add_mesh_object("NoBaseEnsureOb");
+  Material *ma = add_material_with_principled(*ob, "NoBaseEnsureMat");
+
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  BKE_paint_layers_default_channels_apply(*ma, *row);
+  BKE_paint_layers_active_set(*ma, row->marker);
+  /* Base Color leaves the set: the row keeps its record and map slot, but takes no further part. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false));
+
+  PaintModeSettings mode_settings{};
+  mode_settings.new_channel_image_size = PAINT_NEW_CHANNEL_IMAGE_SIZE_256;
+  const int visible_channels = paint_material_channel_test_default_visibility();
+
+  /* The brush still writes Base Color as well. That channel must neither get a map nor stop the
+   * channels after it: Base Color comes first, so an early return used to leave Metallic mapless. */
+  BrushMaterialPaint brush_paint{};
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR].use = 1;
+  brush_paint.channels[PAINT_MATERIAL_CHANNEL_METALLIC].use = 1;
+
+  const PaintMaterialImagesEnsureResult res = BKE_paint_material_images_ensure_writable(
+      *bmain, *ob, brush_paint, mode_settings, visible_channels);
+  EXPECT_EQ(res.created, 1);
+
+  const MaterialPaintLayerChannel *base_record = nullptr;
+  Image *metallic_map = nullptr;
+  for (int i = 0; i < row->channels_num; i++) {
+    if (row->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      base_record = &row->channels[i];
+    }
+    else if (row->channels[i].channel == PAINT_MATERIAL_CHANNEL_METALLIC) {
+      metallic_map = row->channels[i].image;
+    }
+  }
+  ASSERT_NE(base_record, nullptr);
+  EXPECT_EQ(base_record->image, nullptr);
+  ASSERT_NE(metallic_map, nullptr);
+
+  /* A channel outside the set is not a target; the ones inside it are. */
+  PaintLayersTarget base;
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base));
+  PaintLayersTarget metallic;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, metallic));
+  EXPECT_EQ(BKE_paint_layers_target_image(metallic), metallic_map);
 }
 TEST_F(PaintMaterialChannelTest, image_paint_layer_id_defaults_to_nil)
 {

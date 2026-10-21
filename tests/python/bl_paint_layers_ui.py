@@ -101,11 +101,14 @@ class PaintLayersUiTest(unittest.TestCase):
                          {'BASE_COLOR', 'METALLIC', 'ROUGHNESS', 'NORMAL', 'AO'})
         self.assertTrue(self.material.paint_layers_channel_in_set(channel='BASE_COLOR'))
         self.material.paint_layers_channels = {'METALLIC', 'ROUGHNESS'}
-        # Base Color cannot be removed: it is always in the set.
-        self.assertIn('BASE_COLOR', set(self.material.paint_layers_channels))
+        # Base Color can be removed as long as there are other channels in the set.
+        self.assertNotIn('BASE_COLOR', set(self.material.paint_layers_channels))
         self.assertNotIn('NORMAL', set(self.material.paint_layers_channels))
         self.assertFalse(self.material.paint_layers_channel_in_set(channel='NORMAL'))
         self.assertTrue(self.material.paint_layers_channel_in_set(channel='METALLIC'))
+        # An empty set is refused: the last channel cannot be removed.
+        self.material.paint_layers_channels = set()
+        self.assertEqual(set(self.material.paint_layers_channels), {'METALLIC', 'ROUGHNESS'})
 
     def test_layer_widget_channels_follow_the_material_set(self):
         from bl_ui.properties_material_paint_layers import material_layer_visible_channels

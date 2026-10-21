@@ -4852,6 +4852,10 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       {
         continue;
       }
+      /* A channel the material's set leaves out is not a missing map: the user switched it off. */
+      if (!BKE_paint_material_channel_in_active_set(*ob, info.channel)) {
+        continue;
+      }
       Image *channel_image;
       ImageUser *channel_iuser;
       if (!BKE_paint_principled_channel_image_get(

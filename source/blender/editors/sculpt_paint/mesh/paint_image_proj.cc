@@ -6976,7 +6976,13 @@ static bool proj_paint_add_layered_slot(bContext *C, wmOperator *op, Object &ob,
     return false;
   }
   PaintLayersTarget target;
-  if (!BKE_paint_layers_target_get(ma, channel, mode, target)) {
+  const PaintLayersTargetStatus status = BKE_paint_layers_target_resolve(
+      ma, channel, mode, target);
+  if (status == PaintLayersTargetStatus::OutsideChannelSet) {
+    BKE_report(op->reports, RPT_ERROR, "The channel is not part of the material's channel set");
+    return false;
+  }
+  if (status != PaintLayersTargetStatus::Ok) {
     BKE_report(op->reports,
                RPT_ERROR,
                mode == PaintLayersTargetMode::Mask ?

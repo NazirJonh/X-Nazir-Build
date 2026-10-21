@@ -899,8 +899,8 @@ class LAYER_MATERIAL_PT_active_channel(LayerMaterialButtonsPanel, Panel):
     """The owner material's global paint channel set: which channels the stack works with.
 
     A channel removed here leaves each row's record and map untouched; the rows simply stop showing
-    it. Base Color is the material's constant and is always in the set. The stack starts with the
-    set chosen in the New Layered Material dialog.
+    it. Base Color is an ordinary channel, but the set always keeps at least one, so the last one
+    cannot be removed. The stack starts with the set chosen in the New Layered Material dialog.
     """
 
     bl_idname = "LAYER_MATERIAL_PT_active_channel"

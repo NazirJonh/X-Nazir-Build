@@ -211,7 +211,9 @@ const EnumPropertyItem rna_enum_symmetrize_direction_items[] = {
 #  include "BKE_mesh.hh"
 #  include "BKE_object.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_layers.hh"
 #  include "BKE_paint_layers_object_mask.hh"
+#  include "BKE_paint_layers_target.hh"
 #  include "BKE_paint_types.hh"
 #  include "BKE_particle.h"
 #  include "BKE_pointcache.h"
@@ -351,6 +353,40 @@ static const EnumPropertyItem *rna_ParticleEdit_tool_itemf(bContext *C,
   }
 
   return particle_edit_cache_brush_items;
+}
+
+/**
+ * The Stack Layers channel cursor offers only the channels of the active layered material's set: a
+ * channel outside it regulates nothing there, so choosing it would edit a value no layer reads. The
+ * value the cursor already holds stays listed (like #rna_MaterialPaintLayer_blend_itemf, only the
+ * choice is narrowed), so the button never reads blank in the moment before the Outliner moves the
+ * cursor into the set (#paint_stack_selected_channel). Putting a channel back into the set on the
+ * Layer Material tab brings it back here.
+ */
+static const EnumPropertyItem *rna_PaintModeSettings_stack_layer_channel_itemf(
+    bContext *C, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  Object *ob = (C != nullptr) ? CTX_data_active_object(C) : nullptr;
+  const Material *ma = BKE_paint_layers_active_material_get(ob);
+  if (ma == nullptr || ptr == nullptr) {
+    return rna_enum_material_paint_channel_items;
+  }
+  const int current = static_cast<const PaintModeSettings *>(ptr->data)->stack_layer_channel;
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  for (const EnumPropertyItem *item = rna_enum_material_paint_channel_items;
+       item->identifier != nullptr;
+       item++)
+  {
+    if (item->value == current ||
+        BKE_paint_layers_channel_in_set(*ma, eMaterialPaintChannel(item->value)))
+    {
+      RNA_enum_item_add(&items, &items_num, item);
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
 }
 
 static bool rna_ParticleEdit_editable_get(PointerRNA *ptr)
@@ -3473,6 +3509,8 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   prop = RNA_def_property(srna, "stack_layer_channel", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "stack_layer_channel");
   RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+  RNA_def_property_enum_funcs(
+      prop, nullptr, nullptr, "rna_PaintModeSettings_stack_layer_channel_itemf");
   RNA_def_property_ui_text(prop,
                            "Stack Layer Channel",
                            "The channel whose value the Stack Layers columns show and edit");

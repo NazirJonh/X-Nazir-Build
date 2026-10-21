@@ -115,20 +115,29 @@ Vector<ImagePaintTarget> init_image_paint_targets(Object &ob,
           BKE_paint_material_image_targets_get(
               ob, paint_mode_settings, brush_paint, visible_material_channels);
       /* What the object mask hides belongs to the active row, so every channel map of the stroke
-       * shares it. Base Color resolves in both modes. */
+       * shares it. */
       bool object_masked = false;
       bool mask_stroke = false;
       uint32_t excluded_tiles = 0;
+      const PaintLayersTargetMode target_mode = BKE_paint_layers_target_mode(&paint_mode_settings);
       PaintLayersTarget layer_target;
-      if (BKE_paint_layers_target_get(ob,
-                                      -1,
-                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
-                                      BKE_paint_layers_target_mode(&paint_mode_settings),
-                                      layer_target))
+      if (BKE_paint_layers_target_get(
+              ob, -1, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target_mode, layer_target))
       {
         object_masked = layer_target.object_masked;
         excluded_tiles = layer_target.excluded_tiles;
         mask_stroke = layer_target.mode == PaintLayersTargetMode::Mask;
+      }
+      else if (target_mode == PaintLayersTargetMode::Content) {
+        /* Base Color may be outside the material's channel set, which makes it no content target
+         * but does not detach the object mask from the row: resolve the row itself. */
+        Material *layered = BKE_paint_layers_active_material_get(&ob);
+        if (layered != nullptr) {
+          if (MaterialPaintLayer *active_row = BKE_paint_layers_active_layer_get(*layered)) {
+            object_masked = !BKE_paint_layer_object_mask_visible(ob, *layered, *active_row, 0);
+            excluded_tiles = BKE_paint_layer_object_mask_excluded_tiles(ob, *layered, *active_row);
+          }
+        }
       }
       for (const PaintMaterialImageTarget &material_target : material_targets) {
         ImagePaintTarget target;

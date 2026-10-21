@@ -71,6 +71,35 @@ enum class PaintLayersTargetMode : int8_t {
   Mask = 1,
 };
 
+/**
+ * Why a paint target did or did not resolve. The boolean #BKE_paint_layers_target_get overloads
+ * collapse every refusal into false; callers that react differently to a refusal (skip one channel
+ * versus give up on the whole stroke) ask #BKE_paint_layers_target_resolve instead of re-deriving
+ * the reason from the material themselves.
+ */
+enum class PaintLayersTargetStatus : int8_t {
+  /** The target resolved. Not a promise that a record or map exists: #PaintLayersTarget::channel_record
+   * stays null while the row has no record for the channel (it is created on the first stroke), so
+   * callers that need an existing record check #BKE_paint_layers_target_is_live. */
+  Ok = 0,
+  /** No material, or it is not a layered one. */
+  NotLayered,
+  /** The channel index is out of range. */
+  InvalidChannel,
+  /** The material has no active row. */
+  NoActiveRow,
+  /** Content: the active row owns no map a stroke could write (a filter, or a row that reads a
+   * material). */
+  RowTakesNoStrokes,
+  /** Content: the channel is not in the material's channel set, so it takes part nowhere. This is
+   * the user's choice and concerns this channel alone, not the rest of the stroke. */
+  OutsideChannelSet,
+  /** Mask: only Base Color names the mask map, so any other channel has no target. */
+  ChannelNotInMode,
+  /** Mask: the row has no mask, or its kind is not a stroke target. */
+  NoMask,
+};
+
 /** The resolved description row and channel a stroke paints into. */
 struct PaintLayersTarget {
   /** The material owning the row; never null when the resolver succeeded. */
@@ -121,13 +150,28 @@ bool BKE_paint_layers_target_get(Material &ma, int channel, PaintLayersTarget &r
  * a mask is one grey map, so a stroke's other channels resolve to nothing instead of being written
  * into it.
  *
- * \return false as #BKE_paint_layers_target_get does, and in Mask mode also when \a channel is not
- * Base Color or the row has no mask.
+ * In #PaintLayersTargetMode::Content a channel outside #Material::paint_layers_channels resolves to
+ * nothing: the material's set is the filter over what the stack paints, and a stroke into such a
+ * channel would be invisible work. Mask mode ignores the set, because a mask is not a content
+ * channel.
+ *
+ * \return false as #BKE_paint_layers_target_get does, when \a channel is outside the material's
+ * channel set (Content), and in Mask mode also when \a channel is not Base Color or the row has no
+ * mask.
  */
 bool BKE_paint_layers_target_get(Material &ma,
                                  int channel,
                                  PaintLayersTargetMode mode,
                                  PaintLayersTarget &r_target);
+
+/**
+ * As #BKE_paint_layers_target_get for \a mode, reporting why a target is refused. \a r_target is
+ * only meaningful when #PaintLayersTargetStatus::Ok is returned.
+ */
+PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
+                                                        int channel,
+                                                        PaintLayersTargetMode mode,
+                                                        PaintLayersTarget &r_target);
 
 /** The mode a stroke runs in: #PaintModeSettings::layer_target_mode, Content for null. */
 PaintLayersTargetMode BKE_paint_layers_target_mode(const PaintModeSettings *settings);
@@ -159,6 +203,13 @@ bool BKE_paint_layers_target_get(Object &ob,
                                  int channel,
                                  PaintLayersTargetMode mode,
                                  PaintLayersTarget &r_target);
+
+/** As #BKE_paint_layers_target_resolve, through an object and one of its material slots. */
+PaintLayersTargetStatus BKE_paint_layers_target_resolve(Object &ob,
+                                                        int material_slot,
+                                                        int channel,
+                                                        PaintLayersTargetMode mode,
+                                                        PaintLayersTarget &r_target);
 
 /**
  * Whether the active row takes strokes into the channel: it has a record for it and the record is

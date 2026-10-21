@@ -107,15 +107,27 @@ const Material &layers_owner(const ID &owner)
   return id_cast<const Material &>(owner);
 }
 
-/** The channel the Stack Layers header selected, from the scene's paint settings; clamped. */
-int paint_stack_selected_channel(const StackReadContext &ctx)
+/**
+ * The channel the Stack Layers header selected, from the scene's paint settings; clamped.
+ *
+ * The cursor is a scene setting while the channel set belongs to the material, so it can name a
+ * channel \a material leaves out (Base Color by default, or after switching to another material).
+ * The columns would then edit a channel that takes part nowhere, and the header menu, which only
+ * offers the set, would still list it. The cursor is moved into the set here, the one place every
+ * view of the stack passes through, so the header and the columns always agree.
+ */
+int paint_stack_selected_channel(const StackReadContext &ctx, const Material &material)
 {
   if (ctx.scene == nullptr || ctx.scene->toolsettings == nullptr) {
     return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   }
-  const int channel = ctx.scene->toolsettings->paint_mode.stack_layer_channel;
-  return (channel >= 0 && channel < PAINT_MATERIAL_CHANNEL_NUM) ? channel :
-                                                                  PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  int &cursor = ctx.scene->toolsettings->paint_mode.stack_layer_channel;
+  const int clamped = BKE_paint_layers_channel_clamp_to_set(
+      material,
+      (cursor >= 0 && cursor < PAINT_MATERIAL_CHANNEL_NUM) ? cursor :
+                                                              PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  cursor = clamped;
+  return clamped;
 }
 
 /**
@@ -407,7 +419,9 @@ StackRow paint_correction_row_build(const Material &material,
       base = &effect.channels[c];
     }
   }
-  if (fill && BKE_paint_layers_base_color_active(effect) && base->image == nullptr) {
+  if (fill && BKE_paint_layers_base_color_active(effect) && base->image == nullptr &&
+      BKE_paint_layers_channel_in_set(material, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+  {
     slot.is_color_swatch = true;
     slot.icon = ICON_GP_DRAW_FILL;
     BKE_paint_layers_base_color_get(effect, slot.color);
@@ -592,9 +606,11 @@ void paint_stack_rows_append(const Material &material,
     }
     else if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
       /* A Fill is its colour: one swatch with the bucket drawn over it, and no channel-texture
-       * placeholder. With the Base Color record removed or switched off the row lays no colour, so
-       * no swatch is drawn. */
-      if (BKE_paint_layers_base_color_active(layer)) {
+       * placeholder. With the Base Color record removed, switched off, or outside the material's
+       * channel set the row lays no colour, so no swatch is drawn. */
+      if (BKE_paint_layers_base_color_active(layer) &&
+          BKE_paint_layers_channel_in_set(material, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
+      {
         StackRowPreview fill_swatch;
         fill_swatch.is_color_swatch = true;
         fill_swatch.icon = ICON_GP_DRAW_FILL;
@@ -864,7 +880,9 @@ class PaintLayersStackSource final : public StackSource,
     uint64_t hash = uint64_t(material.paint_layers_flag);
     /* The header's channel cursor changes which pair the columns address, so the rows rebuild
      * when it moves. */
-    hash = hash * 1000003u ^ uint64_t(paint_stack_selected_channel(ctx));
+    hash = hash * 1000003u ^ uint64_t(paint_stack_selected_channel(ctx, material));
+    /* The set decides the swatches and the cursor's stand-in, and an edit of it moves no marker. */
+    hash = hash * 1000003u ^ uint64_t(BKE_paint_layers_channel_set_mask_get(material));
     /* The action button reads pressed from this flag, so the rows have to rebuild when it flips. */
     if (ctx.scene != nullptr && ctx.scene->toolsettings != nullptr) {
       hash = hash * 1000003u ^
@@ -978,7 +996,8 @@ class PaintLayersStackSource final : public StackSource,
                   Vector<StackRow> &r_rows) const override
   {
     const Material &material = layers_owner(owner);
-    paint_stack_rows_from_description(material, paint_stack_selected_channel(ctx), r_rows);
+    paint_stack_rows_from_description(
+        material, paint_stack_selected_channel(ctx, material), r_rows);
     if (ctx.scene != nullptr && ctx.scene->toolsettings != nullptr &&
         ctx.scene->toolsettings->paint_mode.layer_object_mask_edit != 0)
     {

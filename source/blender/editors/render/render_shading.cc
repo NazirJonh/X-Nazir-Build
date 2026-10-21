@@ -946,9 +946,6 @@ static void new_layered_material_ui(bContext * /*C*/, wmOperator *op)
   ui::Layout &col = op->layout->column(false);
   for (const NewLayeredChannel &entry : new_layered_channels) {
     ui::Layout &row = col.row(true);
-    /* Base Color is the material's constant and BKE keeps it in the set, so it reads as ticked but
-     * offers no toggle that could never stick. */
-    row.enabled_set(entry.channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     row.prop(op->ptr, entry.prop_name, UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
   op->layout->prop(op->ptr, "image_size", UI_ITEM_NONE, std::nullopt, ICON_NONE);
@@ -972,6 +969,14 @@ static wmOperatorStatus new_layered_material_invoke(bContext *C,
 static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
 {
   Main *bmain = CTX_data_main(C);
+  /* An empty set is not a valid material (BKE refuses to store one), and the material must not be
+   * created before this is known, or a refused creation would leave an orphan behind. */
+  const uint16_t channel_mask = new_layered_material_channel_mask(op);
+  if (channel_mask == 0) {
+    BKE_report(op->reports, RPT_ERROR, "Select at least one channel for the new material");
+    return OPERATOR_CANCELLED;
+  }
+
   PointerRNA ptr;
   PropertyRNA *prop;
   ui::context_active_but_prop_get_templateID(C, &ptr, &prop);
@@ -988,20 +993,32 @@ static wmOperatorStatus new_layered_material_exec(bContext *C, wmOperator *op)
   nodes::node_tree_shader_default(C, bmain, &ma->id);
   /* The dialog's set takes the place of the build default #BKE_paint_layers_add materialized:
    * written before any record is authored, so the base layer takes part in the chosen channels
-   * only. BKE forces Base Color back in, so the material keeps its constant whatever was ticked. */
-  BKE_paint_layers_channel_set_mask_set(*ma, new_layered_material_channel_mask(op));
+   * only. Base Color is no longer forced in, so the material can start without it if unticked. */
+  BKE_paint_layers_channel_set_mask_set(*ma, channel_mask);
   ma->paint_layers_image_size = int16_t(RNA_enum_get(op->ptr, "image_size"));
-  /* A Paint row whose Base Color is the default grey, so a fresh layered material looks like any
-   * other new one until something is painted into the row. */
+  /* A Paint row named after Base Color as before, unless that channel is not ticked: a row called
+   * "Base Color" without the channel would say the opposite of what it holds. */
+  const bool has_base_color = (channel_mask & (uint16_t(1) << PAINT_MATERIAL_CHANNEL_BASE_COLOR)) !=
+                              0;
   PaintLayerAddParams add_params;
-  add_params.name = "Base Color";
+  add_params.name = has_base_color ? "Base Color" : "Layer";
   MaterialPaintLayer *base = BKE_paint_layers_add_with_policy(*ma, add_params);
-  const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
-  BKE_paint_layers_channel_set_value(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_color);
+  if (has_base_color) {
+    /* The default grey gives the row a look like any other new material until something is
+     * painted into it. Without the channel there is no record to hold it. */
+    const float base_color[4] = {0.8f, 0.8f, 0.8f, 1.0f};
+    BKE_paint_layers_channel_set_value(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_color);
+  }
   BKE_paint_layers_active_set(*ma, base->marker);
   /* The base layer is paintable in every ticked channel from the start; the material's own size
    * decides the resolution, the scene's is only the fallback of the call. */
-  const Scene *scene = CTX_data_scene(C);
+  Scene *scene = CTX_data_scene(C);
+  if (scene != nullptr) {
+    /* The Stack Layers channel cursor is a scene setting that starts on Base Color; a material
+     * created without it must not open with the cursor resting on a channel it does not have. */
+    int &cursor = scene->toolsettings->paint_mode.stack_layer_channel;
+    cursor = BKE_paint_layers_channel_clamp_to_set(*ma, cursor);
+  }
   BKE_paint_layers_active_maps_ensure(
       *bmain,
       *ma,
@@ -1037,8 +1054,8 @@ void MATERIAL_OT_new_layered(wmOperatorType *ot)
   /* flags */
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
-  /* The channels the stack works with; the base layer takes part in the ticked ones only. Base
-   * Color is always in the set, whatever its checkbox says. */
+  /* The channels the stack works with; the base layer takes part in the ticked ones only. Every
+   * checkbox is independent, Base Color included, but at least one must stay ticked. */
   const uint16_t default_set = BKE_paint_layers_default_channel_set();
   for (const NewLayeredChannel &entry : new_layered_channels) {
     RNA_def_boolean(ot->srna,

@@ -1051,6 +1051,10 @@ static int rna_Material_paint_layers_channels_get(PointerRNA *ptr)
 static void rna_Material_paint_layers_channels_set(PointerRNA *ptr, int value)
 {
   Material *ma = id_cast<Material *>(ptr->owner_id);
+  /* Ignore empty sets: the set must have at least one channel. */
+  if (uint16_t(value) == 0) {
+    return;
+  }
   BKE_paint_layers_channel_set_mask_set(*ma, uint16_t(value));
 }
 
@@ -5007,7 +5011,7 @@ void RNA_def_material(BlenderRNA *brna)
       prop,
       "Channels",
       "The material's global paint channel set; while unset it is derived from the layer records "
-      "and the build default. Base Color is always in the set");
+      "and the build default. Base Color may be left out; an empty set is ignored");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
   {

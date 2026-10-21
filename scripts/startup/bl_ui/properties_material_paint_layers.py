@@ -51,14 +51,19 @@ def material_layer_weight_record_count(material, layer):
 def draw_material_channel_set(layout, material):
     """Checkboxes for the material's global paint channel set, one per supported channel.
 
-    Base Color is always in the set (BKE forces it back on) and is the material's constant, so its
-    row is shown checked but disabled rather than offering a toggle that can never stick.
+    Base Color is an ordinary channel: the stack can work without it. The set itself can never be
+    empty, so the last remaining checkbox is drawn disabled rather than accepting a click that BKE
+    would refuse.
     """
     col = layout.column()
+    enabled = [
+        channel_id for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER
+        if material.paint_layers_channel_in_set(channel=channel_id)
+    ]
+    last_enabled = enabled[0] if len(enabled) == 1 else None
     for channel_id in _MATERIAL_PAINT_CHANNEL_UI_ORDER:
         row = col.row(align=True)
-        if channel_id == 'BASE_COLOR':
-            row.enabled = False
+        row.enabled = channel_id != last_enabled
         row.prop_enum(material, "paint_layers_channels", channel_id)
 
 

@@ -2303,6 +2303,18 @@ static void paint_layers_texpaint_slots_fill(Material &ma, const PaintModeSettin
     ma.paint_active_slot = clamp_i(ma.paint_content_slot - 1, 0, count - 1);
     ma.paint_content_slot = 0;
   }
+  if (mode == PaintLayersTargetMode::Content &&
+      !BKE_paint_layers_channel_in_set(ma, infos[ma.paint_active_slot]->channel))
+  {
+    /* The first slot is Base Color, which is also what the active slot starts at; a material
+     * created without it would otherwise paint into a slot that is not a target at all. */
+    for (const int index : IndexRange(count)) {
+      if (BKE_paint_layers_channel_in_set(ma, infos[index]->channel)) {
+        ma.paint_active_slot = index;
+        break;
+      }
+    }
+  }
 }
 
 /** \} */

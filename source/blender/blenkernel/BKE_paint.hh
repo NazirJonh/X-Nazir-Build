@@ -1351,6 +1351,16 @@ bool BKE_paint_material_channel_is_enabled(const BrushMaterialPaint &brush_paint
                                             eMaterialPaintChannel channel);
 
 /**
+ * Whether \a channel takes part in the paint channel set of \a ob's active material.
+ *
+ * Only a layered material has such a set; any other material has no filter and answers true for
+ * every channel. A channel the user switched off is not a paint target at all (see
+ * #BKE_paint_layers_target_get), so callers that report or create maps must skip it instead of
+ * treating it as a missing map.
+ */
+bool BKE_paint_material_channel_in_active_set(Object &ob, eMaterialPaintChannel channel);
+
+/**
  * Returns whether \a channel's painted values are written to its target map/attribute this stroke.
  * For Alpha, additionally requires #BrushMaterialPaint.use_alpha_map; other channels follow
  * #BKE_paint_material_channel_is_enabled.

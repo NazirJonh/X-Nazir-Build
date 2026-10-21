@@ -1815,6 +1815,11 @@ static bool material_paint_channels_assign_images_layer_assign(Material &materia
                                                                const eMaterialPaintChannel channel,
                                                                Image &image)
 {
+  /* A record outside the material's channel set would be invisible work: the row takes no part in
+   * that channel. The set is the user's choice, so refuse instead of adding the channel back. */
+  if (!BKE_paint_layers_channel_in_set(material, channel)) {
+    return false;
+  }
   if (BKE_paint_layers_channel_add(material, &layer, channel) == nullptr) {
     return false;
   }
@@ -2652,6 +2657,10 @@ static wmOperatorStatus material_paint_images_ensure_exec(bContext *C, wmOperato
     if (!BKE_paint_material_channel_writes_to_target(
             brush_paint, mode_settings, paint->visible_material_channels, info.channel))
     {
+      continue;
+    }
+    /* A channel the material's set leaves out is not a missing map: the user switched it off. */
+    if (!BKE_paint_material_channel_in_active_set(*ob, info.channel)) {
       continue;
     }
     Image *image = nullptr;

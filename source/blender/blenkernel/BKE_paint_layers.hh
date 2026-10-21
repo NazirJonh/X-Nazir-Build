@@ -220,9 +220,15 @@ void BKE_paint_layers_default_channels_apply(Material &ma, MaterialPaintLayer &l
  *
  * When #Material::paint_layers_channels is zero the set is derived: the union of every layer's
  * channel records plus the build default (Base Color, Metallic, Roughness, Normal, AO), so a file
- * written before the field existed reads the same set it always offered. Base Color is always in
- * the returned set, whatever is stored. This is a read-only view of the description; it never
- * creates a channel record.
+ * written before the field existed reads the same set it always offered. The derived set is never
+ * empty. Base Color is an ordinary channel of the set and may be absent from a stored one; the
+ * getter does not force it back in. An empty stored set is impossible: the setters refuse it.
+ *
+ * Derived and stored sets differ on purpose in one respect: a derived set (field zero) is a union
+ * over the records, so it follows them when a record is added; a stored set is the user's filter and
+ * never changes because a record was authored (#BKE_paint_layers_channel_add), only through the
+ * setters. A caller that must put a channel into the set does so explicitly.
+ * This is a read-only view of the description; it never creates a channel record.
  */
 uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma);
 
@@ -230,24 +236,36 @@ uint16_t BKE_paint_layers_channel_set_mask_get(const Material &ma);
 bool BKE_paint_layers_channel_in_set(const Material &ma, eMaterialPaintChannel channel);
 
 /**
+ * \a channel when \a ma's set holds it, otherwise the first channel of the set (in
+ * #eMaterialPaintChannel order). For cursors that live outside the material, such as the Stack
+ * Layers channel selection, which must not rest on a channel the material leaves out.
+ */
+int BKE_paint_layers_channel_clamp_to_set(const Material &ma, int channel);
+
+/**
  * Add or remove \a channel from \a ma's global paint channel set, materializing the derived set on
  * the first explicit write (a zero field becomes the computed mask, then the edit is applied).
  *
  * The layers are never touched: no channel record or map is created or removed, so switching a
- * channel off keeps every layer's data and switching one on does not author records. Base Color
- * cannot be switched off -- it is the material's constant -- and a request to do so is refused.
+ * channel off keeps every layer's data and switching one on does not author records. Base Color is
+ * an ordinary channel and may be switched off, but the set can never become empty: removing the
+ * last channel is refused.
  *
- * \return false when \a channel is out of range or Base Color is to be disabled.
+ * \return false when \a channel is out of range, or when disabling it would leave the set empty.
  */
 bool BKE_paint_layers_channel_set_enable(Material &ma,
                                          eMaterialPaintChannel channel,
                                          bool enabled);
 
 /**
- * Write \a ma's global paint channel set as a whole bitmask, forcing Base Color in and tagging the
- * material once. The layers are never touched; see #BKE_paint_layers_channel_set_enable.
+ * Write \a ma's global paint channel set as a whole bitmask. The mask cannot be empty (must have at
+ * least one channel) and Base Color has no special status: it may be left out. The layers are never
+ * touched; see #BKE_paint_layers_channel_set_enable.
+ *
+ * \return true when the mask was accepted (written, or already the stored one), false when \a mask
+ * was empty and the set was left unchanged.
  */
-void BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
+bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask);
 
 /**
  * The channel set a fresh stack offers before any set is authored: the build default (Base Color,
@@ -1204,6 +1222,13 @@ enum class PaintLayersIssueCode : int8_t {
    * this says why.
    */
   MapCoverageMissingMap = 4,
+  /**
+   * An enabled Fill row or Fill correction while Base Color is outside the material's channel set.
+   * A Fill's colour lives in its Base Color record, and a channel outside the set takes part
+   * nowhere, so the row's flat colour has nowhere to go. This says why instead of leaving a silent
+   * no-op; the row may still take part through other channels that carry maps or values.
+   */
+  FillWithoutBaseColor = 5,
 };
 
 /** One entry #BKE_paint_layers_issues_get reports. */

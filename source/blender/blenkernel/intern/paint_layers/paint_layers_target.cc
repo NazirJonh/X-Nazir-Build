@@ -120,15 +120,24 @@ bool BKE_paint_layers_target_get(Material &ma,
                                  const PaintLayersTargetMode mode,
                                  PaintLayersTarget &r_target)
 {
+  return BKE_paint_layers_target_resolve(ma, channel, mode, r_target) ==
+         PaintLayersTargetStatus::Ok;
+}
+
+PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
+                                                        const int channel,
+                                                        const PaintLayersTargetMode mode,
+                                                        PaintLayersTarget &r_target)
+{
   if (!BKE_paint_layers_is_layered(ma)) {
-    return false;
+    return PaintLayersTargetStatus::NotLayered;
   }
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
-    return false;
+    return PaintLayersTargetStatus::InvalidChannel;
   }
   MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(ma);
   if (layer == nullptr) {
-    return false;
+    return PaintLayersTargetStatus::NoActiveRow;
   }
   r_target = {};
   r_target.material = &ma;
@@ -139,19 +148,23 @@ bool BKE_paint_layers_target_get(Material &ma,
     /* A filter's records only say which channels it works in: there is no map to write into, and
      * a stroke must not make one. The mask of its row is still paintable. */
     if (paint_layer_effect_is_filter(*layer)) {
-      return false;
+      return PaintLayersTargetStatus::RowTakesNoStrokes;
     }
     /* Likewise a row that reads a material: it owns no map for a stroke to write into. */
     if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE)) {
-      return false;
+      return PaintLayersTargetStatus::RowTakesNoStrokes;
+    }
+    /* Cannot paint into a channel that is not in the material's channel set. */
+    if (!BKE_paint_layers_channel_in_set(ma, eMaterialPaintChannel(channel))) {
+      return PaintLayersTargetStatus::OutsideChannelSet;
     }
     r_target.channel_record = paint_layer_channel_find(*layer, channel);
-    return true;
+    return PaintLayersTargetStatus::Ok;
   }
   /* A mask is one grey map in the item's Base Color record: a stroke's other channels have nothing
    * to write into, and a row without a mask has nothing to paint (the mode switch adds one). */
   if (channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
-    return false;
+    return PaintLayersTargetStatus::ChannelNotInMode;
   }
   /* The correction being worked on, when it is one of this row's; the base mask otherwise. */
   MaterialPaintLayer *active_item = BKE_paint_layers_active_mask_item_get(ma);
@@ -159,7 +172,7 @@ bool BKE_paint_layers_target_get(Material &ma,
                              BKE_paint_layers_mask_item_owner(ma, *active_item) == layer;
   r_target.mask_item = item_of_layer ? active_item : BKE_paint_layers_mask_base(*layer);
   if (r_target.mask_item == nullptr) {
-    return false;
+    return PaintLayersTargetStatus::NoMask;
   }
   /* A map-coverage item whose kind is reference-only (Color ID: an external ID Map) is not a stroke
    * target; editability is a trait of the kind, so the user cannot pick it by accident. A paintable
@@ -167,10 +180,10 @@ bool BKE_paint_layers_target_get(Material &ma,
   if (paint_layer_kind_is_map_coverage(*r_target.mask_item) &&
       !paint_layer_kind_map_paintable(*r_target.mask_item))
   {
-    return false;
+    return PaintLayersTargetStatus::NoMask;
   }
   r_target.channel_record = paint_layer_channel_find(*r_target.mask_item, channel);
-  return true;
+  return PaintLayersTargetStatus::Ok;
 }
 
 Material *BKE_paint_layers_active_material_get(Object *ob)
@@ -259,23 +272,34 @@ bool BKE_paint_layers_target_get(
   return true;
 }
 
+PaintLayersTargetStatus BKE_paint_layers_target_resolve(Object &ob,
+                                                        const int material_slot,
+                                                        const int channel,
+                                                        const PaintLayersTargetMode mode,
+                                                        PaintLayersTarget &r_target)
+{
+  Material *ma = (material_slot < 0) ?
+                     BKE_paint_layers_active_material_get(&ob) :
+                     BKE_object_material_get(&ob, short(material_slot + 1));
+  if (ma == nullptr) {
+    return PaintLayersTargetStatus::NotLayered;
+  }
+  const PaintLayersTargetStatus status = BKE_paint_layers_target_resolve(
+      *ma, channel, mode, r_target);
+  if (status == PaintLayersTargetStatus::Ok) {
+    object_mask_resolve(ob, *ma, r_target);
+  }
+  return status;
+}
+
 bool BKE_paint_layers_target_get(Object &ob,
                                  const int material_slot,
                                  const int channel,
                                  const PaintLayersTargetMode mode,
                                  PaintLayersTarget &r_target)
 {
-  Material *ma = (material_slot < 0) ?
-                     BKE_paint_layers_active_material_get(&ob) :
-                     BKE_object_material_get(&ob, short(material_slot + 1));
-  if (ma == nullptr) {
-    return false;
-  }
-  if (!BKE_paint_layers_target_get(*ma, channel, mode, r_target)) {
-    return false;
-  }
-  object_mask_resolve(ob, *ma, r_target);
-  return true;
+  return BKE_paint_layers_target_resolve(ob, material_slot, channel, mode, r_target) ==
+         PaintLayersTargetStatus::Ok;
 }
 
 bool BKE_paint_layers_target_is_live(const PaintLayersTarget &target)

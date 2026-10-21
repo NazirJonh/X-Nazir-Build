@@ -596,6 +596,20 @@ static TreeElement *stack_drop_target_row(bContext *C,
   if (te == nullptr || TREESTORE(te)->type != TSE_STACK_LAYER) {
     return nullptr;
   }
+  if (!climbed && insert_type == TE_INSERT_INTO) {
+    /* A correction or mask item is one line high and has no inside to land in, so its middle third
+     * is a dead zone that would swallow the gesture of dropping between two of them: read it as the
+     * half of the row the pointer is in, the way a row move does (see
+     * #stack_drop_attached_rules_apply). */
+    SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+    const StackRow *row = (space_outliner != nullptr) ?
+                              outliner_stack_row_find(*space_outliner,
+                                                      int(TREESTORE(te)->nr)) :
+                              nullptr;
+    if (row != nullptr && !row->parent_section_id.empty()) {
+      insert_type = (zone.offset_fraction > 0.5f) ? TE_INSERT_BEFORE : TE_INSERT_AFTER;
+    }
+  }
   if (r_insert_type != nullptr) {
     *r_insert_type = insert_type;
   }
@@ -831,7 +845,10 @@ bool stack_id_drop_poll(bContext *C, wmDrag *drag, const wmEvent *event)
       payload.id_type = matched_type;
       const char *hint = nullptr;
       if (!handler->can_accept(ctx, *owner, payload, target, &hint)) {
-        stack_drop_aim_set(*space_outliner, nullptr, place);
+        /* The aim is kept even though nothing is drawn: the drop re-asks the handler against it
+         * and is refused again. An emptied aim would read as "no row" there, which accepts, and
+         * the drop would land on top of the stack instead of where it was refused. */
+        stack_drop_aim_set(*space_outliner, target_row, place);
         clear_indicator();
         return true;
       }
@@ -880,6 +897,9 @@ std::string stack_id_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wm
     target.anchor = outliner_stack_identity_of(*space_outliner, int(TREESTORE(target_row)->nr));
   }
 
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+
   /* A plain local data-block can be judged before the drop, and what the source would refuse is
    * worth reading while dragging, not only after -- an asset or an external drag resolves only at
    * drop time, so its refusals come from the handler then. */
@@ -888,8 +908,6 @@ std::string stack_id_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wm
       StackDropPayload payload;
       payload.id_uid = local->session_uid;
       payload.id_type = matched_type;
-      const StackReadContext ctx = outliner_stack_read_context(*C);
-      const ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
       const char *hint = nullptr;
       if (owner != nullptr && !handler->can_accept(ctx, *owner, payload, target, &hint)) {
         /* A refusal with no wording of its own keeps the generic tooltip out: the drop will not
@@ -904,7 +922,18 @@ std::string stack_id_drop_tooltip(bContext *C, wmDrag *drag, const int xy[2], wm
     const StackRow *row = outliner_stack_row_find(*space_outliner, int(TREESTORE(target_row)->nr));
     row_name = (row != nullptr) ? row->name : std::string("layer");
   }
-  return handler->drop_tooltip(matched_type, WM_drag_get_item_name(drag), row_name, target);
+
+  StackDropPayload payload;
+  payload.id_type = matched_type;
+  if (drag->type == WM_DRAG_PATH) {
+    const char *path = WM_drag_get_single_path(drag);
+    if (path != nullptr) {
+      payload.filepath = path;
+    }
+  }
+
+  return handler->drop_tooltip(
+      ctx, owner, payload, WM_drag_get_item_name(drag), row_name, target);
 }
 
 static wmOperatorStatus stack_id_drop_invoke(bContext *C,
@@ -929,19 +958,24 @@ static wmOperatorStatus stack_id_drop_invoke(bContext *C,
    * which is exactly the kind of event the editor answers by dropping what it has cached. */
   const SpaceOutliner_Runtime::StackDropAim aim = space_outliner->runtime->stack_drop_aim;
 
-  ID *dropped = handler->drop_resolve(*C, *drag);
-  if (dropped == nullptr) {
+  /* Resolving fills in what the payload names: a data-block, or a file path for the actions that
+   * take one. */
+  StackDropPayload payload;
+  ID *dropped = handler->drop_resolve(*C, *drag, payload);
+  if (dropped == nullptr && payload.filepath.empty()) {
     return OPERATOR_CANCELLED;
   }
+  if (dropped != nullptr) {
+    payload.id_uid = dropped->session_uid;
+    payload.id_type = GS(dropped->name);
+  }
+
   const StackReadContext ctx = outliner_stack_read_context(*C);
   ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
   if (owner == nullptr) {
     return OPERATOR_CANCELLED;
   }
 
-  StackDropPayload payload;
-  payload.id_uid = dropped->session_uid;
-  payload.id_type = GS(dropped->name);
   /* What the poll aimed at a moment ago on this very event -- see #stack_drop_aim_set. */
   StackDropTarget target;
   target.anchor = aim.anchor;

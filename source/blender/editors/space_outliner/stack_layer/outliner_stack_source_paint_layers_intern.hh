@@ -14,6 +14,8 @@
  * the test drive them without an Outliner (or a #bContext at all).
  */
 
+#include <memory>
+
 #include "BLI_vector.hh"
 
 #include "outliner_stack_source.hh"
@@ -50,6 +52,12 @@ int paint_layers_edit_duplicate(Main &bmain, Material &material, int ordinal);
 bool paint_layers_edit_color_tag(Material &material, int ordinal, int color_tag);
 /** Drop the paint target (the active row); false when there was none. */
 bool paint_layers_edit_target_clear(Material &material);
+
+/**
+ * Create the drop handler of the paint-layers source: the built-in image and material actions,
+ * plus the FileHandler fallback for files no built-in action takes.
+ */
+std::unique_ptr<StackDropHandler> paint_layers_drop_handler_create();
 
 }  // namespace ed::outliner
 }  // namespace blender

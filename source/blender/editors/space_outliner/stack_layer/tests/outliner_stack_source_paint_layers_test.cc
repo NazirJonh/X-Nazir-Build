@@ -719,13 +719,17 @@ TEST_F(OutlinerStackPaintLayersSourceTest, the_drop_catches_materials_and_words_
   EXPECT_TRUE(handler->drop_supports_into(ID_IM)) << "an image can be assigned to a row";
 
   StackDropTarget target;
-  EXPECT_EQ(handler->drop_tooltip(ID_MA, "Wood", "", target),
+  StackReadContext ctx;
+  ctx.bmain = bmain;
+  StackDropPayload payload;
+  payload.id_type = ID_MA;
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, payload, "Wood", "", target),
             "Add Wood as a Material layer on top");
   target.place = StackMovePlace::Above;
-  EXPECT_EQ(handler->drop_tooltip(ID_MA, "Wood", "Base", target),
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, payload, "Wood", "Base", target),
             "Add Wood as a Material layer above Base");
   target.place = StackMovePlace::Below;
-  EXPECT_EQ(handler->drop_tooltip(ID_MA, "Wood", "Base", target),
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, payload, "Wood", "Base", target),
             "Add Wood as a Material layer below Base");
 }
 
@@ -779,10 +783,22 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
   EXPECT_FALSE(handler->can_accept(ctx, material->id, payload, target, &hint));
   EXPECT_NE(hint, nullptr);
 
-  EXPECT_EQ(handler->drop_tooltip(ID_IM, "Map", "Fill 1", target), "Assign Map to Fill 1");
-  EXPECT_EQ(handler->drop_tooltip(ID_IM, "Map", "", target), "Add Map as a new Fill layer on top");
+  StackDropPayload tooltip_payload;
+  tooltip_payload.id_type = ID_IM;
+  tooltip_payload.id_uid = image->id.session_uid;
+  /* The tooltip is the one of the action that would take the drop, so it is asked at a target that
+   * accepts it: the row it was refused on has only the disabled hint above. */
+  target.anchor.row_id = fill->marker;
+  target.place = StackMovePlace::Into;
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, tooltip_payload, "Map", "Fill 1", target),
+            "Assign Map to Fill 1");
+  target.anchor = StackItemIdentity{};
+  target.place = StackMovePlace::Above;
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, tooltip_payload, "Map", "", target),
+            "Add Map as a new Fill layer on top");
+  target.anchor.row_id = fill->marker;
   target.place = StackMovePlace::Below;
-  EXPECT_EQ(handler->drop_tooltip(ID_IM, "Map", "Fill 1", target),
+  EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, tooltip_payload, "Map", "Fill 1", target),
             "Add Map as a new Fill layer below Fill 1");
 }
 

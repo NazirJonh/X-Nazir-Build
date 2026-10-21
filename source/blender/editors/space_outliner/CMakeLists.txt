@@ -37,6 +37,7 @@ set(SRC
   stack_layer/outliner_stack_layers_ops.cc
   stack_layer/outliner_stack_ui_state.cc
   stack_layer/outliner_stack_dragdrop.cc
+  stack_layer/outliner_stack_drop_actions.cc
   stack_layer/outliner_stack_source.cc
   stack_layer/outliner_stack_source_paint_layers.cc
   stack_layer/outliner_stack_source_shape_keys.cc

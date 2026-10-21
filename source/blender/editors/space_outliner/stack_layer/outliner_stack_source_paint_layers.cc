@@ -823,8 +823,7 @@ bool paint_layers_edit_target_clear(Material &material)
 
 class PaintLayersStackSource final : public StackSource,
                                      public StackEditor,
-                                     public StackGroupingEditor,
-                                     public StackDropHandler {
+                                     public StackGroupingEditor {
  public:
   eSpaceOutliner_StackSource type() const override
   {
@@ -1209,7 +1208,7 @@ class PaintLayersStackSource final : public StackSource,
 
   const StackDropHandler *drop_handler() const override
   {
-    return this;
+    return drop_handler_.get();
   }
 
   StringRefNull default_section_id() const override
@@ -1912,318 +1911,9 @@ class PaintLayersStackSource final : public StackSource,
 
   /** \} */
 
-  /* ---------------------------------------------------------------- */
-  /** \name StackDropHandler
-   *
-   * A material dropped onto the stack becomes a Material layer that shows what it shows, the same
-   * layer the Add menu makes from the material it asks for. It lands beside the row the drop was
-   * aimed at, or on top when it named none; a material is always a row of its own, so a drop onto
-   * the middle of a row reads as one beside it. The material may come from the file or from an
-   * asset library, which is imported with "Append & Reuse": the layer reads it, so it has to be
-   * local, and one shared copy is better than a new one per drop.
-   *
-   * An image dropped beside a row becomes a Fill layer of its own; dropped onto a Fill row it
-   * becomes that row's map for a channel the popup asks for.
-   * \{ */
-
-  bool can_accept(const StackReadContext &ctx,
-                  const ID &owner,
-                  const StackDropPayload &payload,
-                  const StackDropTarget &target,
-                  const char **r_disabled_hint) const override
-  {
-    if (payload.id_uid == 0 || !ELEM(payload.id_type, ID_MA, ID_IM)) {
-      return false;
-    }
-    if (!this->can_reorder(owner)) {
-      *r_disabled_hint = TIP_("The layered material is linked or overridden");
-      return false;
-    }
-    if (payload.id_type == ID_IM) {
-      if (BLI_uuid_is_nil(target.anchor.row_id) || target.place != StackMovePlace::Into) {
-        /* A new layer takes the image: on top, or beside the row the drop was aimed at. */
-        return true;
-      }
-      const MaterialPaintLayer *row = BKE_paint_layers_find(
-          const_cast<Material &>(layers_owner(owner)), target.anchor.row_id);
-      if (row == nullptr) {
-        return false;
-      }
-      /* A Paint row owns the maps its brush writes into, so a drop must not swap them; a folder
-       * composites its children and a Material layer shows its source. The rule is the BKE one the
-       * popup applies, so the drag and the assignment cannot disagree. */
-      switch (BKE_paint_layers_row_image_map_issue(*row)) {
-        case PaintLayerImageMapIssue::None:
-          return true;
-        case PaintLayerImageMapIssue::PaintRowOwnsMaps:
-          *r_disabled_hint = TIP_(
-              "The maps of a Paint layer cannot be replaced; drop the image between rows to add a "
-              "Fill layer");
-          return false;
-        case PaintLayerImageMapIssue::TakesNoImage:
-          *r_disabled_hint = TIP_(
-              "Only a Fill row takes an image; drop it between rows to add a Fill layer");
-          return false;
-      }
-      return false;
-    }
-    /* The same refusals the Add reports: the drop states them up front, as a hint on the gesture
-     * the user is making right now. */
-    const Material &material = layers_owner(owner);
-    if (ctx.bmain != nullptr) {
-      if (const Material *candidate = id_cast<const Material *>(
-              BKE_libblock_find_session_uid(ctx.bmain, ID_MA, payload.id_uid)))
-      {
-        switch (BKE_paint_layers_material_source_issue(material, *candidate)) {
-          case PaintLayerMaterialSourceIssue::None:
-            break;
-          case PaintLayerMaterialSourceIssue::Self:
-            *r_disabled_hint = TIP_("A layered material cannot read itself");
-            return false;
-          case PaintLayerMaterialSourceIssue::Cycle:
-            *r_disabled_hint = TIP_("That material already reads this one; it would form a cycle");
-            return false;
-        }
-      }
-    }
-    return true;
-  }
-
-  bool execute(bContext &C,
-               const StackFocus & /*focus*/,
-               ID &owner,
-               const StackDropPayload &payload,
-               const StackDropTarget &target,
-               const wmEvent *event,
-               int *r_affected_ordinal) const override
-  {
-    const char *hint = nullptr;
-    if (!this->can_accept(outliner_stack_read_context(C), owner, payload, target, &hint)) {
-      return false;
-    }
-    if (payload.id_type == ID_IM) {
-      /* The channel is the user's choice, made in the popup the assign operator opens; the
-       * properties carry the image and where it goes. The popup's own call is the undo step. */
-      Material &material = layers_owner(owner);
-      const MaterialPaintLayer *anchor = BLI_uuid_is_nil(target.anchor.row_id) ?
-                                             nullptr :
-                                             BKE_paint_layers_find(material, target.anchor.row_id);
-      PointerRNA props = WM_operator_properties_create(
-          "OUTLINER_OT_stack_layer_channel_image_assign");
-      RNA_int_set(&props, "image_uid", int(payload.id_uid));
-      if (anchor != nullptr) {
-        char marker_str[UUID_STRING_SIZE];
-        BLI_uuid_format(marker_str, anchor->marker);
-        RNA_string_set(
-            &props, (target.place == StackMovePlace::Into) ? "layer" : "anchor", marker_str);
-      }
-      RNA_boolean_set(&props, "below", target.place == StackMovePlace::Below);
-      const wmOperatorStatus status = WM_operator_name_call(
-          &C,
-          "OUTLINER_OT_stack_layer_channel_image_assign",
-          wm::OpCallContext::InvokeDefault,
-          &props,
-          event);
-      WM_operator_properties_free(&props);
-      return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
-    }
-    Material *source = id_cast<Material *>(
-        BKE_libblock_find_session_uid(CTX_data_main(&C), ID_MA, payload.id_uid));
-    if (source == nullptr) {
-      return false;
-    }
-    Material &material = layers_owner(owner);
-    const MaterialPaintLayer *anchor = BLI_uuid_is_nil(target.anchor.row_id) ?
-                                           nullptr :
-                                           BKE_paint_layers_find(material, target.anchor.row_id);
-    StackAddArgs args;
-    args.source = &source->id;
-    args.place = target.place;
-    /* The line was drawn beside the row the drop was aimed at: an anchor folder does not swallow
-     * it. */
-    args.fill_folder = false;
-
-    Vector<StackAddKindInfo> kinds;
-    this->add_kinds(kinds);
-    const auto *material_kind = std::find_if(
-        kinds.begin(), kinds.end(), [](const StackAddKindInfo &kind) {
-          return kind.source_id_type == ID_MA;
-        });
-    if (material_kind == kinds.end()) {
-      return false;
-    }
-    SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
-    if (space_outliner == nullptr) {
-      return false;
-    }
-    /* The same wrapper the Add uses: it invalidates the cached rows, moves the selection to the
-     * new row and notifies the Outliner. Calling the source's #row_add here would repeat what only
-     * this path knows to do. */
-    const int ordinal = outliner_stack_row_add(
-        &C,
-        *space_outliner,
-        int(material_kind - kinds.begin()),
-        anchor != nullptr ? paint_layers_ordinal_of(material, anchor) : -1,
-        args);
-    if (ordinal < 0) {
-      return false;
-    }
-    if (r_affected_ordinal != nullptr) {
-      *r_affected_ordinal = ordinal;
-    }
-    /* #OUTLINER_OT_stack_layer_id_drop carries no #OPTYPE_UNDO: a drop that only hands off to a
-     * popup has nothing of its own to push, so the drop that edits directly pushes its own. */
-    ED_undo_push(&C, "Add Material Layer");
-    return true;
-  }
-
-  void drop_id_types(Vector<short> &r_types) const override
-  {
-    r_types.append(ID_IM);
-    r_types.append(ID_MA);
-  }
-
-  /** Only an image can come from a bare file: a material always lives in a .blend library. */
-  bool drop_external_poll(const wmDrag &drag) const override
-  {
-    if (drag.type != WM_DRAG_PATH) {
-      return false;
-    }
-    const char *path = WM_drag_get_single_path(&drag);
-    return path != nullptr && BLI_path_extension_check_array(path, imb_ext_image) &&
-           BLI_exists(path);
-  }
-
-  /**
-   * An image dropped onto a Fill row is assigned to it; a material is always a row of its own. A
-   * bare file (\a id_type 0) is deliberately not assigned: it always becomes a Fill layer of its
-   * own, so a file never replaces a map of a row the user did not open for it.
-   */
-  bool drop_supports_into(short id_type) const override
-  {
-    return id_type == ID_IM;
-  }
-
-  /**
-   * Resolve \a drag into a local image or material: a local data-block, an asset (a bare
-   * file-backed image asset included) or a dropped image file. A material asset is always imported
-   * with "Append & Reuse": the layer reads it, so it has to be local, and one shared copy is
-   * better than a new one per drop.
-   */
-  ID *drop_resolve(bContext &C, wmDrag &drag) const override
-  {
-    Main &bmain = *CTX_data_main(&C);
-
-    if (drag.type == WM_DRAG_PATH) {
-      if (!this->drop_external_poll(drag)) {
-        return nullptr;
-      }
-      Image *image = BKE_image_load_exists(&bmain, WM_drag_get_single_path(&drag), nullptr);
-      if (image != nullptr) {
-        /* The layer that takes the image is its user. */
-        id_us_min(&image->id);
-      }
-      return (image != nullptr) ? &image->id : nullptr;
-    }
-
-    if (drag.type == WM_DRAG_ASSET_LIST) {
-      const ListBaseT<wmDragAssetListItem> *asset_drags = WM_drag_asset_list_get(&drag);
-      if (asset_drags == nullptr) {
-        return nullptr;
-      }
-      for (const wmDragAssetListItem &item : *asset_drags) {
-        const ID_Type item_idtype = item.is_external ?
-                                        item.asset_data.external_info->asset->get_id_type() :
-                                        (item.asset_data.local_id ?
-                                             GS(item.asset_data.local_id->name) :
-                                             ID_Type(0));
-        if (item_idtype == ID_IM) {
-          if (!item.is_external) {
-            return item.asset_data.local_id;
-          }
-          return this->image_from_asset(bmain, *item.asset_data.external_info->asset);
-        }
-        if (item_idtype == ID_MA) {
-          if (!item.is_external) {
-            return item.asset_data.local_id;
-          }
-          return this->material_from_asset(C, *item.asset_data.external_info->asset);
-        }
-      }
-      return nullptr;
-    }
-
-    /* A plain local data-block or a single asset drag. */
-    if (ID *local = WM_drag_get_local_ID_or_import_from_asset(&C, &drag, ID_IM)) {
-      return local;
-    }
-    if (drag.type == WM_DRAG_ASSET) {
-      if (wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_IM)) {
-        return this->image_from_asset(bmain, *asset_drag->asset);
-      }
-    }
-    if (ID *local = WM_drag_get_local_ID(&drag, ID_MA)) {
-      return local;
-    }
-    if (drag.type == WM_DRAG_ASSET) {
-      if (wmDragAsset *asset_drag = WM_drag_get_asset_data(&drag, ID_MA)) {
-        return this->material_from_asset(C, *asset_drag->asset);
-      }
-    }
-    return nullptr;
-  }
-
-  std::string drop_tooltip(short id_type,
-                           StringRef item_name,
-                           StringRef row_name,
-                           const StackDropTarget &target) const override
-  {
-    if (id_type == ID_MA) {
-      if (row_name.is_empty()) {
-        return fmt::format(fmt::runtime(TIP_("Add {} as a Material layer on top")), item_name);
-      }
-      return fmt::format(fmt::runtime(target.place == StackMovePlace::Below ?
-                                          TIP_("Add {} as a Material layer below {}") :
-                                          TIP_("Add {} as a Material layer above {}")),
-                         item_name,
-                         row_name);
-    }
-    /* An image, or a drag that only resolves at drop time: a bare file can only become an image.
-     */
-    if (row_name.is_empty()) {
-      return fmt::format(fmt::runtime(TIP_("Add {} as a new Fill layer on top")), item_name);
-    }
-    switch (target.place) {
-      case StackMovePlace::Into:
-        return fmt::format(fmt::runtime(TIP_("Assign {} to {}")), item_name, row_name);
-      case StackMovePlace::Below:
-        return fmt::format(
-            fmt::runtime(TIP_("Add {} as a new Fill layer below {}")), item_name, row_name);
-      case StackMovePlace::Above:
-        break;
-    }
-    return fmt::format(
-        fmt::runtime(TIP_("Add {} as a new Fill layer above {}")), item_name, row_name);
-  }
-
  private:
-  /** The local image an image asset stands for, marked as an asset the way a dropped one is. */
-  static ID *image_from_asset(Main &bmain, const asset_system::AssetRepresentation &asset)
-  {
-    Image *image = asset::resolve_image_from_asset(bmain, asset);
-    if (image != nullptr && image->id.asset_data == nullptr) {
-      asset::image_mark_as_asset(image);
-    }
-    return (image != nullptr) ? &image->id : nullptr;
-  }
-
-  static ID *material_from_asset(bContext &C, const asset_system::AssetRepresentation &asset)
-  {
-    return asset::asset_local_id_ensure_imported(
-        *CTX_data_main(&C), asset, 0, ASSET_IMPORT_APPEND_REUSE, std::nullopt, CTX_wm_reports(&C));
-  }
-
-  /** \} */
+  /** Drop handler with the built-in actions and the FileHandler fallback. */
+  std::unique_ptr<StackDropHandler> drop_handler_ = paint_layers_drop_handler_create();
 };
 
 std::unique_ptr<StackSource> stack_source_paint_layers_create()
@@ -2361,6 +2051,7 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
 
   MaterialPaintLayer *layer = nullptr;
   bool created = false;
+  bool created_correction = false;
   if (RNA_string_length(op->ptr, "layer") > 0) {
     layer = stack_channel_image_assign_marker_layer(material, *op, "layer");
     if (layer == nullptr) {
@@ -2392,15 +2083,43 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     PaintLayerPlace place = (anchor != nullptr && RNA_boolean_get(op->ptr, "below")) ?
                                 PaintLayerPlace::Below :
                                 PaintLayerPlace::Above;
-    /* Added bare, not through the Add policy: the policy gives a Fill the default channel set, and
-     * the layer should take part in the one channel the user picked and no other. */
-    layer = BKE_paint_layers_add(material, name, anchor, place);
-    if (layer == nullptr) {
-      BKE_report(op->reports, RPT_ERROR, "Could not add a layer for the image");
-      return OPERATOR_CANCELLED;
+    if (anchor != nullptr) {
+      if (MaterialPaintLayer *correction_owner = BKE_paint_layers_correction_owner(material,
+                                                                                  *anchor))
+      {
+        /* Beside a correction the line means another correction of the row it hangs on, at that
+         * place among them -- "between two corrections" included. A stack row cannot be linked
+         * next to one, which is why this does not go through #BKE_paint_layers_add. */
+        layer = BKE_paint_layers_correction_add(
+            material, correction_owner, name, MA_PAINT_LAYER_SOURCE_CONSTANT);
+        if (layer == nullptr || !BKE_paint_layers_edit_move(material, *layer, anchor, place)) {
+          if (layer != nullptr) {
+            BKE_paint_layers_correction_remove(material, layer);
+          }
+          BKE_report(op->reports, RPT_ERROR, "Could not add a correction for the image");
+          return OPERATOR_CANCELLED;
+        }
+        created = true;
+        created_correction = true;
+      }
+      else if (MaterialPaintLayer *mask_owner = BKE_paint_layers_mask_item_owner(material,
+                                                                                 *anchor))
+      {
+        /* A mask item is no place for a stack row either: the row it belongs to is. */
+        anchor = mask_owner;
+      }
     }
-    layer->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
-    created = true;
+    if (layer == nullptr) {
+      /* Added bare, not through the Add policy: the policy gives a Fill the default channel set,
+       * and the layer should take part in the one channel the user picked and no other. */
+      layer = BKE_paint_layers_add(material, name, anchor, place);
+      if (layer == nullptr) {
+        BKE_report(op->reports, RPT_ERROR, "Could not add a layer for the image");
+        return OPERATOR_CANCELLED;
+      }
+      layer->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+      created = true;
+    }
   }
 
   if (BKE_paint_layers_channel_add(material, layer, channel) == nullptr ||
@@ -2409,15 +2128,28 @@ static wmOperatorStatus stack_channel_image_assign_exec(bContext *C, wmOperator 
     BKE_report(op->reports, RPT_ERROR, "The image could not be assigned to the channel");
     if (created) {
       /* A refused assignment must not read as a silent add. */
-      BKE_paint_layers_remove(material, layer);
+      if (created_correction) {
+        BKE_paint_layers_correction_remove(material, layer);
+      }
+      else {
+        BKE_paint_layers_remove(material, layer);
+      }
     }
     return OPERATOR_CANCELLED;
+  }
+  if (created_correction && channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+    /* A Fill correction starts with a Base Color so a fresh one is visible; when the image landed
+     * in another channel that flat colour must not cover the row's Base Color as well. */
+    BKE_paint_layers_channel_remove(material, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   }
   /* What the Add wrapper does for a row it made: the cached rows go, the selection and the active
    * row move to the layer the image landed on, and the Outliner rebuilds. */
   const int ordinal = paint_layers_ordinal_of(material, layer);
   stack_row_edit_finished(*C, *space_outliner, material.id, ordinal, true);
   outliner_stack_row_activate(C, *space_outliner, ordinal);
+  /* A correction is listed under its row's channels section: bring that section up so the
+   * correction the drop just made is not there and unseen. */
+  stack_row_reveal_attached(*space_outliner, ordinal);
   /* The edit helper above only tells the Outliner; the Properties editor and the previews show the
    * material. */
   WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &material.id);
@@ -2428,7 +2160,8 @@ void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot)
 {
   ot->name = "Assign Image to Channel";
   ot->description =
-      "Assign the dropped image to a channel of the layer, or add a new Fill layer for it";
+      "Assign the dropped image to a channel of the layer, or add a new Fill layer or correction "
+      "for it";
   ot->idname = "OUTLINER_OT_stack_layer_channel_image_assign";
 
   ot->invoke = stack_channel_image_assign_invoke;
@@ -2462,7 +2195,8 @@ void OUTLINER_OT_stack_layer_channel_image_assign(wmOperatorType *ot)
                  nullptr,
                  UUID_STRING_SIZE,
                  "Anchor",
-                 "Marker of the row a new layer is placed beside; empty puts it on top");
+                 "Marker of the row or correction a new layer is placed beside; empty puts it on "
+                 "top");
   RNA_def_boolean(ot->srna, "below", false, "Below", "Place a new layer below the anchor row");
 }
 

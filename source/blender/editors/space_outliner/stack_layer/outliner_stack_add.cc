@@ -406,13 +406,7 @@ int outliner_stack_row_add(bContext *C,
   /* A row attached to its parent's content section is only listed while that section is the one
    * showing, so a row just added brings its section up: a mask correction added while the channels
    * were on show would otherwise be there and not be seen. */
-  if (const StackRow *added = outliner_stack_row_find(space_outliner, new_ordinal)) {
-    if (!added->parent_section_id.empty()) {
-      if (const StackRow *parent = outliner_stack_row_find(space_outliner, added->parent_ordinal)) {
-        outliner_stack_row_active_section_set(space_outliner, *parent, added->parent_section_id);
-      }
-    }
-  }
+  stack_row_reveal_attached(space_outliner, new_ordinal);
   return new_ordinal;
 }
 

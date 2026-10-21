@@ -361,6 +361,19 @@ bool outliner_stack_row_active_section_set(SpaceOutliner &space_outliner,
   return true;
 }
 
+void stack_row_reveal_attached(SpaceOutliner &space_outliner, const int ordinal)
+{
+  const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+  if (row == nullptr || row->parent_section_id.empty()) {
+    return;
+  }
+  const StackRow *parent = outliner_stack_row_find(space_outliner, row->parent_ordinal);
+  if (parent == nullptr) {
+    return;
+  }
+  outliner_stack_row_active_section_set(space_outliner, *parent, row->parent_section_id);
+}
+
 bool stack_rows_are_siblings(const StackRow &a, const StackRow &b)
 {
   return a.parent_ordinal == b.parent_ordinal && a.parent_section_id == b.parent_section_id;

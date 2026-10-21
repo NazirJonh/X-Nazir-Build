@@ -48,6 +48,16 @@ void stack_row_edit_finished(bContext &C,
                              bool needs_renumber);
 
 /**
+ * Bring the content section the row at \a ordinal is attached to on show.
+ *
+ * An attached row (a correction, a mask item) is listed only while its parent's active content
+ * section is the one it belongs to; a row just created under another section is in the data and
+ * still unseen. The editor's Add calls this after activating the new row, and so must any other
+ * path that creates one of these rows without going through that operator.
+ */
+void stack_row_reveal_attached(SpaceOutliner &space_outliner, int ordinal);
+
+/**
  * The prologue and epilogue every mutating wrapper below shares: resolve the owner, get the
  * source's editor, run \a fn, invalidate the cached rows and notify on success.
  *

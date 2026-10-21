@@ -532,6 +532,8 @@ struct StackDropPayload {
   short id_type = 0;
   /** The stack row being dragged, when that is what this is. */
   StackItemIdentity source_item;
+  /** Path to an external file dropped from outside Blender. Empty when this is an ID or row. */
+  std::string filepath;
 };
 
 /** Where a drop is aimed. */
@@ -552,29 +554,35 @@ struct StackDropTarget {
 };
 
 /**
- * What a source does with something dropped onto its stack.
+ * One registered action a drop can resolve to.
  *
- * A source with nothing to accept leaves #StackSource::drop_handler at its default of null rather
- * than implementing this with every method refusing.
+ * A source's drop handler holds a registry of actions, tried in priority order. Each action
+ * declares what it handles (#can_handle), whether the current state accepts it (#can_accept), and
+ * what it does (#execute). This is how new drop types -- a text file describing nodes, a node
+ * group as an effect, a smart-material asset -- are added without editing the dispatch in
+ * #StackDropHandler: an action is registered, and the handler tries it.
  *
- * All of it runs on the UI thread, inside the drop operator or its poll. #can_accept is asked
- * while the drag moves and must only read; #execute resolves and mutates, and owns that edit: it
- * pushes its own undo step when it changes data, because the drop operator carries no
- * #OPTYPE_UNDO -- and it refuses what #can_accept refuses, since the operator does not ask twice.
- * A handler may instead open a popup, whose own operator pushes the step, and an
- * automatic push before it would capture nothing. A handler that adds or removes rows leaves the
- * Stack Layers mode through #outliner_stack_row_add or #stack_row_edit_finished, never by
- * reimplementing the invalidation and selection they do.
- *
- * Where the drop lands is recorded by the poll (#SpaceOutliner_Runtime::StackDropAim) and read
- * back by #execute: the aim is not recomputed, since the poll is the pass that asked the mouse.
+ * Actions are polled and executed in ascending priority order: lower numbers run first. Built-in
+ * actions use 90 and up; extensions and the FileHandler fallback use 900+.
  */
-class StackDropHandler {
+class StackDropAction {
  public:
-  virtual ~StackDropHandler() = default;
+  virtual ~StackDropAction() = default;
+
+  /** Priority: actions are tried in ascending order (lower values first). */
+  virtual int priority() const = 0;
 
   /**
-   * Whether \a payload may be dropped at \a target right now.
+   * Whether this action can handle \a payload. Checked before #can_accept; an action that cannot
+   * handle the payload at all is never asked whether the current state accepts it.
+   */
+  virtual bool can_handle(const StackDropPayload &payload) const = 0;
+
+  /**
+   * Whether \a payload may be dropped at \a target right now. Only called when #can_handle
+   * returned true. An action that declines without a word lets the next action for the same
+   * payload have its say, so "an image beside a row" and "an image onto a row" can be separate
+   * actions.
    *
    * \param r_disabled_hint: when refusing, a reason to show the user; left untouched to decline
    * silently (a plain "no" cursor, no tooltip).
@@ -584,6 +592,12 @@ class StackDropHandler {
                           const StackDropPayload &payload,
                           const StackDropTarget &target,
                           const char **r_disabled_hint) const = 0;
+
+  /**
+   * Execute the drop. Only called when #can_accept returned true.
+   *
+   * \return true when the drop succeeded, false to cancel.
+   */
   virtual bool execute(bContext &C,
                        const StackFocus &focus,
                        ID &owner,
@@ -593,60 +607,140 @@ class StackDropHandler {
                        int *r_affected_ordinal) const = 0;
 
   /**
-   * ID types this handler accepts as a drop of a data-block, in addition to a row of its own
-   * stack (#StackDropPayload::source_item). Left empty by a handler whose only acceptable drops
-   * are rows, or whose data-blocks only ever arrive through #drop_external_poll /
-   * #drop_resolve -- a dropped file names no ID type up front.
+   * The tooltip for a payload this action handles, hovering where the drop would land.
+   * \a item_name names the dragged data-block or file, \a row_name the row it was aimed at and is
+   * empty when the drop names no row ("the top of the stack").
    */
-  virtual void drop_id_types(Vector<short> & /*r_types*/) const {}
+  virtual std::string tooltip(const StackDropPayload &payload,
+                              StringRef item_name,
+                              StringRef row_name,
+                              const StackDropTarget &target) const = 0;
 
   /**
-   * Whether a drag that names no local data-block and no asset of a type in #drop_id_types --
-   * typically a file dropped from outside Blender -- might still resolve into one through
-   * #drop_resolve, judged without the side effects (loading a file, importing an asset) that
-   * resolving would have. Default: no such drag is accepted.
+   * Whether a drop landing in the middle of a row (#StackMovePlace::Into) means something for
+   * this action's payload -- assigned to that row somehow -- rather than falling back to landing
+   * beside it. Default: no such reading.
    */
-  virtual bool drop_external_poll(const wmDrag & /*drag*/) const
+  virtual bool supports_into(const StackDropPayload & /*payload*/) const
   {
     return false;
   }
 
   /**
-   * Whether a drop landing in the middle of a row (#StackMovePlace::Into) means something of its
-   * own for \a id_type -- assigned to that row somehow -- rather than falling back to landing
-   * beside it, the way a row-creating drop reads by default. \a id_type is 0 for a drag
-   * #drop_resolve will only be able to name once it runs, such as a dropped file; a handler with
-   * an #Into reading for some external drop and not others has to judge blind here and may prefer
-   * to just say no.
+   * Append the ID types this action takes as a dropped data-block, for the handler's aggregate
+   * list. Left empty by an action that only takes files.
    */
-  virtual bool drop_supports_into(short /*id_type*/) const
-  {
-    return false;
-  }
+  virtual void id_types(Vector<short> & /*r_types*/) const {}
+};
+
+/**
+ * What a source does with something dropped onto its stack.
+ *
+ * A facade over a registry of #StackDropAction instances, tried in priority order. Actions
+ * declare what they handle, whether the current state accepts it, and what they do; new drop
+ * types are added by registering actions rather than editing dispatch here.
+ *
+ * A source with nothing to accept leaves #StackSource::drop_handler at its default of null rather
+ * than constructing an empty handler.
+ *
+ * All of it runs on the UI thread, inside the drop operator or its poll. #can_accept is asked
+ * while the drag moves and must only read; #execute resolves and mutates, and owns that edit: it
+ * pushes its own undo step when it changes data, because the drop operator carries no
+ * #OPTYPE_UNDO. A handler that adds or removes rows leaves the Stack Layers mode through
+ * #outliner_stack_row_add or #stack_row_edit_finished, never by reimplementing the invalidation
+ * and selection they do.
+ *
+ * Where the drop lands is recorded by the poll (#SpaceOutliner_Runtime::StackDropAim) and read
+ * back by #execute: the aim is not recomputed, since the poll is the pass that asked the mouse.
+ */
+class StackDropHandler {
+ public:
+  virtual ~StackDropHandler() = default;
 
   /**
-   * Resolve \a drag into a local data-block of one of #drop_id_types, or one #drop_external_poll
-   * allowed. Only ever called from the drop itself, never from poll: an import or a file load is
-   * this source's own side effect to own.
+   * Register a drop action. Actions are tried in ascending priority order (lower values first).
+   * Typically called during source construction to populate built-in actions.
    */
-  virtual ID *drop_resolve(bContext & /*C*/, wmDrag & /*drag*/) const
-  {
-    return nullptr;
-  }
+  void add_action(std::unique_ptr<StackDropAction> action);
 
   /**
-   * The tooltip for a drag #drop_id_types or #drop_external_poll already accepted, hovering where
-   * #stack_drop_aim_find (`outliner_dragdrop.cc`) resolved a target for. \a id_type is 0 when the
-   * drag will only resolve to a type once dropped. \a row_name is empty when the drop names no
-   * row, which reads as "the top of the stack".
+   * Whether \a payload may be dropped at \a target right now. Asks each action that handles the
+   * payload, in priority order, and stops at the first one that accepts it.
+   *
+   * \param r_disabled_hint: when refusing, a reason to show the user; left untouched to decline
+   * silently (a plain "no" cursor, no tooltip).
    */
-  virtual std::string drop_tooltip(short /*id_type*/,
-                                   StringRef /*item_name*/,
-                                   StringRef /*row_name*/,
-                                   const StackDropTarget & /*target*/) const
-  {
-    return {};
-  }
+  bool can_accept(const StackReadContext &ctx,
+                  const ID &owner,
+                  const StackDropPayload &payload,
+                  const StackDropTarget &target,
+                  const char **r_disabled_hint) const;
+
+  /**
+   * Execute the drop through the first action that handles the payload and accepts it.
+   */
+  bool execute(bContext &C,
+               const StackFocus &focus,
+               ID &owner,
+               const StackDropPayload &payload,
+               const StackDropTarget &target,
+               const wmEvent *event,
+               int *r_affected_ordinal) const;
+
+  /**
+   * ID types this handler accepts as a drop of a data-block, aggregated from all registered
+   * actions. Left empty when only rows or files are accepted.
+   */
+  void drop_id_types(Vector<short> &r_types) const;
+
+  /**
+   * Whether a drag that names no local data-block might still resolve through one of the
+   * registered actions -- an image file, or a file a registered FileHandler claims.
+   */
+  bool drop_external_poll(const wmDrag &drag) const;
+
+  /**
+   * Whether a drop landing in the middle of a row (#StackMovePlace::Into) means something for any
+   * registered action. \a id_type is 0 for a drag that will only resolve at drop time.
+   */
+  bool drop_supports_into(short id_type) const;
+
+  /**
+   * Resolve \a drag into a local data-block and fill in what \a payload names. A dropped image
+   * file is loaded here; other files are left as a path for the actions that take one. Only ever
+   * called from the drop itself, never from poll: an import or a file load is this source's own
+   * side effect to own.
+   */
+  ID *drop_resolve(bContext &C, wmDrag &drag, StackDropPayload &payload) const;
+
+  /**
+   * The tooltip for \a payload hovering where it would land, from the action that would take it.
+   * \a row_name is empty when the drop names no row ("the top of the stack").
+   */
+  std::string drop_tooltip(const StackReadContext &ctx,
+                           const ID *owner,
+                           const StackDropPayload &payload,
+                           StringRef item_name,
+                           StringRef row_name,
+                           const StackDropTarget &target) const;
+
+ protected:
+  /**
+   * The first action, in priority order, that handles \a payload and accepts \a target. When none
+   * accepts, \a r_disabled_hint keeps the last refusal that had a reason.
+   */
+  const StackDropAction *find_action(const StackReadContext &ctx,
+                                     const ID *owner,
+                                     const StackDropPayload &payload,
+                                     const StackDropTarget &target,
+                                     const char **r_disabled_hint) const;
+
+  /** The first action, in priority order, whose #can_handle takes \a payload. */
+  const StackDropAction *find_action_handling(const StackDropPayload &payload) const;
+
+ private:
+  /** Registered actions, kept sorted by ascending priority. */
+  Vector<std::unique_ptr<StackDropAction>> actions_;
 };
 
 /** Widths, in UI units, of the columns a stack row reserves at its right edge. */

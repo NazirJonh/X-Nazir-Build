@@ -57,6 +57,7 @@
 #include "BKE_main.hh"
 #include "BKE_mask.hh"
 #include "BKE_packedFile.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -1016,6 +1017,63 @@ void IMAGE_OT_combined_light_rotate(wmOperatorType *ot)
   ot->poll = space_image_combined_light_poll;
 
   ot->flag = OPTYPE_BLOCKING | OPTYPE_GRAB_CURSOR_XY;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Activate Composite Canvas Operator
+ * \{ */
+
+/**
+ * Poll for #IMAGE_OT_activate_composite_canvas.
+ * Available in Paint mode when the active object has a layered material with a preferred
+ * display image (i.e. a PBR paint layer stack).
+ */
+static bool activate_composite_canvas_poll(bContext *C)
+{
+  const SpaceImage *sima = CTX_wm_space_image(C);
+  if (sima == nullptr || sima->mode != SI_MODE_PAINT) {
+    return false;
+  }
+  const Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr) {
+    return false;
+  }
+  return BKE_paint_material_preferred_display_image(const_cast<Object &>(*ob)) != nullptr;
+}
+
+static wmOperatorStatus activate_composite_canvas_exec(bContext *C, wmOperator * /*op*/)
+{
+  SpaceImage *sima = CTX_wm_space_image(C);
+  Object *ob = CTX_data_active_object(C);
+  Main *bmain = CTX_data_main(C);
+
+  Image *image = BKE_paint_material_preferred_display_image(*ob);
+  if (image == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The flags are set after the image: an automatic set may already have chosen a default pass,
+   * and this operator must end on Combined regardless. */
+  ED_space_image_set(bmain, sima, image, true);
+  sima->material_paint_pass = PAINT_LAYER_PASS_COMBINED;
+  sima->flag |= SI_PAINT_COMPOSITE_MODE;
+
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void IMAGE_OT_activate_composite_canvas(wmOperatorType *ot)
+{
+  ot->name = "Show Composite Canvas";
+  ot->idname = "IMAGE_OT_activate_composite_canvas";
+  ot->description =
+      "Open the composited view of the active layered material in the Image Editor";
+
+  ot->exec = activate_composite_canvas_exec;
+  ot->poll = activate_composite_canvas_poll;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */

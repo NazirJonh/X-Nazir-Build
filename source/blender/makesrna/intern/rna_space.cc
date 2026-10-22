@@ -2736,6 +2736,14 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
       RNA_enum_item_add(&item, &totitem, &combined_item);
       continue;
     }
+    /* A channel the layered material's set leaves out takes part in no composite, so offering it
+     * would only show an empty pass. Mask is no channel (its value is past the channel range) and
+     * stays: it shows the layers' internal data whatever the set holds. */
+    if (pass < PAINT_MATERIAL_CHANNEL_NUM && BKE_paint_layers_is_layered(*ma) &&
+        !BKE_paint_layers_channel_in_set(*ma, eMaterialPaintChannel(pass)))
+    {
+      continue;
+    }
     const bool resolvable =
         bmain != nullptr && (BKE_paint_layers_is_layered(*ma) ?
                                  BKE_paint_layers_composite_image_layers(

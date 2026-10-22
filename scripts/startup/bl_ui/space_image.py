@@ -1097,6 +1097,22 @@ class IMAGE_HT_header(Header):
         if not show_render:
             layout.prop(sima, "use_image_pin", text="", emboss=False)
 
+        # One click back to the composite preview of a layered material. Keyed on the material, not
+        # on the shown image, so it also works while the editor is empty or shows an unrelated image.
+        # The Combined flag outlives a switch to an unrelated image, so it only counts as showing the
+        # composite while the image still belongs to a composited material.
+        showing_combined = sima.is_material_paint_combined and sima.is_material_paint_canvas
+        if not show_render and sima.mode == 'PAINT' and not showing_combined:
+            ob = context.image_paint_object or context.active_object
+            mat = ob.active_material if ob else None
+            if mat is not None and mat.is_layered:
+                layout.operator(
+                    "image.activate_composite_canvas",
+                    text="",
+                    icon='NODE_COMPOSITING',
+                    emboss=False,
+                )
+
         layout.separator_spacer()
 
         # Gizmo toggle & popover.

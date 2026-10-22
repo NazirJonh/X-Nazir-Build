@@ -14,6 +14,8 @@
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_space_types.h"
 
 #include "BLI_math_rotation.h"
 
@@ -223,6 +225,8 @@ const EnumPropertyItem rna_enum_material_paint_layer_color_items[] = {
 #  include "DNA_meshdata_types.h"
 #  include "DNA_node_types.h"
 #  include "DNA_object_types.h"
+
+#  include "ED_image.hh"
 #  include "DNA_screen_types.h"
 #  include "DNA_space_types.h"
 
@@ -1056,6 +1060,40 @@ static void rna_Material_paint_layers_channels_set(PointerRNA *ptr, int value)
     return;
   }
   BKE_paint_layers_channel_set_mask_set(*ma, uint16_t(value));
+}
+
+/**
+ * Move Image Editors off a composite pass the set no longer holds: the Composite menu stops
+ * listing it, and a selector resting on a missing item reads blank while the canvas keeps showing
+ * the empty pass.
+ */
+static void rna_Material_paint_layers_channels_update(Main *bmain,
+                                                      Scene * /*scene*/,
+                                                      PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (bmain != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    for (bScreen &screen : bmain->screens) {
+      for (ScrArea &area : screen.areabase) {
+        for (SpaceLink &space : area.spacedata) {
+          if (space.spacetype != SPACE_IMAGE) {
+            continue;
+          }
+          SpaceImage &sima = reinterpret_cast<SpaceImage &>(space);
+          /* Only passes that are channels: Combined and Mask are not part of the set. */
+          if ((sima.flag & SI_PAINT_COMPOSITE_MODE) == 0 ||
+              sima.material_paint_pass >= PAINT_MATERIAL_CHANNEL_NUM ||
+              ED_space_image_composite_material_get(bmain, sima.image) != ma)
+          {
+            continue;
+          }
+          sima.material_paint_pass = BKE_paint_layers_channel_clamp_to_set(
+              *ma, sima.material_paint_pass);
+        }
+      }
+    }
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
 }
 
 static bool rna_Material_paint_layers_channel_in_set(Material *ma, int channel)
@@ -5012,7 +5050,7 @@ void RNA_def_material(BlenderRNA *brna)
       "Channels",
       "The material's global paint channel set; while unset it is derived from the layer records "
       "and the build default. Base Color may be left out; an empty set is ignored");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_channels_update");
 
   {
     FunctionRNA *func = RNA_def_function(

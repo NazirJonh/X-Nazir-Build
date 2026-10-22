@@ -331,6 +331,7 @@ static void image_operatortypes()
   WM_operatortype_append(IMAGE_OT_view_rotate_reset);
   WM_operatortype_append(IMAGE_OT_view_rotate_interactive);
   WM_operatortype_append(IMAGE_OT_combined_light_rotate);
+  WM_operatortype_append(IMAGE_OT_activate_composite_canvas);
 #ifdef WITH_INPUT_NDOF
   WM_operatortype_append(IMAGE_OT_view_ndof);
 #endif

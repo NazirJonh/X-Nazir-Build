@@ -385,10 +385,17 @@ StackRow paint_correction_row_build(const Material &material,
   row.enabled = (effect.flag & MA_PAINT_LAYER_ENABLED) != 0;
   row.supported = true;
   const bool fill = effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
-  row.name = effect.name[0] != '\0' ? effect.name : (fill ? "Correction Fill" : "Correction Paint");
+  const bool from_material = effect.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
+  row.name = effect.name[0] != '\0' ?
+                 effect.name :
+                 (from_material ? "Material Correction" :
+                                  (fill ? "Correction Fill" : "Correction Paint"));
   row.name_buffer = const_cast<char *>(effect.name);
   const bool filter = effect.source == MA_PAINT_LAYER_SOURCE_FILTER;
-  row.icon = filter ? ICON_ARROW_LEFTRIGHT : (fill ? ICON_GP_DRAW_FILL : ICON_BRUSH_DATA);
+  row.icon = filter        ? ICON_ARROW_LEFTRIGHT :
+             from_material ? ICON_MATERIAL :
+             fill          ? ICON_GP_DRAW_FILL :
+                             ICON_BRUSH_DATA;
   /* A correction reads as a setting of its layer rather than as a member of the stack. */
   row.compact = true;
 
@@ -407,6 +414,12 @@ StackRow paint_correction_row_build(const Material &material,
   }
   /* The mode column edits the blend of this channel alone, like the value column above. */
   paint_row_mode_target_set(row, material, effect, channel);
+  if (from_material) {
+    /* It shows what its source shows and owns no map: nothing to preview or switch the brush to,
+     * as for a Material layer. */
+    paint_issue_slots_append(issues, owner_marker, effect.marker, row);
+    return row;
+  }
 
   /* The slot shows the correction's first map, blank or not, and switches the brush to content. A
    * Fill correction is its colour while it has no map: the swatch a Fill layer shows, with the same
@@ -1375,6 +1388,18 @@ class PaintLayersStackSource final : public StackSource,
     /* Picked from the ID Browser popover, with the Material asset libraries. */
     material.source_browse_prop = "paint_layer_add_material";
     r_kinds.append(material);
+    /* After it again, for the same reason: a correction that lays what another material shows. */
+    StackAddKindInfo material_correction{
+        "CORRECTION_MATERIAL",
+        N_("Material Correction"),
+        "What another material shows, laid over the active layer's colour, below the layer's own "
+        "blend",
+        ICON_MATERIAL};
+    material_correction.source_id_type = ID_MA;
+    /* Picked from the same ID Browser popover as a Material layer. */
+    material_correction.source_browse_prop = "paint_layer_add_material_correction";
+    material_correction.is_effect = true;
+    r_kinds.append(material_correction);
   }
 
   int row_add(bContext &C,
@@ -1391,15 +1416,18 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int coverage_first_kind = mask_filter_first_kind + filter_num;
     constexpr int coverage_num = int(std::size(paint_coverage_add_kinds));
     constexpr int material_kind = coverage_first_kind + coverage_num;
-    if (kind < 0 || kind > material_kind || !this->is_editable(owner)) {
+    constexpr int material_correction_kind = material_kind + 1;
+    if (kind < 0 || kind > material_correction_kind || !this->is_editable(owner)) {
       return -1;
     }
     const bool is_material = kind == material_kind;
-    const bool is_mask_filter = kind >= mask_filter_first_kind && !is_material;
-    const bool is_adjustment = kind >= adjustment_first_kind && !is_mask_filter && !is_material;
+    const bool is_material_correction = kind == material_correction_kind;
+    const bool reads_material = is_material || is_material_correction;
+    const bool is_mask_filter = kind >= mask_filter_first_kind && !reads_material;
+    const bool is_adjustment = kind >= adjustment_first_kind && !is_mask_filter && !reads_material;
     /* A filter correction hangs on a layer; an adjustment is a layer. */
     const bool is_filter = kind >= filter_first_kind && !is_adjustment && !is_mask_filter &&
-                           !is_material;
+                           !reads_material;
     Material &material = layers_owner(owner);
     MaterialPaintLayer *anchor = (ordinal < 0) ?
                                      nullptr :
@@ -1419,7 +1447,7 @@ class PaintLayersStackSource final : public StackSource,
                           paint_coverage_add_kinds[kind - coverage_first_kind].filter :
                           paint_filter_add_kinds[kind - mask_filter_first_kind].filter;
     }
-    if (is_material) {
+    if (reads_material) {
       /* The Add resolved the data-block it names before the call; a kind that needs one is never
        * called without it, but the call is also open to scripts. */
       if (args.source == nullptr || GS(args.source->name) != ID_MA) {
@@ -1430,17 +1458,18 @@ class PaintLayersStackSource final : public StackSource,
       /* Each Material row reads a material of its own, so its settings are its own. */
       params.bmain = CTX_data_main(&C);
     }
-    params.kind = is_material    ? PaintLayerAddKind::Material :
-                  is_mask_filter ? PaintLayerAddKind::MaskFilter :
-                  is_adjustment  ? PaintLayerAddKind::Adjustment :
-                  is_filter      ? PaintLayerAddKind::Filter :
-                  (kind == 1)   ? PaintLayerAddKind::Fill :
-                  (kind == 2) ? PaintLayerAddKind::Folder :
-                  (kind == 3) ? PaintLayerAddKind::Correction :
-                  (kind == 4) ? PaintLayerAddKind::CorrectionFill :
-                  (kind == 5) ? PaintLayerAddKind::MaskCorrection :
-                  (kind == 6) ? PaintLayerAddKind::MaskCorrectionFill :
-                                PaintLayerAddKind::Paint;
+    params.kind = is_material            ? PaintLayerAddKind::Material :
+                  is_material_correction ? PaintLayerAddKind::CorrectionMaterial :
+                  is_mask_filter         ? PaintLayerAddKind::MaskFilter :
+                  is_adjustment          ? PaintLayerAddKind::Adjustment :
+                  is_filter              ? PaintLayerAddKind::Filter :
+                  (kind == 1)            ? PaintLayerAddKind::Fill :
+                  (kind == 2)            ? PaintLayerAddKind::Folder :
+                  (kind == 3)            ? PaintLayerAddKind::Correction :
+                  (kind == 4)            ? PaintLayerAddKind::CorrectionFill :
+                  (kind == 5)            ? PaintLayerAddKind::MaskCorrection :
+                  (kind == 6)            ? PaintLayerAddKind::MaskCorrectionFill :
+                                           PaintLayerAddKind::Paint;
     const bool is_mask_correction = ELEM(params.kind,
                                          PaintLayerAddKind::MaskCorrection,
                                          PaintLayerAddKind::MaskCorrectionFill,
@@ -1448,7 +1477,8 @@ class PaintLayersStackSource final : public StackSource,
     const bool is_correction = is_mask_correction || is_filter ||
                                ELEM(params.kind,
                                     PaintLayerAddKind::Correction,
-                                    PaintLayerAddKind::CorrectionFill);
+                                    PaintLayerAddKind::CorrectionFill,
+                                    PaintLayerAddKind::CorrectionMaterial);
     if (anchor != nullptr && !is_correction) {
       /* A correction is not a place a row can be added next to: the row it hangs on is. */
       if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {
@@ -1485,7 +1515,7 @@ class PaintLayersStackSource final : public StackSource,
                    RPT_WARNING,
                    "An adjustment needs a Pass Through folder or the top of the stack");
       }
-      if (is_material) {
+      if (reads_material) {
         BKE_report(CTX_wm_reports(&C),
                    RPT_WARNING,
                    "That material cannot be read here: it is this material, or it already reads it");

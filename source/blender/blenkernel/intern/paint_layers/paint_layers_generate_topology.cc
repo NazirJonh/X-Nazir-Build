@@ -239,11 +239,22 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, effect) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, effect);
+    const bool reads_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
+    if (reads_source) {
+      /* A correction that reads a material has nodes that follow its source, as a Material row's
+       * do: which channels are a value, a texture, a rendered map or the source's graph, and which
+       * image each reads and how. The values are inputs. */
+      hash = topology_hash_mix(hash, 0x501);
+      hash = topology_hash_mix(hash, paint_layer_material_live_signature(ma, effect));
+    }
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
       if (paint_layer_effect_lays(ma, effect, channel)) {
         const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
-        if (record->image != nullptr) {
+        if (reads_source) {
+          hash = topology_hash_mix(hash, 2);
+        }
+        else if (record->image != nullptr) {
           topology_hash_string(hash, record->image->id.name);
         }
         else {

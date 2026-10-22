@@ -113,6 +113,17 @@ void BKE_paint_layers_foreach(
     Material &ma, FunctionRef<bool(MaterialPaintLayer &layer, MaterialPaintLayer *parent)> fn);
 
 /**
+ * Visit every row of \a ma that reads another material: the Material rows of the stack and the
+ * Material corrections laid over any row, a folder's included. Each is visited with its place in
+ * the description only; use #BKE_paint_layers_correction_owner for a correction's row. Return
+ * false from \a fn to stop.
+ */
+void BKE_paint_layers_foreach_source_row(const Material &ma,
+                                         FunctionRef<bool(const MaterialPaintLayer &row)> fn);
+void BKE_paint_layers_foreach_source_row(Material &ma,
+                                         FunctionRef<bool(MaterialPaintLayer &row)> fn);
+
+/**
  * The list of \a ma's stack that directly holds \a layer -- the top-level list or a folder's
  * children, at any depth -- or null when \a layer is not part of the stack.
  */
@@ -527,6 +538,24 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,
                                                     const char *name);
+
+/**
+ * Add a content correction to \a owner that lays what the material \a source shows: in each
+ * channel the source supplies, its plain value, its plain texture, or its graph, over the row's
+ * colour, at the correction's opacity and blend. It owns no channel records, so a stroke has
+ * nothing to write into; the Material row's rules decide, channel by channel, what is laid
+ * (see #BKE_paint_layers_material_row_due and the Material source of a row).
+ *
+ * A source whose transparency is a map lays nothing yet: the correction has no coverage of its own
+ * to carry one.
+ *
+ * \return the new correction, or null when \a owner is not a row of \a ma's stack, \a source is
+ * null, or it is \a ma or already reads it (a cycle).
+ */
+MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
+                                                             MaterialPaintLayer *owner,
+                                                             const char *name,
+                                                             Material *source);
 
 /**
  * Remove the content correction \a effect from its owner, letting go of its maps. The active
@@ -953,8 +982,8 @@ bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Mate
 
 /**
  * Whether the material \a layer reads is a directly linked source that
- * #BKE_paint_layers_material_source_make_local can take: \a layer is a Material row of an editable,
- * non-override \a ma. A source that is merely an indirect dependency is not the user's to take.
+ * #BKE_paint_layers_material_source_make_local can take: \a layer is a Material row, or a content
+ * correction that reads a material, of an editable, non-override \a ma. A source that is merely an indirect dependency is not the user's to take.
  */
 bool BKE_paint_layers_material_source_can_make_local(const Material &ma,
                                                      const MaterialPaintLayer *layer);

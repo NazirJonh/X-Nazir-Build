@@ -102,6 +102,22 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     }
     return effect;
   }
+  if (params.kind == PaintLayerAddKind::CorrectionMaterial) {
+    /* An Add aimed at a correction means another one on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+    }
+    if (owner == nullptr || params.source == nullptr) {
+      return nullptr;
+    }
+    /* A correction reading a material goes by the name of what it reads. */
+    const std::string name = (params.name != nullptr) ? std::string(params.name) :
+                                                        std::string(params.source->id.name + 2);
+    return BKE_paint_layers_correction_add_material(ma, owner, name.c_str(), params.source);
+  }
   if (params.kind == PaintLayerAddKind::Filter) {
     /* Like a correction, an Add aimed at one means another on the row it hangs on. */
     MaterialPaintLayer *owner = params.anchor;

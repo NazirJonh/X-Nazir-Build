@@ -418,8 +418,8 @@ static bNode *instance_ensure(Material &ma, bNodeTree &tree)
  */
 static void source_groups_refresh(Main &bmain, Material &ma)
 {
-  BKE_paint_layers_foreach(
-      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+  BKE_paint_layers_foreach_source_row(
+      static_cast<const Material &>(ma), [&](const MaterialPaintLayer &layer) -> bool {
         if (layer.material == nullptr) {
           return true;
         }

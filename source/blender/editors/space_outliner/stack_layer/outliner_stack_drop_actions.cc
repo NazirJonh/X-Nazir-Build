@@ -682,7 +682,7 @@ class MaterialLayerAction final : public StackDropAction {
     editor->add_kinds(kinds);
     const auto *material_kind = std::find_if(
         kinds.begin(), kinds.end(), [](const StackAddKindInfo &kind) {
-          return kind.source_id_type == ID_MA;
+          return kind.identifier == "MATERIAL";
         });
     if (material_kind == kinds.end()) {
       return false;

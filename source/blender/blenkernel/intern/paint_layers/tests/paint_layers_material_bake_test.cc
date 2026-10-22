@@ -1428,4 +1428,158 @@ TEST_F(PaintLayersMaterialBakeTest, a_clipping_wrap_reaches_the_cpu_coverage_and
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name A content correction that reads a material
+ * \{ */
+
+class PaintLayersMaterialCorrectionTest : public PaintLayersMaterialBakeTest {
+ public:
+  /** A Paint row named "Base" with a Material correction named "Mat" reading the fixture's source.
+   */
+  MaterialPaintLayer *add_row_with_correction(MaterialPaintLayer **r_effect)
+  {
+    PaintLayerAddParams params;
+    params.name = "Base";
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+    EXPECT_NE(row, nullptr);
+    MaterialPaintLayer *effect = BKE_paint_layers_correction_add_material(*ma, row, "Mat", source);
+    EXPECT_NE(effect, nullptr);
+    *r_effect = effect;
+    return row;
+  }
+};
+
+TEST_F(PaintLayersMaterialCorrectionTest, it_hangs_on_a_row_and_owns_no_records)
+{
+  MaterialPaintLayer *effect = nullptr;
+  MaterialPaintLayer *row = add_row_with_correction(&effect);
+  ASSERT_NE(effect, nullptr);
+  EXPECT_EQ(effect->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(effect->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
+  EXPECT_EQ(effect->material, source);
+  EXPECT_EQ(effect->channels_num, 0) << "what it lays is what its source supplies";
+  EXPECT_EQ(BKE_paint_layers_correction_owner(*ma, *effect), row);
+  EXPECT_EQ(BKE_paint_layers_channel_add(*ma, effect, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+
+  const int users = source->id.us;
+  EXPECT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
+  EXPECT_EQ(source->id.us, users - 1) << "the correction was a user of its source";
+}
+
+TEST_F(PaintLayersMaterialCorrectionTest, it_refuses_itself_a_cycle_and_a_missing_source)
+{
+  PaintLayerAddParams params;
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add_material(*ma, row, "Self", ma), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add_material(*ma, row, "None", nullptr), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add_material(*ma, nullptr, "Orphan", source), nullptr);
+
+  /* The source reads this material through a correction of its own: reading it back is a cycle. */
+  PaintLayerAddParams source_params;
+  MaterialPaintLayer *source_row = BKE_paint_layers_add_with_policy(*source, source_params);
+  ASSERT_NE(source_row, nullptr);
+  ASSERT_NE(BKE_paint_layers_correction_add_material(*source, source_row, "Back", ma), nullptr);
+  EXPECT_EQ(BKE_paint_layers_correction_add_material(*ma, row, "Cycle", source), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_material_depends_on(*source, *ma));
+}
+
+TEST_F(PaintLayersMaterialCorrectionTest, it_lays_the_channels_its_source_supplies_as_values)
+{
+  MaterialPaintLayer *effect = nullptr;
+  MaterialPaintLayer *row = add_row_with_correction(&effect);
+  ASSERT_NE(effect, nullptr);
+  edit_source(0.3f);
+
+  EXPECT_TRUE(paint_layer_effect_lays(*ma, *effect, PAINT_MATERIAL_CHANNEL_METALLIC));
+  EXPECT_TRUE(paint_layer_effects_lay(*ma, *row, PAINT_MATERIAL_CHANNEL_METALLIC));
+  EXPECT_FALSE(paint_layer_effect_lays(*ma, *effect, PAINT_MATERIAL_CHANNEL_NORMAL))
+      << "a plain value is no tangent normal";
+  EXPECT_TRUE(paint_layer_row_participates(*ma, *row, PAINT_MATERIAL_CHANNEL_METALLIC))
+      << "an unpainted row is kept for its corrections";
+  EXPECT_TRUE(BKE_paint_layers_material_row_needs_render(*ma, *effect))
+      << "the graphs of the fixture's source are rendered, its values are not";
+  EXPECT_FALSE(BKE_paint_layers_material_channel_needs_render(
+      *ma, *effect, PAINT_MATERIAL_CHANNEL_METALLIC));
+}
+
+TEST_F(PaintLayersMaterialCorrectionTest, a_source_whose_transparency_is_a_map_lays_nothing)
+{
+  MaterialPaintLayer *effect = nullptr;
+  add_row_with_correction(&effect);
+  ASSERT_NE(effect, nullptr);
+  ASSERT_TRUE(paint_layer_effect_lays(*ma, *effect, PAINT_MATERIAL_CHANNEL_METALLIC));
+
+  texture_link(*source, *add_image("Cutout"), "Alpha", "Alpha");
+  EXPECT_FALSE(paint_layer_effect_lays(*ma, *effect, PAINT_MATERIAL_CHANNEL_METALLIC))
+      << "the correction has no coverage of its own to carry a map";
+  EXPECT_FALSE(BKE_paint_layers_material_row_needs_render(*ma, *effect))
+      << "and so there is nothing of it to render";
+}
+
+TEST_F(PaintLayersMaterialCorrectionTest, the_generator_gives_the_correction_a_live_input)
+{
+  MaterialPaintLayer *effect = nullptr;
+  add_row_with_correction(&effect);
+  ASSERT_NE(effect, nullptr);
+  edit_source(0.3f);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Base");
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(interface_has_socket(*group, "Base Mat Metallic Source", false))
+      << "a plain value of the source is an input of the row's group";
+  EXPECT_TRUE(interface_has_socket(*group, "Base Mat Metallic Opacity", false));
+
+  /* Editing the value in the source reaches the input without a rebuild. */
+  edit_source(0.8f);
+  EXPECT_TRUE(BKE_paint_layers_values_sync(*ma));
+  const bNodeTreeInterfaceSocket *live = interface_input_find(*group, "Base Mat Metallic Source");
+  ASSERT_NE(live, nullptr);
+  ASSERT_NE(live->socket_data, nullptr);
+  EXPECT_FLOAT_EQ(static_cast<const bNodeSocketValueRGBA *>(live->socket_data)->value[0], 0.8f);
+}
+
+TEST_F(PaintLayersMaterialCorrectionTest, the_cpu_composite_carries_the_value_as_a_correction)
+{
+  MaterialPaintLayer *effect = nullptr;
+  add_row_with_correction(&effect);
+  ASSERT_NE(effect, nullptr);
+  edit_source(0.3f);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_EQ(layers[0].content_corrections.size(), 1);
+  const PaintMaterialCompositeCorrection &correction = layers[0].content_corrections[0];
+  EXPECT_TRUE(correction.has_constant_color);
+  EXPECT_FLOAT_EQ(correction.constant_color[0], 0.3f);
+  EXPECT_EQ(correction.image, nullptr);
+}
+
+TEST_F(PaintLayersMaterialCorrectionTest, an_edit_of_the_source_concerns_the_material_it_corrects)
+{
+  MaterialPaintLayer *effect = nullptr;
+  add_row_with_correction(&effect);
+  ASSERT_NE(effect, nullptr);
+  Vector<Material *> consumers;
+  BKE_paint_layers_source_material_consumers(*bmain, *source, consumers);
+  ASSERT_EQ(consumers.size(), 1);
+  EXPECT_EQ(consumers[0], ma);
+
+  Vector<const MaterialPaintLayer *> rows;
+  BKE_paint_layers_foreach_source_row(static_cast<const Material &>(*ma),
+                                      [&](const MaterialPaintLayer &row) {
+                                        rows.append(&row);
+                                        return true;
+                                      });
+  ASSERT_EQ(rows.size(), 1);
+  EXPECT_EQ(rows[0], effect);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

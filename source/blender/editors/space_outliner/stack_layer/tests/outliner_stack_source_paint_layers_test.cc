@@ -73,7 +73,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 19u);
+  ASSERT_EQ(kinds.size(), 20u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -112,6 +112,10 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   /* Last, so no index above moves: the kind a dropped material is made into. */
   EXPECT_EQ(kinds[18].identifier, "MATERIAL");
   EXPECT_EQ(kinds[18].source_id_type, ID_MA);
+  EXPECT_EQ(kinds[19].identifier, "CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[19].source_id_type, ID_MA);
+  EXPECT_TRUE(kinds[19].is_effect) << "listed with the other corrections";
+  EXPECT_FALSE(kinds[18].is_effect);
   EXPECT_FALSE(kinds[15].takes_color);
 }
 
@@ -800,6 +804,45 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
   target.place = StackMovePlace::Below;
   EXPECT_EQ(handler->drop_tooltip(ctx, &material->id, tooltip_payload, "Map", "Fill 1", target),
             "Add Map as a new Fill layer below Fill 1");
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_material_correction_is_a_row_with_no_map_to_show)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  Material *other = BKE_material_add(bmain, "Other");
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add_material(
+      *material, layer, "Wood", other);
+  ASSERT_NE(effect, nullptr);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 2u);
+  const StackRow &row = rows[0].name == "Wood" ? rows[0] : rows[1];
+  EXPECT_EQ(row.name, "Wood");
+  EXPECT_EQ(row.icon, ICON_MATERIAL);
+  EXPECT_TRUE(row.compact) << "a correction reads as a setting of its layer";
+  EXPECT_TRUE(row.preview_slots.is_empty()) << "it shows what its source shows";
+  EXPECT_TRUE(row.content_sections.is_empty()) << "and owns no map to switch the brush to";
+  EXPECT_STREQ(row.value_prop, "opacity");
+  EXPECT_STREQ(row.mode_prop, "blend_type");
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_dropped_material_may_be_added_as_a_correction)
+{
+  Vector<StackAddKindInfo> kinds;
+  source().editor()->add_kinds(kinds);
+  int material_kind = -1;
+  int correction_kind = -1;
+  for (const int i : kinds.index_range()) {
+    if (kinds[i].identifier == "MATERIAL") {
+      material_kind = i;
+    }
+    if (kinds[i].identifier == "CORRECTION_MATERIAL") {
+      correction_kind = i;
+    }
+  }
+  ASSERT_GE(material_kind, 0);
+  ASSERT_EQ(correction_kind, material_kind + 1) << "row_add dispatches by index";
 }
 
 }  // namespace tests

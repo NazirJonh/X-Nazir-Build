@@ -988,7 +988,7 @@ static wmOperatorStatus paint_layer_source_make_local_exec(bContext *C, wmOperat
   Material *ma = nullptr;
   MaterialPaintLayer *layer = paint_layer_source_make_local_layer(C, &ma);
   if (layer == nullptr) {
-    BKE_report(op->reports, RPT_ERROR, "The active Material layer has no linked source to make local");
+    BKE_report(op->reports, RPT_ERROR, "The active Material layer or correction has no linked source to make local");
     return OPERATOR_CANCELLED;
   }
   Material *local = BKE_paint_layers_material_source_make_local(*CTX_data_main(C), *ma, layer);
@@ -1008,7 +1008,7 @@ void PAINT_OT_layer_source_make_local(wmOperatorType *ot)
   ot->name = "Make Source Material Local";
   ot->idname = "PAINT_OT_layer_source_make_local";
   ot->description =
-      "Make the material the active Material layer reads local to this file, so it can be edited";
+      "Make the material the active Material layer or correction reads local to this file, so it can be edited";
 
   ot->exec = paint_layer_source_make_local_exec;
   ot->poll = paint_layer_source_make_local_poll;

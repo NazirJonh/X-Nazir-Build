@@ -2176,11 +2176,10 @@ void DepsgraphNodeBuilder::build_material(Material *material)
    * the graph and the editors would never hear of it. Building the source here puts it in the
    * graph. Recursion and source cycles are stopped by `built_map_`, which is tagged above. */
   if (BKE_paint_layers_is_layered(*material)) {
-    BKE_paint_layers_foreach(
-        *material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
-          if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr &&
-              layer.material != material)
-          {
+    /* The Material rows of the stack and the Material corrections laid over any row. */
+    BKE_paint_layers_foreach_source_row(
+        static_cast<const Material &>(*material), [&](const MaterialPaintLayer &layer) {
+          if (layer.material != nullptr && layer.material != material) {
             build_material(layer.material);
           }
           return true;

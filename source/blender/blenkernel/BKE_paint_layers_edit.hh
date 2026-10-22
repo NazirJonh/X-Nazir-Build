@@ -73,6 +73,12 @@ enum class PaintLayerAddKind : int8_t {
    * source, for the owner itself and for a source that reads the owner.
    */
   Material,
+  /**
+   * A content correction of the anchor row (or of the row an anchor correction hangs on) that lays
+   * what another material shows, #PaintLayerAddParams::source, over the row's colour. Refused for
+   * no anchor row, no source, the owner itself and a source that reads the owner.
+   */
+  CorrectionMaterial,
 };
 
 struct PaintLayerAddParams {
@@ -101,7 +107,7 @@ struct PaintLayerAddParams {
   const float *fill_color = nullptr;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
-  /** The material a #PaintLayerAddKind::Material Add reads. */
+  /** The material a #PaintLayerAddKind::Material or ::CorrectionMaterial Add reads. */
   Material *source = nullptr;
   /**
    * When set, a #PaintLayerAddKind::Material row reads a local copy of \a source made in this

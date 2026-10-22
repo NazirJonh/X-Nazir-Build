@@ -216,10 +216,21 @@ int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
   return layer.bake != nullptr ? int(layer.bake->mode) : int(MA_PAINT_LAYER_BAKE_AUTO);
 }
 
+/**
+ * Whether \a layer is a row \a ma keeps a bake for: a row of its stack, or a content correction
+ * that reads a material, whose maps are rendered from the source like a Material row's.
+ */
+static bool bake_row_owned(Material &ma, const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_owner_list(ma, layer) != nullptr ||
+         (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) &&
+          BKE_paint_layers_correction_owner(ma, layer) != nullptr);
+}
+
 bool BKE_paint_layers_bake_mode_set(Material &ma, MaterialPaintLayer &layer, const int mode)
 {
   if (mode < MA_PAINT_LAYER_BAKE_AUTO || mode > MA_PAINT_LAYER_BAKE_NEVER ||
-      BKE_paint_layers_owner_list(ma, layer) == nullptr)
+      !bake_row_owned(ma, layer))
   {
     return false;
   }
@@ -235,7 +246,7 @@ int BKE_paint_layers_bake_size_get(const MaterialPaintLayer &layer)
 
 bool BKE_paint_layers_bake_size_set(Material &ma, MaterialPaintLayer &layer, const int size)
 {
-  if (size <= 0 || BKE_paint_layers_owner_list(ma, layer) == nullptr) {
+  if (size <= 0 || !bake_row_owned(ma, layer)) {
     return false;
   }
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
@@ -302,7 +313,7 @@ static void bake_release_users(MaterialPaintLayerBake &bake)
 
 bool BKE_paint_layers_bake_clear(Material &ma, MaterialPaintLayer &layer)
 {
-  if (BKE_paint_layers_owner_list(ma, layer) == nullptr) {
+  if (!bake_row_owned(ma, layer)) {
     return false;
   }
   if (layer.bake != nullptr) {
@@ -318,9 +329,7 @@ bool BKE_paint_layers_bake_set_map(Material &ma,
                                    const int channel,
                                    Image *image)
 {
-  if (channel < -1 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
-      BKE_paint_layers_owner_list(ma, layer) == nullptr)
-  {
+  if (channel < -1 || channel >= PAINT_MATERIAL_CHANNEL_NUM || !bake_row_owned(ma, layer)) {
     return false;
   }
   MaterialPaintLayerBake *bake = BKE_paint_layers_bake_struct_ensure(layer);
@@ -829,7 +838,7 @@ bool BKE_paint_layers_bake_is_valid(const Material &ma, const MaterialPaintLayer
 
 void BKE_paint_layers_bake_finalize(Material &ma, MaterialPaintLayer &layer)
 {
-  if (layer.bake == nullptr || BKE_paint_layers_owner_list(ma, layer) == nullptr) {
+  if (layer.bake == nullptr || !bake_row_owned(ma, layer)) {
     return;
   }
   uint32_t hash[2];
@@ -1179,7 +1188,16 @@ static bool bake_hidden_find(const ListBaseT<MaterialPaintLayer> &list,
 static bool bake_row_is_hidden(const Material &ma, const MaterialPaintLayer &layer)
 {
   bool hidden = false;
-  bake_hidden_find(ma.paint_layers, &layer, false, hidden);
+  if (bake_hidden_find(ma.paint_layers, &layer, false, hidden)) {
+    return hidden;
+  }
+  /* A content correction is hidden by its own switch or by the row it hangs on. */
+  if (const MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(
+          const_cast<Material &>(ma), layer))
+  {
+    bake_hidden_find(ma.paint_layers, owner, false, hidden);
+    hidden = hidden || (layer.flag & MA_PAINT_LAYER_ENABLED) == 0;
+  }
   return hidden;
 }
 
@@ -1541,7 +1559,8 @@ bool BKE_paint_layers_bake_heavy_pending(const Material &ma)
 bool paint_layer_row_material_shown(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (layer.bake == nullptr || layer.material == nullptr ||
-      layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER || layer.role != MA_PAINT_LAYER_ROLE_LAYER)
+      layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
+      !ELEM(layer.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT))
   {
     return false;
   }
@@ -1691,8 +1710,8 @@ bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
                                                         const MaterialPaintLayer &row)
 {
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
-      row.role != MA_PAINT_LAYER_ROLE_LAYER || row.material == nullptr ||
-      row.material->nodetree == nullptr ||
+      !ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
+      row.material == nullptr || row.material->nodetree == nullptr ||
       BKE_paint_layers_bake_mode_get(row) == MA_PAINT_LAYER_BAKE_NEVER ||
       !BKE_paint_layers_material_row_needs_render(ma, row))
   {
@@ -1718,8 +1737,8 @@ bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
 bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
-      layer.role != MA_PAINT_LAYER_ROLE_LAYER || layer.material == nullptr ||
-      layer.material->nodetree == nullptr ||
+      !ELEM(layer.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
+      layer.material == nullptr || layer.material->nodetree == nullptr ||
       BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_NEVER)
   {
     return false;
@@ -1840,11 +1859,10 @@ float BKE_paint_layers_source_edit_delay(const Material &consumer, const Materia
    * a value that moves it would otherwise render at every pause of the hand. */
   bool active_reads_source = false;
   bool preview_wait = false;
-  BKE_paint_layers_foreach(
-      consumer, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) {
-        if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
-            row.material != &source || !BKE_paint_layers_bake_row_is_deferred(consumer, row))
-        {
+  /* The Material corrections count as well: one that is being edited waits like a row does. */
+  BKE_paint_layers_foreach_source_row(
+      consumer, [&](const MaterialPaintLayer &row) {
+        if (row.material != &source || !BKE_paint_layers_bake_row_is_deferred(consumer, row)) {
           return true;
         }
         if (delayed_preview && BKE_paint_layers_material_row_preview_active(consumer, row)) {
@@ -1952,12 +1970,9 @@ void BKE_paint_layers_material_row_log(const Material &ma,
 bool BKE_paint_layers_material_sources_notice(Material &ma)
 {
   Vector<std::pair<bUUID, uint64_t>> signatures;
-  BKE_paint_layers_foreach(
-      static_cast<const Material &>(ma),
-      [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) {
-        if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE)) {
-          signatures.append({row.marker, paint_layer_material_live_signature(ma, row)});
-        }
+  BKE_paint_layers_foreach_source_row(
+      static_cast<const Material &>(ma), [&](const MaterialPaintLayer &row) {
+        signatures.append({row.marker, paint_layer_material_live_signature(ma, row)});
         return true;
       });
   if (signatures.is_empty()) {
@@ -2013,13 +2028,11 @@ void BKE_paint_layers_source_material_consumers(Main &bmain,
       continue;
     }
     bool reads = false;
-    BKE_paint_layers_foreach(static_cast<const Material &>(ma),
-                             [&](const MaterialPaintLayer &row, const MaterialPaintLayer *) {
-                               reads = paint_layer_kind_has_flag(row,
-                                                                 PAINT_LAYER_KIND_READS_SOURCE) &&
-                                       row.material == &source;
-                               return !reads;
-                             });
+    BKE_paint_layers_foreach_source_row(static_cast<const Material &>(ma),
+                                        [&](const MaterialPaintLayer &row) {
+                                          reads = row.material == &source;
+                                          return !reads;
+                                        });
     if (reads) {
       r_consumers.append(&ma);
     }
@@ -2035,7 +2048,7 @@ bool BKE_paint_layers_bake_outstanding(const Material &ma)
     return true;
   }
   bool due = false;
-  BKE_paint_layers_foreach(ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer *) {
+  BKE_paint_layers_foreach_source_row(ma, [&](const MaterialPaintLayer &row) {
     due = BKE_paint_layers_material_row_due(ma, row);
     return !due;
   });
@@ -2072,7 +2085,7 @@ void BKE_paint_layers_material_bake_apply(Main & /*bmain*/,
                                           const Span<Image *> images)
 {
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) || size <= 0 ||
-      channels.size() != images.size() || BKE_paint_layers_owner_list(ma, layer) == nullptr)
+      channels.size() != images.size() || !bake_row_owned(ma, layer))
   {
     return;
   }

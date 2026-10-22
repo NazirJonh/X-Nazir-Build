@@ -1421,12 +1421,15 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
   Map<int, bNodeTreeInterfaceSocket *> *by_channel = effect_opacity_inputs_.lookup_ptr(&effect);
+  /* A correction that reads a material has no record: its colour and alpha are what the source
+   * supplies in the channel, built the way a Material row's are. */
+  const bool from_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
   /* A Fill correction with no map in the channel is a flat colour, an input of the group; every
    * other correction reads its map. */
-  const bool flat = record != nullptr && record->image == nullptr &&
+  const bool flat = !from_source && record != nullptr && record->image == nullptr &&
                     paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE);
-  if (record == nullptr || (!flat && record->image == nullptr) || by_channel == nullptr ||
-      content.socket == nullptr)
+  if (by_channel == nullptr || content.socket == nullptr ||
+      (!from_source && (record == nullptr || (!flat && record->image == nullptr))))
   {
     return false;
   }
@@ -1436,7 +1439,34 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   bNode *map = nullptr;
   bNodeSocket *map_color = nullptr;
   bNodeSocket *map_alpha = nullptr;
-  if (flat) {
+  KindEmitResult source_emitted;
+  if (from_source) {
+    /* The source's colour, its content alpha (a map's own, one for a value or a graph) and the
+     * coverage when its transparency is a plain value, which is all a correction lays. */
+    if (opacity == nullptr) {
+      return false;
+    }
+    const RowEmitContext emit_context{tree,
+                                      group,
+                                      effect,
+                                      channel,
+                                      /*folder=*/false,
+                                      /*adjustment=*/false,
+                                      /*empty_base=*/false,
+                                      /*track_alpha=*/false,
+                                      /*record=*/nullptr,
+                                      /*below=*/nullptr,
+                                      /*below_alpha=*/nullptr,
+                                      /*folder_color=*/nullptr,
+                                      /*folder_alpha=*/nullptr,
+                                      /*baked_color=*/nullptr};
+    source_emitted = this->material_source_emit(emit_context);
+    if (source_emitted.color.socket == nullptr || source_emitted.content_alpha.socket == nullptr) {
+      return false;
+    }
+    map_color = source_emitted.color.socket;
+  }
+  else if (flat) {
     Map<int, bNodeTreeInterfaceSocket *> *fill_by_channel = fill_inputs_.lookup_ptr(&effect);
     bNodeTreeInterfaceSocket **fill_iface = (fill_by_channel != nullptr) ?
                                                 fill_by_channel->lookup_ptr(channel) :
@@ -1475,12 +1505,13 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   };
   /* The map is read as stored, like a row's own map: a colour map is un-premultiplied by the node,
    * and a data map follows the same rule a row's does, so the two cannot disagree. */
-  NodeOutput color = {flat ? group.group_input : map, map_color};
+  NodeOutput color = from_source ? source_emitted.color :
+                                   NodeOutput{flat ? group.group_input : map, map_color};
   if (mapped && channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     /* The Mapping moved only the read point; the tangent-space vectors follow it. */
     color = this->normal_remap_add(tree, effect, color, &nodes);
   }
-  NodeOutput alpha = {map, map_alpha};
+  NodeOutput alpha = from_source ? source_emitted.content_alpha : NodeOutput{map, map_alpha};
   if (mapped) {
     /* A clipping UV wrap takes the part outside the square out of the map's alpha. */
     alpha = this->mapping_clip_alpha(tree, effect, alpha, nodes);
@@ -1502,6 +1533,15 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   NodeOutput factor = {group.group_input, opacity};
   if (!flat) {
     factor = this->multiply_nodes_add(tree, {group.group_input, opacity}, alpha);
+    if (factor.node == nullptr) {
+      return discard();
+    }
+    nodes.append(factor.node);
+    factor_node_for_frame = factor.node;
+  }
+  if (from_source && source_emitted.coverage.socket != nullptr) {
+    /* The source's transparency, a plain value: the correction covers by it as well. */
+    factor = this->multiply_nodes_add(tree, factor, source_emitted.coverage);
     if (factor.node == nullptr) {
       return discard();
     }

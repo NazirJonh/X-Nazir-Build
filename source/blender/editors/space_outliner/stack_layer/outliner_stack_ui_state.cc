@@ -191,6 +191,9 @@ void outliner_stack_row_added_sync(bContext &C, ID &owner, const bUUID &row_id)
         if (ordinal < 0) {
           continue;
         }
+        /* A correction is listed under its row's content section: bring that section up, or the
+         * row just made is in the data and unseen. */
+        stack_row_reveal_attached(space_outliner, ordinal);
         stack_row_ui_state_edit_select(ctx, space_outliner, owner, ordinal);
         /* The same follow-up the Add wrapper gives a row it made: the target mode, the mask and the
          * texture-paint slots all resolve through the active row. */

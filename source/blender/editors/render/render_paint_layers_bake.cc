@@ -14,6 +14,7 @@
 
 #include "ED_material_bake.hh"
 #include "ED_paint_layers_bake.hh"
+#include "ED_undo.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
@@ -145,10 +146,9 @@ bool paint_layers_bake_jobs_in_flight(const wmWindowManager &wm,
     return false;
   }
   bool row_running = false;
-  BKE_paint_layers_foreach(ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer *) {
-    row_running = row.source == MA_PAINT_LAYER_SOURCE_MATERIAL &&
-                  paint_layers_bake_job_test_excluding(
-                      wm, &row, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE, exclude_owner, exclude_job_type);
+  BKE_paint_layers_foreach_source_row(ma, [&](const MaterialPaintLayer &row) {
+    row_running = paint_layers_bake_job_test_excluding(
+        wm, &row, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE, exclude_owner, exclude_job_type);
     return !row_running;
   });
   return row_running;
@@ -469,7 +469,8 @@ bool paint_layer_row_result_run(Main &bmain,
                                 const bUUID &source_marker,
                                 const bUUID &target_marker,
                                 const int size,
-                                ReportList *reports)
+                                ReportList *reports,
+                                bool *r_committed_inline = nullptr)
 {
   PaintLayersRowResultJob *job = BKE_paint_layers_row_result_job_create(
       bmain, owner, source_marker, target_marker, size);
@@ -504,16 +505,29 @@ bool paint_layer_row_result_run(Main &bmain,
     return false;
   }
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &owner.id);
+  if (r_committed_inline != nullptr) {
+    *r_committed_inline = true;
+  }
   return true;
 }
 
-/** The Material rows of \a row and below it whose maps have to be rendered before they are read. */
+/**
+ * The Material rows of \a row, its corrections and the rows inside it (a folder's children) whose
+ * maps have to be rendered before they are read. The result of a row is that row's own content: the
+ * rows beside or below it in the same list are not part of it, so they are not rendered here.
+ */
 void paint_layer_row_result_forced_collect(const Material &ma,
                                            const MaterialPaintLayer &row,
                                            Vector<bUUID> &r_markers)
 {
   if (BKE_paint_layers_material_row_render_forced_wanted(ma, row)) {
     r_markers.append(row.marker);
+  }
+  /* A Material correction renders its own maps and is read by the row's result as well. */
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if (BKE_paint_layers_material_row_render_forced_wanted(ma, effect)) {
+      r_markers.append(effect.marker);
+    }
   }
   for (const MaterialPaintLayer &child : row.children) {
     paint_layer_row_result_forced_collect(ma, child, r_markers);
@@ -650,16 +664,23 @@ wmOperatorStatus paint_layer_row_result_exec(bContext *C, wmOperator *op)
     return OPERATOR_FINISHED;
   }
 
-  return paint_layer_row_result_run(*bmain,
-                                    *wm,
-                                    CTX_wm_window(C),
-                                    *owner,
-                                    source->marker,
-                                    target->marker,
-                                    size,
-                                    op->reports) ?
-             OPERATOR_FINISHED :
-             OPERATOR_CANCELLED;
+  bool committed_inline = false;
+  if (!paint_layer_row_result_run(*bmain,
+                                  *wm,
+                                  CTX_wm_window(C),
+                                  *owner,
+                                  source->marker,
+                                  target->marker,
+                                  size,
+                                  op->reports,
+                                  &committed_inline))
+  {
+    return OPERATOR_CANCELLED;
+  }
+  if (committed_inline) {
+    ED_undo_push(C, "Use Row Result");
+  }
+  return OPERATOR_FINISHED;
 }
 
 /** \} */
@@ -880,7 +901,10 @@ void MATERIAL_OT_paint_layer_use_row_result(wmOperatorType *ot)
   ot->description =
       "Bake another row's result for every channel it takes part in into this row's channel maps";
   ot->idname = "MATERIAL_OT_paint_layer_use_row_result";
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* No #OPTYPE_UNDO: a heavy row or a source whose maps are still rendering commits later, from a
+   * job callback, so a step pushed at the call would not hold the change. The inline path pushes its
+   * own step once it has written. */
+  ot->flag = OPTYPE_REGISTER;
   ot->exec = paint_layer_row_result_exec;
   ot->poll = paint_layer_row_result_poll;
 

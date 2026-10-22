@@ -152,9 +152,10 @@ PaintLayerMaterialSource paint_layer_material_channel_source(const Material &ma,
 {
   PaintLayerMaterialSource out;
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
-      row.role != MA_PAINT_LAYER_ROLE_LAYER || row.material == nullptr ||
-      row.material->nodetree == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
-      channel == PAINT_MATERIAL_CHANNEL_ALPHA || paint_layer_channel_filtered(ma, channel))
+      !ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
+      row.material == nullptr || row.material->nodetree == nullptr || channel < 0 ||
+      channel >= PAINT_MATERIAL_CHANNEL_NUM || channel == PAINT_MATERIAL_CHANNEL_ALPHA ||
+      paint_layer_channel_filtered(ma, channel))
   {
     return out;
   }
@@ -254,6 +255,28 @@ bool paint_layer_row_reads_source(const Material &ma,
              PaintLayerMaterialCoverageKind::Pending;
 }
 
+bool paint_layer_correction_reads_source(const Material &ma,
+                                         const MaterialPaintLayer &effect,
+                                         const int channel)
+{
+  if (!paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE) ||
+      effect.role != MA_PAINT_LAYER_ROLE_EFFECT || paint_layer_channel_filtered(ma, channel))
+  {
+    return false;
+  }
+  const PaintLayerMaterialSource source = paint_layer_material_channel_source(ma, effect, channel);
+  if (source.kind == PaintLayerMaterialSourceKind::None ||
+      (channel == PAINT_MATERIAL_CHANNEL_NORMAL &&
+       source.kind == PaintLayerMaterialSourceKind::LiveConstant))
+  {
+    return false;
+  }
+  const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma, effect);
+  return ELEM(coverage.kind,
+              PaintLayerMaterialCoverageKind::Full,
+              PaintLayerMaterialCoverageKind::LiveConstant);
+}
+
 bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
                                                     const MaterialPaintLayer &row,
                                                     const int channel)
@@ -266,6 +289,15 @@ bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
   }
   const std::shared_ptr<const MaterialSourceResolve> resolve = BKE_paint_layers_source_resolve(
       *row.material);
+  /* A correction lays nothing where the source's transparency is a map or a graph (see
+   * #paint_layer_correction_reads_source), so there is nothing of it to render at all. */
+  if (row.role == MA_PAINT_LAYER_ROLE_EFFECT &&
+      !ELEM(resolve->channels[PAINT_MATERIAL_CHANNEL_ALPHA],
+            ChannelResolution::Unavailable,
+            ChannelResolution::Constant))
+  {
+    return false;
+  }
   switch (resolve->channels[channel]) {
     case ChannelResolution::Baked:
       return true;

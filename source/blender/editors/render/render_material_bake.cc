@@ -2040,11 +2040,10 @@ void material_bake_layered_rows_ensure(Main &bmain,
   BKE_paint_layers_preview_wanted_set(ma,
                                       force_preview || material_composite_is_shown(bmain, *wm, ma));
 
+  /* The Material rows of the stack and the Material corrections laid over any row. */
   Vector<MaterialPaintLayer *> rows;
-  BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) {
-    if (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
-      rows.append(&row);
-    }
+  BKE_paint_layers_foreach_source_row(ma, [&](MaterialPaintLayer &row) {
+    rows.append(&row);
     return true;
   });
 

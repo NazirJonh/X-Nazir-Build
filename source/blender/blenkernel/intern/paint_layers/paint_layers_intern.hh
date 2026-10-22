@@ -152,6 +152,18 @@ PaintLayerMaterialCoverage paint_layer_material_coverage_source(
 bool paint_layer_row_reads_source(const Material &ma, const MaterialPaintLayer &row, int channel);
 
 /**
+ * Whether the content correction \a effect, a correction that reads a material, lays anything in
+ * \a channel: the source supplies the channel, and its transparency is a plain value or none. A
+ * source whose transparency is a map (or a graph) is not laid by a correction yet, since the
+ * correction has no coverage of its own to carry one; it lays nothing here, on the generator's
+ * side and the CPU's alike. A plain value is no tangent normal, so it lays nothing in Normal
+ * either.
+ */
+bool paint_layer_correction_reads_source(const Material &ma,
+                                         const MaterialPaintLayer &effect,
+                                         int channel);
+
+/**
  * Whether the graph of \a row's source in \a channel can be copied into a group: the Principled
  * BSDF is reached through groups the wrapper can copy (#BKE_paint_layers_source_group_wrappable),
  * and the source supplies the channel as a graph (the Normal as the encoded map the chain reads).
@@ -294,6 +306,11 @@ inline bool paint_layer_effect_lays(const Material &ma,
   if (paint_layer_channel_filtered(ma, channel)) {
     return false;
   }
+  /* A correction that reads a material has no records: what it lays is what its source supplies.
+   */
+  if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
+    return paint_layer_correction_reads_source(ma, effect, channel);
+  }
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
   if (!paint_layer_channel_live(record)) {
     return false;
@@ -354,6 +371,9 @@ inline const char *paint_layer_effect_label(const MaterialPaintLayer &effect)
 {
   if (effect.name[0] != '\0') {
     return effect.name;
+  }
+  if (effect.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return "Material Correction";
   }
   return effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT ? "Correction Fill" : "Correction Paint";
 }

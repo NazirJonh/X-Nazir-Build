@@ -407,20 +407,53 @@ static bool composite_image_layer_build(const Material &ma,
       continue;
     }
     PaintMaterialCompositeCorrection correction;
-    const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
-    if (effect_record->image != nullptr) {
-      correction.image = effect_record->image;
-      composite_mapping_describe(ma, effect, channel, correction.mapping);
-    }
-    else {
-      /* Only a Fill correction lays without a map: its flat colour. */
-      copy_v4_v4(correction.constant_color, effect_record->value);
-      correction.has_constant_color = true;
-    }
     correction.iuser = nullptr;
-    correction.blend = layer_channel_blend(effect, channel);
     correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                          pass_through_scale;
+    if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
+      /* What the source supplies, as a Material row's colour: its plain value, its plain texture
+       * or the map rendered from it. A graph with no map yet is the generator's to show alone, so
+       * nothing is carried until the render lands. The correction's transparency is a plain value
+       * or none (see #paint_layer_correction_reads_source), and a value folds into the opacity. */
+      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+          ma, effect, channel, PaintLayerMaterialUse::Composite);
+      const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+          ma, effect, PaintLayerMaterialUse::Composite);
+      if (source.kind == PaintLayerMaterialSourceKind::None ||
+          coverage.kind == PaintLayerMaterialCoverageKind::Pending)
+      {
+        continue;
+      }
+      if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+        copy_v4_v4(correction.constant_color, source.constant);
+        correction.has_constant_color = true;
+      }
+      else {
+        correction.image = source.image;
+        correction.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ?
+                               source.iuser :
+                               nullptr;
+        /* The source is read at the correction's UV, as the generator's source wrapper does and as
+         * a Material row's map is: the Image Editor's composite and the gizmo go through this. */
+        composite_mapping_describe(ma, effect, channel, correction.mapping);
+      }
+      if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+        correction.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
+      }
+    }
+    else {
+      const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
+      if (effect_record->image != nullptr) {
+        correction.image = effect_record->image;
+        composite_mapping_describe(ma, effect, channel, correction.mapping);
+      }
+      else {
+        /* Only a Fill correction lays without a map: its flat colour. */
+        copy_v4_v4(correction.constant_color, effect_record->value);
+        correction.has_constant_color = true;
+      }
+    }
+    correction.blend = layer_channel_blend(effect, channel);
     out.content_corrections.append(correction);
   }
   /* The mask is one for all channels of the row, so the same item reaches every channel's stack,

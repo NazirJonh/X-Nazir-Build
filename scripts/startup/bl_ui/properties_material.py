@@ -892,7 +892,8 @@ class LAYER_MATERIAL_PT_row_result(LayerMaterialButtonsPanel, Panel):
         if not super().poll(context):
             return False
         owner, layer = cls._active_layer(context)
-        if owner is None or layer is None:
+        # A row that reads a material owns no maps to bake into.
+        if owner is None or layer is None or layer.source == 'MATERIAL':
             return False
         return cls._shown_mask_item(context, owner, layer) is None
 

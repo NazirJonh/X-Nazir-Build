@@ -224,6 +224,32 @@ void BKE_paint_layers_foreach(
       });
 }
 
+void BKE_paint_layers_foreach_source_row(const Material &ma,
+                                         FunctionRef<bool(const MaterialPaintLayer &row)> fn)
+{
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) && !fn(layer)) {
+          return false;
+        }
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE) && !fn(effect)) {
+            return false;
+          }
+        }
+        return true;
+      });
+}
+
+void BKE_paint_layers_foreach_source_row(Material &ma,
+                                         FunctionRef<bool(MaterialPaintLayer &row)> fn)
+{
+  BKE_paint_layers_foreach_source_row(static_cast<const Material &>(ma),
+                                      [&](const MaterialPaintLayer &row) -> bool {
+                                        return fn(const_cast<MaterialPaintLayer &>(row));
+                                      });
+}
+
 MaterialPaintLayer *BKE_paint_layers_parent(Material &ma, const MaterialPaintLayer &layer)
 {
   const MaterialPaintLayer *parent = nullptr;
@@ -871,6 +897,29 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     const char *name)
 {
   return BKE_paint_layers_correction_add(ma, owner, name, MA_PAINT_LAYER_SOURCE_IMAGE);
+}
+
+MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
+                                                             MaterialPaintLayer *owner,
+                                                             const char *name,
+                                                             Material *source)
+{
+  /* The same pair check a Material row has, so the descriptions stay acyclic. */
+  if (!paint_layer_in_stack(ma, owner) || source == nullptr ||
+      BKE_paint_layers_material_depends_on(*source, ma))
+  {
+    return nullptr;
+  }
+  MaterialPaintLayer *effect = paint_layer_alloc(ma,
+                                                 name != nullptr ? name : "Material Correction");
+  effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  effect->source = MA_PAINT_LAYER_SOURCE_MATERIAL;
+  /* It owns no channel records: what it lays in a channel is what its source supplies there. */
+  effect->material = source;
+  id_us_plus(&source->id);
+  BLI_addtail(&owner->effects, effect);
+  BKE_paint_layers_tag_edited(ma);
+  return effect;
 }
 
 MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
@@ -2408,7 +2457,12 @@ PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaint
 
 bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source)
 {
-  if (!paint_layer_in_stack(ma, layer) || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+  /* A row of the stack or a content correction; a mask item reading a material has no rules yet.
+   */
+  if (layer == nullptr || !paint_layer_in_stack_or_effect(ma, layer) ||
+      layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM ||
+      layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL)
+  {
     return false;
   }
   if (source == nullptr ||
@@ -2431,7 +2485,9 @@ bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Mate
 bool BKE_paint_layers_material_source_can_make_local(const Material &ma,
                                                      const MaterialPaintLayer *layer)
 {
-  if (!paint_layer_in_stack(ma, layer) || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+  /* A Material row, or a correction that reads a material: the user may want to tune the source
+   * of either, and a correction hangs on a row rather than being one of the stack. */
+  if (!paint_layer_owned(ma, layer) || layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
     return false;
   }
   /* A linked or overridden stack is not the user's to edit; localizing a source under it would

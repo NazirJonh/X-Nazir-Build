@@ -3259,11 +3259,9 @@ void DepsgraphRelationBuilder::build_material(Material *material, ID *owner)
    * through the `owner` branch above: a material has no `SHADING` operation of its own, only
    * `MATERIAL_UPDATE`. */
   if (BKE_paint_layers_is_layered(*material)) {
-    BKE_paint_layers_foreach(
-        *material, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
-          if (layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL || layer.material == nullptr ||
-              layer.material == material)
-          {
+    BKE_paint_layers_foreach_source_row(
+        static_cast<const Material &>(*material), [&](const MaterialPaintLayer &layer) {
+          if (layer.material == nullptr || layer.material == material) {
             return true;
           }
           build_material(layer.material, nullptr);

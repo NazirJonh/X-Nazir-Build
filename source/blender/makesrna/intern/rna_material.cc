@@ -839,9 +839,11 @@ static bool rna_Material_paint_layer_add_material_poll(PointerRNA *ptr, PointerR
   return ma == nullptr || source == nullptr || !BKE_paint_layers_material_depends_on(*source, *ma);
 }
 
-/* Adds the row for the material the setter recorded. The popover assignment pushes no undo step of
- * its own. */
-static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA *ptr)
+/* Adds the row (or the correction on the active row) for the material the setter recorded. The
+ * popover assignment pushes no undo step of its own. */
+static void rna_Material_paint_layer_add_material_do(bContext *C,
+                                                     PointerRNA *ptr,
+                                                     const PaintLayerAddKind kind)
 {
   Material *source = rna_paint_layer_add_material_pending;
   rna_paint_layer_add_material_pending = nullptr;
@@ -854,8 +856,9 @@ static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA
     BKE_report(reports, RPT_ERROR, "The material is not a layered material");
     return;
   }
+  const bool correction = kind == PaintLayerAddKind::CorrectionMaterial;
   PaintLayerAddParams params;
-  params.kind = PaintLayerAddKind::Material;
+  params.kind = kind;
   params.source = source;
   params.bmain = CTX_data_main(C);
   params.anchor = BKE_paint_layers_active_layer_get(*ma);
@@ -863,7 +866,10 @@ static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA
   if (layer == nullptr) {
     BKE_report(reports,
                RPT_ERROR,
-               "That material cannot be read here: it is this material, or it already reads it");
+               correction ? "That material cannot be read here: there is no layer to correct, or "
+                            "it is this material, or it already reads it" :
+                            "That material cannot be read here: it is this material, or it "
+                            "already reads it");
     return;
   }
   BKE_paint_layers_active_set(*ma, layer->marker);
@@ -871,8 +877,18 @@ static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA
    * has to be told the row it now has is the active one -- otherwise the rows it cached before the
    * Add keep the old row lit. */
   ed::outliner::outliner_stack_row_added_sync(*C, ma->id, layer->marker);
-  ED_undo_push(C, "Add Material Layer");
+  ED_undo_push(C, correction ? "Add Material Correction" : "Add Material Layer");
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ptr->owner_id);
+}
+
+static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA *ptr)
+{
+  rna_Material_paint_layer_add_material_do(C, ptr, PaintLayerAddKind::Material);
+}
+
+static void rna_Material_paint_layer_add_material_correction_update(bContext *C, PointerRNA *ptr)
+{
+  rna_Material_paint_layer_add_material_do(C, ptr, PaintLayerAddKind::CorrectionMaterial);
 }
 
 static void rna_Material_paint_layers_remove(Material *ma,
@@ -5007,6 +5023,25 @@ void RNA_def_material(BlenderRNA *brna)
                            "Write-only: assigning a material adds a layer that reads it above the "
                            "active layer; reads as none");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_material_update");
+
+  /* The same write-only assignment for a Material correction on the active layer: the ID Browser
+   * popover of the Add asks for the material through it. */
+  prop = RNA_def_property(srna, "paint_layer_add_material_correction", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_Material_paint_layer_add_material_get",
+                                 "rna_Material_paint_layer_add_material_set",
+                                 nullptr,
+                                 "rna_Material_paint_layer_add_material_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_HIDDEN);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_NO_COMPARISON);
+  RNA_def_property_ui_text(prop,
+                           "Add Material Correction",
+                           "Write-only: assigning a material adds a correction that lays it over "
+                           "the active layer; reads as none");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_material_correction_update");
 
   prop = RNA_def_property(srna, "paint_layers_is_stale", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_is_stale_get", nullptr);

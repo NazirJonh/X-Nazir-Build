@@ -7868,6 +7868,12 @@ struct SculptPaintStroke final : public PaintStroke {
    * which the regular dab pipeline owns and resets on its own schedule. */
   bool fill_line_filled_ = false;
 
+  /* One fill session for the whole stroke: it keeps the projection session (Pixels expansion) or
+   * the per-object BMesh copy (Face/Island/Mesh) alive between dabs. Opaque here on purpose -- the
+   * fill code owns the definition; this only holds the lifetime. */
+  TextureFillSession *fill_session_ = nullptr;
+  void fill_session_finish();
+
   /* Sculpt layers: Erase Layer transiently arms recording into the recording target layer for
    * the duration of this stroke when REC was not already on (see #test_start / #done). One entry
    * per object that had the Erase Layer brush arm recording this stroke — each sync-group member
@@ -7915,6 +7921,10 @@ struct SculptPaintStroke final : public PaintStroke {
     wm_ = CTX_wm_manager(C);
   }
 
+  /* Not `override`: #PaintStroke's destructor is protected and non-virtual, and every stroke is
+   * deleted through its concrete type. This exists to release #fill_session_ on early-out paths. */
+  ~SculptPaintStroke();
+
   void stroke_cache_init(const float mval[2]);
   void stroke_cache_update(PointerRNA *ptr);
 
@@ -7940,6 +7950,25 @@ struct SculptPaintStroke final : public PaintStroke {
   void done(bool is_cancel, bool stroke_started) override;
   void post_done(bContext *C, bool is_cancel, bool stroke_started) override;
 };
+
+/**
+ * Close and free the fill session, if the stroke opened one. Idempotent: called from #done and from
+ * the destructor, so an early-out path that never reaches #done cannot leak the projection session or
+ * the BMesh copy it holds.
+ */
+void SculptPaintStroke::fill_session_finish()
+{
+  if (fill_session_ == nullptr) {
+    return;
+  }
+  paint_texture_fill_session_free(fill_session_);
+  fill_session_ = nullptr;
+}
+
+SculptPaintStroke::~SculptPaintStroke()
+{
+  this->fill_session_finish();
+}
 
 void SculptPaintStroke::layered_maps_ensure(bContext *C)
 {
@@ -10047,12 +10076,17 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       }
       const bool fill_once = fill_brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_MESH;
       if (!fill_once || !this->fill_line_filled_) {
-        if (paint_image_viewport_fill_at_mouse(this->evil_C,
-                                               &sd.paint,
-                                               fill_brush,
-                                               this->object,
-                                               sd.paint.runtime->draw_inverted,
-                                               ss.cache->mouse_event))
+        /* The first dab opens the session; every later one reuses its projection session or
+         * BMesh copy instead of rebuilding them (see #TextureFillSession). */
+        if (this->fill_session_ == nullptr) {
+          this->fill_session_ = paint_texture_fill_session_begin(this->evil_C,
+                                                                &sd.paint,
+                                                                fill_brush,
+                                                                this->object,
+                                                                sd.paint.runtime->draw_inverted);
+        }
+        if (this->fill_session_ != nullptr &&
+            paint_texture_fill_session_step(*this->fill_session_, ss.cache->mouse_event))
         {
           this->fill_line_filled_ = true;
         }
@@ -10471,6 +10505,11 @@ bool SculptPaintStroke::activate_curve_patch_target(Object &target)
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
   Sculpt &sd = *this->sculpt_;
+  /* Flush and release the fill session before anything else: it holds a live projection session
+   * (and, for the geometry fill, BMesh copies), and the undo step it writes into is closed by the
+   * caller right after this returns. */
+  this->fill_session_finish();
+
   const Span<Object *> objects = this->multi_.mode_objects;
 
   bool any_stroke_cache = false;

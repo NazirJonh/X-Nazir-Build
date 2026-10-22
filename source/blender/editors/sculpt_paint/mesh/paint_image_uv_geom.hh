@@ -14,6 +14,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_polyfill_2d.h"
+#include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -92,7 +93,11 @@ enum UVPixelClaim : uint8_t {
  * #UV_CLAIM_FILL_INCLUSIVE (plus #UV_CLAIM_FILL_STRICT on strict hits), then every other
  * visible face whose UV bounds meet the tile writes #UV_CLAIM_FOREIGN_INCLUSIVE.
  *
- * \a r_claim must be sized `width * height`; it is cleared by this function.
+ * \a r_claim must be sized `width * height`. When \a limit is null the whole buffer is cleared
+ * and every face on the tile is considered; when it is given (texel range `[xmin, xmax) x
+ * [ymin, ymax)`), only those texels are cleared and only faces whose UV bounds meet them are
+ * considered foreign. Texels outside the limit are then left uninitialized and must not be read:
+ * the caller only consumes the texels it limited to.
  */
 void image_paint_uv_claim_buffer_build(BMesh *bm,
                                        const BMUVOffsets &offsets,
@@ -100,7 +105,8 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
                                        const float2 &uv_origin,
                                        int width,
                                        int height,
-                                       MutableSpan<uint8_t> r_claim);
+                                       MutableSpan<uint8_t> r_claim,
+                                       const rcti *limit = nullptr);
 
 /**
  * Rasterize \a face_indices (indices into \a bm only) into \a ibuf.
@@ -113,6 +119,10 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
  * \a data_fill_value instead; the caller resolves it into the target channel's range, so no
  * signed/unsigned remapping happens here. 2x2 quarter-pixel supersampling weights the edge
  * texels and the destination alpha is preserved.
+ *
+ * \a r_dirty, when given, receives the texel range this call could have written, so the caller can
+ * mark exactly that region (undo tiles, GPU upload) instead of the whole map. It is empty when
+ * nothing was rasterized.
  */
 void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
                                          const BMUVOffsets &offsets,
@@ -124,7 +134,8 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
                                          const float color[3],
                                          float strength,
                                          IMB_BlendMode blend,
-                                         float data_fill_value);
+                                         float data_fill_value,
+                                         rcti *r_dirty = nullptr);
 
 /**
  * Visit every pixel center covered by a triangle given in tile-local pixel space.

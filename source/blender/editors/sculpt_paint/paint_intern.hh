@@ -961,6 +961,17 @@ void paint_2d_bucket_fill(const bContext *C,
                           void *ps,
                           bool invert = false);
 /**
+ * Per-stroke cache for the Face/Island/Mesh fill: the BMesh copy of every object the stroke fills
+ * and the per-material canvas/UV resolution, so a line of dabs copies each mesh once instead of
+ * once per dab. Owned by the caller; free with #paint_image_geometry_fill_cache_free.
+ */
+struct ImagePaintGeometryFillStrokeCache;
+ImagePaintGeometryFillStrokeCache *paint_image_geometry_fill_cache_new();
+/** Drop the deferred GPU invalidation once, at the end of the stroke. */
+void paint_image_geometry_fill_cache_end(ImagePaintGeometryFillStrokeCache *cache);
+void paint_image_geometry_fill_cache_free(ImagePaintGeometryFillStrokeCache *cache);
+
+/**
  * 3D Texture Paint Face/Island/Mesh fill.
  *
  * Ray-casts the original mesh / Edit BMesh of \a ob (not the evaluated mesh) so the hit
@@ -971,6 +982,9 @@ void paint_2d_bucket_fill(const bContext *C,
  * mesh is raycast and the click resolves to whichever one is actually closest under the cursor,
  * not necessarily \a ob (see #texture_fill_target_objects).
  *
+ * \a cache, when given, keeps those meshes and their material targets alive between the dabs of
+ * one stroke (see #ImagePaintGeometryFillStrokeCache).
+ *
  * \return true if any tile was written.
  */
 bool paint_image_proj_geometry_fill(const bContext *C,
@@ -978,7 +992,8 @@ bool paint_image_proj_geometry_fill(const bContext *C,
                                     Brush *br,
                                     Object *ob,
                                     const float mouse[2],
-                                    bool invert = false);
+                                    bool invert = false,
+                                    ImagePaintGeometryFillStrokeCache *cache = nullptr);
 /**
  * Geometry fill from original mesh face indices. The indices must belong to \a ob's original mesh
  * or Edit BMesh, rather than an evaluated mesh with potentially different topology.
@@ -1025,6 +1040,30 @@ void paint_image_geometry_fill_gesture_resolve(bContext *C,
                                                Brush *br,
                                                ImagePaintGeometryFillGestureState *state,
                                                const rcti &rect);
+/**
+ * One texture-fill stroke.
+ *
+ * The setup proportional to the mesh - the projection session for the Pixels expansion, the BMesh
+ * copy plus per-material canvas resolution for Face/Island/Mesh - is built once here and reused by
+ * every #paint_texture_fill_session_step, because a Fill stroke performs one fill per dab (a 300 px
+ * line at the default spacing is 30-60 of them). The GPU invalidation of the written maps is
+ * deferred to #paint_texture_fill_session_end for the same reason.
+ *
+ * The caller owns the image undo step: the session only assumes one is open, exactly like
+ * #paint_image_viewport_fill_at_mouse did per call.
+ */
+struct TextureFillSession;
+
+/** \return null when \a brush cannot fill (no brush/object, gradient fill). */
+TextureFillSession *paint_texture_fill_session_begin(
+    const bContext *C, const Paint *paint, Brush *brush, Object *ob, bool inverted);
+/** Fill at \a mouse, reusing everything #paint_texture_fill_session_begin prepared. */
+bool paint_texture_fill_session_step(TextureFillSession &session, const float mouse[2]);
+/** Flush what the steps deferred (GPU texture invalidation). Idempotent. */
+void paint_texture_fill_session_end(TextureFillSession &session);
+/** Ends the session if needed and frees it. Null is accepted. */
+void paint_texture_fill_session_free(TextureFillSession *session);
+
 /**
  * Single-shot texture fill from 3D viewport screen coords.
  * Solid color only (v1). Geometry expand or pixel flood depending on \a brush.fill_expand.

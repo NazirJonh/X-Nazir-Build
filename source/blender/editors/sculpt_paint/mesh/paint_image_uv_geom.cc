@@ -295,10 +295,32 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
                                        const float2 &uv_origin,
                                        const int width,
                                        const int height,
-                                       MutableSpan<uint8_t> r_claim)
+                                       MutableSpan<uint8_t> r_claim,
+                                       const rcti *limit)
 {
   BLI_assert(r_claim.size() == int64_t(width) * int64_t(height));
-  r_claim.fill(0);
+
+  /* Texel range this build is responsible for, `[xmin, xmax) x [ymin, ymax)`. Full canvas when the
+   * caller has no tighter bound; that is the case for the 2D fill, where the faces are the whole
+   * visible layout. */
+  rcti texel_range;
+  if (limit != nullptr) {
+    texel_range = *limit;
+  }
+  else {
+    BLI_rcti_init(&texel_range, 0, width, 0, height);
+  }
+  if (BLI_rcti_is_empty(&texel_range)) {
+    return;
+  }
+
+  /* Only the responsible rows are cleared: a limited caller allocated the buffer uninitialized and
+   * never reads outside the range. Per-row instead of one fill() so a small fill on a 4K canvas
+   * does not zero 16 MB. */
+  const int row_len = BLI_rcti_size_x(&texel_range);
+  for (int y = texel_range.ymin; y < texel_range.ymax; y++) {
+    r_claim.slice(int64_t(y) * int64_t(width) + texel_range.xmin, row_len).fill(0);
+  }
 
   if (bm == nullptr || offsets.uv < 0) {
     return;
@@ -325,8 +347,12 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
 
   /* Bounds-reject before any per-pixel work: on a dense mesh most faces live on other
    * parts of the layout, and rasterizing them would dominate the cost. */
-  rctf tile_bounds;
-  BLI_rctf_init(&tile_bounds, uv_origin.x, uv_origin.x + 1.0f, uv_origin.y, uv_origin.y + 1.0f);
+  rctf limit_bounds;
+  BLI_rctf_init(&limit_bounds,
+                uv_origin.x + float(texel_range.xmin) / float(width),
+                uv_origin.x + float(texel_range.xmax) / float(width),
+                uv_origin.y + float(texel_range.ymin) / float(height),
+                uv_origin.y + float(texel_range.ymax) / float(height));
 
   BMIter fiter;
   BMFace *efa;
@@ -337,7 +363,7 @@ void image_paint_uv_claim_buffer_build(BMesh *bm,
     }
     rctf face_bounds;
     face_uv_bounds_init(efa, offsets, face_bounds);
-    if (!BLI_rctf_isect(&tile_bounds, &face_bounds, nullptr)) {
+    if (!BLI_rctf_isect(&limit_bounds, &face_bounds, nullptr)) {
       continue;
     }
     foreach_face_pixel(
@@ -363,13 +389,22 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
                                          const float color[3],
                                          float strength,
                                          IMB_BlendMode blend,
-                                         const float data_fill_value)
+                                         const float data_fill_value,
+                                         rcti *r_dirty)
 {
+  if (r_dirty != nullptr) {
+    BLI_rcti_init_minmax(r_dirty);
+  }
   if (bm == nullptr || ibuf == nullptr || face_indices.is_empty()) {
     return;
   }
 
   BM_mesh_elem_table_ensure(bm, BM_FACE);
+
+  if (offsets.uv < 0) {
+    /* No UV layer to rasterize from; the claim passes below reject the same case. */
+    return;
+  }
 
   const bool do_float = (ibuf->float_data() != nullptr);
   const bool is_data = ibuf->colorspace_is_data();
@@ -408,6 +443,67 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
   const int height = ibuf->y;
 
   const int64_t pixel_num = int64_t(width) * int64_t(height);
+
+  /*
+   * Texel range the fill can possibly touch: the union of the fill faces' UV bounds, plus two texels
+   * of slack. One is for the seam ring that dilates one texel past the covered ones and for the
+   * quarter-pixel AA shift; the second covers a covered texel that lands exactly on the ceil edge, so
+   * its ring neighbor is still inside the cleared range. Everything below is bounded by it - clearing,
+   * rasterization and the scan.
+   *
+   * This is what makes a fill cost scale with its own footprint instead of the canvas: before it,
+   * a 4K map paid 16 M texels of clearing and scanning per call, plus a rasterization of *every
+   * face on the tile* (the foreign-face pass only rejected faces outside the whole tile), while the
+   * fill itself may cover a few thousand texels. On a Fill stroke that runs per dab it dominated
+   * everything else.
+   */
+  rcti texel_range;
+  {
+    rctf face_bounds_uv;
+    BLI_rctf_init_minmax(&face_bounds_uv);
+    bool any = false;
+    for (const int face_index : face_indices) {
+      const BMFace *efa = BM_face_at_index(bm, face_index);
+      if (efa == nullptr) {
+        continue;
+      }
+      rctf one;
+      face_uv_bounds_init(efa, offsets, one);
+      if (!BLI_rctf_is_valid(&one)) {
+        continue;
+      }
+      if (!any) {
+        face_bounds_uv = one;
+        any = true;
+      }
+      else {
+        BLI_rctf_union(&face_bounds_uv, &one);
+      }
+    }
+    if (!any) {
+      return;
+    }
+    const int xmin = std::clamp(
+        int(std::floor((face_bounds_uv.xmin - uv_origin.x) * float(width))) - 2, 0, width);
+    const int xmax = std::clamp(
+        int(std::ceil((face_bounds_uv.xmax - uv_origin.x) * float(width))) + 2, 0, width);
+    const int ymin = std::clamp(
+        int(std::floor((face_bounds_uv.ymin - uv_origin.y) * float(height))) - 2, 0, height);
+    const int ymax = std::clamp(
+        int(std::ceil((face_bounds_uv.ymax - uv_origin.y) * float(height))) + 2, 0, height);
+    BLI_rcti_init(&texel_range, xmin, xmax, ymin, ymax);
+    if (BLI_rcti_is_empty(&texel_range)) {
+      return;
+    }
+  }
+  const int range_row_len = BLI_rcti_size_x(&texel_range);
+  const int range_row_start = texel_range.xmin;
+  auto clear_rows = [&](MutableSpan<uint8_t> rows) {
+    for (int y = texel_range.ymin; y < texel_range.ymax; y++) {
+      rows.slice(int64_t(y) * int64_t(width) + range_row_start, range_row_len).fill(0);
+    }
+  };
+
   Array<uint8_t> claim(pixel_num);
 
   /* 2x2 quarter-pixel supersampling of the fill-side coverage. Only the data branch needs it:
@@ -418,7 +514,7 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
   Array<uint8_t> aa_coverage;
   if (is_data) {
     aa_coverage.reinitialize(pixel_num);
-    aa_coverage.fill(0);
+    clear_rows(aa_coverage.as_mutable_span());
     static constexpr float2 aa_offsets[4] = {
         {-0.25f, -0.25f}, {0.25f, -0.25f}, {-0.25f, 0.25f}, {0.25f, 0.25f}};
     for (const int pass : IndexRange(4)) {
@@ -511,11 +607,16 @@ void image_paint_rasterize_faces_to_ibuf(BMesh *bm,
     }
   };
 
-  image_paint_uv_claim_buffer_build(bm, offsets, face_indices, uv_origin, width, height, claim);
+  image_paint_uv_claim_buffer_build(
+      bm, offsets, face_indices, uv_origin, width, height, claim, &texel_range);
+
+  if (r_dirty != nullptr) {
+    *r_dirty = texel_range;
+  }
 
   Vector<int2> filled_pixels;
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
+  for (int y = texel_range.ymin; y < texel_range.ymax; y++) {
+    for (int x = texel_range.xmin; x < texel_range.xmax; x++) {
       const int64_t index = int64_t(y) * int64_t(width) + int64_t(x);
       const uint8_t bits = claim[index];
       if ((bits & UV_CLAIM_FILL_INCLUSIVE) == 0) {

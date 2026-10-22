@@ -321,6 +321,9 @@ static void texture_fill_record_stroke_end(const bContext *C,
  *
  * Samples at the brush's own Spacing setting, matching the dab spacing of a regular Line
  * stroke, and wraps every sample in one image-undo step so a single Ctrl+Z removes the line.
+ *
+ * All samples share one #TextureFillSession, so the projection session (Pixels) or the BMesh copy
+ * and per-material resolution (Face/Island/Mesh) is built once for the line rather than per sample.
  */
 static bool texture_fill_line(bContext *C,
                               wmOperator *op,
@@ -354,29 +357,32 @@ static bool texture_fill_line(bContext *C,
 
   bool did_fill = false;
   float2 last_filled = gesture.start;
-  if (brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_MESH) {
-    /* Mesh expansion fills every visible face; a single sample at the click is the whole
-     * result, and repeating it per dab would redo the same fill for the whole line. */
-    last_filled = gesture.end;
-    did_fill = paint_image_viewport_fill_at_mouse(
-        C, paint, brush, ob, invert, &last_filled.x);
-    if (!did_fill) {
-      last_filled = gesture.start;
-      did_fill = paint_image_viewport_fill_at_mouse(
-          C, paint, brush, ob, invert, &last_filled.x);
-    }
-  }
-  else if (steps > 0) {
-    /* Starts at the first spacing step, not at `gesture.start`: that point is the previous
-     * stroke's own end, so filling it again would stamp the brush twice over the last stroke and
-     * double an erase. The segment is instead covered outward from where the paint already is. */
-    for (int i = 1; i <= steps; i++) {
-      const float2 mouse = gesture.start + delta * (float(i) / float(steps));
-      if (paint_image_viewport_fill_at_mouse(C, paint, brush, ob, invert, &mouse.x)) {
-        did_fill = true;
-        last_filled = mouse;
+  if (TextureFillSession *session = paint_texture_fill_session_begin(C, paint, brush, ob, invert))
+  {
+    if (brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_MESH) {
+      /* Mesh expansion fills every visible face; a single sample at the click is the whole
+       * result, and repeating it per dab would redo the same fill for the whole line. */
+      last_filled = gesture.end;
+      did_fill = paint_texture_fill_session_step(*session, &last_filled.x);
+      if (!did_fill) {
+        last_filled = gesture.start;
+        did_fill = paint_texture_fill_session_step(*session, &last_filled.x);
       }
     }
+    else if (steps > 0) {
+      /* Starts at the first spacing step, not at `gesture.start`: that point is the previous
+       * stroke's own end, so filling it again would stamp the brush twice over the last stroke and
+       * double an erase. The segment is instead covered outward from where the paint already is. */
+      for (int i = 1; i <= steps; i++) {
+        const float2 mouse = gesture.start + delta * (float(i) / float(steps));
+        if (paint_texture_fill_session_step(*session, &mouse.x)) {
+          did_fill = true;
+          last_filled = mouse;
+        }
+      }
+    }
+    /* Ends the session too, which flushes the deferred GPU invalidation inside the undo step. */
+    paint_texture_fill_session_free(session);
   }
 
   ED_image_undo_push_end();
@@ -632,38 +638,35 @@ void PAINT_OT_texture_fill_mode_set(wmOperatorType *ot)
   RNA_def_property_flag(ot->prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
-bool paint_image_viewport_fill_at_mouse(const bContext *C,
-                                        const Paint *paint,
-                                        Brush *brush,
-                                        Object *ob,
-                                        bool stroke_inverted,
-                                        const float mouse[2])
+/**
+ * One texture-fill stroke: everything that costs more than the pixels the fill covers lives here for
+ * the whole stroke instead of being rebuilt per dab.
+ *
+ * Pixels expansion keeps the projection session (#paint_proj_new_stroke) alive and feeds it one
+ * #paint_proj_stroke per step; Face/Island/Mesh expansion keeps the per-object BMesh copy and the
+ * per-material canvas resolution in #ImagePaintGeometryFillStrokeCache. The GPU invalidation of the
+ * written maps is deferred to #paint_texture_fill_session_end for the same reason.
+ */
+struct TextureFillSession {
+  const bContext *C = nullptr;
+  Paint *paint = nullptr;
+  Brush *brush = nullptr;
+  Object *ob = nullptr;
+  bool inverted = false;
+  bool ended = false;
+
+  /* Pixels expansion. */
+  bool use_projection = false;
+  void *proj_handle = nullptr;
+
+  /* Face/Island/Mesh expansion. */
+  ImagePaintGeometryFillStrokeCache *geo_cache = nullptr;
+};
+
+/** Fill with the projection session: one #paint_proj_stroke per step, setup done once. */
+static bool texture_fill_session_projection_step(TextureFillSession &session, const float mouse[2])
 {
-  if (brush == nullptr || ob == nullptr) {
-    return false;
-  }
-  if (brush->flag & BRUSH_USE_GRADIENT) {
-    /* v2 — solid fallback for v1 */
-    return false;
-  }
-
-  float color[3];
-  if (stroke_inverted) {
-    copy_v3_v3(color, BKE_brush_secondary_color_get(paint, brush));
-  }
-  else {
-    copy_v3_v3(color, BKE_brush_color_get(paint, brush));
-  }
-
-  if (ELEM(brush->fill_expand,
-           IMAGE_PAINT_SELECT_EXPAND_FACE,
-           IMAGE_PAINT_SELECT_EXPAND_ISLAND,
-           IMAGE_PAINT_SELECT_EXPAND_MESH))
-  {
-    return paint_image_proj_geometry_fill(C, color, brush, ob, mouse, stroke_inverted);
-  }
-
-  /* Pixel flood — minimal projection stroke session */
+  const bContext *C = session.C;
   UndoStack *ustack = ED_undo_stack_get();
   if (ustack == nullptr || ustack->step_init == nullptr ||
       ustack->step_init->type != BKE_UNDOSYS_TYPE_IMAGE)
@@ -674,33 +677,131 @@ bool paint_image_viewport_fill_at_mouse(const bContext *C,
     return false;
   }
 
-  bContext *C_mut = const_cast<bContext *>(C);
-  Scene *scene = CTX_data_scene(C);
-  ToolSettings *ts = scene->toolsettings;
-  /* Sculpt fill: projection paint reads imapaint.paint/mode/canvas, not the sculpt canvas
-   * (ts->paint_mode). Sync both for the duration of this one-shot stroke. */
-  Brush *prev_imapaint_brush = ts->imapaint.paint.brush;
-  int prev_imapaint_mode = ts->imapaint.mode;
-  Image *prev_imapaint_canvas = ts->imapaint.canvas;
-  ts->imapaint.paint.brush = brush;
-  ts->imapaint.mode = ts->paint_mode.canvas_source;
-  ts->imapaint.canvas = ts->paint_mode.canvas_image;
-  void *stroke_handle = paint_proj_new_stroke(
-      C_mut, ob, mouse, BrushStrokeMode::Normal, BrushSwitchMode::None);
-  ts->imapaint.paint.brush = prev_imapaint_brush;
-  ts->imapaint.mode = prev_imapaint_mode;
-  ts->imapaint.canvas = prev_imapaint_canvas;
-  if (stroke_handle == nullptr) {
-    return false;
+  if (session.proj_handle == nullptr) {
+    bContext *C_mut = const_cast<bContext *>(C);
+    Scene *scene = CTX_data_scene(C);
+    ToolSettings *ts = scene->toolsettings;
+    /* Sculpt fill: projection paint reads imapaint.paint/mode/canvas, not the sculpt canvas
+     * (ts->paint_mode). Synced only for the construction of the session, which reads them once. */
+    Brush *prev_imapaint_brush = ts->imapaint.paint.brush;
+    int prev_imapaint_mode = ts->imapaint.mode;
+    Image *prev_imapaint_canvas = ts->imapaint.canvas;
+    ts->imapaint.paint.brush = session.brush;
+    ts->imapaint.mode = ts->paint_mode.canvas_source;
+    ts->imapaint.canvas = ts->paint_mode.canvas_image;
+    session.proj_handle = paint_proj_new_stroke(
+        C_mut, session.ob, mouse, BrushStrokeMode::Normal, BrushSwitchMode::None);
+    ts->imapaint.paint.brush = prev_imapaint_brush;
+    ts->imapaint.mode = prev_imapaint_mode;
+    ts->imapaint.canvas = prev_imapaint_canvas;
+    if (session.proj_handle == nullptr) {
+      return false;
+    }
   }
 
   const float pressure = 1.0f;
-  const float size = BKE_brush_radius_get(paint, brush);
-  paint_proj_stroke(C, stroke_handle, mouse, mouse, 0, pressure, 0.0f, size);
-  paint_proj_redraw(C, stroke_handle, false);
-  paint_proj_redraw(C, stroke_handle, true);
-  paint_proj_stroke_done(stroke_handle);
+  const float size = BKE_brush_radius_get(session.paint, session.brush);
+  paint_proj_stroke(C, session.proj_handle, mouse, mouse, false, pressure, 0.0f, size);
+  paint_proj_redraw(C, session.proj_handle, false);
   return true;
+}
+
+TextureFillSession *paint_texture_fill_session_begin(const bContext *C,
+                                                     const Paint *paint,
+                                                     Brush *brush,
+                                                     Object *ob,
+                                                     const bool inverted)
+{
+  if (paint == nullptr || brush == nullptr || ob == nullptr) {
+    return nullptr;
+  }
+  if (brush->flag & BRUSH_USE_GRADIENT) {
+    /* v2 — solid fallback for v1 */
+    return nullptr;
+  }
+
+  TextureFillSession *session = MEM_new<TextureFillSession>("TextureFillSession");
+  session->C = C;
+  session->paint = const_cast<Paint *>(paint);
+  session->brush = brush;
+  session->ob = ob;
+  session->inverted = inverted;
+  session->use_projection = !ELEM(brush->fill_expand,
+                                  IMAGE_PAINT_SELECT_EXPAND_FACE,
+                                  IMAGE_PAINT_SELECT_EXPAND_ISLAND,
+                                  IMAGE_PAINT_SELECT_EXPAND_MESH);
+  if (!session->use_projection) {
+    session->geo_cache = paint_image_geometry_fill_cache_new();
+  }
+  return session;
+}
+
+bool paint_texture_fill_session_step(TextureFillSession &session, const float mouse[2])
+{
+  float color[3];
+  if (session.inverted) {
+    copy_v3_v3(color, BKE_brush_secondary_color_get(session.paint, session.brush));
+  }
+  else {
+    copy_v3_v3(color, BKE_brush_color_get(session.paint, session.brush));
+  }
+
+  if (!session.use_projection) {
+    return paint_image_proj_geometry_fill(session.C,
+                                          color,
+                                          session.brush,
+                                          session.ob,
+                                          mouse,
+                                          session.inverted,
+                                          session.geo_cache);
+  }
+  return texture_fill_session_projection_step(session, mouse);
+}
+
+void paint_texture_fill_session_end(TextureFillSession &session)
+{
+  if (session.ended) {
+    return;
+  }
+  session.ended = true;
+  if (session.proj_handle != nullptr) {
+    paint_proj_redraw(session.C, session.proj_handle, true);
+    paint_proj_stroke_done(session.proj_handle);
+    session.proj_handle = nullptr;
+  }
+  if (session.geo_cache != nullptr) {
+    paint_image_geometry_fill_cache_end(session.geo_cache);
+  }
+}
+
+void paint_texture_fill_session_free(TextureFillSession *session)
+{
+  if (session == nullptr) {
+    return;
+  }
+  paint_texture_fill_session_end(*session);
+  if (session->geo_cache != nullptr) {
+    paint_image_geometry_fill_cache_free(session->geo_cache);
+    session->geo_cache = nullptr;
+  }
+  MEM_delete(session);
+}
+
+bool paint_image_viewport_fill_at_mouse(const bContext *C,
+                                        const Paint *paint,
+                                        Brush *brush,
+                                        Object *ob,
+                                        bool stroke_inverted,
+                                        const float mouse[2])
+{
+  TextureFillSession *session = paint_texture_fill_session_begin(
+      C, paint, brush, ob, stroke_inverted);
+  if (session == nullptr) {
+    return false;
+  }
+  const bool did_fill = paint_texture_fill_session_step(*session, mouse);
+  paint_texture_fill_session_free(session);
+  return did_fill;
 }
 
 }  // namespace blender

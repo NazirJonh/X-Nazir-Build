@@ -5294,6 +5294,80 @@ static void paint_2d_geometry_fill_free_items(MutableSpan<ImagePaintUVObjectFace
   }
 }
 
+/** Canvas image and UV layer a material slot paints through, cached per fill call. */
+struct FillMaterialTarget {
+  Image *image = nullptr;
+  BMUVOffsets offsets{};
+};
+
+/**
+ * Per-stroke state of the Face/Island/Mesh fill.
+ *
+ * Everything here is proportional to the mesh (a BMesh copy with face and vertex normals) or to the
+ * material set (canvas image and UV layer per slot), and none of it depends on where the dab lands,
+ * so a Fill stroke - which runs one fill per dab - must keep it for the whole stroke instead of
+ * rebuilding it 30-60 times. See #paint_image_geometry_fill_cache_new.
+ */
+struct ImagePaintGeometryFillStrokeCache {
+  struct ObjectEntry {
+    ImagePaintUVObjectFaces item;
+    /** Canvas image and UV layer per material slot of this object. */
+    Map<short, FillMaterialTarget> material_targets;
+    bool item_ready = false;
+  };
+
+  /* Boxed so an entry keeps its address when the map grows: callers hold references into an entry
+   * (its item and material targets) while a later lookup may add another object. */
+  Map<Object *, std::unique_ptr<ObjectEntry>> objects;
+
+  /**
+   * Images whose GPU texture was invalidated this stroke. Dropping it is what makes the 3D view
+   * show the new pixels, but it costs a full re-upload, so it happens once per stroke in
+   * #paint_image_geometry_fill_cache_end rather than once per dab.
+   */
+  Set<Image *> gpu_invalidated;
+
+  ObjectEntry &entry_for(Object *ob)
+  {
+    return *objects.lookup_or_add_cb(ob, [ob]() {
+      auto entry = std::make_unique<ObjectEntry>();
+      entry->item.object = ob;
+      return entry;
+    });
+  }
+
+  ~ImagePaintGeometryFillStrokeCache()
+  {
+    for (std::unique_ptr<ObjectEntry> &entry : objects.values()) {
+      paint_2d_geometry_fill_item_discard(entry->item);
+    }
+  }
+};
+
+ImagePaintGeometryFillStrokeCache *paint_image_geometry_fill_cache_new()
+{
+  return MEM_new<ImagePaintGeometryFillStrokeCache>("ImagePaintGeometryFillStrokeCache");
+}
+
+void paint_image_geometry_fill_cache_end(ImagePaintGeometryFillStrokeCache *cache)
+{
+  if (cache == nullptr) {
+    return;
+  }
+  for (Image *image : cache->gpu_invalidated) {
+    BKE_image_free_gputextures(image);
+  }
+  cache->gpu_invalidated.clear();
+}
+
+void paint_image_geometry_fill_cache_free(ImagePaintGeometryFillStrokeCache *cache)
+{
+  if (cache == nullptr) {
+    return;
+  }
+  MEM_delete(cache);
+}
+
 static bool paint_2d_geometry_fill_init_bm(Object *ob, ImagePaintUVObjectFaces &item)
 {
   item.object = ob;
@@ -5545,7 +5619,8 @@ static bool paint_2d_geometry_fill_commit(const bContext *C,
                                           SpaceImage *sima,
                                           MutableSpan<ImagePaintUVObjectFaces> items,
                                           const bool texpaint,
-                                          const bool invert)
+                                          const bool invert,
+                                          ImagePaintGeometryFillStrokeCache *cache = nullptr)
 {
   Paint *paint = BKE_paint_get_active_from_context(C);
   const float strength = BKE_brush_alpha_get(paint, br);
@@ -5594,24 +5669,53 @@ static bool paint_2d_geometry_fill_commit(const bContext *C,
     have_last = true;
 
     const float2 origin = image_select_udim_tile_uv_origin(tile_number);
-    ED_imapaint_dirty_region(ima, ibuf, &last_iuser, 0, 0, ibuf->x, ibuf->y, false);
+    /*
+     * Dirty region from the rasterized texels, not the whole map: this is what saves the undo tiles
+     * and the GPU upload of a 4K canvas when a fill covers a few thousand texels. The rasterizer
+     * knows the range it could have written (it already bounds its own work by it), so the union of
+     * the items on this tile is the exact region to save and upload.
+     */
+    rcti raster_dirty;
+    BLI_rcti_init_minmax(&raster_dirty);
 
     for (ImagePaintUVObjectFaces &item : items) {
       const Vector<int> *faces_on_tile = item.tile_faces.lookup_ptr(tile_number);
       if (faces_on_tile == nullptr || faces_on_tile->is_empty()) {
         continue;
       }
+      rcti item_dirty;
+      BLI_rcti_init_minmax(&item_dirty);
       image_paint_rasterize_faces_to_ibuf(item.bm,
-                                           item.offsets,
-                                           *faces_on_tile,
-                                           origin,
-                                           ima,
-                                           tile_number,
-                                           ibuf,
-                                           color,
-                                           strength,
-                                           IMB_BlendMode(br->blend),
-                                           data_fill_value);
+                                          item.offsets,
+                                          *faces_on_tile,
+                                          origin,
+                                          ima,
+                                          tile_number,
+                                          ibuf,
+                                          color,
+                                          strength,
+                                          IMB_BlendMode(br->blend),
+                                          data_fill_value,
+                                          &item_dirty);
+      if (!BLI_rcti_is_empty(&item_dirty)) {
+        if (BLI_rcti_is_empty(&raster_dirty)) {
+          raster_dirty = item_dirty;
+        }
+        else {
+          BLI_rcti_union(&raster_dirty, &item_dirty);
+        }
+      }
+    }
+
+    if (!BLI_rcti_is_empty(&raster_dirty)) {
+      ED_imapaint_dirty_region(ima,
+                               ibuf,
+                               &last_iuser,
+                               raster_dirty.xmin,
+                               raster_dirty.ymin,
+                               BLI_rcti_size_x(&raster_dirty),
+                               BLI_rcti_size_y(&raster_dirty),
+                               false);
     }
   }
 
@@ -5622,9 +5726,18 @@ static bool paint_2d_geometry_fill_commit(const bContext *C,
 
     /* Geometry fill never runs `paint_proj_stroke`, so the 3D view is not tagged
      * via `need_redraw`. Force GPU texture rebuild and shading sync like
-     * `paint_2d_redraw` / `PAINT_OT_project_image`. */
+     * `paint_2d_redraw` / `PAINT_OT_project_image`.
+     *
+     * Deferred to #paint_image_geometry_fill_cache_end when a stroke owns the cache: dropping the
+     * whole texture per dab of a Fill line forces a full re-upload of a 4K map 30-60 times, while
+     * the partial upload #imapaint_image_update just queued is what shows the new texels. */
     if (!(sima && sima->lock)) {
-      BKE_image_free_gputextures(ima);
+      if (cache != nullptr) {
+        cache->gpu_invalidated.add(ima);
+      }
+      else {
+        BKE_image_free_gputextures(ima);
+      }
     }
     DEG_id_tag_update(&ima->id, 0);
     WM_event_add_notifier(C, NC_IMAGE | NA_EDITED, ima);
@@ -5920,12 +6033,6 @@ static BMUVOffsets paint_image_geometry_fill_uv_offsets(BMesh *bm,
   return image_paint_selection_uv_offsets_get(bm, ob, scene);
 }
 
-/** Canvas image and UV layer a material slot paints through, cached per fill call. */
-struct FillMaterialTarget {
-  Image *image = nullptr;
-  BMUVOffsets offsets{};
-};
-
 /**
  * Original-mesh faces the select engine actually rasterized in the region.
  *
@@ -6079,6 +6186,11 @@ static void paint_image_geometry_fill_view_vectors_object(const Object &ob,
  * mirrored seed faces symmetry appends after the box was tested. The click entry point passes
  * null: its seed comes from a ray-cast that already hits the front-most face, and culling its
  * mirror by on-screen visibility would drop symmetry whenever the far side is turned away.
+ *
+ * \a cache, when given, supplies the per-stroke object entry: its BMesh, its material-target map
+ * and the deferred GPU invalidation. Resolving a material's canvas image and UV layer walks the
+ * material list and the BMesh's UV layers, which is wasted work when the same stroke fills the same
+ * object again on the next dab.
  */
 static bool paint_image_proj_geometry_fill_faces_impl(
     const bContext *C,
@@ -6088,13 +6200,18 @@ static bool paint_image_proj_geometry_fill_faces_impl(
     ImagePaintUVObjectFaces &item,
     const Span<int> seed,
     const bool invert,
-    const ImagePaintGeometryFillVisibleFaces *visible = nullptr)
+    const ImagePaintGeometryFillVisibleFaces *visible = nullptr,
+    ImagePaintGeometryFillStrokeCache *cache = nullptr)
 {
   if (br == nullptr || ob == nullptr || item.bm == nullptr || seed.is_empty()) {
     return false;
   }
 
   BM_mesh_elem_table_ensure(item.bm, BM_FACE);
+  /* The item may live for the whole stroke (see #ImagePaintGeometryFillStrokeCache) and expansion
+   * appends to it, so each fill starts from an empty face set rather than from the previous dab's. */
+  item.faces.clear();
+  item.tile_faces.clear();
   /* Back-face culling: faces turned away from the camera are skipped for the gesture highlight
    * and the fill alike, so the two always agree. Re-tested here because symmetry adds mirrored
    * seed faces after the rect/click entry points collected their seeds. */
@@ -6131,7 +6248,9 @@ static bool paint_image_proj_geometry_fill_faces_impl(
   Scene *scene = CTX_data_scene(C);
   /* Both the canvas image and the UV layer follow the face's material slot, so one lookup per
    * material replaces the per-face calls that dominated large fills. */
-  Map<short, FillMaterialTarget> material_targets;
+  Map<short, FillMaterialTarget> local_material_targets;
+  Map<short, FillMaterialTarget> &material_targets =
+      cache != nullptr ? cache->entry_for(ob).material_targets : local_material_targets;
   const auto material_target_get = [&](const short mat_nr) -> const FillMaterialTarget & {
     return material_targets.lookup_or_add_cb(mat_nr, [&] {
       FillMaterialTarget target;
@@ -6229,7 +6348,7 @@ static bool paint_image_proj_geometry_fill_faces_impl(
     Vector<ImagePaintUVObjectFaces> target_items;
     target_items.append(std::move(target_item));
     did_fill |= paint_2d_geometry_fill_commit(
-        C, color, br, group.image, nullptr, target_items, true, invert);
+        C, color, br, group.image, nullptr, target_items, true, invert, cache);
   }
 
   return did_fill;
@@ -6412,7 +6531,8 @@ bool paint_image_proj_geometry_fill(const bContext *C,
                                     Brush *br,
                                     Object *ob,
                                     const float mouse[2],
-                                    const bool invert)
+                                    const bool invert,
+                                    ImagePaintGeometryFillStrokeCache *cache)
 {
   if (br == nullptr || ob == nullptr) {
     return false;
@@ -6429,8 +6549,22 @@ bool paint_image_proj_geometry_fill(const bContext *C,
     return false;
   }
 
-  ImagePaintUVObjectFaces item;
-  if (!paint_2d_geometry_fill_init_bm(ob, item)) {
+  /* Without a stroke cache the BMesh lives for this one call; with one it lives for the whole
+   * stroke, so a line of dabs converts each object's mesh once (see
+   * #ImagePaintGeometryFillStrokeCache). */
+  ImagePaintUVObjectFaces local_item;
+  ImagePaintUVObjectFaces *item = &local_item;
+  if (cache != nullptr) {
+    ImagePaintGeometryFillStrokeCache::ObjectEntry &entry = cache->entry_for(ob);
+    if (!entry.item_ready) {
+      if (!paint_2d_geometry_fill_init_bm(ob, entry.item)) {
+        return false;
+      }
+      entry.item_ready = true;
+    }
+    item = &entry.item;
+  }
+  else if (!paint_2d_geometry_fill_init_bm(ob, local_item)) {
     return false;
   }
 
@@ -6438,12 +6572,12 @@ bool paint_image_proj_geometry_fill(const bContext *C,
   seed.append(face_index);
   /* Mirrored faces join the seed set, so expand and rasterization stay symmetry-agnostic. */
   if (const Mesh *mesh = id_cast<const Mesh *>(ob->data)) {
-    BM_mesh_elem_table_ensure(item.bm, BM_FACE);
-    image_paint_symmetry_mirror_faces(ob, item.bm, hit_position, mesh->symmetry, seed);
+    BM_mesh_elem_table_ensure(item->bm, BM_FACE);
+    image_paint_symmetry_mirror_faces(ob, item->bm, hit_position, mesh->symmetry, seed);
   }
   const bool did_fill = paint_image_proj_geometry_fill_faces_impl(
-      C, color, br, ob, item, seed, invert);
-  paint_2d_geometry_fill_item_discard(item);
+      C, color, br, ob, *item, seed, invert, nullptr, cache);
+  paint_2d_geometry_fill_item_discard(local_item);
   return did_fill;
 }
 

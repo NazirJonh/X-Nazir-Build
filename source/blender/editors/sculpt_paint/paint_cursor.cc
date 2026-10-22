@@ -124,6 +124,9 @@ struct TexSnapshot {
    * pass a stack #MTex rebuilt each cursor draw (#PaintCursorContext.material_preview_mtex_storage),
    * so pointer equality would miss every frame and resample the source. */
   const Tex *old_tex;
+  /** Image sampled from #old_tex. Assigning another image to a Material Paint channel reuses the
+   * channel's #Tex wrapper (only #Tex.ima changes), so #old_tex alone cannot detect it. */
+  const Image *old_tex_image;
   /** #MTex.brush_map_mode at the last build. The buffer layout differs per map mode (View
    * normalizes to the brush radius, Tiled/Stencil fill the whole 512x512 buffer differently), so
    * changing a channel's own Mapping dropdown must invalidate the cache even though #old_tex
@@ -135,6 +138,8 @@ struct TexSnapshot {
   int old_curve_preset;
   /** Alpha stroke-mask source (#use_alpha_stroke_mask). Null when the overlay is not masked. */
   const Tex *old_alpha_tex;
+  /** Image sampled from #old_alpha_tex; see #old_tex_image. */
+  const Image *old_alpha_tex_image;
   /** Source Mode: Material identity. #old_tex is null in that mode, so without these a re-bake,
    * or a switch to another channel of the same material, would keep serving the cached overlay. */
   const ImBuf *old_material_ibuf;
@@ -227,6 +232,13 @@ class PaintCursorGPUStateGuard {
   PaintCursorGPUStateGuard &operator=(const PaintCursorGPUStateGuard &) = delete;
 };
 
+/** Image a texture sample actually reads. Only an image texture's pixels depend on #Tex.ima; other
+ * texture types sample their own data and leave it null. */
+static const Image *paint_tex_sampled_image(const Tex *tex)
+{
+  return (tex != nullptr && tex->type == TEX_IMAGE) ? tex->ima : nullptr;
+}
+
 static int same_tex_snap(TexSnapshot *snap,
                          const MTex *mtex,
                          const ViewContext *vc,
@@ -253,8 +265,10 @@ static int same_tex_snap(TexSnapshot *snap,
           (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL || snap->old_zoom == zoom) &&
           snap->old_texture_clip_shape == brush->texture_clip_shape &&
           snap->old_col == col && snap->old_tex == mtex->tex &&
+          snap->old_tex_image == paint_tex_sampled_image(mtex->tex) &&
           snap->old_map_mode == mtex->brush_map_mode && snap->old_rot == mtex->rot &&
           (!col || snap->old_curve_preset == curve_preset) && snap->old_alpha_tex == alpha_tex &&
+          snap->old_alpha_tex_image == paint_tex_sampled_image(alpha_tex) &&
           snap->old_material_ibuf == material_ibuf &&
           snap->old_material_constant == material_constant &&
           snap->old_texel_mode == texel_mode);
@@ -278,10 +292,12 @@ static void make_tex_snap(TexSnapshot *snap,
   snap->old_texture_clip_shape = brush->texture_clip_shape;
   snap->brush_ptr = brush;
   snap->old_tex = mtex->tex;
+  snap->old_tex_image = paint_tex_sampled_image(mtex->tex);
   snap->old_map_mode = mtex->brush_map_mode;
   snap->old_rot = mtex->rot;
   snap->old_curve_preset = curve_preset;
   snap->old_alpha_tex = alpha_tex;
+  snap->old_alpha_tex_image = paint_tex_sampled_image(alpha_tex);
   snap->old_material_ibuf = material_source != nullptr ? material_source->ibuf : nullptr;
   snap->old_material_constant = material_source != nullptr ? material_source->constant :
                                                              float4(0.0f);

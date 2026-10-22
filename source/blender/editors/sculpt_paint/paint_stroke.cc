@@ -996,6 +996,14 @@ static float paint_space_stroke_spacing(const ViewContext &vc,
   return max_ff(zoom_2d, size_clamp * spacing / 50.0f);
 }
 
+float paint_stroke_screen_spacing(const Paint &paint, const Brush &brush)
+{
+  /* The screen-space branch of #paint_space_stroke_spacing at the no-pressure input and without 2D
+   * zoom, for callers that walk a line themselves and have no stroke to ask. */
+  const float size_clamp = max_ff(1.0f, BKE_brush_radius_get(&paint, &brush));
+  return max_ff(1.0f, size_clamp * brush.spacing / 50.0f);
+}
+
 static float paint_space_stroke_spacing_no_pressure(const ViewContext &vc,
                                                     const Paint *paint,
                                                     const Brush *brush,
@@ -1093,8 +1101,17 @@ static float paint_space_stroke_spacing_variable(ViewContext &vc,
       vc, paint, brush, last_world_space_position, zoom_2d, 1.0f, pressure);
 }
 
-/* For brushes with stroke spacing enabled, moves mouse in steps
- * towards the final mouse location. */
+/*
+ * For brushes with stroke spacing enabled, moves mouse in steps towards the final mouse location.
+ *
+ * TODO(perf): every iteration below runs the whole brush dispatch, and the dabs of one mouse event
+ * overlap almost completely - a PBR paint stroke emitted ~10-20 dabs per event, each costing the
+ * full pixel pass. Merging them into one application per event would replace ~10 read/write passes
+ * per texel with one; the composition needed for it is exact for Mix (see the TODO in
+ * #apply_prepared_paint_range, which also notes that 8-bit maps would then quantize once instead of
+ * once per dab). Not done here because it needs a per-event accumulator in the paint path, which
+ * has not been verified yet.
+ */
 int PaintStroke::space_stroke(bContext *C,
                               wmOperator *op,
                               const float2 final_mouse,
@@ -1239,10 +1256,8 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
       line_start_valid_ = true;
       /* Drive the whole stroke through the regular Line method: every consumer (spacing,
        * projection raycasts, the fill hook, cursors) then sees the method it expects. Restored in
-       * done(). */
-      stroke_method_brush_ = this->brush;
-      saved_stroke_method_ = this->brush->stroke_method;
-      this->brush->stroke_method = BRUSH_STROKE_LINE;
+       * done(), and by the guard if the stroke dies before that. */
+      stroke_method_override_.set(*this->brush, BRUSH_STROKE_LINE);
     }
     else {
       line_from_last_ = false;
@@ -1366,7 +1381,7 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   this->done(is_cancel, stroke_started_);
   this->post_done(C, is_cancel, stroke_started_);
 
-  this->restore_stroke_method();
+  stroke_method_override_.restore();
 
   if (RegionView3D *rv3d = CTX_wm_region_view3d(C)) {
     rv3d->rflag &= ~RV3D_PAINTING;
@@ -1459,20 +1474,25 @@ void PaintStroke::record_last_stroke_end(bContext *C)
                             world_valid ? &world.x : nullptr);
 }
 
-PaintStroke::~PaintStroke()
+ScopedStrokeMethod::~ScopedStrokeMethod()
 {
-  /* Safety net: an early-out path that destroys the stroke without #done would otherwise leave the
-   * brush on the temporary Line method, and that would be saved into the file. */
-  this->restore_stroke_method();
+  this->restore();
 }
 
-void PaintStroke::restore_stroke_method()
+void ScopedStrokeMethod::set(Brush &brush, const int method)
 {
-  if (this->stroke_method_brush_ != nullptr && this->saved_stroke_method_ >= 0) {
-    this->stroke_method_brush_->stroke_method = eBrushStrokeType(this->saved_stroke_method_);
+  BLI_assert(brush_ == nullptr);
+  brush_ = &brush;
+  saved_method_ = brush.stroke_method;
+  brush.stroke_method = eBrushStrokeType(method);
+}
+
+void ScopedStrokeMethod::restore()
+{
+  if (brush_ != nullptr) {
+    brush_->stroke_method = eBrushStrokeType(saved_method_);
+    brush_ = nullptr;
   }
-  this->stroke_method_brush_ = nullptr;
-  this->saved_stroke_method_ = -1;
 }
 
 static bool curves_sculpt_brush_uses_spacing(const eBrushCurvesSculptType tool)

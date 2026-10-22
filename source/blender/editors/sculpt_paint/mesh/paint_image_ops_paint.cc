@@ -350,10 +350,11 @@ static bool texture_fill_line(bContext *C,
 
   const float2 delta = gesture.end - gesture.start;
   const float length = math::length(delta);
-  /* Same spacing meaning as the stroke system: a percentage of the brush diameter, with a
-   * one-pixel floor so a zero spacing cannot produce an unbounded number of samples. */
-  const float spacing = max_ff(1.0f, BKE_brush_radius_get(paint, brush) * brush->spacing / 50.0f);
-  const int steps = (length > 1.0f) ? math::min(int(std::ceil(length / spacing)), 10000) : 0;
+  const float spacing = ed::sculpt_paint::paint_stroke_screen_spacing(*paint, *brush);
+  const int steps = (length > 1.0f) ?
+                        math::min(int(std::ceil(length / spacing)),
+                                  ed::sculpt_paint::paint_stroke_line_dab_max) :
+                        0;
 
   bool did_fill = false;
   float2 last_filled = gesture.start;

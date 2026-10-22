@@ -408,6 +408,25 @@ struct RollStrokeState {
 };
 
 /**
+ * Switches a brush to another stroke method for the lifetime of the guard.
+ *
+ * The brush is shared, saved data, so the original method has to come back on every way out of a
+ * stroke, including ones that never reach #PaintStroke::done. Tying that to the destructor makes it
+ * hold by construction instead of by each exit path remembering to call a restore function.
+ */
+class ScopedStrokeMethod : NonCopyable, NonMovable {
+  Brush *brush_ = nullptr;
+  int saved_method_ = 0;
+
+ public:
+  ~ScopedStrokeMethod();
+  /** Override \a brush's stroke method. A second call before #restore is not supported. */
+  void set(Brush &brush, int method);
+  /** Put the original method back now. Safe to call more than once. */
+  void restore();
+};
+
+/**
  * Common structure for various paint operators (e.g. Sculpt, Grease Pencil, Curves Sculpt)
  *
  * Callback functions defined and stored on this struct (e.g. `StrokeGetLocation`) allow each of
@@ -474,9 +493,8 @@ struct PaintStroke : NonCopyable, NonMovable {
   bool line_from_last_ = false;
   float2 line_start_mouse_ = float2(0.0f, 0.0f);
   bool line_start_valid_ = false;
-  /* Brush whose stroke method this stroke temporarily overrides, and its original value. */
-  Brush *stroke_method_brush_ = nullptr;
-  int saved_stroke_method_ = -1;
+  /* Holds the temporary Line method of a Shift+line stroke; restores it on every exit path. */
+  ScopedStrokeMethod stroke_method_override_;
   float2 initial_mouse_ = float2(0.0f, 0.0f);
   float cached_size_pressure_ = 0.0f;
   /* last pressure will store last pressure value for use in interpolation for space strokes */
@@ -631,7 +649,7 @@ struct PaintStroke : NonCopyable, NonMovable {
   }
 
  protected:
-  ~PaintStroke();
+  ~PaintStroke() = default;
   PaintStroke(bContext *C, wmOperator *op, int event_type);
 
   /**
@@ -740,8 +758,6 @@ struct PaintStroke : NonCopyable, NonMovable {
 
   /** Store the end of this stroke for the next Shift+click line. */
   void record_last_stroke_end(bContext *C);
-  /** Put back the brush setting a Shift+line stroke temporarily overrode. */
-  void restore_stroke_method();
 };
 
 /**
@@ -755,6 +771,15 @@ bool paint_brush_uses_shift_line(const Brush &brush, PaintMode mode);
  * A superset of #paint_brush_uses_shift_line: Clone moves the anchor without taking part.
  */
 bool paint_brush_records_stroke_end(const Brush &brush, PaintMode mode);
+
+/**
+ * Distance in pixels between two dabs of a screen-space line, using the stroke system's own
+ * spacing rule. Never below one pixel, so a zero Spacing cannot produce unbounded dab counts.
+ */
+float paint_stroke_screen_spacing(const Paint &paint, const Brush &brush);
+
+/** Upper bound on the dabs of one generated line, whatever its length or spacing. */
+constexpr int paint_stroke_line_dab_max = 10000;
 
 /**
  * Project the stored end of the previous Sculpt paint stroke into region coordinates.

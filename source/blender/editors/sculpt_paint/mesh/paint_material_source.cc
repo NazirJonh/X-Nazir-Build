@@ -815,6 +815,18 @@ static void sample_channel_source_with_layout(const DirectSampleLayout &layout,
                                               float *r_value,
                                               float4 &r_rgba)
 {
+  /* TODO(perf): this per-texel sample was the single largest term of a PBR paint dab when it was
+   * last measured (~120-190 ns per texel-channel, roughly half of the per-dab pixel cost), and it
+   * ran on the direct image path below - the legacy #sculpt_apply_texture fallback was never hit.
+   * What is left is the bilinear fetch and its memory access pattern. Ideas, none verified:
+   * - Sample once per texel per *mouse event* rather than once per dab for channels whose mapping
+   *   does not depend on the dab (Stencil, and anything resolved from the texel's own UV).
+   * - For Area mapping the position is `brush_local_mat * texel_position`, i.e. the same lookup
+   *   under a rigid transform per dab; a footprint cached once and re-indexed could reuse most
+   *   fetches.
+   * - Batch several image rows into one gather call. The per-call setup
+   *   (#make_direct_sample_layout_sculpt, #area_local_mat_for) is cheap, so this only pays if call
+   *   overhead turns out to dominate - measure before changing anything here. */
   if (sample_direct_layout(layout, ctx.symm_point, ctx.view_point_2d, r_value, r_rgba)) {
     return;
   }

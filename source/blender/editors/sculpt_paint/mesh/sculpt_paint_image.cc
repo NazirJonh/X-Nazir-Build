@@ -14,7 +14,9 @@
  * dropped along with the composite tagging API this file no longer calls. */
 #include "DNA_scene_types.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <utility>
 
@@ -262,6 +264,30 @@ float3 calc_pixel_position(const Span<float3> vert_positions,
   return result;
 }
 
+/**
+ * The affine line a #PackedPixelRow walks: texel `i` of the row sits at `r_first + r_delta * i`.
+ * Shared by #calc_pixel_row_positions and #paint_row_brush_span so the two cannot disagree about
+ * where a row's texels are.
+ */
+static void paint_row_position_line(const Span<float3> vert_positions,
+                                    const Span<int3> vert_tris,
+                                    const Span<int> tri_indices,
+                                    const Span<float2> delta_barycentric_coords,
+                                    const PackedPixelRow &pixel_row,
+                                    float3 &r_first,
+                                    float3 &r_delta)
+{
+  const int tri_index = tri_indices[pixel_row.uv_primitive_index];
+  r_first = calc_pixel_position(
+      vert_positions, vert_tris, tri_index, pixel_row.start_barycentric_coord);
+  const float3 second = calc_pixel_position(
+      vert_positions,
+      vert_tris,
+      tri_index,
+      pixel_row.start_barycentric_coord + delta_barycentric_coords[pixel_row.uv_primitive_index]);
+  r_delta = second - r_first;
+}
+
 void calc_pixel_row_positions(const Span<float3> vert_positions,
                               const Span<int3> vert_tris,
                               const Span<int> tri_indices,
@@ -272,16 +298,10 @@ void calc_pixel_row_positions(const Span<float3> vert_positions,
 {
   PRF_scope(ProfileCategory::Editor);
   BLI_assert(positions.size() == range.size());
-  const float3 first = calc_pixel_position(vert_positions,
-                                           vert_tris,
-                                           tri_indices[pixel_row.uv_primitive_index],
-                                           pixel_row.start_barycentric_coord);
-  const float3 second = calc_pixel_position(
-      vert_positions,
-      vert_tris,
-      tri_indices[pixel_row.uv_primitive_index],
-      pixel_row.start_barycentric_coord + delta_barycentric_coords[pixel_row.uv_primitive_index]);
-  const float3 delta = second - first;
+  float3 first;
+  float3 delta;
+  paint_row_position_line(
+      vert_positions, vert_tris, tri_indices, delta_barycentric_coords, pixel_row, first, delta);
 
   const float3 start = first + delta * range.start();
 
@@ -312,6 +332,84 @@ static BitVector<> init_uv_primitives_brush_test(SculptSession &ss,
         isect_aabb_aabb_v3(brush_bounds.min, brush_bounds.max, tri_bounds.min, tri_bounds.max));
   }
   return brush_test;
+}
+
+/**
+ * The part of a row's texels the brush can reach, as an index range into the row.
+ *
+ * Every per-texel term the factor pass computes is either the brush falloff itself or a multiplier
+ * that can only reduce coverage (texture, layer mask, selection weight), so a texel outside the
+ * brush radius is guaranteed to end up with a zero factor. Positions along a row are affine (see
+ * #paint_row_position_line), which makes `|position_scale_normalized(pos(i) - location)| <= radius`
+ * a quadratic in the texel index with at most one interval of solutions.
+ *
+ * That interval is what keeps a dab cheap: an image row can be hundreds of texels long while the
+ * brush only reaches a few dozen of them, and the factor pass would otherwise walk the whole row,
+ * for every dab of the stroke.
+ *
+ * Only the sphere falloff shape is trimmed. The tube shape measures its distance from a point
+ * projected onto the view plane, which can be inside the radius while the texel itself is not, so
+ * the sphere bound is not a superset there; a rectangle texture stamp is left alone as well.
+ *
+ * TODO(perf): the tube case could get the same treatment by solving the quadratic against the
+ * projected point (distance to `location` within the view plane), which is still affine in the
+ * texel index. Unverified: needs the view normal the distance uses, and a check that the rectangle
+ * stamp cannot widen the result beyond it.
+ */
+static IndexRange paint_row_brush_span(const SculptSession &ss,
+                                       const Brush &brush,
+                                       const float3 &first,
+                                       const float3 &delta,
+                                       const int row_size)
+{
+  if (row_size <= 0 || eBrushFalloffShape(brush.falloff_shape) != PAINT_FALLOFF_SHAPE_SPHERE ||
+      brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
+  {
+    return IndexRange(row_size);
+  }
+  /* #calc_brush_distances reads the rectangle-stamp setting from the stroke's brush; keep the trim
+   * off if that one differs from the brush passed in. */
+  if (ss.cache != nullptr && ss.cache->brush != nullptr &&
+      ss.cache->brush->texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE)
+  {
+    return IndexRange(row_size);
+  }
+
+  const float3 location = ss.cache ? ss.cache->location_symm : ss.cursor_location;
+  const float radius = ss.cache ? ss.cache->radius : ss.cursor_radius;
+  /* Same per-axis compensation the distance itself gets in #calc_brush_distances_squared. */
+  const float3 scale = (ss.cache && ss.cache->non_uniform_scale_active) ? ss.cache->position_scale :
+                                                                          float3(1.0f);
+
+  const float3 offset = (first - location) * scale;
+  const float3 step = delta * scale;
+
+  const float a = math::dot(step, step);
+  const float b = 2.0f * math::dot(offset, step);
+  const float c = math::dot(offset, offset) - radius * radius;
+
+  if (a <= 1e-18f) {
+    /* The row walks no distance, so it is either entirely inside or entirely outside. */
+    return (c <= 0.0f) ? IndexRange(row_size) : IndexRange(0);
+  }
+  const float discriminant = b * b - 4.0f * a * c;
+  if (discriminant < 0.0f) {
+    return IndexRange(0);
+  }
+  const float root = std::sqrt(discriminant);
+  const float inv = 0.5f / a;
+  /* Clamped in float before the integer cast: a nearly degenerate triangle makes `a` tiny, and the
+   * roots then overflow `int`. */
+  const float stop_0 = math::clamp((-b - root) * inv, -2.0f, float(row_size) + 2.0f);
+  const float stop_1 = math::clamp((-b + root) * inv, -2.0f, float(row_size) + 2.0f);
+  /* One texel of slack per side: the quadratic is solved in floats, and the texels it lets through
+   * only cost one falloff evaluation that zeroes them again. */
+  const int begin = std::max(0, int(std::floor(stop_0)) - 1);
+  const int end = std::min(row_size, int(std::ceil(stop_1)) + 2);
+  if (end <= begin) {
+    return IndexRange(0);
+  }
+  return IndexRange(begin, end - begin);
 }
 
 /** Apply the per-pixel factor to the initial brush color. */
@@ -938,7 +1036,26 @@ static bool apply_noop_fused(PaintChannelRangeState &state,
   return false;
 }
 
-/** Run the destination part of one prepared paint range. */
+/**
+ * Run the destination part of one prepared paint range.
+ *
+ * TODO(perf): when this was last measured, writing a channel was the second largest term of a PBR
+ * paint dab after the source sampling, and two thirds of it sat in the read side - not the blend
+ * (`a_blend` ~0.25 ms) and not the write (~1.5 ms). Channels whose buffer is already scene linear
+ * take the one-pass #apply_noop_fused path; the rest pay the colorspace processor plus the
+ * straight/premultiplied conversion per texel. Things worth trying, in order of expected payoff:
+ * - Store data channels (Roughness/Metallic/Normal, and any mask) as Non-Color, which makes the
+ *   processor a no-op and moves them onto the fused path. That is also the correct encoding for
+ *   them: converting those maps as color is both slower and wrong.
+ * - Merge the dabs of one mouse event into a single write: for Mix the composition is exact as
+ *   `beta_total = 1 - prod(1 - beta_i)` and `color_total = sum(c_i * w_i)` with
+ *   `w_i = beta_i * prod_{j>i}(1 - beta_j)`, so one read + one write per texel replaces the ~10
+ *   that overlapping dabs currently perform. Note this quantizes an 8-bit map once instead of once
+ *   per dab, so the result is not bit-identical there (float maps are).
+ * - Split the read into unpack / color management / premultiply and batch the color management
+ *   over several rows at once; the processor call has a fixed cost that a 100-200 texel row
+ *   amortizes poorly.
+ */
 static void apply_prepared_paint_range(PaintChannelRangeState &state,
                                        const PackedPixelRow &pixel_row,
                                        const IndexRange range)
@@ -1133,6 +1250,10 @@ struct RowFactorCache {
   std::unique_ptr<IndexMaskMemory> memory = std::make_unique<IndexMaskMemory>();
   IndexMask valid_rows;
   Array<bool> row_changed;
+  /** `[begin, end)` of each row this dab actually reaches, indexed like #row_changed. Only rows
+   * with #row_changed set are meaningful; see #paint_row_brush_span. Also narrows the undo bounds
+   * from a whole row to the part that was written. */
+  Array<int2> row_span;
   /** Indexed like #UDIMTilePixels::pixel_rows; only entries in #valid_rows are populated. */
   Array<Array<float>> row_factors;
   /** Brush factors with the optional source alpha mask applied. Kept separately because the Alpha
@@ -1191,6 +1312,7 @@ static Array<RowFactorCache> compute_paint_row_factors(
         });
 
     tile_cache.row_changed = Array<bool>(tile_cache.valid_rows.min_array_size(), false);
+    tile_cache.row_span = Array<int2>(tile_cache.valid_rows.min_array_size(), int2(0));
     tile_cache.row_factors.reinitialize(tile_cache.valid_rows.min_array_size());
     if (alpha_masking_active && active_sampler != nullptr) {
       tile_cache.row_alpha_factors.reinitialize(tile_cache.valid_rows.min_array_size());
@@ -1200,6 +1322,23 @@ static Array<RowFactorCache> compute_paint_row_factors(
       tile_cache.row_contexts.reinitialize(tile_cache.valid_rows.min_array_size());
     }
   }
+
+  /*
+   * TODO(perf): the row pass below is the last large unexplored term. What was measured before the
+   * timers were removed: with the brush footprint trimmed per row (#paint_row_brush_span) a dab
+   * touches ~98 % useful texels, and the cost splits roughly into positions/contexts (largest CPU
+   * share), distance+hardness, the strength curve, and source sampling (the latter is measured
+   * separately in paint_material_source.cc). Interesting but unverified:
+   * - `row_positions` and `row_contexts` do not depend on the dab, only on geometry and UV layout,
+   *   yet they are rebuilt for every dab of the stroke. Caching them per node for the whole stroke
+   *   (invalidated by the #PixelData layout key) removes that work entirely.
+   * - The per-row masks (`valid_rows`) are per dab by construction, but the uv-primitive brush
+   *   test (#init_uv_primitives_brush_test) could be done once per mouse event for the union of
+   *   the event's dabs instead of once per dab.
+   * - #paint_row_brush_span only trims the sphere falloff shape; the tube shape needs the projected
+   *   distance instead (the current sphere bound is not a superset there), which would extend the
+   *   same win to Projected brushes.
+   */
 
   threading::EnumerableThreadSpecific<PaintLocalData> all_factor_tls;
   for (const int tile_i : pixel_node.tiles.index_range()) {
@@ -1217,18 +1356,45 @@ static Array<RowFactorCache> compute_paint_row_factors(
           const float2 layout_size = layout_buffer != nullptr ?
                                           float2(float(layout_buffer->x), float(layout_buffer->y)) :
                                           float2(0.0f);
+
+          float3 row_first;
+          float3 row_delta;
+          paint_row_position_line(positions,
+                                  pbvh_data.vert_tris,
+                                  pixel_node.uv_primitives.tri_indices,
+                                  pixel_node.uv_primitives.delta_barycentric_coords,
+                                  pixel_row,
+                                  row_first,
+                                  row_delta);
+          const IndexRange brush_span = paint_row_brush_span(
+              ss, brush, row_first, row_delta, row_size);
+          /* Exact span, not chunk-aligned: both the factor pass and the channel passes now iterate
+           * `brush_span` itself (see #threading::parallel_for below), so nothing outside it is read
+           * or written and the undo bounds can be that same span. */
+          tile_cache.row_span[row_i] = int2(int(brush_span.start()),
+                                            int(brush_span.one_after_last()));
+          if (brush_span.is_empty()) {
+            /* Nothing is left of this row: #row_changed stays false, and every consumer of the
+             * row arrays is gated on it, so the arrays are not even allocated. */
+            return;
+          }
+
+          /* Zeroed, not left uninitialized: only the span is computed, and "outside the span the
+           * factor is zero" is the invariant every consumer of the row relies on. Holding it by
+           * construction keeps a consumer that reads the whole row correct in release builds too. */
           Array<float> &row_factors = tile_cache.row_factors[row_i];
-          row_factors.reinitialize(row_size);
+          row_factors = Array<float>(row_size, 0.0f);
           if (alpha_masking_active && active_sampler != nullptr) {
-            tile_cache.row_alpha_factors[row_i].reinitialize(row_size);
+            tile_cache.row_alpha_factors[row_i] = Array<float>(row_size, 0.0f);
           }
           if (needs_positions) {
             tile_cache.row_positions[row_i].reinitialize(row_size);
             tile_cache.row_contexts[row_i].reinitialize(row_size);
           }
 
-          threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
+          threading::parallel_for(brush_span, 512, [&](const IndexRange range) {
             PaintLocalData &tls = all_factor_tls.local();
+
             tls.pixel_positions.resize(range.size());
             calc_pixel_row_positions(positions,
                                      pbvh_data.vert_tris,
@@ -1255,7 +1421,6 @@ static Array<RowFactorCache> compute_paint_row_factors(
                                           (float(texel_y) + 0.5f) / layout_size.y);
                 }
               }
-
             }
 
             MutableSpan<float> factors = row_factors.as_mutable_span().slice(range);
@@ -1266,9 +1431,11 @@ static Array<RowFactorCache> compute_paint_row_factors(
                 ss, tls.pixel_positions, eBrushFalloffShape(brush.falloff_shape), tls.distances);
             filter_distances_with_radius(cache.radius, tls.distances, factors);
             apply_hardness_to_distances(cache, tls.distances);
+
             calc_brush_strength_factors(cache, brush, tls.distances, factors);
-            calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
             scale_factors(factors, cache.bstrength);
+
+            calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
 
             /* The active row's own mask clips the stroke the way it clips the row in the render:
              * a texel the mask hides keeps a zero factor and is never written. */
@@ -1316,7 +1483,9 @@ static Array<RowFactorCache> compute_paint_row_factors(
             }
           });
 
-          if (std::ranges::all_of(row_factors, [](const float factor) { return factor == 0.0f; }))
+          /* Only the span can hold a non-zero factor; scanning the zeroed rest is wasted work. */
+          if (std::ranges::all_of(row_factors.as_span().slice(brush_span),
+                                  [](const float factor) { return factor == 0.0f; }))
           {
             return;
           }
@@ -1331,8 +1500,13 @@ static Array<RowFactorCache> compute_paint_row_factors(
         return;
       }
       const PackedPixelRow &pixel_row = tile_data.pixel_rows[row_i];
-      const int2 start(pixel_row.start_image_coordinate.x, pixel_row.start_image_coordinate.y);
-      const int2 end = start + int2(pixel_row.num_pixels + 1, 0);
+      /* Only the part of the row the dab reached: a whole-row bound would capture undo tiles the
+       * stroke never writes, and a row can be far wider than the brush. */
+      const int2 span = tile_cache.row_span[row_i];
+      const int2 start(int(pixel_row.start_image_coordinate.x) + span.x,
+                       int(pixel_row.start_image_coordinate.y));
+      const int2 end(int(pixel_row.start_image_coordinate.x) + span.y + 1,
+                     int(pixel_row.start_image_coordinate.y));
       tile_cache.dirty_bounds = bounds::merge(tile_cache.dirty_bounds, Bounds<int2>(start, end));
     });
   }
@@ -1522,7 +1696,12 @@ static void apply_paint_channel(ImageData &image_data,
                                                b_m);
           }
 
-          threading::parallel_for(IndexRange(row_size), 512, [&](const IndexRange range) {
+          /* Same span the factor pass filled: outside it every factor is zero, so processing it
+           * would only rewrite texels with their own value. */
+          const int2 row_span_raw = tile_cache.row_span[row_i];
+          const IndexRange row_brush_span(row_span_raw.x, row_span_raw.y - row_span_raw.x);
+
+          threading::parallel_for(row_brush_span, 512, [&](const IndexRange range) {
             /* The row-factor cache feeds every channel pass of this application, so it stays
              * read-only: the selection-mask weighting below goes into a chunk-local copy. */
             const Span<float> cached_factors = row_factors.slice(range);
@@ -1658,7 +1837,6 @@ static void apply_paint_channel(ImageData &image_data,
   }
 
   pixel_node.flags.dirty |= pixels_updated;
-
 }
 
 /** Apply N compatible non-Normal channels in one shared row/range traversal. */
@@ -1844,7 +2022,11 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
               sampler != nullptr ? tile_cache.row_contexts[row_i].as_span() :
                                    Span<material::TexelSampleContext>();
 
-          threading::parallel_for(IndexRange(pixel_row.num_pixels), 512, [&](const IndexRange range) {
+          /* Same span the factor pass filled: outside it every factor is zero. */
+          const int2 row_span_raw = tile_cache.row_span[row_i];
+          const IndexRange row_brush_span(row_span_raw.x, row_span_raw.y - row_span_raw.x);
+
+          threading::parallel_for(row_brush_span, 512, [&](const IndexRange range) {
             if (std::ranges::all_of(factors.slice(range),
                                     [](const float factor) { return factor == 0.0f; }))
             {
@@ -1982,6 +2164,14 @@ static void push_undo(const PixelNode &node_data,
  * first dab of each stroke copy the whole map once per channel. \a tile_caches is indexed like
  * #PixelNode::tiles. The bounds grow by the image's seam margin because
  * #fix_non_manifold_seam_bleeding writes the bleed texels next to painted ones.
+ *
+ * TODO(perf): the first dab touching a tile still copies it (~10-20 ms on a dense canvas, when this
+ * was measured), which is inherent, but the repeated calls on later dabs are not free either:
+ * #ED_image_paint_tile_push finds the already-captured tile yet takes the undo system's single
+ * global spin lock to do so, and this runs from a parallel loop. A per-stroke set of
+ * `(Image*, tile)` already pushed - the pattern used by `ImageColorEffect::undo_pushed_nodes_` -
+ * would skip the lock entirely. Unverified: needs a guard for the undo step being reopened and for
+ * a #PixelNode rebuild moving rows onto new tiles.
  */
 static void push_undo_bounds(ImageData &image_data,
                              const PixelNode &pixel_node,
@@ -2156,6 +2346,26 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   if (cache.image_paint_targets.is_empty()) {
     return;
   }
+
+  /*
+   * TODO(perf): this is the per-dab entry point of PBR channel painting, and the place where the
+   * remaining costs live. Measured before the timing instrumentation was removed (single PBVH node,
+   * four channel passes, ~80k texels inside the brush):
+   *   total ~6 ms per dab, of which source sampling ~2.5-3 ms, channel read/blend/write ~2-2.5 ms,
+   *   the row-factor pass ~1.2 ms, the undo tile push ~0.1 ms (with 10-20 ms spikes on dabs that
+   *   capture new tiles).
+   * Candidates, in rough order of expected payoff - all unverified:
+   * - Merge the dabs of one mouse event into a single channel write (exact for Mix, see
+   *   #apply_prepared_paint_range). A stroke emits ~10-20 dabs per event and they overlap almost
+   *   completely, so this removes most of the repeated read/blend/write traffic.
+   * - Cache the row geometry across dabs (see the TODO in #compute_paint_row_factors).
+   * - Deduplicate undo tile captures per stroke: #ED_image_paint_tile_push already returns the
+   *   existing tile, but still takes the undo system's global spin lock each time.
+   * - `target_layout_keys` below re-acquires every tile's ImBuf on every dab; it could be cached on
+   *   #StrokeCache and invalidated with the target set.
+   * Re-measure before and after any of these: the numbers above came from stdout timers that have
+   * since been removed, and the workload depends heavily on canvas size and channel count.
+   */
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
@@ -2571,7 +2781,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
           },
           exec_mode::grain_size(1));
     }
-
 
     {
       /* The copy itself has to run per destination - each channel has its own image buffers - but

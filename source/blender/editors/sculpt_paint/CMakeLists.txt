@@ -251,7 +251,7 @@ set(SRC
   paint_curve_patch_profile.hh
   paint_curve_patch_sampler.hh
   paint_curve_patch_session.hh
-paint_intern.hh
+  paint_intern.hh
   paint_gradient_core.hh
   paint_gradient_curve.hh
   paint_image_curve_patch.hh

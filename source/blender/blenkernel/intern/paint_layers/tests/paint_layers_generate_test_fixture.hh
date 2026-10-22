@@ -54,6 +54,9 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
 
   void SetUp() override
   {
+    /* The runtime blend tier is file-static state: a record from an earlier test must not decide
+     * whether this test's first blend edit is a tier transition. */
+    BKE_paint_layers_blend_tier_clear();
     bmain = BKE_main_new();
     G_MAIN = bmain;
     ma = BKE_material_add(bmain, "Layered");
@@ -62,6 +65,7 @@ class PaintLayersGenerateTest : public bke::BlenderGTestBase {
 
   void TearDown() override
   {
+    BKE_paint_layers_blend_tier_clear();
     BKE_main_free(bmain);
     G_MAIN = nullptr;
   }

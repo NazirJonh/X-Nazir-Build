@@ -288,6 +288,12 @@ static void material_changed(Main *bmain, Material *ma)
   if (bmain->wm.first != nullptr) {
     if (BKE_paint_layers_is_layered(*ma)) {
       ed::material_bake::paint_layers_bake_debounce_arm(*ma);
+      /* A blend scrub keeps its channels dynamic for a while so stepping through modes does not
+       * rebuild the tree each time. The deadline lives in BKE; this timer only wakes up to ask it
+       * to demote. Re-armed here so the wake-up is 2.5s after the *last* scrub, not the first. */
+      if (BKE_paint_layers_blend_tier_next_deadline() >= 0.0) {
+        ed::material_bake::paint_layers_blend_timer_arm();
+      }
     }
     Vector<Material *> consumers;
     BKE_paint_layers_source_material_consumers(*bmain, *ma, consumers);

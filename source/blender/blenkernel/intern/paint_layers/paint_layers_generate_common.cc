@@ -185,6 +185,30 @@ bNode *mix_node_add(bNodeTree &tree,
   return node;
 }
 
+bNodeSocket *paint_layers_blend_group_socket(bNode &instance,
+                                             const char *name,
+                                             const char *identifier)
+{
+  const UString id = UString::from_ptr_noinline(identifier);
+  if (bNodeSocket *socket = bke::node_find_socket(instance, SOCK_IN, id)) {
+    return socket;
+  }
+  if (bNodeSocket *socket = bke::node_find_socket(instance, SOCK_OUT, id)) {
+    return socket;
+  }
+  for (bNodeSocket &socket : instance.inputs) {
+    if (STREQ(socket.name, name)) {
+      return &socket;
+    }
+  }
+  for (bNodeSocket &socket : instance.outputs) {
+    if (STREQ(socket.name, name)) {
+      return &socket;
+    }
+  }
+  return nullptr;
+}
+
 /** A unique interface name for \a base, so a renamed or duplicated layer never collides. */
 void interface_name_unique(const bNodeTreeInterface &interface,
                            const char *base,
@@ -242,6 +266,71 @@ bool row_participates(const Material &ma, const MaterialPaintLayer &layer, const
     }
   }
   return false;
+}
+
+bool paint_layer_blend_dynamic_eligible(const Material &ma,
+                                        const MaterialPaintLayer &layer,
+                                        const int channel)
+{
+  /* Normal combines normals in its own group instead of building a Mix node, so neither tier
+   * exists for it. */
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
+      channel == PAINT_MATERIAL_CHANNEL_NORMAL)
+  {
+    return false;
+  }
+  /* A mask item's blend is the type of its coverage Mix, which is built by the mask chain and
+   * never served by the dynamic blend group; a tier record for it would only force a pointless
+   * rebuild when it expires. */
+  if (layer.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    return false;
+  }
+  /* An inlined folder builds no row of its own, so its blend has no node to be dynamic. */
+  if (BKE_paint_layers_folder_is_pass_through(layer)) {
+    return false;
+  }
+  /* A content correction may lay in fewer channels than its owner: only the channels it really
+   * builds blend nodes in are eligible. */
+  if (layer.role == MA_PAINT_LAYER_ROLE_EFFECT) {
+    return paint_layer_effect_lays(ma, layer, channel);
+  }
+  return row_participates(ma, layer, channel);
+}
+
+uint64_t paint_layer_blend_dynamic_mask(const Material &ma, const MaterialPaintLayer &layer)
+{
+  uint64_t mask = 0;
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    if (!paint_layer_blend_dynamic_eligible(ma, layer, channel)) {
+      continue;
+    }
+    if (paint_layers_blend_tier_is_dynamic(ma, layer.marker, channel)) {
+      mask |= uint64_t(1) << channel;
+    }
+  }
+  return mask;
+}
+
+bool paint_layers_blend_any_dynamic(const Material &ma)
+{
+  bool any = false;
+  /* #BKE_paint_layers_foreach visits rows and folders only; a correction of a row builds its own
+   * blend node and is walked here explicitly. */
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        if (paint_layer_blend_dynamic_mask(ma, layer) != 0) {
+          any = true;
+          return false;
+        }
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          if (paint_layer_blend_dynamic_mask(ma, effect) != 0) {
+            any = true;
+            return false;
+          }
+        }
+        return true;
+      });
+  return any;
 }
 
 static void form_map_add(const ListBaseT<MaterialPaintLayer> &list,

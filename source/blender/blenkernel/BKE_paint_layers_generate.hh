@@ -38,6 +38,11 @@ struct PaintLayersBuildContext {
   /** Shared group an instance of which combines two tangent-space normal maps, or null. */
   bNodeTree *normal_combine_group = nullptr;
   /**
+   * Shared group an instance of which blends by a runtime mode, or null. Only rows and channels in
+   * the runtime "scrubbing" tier use it; every other blend stays a static Mix node.
+   */
+  bNodeTree *blend_group = nullptr;
+  /**
    * Hands out the empty node group that holds \a layer's own nodes, named and marked as that
    * layer's. Required: the build puts every layer in a group of its own, so a caller that cannot
    * create data-blocks cannot build.

@@ -13,6 +13,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
 
+#include <cstdio>
 #include <cstring>
 
 #include "paint_layers_intern.hh"
@@ -1837,6 +1838,11 @@ bool BKE_paint_layers_channel_opacity_set(Material &ma,
   else {
     BKE_paint_layers_tag_value_edited(ma);
   }
+  /* A folder that just inlined has no row of its own, so any tier record under its marker would
+   * describe a node that is about to disappear. */
+  if (BKE_paint_layers_folder_is_pass_through(layer)) {
+    bke::paint_layers::paint_layers_blend_tier_forget_row(ma, layer.marker);
+  }
   return true;
 }
 
@@ -1865,11 +1871,33 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
   if (layer.channel_settings[channel].blend == blend) {
     return true;
   }
-  const uint64_t shape = bke::paint_layers::paint_layer_blend_shape(layer);
+  const uint64_t shape_before = bke::paint_layers::paint_layer_blend_shape(layer);
+  const uint64_t mask_before = bke::paint_layers::paint_layer_blend_dynamic_mask(ma, layer);
+  const int effective_before = BKE_paint_layers_channel_blend_effective(layer, channel);
   layer.channel_settings[channel].blend = int8_t(blend);
-  /* Replace swaps the Normal node and a folder's blend can move it across Pass Through: only then
-   * is the graph a different shape. Every other mode is the same Mix node with another type. */
-  if (bke::paint_layers::paint_layer_blend_shape(layer) != shape) {
+  /* A scrubbed channel is built with the dynamic group; an override does not change the effective
+   * blend, so re-noting it would only keep a stale record alive. An ineligible channel has no
+   * blend node of its own and must not keep one. */
+  if (bke::paint_layers::paint_layer_blend_dynamic_eligible(ma, layer, channel)) {
+    if (BKE_paint_layers_channel_blend_effective(layer, channel) != effective_before) {
+      bke::paint_layers::paint_layers_blend_tier_note(ma, layer.marker, channel);
+    }
+  }
+  else {
+    bke::paint_layers::paint_layers_blend_tier_forget(ma, layer.marker, channel);
+  }
+  /* A folder this edit made Pass Through has no row of its own any more: the other channels' records
+   * would come back stale as soon as it stops inlining again, so drop the whole row. */
+  if (BKE_paint_layers_folder_is_pass_through(layer)) {
+    bke::paint_layers::paint_layers_blend_tier_forget_row(ma, layer.marker);
+  }
+  /* Replace swaps the Normal node and a folder's blend can move it across Pass Through; a moved
+   * runtime tier rebuilds the participating channels too. Every other mode is the same Mix node
+   * with another type, or the same group with another Mode value. */
+  const bool shape_changed = bke::paint_layers::paint_layer_blend_shape(layer) != shape_before;
+  const bool dynamic_changed =
+      bke::paint_layers::paint_layer_blend_dynamic_mask(ma, layer) != mask_before;
+  if (shape_changed || dynamic_changed) {
     BKE_paint_layers_tag_edited(ma);
   }
   else {
@@ -1892,6 +1920,10 @@ bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, const
   }
   else {
     BKE_paint_layers_tag_value_edited(ma);
+  }
+  /* Same as the per-channel opacity: an inlined folder has no blend node for a record to name. */
+  if (BKE_paint_layers_folder_is_pass_through(*layer)) {
+    bke::paint_layers::paint_layers_blend_tier_forget_row(ma, layer->marker);
   }
   return true;
 }
@@ -2227,9 +2259,33 @@ bool BKE_paint_layers_set_blend(Material &ma,
   if (layer->blend == blend) {
     return true;
   }
-  const uint64_t shape = bke::paint_layers::paint_layer_blend_shape(*layer);
+  const uint64_t shape_before = bke::paint_layers::paint_layer_blend_shape(*layer);
+  const uint64_t mask_before = bke::paint_layers::paint_layer_blend_dynamic_mask(ma, *layer);
   layer->blend = blend;
-  if (bke::paint_layers::paint_layer_blend_shape(*layer) != shape) {
+  /* Every channel that inherits the row's blend is being scrubbed by this edit, so it enters the
+   * runtime tier; an override keeps its own blend and is left as it was. A channel the row no
+   * longer builds -- including all of a folder that just became Pass Through -- drops its record,
+   * or it would come back stale the next time the channel is built again. */
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    if (!bke::paint_layers::paint_layer_blend_dynamic_eligible(ma, *layer, channel)) {
+      bke::paint_layers::paint_layers_blend_tier_forget(ma, layer->marker, channel);
+      continue;
+    }
+    if (layer->channel_settings[channel].blend < 0) {
+      bke::paint_layers::paint_layers_blend_tier_note(ma, layer->marker, channel);
+    }
+  }
+  /* A folder that this edit made Pass Through inlines again, so none of its channels has a blend
+   * node; an empty mask alone would not say that, hence the row-wide forget. */
+  if (BKE_paint_layers_folder_is_pass_through(*layer)) {
+    bke::paint_layers::paint_layers_blend_tier_forget_row(ma, layer->marker);
+  }
+  /* A tier move rebuilds the participating channels' nodes, exactly like Replace or a folder
+   * crossing the Pass Through boundary. Inside one tier the mode is a value, synced in place. */
+  const bool shape_changed = bke::paint_layers::paint_layer_blend_shape(*layer) != shape_before;
+  const bool dynamic_changed =
+      bke::paint_layers::paint_layer_blend_dynamic_mask(ma, *layer) != mask_before;
+  if (shape_changed || dynamic_changed) {
     BKE_paint_layers_tag_edited(ma);
   }
   else {

@@ -18,4 +18,16 @@ constexpr const char *NORMAL_COMBINE_ID_B = "Socket_1";
 constexpr const char *NORMAL_COMBINE_ID_FACTOR = "Socket_2";
 constexpr const char *NORMAL_COMBINE_ID_RESULT = "Socket_3";
 
+/**
+ * Interface-socket identifiers of the shared Blend group, fixed by the creation order in
+ * #BKE_paint_material_blend_group_ensure: Factor, A, B, Mode and the Result output. The same
+ * identifier-versus-name rule as above applies: the generator, the sync and the CPU reader all ask
+ * for these, never for the translatable display names.
+ */
+constexpr const char *BLEND_GROUP_ID_FACTOR = "Socket_0";
+constexpr const char *BLEND_GROUP_ID_A = "Socket_1";
+constexpr const char *BLEND_GROUP_ID_B = "Socket_2";
+constexpr const char *BLEND_GROUP_ID_MODE = "Socket_3";
+constexpr const char *BLEND_GROUP_ID_RESULT = "Socket_4";
+
 }  // namespace blender

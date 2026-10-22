@@ -84,6 +84,18 @@ uintptr_t paint_layers_bake_debounce_timer_uuid()
   return reinterpret_cast<uintptr_t>(&paint_layers_bake_debounce_timer_tag);
 }
 
+/**
+ * The blend-tier timer has its own uuid: it is not a bake and does not debounce one. Were it the
+ * same timer, an armed bake debounce would be restarted or cleared by a blend scrub and a demotion
+ * could ride on (or be lost to) a render that has nothing to do with it.
+ */
+char paint_layers_blend_timer_tag = 0;
+
+uintptr_t paint_layers_blend_timer_uuid()
+{
+  return reinterpret_cast<uintptr_t>(&paint_layers_blend_timer_tag);
+}
+
 /** The quiet time after the last edit of a burst before its renders are started. */
 constexpr double paint_layers_bake_debounce_seconds = 0.3;
 
@@ -265,6 +277,35 @@ void paint_layers_bake_undo_post(Main *bmain,
   }
 }
 
+/**
+ * The runtime blend tier is not part of a memfile snapshot, so a load or undo puts back a tree and
+ * a persistent marker but no tier records. BKE reconciles the two; the editor then has nothing
+ * left to demote and drops its timer rather than waking for a deadline that no longer exists.
+ */
+void paint_layers_blend_load_post(Main *bmain,
+                                  PointerRNA ** /*pointers*/,
+                                  const int /*pointers_num*/,
+                                  void * /*arg*/)
+{
+  if (bmain == nullptr) {
+    return;
+  }
+  BKE_paint_layers_blend_load_post(*bmain);
+  paint_layers_blend_timer_reset();
+}
+
+void paint_layers_blend_undo_post(Main *bmain,
+                                  PointerRNA ** /*pointers*/,
+                                  const int /*pointers_num*/,
+                                  void * /*arg*/)
+{
+  if (bmain == nullptr) {
+    return;
+  }
+  BKE_paint_layers_blend_undo_post(*bmain);
+  paint_layers_blend_timer_reset();
+}
+
 double paint_layers_bake_debounce_tick(uintptr_t /*uuid*/, void * /*user_data*/)
 {
   /* #BLI_timer callbacks carry no context; the main database and its window manager are the ones
@@ -314,6 +355,27 @@ double paint_layers_bake_debounce_tick(uintptr_t /*uuid*/, void * /*user_data*/)
   /* The timer runs again only for what is still waiting; otherwise it removes itself and the next
    * #paint_layers_bake_debounce_arm registers it again. */
   return next_wait;
+}
+
+double paint_layers_blend_timer_tick(uintptr_t /*uuid*/, void * /*user_data*/)
+{
+  /* Same as the bake debounce tick: a #BLI_timer callback carries no context, so the main database
+   * and its window manager are the ones the main loop is running with. */
+  if (G_MAIN == nullptr || G_MAIN->wm.first == nullptr) {
+    /* Without a main loop to demote with, the deadlines left in the BKE tier would fire against
+     * whatever #Main comes next; drop them instead of letting a file inherit another file's
+     * scrub. */
+    BKE_paint_layers_blend_tier_clear();
+    return -1.0;
+  }
+  const double now = BLI_time_now_seconds();
+  /* BKE owns the records and decides what is due: it is the only layer that knows which channels
+   * a material's mask really builds, and ED depends on BKE, never the reverse. */
+  BKE_paint_layers_blend_tier_demote_due(*G_MAIN, now);
+  /* The tick demotes only what has come due; the timer runs again for the nearest record left, or
+   * removes itself when nothing is waiting. */
+  const double next = BKE_paint_layers_blend_tier_next_deadline();
+  return next < 0.0 ? -1.0 : std::max(next - now, 0.0);
 }
 
 bool paint_layers_bake_now_poll(bContext *C)
@@ -372,6 +434,25 @@ void paint_layers_bake_undo_callback_init()
   store->arg = nullptr;
   store->func = paint_layers_bake_undo_post;
   BKE_callback_add(store, BKE_CB_EVT_UNDO_POST);
+
+  /* Registered from here so the blend tier is live wherever the paint-layer bake cleanup already
+   * is -- this is the one editor-init entry point that runs after #BKE_callback_global_init. */
+  paint_layers_blend_callbacks_init();
+}
+
+void paint_layers_blend_callbacks_init()
+{
+  bCallbackFuncStore *load_store = MEM_new<bCallbackFuncStore>(__func__);
+  load_store->alloc = true;
+  load_store->arg = nullptr;
+  load_store->func = paint_layers_blend_load_post;
+  BKE_callback_add(load_store, BKE_CB_EVT_LOAD_POST);
+
+  bCallbackFuncStore *undo_store = MEM_new<bCallbackFuncStore>(__func__);
+  undo_store->alloc = true;
+  undo_store->arg = nullptr;
+  undo_store->func = paint_layers_blend_undo_post;
+  BKE_callback_add(undo_store, BKE_CB_EVT_UNDO_POST);
 }
 
 void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bmain)
@@ -501,6 +582,39 @@ void paint_layers_bake_debounce_arm(Material &ma, const double delay_seconds)
                      false);
 }
 
+void paint_layers_blend_timer_arm()
+{
+  const double deadline = BKE_paint_layers_blend_tier_next_deadline();
+  if (deadline < 0.0) {
+    /* Nothing is scrubbing: leave any already-registered timer alone instead of churning it on
+     * every material edit that has nothing to demote. */
+    return;
+  }
+  const double delay = std::max(deadline - BLI_time_now_seconds(), 0.0);
+  /* Re-registering an active #BLI_timer is not allowed, and arming must push the wake-up out to
+   * the nearest deadline BKE now has (every scrub notes a later one), so the old timer goes. */
+  if (BLI_timer_is_registered(paint_layers_blend_timer_uuid())) {
+    BLI_timer_unregister(paint_layers_blend_timer_uuid());
+  }
+  /* No window and no #wmEvent: the tier timer belongs to no editor. #BLI_timer runs it from the
+   * shared main-loop hook (#BLI_timer_execute), the same mechanism `bpy.app.timers` uses. */
+  BLI_timer_register(paint_layers_blend_timer_uuid(),
+                     paint_layers_blend_timer_tick,
+                     nullptr,
+                     nullptr,
+                     delay,
+                     false);
+}
+
+void paint_layers_blend_timer_reset()
+{
+  /* Process-static tier records tied to a file that is about to stop existing, or to one whose
+   * tree a load/undo just rebuilt. A timer left armed would otherwise run against the next #Main,
+   * and BKE's records would outlive the nodes they describe. */
+  BLI_timer_unregister(paint_layers_blend_timer_uuid());
+  BKE_paint_layers_blend_tier_clear();
+}
+
 void paint_layers_bake_debounce_reset()
 {
   /* The pending set is process-static state tied to a file that is about to stop existing (a new
@@ -508,6 +622,9 @@ void paint_layers_bake_debounce_reset()
    */
   BLI_timer_unregister(paint_layers_bake_debounce_timer_uuid());
   paint_layers_bake_debounce_pending().clear();
+  /* The blend tier has the same lifetime, and is reset here so every file change that covers the
+   * bake debounce covers it too (#ED_editors_exit among them). */
+  paint_layers_blend_timer_reset();
 }
 
 void MATERIAL_OT_paint_layers_bake_now(wmOperatorType *ot)

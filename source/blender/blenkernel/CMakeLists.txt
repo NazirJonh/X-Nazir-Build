@@ -264,6 +264,7 @@ set(SRC
   intern/paint_canvas.cc
   intern/paint_layers/paint_layers.cc
   intern/paint_layers/paint_layers_bake.cc
+  intern/paint_layers/paint_layers_blend_tier.cc
   intern/paint_layers/paint_layers_kind.cc
   intern/paint_layers/paint_layers_material_live.cc
   intern/paint_layers/paint_layers_composite.cc
@@ -285,6 +286,7 @@ set(SRC
   intern/paint_layers/paint_layers_target.cc
   intern/paint_material_cache_common.cc
   intern/paint_material_combined.cc
+  intern/paint_material_blend_group.cc
   intern/paint_material_composite.cc
   intern/paint_material_normal_combine.cc
   intern/paint_material_resolve.cc
@@ -857,6 +859,7 @@ if(WITH_GTESTS)
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
     intern/paint_layers/tests/paint_layers_bake_test.cc
+    intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_content_alpha_test.cc

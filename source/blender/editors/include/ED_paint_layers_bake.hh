@@ -52,7 +52,8 @@ void paint_layers_bake_jobs_ensure(wmWindowManager &wm, wmWindow *win, Main &bma
  * Register the #BKE_CB_EVT_UNDO_POST handler that clears a stale #MA_PAINT_LAYERS_BAKE_SCHEDULED
  * mark left in a memfile-undo snapshot. Called once from the editor's startup init
  * (#ED_operatortypes_paint), after #BKE_callback_global_init, so it is registered before the first
- * scene update; the callback system owns and frees the store.
+ * scene update; the callback system owns and frees the store. It also calls
+ * #paint_layers_blend_callbacks_init, so the blend tier shares that one startup entry point.
  */
 void paint_layers_bake_undo_callback_init();
 
@@ -142,6 +143,32 @@ void paint_layers_bake_scheduled_settle(Main &bmain,
  * entry stays meaningful across a Ctrl+Z).
  */
 void paint_layers_bake_debounce_reset();
+
+/**
+ * Re-arm the blend-tier #BLI_timer for #BKE_paint_layers_blend_tier_next_deadline(), replacing an
+ * already-running timer so a scrub pushes the demotion out instead of letting an earlier deadline
+ * fire mid-drag (trailing edge). A no-op when nothing is waiting.
+ *
+ * Separate from #paint_layers_bake_debounce_arm on purpose: demoting a blend tier is not a bake,
+ * and one timer cannot serve two unrelated deadlines without one clearing the other.
+ */
+void paint_layers_blend_timer_arm();
+
+/**
+ * Disarm the blend-tier timer and forget every runtime tier record
+ * (#BKE_paint_layers_blend_tier_clear). Called from #paint_layers_bake_debounce_reset, so file
+ * changes and #ED_editors_exit cover it, and from the load/undo handlers registered by
+ * #paint_layers_blend_callbacks_init.
+ */
+void paint_layers_blend_timer_reset();
+
+/**
+ * Register the #BKE_CB_EVT_LOAD_POST and #BKE_CB_EVT_UNDO_POST handlers that reconcile a
+ * restored file with the runtime-only blend tier: BKE clears the records and marks trees that were
+ * saved dynamic for regeneration, the editor then drops its timer. Called once from the same
+ * startup place as #paint_layers_bake_undo_callback_init.
+ */
+void paint_layers_blend_callbacks_init();
 
 /**
  * "Bake Paint Layers Now": collapse \a ma's debounce and start its due renders immediately, the

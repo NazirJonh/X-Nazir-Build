@@ -85,6 +85,12 @@ inline constexpr const char *TREE_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_topolog
  * When it matches the stored one the root is left alone and only its groups' values are synced. */
 inline constexpr const char *TREE_ROOT_TOPOLOGY_LOW_PROP = "pbr_paint_layers_root_topology";
 inline constexpr const char *TREE_ROOT_TOPOLOGY_HIGH_PROP = "pbr_paint_layers_root_topology_hi";
+/**
+ * On the root generated tree: 1 when any row or correction was built with the runtime blend group.
+ * The tier itself is runtime-only; this dirty bit only tells a file's loader that the saved tree
+ * has to be rebuilt into static Mix nodes before it is used.
+ */
+inline constexpr const char *TREE_ROOT_BLEND_DYNAMIC_PROP = "pbr_paint_blend_dynamic";
 /** On a source group: the source's structure hash (#BKE_paint_layers_source_material_structure_hash)
  * it was filled from. With it unchanged, a source edit only moved socket values, which the group
  * takes in place (#source_group_values_sync). */

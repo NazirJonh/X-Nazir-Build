@@ -1101,14 +1101,14 @@ TEST_F(PaintLayersGenerateTest, toggling_the_mapping_changes_the_shape_and_dragg
   EXPECT_FALSE(interface_has_socket(*group, "Fill Mapping Offset", false));
 }
 
-TEST_F(PaintLayersGenerateTest, a_channel_blend_is_a_node_property_not_a_new_shape)
+TEST_F(PaintLayersGenerateTest, a_channel_blend_is_a_value_inside_the_runtime_tier)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
   const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
   const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_ROUGHNESS};
   const uint64_t plain = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
 
-  /* A plain mode change is the blend_type of the existing Mix nodes: the shape does not move. */
+  /* The first edit after idle keeps the static Mix: a single change costs what it always did. */
   ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
       *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
@@ -1116,17 +1116,41 @@ TEST_F(PaintLayersGenerateTest, a_channel_blend_is_a_node_property_not_a_new_sha
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC, 0);
 
-  /* Replace swaps the Normal node for a Mix: that is structure. */
+  /* The second edit inside the window is a scrub: the static Mix becomes the shared blend group,
+   * so the layer's shape moves once. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_ADD));
+  const uint64_t dynamic = paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms);
+  EXPECT_NE(dynamic, plain);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+
+  /* Inside the tier the mode is the group's Mode value: the shape does not move and only the sync
+   * is asked for. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
+  EXPECT_EQ(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), dynamic);
+  EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC, 0);
+
+  /* Replace still swaps the Normal node for a Mix: that is structure. */
   ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
       *ma, *row, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE));
-  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), plain);
+  EXPECT_NE(paint_layers::paint_layers_layer_topology_hash(*ma, *row, wired, forms), dynamic);
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
 }
 
-TEST_F(PaintLayersGenerateTest, a_channel_blend_edit_keeps_the_row_group)
+TEST_F(PaintLayersGenerateTest, a_channel_blend_edit_keeps_the_row_group_inside_the_tier)
 {
   MaterialPaintLayer *row = add_paint_layer("Row", add_image("Row"));
+
+  /* The second edit enters the runtime tier and rebuilds the row once, with the shared group. */
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_SUBTRACT));
+  ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   bNodeTree *group = layer_tree_find(*bmain, "Row");
   ASSERT_NE(group, nullptr);
@@ -1138,15 +1162,23 @@ TEST_F(PaintLayersGenerateTest, a_channel_blend_edit_keeps_the_row_group)
     }
   }
   ASSERT_NE(blend, nullptr);
-  ASSERT_NE(blend->storage, nullptr);
+  ASSERT_TRUE(BKE_paint_material_is_blend_group(*blend));
 
+  /* A second mode inside the tier only asks for the sync: the group is not rebuilt and its Mode
+   * input takes the new code. */
+  ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
   ASSERT_TRUE(BKE_paint_layers_channel_blend_set(
-      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_MULTIPLY));
-  /* The edit only asks for the sync: no group is rebuilt. */
+      *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, MA_PAINT_LAYER_BLEND_ADD));
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
+  EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC, 0);
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   EXPECT_EQ(layer_tree_find(*bmain, "Row"), group);
-  EXPECT_EQ(static_cast<NodeShaderMix *>(blend->storage)->blend_type, MA_RAMP_MULT);
+  const bNodeSocket *mode = bke::node_find_socket(
+      *blend, SOCK_IN, UString::from_ptr_noinline(BLEND_GROUP_ID_MODE));
+  ASSERT_NE(mode, nullptr);
+  ASSERT_EQ(mode->type, SOCK_INT);
+  ASSERT_NE(mode->default_value, nullptr);
+  EXPECT_EQ(static_cast<const bNodeSocketValueInt *>(mode->default_value)->value, MA_RAMP_ADD);
 }
 
 TEST_F(PaintLayersGenerateTest, a_mapped_correction_and_mask_item_build_their_own_mapping)

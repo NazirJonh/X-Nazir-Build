@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <cstdio>
+
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
 
@@ -22,6 +24,20 @@
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 
+/**
+ * The `[PBR-Layers …]` trace messages are development diagnostics: useful while a layer edit is
+ * traced, pure noise in a normal build. They stay compiled out unless this is set to 1, so a
+ * debugger can turn them on without carrying the prints into a release.
+ */
+#ifndef PBR_LAYERS_DIAGNOSTICS
+#  define PBR_LAYERS_DIAGNOSTICS 0
+#endif
+#if PBR_LAYERS_DIAGNOSTICS
+#  define PBR_LAYERS_LOG(...) printf(__VA_ARGS__)
+#else
+#  define PBR_LAYERS_LOG(...) ((void)0)
+#endif
+
 namespace blender {
 
 struct Image;
@@ -29,6 +45,7 @@ struct ImageUser;
 struct Main;
 struct MaterialPaintLayerBake;
 struct bNode;
+struct bNodeSocket;
 
 /**
  * Whether \a layer is a Material row that shows maps rendered from its source in \a channel: the
@@ -503,6 +520,51 @@ namespace bke::paint_layers {
  * `blend_type` of an existing Mix node, kept current by the generator's blend sync.
  */
 uint64_t paint_layer_blend_shape(const MaterialPaintLayer &layer);
+
+/**
+ * Whether \a layer's \a channel would build a blend node at all in the generator: the Normal
+ * channel combines normals instead, an inlined folder's own blend has nowhere to live, and a
+ * channel the row does not take part in builds nothing. Runtime blend-tier records are only kept
+ * for eligible channels, so the topology hash and the timer never react to a blend that cannot
+ * change a node.
+ */
+bool paint_layer_blend_dynamic_eligible(const Material &ma,
+                                        const MaterialPaintLayer &layer,
+                                        int channel);
+
+/**
+ * A socket of a shared blend group instance by its fixed interface identifier, or by its public
+ * name when the interface was authored differently.
+ *
+ * #bke::node_find_socket matches identifiers, not display names, and the group's identifiers
+ * (`Socket_N`) are not its names (`Factor`, `A`, `B`, `Mode`, `Result`). The generator and the
+ * blend sync both need the same rule, so it lives here once.
+ */
+bNodeSocket *paint_layers_blend_group_socket(bNode &instance,
+                                             const char *name,
+                                             const char *identifier);
+
+/** The bit mask of \a layer's eligible channels currently in the runtime blend tier. */
+uint64_t paint_layer_blend_dynamic_mask(const Material &ma, const MaterialPaintLayer &layer);
+
+/** Whether any row, folder or correction of \a ma is currently in the runtime blend tier. */
+bool paint_layers_blend_any_dynamic(const Material &ma);
+
+/**
+ * Runtime blend-tier state, keyed by the material's session uid and the row's marker. A record
+ * means "this channel is being scrubbed": its blend is built with the shared dynamic group, and
+ * the record is dropped once its deadline passes. Nothing here is saved to a file.
+ */
+bool paint_layers_blend_tier_is_dynamic(const Material &ma, const bUUID marker, int channel);
+void paint_layers_blend_tier_note(const Material &ma, const bUUID marker, int channel);
+void paint_layers_blend_tier_forget(const Material &ma, const bUUID marker, int channel);
+void paint_layers_blend_tier_forget_row(const Material &ma, const bUUID marker);
+/**
+ * Drop records of \a ma whose row or channel no longer builds a blend node. Structural edits other
+ * than the blend setters (a folder gaining a mask, a row deleted) can make a channel ineligible; the
+ * regeneration point calls this so a stale record cannot pull the channel back into the tier.
+ */
+void paint_layers_blend_tier_prune(Material &ma);
 
 }  // namespace bke::paint_layers
 

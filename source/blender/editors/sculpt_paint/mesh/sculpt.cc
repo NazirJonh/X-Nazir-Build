@@ -10451,6 +10451,16 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
         object_ptr->runtime->sculpt_session->vdm_stamps.clear();
       }
     }
+    /* #brush_stroke_init gave the active object a cache before #test_start filled #mode_objects, so
+     * a stroke refused or cancelled in invoke leaves it behind with no member to free it. */
+    if (this->object != nullptr && this->object->runtime->sculpt_session != nullptr &&
+        this->object->runtime->sculpt_session->cache != nullptr)
+    {
+      SculptSession &ss_active = *this->object->runtime->sculpt_session;
+      face_set::face_set_color_stroke_cache_clear(*ss_active.cache);
+      MEM_delete(ss_active.cache);
+      ss_active.cache = nullptr;
+    }
     this->layer_recording_finish(true, false, BKE_paint_brush(&sd.paint));
     brush_exit_tex(sd);
     return;
@@ -11049,6 +11059,12 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
                                        brush->sculpt_brush_type))
     {
       BKE_report(op->reports, RPT_ERROR, "Close the sculpt layer mask session to sculpt geometry");
+      /* No stroke exists to free the cache #brush_stroke_init just created. */
+      if (ss->cache != nullptr) {
+        face_set::face_set_color_stroke_cache_clear(*ss->cache);
+        MEM_delete(ob->runtime->sculpt_session->cache);
+        ob->runtime->sculpt_session->cache = nullptr;
+      }
       return OPERATOR_CANCELLED;
     }
   }

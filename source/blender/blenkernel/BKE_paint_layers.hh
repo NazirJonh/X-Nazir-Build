@@ -718,6 +718,32 @@ bool BKE_paint_layers_channel_blend_set(Material &ma,
                                         int channel,
                                         int blend);
 
+/**
+ * The next time, in `BLI_time_now_seconds()` units, at which a scrubbing blend channel is due to
+ * be simplified back to a static Mix node, or -1 when nothing is waiting.
+ *
+ * The tier state itself lives in BKE; the editor's timer only asks when to wake up.
+ */
+double BKE_paint_layers_blend_tier_next_deadline();
+
+/**
+ * Drop every scrubbing blend record whose deadline has passed, and mark the materials that owned
+ * one for a full regeneration, so their groups go back to static Mix nodes. Returns whether
+ * anything changed. The editor's timer calls this from the main thread.
+ */
+bool BKE_paint_layers_blend_tier_demote_due(Main &bmain, double now);
+
+/** Forget all runtime blend-tier records. Used when a file is loaded, undone or closed. */
+void BKE_paint_layers_blend_tier_clear();
+
+/**
+ * Reconcile a freshly loaded or restored file with the runtime-only tier: forget every record, and
+ * mark each layered material whose generated tree says it was saved with the dynamic group for a
+ * full regeneration. The marker is the only persisted trace; after this the tree is static again.
+ */
+void BKE_paint_layers_blend_load_post(Main &bmain);
+void BKE_paint_layers_blend_undo_post(Main &bmain);
+
 /** Set the opacity of \a layer. */
 bool BKE_paint_layers_set_opacity(Material &ma, MaterialPaintLayer *layer, float opacity);
 

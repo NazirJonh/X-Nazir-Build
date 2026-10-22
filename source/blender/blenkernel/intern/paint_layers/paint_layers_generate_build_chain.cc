@@ -956,6 +956,7 @@ NodeOutput PaintLayersTreeBuilder::object_mask_visible_ensure(bNodeTree &tree,
   object_mask_visible_.add(&layer, visible);
   return visible;
 }
+
 BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
                                                  const MaterialPaintLayer &row,
                                                  const int channel,
@@ -993,6 +994,56 @@ BlendNode PaintLayersTreeBuilder::blend_node_add(bNodeTree &tree,
         BLI_assert_msg(false, "Normal Combine instance sockets were not instantiated");
         return {};
       }
+      return blend;
+    }
+  }
+
+  /* A blend in the runtime tier uses the shared group: its mode is then a socket value the sync
+   * rewrites in place, so scrubbing the mode compiles no new shader. Every blend outside the tier
+   * stays the static Mix below, which is also what a saved file is rebuilt to after loading. */
+  if (ctx_.blend_group != nullptr && tree.typeinfo != nullptr &&
+      tree.typeinfo->group_idname != nullptr &&
+      paint_layer_blend_dynamic_eligible(ma_, row, channel) &&
+      paint_layers_blend_tier_is_dynamic(ma_, row.marker, channel))
+  {
+    bNode *instance = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
+    if (instance != nullptr) {
+      instance->id = &ctx_.blend_group->id;
+      id_us_plus(&ctx_.blend_group->id);
+      /* Why extra: the blend group instance owns no named grid slot per channel. */
+      grid_.place_extra(*instance);
+      /* A hand-assigned group only grows its instance sockets once its declaration is built; this
+       * instantiates them from the group's interface without needing #Main or a whole tree update. */
+      nodes::update_node_declaration_and_sockets(tree, *instance);
+
+      BlendNode blend;
+      blend.node = instance;
+      blend.factor = paint_layers_blend_group_socket(*instance, "Factor", BLEND_GROUP_ID_FACTOR);
+      blend.a = paint_layers_blend_group_socket(*instance, "A", BLEND_GROUP_ID_A);
+      blend.b = paint_layers_blend_group_socket(*instance, "B", BLEND_GROUP_ID_B);
+      bNodeSocket *mode = paint_layers_blend_group_socket(*instance, "Mode", BLEND_GROUP_ID_MODE);
+      blend.result = paint_layers_blend_group_socket(*instance, "Result", BLEND_GROUP_ID_RESULT);
+      if (blend.factor == nullptr || blend.a == nullptr || blend.b == nullptr ||
+          mode == nullptr || blend.result == nullptr)
+      {
+        /* The sockets are the group's own interface; a missing one is a build error, not a shape
+         * to paper over with a Mix that would silently flatten the mode. */
+        BLI_assert_msg(false, "Blend group instance sockets were not instantiated");
+        return {};
+      }
+      BLI_assert(mode->type == SOCK_INT && mode->default_value != nullptr);
+      /* One branch per MA_RAMP_* code: a code outside the range has no branch to select, so clamp
+       * rather than write a Mode that silently falls through to no blend. */
+      BLI_assert(ramp_blend >= MA_RAMP_BLEND && ramp_blend <= MA_RAMP_EXCLUSION);
+      static_cast<bNodeSocketValueInt *>(mode->default_value)->value = std::clamp(
+          ramp_blend, int(MA_RAMP_BLEND), int(MA_RAMP_EXCLUSION));
+      /* The same key as the static Mix: the sync finds this node by it and only rewrites `Mode`,
+       * and the group's node count keeps counting both forms. */
+      char marker[UUID_STRING_SIZE];
+      BLI_uuid_format(marker, row.marker);
+      char blend_key[128];
+      SNPRINTF(blend_key, "B:%s:%d", marker, channel);
+      prop_string_set(instance->system_properties, BLEND_NODE_KEY_PROP, blend_key);
       return blend;
     }
   }

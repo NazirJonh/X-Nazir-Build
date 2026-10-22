@@ -41,6 +41,8 @@
 
 #include "paint_layers/paint_layers_kind.hh"
 
+#include "paint_material_composite_internal.hh"
+
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_tree_interface_types.h"
@@ -115,6 +117,29 @@ static bool composite_mix_node_read(const bNode &node, CompositeMixNode &r_mix)
     r_mix.bottom = bke::node_find_socket(node, SOCK_IN, "A"_ustr);
     r_mix.top = bke::node_find_socket(node, SOCK_IN, "B"_ustr);
     r_mix.blend = CompositeBlend::NormalCombine;
+    return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
+  }
+  if (BKE_paint_material_is_blend_group(node)) {
+    /* The mode is a value on the group rather than a node type: the group exists so that changing
+     * a layer's blend mode is one integer edit instead of a rewire. */
+    const bNodeSocket *mode = bke::node_find_socket(
+        node, SOCK_IN, UString::from_ptr_noinline(BLEND_GROUP_ID_MODE));
+    if (mode == nullptr || mode->type != SOCK_INT || mode->default_value == nullptr) {
+      return false;
+    }
+    /* Strictly the int socket's own storage. A blend mode is a `MA_RAMP_*` code that indexes the
+     * group's branches, so reading it through any other value type -- a float socket that happens
+     * to sit in its place -- would silently round it to a neighbouring mode. */
+    const int mode_value = static_cast<const bNodeSocketValueInt *>(mode->default_value)->value;
+    if (!composite_blend_from_ramp_blend(mode_value, r_mix.blend)) {
+      return false;
+    }
+    r_mix.factor = bke::node_find_socket(
+        node, SOCK_IN, UString::from_ptr_noinline(BLEND_GROUP_ID_FACTOR));
+    r_mix.bottom = bke::node_find_socket(
+        node, SOCK_IN, UString::from_ptr_noinline(BLEND_GROUP_ID_A));
+    r_mix.top = bke::node_find_socket(
+        node, SOCK_IN, UString::from_ptr_noinline(BLEND_GROUP_ID_B));
     return r_mix.factor != nullptr && r_mix.bottom != nullptr && r_mix.top != nullptr;
   }
   if (node.type_legacy == SH_NODE_MIX_RGB_LEGACY) {
@@ -243,14 +268,21 @@ static bool composite_stack_collect(const bNodeSocket &socket,
     return false;
   }
 
-  /* The normal combine group has to be recognized before the socket walk resolves through it:
-   * #BKE_paint_material_source_socket descends into a group and reports the node inside that
-   * happens to feed the output, which says nothing about what the group as a whole does. */
+  /* A group that is itself an operation -- the normal combine, the PBR blend -- has to be
+   * recognized before the socket walk resolves through it: #BKE_paint_material_source_socket
+   * descends into a group and reports the node inside that happens to feed the output, which says
+   * nothing about what the group as a whole does. Both groups are therefore read at the shallow
+   * node. A blend mode this reader does not reproduce makes #composite_mix_node_read fail, and the
+   * caller keeps its bake fallback: the group evaluates every mode correctly in the shader, so
+   * widening the fast path mode by mode would only duplicate that arithmetic and let the two
+   * disagree about a layer's blend. */
   const bNode *shallow_source = composite_source_node_shallow(socket);
-  const bool is_combine_group = shallow_source != nullptr &&
-                                BKE_paint_material_is_normal_combine_group(*shallow_source);
+  const bool is_operation_group =
+      shallow_source != nullptr &&
+      (BKE_paint_material_is_normal_combine_group(*shallow_source) ||
+       BKE_paint_material_is_blend_group(*shallow_source));
 
-  if (!is_combine_group) {
+  if (!is_operation_group) {
     const bNodeSocket *source = BKE_paint_material_source_socket(socket);
     if (source == nullptr) {
       /* An unlinked input is a constant. Nothing to composite and nothing to paint on. */

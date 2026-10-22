@@ -157,6 +157,10 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
   hash = topology_hash_mix(hash, paint_layer_blend_shape(layer));
+  /* The runtime tier changes which node a participating channel gets (the dynamic group against a
+   * static Mix). Mixing its mask here keeps that transition out of #paint_layer_blend_shape, where
+   * it would also move for channels nothing builds. */
+  hash = topology_hash_mix(hash, paint_layer_blend_dynamic_mask(ma, layer));
   topology_hash_string(hash, layer.name);
   /* An applied mapping is a Mapping node and its inputs; its values are inputs, so only whether it
    * applies is structure. The same answer builds the interface, so the two cannot disagree. */
@@ -227,6 +231,8 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     topology_hash_uid(hash, effect.marker);
     /* The correction's own mode is a node property; only Replace changes the node. */
     hash = topology_hash_mix(hash, paint_layer_blend_shape(effect));
+    /* A correction in the runtime tier builds the dynamic group in the channels it lays. */
+    hash = topology_hash_mix(hash, paint_layer_blend_dynamic_mask(ma, effect));
     /* A flat colour and a map are different nodes, so the source is structure. */
     hash = topology_hash_mix(hash, uint64_t(uint8_t(effect.source)));
     /* Which filter it is decides its nodes; its parameters are inputs. */

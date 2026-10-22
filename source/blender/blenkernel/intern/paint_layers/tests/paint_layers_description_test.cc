@@ -148,7 +148,8 @@ TEST_F(PaintLayersDescription, channel_blend_overrides_the_rows_own_per_channel)
   ma->paint_layers_flag = MA_PAINT_LAYERED;
   MaterialPaintLayer *layer = paint_layer_add(*ma, "Layer");
   ASSERT_TRUE(BKE_paint_layers_set_blend(*ma, layer, MA_PAINT_LAYER_BLEND_MULTIPLY));
-  /* A row blend on a leaf is a node property: it asks for the sync, not a rebuild. */
+  /* The first blend edit after idle keeps the static Mix: it is a node property, so only the sync
+   * is asked for. The channel enters the runtime tier with the second edit. */
   EXPECT_EQ(ma->paint_layers_flag & MA_PAINT_LAYERS_REGEN, 0);
   EXPECT_NE(ma->paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC, 0);
   ma->paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);

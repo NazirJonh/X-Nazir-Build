@@ -12,6 +12,7 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include <cstdio>
 #include <utility>
 
 #include "BLI_listbase.h"
@@ -216,7 +217,14 @@ class LayerTreeFactory {
       bUUID marker = BLI_uuid_nil();
       if (layer_tree_marker_get(*candidate, marker) && BLI_uuid_equal(marker, layer.marker)) {
         uint64_t stored = 0;
-        if (tree_topology_hash_get(*candidate, stored) && stored == topology) {
+        const bool has_stored = tree_topology_hash_get(*candidate, stored);
+        PBR_LAYERS_LOG("[PBR-Layers regen]   layer=\"%s\" group topology stored=%llu (has=%d) now=%llu => %s\n",
+               layer.name,
+               (unsigned long long)stored,
+               int(has_stored),
+               (unsigned long long)topology,
+               (has_stored && stored == topology) ? "group KEPT" : "group CLEARED + REBUILT");
+        if (has_stored && stored == topology) {
           /* Unchanged: keep the nodes and the interface; the build only re-links the instance. */
           used_.append(candidate);
           unchanged_.add(&layer);
@@ -240,6 +248,7 @@ class LayerTreeFactory {
         return candidate;
       }
     }
+    PBR_LAYERS_LOG("[PBR-Layers regen]   layer=\"%s\" no previous group => NEW group\n", layer.name);
     bNodeTree *fresh = bke::node_tree_add_tree(&bmain_, name, "ShaderNodeTree");
     if (fresh == nullptr) {
       return nullptr;
@@ -509,6 +518,11 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     return false;
   }
 
+  /* Structural edits outside the blend setters (a folder gaining a mask, a row removed) can make a
+   * tier channel stop building a blend node. Prune before the hash and the build so such a record
+   * cannot pull the channel back into the dynamic tier later. */
+  paint_layers_blend_tier_prune(ma);
+
   PaintLayersBuildContext ctx;
   Vector<int> wired_channels = paint_layers_wired_channels(ma);
   /* The Normal chain needs the shared combine group; create it only when a Normal row exists,
@@ -521,6 +535,11 @@ bool BKE_paint_layers_regenerate(Main &bmain,
       });
   if (normal_row_exists) {
     ctx.normal_combine_group = BKE_paint_material_normal_combine_group_ensure(bmain);
+  }
+  /* Same pattern for the runtime blend group: only a tier channel instantiates it, so the group is
+   * only created when at least one row or correction is being scrubbed. */
+  if (paint_layers_blend_any_dynamic(ma)) {
+    ctx.blend_group = BKE_paint_material_blend_group_ensure(bmain);
   }
 
   /* A value edit changes no structure, so the root's stored hash still matches its description:
@@ -541,8 +560,21 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * keyed blend node no longer matches the description: the kept root cannot be trusted, so the
    * full rebuild below takes over. Nodes are synced before values, so a tree update cannot reset a
    * value written in the same pass. */
-  const bool kept = keep_root && paint_layers_blend_sync(ma, bmain) &&
-                    BKE_paint_layers_values_sync(ma);
+  const bool blend_sync_ok = keep_root && paint_layers_blend_sync(ma, bmain);
+  const bool values_sync_ok = blend_sync_ok && BKE_paint_layers_values_sync(ma);
+  const bool kept = values_sync_ok;
+  PBR_LAYERS_LOG(
+      "[PBR-Layers regen] material=\"%s\" created_tree=%d root_hash=%llu stored_root=%llu "
+      "instance_ok=%d keep_root=%d blend_sync=%d values_sync=%d => %s\n",
+      ma.id.name + 2,
+      int(created_tree),
+      (unsigned long long)root_hash,
+      (unsigned long long)stored_root,
+      int(kept_instance != nullptr && kept_instance->id == &tree->id),
+      int(keep_root),
+      int(blend_sync_ok),
+      int(values_sync_ok),
+      kept ? "KEPT (in-place)" : "FULL REBUILD");
   if (kept) {
     source_groups_refresh(bmain, ma);
     regenerate_tags(bmain, ma, *tree, false);
@@ -607,8 +639,20 @@ bool BKE_paint_layers_regenerate(Main &bmain,
 
     relations_changed = factory.groups_created() || factory.groups_deleted() || created_tree ||
                         report.replaced_foreign_tree;
+    PBR_LAYERS_LOG("[PBR-Layers regen] rebuild done material=\"%s\" groups_created=%d groups_deleted=%d\n",
+           ma.id.name + 2,
+           int(factory.groups_created()),
+           int(factory.groups_deleted()));
     regenerate_tags(bmain, ma, *tree, relations_changed);
   }
+
+  /* The tier itself lives only in memory, so a file written while scrubbing can hold dynamic group
+   * instances no loader could interpret. This bit is the persisted dirty marker: a loader that sees
+   * it asks for a static rebuild. Written on both paths, since a kept tree can already carry dynamic
+   * instances from an earlier pass in this session. */
+  prop_int_set(tree->id.properties,
+               TREE_ROOT_BLEND_DYNAMIC_PROP,
+               paint_layers_blend_any_dynamic(ma) ? 1 : 0);
 
   ma.paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
 
@@ -649,6 +693,14 @@ void BKE_paint_layers_regenerate_tagged(Main &bmain)
         (ma.paint_layers_flag & (MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC)) != 0 ||
         ma.paint_layers_tree == nullptr;
     if (needs_regen) {
+      PBR_LAYERS_LOG(
+          "[PBR-Layers regen] tagged material=\"%s\" flag_regen=%d flag_blend_sync=%d "
+          "bake_stale=%d no_tree=%d\n",
+          ma.id.name + 2,
+          int((ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) != 0),
+          int((ma.paint_layers_flag & MA_PAINT_LAYERS_BLEND_SYNC) != 0),
+          int((ma.paint_layers_flag & MA_PAINT_LAYERS_BAKE_STALE) != 0),
+          int(ma.paint_layers_tree == nullptr));
       BKE_paint_layers_regenerate(bmain, ma);
     }
     else {

@@ -17,6 +17,7 @@
 
 #include "BKE_paint_layers_generate.hh"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -31,6 +32,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_material_composite.hh"
 
 #include "DEG_depsgraph.hh"
 
@@ -41,6 +43,7 @@
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 
+#include "../paint_material_composite_internal.hh"
 #include "paint_layers_generate_intern.hh"
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
@@ -471,16 +474,40 @@ bool paint_layers_blend_sync(Material &ma, Main &bmain)
       }
       const int blend = mask ? row->blend :
                                BKE_paint_layers_channel_blend_effective(*row, channel);
-      if (node.type_legacy != SH_NODE_MIX || node.storage == nullptr) {
+      const int ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(blend));
+      if (node.type_legacy == SH_NODE_MIX && node.storage != nullptr) {
+        NodeShaderMix *storage = static_cast<NodeShaderMix *>(node.storage);
+        if (storage->blend_type != ramp) {
+          storage->blend_type = ramp;
+          BKE_ntree_update_tag_node_property(group, &node);
+          group_changed = true;
+        }
+      }
+      else if (BKE_paint_material_is_blend_group(node)) {
+        /* The dynamic group carries the mode as an integer input: the whole blend is built once
+         * inside the group, so writing this value recompiles no shader. A missing or mistyped
+         * socket means this is not the group the generator makes, and the tree is rebuilt. */
+        bNodeSocket *mode_socket = bke::paint_layers::paint_layers_blend_group_socket(
+            node, "Mode", BLEND_GROUP_ID_MODE);
+        if (mode_socket == nullptr || mode_socket->type != SOCK_INT ||
+            mode_socket->default_value == nullptr || ramp < MA_RAMP_BLEND ||
+            ramp > MA_RAMP_EXCLUSION)
+        {
+          group_ok = false;
+          continue;
+        }
+        auto &mode_value = *static_cast<bNodeSocketValueInt *>(mode_socket->default_value);
+        if (mode_value.value != ramp) {
+          mode_value.value = ramp;
+          BKE_ntree_update_tag_node_property(group, &node);
+          group_changed = true;
+        }
+      }
+      else {
+        /* A keyed node of any other type is a hand edit or a tree from an older layout: neither
+         * can be trusted to carry the description's blend. */
         group_ok = false;
         continue;
-      }
-      NodeShaderMix *storage = static_cast<NodeShaderMix *>(node.storage);
-      const int ramp = BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(blend));
-      if (storage->blend_type != ramp) {
-        storage->blend_type = ramp;
-        BKE_ntree_update_tag_node_property(group, &node);
-        group_changed = true;
       }
     }
     if (!group_ok || found != expected) {

@@ -654,6 +654,19 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain);
 bool BKE_paint_material_is_normal_combine_group(const bNode &node);
 
 /**
+ * The shader node group that blends two colours by a runtime blend mode, created on demand.
+ *
+ * Exists so that changing a layer's blend mode is a value edit rather than a different node type:
+ * the mode is an integer input, and every mode is built once inside the group. Its inputs are
+ * `Factor` (the row's coverage), `A` (below), `B` (the row) and `Mode` (the `MA_RAMP_*` code); its
+ * output is `Result`. The group is shared: a second call returns the one already in \a bmain.
+ */
+bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain);
+
+/** Whether \a node is an instance of #BKE_paint_material_blend_group_ensure's group. */
+bool BKE_paint_material_is_blend_group(const bNode &node);
+
+/**
  * The passes a layered material offers, in the order they are listed to the user.
  *
  * Values are #eMaterialPaintChannel plus #PAINT_LAYER_MAP_MASK. A fixed list rather than one

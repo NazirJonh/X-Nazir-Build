@@ -1369,7 +1369,12 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       }
       /* A heavy row leaves the main thread: the worker job picks it up from the same stale signal
        * this function leaves set. */
-      if (BKE_paint_layers_bake_is_heavy(ma, layer)) {
+      const bool heavy = BKE_paint_layers_bake_is_heavy(ma, layer);
+      PBR_LAYERS_LOG("[PBR-Layers bake] row \"%s\" is due for a bake (heavy=%d => %s)\n",
+             layer.name,
+             int(heavy),
+             heavy ? "left to the worker job" : "baked now on the main thread");
+      if (heavy) {
         continue;
       }
       const int size = bake_size_for(ma, layer);

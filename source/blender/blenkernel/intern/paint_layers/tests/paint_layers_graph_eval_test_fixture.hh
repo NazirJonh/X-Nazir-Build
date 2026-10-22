@@ -102,6 +102,12 @@ class GraphInterpreter {
         out.r = out.g = out.b = out.a = value;
         break;
       }
+      case SOCK_INT: {
+        /* The blend group's Mode: an integer value the compare nodes read as a float. */
+        const int value = static_cast<const bNodeSocketValueInt *>(socket.default_value)->value;
+        out.r = out.g = out.b = out.a = float(value);
+        break;
+      }
       case SOCK_RGBA: {
         const float *value = static_cast<const bNodeSocketValueRGBA *>(socket.default_value)->value;
         out.r = value[0];
@@ -246,6 +252,15 @@ class GraphInterpreter {
 
   RGBA eval_output(const bNode &node, const char *out_identifier) const
   {
+    if (node.is_type("NodeImplicitConversion"_ustr)) {
+      /* The tree update inserts one when the blend group's integer Mode feeds a float Math input;
+       * the conversion is the value itself in every type this interpreter reads. */
+      const Span<const bNodeSocket *> inputs = node.input_sockets();
+      if (!inputs.is_empty()) {
+        return eval_socket(*inputs[0]);
+      }
+      return {};
+    }
     if (node.is_group_input()) {
       return instance_input(out_identifier);
     }
@@ -317,6 +332,20 @@ class GraphInterpreter {
           return socket_default(*out);
         }
         return {};
+      case SH_NODE_MIX_RGB_LEGACY: {
+        /* The runtime blend group's selector: a plain Mix of the branch chosen so far and the next
+         * one, exactly what the node's own GPU function does. */
+        const float fac =
+            eval_socket(*bke::node_find_socket(mutable_node, SOCK_IN, "Fac"_ustr)).r;
+        const RGBA color1 = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color1"_ustr));
+        const RGBA color2 = eval_socket(
+            *bke::node_find_socket(mutable_node, SOCK_IN, "Color2"_ustr));
+        float result[4] = {color1.r, color1.g, color1.b, color1.a};
+        const float top_rgba[4] = {color2.r, color2.g, color2.b, color2.a};
+        ramp_blend(node.custom1, result, clamp_f(fac, 0.0f, 1.0f), top_rgba);
+        return {result[0], result[1], result[2], result[3]};
+      }
       case SH_NODE_MIX: {
         const NodeShaderMix &storage = *static_cast<const NodeShaderMix *>(node.storage);
         if (storage.data_type == SOCK_FLOAT) {
@@ -604,6 +633,8 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
 
   void SetUp() override
   {
+    /* The tier records are file-static; start each graph-evaluation test from the static tier. */
+    BKE_paint_layers_blend_tier_clear();
     bmain = BKE_main_new();
     G_MAIN = bmain;
     ma = BKE_material_add(bmain, "Layered");
@@ -612,6 +643,7 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
 
   void TearDown() override
   {
+    BKE_paint_layers_blend_tier_clear();
     BKE_main_free(bmain);
     G_MAIN = nullptr;
   }

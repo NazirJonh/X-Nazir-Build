@@ -1148,6 +1148,8 @@ void PAINT_OT_material_erase_brush_add(wmOperatorType *ot);
 void PAINT_OT_material_mask_brush_reset(wmOperatorType *ot);
 void PAINT_OT_material_paint_source_mode_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_source_material_set(wmOperatorType *ot);
+void PAINT_OT_brush_layer_source_assign_from_stack(wmOperatorType *ot);
+void PAINT_OT_brush_layer_source_update(wmOperatorType *ot);
 void PAINT_OT_material_paint_images_ensure(wmOperatorType *ot);
 void PAINT_OT_material_paint_brush_sync(wmOperatorType *ot);
 void PAINT_OT_material_channel_value_invert(wmOperatorType *ot);

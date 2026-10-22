@@ -12,6 +12,7 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_gpencil_legacy_types.h"
+#include "DNA_material_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
@@ -20,10 +21,12 @@
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_string_utf8_symbols.h"
+#include "BLI_uuid.h"
 
 #include "BKE_brush.hh"
 #include "BKE_curve_patch.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLT_translation.hh"
@@ -600,6 +603,7 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
 
 #  include "DEG_depsgraph.hh"
 
+#  include "ED_brush_layer_source.hh"
 #  include "ED_material_bake.hh"
 
 #  include "IMB_colormanagement.hh"
@@ -1823,12 +1827,102 @@ static void rna_BrushMaterialPaint_source_update(Main *bmain, Scene *scene, Poin
   const Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
   if (bmain == nullptr || br->material_paint == nullptr ||
       br->material_paint->source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ||
+      BKE_paint_material_source_is_layer(*br->material_paint) ||
       br->material_paint->source_material == nullptr)
   {
     return;
   }
   ed::material_bake::material_source_bake_ensure(
       *bmain, *br->material_paint->source_material, br->material_paint->source_bake_size);
+}
+
+/** Update for the properties that select the Layer source. Also starts the Default material bake
+ * when the kind still is Default, so every source-selection property shares one callback. */
+static void rna_BrushMaterialPaint_layer_source_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  rna_BrushMaterialPaint_source_update(bmain, scene, ptr);
+
+  const Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  if (bmain == nullptr || br->material_paint == nullptr ||
+      !BKE_paint_material_source_is_layer(*br->material_paint))
+  {
+    return;
+  }
+  ed::brush_layer_source::brush_layer_source_bake_ensure(*bmain, *br);
+}
+
+static bool rna_BrushMaterialPaint_source_is_stale_get(PointerRNA *ptr)
+{
+  const Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  if (br == nullptr || br->material_paint == nullptr) {
+    return false;
+  }
+  return ed::brush_layer_source::brush_layer_source_is_stale(*br->material_paint);
+}
+
+static bool rna_BrushMaterialPaint_source_is_baking_get(PointerRNA *ptr)
+{
+  const Brush *br = reinterpret_cast<Brush *>(ptr->owner_id);
+  if (br == nullptr || br->material_paint == nullptr) {
+    return false;
+  }
+  return ed::brush_layer_source::brush_layer_source_is_baking(*br);
+}
+
+/** Only a layered material has a stack or rows to read; a plain material stays a Default-kind
+ * source. */
+static bool rna_BrushMaterialPaint_source_layer_owner_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  const Material *ma = static_cast<const Material *>(value.data);
+  return ma == nullptr || BKE_paint_layers_is_layered(*ma);
+}
+
+/* Changing the owner either drops the row with it, or keeps a marker that still resolves in the
+ * new owner: an isolated row belongs to exactly one stack. */
+static void rna_BrushMaterialPaint_source_layer_owner_update(Main *bmain,
+                                                             Scene *scene,
+                                                             PointerRNA *ptr)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  if (brush_paint->source_layer_owner == nullptr ||
+      (!BLI_uuid_is_nil(brush_paint->source_layer_marker) &&
+       BKE_paint_layers_find(*brush_paint->source_layer_owner, brush_paint->source_layer_marker) ==
+           nullptr))
+  {
+    brush_paint->source_layer_marker = {};
+  }
+  rna_BrushMaterialPaint_layer_source_update(bmain, scene, ptr);
+}
+
+static void rna_BrushMaterialPaint_source_layer_marker_get(PointerRNA *ptr, char *value)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<const BrushMaterialPaint *>(ptr->data);
+  if (BLI_uuid_is_nil(brush_paint->source_layer_marker)) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_uuid_format(value, brush_paint->source_layer_marker);
+}
+
+static int rna_BrushMaterialPaint_source_layer_marker_length(PointerRNA *ptr)
+{
+  const BrushMaterialPaint *brush_paint = static_cast<const BrushMaterialPaint *>(ptr->data);
+  return BLI_uuid_is_nil(brush_paint->source_layer_marker) ? 0 : UUID_STRING_SIZE - 1;
+}
+
+static void rna_BrushMaterialPaint_source_layer_marker_set(PointerRNA *ptr, const char *value)
+{
+  BrushMaterialPaint *brush_paint = static_cast<BrushMaterialPaint *>(ptr->data);
+  if (value == nullptr || value[0] == '\0') {
+    brush_paint->source_layer_marker = {};
+    return;
+  }
+  bUUID marker;
+  /* Malformed text keeps the current marker rather than silently clearing it; an empty string is
+   * the explicit way to clear. */
+  if (BLI_uuid_parse_string(&marker, value)) {
+    brush_paint->source_layer_marker = marker;
+  }
 }
 
 static std::optional<std::string> rna_BrushCurvePatchSettings_path(const PointerRNA * /*ptr*/)
@@ -2094,6 +2188,31 @@ static bool rna_BrushMaterialPaintChannel_resolve(PointerRNA *ptr,
   const Brush *brush = reinterpret_cast<const Brush *>(ptr->owner_id);
   if (brush == nullptr || brush->material_paint == nullptr) {
     return false;
+  }
+  const BrushMaterialPaint &brush_paint = *brush->material_paint;
+  if (BKE_paint_material_source_is_layer(brush_paint)) {
+    const Material *owner = brush_paint.source_layer_owner;
+    if (brush_paint.layer_source_scope == BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW) {
+      /* A row is one baked result; availability is decided by the bake, not by the owner's
+       * Principled inputs. Until it lands the row reads as usable, so the panel does not report
+       * the owner's unrelated channels as errors. */
+      MaterialPaintLayer *row =
+          owner != nullptr && !BLI_uuid_is_nil(brush_paint.source_layer_marker) ?
+              BKE_paint_layers_find(const_cast<Material &>(*owner),
+                                    brush_paint.source_layer_marker) :
+              nullptr;
+      const bool valid = owner != nullptr && BKE_paint_layers_is_layered(*owner) &&
+                         row != nullptr &&
+                         BKE_paint_layers_owner_list(const_cast<Material &>(*owner), *row) !=
+                             nullptr;
+      r_resolution = valid ? ChannelResolution::Baked : ChannelResolution::Unavailable;
+      r_reason = valid ? ChannelUnavailableReason::None : ChannelUnavailableReason::NoMaterial;
+      return true;
+    }
+    const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(owner);
+    r_resolution = resolve.channels[*channel];
+    r_reason = resolve.reasons[*channel];
+    return true;
   }
   const MaterialSourceResolve resolve = BKE_paint_material_source_resolve(
       brush->material_paint->source_material);
@@ -4151,6 +4270,48 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem prop_material_source_kind_items[] = {
+      {BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_DEFAULT,
+       "DEFAULT",
+       0,
+       "Default",
+       "Read every channel from the source material as a whole"},
+      {BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER,
+       "LAYER",
+       0,
+       "Layer",
+       "Read a layered material's stack, either in full or one isolated row of it"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem prop_layer_source_scope_items[] = {
+      {BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW,
+       "ROW",
+       0,
+       "Row",
+       "Bake the isolated result of the selected stack row"},
+      {BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_FULL,
+       "FULL",
+       0,
+       "Full Material",
+       "Bake the layered material's complete stack output"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem prop_source_refresh_mode_items[] = {
+      {BRUSH_MATERIAL_PAINT_SOURCE_REFRESH_AUTO,
+       "AUTO",
+       0,
+       "Auto",
+       "Rebake automatically after the source changes"},
+      {BRUSH_MATERIAL_PAINT_SOURCE_REFRESH_MANUAL,
+       "MANUAL",
+       0,
+       "Manual",
+       "Keep the current bake until Update Now is pressed"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   /* Mirrors #blender::ChannelResolution. Read-only, so the numbers only ever travel from C++ to
    * the UI. */
   static const EnumPropertyItem prop_material_source_resolution_items[] = {
@@ -4502,7 +4663,7 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, prop_source_mode_items);
   RNA_def_property_ui_text(
       prop, "Source Mode", "Where the brush takes its per-channel textures from");
-  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_source_update");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_layer_source_update");
 
   prop = RNA_def_property(srna, "source_layout", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "source_layout");
@@ -4516,7 +4677,7 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, prop_source_bake_size_items);
   RNA_def_property_ui_text(
       prop, "Bake Size", "Resolution of the cached bake of the source material");
-  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_source_update");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_layer_source_update");
 
   prop = RNA_def_property(srna, "source_material", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "source_material");
@@ -4525,6 +4686,72 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Source Material", "Material whose Principled BSDF inputs drive every paint channel");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_source_update");
+
+  prop = RNA_def_property(srna, "material_source_kind", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "material_source_kind");
+  RNA_def_property_enum_items(prop, prop_material_source_kind_items);
+  RNA_def_property_ui_text(prop,
+                           "Material Source",
+                           "Whether the Material source is a whole material or a layered "
+                           "material's stack or row");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_layer_source_update");
+
+  prop = RNA_def_property(srna, "layer_source_scope", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "layer_source_scope");
+  RNA_def_property_enum_items(prop, prop_layer_source_scope_items);
+  RNA_def_property_ui_text(prop,
+                           "Layer Scope",
+                           "Whether the Layer source bakes one isolated stack row or the whole "
+                           "layered material");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_layer_source_update");
+
+  prop = RNA_def_property(srna, "source_layer_owner", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "source_layer_owner");
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_BrushMaterialPaint_source_layer_owner_poll");
+  RNA_def_property_ui_text(
+      prop, "Layer Material", "Layered material whose stack the brush reads from");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_source_layer_owner_update");
+
+  prop = RNA_def_property(srna, "source_layer_marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_BrushMaterialPaint_source_layer_marker_get",
+                                "rna_BrushMaterialPaint_source_layer_marker_length",
+                                "rna_BrushMaterialPaint_source_layer_marker_set");
+  RNA_def_property_ui_text(prop,
+                           "Layer Row",
+                           "Marker of the isolated stack row; empty means no row is selected");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_layer_source_update");
+
+  prop = RNA_def_property(srna, "source_refresh_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "source_refresh_mode");
+  RNA_def_property_enum_items(prop, prop_source_refresh_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Source Update", "When edits to the Layer source are picked up by the brush");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_layer_source_update");
+
+  prop = RNA_def_property(srna, "source_refresh_delay", PROP_FLOAT, PROP_TIME);
+  RNA_def_property_float_sdna(prop, nullptr, "source_refresh_delay");
+  RNA_def_property_range(prop, 0.0f, 60.0f);
+  RNA_def_property_ui_text(prop,
+                           "Refresh Delay",
+                           "Seconds an automatic refresh waits after the last source edit");
+  RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_layer_source_update");
+
+  prop = RNA_def_property(srna, "source_is_stale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_BrushMaterialPaint_source_is_stale_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Source Is Stale",
+                           "The Layer source differs from the pixels the last bake holds");
+
+  prop = RNA_def_property(srna, "source_is_baking", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_BrushMaterialPaint_source_is_baking_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Source Is Baking", "A bake of the Layer source is running or waiting to start");
 
   /* #shared_texture_slot exposes the generic Brush Texture Slot "scale" (soft range -100..100,
    * meant for stencils/procedurals); the Transform panel wants a plain 0..1 slider instead, so

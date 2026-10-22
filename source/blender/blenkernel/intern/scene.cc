@@ -1042,15 +1042,23 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
     }
     scene_foreach_material_paint_mtex(
         data, &preset.material_paint->shared_source_mapping, do_undo_restore, reader);
-    /* The preset holds a user reference on the source material (see #BKE_brush_material_paint_copy),
-     * so it has to be walked here for the same reason the #MTex textures above are: nothing else
-     * restores it on file read or remaps it when the material goes away. */
+    /* The preset holds a user reference on both source materials (see
+     * #BKE_brush_material_paint_copy), so they have to be walked here for the same reason the
+     * #MTex textures above are: nothing else restores them on file read or remaps them when the
+     * material goes away. */
     BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
                                                       &preset.material_paint->source_material,
                                                       do_undo_restore,
                                                       SCENE_FOREACH_UNDO_RESTORE,
                                                       reader,
                                                       &preset.material_paint->source_material,
+                                                      IDWALK_CB_USER);
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &preset.material_paint->source_layer_owner,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_RESTORE,
+                                                      reader,
+                                                      &preset.material_paint->source_layer_owner,
                                                       IDWALK_CB_USER);
   }
 }

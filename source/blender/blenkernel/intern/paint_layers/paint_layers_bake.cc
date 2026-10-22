@@ -386,10 +386,10 @@ static void bake_source_tree_images(const bNodeTree &tree,
  * and children. A Material row reads the images of its source's node trees when its own bake is the
  * question, and the maps it shows when it is a child of the row being baked.
  */
-static void bake_collect_source_images(const Material &ma,
-                                       const MaterialPaintLayer &layer,
-                                       Vector<Image *> &r_images,
-                                       const bool is_child = false)
+void BKE_paint_layers_bake_collect_source_images(const Material &ma,
+                                                 const MaterialPaintLayer &layer,
+                                                 Vector<Image *> &r_images,
+                                                 const bool is_child)
 {
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     if (!is_child) {
@@ -446,13 +446,13 @@ static void bake_collect_source_images(const Material &ma,
     }
   });
   for (const MaterialPaintLayer &effect : layer.effects) {
-    bake_collect_source_images(ma, effect, r_images, true);
+    BKE_paint_layers_bake_collect_source_images(ma, effect, r_images, true);
   }
   for (const MaterialPaintLayer &mask_item : layer.mask_stack) {
-    bake_collect_source_images(ma, mask_item, r_images, true);
+    BKE_paint_layers_bake_collect_source_images(ma, mask_item, r_images, true);
   }
   for (const MaterialPaintLayer &child : layer.children) {
-    bake_collect_source_images(ma, child, r_images, true);
+    BKE_paint_layers_bake_collect_source_images(ma, child, r_images, true);
   }
 }
 
@@ -488,7 +488,7 @@ void BKE_paint_layers_bake_subscribe(Material &ma, MaterialPaintLayer &layer)
   BakeLayerSubscription entry;
   entry.marker = layer.marker;
   Vector<Image *> images;
-  bake_collect_source_images(ma, layer, images);
+  BKE_paint_layers_bake_collect_source_images(ma, layer, images);
   for (Image *image : images) {
     PartialUpdateUser *user = BKE_image_partial_update_create(image);
     bake_subscription_user_drain(*image, user);

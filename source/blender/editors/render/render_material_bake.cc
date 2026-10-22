@@ -389,6 +389,21 @@ bool material_source_bake_cache_contains(const Material &ma, const int resolutio
   return g_bake_cache.contains(key);
 }
 
+bool material_source_bake_is_stale(const Material &ma, const int resolution)
+{
+  const BakeCacheKey key = bake_cache_key(ma, resolution);
+  std::lock_guard lock(g_bake_cache_mutex);
+  const BakeCacheEntry *cached = g_bake_cache.lookup_ptr(key);
+  return cached != nullptr && cached->stale;
+}
+
+bool material_source_bake_is_pending(const Material &ma, const int resolution)
+{
+  const BakeCacheKey key = bake_cache_key(ma, resolution);
+  std::lock_guard lock(g_bake_cache_mutex);
+  return g_bake_pending.contains(key);
+}
+
 /* Membership helpers for the two runtime sets. Separate from #material_bake_to_images so the
  * completion callback can clear them without reaching into the cache section's internals. */
 

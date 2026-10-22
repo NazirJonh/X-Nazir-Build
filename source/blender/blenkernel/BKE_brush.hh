@@ -159,17 +159,18 @@ Brush *BKE_brush_material_mask_ensure(Main &bmain,
  * \param flag: #LIB_ID_CREATE_ / #LIB_ID_COPY_ flags, as passed to the surrounding copy
  * function. Unless #LIB_ID_CREATE_NO_USER_REFCOUNT is set, a counted reference (#id_us_plus) is
  * taken on every #Tex any channel's #BrushMaterialPaintChannel.source_mtex.tex or
- * #BrushMaterialPaint.shared_source_mapping.tex points at.
+ * #BrushMaterialPaint.shared_source_mapping.tex points at, and on both source materials
+ * (#BrushMaterialPaint.source_material and #BrushMaterialPaint.source_layer_owner).
  */
 BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, int flag);
 
 /**
  * Frees \a material_paint. No-op if \a material_paint is null.
  *
- * \param do_user_refcount: When true, drop a counted reference (#id_us_min) on every #Tex the
- * struct holds. Required when the owner is not an ID whose `foreach_id` pass already walked those
- * pointers — notably #PaintMaterialBrushPreset on remove/purge. Must stay false for
- * #brush_free_data / #scene_free (foreach_id already ran) and for copies made with
+ * \param do_user_refcount: When true, drop a counted reference (#id_us_min) on every #Tex and
+ * source material the struct holds. Required when the owner is not an ID whose `foreach_id` pass
+ * already walked those pointers — notably #PaintMaterialBrushPreset on remove/purge. Must stay
+ * false for #brush_free_data / #scene_free (foreach_id already ran) and for copies made with
  * #LIB_ID_CREATE_NO_USER_REFCOUNT, or user counts double-decrement.
  */
 void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
@@ -177,8 +178,8 @@ void BKE_brush_material_paint_free(BrushMaterialPaint *material_paint,
 
 /**
  * Overwrites \a dst's channels/base_color/flags/shared_source_mapping from \a src,
- * adjusting #Tex user counts for every reference gained or dropped. \a dst == \a src
- * (self-assignment) is a defined no-op.
+ * adjusting #Tex and source-material user counts for every reference gained or dropped. \a dst ==
+ * \a src (self-assignment) is a defined no-op.
  */
 void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMaterialPaint &src);
 
@@ -186,7 +187,7 @@ void BKE_brush_material_paint_copy_into(BrushMaterialPaint &dst, const BrushMate
  * Clear dangling PBR Paint ID pointers that survived an undo step.
  *
  * Brushes are `no undo` IDs, so they cross undo boundaries intact. The IDs they reference
- * (channel textures, the shared source mapping texture, and the source material) are regular
+ * (channel textures, the shared source mapping texture, and both source materials) are regular
  * data-blocks that an undo step may remove. Read-time remapping
  * (#read_undo_remap_noundo_data) normally clears such pointers; this is the backstop that keeps a
  * missed one from being dereferenced later, and it never touches user counts (the ID is gone,

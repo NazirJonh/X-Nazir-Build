@@ -4314,6 +4314,18 @@ Span<eMaterialPaintChannel> BKE_paint_material_channel_preview_order()
   return Span<eMaterialPaintChannel>(priority, ARRAY_SIZE(priority));
 }
 
+bool BKE_paint_material_source_is_layer(const BrushMaterialPaint &brush_paint)
+{
+  return brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL &&
+         brush_paint.material_source_kind == BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER;
+}
+
+Material *BKE_paint_material_source_get(const BrushMaterialPaint &brush_paint)
+{
+  return BKE_paint_material_source_is_layer(brush_paint) ? brush_paint.source_layer_owner :
+                                                           brush_paint.source_material;
+}
+
 bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
                                          const PaintModeSettings &mode_settings,
                                          const int visible_material_channels,

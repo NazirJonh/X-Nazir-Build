@@ -697,32 +697,6 @@ bool BKE_paint_layers_bake_set_map(Material &ma,
                                    int channel,
                                    Image *image);
 
-/**
- * Composite \a layer's subtree for \a channel the way a bake of it would: the isolated-group model
- * -- the straight colour, the content alpha in its fourth component and the coverage it lays by --
- * into \a size x \a size buffers. The planner and the generator's substitution read this one
- * function's result, so a baked map means one thing. Source maps are composited at their own
- * resolution and nearest-sampled to \a size.
- *
- * \param dst_rect: (x0, y0, x1, y1) in result pixels; when given only that rectangle is computed
- * and written, which is how a partial re-bake touches one changed tile.
- * \return false when the row has nothing to render in \a channel.
- */
-bool BKE_paint_layers_bake_render_node(const Material &ma,
-                                       const MaterialPaintLayer &layer,
-                                       int channel,
-                                       int size,
-                                       float *r_color_rgba,
-                                       float *r_coverage_gray,
-                                       const int *dst_rect = nullptr);
-
-/** The pixel dimensions of \a layer's content in \a channel, the size a bake defaults to. */
-bool BKE_paint_layers_row_dimensions(const Material &ma,
-                                     const MaterialPaintLayer &layer,
-                                     int channel,
-                                     int &r_width,
-                                     int &r_height);
-
 /** \} */
 
 

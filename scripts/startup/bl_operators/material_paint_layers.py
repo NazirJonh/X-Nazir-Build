@@ -678,6 +678,68 @@ class MATERIAL_OT_paint_layers_output_render(Operator):
         return {'FINISHED'} if written else {'CANCELLED'}
 
 
+# Brush Layer source ##########################################################
+
+# The rows offered by the open search popup. Kept at module level because the enum items callback
+# has to return strings that stay alive, and the popup is built after #invoke has returned.
+_brush_source_row_cache = []
+# (name, library path) of the brush whose Layer source row the open popup assigns.
+_brush_source_row_target = None
+
+
+def _brush_source_row_items(_self, _context):
+    return _brush_source_row_cache
+
+
+def _brush_source_row_collect(rows, depth, items):
+    for row in rows:
+        items.append((row.marker, "{}{}".format("    " * depth, row.name), ""))
+        _brush_source_row_collect(row.children, depth + 1, items)
+
+
+class PAINT_OT_brush_layer_source_row_search(Operator):
+    """Pick the stack row a PBR Paint brush reads, by searching the Layer material's rows"""
+    bl_idname = "paint.brush_layer_source_row_search"
+    bl_label = "Select Layer Row"
+    bl_options = {'INTERNAL'}
+    bl_property = "row"
+
+    row: bpy.props.EnumProperty(name="Row", items=_brush_source_row_items)
+
+    def execute(self, _context):
+        # The popup runs outside the button that opened it, so the layout's context pointer is
+        # gone by now: the brush picked at #invoke is looked up again from its identity.
+        brush = bpy.data.brushes.get(_brush_source_row_target) if _brush_source_row_target else None
+        if brush is None or brush.material_paint is None or not self.row:
+            return {'CANCELLED'}
+        brush.material_paint.source_layer_marker = self.row
+        return {'FINISHED'}
+
+    def invoke(self, context, _event):
+        global _brush_source_row_target
+        brush_paint = getattr(context, "brush_material_paint", None)
+        if brush_paint is None:
+            return {'CANCELLED'}
+        brush = brush_paint.id_data
+        _brush_source_row_target = (brush.name, brush.library.filepath if brush.library else None)
+        owner = brush_paint.source_layer_owner
+        _brush_source_row_cache.clear()
+        if owner is not None and owner.is_layered:
+            _brush_source_row_collect(owner.paint_layers, 0, _brush_source_row_cache)
+        context.window_manager.invoke_search_popup(self)
+        return {'CANCELLED'}
+
+
+class PAINT_IDF_layer_material(bpy.types.IDFilter):
+    """Offer only layered materials in the ID browser of a brush's Layer source"""
+
+    bl_idname = "PAINT_IDF_layer_material"
+
+    @classmethod
+    def filter_id(cls, _context, id):
+        return getattr(id, "is_layered", False)
+
+
 def register():
     bpy.types.Material.paint_layers_output = bpy.props.PointerProperty(type=MaterialPaintLayersOutput)
 
@@ -699,4 +761,6 @@ classes = (
     MATERIAL_OT_paint_layer_id_color_remove,
     MATERIAL_OT_paint_layer_object_mask_toggle,
     MATERIAL_OT_paint_layer_object_mask_refresh_tiles,
+    PAINT_OT_brush_layer_source_row_search,
+    PAINT_IDF_layer_material,
 )

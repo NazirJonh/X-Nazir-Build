@@ -2074,6 +2074,22 @@ static void id_browser_popover_draw(const bContext *C, Panel *panel)
    * editor. */
   PointerRNA wm_ptr = RNA_id_pointer_create(&wm->id);
 
+  /* The Layer source picker of a PBR Paint brush opens on the current file's data-blocks: an
+   * unimported asset has no stack to tell a layered material from a plain one, so the asset
+   * source cannot honor that filter. Only on the first build of the popover's block, so the user
+   * can still switch to an asset library afterwards. The file is deliberately not tagged modified:
+   * this runs while drawing, and merely opening the picker must not make the file dirty. */
+  if (panel->layout->block()->oldblock == nullptr &&
+      wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY &&
+      id_browser_target_idcode(C) == ID_MA)
+  {
+    const std::optional<StringRefNull> layer_filter_idname = CTX_data_string_get(
+        C, "id_browser_filter_type");
+    if (layer_filter_idname && *layer_filter_idname == "PAINT_IDF_layer_material") {
+      wm->id_browser_source = ID_BROWSER_SOURCE_BLEND_DATA;
+    }
+  }
+
   /* Resolved here already because the catalog-tree width below needs it. It only reads
    * #wmWindowManager::id_browser_source, so every later use stays valid. */
   const bool asset_source = wm->id_browser_source == ID_BROWSER_SOURCE_ASSET_LIBRARY;

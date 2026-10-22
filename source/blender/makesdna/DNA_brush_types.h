@@ -16,6 +16,7 @@
 #include "DNA_object_enums.h"
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h" /* for MTex */
+#include "DNA_uuid_types.h"    /* for bUUID */
 
 namespace blender {
 
@@ -227,6 +228,34 @@ enum eBrushMaterialPaintSourceLayout : int8_t {
 };
 
 /**
+ * Which material a #BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL brush reads from.
+ * The two choices keep their own owner pointer, so switching back and forth does not lose
+ * either selection.
+ */
+enum eBrushMaterialPaintMaterialSourceKind : int8_t {
+  /** #BrushMaterialPaint.source_material, the whole material. */
+  BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_DEFAULT = 0,
+  /** #BrushMaterialPaint.source_layer_owner, optionally narrowed to one stack row. */
+  BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER = 1,
+};
+
+/** How much of a layered material a Layer brush source bakes. */
+enum eBrushMaterialPaintLayerSourceScope : int8_t {
+  /** The isolated result of #BrushMaterialPaint.source_layer_marker's row. */
+  BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW = 0,
+  /** The layered material's complete stack output; the marker is ignored. */
+  BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_FULL = 1,
+};
+
+/** When a Layer brush source picks up edits made to its material or row. */
+enum eBrushMaterialPaintSourceRefreshMode : int8_t {
+  /** Re-bake automatically, after #BrushMaterialPaint.source_refresh_delay. */
+  BRUSH_MATERIAL_PAINT_SOURCE_REFRESH_AUTO = 0,
+  /** Keep the current bake until the user runs Update Now. */
+  BRUSH_MATERIAL_PAINT_SOURCE_REFRESH_MANUAL = 1,
+};
+
+/**
  * Stroke parameter preset applied by an Erase brush (#BrushMaterialPaint.erase_mode), mirroring
  * the stock texture paint Erase brushes. The mode is a one-shot preset (falloff, antialiasing):
  * not a runtime branch, so user tweaks made afterwards are kept.
@@ -334,6 +363,29 @@ struct BrushMaterialPaint {
   int source_bake_size = 1024;
   /** Channel source when #source_mode is #BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL. */
   struct Material *source_material = nullptr;
+  /** #eBrushMaterialPaintMaterialSourceKind. Only read in Material source mode. */
+  char material_source_kind = 0;
+  /** #eBrushMaterialPaintLayerSourceScope. Only read for the Layer kind. */
+  char layer_source_scope = 0;
+  /** #eBrushMaterialPaintSourceRefreshMode. Only read for the Layer kind. */
+  char source_refresh_mode = 0;
+  char _pad_layer_source = 0;
+  /**
+   * Seconds an automatic refresh waits after the last edit, so a burst of edits bakes once.
+   * Zero refreshes immediately.
+   */
+  float source_refresh_delay = 0.5f;
+  /**
+   * Layered material the Layer kind reads from. Separate from #source_material so the Default
+   * and Layer selections survive switching between them, and it may be a different material
+   * than the one being painted (the canvas material).
+   */
+  struct Material *source_layer_owner = nullptr;
+  /**
+   * Marker of the stack row isolated by #BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW. Nil in
+   * Full scope; a marker that no longer resolves makes the source stale.
+   */
+  bUUID source_layer_marker = {};
 };
 
 /** Max number of propagation steps for automasking settings. */

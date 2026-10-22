@@ -385,7 +385,11 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
   /* NOTE: deliberately no early return on pinned RNA_Material -- see D9. */
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
-  if (!brush || !brush->material_paint || !brush->material_paint->source_material) {
+  if (!brush || !brush->material_paint) {
+    return false;
+  }
+  Material *source = BKE_paint_material_source_get(*brush->material_paint);
+  if (source == nullptr) {
     return false;
   }
 
@@ -395,7 +399,7 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
   const Main *bmain = CTX_data_main(C);
   bool source_in_main = false;
   for (const Material &ma : bmain->materials) {
-    if (&ma == brush->material_paint->source_material) {
+    if (&ma == source) {
       source_in_main = true;
       break;
     }
@@ -406,7 +410,7 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
 
   path->ptr[path->len] = RNA_id_pointer_create(&brush->id);
   path->len++;
-  path->ptr[path->len] = RNA_id_pointer_create(&brush->material_paint->source_material->id);
+  path->ptr[path->len] = RNA_id_pointer_create(&source->id);
   path->len++;
   return true;
 }

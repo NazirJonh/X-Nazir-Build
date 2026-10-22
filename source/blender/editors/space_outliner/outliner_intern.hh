@@ -1023,6 +1023,7 @@ void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_copy(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_paste(wmOperatorType *ot);

@@ -1524,6 +1524,19 @@ bool BKE_paint_material_preview_mtex_get(const BrushMaterialPaint &brush_paint,
                                          MTex &r_mtex);
 
 /**
+ * True when Source Mode: Material reads a layered material's stack (the Layer kind) rather than a
+ * whole material. Every caller that picks between the two goes through this, so the condition has
+ * one definition.
+ */
+bool BKE_paint_material_source_is_layer(const BrushMaterialPaint &brush_paint);
+
+/**
+ * The material Source Mode: Material reads from: the layered owner for the Layer kind (which never
+ * sets `source_material`), the source material otherwise. Null when none is set.
+ */
+Material *BKE_paint_material_source_get(const BrushMaterialPaint &brush_paint);
+
+/**
  * Mask-mode counterpart of #BKE_paint_material_preview_mtex_get: fills \a r_mtex with the source of
  * \a channel, the one a Mask stroke reads (`mask_source_channel_get`), ignoring the channel enable
  * and visibility gates an ordinary PBR stroke uses. Previewing what the enabled channels happen to

@@ -99,11 +99,13 @@ static void shader_get_from_context(const bContext *C,
   else if (snode->shaderfrom == SNODE_SHADER_BRUSH) {
     Paint *paint = BKE_paint_get_active_from_context(C);
     Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
-    if (brush && brush->material_paint && brush->material_paint->source_material) {
-      Material *ma = brush->material_paint->source_material;
-      *r_from = &brush->id;
-      *r_id = &ma->id;
-      *r_ntree = ma->nodetree;
+    if (brush && brush->material_paint) {
+      Material *ma = BKE_paint_material_source_get(*brush->material_paint);
+      if (ma != nullptr) {
+        *r_from = &brush->id;
+        *r_id = &ma->id;
+        *r_ntree = ma->nodetree;
+      }
     }
   }
   else if (snode->shaderfrom == SNODE_SHADER_PAINT_LAYER) {

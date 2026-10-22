@@ -2028,6 +2028,11 @@ enum eWM_JobType {
    * while the planner's bake runs would otherwise replace its callbacks.
    */
   WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT,
+  /**
+   * A PBR Paint brush's Layer source baking a stack row's isolated content. Keyed on the brush,
+   * separate from the paint-layer planner whose jobs are keyed on the material.
+   */
+  WM_JOB_TYPE_BRUSH_LAYER_SOURCE,
   /* Add as needed, bake, seq proxy build
    * if having hard coded values is a problem. */
 };

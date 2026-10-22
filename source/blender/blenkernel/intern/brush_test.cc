@@ -235,6 +235,16 @@ TEST_F(BrushStaleIDsTest, source_material_present_in_main_is_kept)
   EXPECT_EQ(brush->material_paint->source_material, ma);
 }
 
+TEST_F(BrushStaleIDsTest, source_layer_owner_missing_from_main_is_cleared)
+{
+  Brush *brush = brush_with_material_paint_add();
+  brush->material_paint->source_layer_owner = static_cast<Material *>(
+      BKE_id_new(other_bmain, ID_MA, "UnitTestLayerMaterial"));
+
+  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 1);
+  EXPECT_EQ(brush->material_paint->source_layer_owner, nullptr);
+}
+
 TEST_F(BrushStaleIDsTest, channel_texture_missing_from_main_is_cleared)
 {
   Brush *brush = brush_with_material_paint_add();
@@ -260,12 +270,14 @@ TEST_F(BrushStaleIDsTest, every_stale_reference_is_counted)
   Brush *brush = brush_with_material_paint_add();
   brush->material_paint->source_material = static_cast<Material *>(
       BKE_id_new(other_bmain, ID_MA, "UnitTestMaterial"));
+  brush->material_paint->source_layer_owner = static_cast<Material *>(
+      BKE_id_new(other_bmain, ID_MA, "UnitTestLayerMaterial"));
   brush->material_paint->channels[0].source_mtex.tex = static_cast<Tex *>(
       BKE_id_new(other_bmain, ID_TE, "UnitTestTextureA"));
   brush->material_paint->shared_source_mapping.tex = static_cast<Tex *>(
       BKE_id_new(other_bmain, ID_TE, "UnitTestTextureB"));
 
-  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 3);
+  EXPECT_EQ(BKE_brush_material_paint_stale_ids_clear(*bmain), 4);
 }
 
 /** \} */
@@ -308,6 +320,22 @@ TEST_F(BrushSourceMaterialLocalTest, source_material_is_remapped)
   /* The whole point: the remap has to reach a field inside the separately allocated
    * #BrushMaterialPaint, which it can only do through `brush_foreach_id()`. */
   EXPECT_EQ(brush->material_paint->source_material, ma_new);
+}
+
+TEST_F(BrushSourceMaterialLocalTest, source_layer_owner_is_remapped)
+{
+  Brush *brush = BKE_brush_add(bmain, "UnitTestBrush", OB_MODE_SCULPT);
+  id_us_min(&brush->id);
+  BKE_brush_material_paint_ensure(brush);
+
+  Material *ma_old = BKE_id_new<Material>(bmain, "UnitTestLayerOld");
+  Material *ma_new = BKE_id_new<Material>(bmain, "UnitTestLayerNew");
+  brush->material_paint->source_layer_owner = ma_old;
+  id_us_plus(&ma_old->id);
+
+  BKE_libblock_remap(bmain, ma_old, ma_new, ID_REMAP_SKIP_USER_CLEAR);
+
+  EXPECT_EQ(brush->material_paint->source_layer_owner, ma_new);
 }
 
 TEST_F(BrushSourceMaterialLocalTest, source_material_is_cleared_on_remap_to_null)

@@ -98,6 +98,7 @@
 #include "ED_keyframing.hh"
 #include "ED_node.hh"
 #include "ED_paint.hh"
+#include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
@@ -654,6 +655,7 @@ void WM_exit_ex(bContext *C, const bool do_python_exit, const bool do_user_exit_
 
   /* Owns ImBufs of its own, so it has to be dropped before the leak check at exit. */
   ed::material_bake::material_source_bake_invalidate(nullptr);
+  ed::brush_layer_source::brush_layer_source_bake_invalidate(nullptr);
   BKE_paint_material_composite_cache_free_all();
   BKE_paint_material_combined_cache_free_all();
   ED_preview_free_dbase(); /* Frees a Main dbase, before #BKE_blender_free! */

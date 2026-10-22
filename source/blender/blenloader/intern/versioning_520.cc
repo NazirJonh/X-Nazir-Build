@@ -1129,6 +1129,34 @@ static void version_material_paint_scale_lock_defaults(Main &bmain)
   }
 }
 
+/* The Layer source fields are new and read back zero-filled in older files. Every enum and the
+ * pointer are correct at zero (Default kind, Row scope, Auto refresh, no owner), so only the
+ * refresh delay's DNA default (0.5 s) needs restoring: zero would mean "immediate" and the user
+ * never chose that. */
+static void version_material_paint_layer_source_defaults_one(BrushMaterialPaint *material_paint)
+{
+  if (material_paint != nullptr) {
+    material_paint->source_refresh_delay = 0.5f;
+  }
+}
+
+static void version_material_paint_layer_source_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    version_material_paint_layer_source_defaults_one(brush.material_paint);
+  }
+  for (Scene &scene : bmain.scenes) {
+    if (scene.toolsettings == nullptr) {
+      continue;
+    }
+    for (PaintMaterialBrushPreset &preset :
+         scene.toolsettings->paint_mode.material_paint_brush_presets)
+    {
+      version_material_paint_layer_source_defaults_one(preset.material_paint);
+    }
+  }
+}
+
 static void version_solid_color_width_height_defaults(Main &bmain)
 {
   for (Scene &scene : bmain.scenes) {
@@ -2325,6 +2353,17 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
           fd->filesdna, "BrushMaterialPaint", "char", "shared_mapping_scale_lock"))
   {
     version_material_paint_scale_lock_defaults(*bmain);
+  }
+
+  /* The Layer brush source is new; see #version_material_paint_layer_source_defaults for why only
+   * the refresh delay needs restoring.
+   *
+   * NOTE: Keyed on the member existence instead of a file subversion so this fork-only change
+   * doesn't claim a subversion number that upstream will use for its own versioning. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "BrushMaterialPaint", "float", "source_refresh_delay"))
+  {
+    version_material_paint_layer_source_defaults(*bmain);
   }
 
   /**

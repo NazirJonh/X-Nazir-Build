@@ -55,6 +55,7 @@
 #include "SEQ_sequencer.hh"
 
 #include "ED_image.hh"
+#include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
 #include "ED_node.hh"
 #include "ED_node_preview.hh"
@@ -279,6 +280,8 @@ static void material_changed(Main *bmain, Material *ma)
   /* The Combined preview reads every channel of this material, so a node-tree edit can change it
    * in ways no input hash is asked about. */
   BKE_paint_material_combined_cache_invalidate(ma);
+  /* A Layer brush source reads this material directly or through a row; rebake it once edits stop. */
+  ed::brush_layer_source::brush_layer_source_notify_changed(*bmain, false);
 
   /* The renders an edit makes due -- a Material row's maps, a heavy row's bake -- are started once
    * the edits stop, not by the scene update of each one, so a burst (a slider held down, a node
@@ -400,6 +403,8 @@ static void image_changed(Main *bmain, Image *ima)
   /* A PBR Paint source-material bake reads image pixels through the shader graph, and nothing in
    * the node tree changes when those pixels do, so its cache cannot notice this on its own. */
   ed::material_bake::material_source_bake_tag_image_changed(*ima);
+  ed::brush_layer_source::brush_layer_source_tag_image_changed(*ima);
+  ed::brush_layer_source::brush_layer_source_notify_changed(*bmain, true);
 
   /* Neither the composite nor the Combined preview is told here, deliberately. Both subscribe to
    * the image's own partial-update log, which describes *what* changed; this notifier only knows

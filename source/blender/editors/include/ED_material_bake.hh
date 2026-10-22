@@ -146,6 +146,15 @@ void material_source_bake_tag_image_changed(const Image &image);
 bool material_source_bake_cache_contains(const Material &ma, int resolution);
 
 /**
+ * Whether the exact bake the current node trees call for is cached but marked stale because an
+ * image it sampled was edited. The pixels stay readable until a replacement lands.
+ */
+bool material_source_bake_is_stale(const Material &ma, int resolution);
+
+/** Whether a bake job for the current node-tree state and \a resolution is in flight. */
+bool material_source_bake_is_pending(const Material &ma, int resolution);
+
+/**
  * What to show for a brush in Source Mode: Material, where no channel has a #Tex to sample.
  *
  * A channel is either baked into a buffer covering UV [0, 1]^2, or a plain constant. #mtex carries

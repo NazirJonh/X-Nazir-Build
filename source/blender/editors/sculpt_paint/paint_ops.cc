@@ -81,6 +81,7 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_mark_clear.hh"
 #include "ED_asset_menu_utils.hh"
+#include "ED_brush_layer_source.hh"
 #include "ED_image.hh"
 #include "ED_paint.hh"
 #include "ED_paint_layers_bake.hh"
@@ -820,6 +821,125 @@ static wmOperatorStatus material_paint_source_material_set_exec(bContext *C, wmO
   ED_undo_push(C, "Assign Material to Brush");
 
   return OPERATOR_FINISHED;
+}
+
+/** "Use as Brush Source" from the Stack Outliner: a layered material and one of its rows. */
+static wmOperatorStatus brush_layer_source_assign_from_stack_exec(bContext *C, wmOperator *op)
+{
+  Main &bmain = *CTX_data_main(C);
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint != nullptr ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint brush");
+    return OPERATOR_CANCELLED;
+  }
+
+  Material *ma = id_cast<Material *>(
+      WM_operator_properties_id_lookup_from_name_or_session_uid(&bmain, op->ptr, ID_MA));
+  if (ma == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No material specified");
+    return OPERATOR_CANCELLED;
+  }
+  if (!BKE_paint_layers_is_layered(*ma)) {
+    BKE_report(op->reports, RPT_ERROR, "The material is not a layered material");
+    return OPERATOR_CANCELLED;
+  }
+  if (ID_IS_LINKED(&ma->id)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Linked material cannot be used as a brush source; append it first");
+    return OPERATOR_CANCELLED;
+  }
+
+  char marker_str[UUID_STRING_SIZE];
+  RNA_string_get(op->ptr, "marker", marker_str);
+  bUUID marker;
+  MaterialPaintLayer *source_row = nullptr;
+  if (BLI_uuid_parse_string(&marker, marker_str)) {
+    source_row = BKE_paint_layers_find(*ma, marker);
+  }
+  if (source_row == nullptr || BKE_paint_layers_owner_list(*ma, *source_row) == nullptr) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "The stack row no longer exists, or is a correction or mask item");
+    return OPERATOR_CANCELLED;
+  }
+
+  brush = material_paint_brush_ensure_local(C, paint, *brush, op->reports);
+  if (ID_IS_LINKED(&brush->id)) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Linked brush cannot reference a source material; make it local first");
+    return OPERATOR_CANCELLED;
+  }
+  BKE_brush_material_paint_ensure(brush);
+
+  PointerRNA mp_ptr = RNA_pointer_create_id_subdata(
+      brush->id, RNA_BrushMaterialPaint, brush->material_paint);
+  PropertyRNA *prop = RNA_struct_find_property(&mp_ptr, "source_mode");
+  RNA_property_enum_set(&mp_ptr, prop, BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL);
+  prop = RNA_struct_find_property(&mp_ptr, "material_source_kind");
+  RNA_property_enum_set(&mp_ptr, prop, BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER);
+  prop = RNA_struct_find_property(&mp_ptr, "layer_source_scope");
+  RNA_property_enum_set(&mp_ptr, prop, BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW);
+  /* The owner through RNA because it is #PROP_ID_REFCOUNT; its update also drops a marker that
+   * does not resolve in this stack. The marker goes in afterwards, so it survives. */
+  prop = RNA_struct_find_property(&mp_ptr, "source_layer_owner");
+  RNA_property_pointer_set(&mp_ptr, prop, RNA_id_pointer_create(&ma->id), nullptr);
+  RNA_property_update(C, &mp_ptr, prop);
+  prop = RNA_struct_find_property(&mp_ptr, "source_layer_marker");
+  RNA_property_string_set(&mp_ptr, prop, marker_str);
+  RNA_property_update(C, &mp_ptr, prop);
+
+  material_paint_source_changed(C, paint, brush);
+  ED_undo_push(C, "Use as Brush Source");
+  return OPERATOR_FINISHED;
+}
+
+static bool brush_layer_source_assign_from_stack_poll(bContext *C)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint != nullptr && BKE_paint_brush(paint) != nullptr;
+}
+
+/** Update Now for a Layer source: start the current bake without waiting out the debounce. */
+static wmOperatorStatus brush_layer_source_update_exec(bContext *C, wmOperator *op)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint != nullptr ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active material paint brush");
+    return OPERATOR_CANCELLED;
+  }
+  BrushMaterialPaint &brush_paint = *brush->material_paint;
+  if (!BKE_paint_material_source_is_layer(brush_paint) || brush_paint.source_layer_owner == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No Layer material source is selected");
+    return OPERATOR_CANCELLED;
+  }
+  if (brush_paint.layer_source_scope == BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW) {
+    MaterialPaintLayer *row = BLI_uuid_is_nil(brush_paint.source_layer_marker) ?
+                                   nullptr :
+                                   BKE_paint_layers_find(*brush_paint.source_layer_owner,
+                                                         brush_paint.source_layer_marker);
+    if (row == nullptr ||
+        BKE_paint_layers_owner_list(*brush_paint.source_layer_owner, *row) == nullptr)
+    {
+      BKE_report(op->reports, RPT_ERROR, "No stack row is selected as the source");
+      return OPERATOR_CANCELLED;
+    }
+  }
+
+  ed::brush_layer_source::brush_layer_source_bake_update_now(*CTX_data_main(C), *brush);
+  WM_event_add_notifier(C, NC_BRUSH | NA_EDITED, brush);
+  return OPERATOR_FINISHED;
+}
+
+static bool brush_layer_source_update_poll(bContext *C)
+{
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint != nullptr ? BKE_paint_brush(paint) : nullptr;
+  return brush != nullptr && brush->material_paint != nullptr &&
+         BKE_paint_material_source_is_layer(*brush->material_paint);
 }
 
 /** Invert one stack layer's channel constant, addressed by the layer's UUID marker. */
@@ -2772,6 +2892,37 @@ void PAINT_OT_material_paint_source_material_set(wmOperatorType *ot)
   WM_operator_properties_id_lookup(ot, true);
 }
 
+void PAINT_OT_brush_layer_source_assign_from_stack(wmOperatorType *ot)
+{
+  ot->name = "Use as Brush Source";
+  ot->idname = "PAINT_OT_brush_layer_source_assign_from_stack";
+  ot->description =
+      "Use a layered material's stack row as the active PBR Paint brush's Layer source";
+  ot->exec = brush_layer_source_assign_from_stack_exec;
+  ot->poll = brush_layer_source_assign_from_stack_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_INTERNAL;
+
+  WM_operator_properties_id_lookup(ot, true);
+  RNA_def_string(ot->srna,
+                 "marker",
+                 nullptr,
+                 0,
+                 "Marker",
+                 "Marker of the stack row to use as the source");
+}
+
+void PAINT_OT_brush_layer_source_update(wmOperatorType *ot)
+{
+  ot->name = "Update Brush Layer Source";
+  ot->idname = "PAINT_OT_brush_layer_source_update";
+  ot->description =
+      "Bake the Layer source now instead of waiting for the automatic refresh, or when the "
+      "source is set to Manual";
+  ot->exec = brush_layer_source_update_exec;
+  ot->poll = brush_layer_source_update_poll;
+  ot->flag = OPTYPE_REGISTER;
+}
+
 void PAINT_OT_material_paint_brush_ensure(wmOperatorType *ot)
 {
   ot->name = "Enable Material Paint Channels for Brush";
@@ -3423,6 +3574,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_mask_brush_reset);
   WM_operatortype_append(PAINT_OT_material_paint_source_mode_set);
   WM_operatortype_append(PAINT_OT_material_paint_source_material_set);
+  WM_operatortype_append(PAINT_OT_brush_layer_source_assign_from_stack);
+  WM_operatortype_append(PAINT_OT_brush_layer_source_update);
   WM_operatortype_append(PAINT_OT_material_paint_images_ensure);
   WM_operatortype_append(PAINT_OT_material_paint_brush_sync);
   WM_operatortype_append(PAINT_OT_material_channel_value_invert);

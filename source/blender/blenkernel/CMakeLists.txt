@@ -72,6 +72,7 @@ set(SRC
   intern/boids.cc
   intern/bpath.cc
   intern/brush.cc
+  intern/brush_layer_source.cc
   intern/bvhutils.cc
   intern/cachefile.cc
   intern/callbacks.cc
@@ -858,6 +859,7 @@ if(WITH_GTESTS)
     intern/multires_group_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
+    intern/paint_layers/tests/brush_layer_source_test.cc
     intern/paint_layers/tests/paint_layers_bake_test.cc
     intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc

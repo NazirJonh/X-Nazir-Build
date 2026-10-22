@@ -40,6 +40,7 @@
 #include "ED_asset.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_image.hh"
+#include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
 #include "ED_mesh.hh"
 #include "ED_object.hh"
@@ -250,6 +251,7 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
    * cached bakes. Dropping them per undo step would force a full EEVEE re-render on every Ctrl+Z. */
   if (do_undo_system) {
     material_bake::material_source_bake_invalidate(nullptr);
+    brush_layer_source::brush_layer_source_bake_invalidate(nullptr);
     /* Same reasoning for the composite cache, which owns #ImBuf buffers of its own and is keyed
      * on session UIDs the same way. */
     BKE_paint_material_composite_cache_free_all();

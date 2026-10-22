@@ -24,8 +24,14 @@
 #include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
+#include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_report.hh"
+
+#include "DNA_material_types.h"
 
 #include "BLI_string.h"
+#include "BLI_uuid.h"
 
 #include "ED_screen.hh"
 
@@ -202,6 +208,80 @@ void OUTLINER_OT_stack_row_action(wmOperatorType *ot)
   /* No undo: the action is UI state, not data. */
   ot->flag = OPTYPE_INTERNAL;
   RNA_def_int(ot->srna, "ordinal", -1, -1, SHRT_MAX, "Ordinal", "", -1, SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+/**
+ * "Use as Brush Source": hand the row under the menu to the paint operator that owns brush
+ * selection. The outliner knows the material and the row's stable marker; it does not touch the
+ * brush itself.
+ */
+static wmOperatorStatus stack_row_use_as_brush_source_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
+  if (owner == nullptr || row == nullptr || BLI_uuid_is_nil(row->stable_id)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (GS(owner->name) != ID_MA) {
+    BKE_report(op->reports, RPT_ERROR, "The stack row is not part of a material");
+    return OPERATOR_CANCELLED;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("PAINT_OT_brush_layer_source_assign_from_stack",
+                                            false);
+  if (ot == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  PointerRNA props = WM_operator_properties_create_ptr(ot);
+  WM_operator_properties_id_lookup_set_from_id(&props, owner);
+  char marker_str[UUID_STRING_SIZE];
+  BLI_uuid_format(marker_str, row->stable_id);
+  RNA_string_set(&props, "marker", marker_str);
+  const wmOperatorStatus ret = WM_operator_name_call_ptr(
+      C, ot, wm::OpCallContext::ExecDefault, &props, nullptr);
+  WM_operator_properties_free(&props);
+  return ret;
+}
+
+static bool stack_row_use_as_brush_source_poll(bContext *C)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr || GS(owner->name) != ID_MA ||
+      !BKE_paint_layers_is_layered(*reinterpret_cast<Material *>(owner)))
+  {
+    return false;
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint != nullptr && BKE_paint_brush(paint) != nullptr;
+}
+
+void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot)
+{
+  ot->name = "Use as Brush Source";
+  ot->idname = "OUTLINER_OT_stack_layer_use_as_brush_source";
+  ot->description =
+      "Use the stack row as the active PBR Paint brush's Layer source";
+  ot->exec = stack_row_use_as_brush_source_exec;
+  ot->poll = stack_row_use_as_brush_source_poll;
+  /* No undo of its own: the paint operator owns the brush/preset change and its undo push. */
+  ot->flag = OPTYPE_INTERNAL;
+
+  rna_def_stack_row_ordinal(ot, "Row to use as the source; -1 uses the active one");
   rna_def_stack_row_marker(ot);
 }
 

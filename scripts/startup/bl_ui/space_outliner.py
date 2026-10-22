@@ -136,6 +136,17 @@ def _draw_stack_layer_effect_entries(layout):
     ).type = 'MASK_CORRECTION_FILL'
 
 
+class OUTLINER_MT_stack_layer_advanced(Menu):
+    bl_label = "Advanced"
+
+    def draw(self, _context):
+        self.layout.operator(
+            "outliner.stack_layer_use_as_brush_source",
+            text="Use as Brush Source",
+            icon='BRUSH_DATA',
+        )
+
+
 class OUTLINER_MT_stack_layer_effect_add(Menu):
     bl_label = "Add Correction"
 
@@ -290,6 +301,8 @@ class OUTLINER_MT_context_menu(Menu):
                     space.stack_source == 'PAINT_MATERIAL'):
                 layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
                 layout.menu("OUTLINER_MT_stack_layer_effect_add", icon='SHADERFX')
+                if bpy.ops.outliner.stack_layer_use_as_brush_source.poll():
+                    layout.menu("OUTLINER_MT_stack_layer_advanced")
                 # Switching the mask off and taking it away act on the mask being worked on: the
                 # toggle's poll answers whether the row's mask slot is the one showing.
                 if bpy.ops.outliner.stack_layer_mask_toggle.poll():
@@ -806,6 +819,7 @@ classes = (
     OUTLINER_HT_tool_header,
     OUTLINER_MT_stack_layer_mask_add,
     OUTLINER_MT_stack_layer_effect_add,
+    OUTLINER_MT_stack_layer_advanced,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,
     OUTLINER_MT_collection,

@@ -281,9 +281,12 @@ static void brush_foreach_id(ID *id, LibraryForeachIDData *data)
           data,
           BKE_texture_mtex_foreach_id(data, &brush->material_paint->channels[i].source_mtex));
     }
-    /* The source material is an ID reference like any channel texture: without this the user count
-     * is never updated and remapping, library overrides and unused-data purging all miss it. */
+    /* The source materials are ID references like any channel texture: without this the user
+     * count is never updated and remapping, library overrides and unused-data purging all miss
+     * them. */
     BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, brush->material_paint->source_material, IDWALK_CB_USER);
+    BKE_LIB_FOREACHID_PROCESS_IDSUPER(
+        data, brush->material_paint->source_layer_owner, IDWALK_CB_USER);
   }
 }
 
@@ -1196,8 +1199,8 @@ static void material_paint_mtex_tex_user_adjust(MTex &mtex, const int delta)
 }
 
 /** Adjusts the user count of every ID embedded in \a material_paint: each channel's
- *  #BrushMaterialPaintChannel.source_mtex, #BrushMaterialPaint.shared_source_mapping and
- *  #BrushMaterialPaint.source_material. */
+ *  #BrushMaterialPaintChannel.source_mtex, #BrushMaterialPaint.shared_source_mapping and both
+ *  source material owners. */
 static void material_paint_all_id_user_adjust(BrushMaterialPaint &material_paint, const int delta)
 {
   for (BrushMaterialPaintChannel &channel : material_paint.channels) {
@@ -1209,14 +1212,19 @@ static void material_paint_all_id_user_adjust(BrushMaterialPaint &material_paint
    * costs nothing when the invariant does hold. */
   material_paint_mtex_tex_user_adjust(material_paint.shared_source_mapping, delta);
 
-  if (material_paint.source_material != nullptr) {
+  auto adjust_material = [delta](Material *&material) {
+    if (material == nullptr) {
+      return;
+    }
     if (delta == 1) {
-      id_us_plus(&material_paint.source_material->id);
+      id_us_plus(&material->id);
     }
     else {
-      id_us_min(&material_paint.source_material->id);
+      id_us_min(&material->id);
     }
-  }
+  };
+  adjust_material(material_paint.source_material);
+  adjust_material(material_paint.source_layer_owner);
 }
 
 BrushMaterialPaint *BKE_brush_material_paint_copy(const BrushMaterialPaint &src, const int flag)
@@ -1296,6 +1304,7 @@ int BKE_brush_material_paint_stale_ids_clear(Main &bmain)
     /* Same class of risk as #Tex: a regular data-block an undo step can remove while the brush
      * carries the raw pointer across the boundary. */
     clear_stale_material(brush.material_paint->source_material);
+    clear_stale_material(brush.material_paint->source_layer_owner);
   }
   return cleared;
 }

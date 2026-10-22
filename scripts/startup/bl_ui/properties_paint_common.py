@@ -2699,17 +2699,65 @@ def draw_material_paint_channels(
             col.label(text="Linked brush cannot use a source material", icon='ERROR')
         sub = col.column()
         sub.enabled = not brush_is_linked
-        # Same control as the per-channel image slots (see #_draw_material_paint_source_texture):
-        # passing text gives the paint-slot layout, a labelled drop button while empty and a
-        # preview row once assigned. Browse and Unlink come with the template.
-        sub.template_ID_browser(
-            material_paint,
-            "source_material",
-            text=iface_("Drop material"),
-            # The user count is not actionable here; the row is a paint source picker, not a
-            # data-block manager.
-            use_users=False,
-        )
+        sub.prop(material_paint, "material_source_kind", expand=True)
+        if material_paint.material_source_kind == 'DEFAULT':
+            # Same control as the per-channel image slots (see #_draw_material_paint_source_texture):
+            # passing text gives the paint-slot layout, a labelled drop button while empty and a
+            # preview row once assigned. Browse and Unlink come with the template.
+            sub.template_ID_browser(
+                material_paint,
+                "source_material",
+                text=iface_("Drop material"),
+                # The user count is not actionable here; the row is a paint source picker, not a
+                # data-block manager.
+                use_users=False,
+            )
+        else:
+            sub.template_ID_browser(
+                material_paint,
+                "source_layer_owner",
+                text=iface_("Drop layer material"),
+                filter_type="PAINT_IDF_layer_material",
+                use_users=False,
+            )
+            layer_owner = material_paint.source_layer_owner
+            if layer_owner is None:
+                sub.label(text="Pick a layered material", icon='INFO')
+            elif not layer_owner.is_layered:
+                # The picker filters these out; this covers a file saved with an owner that has
+                # since lost its stack.
+                sub.label(text="Layer Material must be a layered material", icon='ERROR')
+            else:
+                sub.prop(material_paint, "layer_source_scope", expand=True)
+                if material_paint.layer_source_scope == 'ROW':
+                    row_item = layer_owner.paint_layers.find(material_paint.source_layer_marker) \
+                        if material_paint.source_layer_marker else None
+                    sub.context_pointer_set("brush_material_paint", material_paint)
+                    sub.operator(
+                        "paint.brush_layer_source_row_search",
+                        text=row_item.name if row_item is not None else iface_("Select Layer Row"),
+                        icon='VIEWZOOM',
+                    )
+                sub.prop(material_paint, "source_refresh_mode")
+                if material_paint.source_refresh_mode == 'AUTO':
+                    sub.prop(material_paint, "source_refresh_delay")
+                stale = material_paint.source_is_stale
+                baking = material_paint.source_is_baking
+                status = sub.row(align=True)
+                if baking:
+                    status.label(text="Updating source...", icon='TIME')
+                elif stale:
+                    status.label(text="Source changed", icon='ERROR')
+                else:
+                    status.label(text="Source up to date", icon='CHECKMARK')
+                if material_paint.source_refresh_mode == 'MANUAL':
+                    row = sub.row(align=True)
+                    row.enabled = stale and not baking
+                    row.operator(
+                        "paint.brush_layer_source_update",
+                        text="Update Now",
+                        icon='FILE_REFRESH',
+                    )
         sub.prop(material_paint, "source_layout")
         sub.prop(material_paint, "source_bake_size")
     if is_erase_brush:

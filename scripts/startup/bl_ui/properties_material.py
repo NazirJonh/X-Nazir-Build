@@ -1015,6 +1015,49 @@ def paint_layer_mask_objects(context, mat):
     )
 
 
+class LAYER_MATERIAL_PT_output_texture(LayerMaterialButtonsPanel, Panel):
+    """Where and how Render Output writes the final maps of the layered material."""
+
+    bl_idname = "LAYER_MATERIAL_PT_output_texture"
+    bl_label = "Output Texture"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if cls._object_mask_editing(context):
+            return False
+        return cls._owner_material(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        owner = self._owner_material(context)
+        if owner is None:
+            return
+        out = owner.paint_layers_output
+
+        layout.prop(out, "destination")
+        if out.destination == 'DISK':
+            layout.prop(out, "directory")
+        layout.prop(out, "file_format")
+        layout.prop(out, "color_depth")
+        layout.prop(out, "existing_mode")
+        layout.prop(out, "name_pattern")
+
+        layout.separator()
+        layout.context_pointer_set("material", owner)
+        # The render reads the composite of the stack, so it waits for the maps like the Bake panel.
+        col = layout.column()
+        col.enabled = not owner.paint_layers_is_stale
+        col.operator("material.paint_layers_output_render", icon='RENDER_RESULT')
+        if owner.paint_layers_is_stale:
+            row = layout.row(align=True)
+            row.label(text="Updating...", icon='TIME')
+            row.operator("material.paint_layers_bake_now", text="Update Now", icon='FILE_REFRESH')
+        if out.last_result:
+            layout.label(text=out.last_result, icon='INFO')
+
+
 class LAYER_MATERIAL_PT_object_mask(LayerMaterialButtonsPanel, Panel):
     """Which objects, or which UDIM tiles of each object, the active layer shows on. While it is
     edited it is the only panel of the Layered Material tab."""
@@ -1127,6 +1170,7 @@ classes = (
     LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_advanced,
     LAYER_MATERIAL_PT_active_channel,
+    LAYER_MATERIAL_PT_output_texture,
     LAYER_MATERIAL_PT_object_mask,
 )
 

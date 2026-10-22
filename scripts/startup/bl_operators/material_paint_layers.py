@@ -6,8 +6,10 @@
 move) live in the RNA and the Outliner; UI-only code lives in bl_ui. These operate on
 Material.paint_layers by marker."""
 
+import os
+
 import bpy
-from bpy.types import Operator
+from bpy.types import Operator, PropertyGroup
 
 
 def _context_material(context):
@@ -386,7 +388,307 @@ class MATERIAL_OT_paint_layer_object_mask_refresh_tiles(_PaintLayerOperator):
         return {'FINISHED'}
 
 
+# Output Texture ##############################################################
+
+# Python cannot read the C++ `is_color` flag of a channel, so the colour channels are mirrored from
+# the channel table in `BKE_paint_material_channel_info`; every other channel is data (Non-Color).
+_OUTPUT_COLOR_CHANNELS = {'BASE_COLOR', 'EMISSION'}
+
+_OUTPUT_EXTENSIONS = {'PNG': ".png", 'TIFF': ".tif", 'OPEN_EXR': ".exr"}
+
+
+def _output_clamp_color_depth(out):
+    """Keep a color depth the file format writes: OpenEXR is 16 or 32 bit, PNG and TIFF 8 or 16."""
+    allowed = ('16', '32') if out.file_format == 'OPEN_EXR' else ('8', '16')
+    if out.color_depth not in allowed:
+        out.color_depth = allowed[0]
+
+
+def _output_file_format_update(self, _context):
+    _output_clamp_color_depth(self)
+
+
+class MaterialPaintLayersOutput(PropertyGroup):
+    """Where and how Render Output writes the final maps of a layered material.
+
+    Stored as ID properties on the material, so it is saved in the .blend and copied with it.
+    """
+
+    destination: bpy.props.EnumProperty(
+        name="Destination",
+        items=(
+            ('DISK', "Disk", "Save the maps as files in the directory"),
+            ('PACKED', "Packed", "Pack the maps into the .blend file"),
+        ),
+        default='DISK',
+    )
+    directory: bpy.props.StringProperty(
+        name="Directory",
+        description="Folder for the saved maps; a relative path is taken from the .blend",
+        subtype='DIR_PATH',
+    )
+    file_format: bpy.props.EnumProperty(
+        name="File Format",
+        items=(
+            ('PNG', "PNG", "Save as PNG"),
+            ('TIFF', "TIFF", "Save as TIFF"),
+            ('OPEN_EXR', "OpenEXR", "Save as OpenEXR"),
+        ),
+        default='PNG',
+        update=_output_file_format_update,
+    )
+    color_depth: bpy.props.EnumProperty(
+        name="Color Depth",
+        description="Bits per channel; the values a format cannot write are reset",
+        items=(
+            ('8', "8", "8 bits per channel"),
+            ('16', "16", "16 bits per channel"),
+            ('32', "32", "32 bits per channel (OpenEXR only)"),
+        ),
+        default='8',
+        update=_output_file_format_update,
+    )
+    existing_mode: bpy.props.EnumProperty(
+        name="Existing Maps",
+        items=(
+            ('UPDATE', "Update Existing", "Overwrite the maps of the previous render"),
+            ('INCREMENT', "Add New", "Keep the previous maps and add _v001, _v002, ..."),
+        ),
+        default='UPDATE',
+    )
+    name_pattern: bpy.props.StringProperty(
+        name="Name Pattern",
+        description="File and image name; {material} and {channel} are replaced",
+        default="{material}_{channel}",
+    )
+    last_result: bpy.props.StringProperty(
+        name="Last Result",
+        description="Summary of the last Render Output",
+        default="",
+    )
+
+
+def _output_channels(mat):
+    """The channels of the material's set, in the order the channel enum lists them."""
+    return [item[0] for item in _paint_channel_enum_items() if mat.paint_layers_channel_in_set(channel=item[0])]
+
+
+_OUTPUT_SIDES = {
+    'SIZE_256': 256,
+    'SIZE_512': 512,
+    'SIZE_1K': 1024,
+    'SIZE_2K': 2048,
+    'SIZE_4K': 4096,
+    'SIZE_8K': 8192,
+}
+
+
+def _output_side(context, mat):
+    """The map size. The enums give identifiers, not numbers; `SCENE` is the material's
+    `Scene Default`, which is the scene's new channel size."""
+    side = _OUTPUT_SIDES.get(mat.paint_layers_image_size, 0)
+    if side <= 0:
+        side = _OUTPUT_SIDES.get(context.scene.tool_settings.paint_mode.new_channel_image_size, 0)
+    return side
+
+
+def _output_base_name(out, mat, identifier):
+    # Plain replacement, not `str.format`: a name pattern may contain other braces.
+    name = out.name_pattern.replace("{material}", mat.name).replace("{channel}", identifier.lower())
+    return bpy.path.clean_name(name) or identifier.lower()
+
+
+def _output_file_path(directory, file_name, file_format):
+    return os.path.join(directory, file_name + _OUTPUT_EXTENSIONS[file_format])
+
+
+def _output_name_free(out, mat, identifier, suffix, directory):
+    file_name = _output_base_name(out, mat, identifier) + suffix
+    if file_name in bpy.data.images:
+        return False
+    if out.destination == 'DISK':
+        return not os.path.exists(_output_file_path(directory, file_name, out.file_format))
+    return True
+
+
+def _output_suffix(out, mat, channels, directory):
+    """The version suffix of this run: `_v001`, `_v002`, ... for Add New, empty for Update Existing.
+
+    One number serves every channel, so the maps of a run share a version. None when no number is
+    free up to 999.
+    """
+    if out.existing_mode != 'INCREMENT':
+        return ""
+    for version in range(1, 1000):
+        suffix = "_v{:03d}".format(version)
+        if all(_output_name_free(out, mat, identifier, suffix, directory) for identifier in channels):
+            return suffix
+    return None
+
+
+def _output_find_image(mat, identifier):
+    """The image Update Existing wrote for this channel on an earlier run, or None."""
+    key = "{:s}|{:s}".format(mat.name, identifier)
+    for image in bpy.data.images:
+        if image.get("paint_layers_output") == key:
+            return image
+    return None
+
+
+def _output_target_image(out, mat, side, identifier, file_name):
+    """The image the channel is composited into. Returns the image and whether it was just created."""
+    if out.existing_mode == 'UPDATE':
+        image = _output_find_image(mat, identifier)
+        if image is not None:
+            if image.size[0] != side or image.size[1] != side:
+                image.scale(side, side)
+            image.colorspace_settings.name = "sRGB" if identifier in _OUTPUT_COLOR_CHANNELS else "Non-Color"
+            return image, False
+    image = bpy.data.images.new(
+        file_name, side, side, alpha=True, float_buffer=(out.color_depth != '8'),
+    )
+    image.colorspace_settings.name = "sRGB" if identifier in _OUTPUT_COLOR_CHANNELS else "Non-Color"
+    if out.existing_mode == 'UPDATE':
+        # Marks the image as this channel's output for the next Update Existing run.
+        image["paint_layers_output"] = "{:s}|{:s}".format(mat.name, identifier)
+    return image, True
+
+
+def _output_write_all(mat, out, side, channels, directory, suffix):
+    """Composite and write every channel. Returns the written, skipped and failed channel lists."""
+    written, skipped, failed = [], [], []
+    tmp_scene = None
+    if out.destination == 'DISK':
+        # `Image.save_render` takes the file format, depth and colour mode from a scene, so a
+        # temporary one carries the settings of this output; it is removed on every path out.
+        tmp_scene = bpy.data.scenes.new("_paint_layers_output_tmp")
+    try:
+        if tmp_scene is not None:
+            settings = tmp_scene.render.image_settings
+            settings.file_format = out.file_format
+            settings.color_depth = out.color_depth
+            settings.color_mode = 'RGBA'
+            # A new scene would tone-map the saved pixels with its default view transform
+            # (AgX); the maps must be written as they are.
+            tmp_scene.view_settings.look = 'None'
+            tmp_scene.view_settings.exposure = 0.0
+            tmp_scene.view_settings.gamma = 1.0
+            tmp_scene.view_settings.use_curve_mapping = False
+
+        for identifier in channels:
+            file_name = _output_base_name(out, mat, identifier) + suffix
+            image, is_new = _output_target_image(out, mat, side, identifier, file_name)
+            try:
+                composited = mat.paint_layers.composite(channel=identifier, image=image)
+                reason = "nothing to composite"
+            except RuntimeError as ex:
+                composited = False
+                reason = str(ex)
+            if not composited:
+                # A new image nothing was composited into is not kept; an updated one keeps its maps.
+                if is_new:
+                    bpy.data.images.remove(image)
+                skipped.append("{:s} ({:s})".format(identifier, reason))
+                continue
+
+            try:
+                image.file_format = out.file_format
+                if out.destination == 'DISK':
+                    filepath = _output_file_path(directory, file_name, out.file_format)
+                    # Raw writes a data map untouched; Standard is the plain sRGB encoding a colour
+                    # map needs. Neither adds a tone-mapping curve.
+                    tmp_scene.view_settings.view_transform = (
+                        'Standard' if identifier in _OUTPUT_COLOR_CHANNELS else 'Raw')
+                    image.save_render(filepath=filepath, scene=tmp_scene)
+                    image.filepath_raw = filepath
+                else:
+                    image.pack()
+            except (RuntimeError, OSError) as ex:
+                failed.append("{:s} ({:s})".format(identifier, str(ex)))
+                continue
+            written.append(identifier)
+    finally:
+        if tmp_scene is not None:
+            bpy.data.scenes.remove(tmp_scene)
+    return written, skipped, failed
+
+
+class MATERIAL_OT_paint_layers_output_render(Operator):
+    """Render the final maps of every channel of the layered material into files or packed images"""
+
+    bl_idname = "material.paint_layers_output_render"
+    bl_label = "Render Output"
+    # Not undoable: the files written to disk cannot be taken back, and packed images are new
+    # data-blocks that an undo step would not restore cleanly.
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        mat = _context_material(context)
+        return mat is not None and mat.is_layered and mat.library is None
+
+    def execute(self, context):
+        mat = _context_material(context)
+        out = mat.paint_layers_output
+
+        if mat.paint_layers_is_stale:
+            self.report({'ERROR'}, "Wait until the layer maps are up to date, or press Update Now")
+            return {'CANCELLED'}
+
+        channels = _output_channels(mat)
+        side = _output_side(context, mat)
+        if not channels or side <= 0:
+            self.report({'ERROR'}, "Nothing to render: the material has no channels")
+            return {'CANCELLED'}
+
+        directory = ""
+        if out.destination == 'DISK':
+            if not out.directory or (out.directory.startswith("//") and not bpy.data.filepath):
+                self.report({'ERROR'}, "Set the output directory; a relative one needs a saved .blend")
+                return {'CANCELLED'}
+            directory = bpy.path.abspath(out.directory)
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError as ex:
+                self.report({'ERROR'}, "Cannot create the directory: {:s}".format(str(ex)))
+                return {'CANCELLED'}
+
+        suffix = _output_suffix(out, mat, channels, directory)
+        if suffix is None:
+            self.report({'ERROR'}, "No free version number: remove some of the _v### maps first")
+            return {'CANCELLED'}
+
+        # This path does not read the 3D view pass, but a future node path might change it, so the
+        # pass is put back whatever happens here.
+        pass_before = mat.paint_layers_view_pass
+        try:
+            written, skipped, failed = _output_write_all(mat, out, side, channels, directory, suffix)
+        finally:
+            if mat.paint_layers_view_pass != pass_before:
+                mat.paint_layers_view_pass = pass_before
+
+        self.report({'INFO'}, "Output Texture: {:d} written, {:d} skipped, {:d} failed".format(
+            len(written), len(skipped), len(failed)))
+        parts = ["{:d} written".format(len(written))]
+        if skipped:
+            parts.append("skipped: " + ", ".join(skipped))
+        if failed:
+            parts.append("failed: " + ", ".join(failed))
+        out.last_result = "; ".join(parts)
+        return {'FINISHED'} if written else {'CANCELLED'}
+
+
+def register():
+    bpy.types.Material.paint_layers_output = bpy.props.PointerProperty(type=MaterialPaintLayersOutput)
+
+
+def unregister():
+    del bpy.types.Material.paint_layers_output
+
+
 classes = (
+    MaterialPaintLayersOutput,
+    MATERIAL_OT_paint_layers_output_render,
     MATERIAL_OT_paint_layer_channel_add,
     MATERIAL_OT_paint_layer_channel_remove,
     MATERIAL_OT_paint_layer_channel_toggle,

@@ -67,6 +67,7 @@ def register():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        material_paint_layers,
         sculpt_insert_asset,
         userpref_sync,
     )
@@ -79,6 +80,7 @@ def register():
 
     bone_selection_sets.register()
     copy_global_transform.register()
+    material_paint_layers.register()
     sculpt_insert_asset.register()
 
 
@@ -87,11 +89,13 @@ def unregister():
     from . import (
         bone_selection_sets,
         copy_global_transform,
+        material_paint_layers,
         sculpt_insert_asset,
     )
 
     bone_selection_sets.unregister()
     copy_global_transform.unregister()
+    material_paint_layers.unregister()
     sculpt_insert_asset.unregister()
 
     if hasattr(bpy.types.WindowManager, "sync_settings"):

@@ -2594,6 +2594,7 @@ static bool brush_gen_texture(const Brush *br,
       float intensity;
       float rgba[4];
       bool has_rgb;
+      float source_alpha = 1.0f;
       if (use_material_source) {
         /* Same placement as the cursor overlay and the stroke: #MTex size/ofs, the [-1, 1] to
          * [0, 1] remap, then a wrapped bilinear fetch. A baked buffer has no #Tex and therefore
@@ -2605,6 +2606,13 @@ static bool brush_gen_texture(const Brush *br,
             (vx + 1.0f) * 0.5f * float(material_source_ibuf->x),
             (vy + 1.0f) * 0.5f * float(material_source_ibuf->y));
         copy_v4_v4(rgba, sampled);
+        /* A baked layer is transparent where it has no content, and those texels hold black. Keep
+         * the alpha so the preview shows the hole, and undo its pull on the color at the edges:
+         * black texels add nothing to the sum, so dividing by alpha restores the color. */
+        source_alpha = math::clamp(sampled.w, 0.0f, 1.0f);
+        if (source_alpha > 1e-4f) {
+          mul_v3_fl(rgba, 1.0f / source_alpha);
+        }
         intensity = IMB_colormanagement_get_luminance(sampled);
         has_rgb = true;
       }
@@ -2624,7 +2632,7 @@ static bool brush_gen_texture(const Brush *br,
         px[0] = rgba[0];
         px[1] = rgba[1];
         px[2] = rgba[2];
-        px[3] = 1.0f;
+        px[3] = source_alpha;
       }
       else {
         /* Classic intensity preview. #radial_control_paint_tex tints this with the brush fill

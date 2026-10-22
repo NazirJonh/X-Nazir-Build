@@ -68,6 +68,7 @@
 
 #include "ED_image.hh"
 #include "ED_image_paint_symmetry.hh"
+#include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
 #include "ED_paint_curve_draw.hh"
 #include "ED_screen.hh"
@@ -1820,8 +1821,13 @@ static void paint_cursor_ensure_material_source_bake(const bContext &C,
     return;
   }
   BrushMaterialPaint &brush_paint = *pcontext.brush->material_paint;
-  if (brush_paint.source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ||
-      brush_paint.source_material == nullptr)
+  if (brush_paint.source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
+    return;
+  }
+  const bool layer_source =
+      brush_paint.material_source_kind == BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER;
+  if (layer_source ? brush_paint.source_layer_owner == nullptr :
+                     brush_paint.source_material == nullptr)
   {
     return;
   }
@@ -1843,6 +1849,10 @@ static void paint_cursor_ensure_material_source_bake(const bContext &C,
   }
   last_check_seconds = now_seconds;
 
+  if (layer_source) {
+    ed::brush_layer_source::brush_layer_source_bake_ensure(C, *pcontext.brush);
+    return;
+  }
   ed::material_bake::material_source_bake_ensure(
       C, *brush_paint.source_material, brush_paint.source_bake_size);
 }

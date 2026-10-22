@@ -96,6 +96,7 @@
 #include "paint_material_blend.hh"
 #include "paint_material_source.hh"
 
+#include "ED_brush_layer_source.hh"
 #include "ED_image.hh"
 #include "ED_image_paint_symmetry.hh"
 #include "ED_paint.hh"
@@ -4821,6 +4822,10 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     BKE_paint_material_channel_cache_invalidate(BKE_object_material_get(ob, ob->actcol));
 
     Main *bmain = CTX_data_main(C);
+    if (!ed::brush_layer_source::brush_layer_source_stroke_ready(*bmain, *brush, op->reports)) {
+      return nullptr;
+    }
+    ed::brush_layer_source::brush_layer_source_bake_ensure(*bmain, *brush);
     BKE_paint_material_images_ensure_writable(
         *bmain, *ob, brush_paint, paint_mode, settings->imapaint.paint.visible_material_channels);
     ED_space_image_paint_auto_select_material_canvas(bmain, ob);

@@ -85,6 +85,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "ED_fileselect.hh"
+#include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
 #include "ED_gpencil_legacy.hh"
 #include "ED_grease_pencil.hh"
@@ -2710,11 +2711,25 @@ static void radial_control_set_tex(RadialControl *rc)
         /* Radial control only has the Brush, so there is no #Paint to take a visibility set or
          * mode settings from -- the same compromise #brush_radial_preview_mtex makes. */
         const PaintModeSettings mode_settings{};
-        ed::material_bake::material_source_preview_get(*radial_brush->material_paint,
-                                                       mode_settings,
-                                                       PAINT_MATERIAL_CHANNELS_VISIBLE_ALL,
-                                                       material_preview,
-                                                       radial_bake);
+        if (radial_brush->material_paint->material_source_kind ==
+            BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER)
+        {
+          /* Same split as the paint cursor: a Layer source lives in its own cache, so asking the
+           * Material bake would leave the preview on the Maps texture. */
+          ed::brush_layer_source::brush_layer_source_preview_get(
+              *radial_brush->material_paint,
+              mode_settings,
+              PAINT_MATERIAL_CHANNELS_VISIBLE_ALL,
+              material_preview,
+              radial_bake);
+        }
+        else {
+          ed::material_bake::material_source_preview_get(*radial_brush->material_paint,
+                                                         mode_settings,
+                                                         PAINT_MATERIAL_CHANNELS_VISIBLE_ALL,
+                                                         material_preview,
+                                                         radial_bake);
+        }
       }
       if ((ibuf = BKE_brush_gen_radial_control_imbuf(radial_brush,
                                                      rc->use_secondary_tex,

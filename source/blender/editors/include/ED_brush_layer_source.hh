@@ -29,6 +29,7 @@ struct BrushMaterialPaint;
 struct Image;
 struct Main;
 struct Material;
+struct ReportList;
 }  // namespace blender
 
 namespace blender::ed::brush_layer_source {
@@ -73,6 +74,14 @@ void brush_layer_source_bake_ensure(const bContext &C, const Brush &brush);
  * debounce.
  */
 void brush_layer_source_bake_ensure(Main &bmain, const Brush &brush, bool force = false);
+
+/**
+ * Whether a stroke with \a brush may start. A Layer source the brush samples must have a current
+ * bake before the first dab: painting the brush's own value instead would silently write something
+ * the source does not describe. When it is not ready this starts the bake, reports \a reports and
+ * returns false. Brushes without a Layer source always return true.
+ */
+bool brush_layer_source_stroke_ready(Main &bmain, const Brush &brush, ReportList *reports);
 
 /** Update Now: start the current source's bake immediately, cancelling any refresh debounce. */
 void brush_layer_source_bake_update_now(Main &bmain, const Brush &brush);

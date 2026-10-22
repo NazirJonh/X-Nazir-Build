@@ -45,6 +45,7 @@
 
 #include "WM_api.hh"
 
+#include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
 #include "ED_view3d.hh"
 
@@ -288,26 +289,40 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
     }
   }
   bool any_source = false;
+  const bool material_mode = brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL;
+  const bool layer_source = BKE_paint_material_source_is_layer(brush_paint);
+  const bool layer_row = layer_source &&
+                         brush_paint.layer_source_scope ==
+                             BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW;
+  const Material *material_for_resolve = nullptr;
+  if (material_mode && !layer_row) {
+    material_for_resolve = layer_source ? brush_paint.source_layer_owner :
+                                          brush_paint.source_material;
+  }
   const MaterialSourceResolve material_resolve =
-      brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ?
-          BKE_paint_material_source_resolve(brush_paint.source_material) :
-          MaterialSourceResolve{};
-  if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL &&
-      brush_paint.source_material != nullptr)
-  {
-    bool any_baked = false;
-    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-      if (mask_channel && channel != *mask_channel) {
-        continue;
-      }
-      any_baked |= material_resolve.channels[channel] == ChannelResolution::Baked;
+      material_for_resolve != nullptr ? BKE_paint_material_source_resolve(material_for_resolve) :
+                                        MaterialSourceResolve{};
+  if (material_mode) {
+    if (layer_row) {
+      /* The row bake's own resolve decides which channels it could supply; it is null until the
+       * first bake lands, which is what makes the channel unusable for a stroke in the meantime. */
+      bake_ = ed::brush_layer_source::brush_layer_source_bake_get(brush_paint);
     }
-    if (any_baked) {
-      /* Whatever is cached right now; the bake itself runs in a job (see
-       * #material_source_bake_ensure), so a stroke never waits on a render. A channel with no bake
-       * yet keeps painting its own value until one lands. */
-      bake_ = ed::material_bake::material_source_bake_get(*brush_paint.source_material,
-                                                          brush_paint.source_bake_size);
+    else if (material_for_resolve != nullptr) {
+      bool any_baked = false;
+      for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+        if (mask_channel && channel != *mask_channel) {
+          continue;
+        }
+        any_baked |= material_resolve.channels[channel] == ChannelResolution::Baked;
+      }
+      if (any_baked) {
+        /* Whatever is cached right now; the bake itself runs in a job (see
+         * #material_source_bake_ensure), so a stroke never waits on a render. A channel with no bake
+         * yet keeps painting its own value until one lands. */
+        bake_ = ed::material_bake::material_source_bake_get(*material_for_resolve,
+                                                            brush_paint.source_bake_size);
+      }
     }
   }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
@@ -332,10 +347,17 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
     const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];
     ChannelSource &source = sources_[info.channel];
     if (brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
-      switch (material_resolve.channels[info.channel]) {
+      const ChannelResolution resolution =
+          layer_row ?
+              (bake_ != nullptr ? bake_->resolution(info.channel) : ChannelResolution::Unavailable) :
+              material_resolve.channels[info.channel];
+      switch (resolution) {
         case ChannelResolution::Constant: {
           source.kind = ChannelSourceKind::Constant;
-          source.constant_value = material_resolve.constants[info.channel];
+          source.constant_value = layer_row ?
+                                      (bake_ != nullptr ? bake_->channel_constant(info.channel) :
+                                                          float4(0.0f)) :
+                                      material_resolve.constants[info.channel];
           source.usable = true;
           source.flip_green_channel = false;
           any_source = true;
@@ -343,6 +365,9 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
         }
         case ChannelResolution::Image: {
           const ChannelSourceImage &resolved = material_resolve.images[info.channel];
+          if (resolved.image == nullptr) {
+            break;
+          }
           source.kind = ChannelSourceKind::Image;
           source.image = resolved.image;
           source.image_iuser = resolved.iuser;
@@ -362,6 +387,7 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
         }
         case ChannelResolution::Baked: {
           source.kind = ChannelSourceKind::Baked;
+          source.alpha_weighted = layer_source;
           source.ibuf = bake_ != nullptr ?
                             const_cast<ImBuf *>(bake_->channel_image(info.channel)) :
                             nullptr;
@@ -573,6 +599,7 @@ static void attach_direct_sample_image(DirectSampleLayout &layout,
   const Tex *tex = mtex.tex;
   layout.wrap = tex == nullptr || tex->extend == TEX_REPEAT;
   layout.clip = tex != nullptr && tex->extend == TEX_CLIP;
+  layout.alpha_weighted = source.alpha_weighted;
   layout.eval_size_x = mtex.size[0];
   layout.eval_size_y = mtex.size[1];
   layout.eval_ofs_x = mtex.ofs[0];
@@ -659,6 +686,49 @@ static void apply_direct_sample_rotation(const DirectSampleLayout &layout, float
   y = flen * sinf(angle);
 }
 
+/**
+ * Bilinear sample of a four-channel float buffer that weights each texel's color by its alpha.
+ *
+ * A baked layer is transparent where the layer has no content, and those texels hold black. A
+ * plain bilinear blend drags that black into the color along every transparent edge, which reads
+ * as dark rims in Base Color and as zero Metallic or Roughness; weighting by alpha keeps the color
+ * of the opaque neighbors and leaves the coverage to the alpha. Same texel convention as
+ * #math::interpolate_bilinear_fl: no half-texel offset.
+ */
+static float4 interpolate_bilinear_alpha_weighted_fl(
+    const float *pixels, const int width, const int height, const float px, const float py,
+    const bool wrap)
+{
+  const float fx = math::floor(px);
+  const float fy = math::floor(py);
+  const float tx = px - fx;
+  const float ty = py - fy;
+  const int x0 = int(fx);
+  const int y0 = int(fy);
+  const float weights[4] = {(1.0f - tx) * (1.0f - ty), tx * (1.0f - ty), (1.0f - tx) * ty, tx * ty};
+  const int2 offsets[4] = {int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1)};
+  float3 rgb_weighted(0.0f);
+  float alpha = 0.0f;
+  for (const int i : IndexRange(4)) {
+    int x = x0 + offsets[i].x;
+    int y = y0 + offsets[i].y;
+    if (wrap) {
+      x = ((x % width) + width) % width;
+      y = ((y % height) + height) % height;
+    }
+    else {
+      x = math::clamp(x, 0, width - 1);
+      y = math::clamp(y, 0, height - 1);
+    }
+    const float *texel = pixels + (int64_t(y) * int64_t(width) + int64_t(x)) * 4;
+    const float texel_alpha = texel[3] * weights[i];
+    rgb_weighted += float3(texel[0], texel[1], texel[2]) * texel_alpha;
+    alpha += texel_alpha;
+  }
+  const float3 rgb = alpha > 1e-6f ? rgb_weighted / alpha : float3(0.0f);
+  return float4(rgb.x, rgb.y, rgb.z, alpha);
+}
+
 static bool sample_layout_image(const DirectSampleLayout &layout,
                                 const float tex_x,
                                 const float tex_y,
@@ -692,7 +762,11 @@ static bool sample_layout_image(const DirectSampleLayout &layout,
   const float px = u * float(layout.ibuf_x);
   const float py = v * float(layout.ibuf_y);
 
-  if (layout.float_pixels != nullptr) {
+  if (layout.float_pixels != nullptr && layout.alpha_weighted) {
+    r_rgba = interpolate_bilinear_alpha_weighted_fl(
+        layout.float_pixels, layout.ibuf_x, layout.ibuf_y, px, py, layout.wrap);
+  }
+  else if (layout.float_pixels != nullptr) {
     r_rgba = layout.wrap ? math::interpolate_bilinear_wrap_fl(
                                layout.float_pixels, layout.ibuf_x, layout.ibuf_y, px, py) :
                            math::interpolate_bilinear_fl(
@@ -928,8 +1002,14 @@ bool ChannelSourceSet::sample_image_direct(const ChannelSource &source,
   const bool wrap = tex == nullptr || tex->extend == TEX_REPEAT;
 
   if (ibuf->float_data() != nullptr) {
-    r_rgba = wrap ? imbuf::interpolate_bilinear_wrap_fl(ibuf, px, py) :
-                    imbuf::interpolate_bilinear_fl(ibuf, px, py);
+    if (source.alpha_weighted) {
+      r_rgba = interpolate_bilinear_alpha_weighted_fl(
+          ibuf->float_data(), ibuf->x, ibuf->y, px, py, wrap);
+    }
+    else {
+      r_rgba = wrap ? imbuf::interpolate_bilinear_wrap_fl(ibuf, px, py) :
+                      imbuf::interpolate_bilinear_fl(ibuf, px, py);
+    }
   }
   else {
     const uchar4 col = wrap ? imbuf::interpolate_bilinear_wrap_byte(ibuf, px, py) :
@@ -961,7 +1041,10 @@ bool ChannelSourceSet::sample_image_unit(const ChannelSource &source,
   const float px = math::clamp(u, 0.0f, 1.0f) * float(ibuf->x);
   const float py = math::clamp(v, 0.0f, 1.0f) * float(ibuf->y);
   if (ibuf->float_data() != nullptr) {
-    r_rgba = imbuf::interpolate_bilinear_fl(ibuf, px, py);
+    r_rgba = source.alpha_weighted ?
+                 interpolate_bilinear_alpha_weighted_fl(
+                     ibuf->float_data(), ibuf->x, ibuf->y, px, py, false) :
+                 imbuf::interpolate_bilinear_fl(ibuf, px, py);
   }
   else {
     const uchar4 col = imbuf::interpolate_bilinear_byte(ibuf, px, py);
@@ -988,7 +1071,10 @@ bool ChannelSourceSet::sample_baked(const ChannelSource &source,
   const float px = u * float(source.ibuf->x);
   const float py = v * float(source.ibuf->y);
   if (source.ibuf->float_data() != nullptr) {
-    r_rgba = imbuf::interpolate_bilinear_wrap_fl(source.ibuf, px, py);
+    r_rgba = source.alpha_weighted ?
+                 interpolate_bilinear_alpha_weighted_fl(
+                     source.ibuf->float_data(), source.ibuf->x, source.ibuf->y, px, py, true) :
+                 imbuf::interpolate_bilinear_wrap_fl(source.ibuf, px, py);
   }
   else if (source.ibuf->byte_data() != nullptr) {
     const uchar4 col = imbuf::interpolate_bilinear_wrap_byte(source.ibuf, px, py);
@@ -1571,6 +1657,51 @@ void ChannelSourceSampler::gather_scalars(const eMaterialPaintChannel channel,
                                       rgba);
     r_values[i] = scalar_source_finish(brush_paint_, channel, range, value);
   }
+}
+
+bool ChannelSourceSampler::gather_source_coverage(const Span<TexelSampleContext> contexts,
+                                                  const Span<float> factors,
+                                                  const int thread,
+                                                  MutableSpan<float> r_coverage) const
+{
+  BLI_assert(contexts.size() == factors.size());
+  BLI_assert(r_coverage.size() == contexts.size());
+
+  if (brush_paint_.source_mode != BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL ||
+      brush_paint_.material_source_kind != BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER)
+  {
+    return false;
+  }
+  /* The content alpha belongs to the layer, so every channel map carries the same one; the first
+   * usable baked map stands for all of them. */
+  const ChannelSource *source = nullptr;
+  int channel = 0;
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    const ChannelSource &candidate = sources_.source(i);
+    if (candidate.usable && candidate.kind == ChannelSourceKind::Baked) {
+      source = &candidate;
+      channel = i;
+      break;
+    }
+  }
+  if (source == nullptr) {
+    return false;
+  }
+
+  const float4x4 *area_local_mat = area_local_mat_for(channel, *source);
+  const DirectSampleLayout layout = make_direct_sample_layout_sculpt(
+      *source, ss_, brush_, area_local_mat);
+  for (const int i : contexts.index_range()) {
+    if (factors[i] == 0.0f) {
+      r_coverage[i] = 0.0f;
+      continue;
+    }
+    float4 rgba;
+    sample_channel_source_with_layout(
+        layout, sources_, *source, ss_, brush_, contexts[i], thread, area_local_mat, nullptr, rgba);
+    r_coverage[i] = math::clamp(rgba.w, 0.0f, 1.0f);
+  }
+  return true;
 }
 
 /** Shared body: the screen basis is derived from \a win_size; a non-positive size means "no

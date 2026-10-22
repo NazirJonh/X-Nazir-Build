@@ -732,6 +732,8 @@ struct PaintLocalData {
   Vector<float3> sampled_colors;
   /** Scalar channel gather for one chunk; splatted to #sampled_colors for the shared write path. */
   Vector<float> sampled_scalars;
+  /** Layer source coverage for one chunk (see #ChannelSourceSampler::gather_source_coverage). */
+  Vector<float> source_coverage;
 };
 
 /** Destination state for one channel during a shared pixel-range pass. */
@@ -1462,6 +1464,21 @@ static Array<RowFactorCache> compute_paint_row_factors(
                                active_sampler->scalar(
                                    *mask_coverage_channel, contexts[i], thread_id);
                 factors[i] *= math::clamp(coverage, 0.0f, 1.0f);
+              }
+            }
+            else if (active_sampler != nullptr) {
+              /* A Layer source is transparent where its layer has no content; those texels hold
+               * black, so they must not be painted. Computed once here for every channel pass. */
+              const Span<material::TexelSampleContext> contexts =
+                  tile_cache.row_contexts[row_i].as_span().slice(range);
+              const int thread_id = BLI_task_parallel_thread_id(nullptr);
+              tls.source_coverage.resize(range.size());
+              if (active_sampler->gather_source_coverage(
+                      contexts, factors, thread_id, tls.source_coverage))
+              {
+                for (const int i : range.index_range()) {
+                  factors[i] *= tls.source_coverage[i];
+                }
               }
             }
 

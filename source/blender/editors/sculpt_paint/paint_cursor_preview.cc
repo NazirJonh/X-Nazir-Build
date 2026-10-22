@@ -11,6 +11,8 @@
  * without touching the cursor drawing code.
  */
 
+#include <optional>
+
 #include "paint_cursor.hh"
 
 #include "BLI_utildefines.h"
@@ -23,6 +25,7 @@
 
 #include "BKE_paint.hh"
 
+#include "ED_brush_layer_source.hh"
 #include "ED_material_bake.hh"
 
 #include "mesh/paint_material_source.hh"
@@ -63,6 +66,30 @@ static bool mask_source_applies(const OverlayPreviewInput &in)
          in.brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_ERASE;
 }
 
+/** The one preview source for both Material kinds: the layer bake when Layer is selected, the
+ * material bake otherwise. */
+static bool material_source_preview_resolve(const OverlayPreviewInput &in,
+                                            PaintCursorContext &pcontext,
+                                            const std::optional<eMaterialPaintChannel> only_channel)
+{
+  if (in.brush_paint.material_source_kind ==
+      BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER)
+  {
+    return brush_layer_source::brush_layer_source_preview_get(in.brush_paint,
+                                                              in.mode_settings,
+                                                              in.visible_channels,
+                                                              pcontext.material_preview_source,
+                                                              pcontext.material_preview_bake,
+                                                              only_channel);
+  }
+  return material_bake::material_source_preview_get(in.brush_paint,
+                                                    in.mode_settings,
+                                                    in.visible_channels,
+                                                    pcontext.material_preview_source,
+                                                    pcontext.material_preview_bake,
+                                                    only_channel);
+}
+
 static bool mask_source_resolve(const OverlayPreviewInput &in, PaintCursorContext &pcontext)
 {
   const std::optional<eMaterialPaintChannel> mask_channel = material::mask_source_channel_get(
@@ -80,12 +107,7 @@ static bool mask_source_resolve(const OverlayPreviewInput &in, PaintCursorContex
   if (in.brush_paint.source_mode == BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL) {
     /* A Mask stroke reads exactly this channel from the bake, regardless of the PBR channel's
      * enable and visibility gates. */
-    const bool ok = material_bake::material_source_preview_get(in.brush_paint,
-                                                               in.mode_settings,
-                                                               in.visible_channels,
-                                                               pcontext.material_preview_source,
-                                                               pcontext.material_preview_bake,
-                                                               mask_channel);
+    const bool ok = material_source_preview_resolve(in, pcontext, mask_channel);
     pcontext.material_preview_mtex_storage = dna::shallow_copy(
         pcontext.material_preview_source.mtex);
     /* A constant channel has no texture to draw; only a baked buffer is previewed. */
@@ -118,11 +140,7 @@ static bool material_bake_applies(const OverlayPreviewInput &in)
 
 static bool material_bake_resolve(const OverlayPreviewInput &in, PaintCursorContext &pcontext)
 {
-  const bool ok = material_bake::material_source_preview_get(in.brush_paint,
-                                                             in.mode_settings,
-                                                             in.visible_channels,
-                                                             pcontext.material_preview_source,
-                                                             pcontext.material_preview_bake);
+  const bool ok = material_source_preview_resolve(in, pcontext, std::nullopt);
   pcontext.material_preview_mtex_storage = dna::shallow_copy(
       pcontext.material_preview_source.mtex);
   return ok;

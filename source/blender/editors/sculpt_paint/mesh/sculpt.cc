@@ -102,6 +102,7 @@
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
+#include "ED_brush_layer_source.hh"
 #include "ED_image.hh"
 #include "ED_mesh.hh"
 #include "ED_object.hh"
@@ -1007,7 +1008,7 @@ static bool material_paint_uses_area_mapping(const Brush &brush)
      * Answering from the material pointer alone deliberately over-approximates: resolving the node
      * tree here would run per dab, and a normal computed for a material that turns out to supply
      * only constants costs far less than a misplaced source. */
-    return brush_paint.source_material != nullptr;
+    return BKE_paint_material_source_get(brush_paint) != nullptr;
   }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];
@@ -8254,6 +8255,7 @@ static void init_material_canvas_for_object(Main &bmain,
     return;
   }
   const BrushMaterialPaint &brush_paint = *brush.material_paint;
+  ed::brush_layer_source::brush_layer_source_bake_ensure(bmain, brush);
   BKE_paint_material_images_ensure_writable(
       bmain, ob, brush_paint, paint_mode_init, sd.paint.visible_material_channels);
 
@@ -8305,6 +8307,28 @@ static void init_material_canvas_for_object(Main &bmain,
       paint_mode_init,
       sd.paint.visible_material_channels,
       /*resolve_mask_source=*/true);
+}
+
+/**
+ * A Layer source the brush samples must have a current bake before the first dab: painting the
+ * brush's own value instead would silently write something the source does not describe (PRD-Q-006).
+ */
+static bool brush_layer_source_stroke_ready(bContext *C, wmOperator *op)
+{
+  const Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return true;
+  }
+  if (scene->toolsettings->paint_mode.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+    return true;
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  Brush *brush = paint != nullptr ? BKE_paint_brush(paint) : nullptr;
+  if (brush == nullptr || brush->material_paint == nullptr) {
+    return true;
+  }
+  return ed::brush_layer_source::brush_layer_source_stroke_ready(
+      *CTX_data_main(C), *brush, op->reports);
 }
 
 static void brush_stroke_init(bContext *C, const wmOperator *op)
@@ -10976,6 +11000,10 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     }
   }
 
+  if (!brush_layer_source_stroke_ready(C, op)) {
+    return OPERATOR_CANCELLED;
+  }
+
   stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event->type);
   brush_stroke_init(C, op);
 
@@ -11130,6 +11158,9 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
 
 static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
 {
+  if (!brush_layer_source_stroke_ready(C, op)) {
+    return OPERATOR_CANCELLED;
+  }
   brush_stroke_init(C, op);
 
   /* The scripted and redo path into the same stroke, so it must refuse a geometry brush during a

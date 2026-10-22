@@ -126,6 +126,8 @@ struct DirectSampleLayout {
   int ibuf_y = 0;
   bool wrap = false;
   bool clip = false;
+  /** Baked sources only: texel colors are weighted by alpha when sampled. */
+  bool alpha_weighted = false;
   float eval_size_x = 1.0f;
   float eval_size_y = 1.0f;
   float eval_ofs_x = 0.0f;
@@ -258,6 +260,12 @@ class ChannelSourceSet {
     const ImageUser *image_iuser = nullptr;
     /** False when the slot has a texture but it cannot be sampled (no image, or load failure). */
     bool usable = false;
+    /**
+     * Baked Layer source only: texel colors are weighted by their alpha when sampled, because a
+     * layer's transparent texels hold black. The Default Material bake keeps plain bilinear
+     * sampling, which is what it always had.
+     */
+    bool alpha_weighted = false;
     /**
      * True when the source is a byte image whose pixels are not already in scene-linear space
      * (e.g. an sRGB Base Color texture). #BKE_brush_sample_tex_3d only auto-decodes the brush's
@@ -519,6 +527,17 @@ class ChannelSourceSampler {
                       Span<float> factors,
                       int thread,
                       MutableSpan<float> r_values) const;
+
+  /**
+   * Coverage of a Layer source's bake at each element of \a contexts: the content alpha its
+   * channel maps carry, so a stroke leaves the canvas alone where the source layer is transparent
+   * instead of painting the black those texels hold. Zero-factor slots are written as zero.
+   * \return false, with \a r_coverage untouched, when the brush has no baked Layer source.
+   */
+  bool gather_source_coverage(Span<TexelSampleContext> contexts,
+                              Span<float> factors,
+                              int thread,
+                              MutableSpan<float> r_coverage) const;
 
   /**
    * Sample the Normal channel and remap each unpacked decal normal into the destination

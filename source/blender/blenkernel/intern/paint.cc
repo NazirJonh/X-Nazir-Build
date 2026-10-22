@@ -4356,7 +4356,7 @@ bool BKE_paint_material_mask_preview_mtex_get(const BrushMaterialPaint &brush_pa
     /* The bake supplies the pixels; only its placement is taken from the channel. */
     BKE_paint_material_channel_effective_mtex(brush_paint, paint_channel, r_mtex);
     r_mtex.tex = nullptr;
-    return brush_paint.source_material != nullptr;
+    return BKE_paint_material_source_get(brush_paint) != nullptr;
   }
   if (!BKE_paint_material_channel_has_source(paint_channel)) {
     r_mtex = dna::shallow_copy(MTex());

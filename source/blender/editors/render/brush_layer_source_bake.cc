@@ -38,6 +38,7 @@
 #include "BKE_main.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_report.hh"
 
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
@@ -891,6 +892,21 @@ void brush_layer_source_bake_ensure(const bContext &C, const Brush &brush)
   if (bmain != nullptr) {
     brush_layer_source_bake_ensure(*bmain, brush, false);
   }
+}
+
+bool brush_layer_source_stroke_ready(Main &bmain, const Brush &brush, ReportList *reports)
+{
+  const BrushMaterialPaint *brush_paint = brush.material_paint;
+  if (brush_paint == nullptr || !BKE_paint_material_source_is_layer(*brush_paint) ||
+      brush_layer_source_bake_ready(*brush_paint))
+  {
+    return true;
+  }
+  brush_layer_source_bake_ensure(bmain, brush, false);
+  BKE_report(reports,
+             RPT_INFO,
+             "Brush Layer source is not ready; wait for the bake or press Update Now");
+  return false;
 }
 
 void brush_layer_source_bake_update_now(Main &bmain, const Brush &brush)

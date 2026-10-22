@@ -13,39 +13,55 @@
 #include "BKE_paint_layers_generate.hh"
 
 #include <cstdio>
+#include <iterator>
 #include <utility>
 
 #include "BLI_listbase.h"
+#include "BLI_listbase_iterator.hh"
 #include "BLI_map.hh"
+#include "BLI_math_vector.h"
 #include "BLI_set.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
+#include "BLI_ustring.hh"
 #include "BLI_threads.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_idprop.hh"
+#include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
+#include "BKE_node_tree_interface.hh"
 #include "BKE_node_tree_update.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_material_resolve.hh"
 
 #include "DEG_depsgraph.hh"
 #include "DEG_depsgraph_build.hh"
 
+#include "NOD_shader.h"
 #include "NOD_socket.hh"
 
 #include "DNA_ID.h"
 #include "DNA_image_types.h"
+#include "DNA_layer_types.h"
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_enums.h"
+#include "DNA_object_types.h"
 #include "DNA_uuid_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "paint_layers_generate_intern.hh"
 #include "paint_layers_generate_layout.hh"
@@ -487,6 +503,529 @@ static void regenerate_tags(Main &bmain,
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Viewport paint pass preview
+ *
+ * The preview keeps a Mix Shader between the material's Principled and its Material Output, with an
+ * Emission fed by one channel's generated result. The mix factor is the only thing that moves when
+ * a pass is selected: 0 shows the material, 1 shows the pass. The nodes are marked so a user's own
+ * Mix or Emission is never mistaken for them.
+ * \{ */
+
+/** A marked viewer node of \a ma's embedded tree, or null. */
+static bNode *viewer_node_find(Material &ma, const char *prop_key, const int type_legacy)
+{
+  if (ma.nodetree == nullptr) {
+    return nullptr;
+  }
+  for (bNode &node : ma.nodetree->nodes) {
+    if (node.type_legacy != type_legacy) {
+      continue;
+    }
+    if (prop_int_get(node.prop, prop_key, 0) != 0) {
+      return &node;
+    }
+  }
+  return nullptr;
+}
+
+/**
+ * The node feeding \a socket, and how many links feed it. More than one is ambiguous and treated as
+ * a hand-built graph by the caller.
+ */
+static bNode *viewer_socket_source(const bNodeTree &tree,
+                                   const bNodeSocket &socket,
+                                   int &r_links_num)
+{
+  bNode *from = nullptr;
+  r_links_num = 0;
+  for (const bNodeLink &link : tree.links) {
+    if (link.tosock != &socket) {
+      continue;
+    }
+    r_links_num++;
+    from = link.fromnode;
+  }
+  return from;
+}
+
+static bool viewer_socket_linked_to(const bNodeTree &tree,
+                                    const bNodeSocket &to,
+                                    const bNodeSocket &from)
+{
+  for (const bNodeLink &link : tree.links) {
+    if (link.tosock == &to && link.fromsock == &from) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void viewer_mix_factor_set(bNodeTree &tree, bNode &mix, const float factor)
+{
+  bNodeSocket *fac = socket_in(mix, "Fac");
+  if (fac == nullptr) {
+    return;
+  }
+  bke::node_remove_socket_links(tree, *fac);
+  if (bNodeSocketValueFloat *value = static_cast<bNodeSocketValueFloat *>(fac->default_value)) {
+    value->value = factor;
+  }
+}
+
+static void viewer_depsgraph_tag(Main *bmain, Material &ma)
+{
+  if (ma.nodetree == nullptr) {
+    return;
+  }
+  BKE_ntree_update_tag_all(ma.nodetree);
+  if (bmain != nullptr) {
+    BKE_ntree_update_after_single_tree_change(*bmain, *ma.nodetree);
+  }
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+}
+
+bool BKE_paint_layers_is_view_pass_mix(const bNode &node)
+{
+  return node.type_legacy == SH_NODE_MIX_SHADER &&
+         prop_int_get(node.prop, VIEW_PASS_MIX_PROP, 0) != 0;
+}
+
+/** The active row of \a ma, or null. */
+static MaterialPaintLayer *view_pass_active_layer(const Material &ma)
+{
+  Material &mutable_ma = const_cast<Material &>(ma);
+  MaterialPaintLayer *active = BKE_paint_layers_active_layer_get(mutable_ma);
+  /* A content correction answers as itself, but the mask it is laid under is its row's. A mask
+   * item is already answered as that row. */
+  if (active != nullptr && active->role == MA_PAINT_LAYER_ROLE_EFFECT) {
+    if (MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(mutable_ma, *active)) {
+      return owner;
+    }
+  }
+  return active;
+}
+
+/** The flat color the viewer shows for a channel of the set that has no layer stack to show. */
+static void view_pass_empty_color(const int pass, float r_color[4])
+{
+  /* The neutral value of the channel: no occlusion, a flat tangent normal, full coverage. */
+  float value[3] = {0.0f, 0.0f, 0.0f};
+  switch (pass) {
+    case PAINT_MATERIAL_CHANNEL_AO:
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+      value[0] = value[1] = value[2] = 1.0f;
+      break;
+    case PAINT_MATERIAL_CHANNEL_NORMAL:
+      value[0] = value[1] = 0.5f;
+      value[2] = 1.0f;
+      break;
+    default:
+      break;
+  }
+  copy_v3_v3(r_color, value);
+  r_color[3] = 1.0f;
+}
+
+/** The interface output of \a tree named \a name, or null. */
+static bNodeTreeInterfaceSocket *tree_output_interface_find(bNodeTree &tree, const char *name)
+{
+  tree.ensure_interface_cache();
+  for (bNodeTreeInterfaceSocket *iface : tree.interface_outputs()) {
+    if (iface->name != nullptr && STREQ(iface->name, name) && iface->identifier != nullptr) {
+      return iface;
+    }
+  }
+  return nullptr;
+}
+
+/** The Group Output input socket of \a tree fed by the interface output \a name. */
+static bNodeSocket *tree_group_output_socket_find(bNodeTree &tree, const char *name)
+{
+  bNode *output = tree.group_output_node();
+  bNodeTreeInterfaceSocket *iface = tree_output_interface_find(tree, name);
+  if (output == nullptr || iface == nullptr) {
+    return nullptr;
+  }
+  return bke::node_find_socket(*output, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+}
+
+/** The instance in \a ma's generated root of the layer group \a marker, or null. */
+static bNode *view_pass_layer_instance_find(const Material &ma, const bUUID &marker)
+{
+  if (ma.paint_layers_tree == nullptr || BLI_uuid_is_nil(marker)) {
+    return nullptr;
+  }
+  for (bNode &node : ma.paint_layers_tree->nodes) {
+    if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+      continue;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(node.id);
+    if (group == nullptr) {
+      continue;
+    }
+    bUUID group_marker = BLI_uuid_nil();
+    if (!layer_tree_marker_get(*group, group_marker) ||
+        !BLI_uuid_equal(group_marker, marker) ||
+        !BLI_uuid_equal(tree_owner_uid_get(*group), ma.paint_layers_owner_uid))
+    {
+      continue;
+    }
+    return &node;
+  }
+  return nullptr;
+}
+
+/* Combined first, then every channel the generated tree can expose, then the active layer's mask.
+ * Height is here although the Image Editor's display list leaves it out: the viewport shows the
+ * channel's generated result directly, and the mask is a display of its own.
+ *
+ * Append-only: #Material::paint_layers_view_pass stores an index into this array. */
+static constexpr int view_passes[] = {
+    PAINT_LAYER_PASS_COMBINED,
+    PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+    PAINT_MATERIAL_CHANNEL_METALLIC,
+    PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+    PAINT_MATERIAL_CHANNEL_SPECULAR,
+    PAINT_MATERIAL_CHANNEL_NORMAL,
+    PAINT_MATERIAL_CHANNEL_HEIGHT,
+    PAINT_MATERIAL_CHANNEL_AO,
+    PAINT_MATERIAL_CHANNEL_ALPHA,
+    PAINT_MATERIAL_CHANNEL_EMISSION,
+    PAINT_LAYER_MAP_MASK,
+};
+/* Guards the stored indices: Combined has to stay zero, which is what files saved before the
+ * preview read as, and reordering an entry needs a versioning step (see the list's declaration). */
+static_assert(view_passes[0] == PAINT_LAYER_PASS_COMBINED);
+static_assert(std::size(view_passes) == 11);
+static_assert(view_passes[1] == PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+              view_passes[6] == PAINT_MATERIAL_CHANNEL_HEIGHT &&
+              view_passes[std::size(view_passes) - 1] == PAINT_LAYER_MAP_MASK);
+
+Span<int> BKE_paint_layers_view_passes()
+{
+  return Span<int>(view_passes, int(std::size(view_passes)));
+}
+
+int BKE_paint_layers_view_pass_get(const Material &ma)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return PAINT_LAYER_PASS_COMBINED;
+  }
+  const Span<int> passes = BKE_paint_layers_view_passes();
+  if (passes.is_empty()) {
+    return PAINT_LAYER_PASS_COMBINED;
+  }
+  int index = ma.paint_layers_view_pass;
+  if (index < 0) {
+    index = 0;
+  }
+  else if (index >= int(passes.size())) {
+    index = int(passes.size()) - 1;
+  }
+  return passes[index];
+}
+
+bool BKE_paint_layers_view_pass_available(const Material &ma, const int pass)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return false;
+  }
+  if (pass == PAINT_LAYER_PASS_COMBINED) {
+    return true;
+  }
+  if (pass == PAINT_LAYER_MAP_MASK) {
+    MaterialPaintLayer *active = view_pass_active_layer(ma);
+    if (active == nullptr || BKE_paint_layers_mask_base(*active) == nullptr) {
+      return false;
+    }
+    /* Before the generated tree carries the mask output, offer the pass so choosing it can upgrade
+     * the tree once. Afterwards, require the active row's group to expose it. */
+    if (ma.paint_layers_tree == nullptr ||
+        tree_output_interface_find(*ma.paint_layers_tree, "Result Mask") == nullptr)
+    {
+      return true;
+    }
+    bNode *instance = view_pass_layer_instance_find(ma, active->marker);
+    if (instance == nullptr || instance->id == nullptr || GS(instance->id->name) != ID_NT) {
+      return false;
+    }
+    bNodeTree *group = id_cast<bNodeTree *>(instance->id);
+    return group != nullptr && instance_output_find(*group, *instance, "Mask") != nullptr;
+  }
+  /* Every role past the channel range has no generated result of its own. */
+  if (pass < 0 || pass >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  if (!BKE_paint_layers_channel_in_set(ma, eMaterialPaintChannel(pass))) {
+    return false;
+  }
+  /* Every channel of the set is offered, as the Image Editor does: one without a layer stack has no
+   * generated result, and the viewer shows its neutral flat value instead (see the sync). This
+   * also keeps the check cheap, as it runs for each item of the header menu on every redraw. */
+  return true;
+}
+
+bool BKE_paint_layers_view_pass_set(Material &ma, const int pass)
+{
+  if (pass != PAINT_LAYER_PASS_COMBINED && !BKE_paint_layers_view_pass_available(ma, pass)) {
+    return false;
+  }
+  const Span<int> passes = BKE_paint_layers_view_passes();
+  int index = 0;
+  if (pass != PAINT_LAYER_PASS_COMBINED) {
+    for (int i = 1; i < int(passes.size()); i++) {
+      if (passes[i] == pass) {
+        index = i;
+        break;
+      }
+    }
+    if (index == 0) {
+      /* A channel the display list does not offer (Height, Custom) is no preview. */
+      return false;
+    }
+  }
+  ma.paint_layers_view_pass = int16_t(index);
+  return true;
+}
+
+/**
+ * Point the root's `Result Mask` output at the active row's group instance. Returns false when the
+ * active row has no mask output; a root saved before the output existed is scheduled for the one
+ * rebuild that adds it.
+ */
+static bool view_pass_mask_root_link(Main *bmain, Material &ma)
+{
+  if (ma.paint_layers_tree == nullptr) {
+    return false;
+  }
+  bNodeTree &root = *ma.paint_layers_tree;
+  if (tree_output_interface_find(root, "Result Mask") == nullptr) {
+    /* Only a tree with channel outputs can gain the mask output; one with nothing wired is left
+     * alone, so the pass cannot schedule itself for rebuild forever. */
+    if (!root.interface_outputs().is_empty() &&
+        (ma.paint_layers_flag & MA_PAINT_LAYERS_REGEN) == 0)
+    {
+      ma.paint_layers_flag |= MA_PAINT_LAYERS_REGEN;
+      DEG_id_tag_update(&ma.id, ID_RECALC_SHADING | ID_RECALC_SYNC_TO_EVAL);
+    }
+    return false;
+  }
+
+  MaterialPaintLayer *active = view_pass_active_layer(ma);
+  if (active == nullptr || BKE_paint_layers_mask_base(*active) == nullptr) {
+    return false;
+  }
+  bNode *instance = view_pass_layer_instance_find(ma, active->marker);
+  if (instance == nullptr || instance->id == nullptr || GS(instance->id->name) != ID_NT) {
+    return false;
+  }
+  bNodeTree *group = id_cast<bNodeTree *>(instance->id);
+  bNodeSocket *mask_out = (group != nullptr) ? instance_output_find(*group, *instance, "Mask") :
+                                               nullptr;
+  bNode *root_output = root.group_output_node();
+  bNodeSocket *root_out = tree_group_output_socket_find(root, "Result Mask");
+  if (mask_out == nullptr || root_output == nullptr || root_out == nullptr) {
+    return false;
+  }
+  if (viewer_socket_linked_to(root, *root_out, *mask_out)) {
+    return true;
+  }
+  bke::node_remove_socket_links(root, *root_out);
+  bke::node_add_link(root, *instance, *mask_out, *root_output, *root_out);
+  BKE_ntree_update_tag_all(&root);
+  if (bmain != nullptr) {
+    BKE_ntree_update_after_single_tree_change(*bmain, root);
+  }
+  DEG_id_tag_update(&root.id, ID_RECALC_SYNC_TO_EVAL);
+  return true;
+}
+
+bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma)
+{
+  if (ma.nodetree == nullptr || !BKE_paint_layers_is_layered(ma)) {
+    return false;
+  }
+  /* A linked or override material's trees are owned by another file: never rewrite them for a
+   * view-only setting. */
+  if (!ID_IS_EDITABLE(&ma.id) || ID_IS_OVERRIDE_LIBRARY(&ma.id)) {
+    return false;
+  }
+
+  int pass = BKE_paint_layers_view_pass_get(ma);
+  if (pass != PAINT_LAYER_PASS_COMBINED && !BKE_paint_layers_view_pass_available(ma, pass)) {
+    /* The channel left the material's set or lost its stack: the selector must not rest on a
+     * pass that can no longer be shown. */
+    ma.paint_layers_view_pass = 0;
+    pass = PAINT_LAYER_PASS_COMBINED;
+  }
+
+  bNode *mix = viewer_node_find(ma, VIEW_PASS_MIX_PROP, SH_NODE_MIX_SHADER);
+  if (pass == PAINT_LAYER_PASS_COMBINED) {
+    if (mix != nullptr) {
+      viewer_mix_factor_set(*ma.nodetree, *mix, 0.0f);
+      viewer_depsgraph_tag(bmain, ma);
+    }
+    return true;
+  }
+
+  bNodeTree &tree = *ma.nodetree;
+  /* Any failure leaves the material on its combined shading: a half-installed viewer must never
+   * keep showing a pass whose channel moved. */
+  const auto fail = [&]() -> bool {
+    if (mix != nullptr) {
+      viewer_mix_factor_set(tree, *mix, 0.0f);
+      viewer_depsgraph_tag(bmain, ma);
+    }
+    return false;
+  };
+
+  bNode *output = ntreeShaderOutputNode(&tree, SHD_OUTPUT_ALL);
+  if (output == nullptr) {
+    return fail();
+  }
+  bNodeSocket *surface = socket_in(*output, "Surface");
+  if (surface == nullptr) {
+    return fail();
+  }
+
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  const bNode *principled_const = BKE_paint_material_principled_find(ma, reason);
+  if (principled_const == nullptr) {
+    return fail();
+  }
+  /* The Mix has to reach the Principled with a link in this tree. A Principled the resolver found
+   * inside a group is wired through that group and cannot be linked here directly. */
+  bool principled_in_tree = false;
+  for (bNode &node : tree.nodes) {
+    if (&node == principled_const) {
+      principled_in_tree = true;
+      break;
+    }
+  }
+  if (!principled_in_tree) {
+    return fail();
+  }
+  bNode &principled = const_cast<bNode &>(*principled_const);
+  bNodeSocket *bsdf = socket_out(principled, "BSDF");
+  if (bsdf == nullptr) {
+    return fail();
+  }
+
+  int surface_links_num = 0;
+  bNode *surface_from = viewer_socket_source(tree, *surface, surface_links_num);
+  if (mix == nullptr) {
+    /* Only a material whose Surface the generator routes from a Principled gets a viewer: on a
+     * hand-built shader the Mix would change what the user sees without their asking. */
+    if (surface_links_num != 1 || surface_from != &principled) {
+      return fail();
+    }
+    mix = bke::node_add_static_node(nullptr, tree, SH_NODE_MIX_SHADER);
+    if (mix == nullptr) {
+      return fail();
+    }
+    prop_int_set(mix->prop, VIEW_PASS_MIX_PROP, 1);
+    STRNCPY_UTF8(mix->label, "Paint Pass");
+    mix->location[0] = output->location[0] - 200.0f;
+    mix->location[1] = output->location[1];
+  }
+  else if (!(surface_links_num == 1 && surface_from == mix)) {
+    /* The Mix is ours, but the user may have detached it. Reattach only where the Surface is free
+     * or still fed by the Principled; anything else is their graph. */
+    if (surface_links_num != 0 && !(surface_links_num == 1 && surface_from == &principled)) {
+      return fail();
+    }
+    bke::node_remove_socket_links(tree, *surface);
+  }
+
+  bNodeSocket *mix_principled = static_cast<bNodeSocket *>(BLI_findlink(&mix->inputs, 1));
+  bNodeSocket *mix_viewer = static_cast<bNodeSocket *>(BLI_findlink(&mix->inputs, 2));
+  bNodeSocket *mix_out = socket_out(*mix, "Shader");
+  if (mix_principled == nullptr || mix_viewer == nullptr || mix_out == nullptr) {
+    return fail();
+  }
+  if (!viewer_socket_linked_to(tree, *surface, *mix_out)) {
+    bke::node_remove_socket_links(tree, *surface);
+    bke::node_add_link(tree, *mix, *mix_out, *output, *surface);
+  }
+  if (!viewer_socket_linked_to(tree, *mix_principled, *bsdf)) {
+    bke::node_remove_socket_links(tree, *mix_principled);
+    bke::node_add_link(tree, principled, *bsdf, *mix, *mix_principled);
+  }
+
+  bNode *emission = viewer_node_find(ma, VIEW_PASS_EMISSION_PROP, SH_NODE_EMISSION);
+  if (emission == nullptr) {
+    emission = bke::node_add_static_node(nullptr, tree, SH_NODE_EMISSION);
+    if (emission == nullptr) {
+      return fail();
+    }
+    prop_int_set(emission->prop, VIEW_PASS_EMISSION_PROP, 1);
+    STRNCPY_UTF8(emission->label, "Paint Pass Viewer");
+    emission->location[0] = mix->location[0] - 200.0f;
+    emission->location[1] = mix->location[1] - 160.0f;
+  }
+  bNodeSocket *emission_out = socket_out(*emission, "Emission");
+  bNodeSocket *emission_color = socket_in(*emission, "Color");
+  bNodeSocket *emission_strength = socket_in(*emission, "Strength");
+  if (emission_out == nullptr || emission_color == nullptr) {
+    return fail();
+  }
+  if (emission_strength != nullptr) {
+    if (bNodeSocketValueFloat *value = static_cast<bNodeSocketValueFloat *>(
+            emission_strength->default_value))
+    {
+      value->value = 1.0f;
+    }
+  }
+  if (!viewer_socket_linked_to(tree, *mix_viewer, *emission_out)) {
+    bke::node_remove_socket_links(tree, *mix_viewer);
+    bke::node_add_link(tree, *emission, *emission_out, *mix, *mix_viewer);
+  }
+
+  bNode *instance = instance_find(ma, ma.paint_layers_owner_uid);
+  if (instance == nullptr || ma.paint_layers_tree == nullptr) {
+    return fail();
+  }
+  bNodeSocket *result = nullptr;
+  if (pass == PAINT_LAYER_MAP_MASK) {
+    /* The root's mask output has to follow the active row before the material can show it. */
+    if (!view_pass_mask_root_link(bmain, ma)) {
+      return fail();
+    }
+    result = instance_output_find(*ma.paint_layers_tree, *instance, "Result Mask");
+  }
+  else {
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+        eMaterialPaintChannel(pass));
+    char result_name[64];
+    SNPRINTF(result_name, "Result %s", info.ui_name);
+    result = instance_output_find(*ma.paint_layers_tree, *instance, result_name);
+  }
+  if (result == nullptr && pass != PAINT_LAYER_MAP_MASK) {
+    /* A channel of the set that no row takes part in has no generated result. It is still offered,
+     * as the Image Editor offers it, and shows the channel's neutral value. */
+    bke::node_remove_socket_links(tree, *emission_color);
+    if (bNodeSocketValueRGBA *value = static_cast<bNodeSocketValueRGBA *>(
+            emission_color->default_value))
+    {
+      view_pass_empty_color(pass, value->value);
+    }
+  }
+  else if (result == nullptr) {
+    return fail();
+  }
+  else if (!viewer_socket_linked_to(tree, *emission_color, *result)) {
+    bke::node_remove_socket_links(tree, *emission_color);
+    bke::node_add_link(tree, *instance, *result, *emission, *emission_color);
+  }
+
+  viewer_mix_factor_set(tree, *mix, 1.0f);
+  viewer_depsgraph_tag(bmain, ma);
+  return true;
+}
+
+/** \} */
+
 bool BKE_paint_layers_regenerate(Main &bmain,
                                  Material &ma,
                                  PaintLayersRegenerateReport *r_report)
@@ -655,6 +1194,10 @@ bool BKE_paint_layers_regenerate(Main &bmain,
                paint_layers_blend_any_dynamic(ma) ? 1 : 0);
 
   ma.paint_layers_flag &= ~(MA_PAINT_LAYERS_REGEN | MA_PAINT_LAYERS_BLEND_SYNC);
+
+  /* A rebuild re-creates the instance's sockets, so the viewport pass viewer has to find the
+   * channel result again. Idempotent and cheap when the combined shading is shown. */
+  BKE_paint_layers_view_pass_sync(&bmain, ma);
 
   report.relations_changed = relations_changed;
   report_out();

@@ -39,7 +39,7 @@ static int enum_menu_step_clamped(bContext *C, const int direction, Button *but)
 
   Vector<int> values;
   for (const EnumPropertyItem *item = items; item->identifier; item++) {
-    if (item->identifier[0] != '\0') {
+    if (item->identifier[0] != '\0' && item->value != RNA_ENUM_VALUE_ACTION) {
       values.append(item->value);
     }
   }

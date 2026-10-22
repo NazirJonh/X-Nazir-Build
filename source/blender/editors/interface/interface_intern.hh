@@ -1803,6 +1803,9 @@ void button_search_refresh(ButtonSearch *but);
 /* `interface_region_menu_popup.cc` */
 
 int button_menu_step(Button *but, int direction);
+/** The region's button event handler (#region_handlers_add), for a handler placed in front of it
+ * that has to give the events it does not take to the buttons itself. */
+int region_handler(bContext *C, const wmEvent *event, void *userdata);
 bool button_menu_step_poll(const Button *but);
 Button *popup_menu_memory_get(Block *block);
 void popup_menu_memory_set(Block *block, Button *but);

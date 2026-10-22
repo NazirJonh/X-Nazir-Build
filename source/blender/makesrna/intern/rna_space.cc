@@ -2637,6 +2637,25 @@ static bool space_image_layered_maps_get(Material &ma,
 }
 
 /**
+ * The last entry of the canvas menu: a checkbox that keeps the pass equal between this editor and
+ * the 3D Viewport. It is an action item (#RNA_ENUM_VALUE_ACTION), so Ctrl-Wheel steps over it.
+ */
+static void space_image_canvas_sync_item_add(EnumPropertyItem **r_item, int *r_totitem, Main &bmain)
+{
+  EnumPropertyItem separator{};
+  separator.identifier = "";
+  RNA_enum_item_add(r_item, r_totitem, &separator);
+
+  EnumPropertyItem sync{};
+  sync.value = RNA_ENUM_VALUE_ACTION;
+  sync.identifier = "SYNC_VIEW_PASS";
+  sync.name = "Sync Views";
+  sync.description = "Show the same paint pass in the 3D Viewport and in this editor";
+  sync.icon = ED_paint_view_pass_sync_get(bmain) ? ICON_CHECKBOX_HLT : ICON_CHECKBOX_DEHLT;
+  RNA_enum_item_add(r_item, r_totitem, &sync);
+}
+
+/**
  * Paint-slot images of the active material, deduplicated, in node order: the same set and order
  * #PAINT_OT_material_canvas_cycle steps through, so the `C` / `Shift-C` hotkey and this selector
  * never disagree about what comes next.
@@ -2775,6 +2794,7 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
     }
   }
   if (!has_active_layer) {
+    space_image_canvas_sync_item_add(&item, &totitem, *CTX_data_main(C));
     RNA_enum_item_end(&item, &totitem);
     *r_free = true;
     return item;
@@ -2815,6 +2835,7 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
     RNA_enum_item_add(&item, &totitem, &layer_item);
   }
 
+  space_image_canvas_sync_item_add(&item, &totitem, *CTX_data_main(C));
   RNA_enum_item_end(&item, &totitem);
   *r_free = true;
 
@@ -2835,6 +2856,10 @@ static int rna_SpaceImageEditor_material_paint_canvas_get(PointerRNA *ptr)
 static void rna_SpaceImageEditor_material_paint_canvas_set(PointerRNA *ptr, int value)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  if (value == RNA_ENUM_VALUE_ACTION) {
+    ED_paint_view_pass_sync_toggle(*G_MAIN);
+    return;
+  }
   if (value <= SPACE_IMAGE_CANVAS_MISSING_BASE) {
     /* A channel the active layer has no map for. The item exists so the section keeps its shape;
      * there is nothing to select. */
@@ -2846,6 +2871,7 @@ static void rna_SpaceImageEditor_material_paint_canvas_set(PointerRNA *ptr, int 
      * the switch. */
     sima->material_paint_pass = SPACE_IMAGE_CANVAS_PASS_BASE - value;
     sima->flag |= SI_PAINT_COMPOSITE_MODE;
+    ED_paint_material_view_pass_from_image(*G_MAIN, *sima);
     return;
   }
   sima->flag &= ~SI_PAINT_COMPOSITE_MODE;

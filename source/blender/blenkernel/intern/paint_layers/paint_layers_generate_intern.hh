@@ -52,6 +52,14 @@ namespace bke::paint_layers {
 inline constexpr const char *TREE_OWNER_PROP = "pbr_paint_layers_owner";
 /** On the instance node in the material's embedded tree: the same owner uid. */
 inline constexpr const char *INSTANCE_OWNER_PROP = "pbr_paint_layers_instance";
+/**
+ * On the Mix Shader and Emission nodes the viewport paint pass preview installs in the material's
+ * embedded tree: 1 marks them as that viewer, so a user's own Mix or Emission is never mistaken for
+ * it. A flag rather than an owner uid: the viewer lives in the material's own tree, which a copy
+ * carries with it.
+ */
+inline constexpr const char *VIEW_PASS_MIX_PROP = "pbr_paint_view_pass_mix";
+inline constexpr const char *VIEW_PASS_EMISSION_PROP = "pbr_paint_view_pass_emission";
 /** On a layer's own node group: the marker of the layer it holds. The tree also carries
  * #TREE_OWNER_PROP of the material, so a copy never adopts the source's groups. */
 inline constexpr const char *TREE_LAYER_PROP = "pbr_paint_layers_layer_tree";

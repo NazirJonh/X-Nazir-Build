@@ -21,6 +21,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
@@ -1540,12 +1541,19 @@ MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker)
 
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker)
 {
+  const bool active_changed = !BLI_uuid_equal(ma.active_layer_marker, marker);
   /* Leaving a row is when its deferred bake becomes due: the row and its ancestor folders left
    * behind may carry a cache that has to catch up (see #BKE_paint_layers_bake_row_is_deferred). */
-  if (!BLI_uuid_equal(ma.active_layer_marker, marker)) {
+  if (active_changed) {
     ma.paint_layers_flag |= MA_PAINT_LAYERS_BAKE_STALE;
   }
   ma.active_layer_marker = marker;
+  /* The viewport's Mask pass shows the active row's mask, so moving the active row has to move the
+   * root's mask output with it. */
+  if (active_changed && BKE_paint_layers_view_pass_get(ma) == PAINT_LAYER_MAP_MASK) {
+    Main *bmain = (G_MAIN != nullptr && BKE_id_is_in_global_main(&ma.id)) ? G_MAIN : nullptr;
+    BKE_paint_layers_view_pass_sync(bmain, ma);
+  }
 }
 
 bUUID BKE_paint_layers_active_get(const Material &ma)

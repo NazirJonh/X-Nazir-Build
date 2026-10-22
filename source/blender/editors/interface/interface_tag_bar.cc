@@ -1096,25 +1096,18 @@ int tag_bar_region_handler(bContext *C, const wmEvent *event, void * /*userdata*
     return WM_UI_HANDLER_CONTINUE;
   }
 
-  /* Check if Ctrl modifier is pressed */
-  if ((event->modifier & blender::KM_CTRL) == 0) {
-    return WM_UI_HANDLER_CONTINUE;
+  /* This handler sits in front of the region's button handler. A wheel event it leaves unhandled
+   * makes the window manager skip every later UI handler for wheel events (see
+   * #wm_handler_ui_call), so the header buttons would lose Ctrl-Wheel cycling. Whatever is not a
+   * tag cycle therefore goes to the button handler right here. */
+  if ((event->modifier & blender::KM_CTRL) != 0 && is_mouse_over_tag_bar(C, event)) {
+    const int direction = (event->type == blender::WHEELUPMOUSE) ? -1 : 1;
+    if (cycle_active_tag(C, direction)) {
+      return WM_UI_HANDLER_BREAK;
+    }
   }
 
-  /* Check if mouse is over tag bar area */
-  if (!is_mouse_over_tag_bar(C, event)) {
-    return WM_UI_HANDLER_CONTINUE;
-  }
-
-  /* Determine scroll direction */
-  const int direction = (event->type == blender::WHEELUPMOUSE) ? -1 : 1;
-
-  /* Cycle through tags */
-  if (cycle_active_tag(C, direction)) {
-    return WM_UI_HANDLER_BREAK;
-  }
-
-  return WM_UI_HANDLER_CONTINUE;
+  return region_handler(C, event, nullptr);
 }
 
 /** \} */

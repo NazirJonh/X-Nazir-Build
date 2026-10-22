@@ -25,6 +25,7 @@
 #include "BLI_path_utils.hh"
 #include "BLI_utildefines.h"
 #include "BLI_uuid.h"
+#include "BLI_set.hh"
 #include "BLI_vector.hh"
 
 #include "BLT_translation.hh"
@@ -37,11 +38,15 @@
 #include "IMB_interp.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_workspace_types.h"
 #include "DNA_image_types.h"
+#include "DNA_layer_types.h"
 #include "DNA_material_types.h"
 #include "DNA_object_enums.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_screen_types.h"
+#include "DNA_windowmanager_types.h"
 #include "DNA_space_types.h"
 
 #include "BKE_asset.hh"
@@ -51,6 +56,8 @@
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
+#include "BKE_layer.hh"
+#include "BKE_wm_runtime.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_name_matching.hh"
@@ -2376,6 +2383,7 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
         break;
       }
     }
+    ED_paint_material_view_pass_from_image(*bmain, *sima);
     WM_event_add_notifier(C, NC_SPACE | ND_SPACE_IMAGE, nullptr);
     return OPERATOR_FINISHED;
   }
@@ -2480,6 +2488,242 @@ void PAINT_OT_material_canvas_cycle(wmOperatorType *ot)
                   "Keep View",
                   "Preserve the current zoom and pan instead of adopting the next image's "
                   "remembered view");
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Cycle Material View Pass
+ *
+ * Steps the 3D Viewport's display of the active layered material through the paint passes, in the
+ * same order the viewport's pass menu lists them. Combined is part of the cycle: stepping past the
+ * last channel returns to the shaded material. Bound to `C` / `Shift-C` while a Paint toolbar brush
+ * is active; the operator polls false for every other brush, so their brush shortcuts keep the
+ * keys.
+ * \{ */
+
+static bool material_view_pass_cycle_poll(bContext *C)
+{
+  const SpaceLink *space = CTX_wm_space_data(C);
+  if (space == nullptr || space->spacetype != SPACE_VIEW3D) {
+    return false;
+  }
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || ob->type != OB_MESH || ob->mode != OB_MODE_SCULPT) {
+    return false;
+  }
+  const Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr ||
+      scene->toolsettings->paint_mode.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL)
+  {
+    return false;
+  }
+  Material *ma = BKE_object_material_get(ob, ob->actcol);
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma) || !ID_IS_EDITABLE(&ma->id)) {
+    return false;
+  }
+  /* Only the Paint toolbar group owns the keys: a sculpt brush must keep C/Shift-C for Clay Strips
+   * and Crease Polish. The active brush is not enough to tell, as it stays the last one used while
+   * an operator tool (masks, transforms) is active, so the tool has to be a brush tool too.
+   * Mirrors the `is_paint_tool` test of the 3D Viewport header. */
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  if (tref == nullptr || tref->runtime == nullptr ||
+      (tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES) == 0)
+  {
+    return false;
+  }
+  const Brush *brush = BKE_paint_brush_for_read(BKE_paint_get_active_from_context(C));
+  return brush != nullptr && ELEM(brush->sculpt_brush_type,
+                                  SCULPT_BRUSH_TYPE_PAINT,
+                                  SCULPT_BRUSH_TYPE_ERASE,
+                                  SCULPT_BRUSH_TYPE_SMEAR,
+                                  SCULPT_BRUSH_TYPE_TEXTURE_FILL,
+                                  SCULPT_BRUSH_TYPE_CLONE);
+}
+
+/** The scene of the active window: its tool settings own the option to sync the view pass. */
+static Scene *view_pass_sync_scene(Main &bmain)
+{
+  for (wmWindowManager &wm : bmain.wm) {
+    const wmWindow *win = wm.runtime->winactive;
+    if (win == nullptr) {
+      win = static_cast<const wmWindow *>(wm.windows.first);
+    }
+    if (win != nullptr && win->scene != nullptr) {
+      return win->scene;
+    }
+  }
+  return nullptr;
+}
+
+bool ED_paint_view_pass_sync_get(Main &bmain)
+{
+  const Scene *scene = view_pass_sync_scene(bmain);
+  return scene == nullptr || scene->toolsettings == nullptr ||
+         scene->toolsettings->paint_mode.view_pass_sync_off == 0;
+}
+
+/**
+ * Put every Image Editor that shows a composite of \a ma on \a pass. An editor that shows a layer
+ * map is left alone: it is the canvas a stroke writes into, and a pass chosen elsewhere must not
+ * take it away.
+ */
+static void view_pass_images_set(Main &bmain, Material &ma, const int pass)
+{
+  /* The Image Editor's list has no Height; keep what it shows rather than guessing. */
+  if (pass == PAINT_MATERIAL_CHANNEL_HEIGHT) {
+    return;
+  }
+  for (bScreen &screen : bmain.screens) {
+    for (ScrArea &area : screen.areabase) {
+      for (SpaceLink &space : area.spacedata) {
+        if (space.spacetype != SPACE_IMAGE) {
+          continue;
+        }
+        SpaceImage &sima = reinterpret_cast<SpaceImage &>(space);
+        if (sima.mode != SI_MODE_PAINT || (sima.flag & SI_PAINT_COMPOSITE_MODE) == 0 ||
+            sima.image == nullptr || ED_space_image_composite_material_get(&bmain, sima.image) != &ma)
+        {
+          continue;
+        }
+        sima.material_paint_pass = pass;
+      }
+    }
+  }
+}
+
+void ED_paint_material_view_pass_apply(Main &bmain, Material &ma)
+{
+  BKE_paint_layers_view_pass_sync(&bmain, ma);
+  const int pass = BKE_paint_layers_view_pass_get(ma);
+  if (ED_paint_view_pass_sync_get(bmain)) {
+    view_pass_images_set(bmain, ma, pass);
+  }
+
+  /* A Sculpt Mode stroke can span several selected objects: the pass is the view of all their
+   * active materials, not only the active object's. */
+  Set<Material *> materials;
+  for (wmWindowManager &wm : bmain.wm) {
+    for (wmWindow &window : wm.windows) {
+      if (window.scene == nullptr) {
+        continue;
+      }
+      const ViewLayer *view_layer = BKE_view_layer_find(window.scene, window.view_layer_name);
+      if (view_layer == nullptr) {
+        continue;
+      }
+      for (const Base &base : view_layer->object_bases) {
+        const Object *ob = base.object;
+        if ((base.flag & BASE_SELECTED) == 0 || ob == nullptr || ob->type != OB_MESH ||
+            ob->mode != OB_MODE_SCULPT)
+        {
+          continue;
+        }
+        Material *other = BKE_object_material_get(const_cast<Object *>(ob), ob->actcol);
+        if (other != nullptr && other != &ma && BKE_paint_layers_is_layered(*other) &&
+            ID_IS_EDITABLE(&other->id))
+        {
+          materials.add(other);
+        }
+      }
+    }
+  }
+
+  for (Material *other : materials) {
+    BKE_paint_layers_view_pass_set(*other,
+                                   BKE_paint_layers_view_pass_available(*other, pass) ?
+                                       pass :
+                                       PAINT_LAYER_PASS_COMBINED);
+    /* Synced even when the pass did not change: the viewer nodes are derived data and may be
+     * missing after a copy or an undo. */
+    BKE_paint_layers_view_pass_sync(&bmain, *other);
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
+}
+
+void ED_paint_view_pass_sync_toggle(Main &bmain)
+{
+  Scene *scene = view_pass_sync_scene(bmain);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return;
+  }
+  char &sync_off = scene->toolsettings->paint_mode.view_pass_sync_off;
+  sync_off = (sync_off == 0) ? 1 : 0;
+  if (sync_off != 0) {
+    return;
+  }
+  /* Turned on: the 3D Viewport's pass is the reference the Image Editors catch up with. */
+  ViewLayer *view_layer = BKE_view_layer_default_view(scene);
+  Object *ob = (view_layer != nullptr) ? BKE_view_layer_active_object_get(view_layer) : nullptr;
+  Material *ma = (ob != nullptr) ? BKE_object_material_get(ob, ob->actcol) : nullptr;
+  if (ma != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    ED_paint_material_view_pass_apply(bmain, *ma);
+  }
+}
+
+void ED_paint_material_view_pass_from_image(Main &bmain, SpaceImage &sima)
+{
+  if (sima.image == nullptr || (sima.flag & SI_PAINT_COMPOSITE_MODE) == 0 ||
+      !ED_paint_view_pass_sync_get(bmain))
+  {
+    return;
+  }
+  Material *ma = ED_space_image_composite_material_get(&bmain, sima.image);
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma) || !ID_IS_EDITABLE(&ma->id)) {
+    return;
+  }
+  const int pass = sima.material_paint_pass;
+  BKE_paint_layers_view_pass_set(*ma,
+                                 BKE_paint_layers_view_pass_available(*ma, pass) ?
+                                     pass :
+                                     PAINT_LAYER_PASS_COMBINED);
+  ED_paint_material_view_pass_apply(bmain, *ma);
+}
+
+static wmOperatorStatus material_view_pass_cycle_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  Material *ma = (ob != nullptr) ? BKE_object_material_get(ob, ob->actcol) : nullptr;
+  if (ma == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  Vector<int> passes;
+  for (const int pass : BKE_paint_layers_view_passes()) {
+    if (pass == PAINT_LAYER_PASS_COMBINED || BKE_paint_layers_view_pass_available(*ma, pass)) {
+      passes.append(pass);
+    }
+  }
+  if (passes.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool reverse = RNA_boolean_get(op->ptr, "reverse");
+  const int count = int(passes.size());
+  const int current = int(passes.first_index_of_try(BKE_paint_layers_view_pass_get(*ma)));
+  const int next = (current < 0) ? (reverse ? count - 1 : 0) :
+                                   (current + (reverse ? -1 : 1) + count) % count;
+  if (!BKE_paint_layers_view_pass_set(*ma, passes[next])) {
+    return OPERATOR_CANCELLED;
+  }
+
+  ED_paint_material_view_pass_apply(*CTX_data_main(C), *ma);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_material_view_pass_cycle(wmOperatorType *ot)
+{
+  ot->name = "Cycle Material View Pass";
+  ot->idname = "PAINT_OT_material_view_pass_cycle";
+  ot->description =
+      "Show the next paint pass of the active layered material in the 3D Viewport (PBR paint)";
+  ot->exec = material_view_pass_cycle_exec;
+  ot->poll = material_view_pass_cycle_poll;
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_boolean(
+      ot->srna, "reverse", false, "Reverse", "Step to the previous pass instead of the next");
 }
 
 /** \} */
@@ -3191,6 +3435,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_channel_source_image_set);
   WM_operatortype_append(PAINT_OT_material_paint_channels_assign_images);
   WM_operatortype_append(PAINT_OT_material_canvas_cycle);
+  WM_operatortype_append(PAINT_OT_material_view_pass_cycle);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

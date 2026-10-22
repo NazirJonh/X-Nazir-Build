@@ -4494,10 +4494,15 @@ int RNA_property_enum_step(
 
   do {
     i = mod_i(i + single_step, totitem);
-    if (item_array[i].identifier[0]) {
+    if (item_array[i].identifier[0] && item_array[i].value != RNA_ENUM_VALUE_ACTION) {
       step_tot += single_step;
     }
   } while ((i != i_init) && (step_tot != step));
+
+  /* The loop can end on an action item when stepping wraps all the way round. */
+  if (item_array[i].value == RNA_ENUM_VALUE_ACTION) {
+    i = i_init;
+  }
 
   if (i != i_init) {
     result_value = item_array[i].value;

@@ -36,6 +36,7 @@ struct ImageUndoStep;
 struct ImageUser;
 struct ImBuf;
 struct Main;
+struct Material;
 struct Object;
 struct Paint;
 struct PaintModeSettings;
@@ -457,6 +458,33 @@ eV3DShadingColorType ED_paint_shading_color_override(bContext *C,
  * When #tref isn't given the active tool from the context is used.
  */
 bool ED_paint_brush_type_use_canvas(bContext *C, bToolRef *tref);
+
+/**
+ * Show \a ma through the view pass it already stores (#Material::paint_layers_view_pass) in every
+ * 3D Viewport: sync its preview nodes, give the same pass to the active material of every other
+ * selected Sculpt Mode mesh, and notify. A material that cannot show the pass goes back to
+ * Combined, so a multi-object view never mixes unrelated pass states. With the sync on
+ * (#ED_paint_view_pass_sync_get) the Image Editors that show a composite of \a ma follow the pass.
+ *
+ * The one entry point for the header menu (through RNA) and the cycle operator.
+ */
+void ED_paint_material_view_pass_apply(Main &bmain, Material &ma);
+
+/**
+ * Whether the pass of a layered material is kept equal between the 3D Viewport and the Image
+ * Editors (#PaintModeSettings::view_pass_sync_off, read from the active window's scene).
+ */
+bool ED_paint_view_pass_sync_get(Main &bmain);
+
+/** Switch #ED_paint_view_pass_sync_get; turning it on aligns the Image Editors with the 3D
+ * Viewport at once. */
+void ED_paint_view_pass_sync_toggle(Main &bmain);
+
+/**
+ * The Image Editor \a sima has just been put on a composite pass: when the sync is on, show the same
+ * pass of the material it displays in the 3D Viewport (and every other Image Editor).
+ */
+void ED_paint_material_view_pass_from_image(Main &bmain, SpaceImage &sima);
 
 /** Store the last used tool in the sculpt session. */
 void ED_paint_brush_type_update_sticky_shading_color(bContext *C, Object *ob);

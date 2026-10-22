@@ -5,6 +5,7 @@
 #pragma once
 
 #include "BLI_function_ref.hh"
+#include "BLI_span.hh"
 
 #include "DNA_uuid_types.h"
 
@@ -13,6 +14,7 @@ namespace blender {
 struct Main;
 struct Material;
 struct MaterialPaintLayer;
+struct bNode;
 struct bNodeTree;
 
 /**
@@ -121,6 +123,52 @@ bool BKE_paint_layers_regenerate(Main &bmain,
  * already built.
  */
 void BKE_paint_layers_regenerate_tagged(Main &bmain);
+
+/* -------------------------------------------------------------------- */
+/** \name Viewport paint pass preview
+ *
+ * The 3D Viewport shows a layered material through its Principled shading. To paint while seeing
+ * one channel alone, a Mix Shader is inserted between that Principled and the Material Output and
+ * an Emission fed by the channel's generated result takes over while a pass is selected.
+ * \{ */
+
+/**
+ * The passes the 3D Viewport offers, in menu order: Combined, every shading channel the generated
+ * tree can expose (Height included), and the active layer's Mask. This is a viewport list of its
+ * own: the Image Editor's display list keeps ignoring Height, and its Mask entry is a layer-map
+ * role rather than the active layer's mask this list ends with.
+ *
+ * #Material::paint_layers_view_pass stores an index into this list, so it is append-only: changing
+ * the position of an entry silently changes what files saved earlier show. A new pass goes at the
+ * end, or the order changes together with a versioning step that remaps the stored index.
+ */
+Span<int> BKE_paint_layers_view_passes();
+
+/** The pass \a ma is shown through in the 3D Viewport: a value from #BKE_paint_layers_view_passes,
+ * #PAINT_LAYER_PASS_COMBINED for the shaded material. */
+int BKE_paint_layers_view_pass_get(const Material &ma);
+
+/** Select the 3D Viewport pass of \a ma. Returns false when \a pass is not one the preview can
+ * show. */
+bool BKE_paint_layers_view_pass_set(Material &ma, int pass);
+
+/** Whether the viewer can show \a pass of \a ma: any channel of its paint channel set (one without a
+ * layer stack shows its neutral value), or the Mask of an active row that has a mask. Combined is
+ * always available. */
+bool BKE_paint_layers_view_pass_available(const Material &ma, int pass);
+
+/**
+ * Make the material's viewport preview nodes match its stored view pass: install the Mix Shader and
+ * Emission when a pass is selected, wire the channel's generated result into it, and move the mix
+ * factor so the viewport shows the pass instead of the Principled shading. Idempotent, and safe to
+ * call after every regeneration. \a bmain may be null when the caller cannot update the tree.
+ */
+bool BKE_paint_layers_view_pass_sync(Main *bmain, Material &ma);
+
+/** Whether \a node is the Mix Shader #BKE_paint_layers_view_pass_sync installs. */
+bool BKE_paint_layers_is_view_pass_mix(const bNode &node);
+
+/** \} */
 
 /**
  * Copy the description's animatable values (each row's opacity, a Fill row's constant) into the

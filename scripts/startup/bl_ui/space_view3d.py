@@ -1224,6 +1224,21 @@ class VIEW3D_HT_header(Header):
             # the appropriate color types are selected in Solid mode, I.E. 'TEXTURE'
             row.active = is_paint_tool
 
+            # Paint pass (PBR Paint): show one channel or the active layer's mask alone while
+            # painting. Also shown while a pass is active, so it can be switched off from any
+            # sculpt tool.
+            mat = obj.active_material if obj else None
+            if (mat is not None and mat.is_layered and
+                    (canvas_source == 'MATERIAL' or
+                     mat.paint_layers_view_pass != 'COMPOSITE_COMBINED')):
+                row = layout.row(align=True)
+                # The pass lives in the material, so renders show it too: highlight it while
+                # anything but Combined is selected.
+                row.alert = mat.paint_layers_view_pass != 'COMPOSITE_COMBINED'
+                # Same selector the Outliner stack uses: it steps through the menu's own items on
+                # Ctrl-Wheel and keeps its width while the item name changes.
+                row.template_enum_menu(mat, "paint_layers_view_pass", width=5.0, wrap=False)
+
             if VIEW3D_HT_header.paint_curve_uses_view3d_snapping(context):
                 VIEW3D_HT_header.draw_paint_curve_snap_template(layout, context)
             else:

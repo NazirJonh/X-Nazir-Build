@@ -14,6 +14,9 @@
 #include "BKE_paint_material_resolve.hh"
 
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
+
+#include "paint_layers/paint_layers_generate_intern.hh"
 
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
@@ -153,6 +156,76 @@ TEST_F(PaintMaterialResolveTest, mix_shader_before_output_reports_no_principled)
                      *bke::node_find_socket(*mix, SOCK_OUT, "Shader"_ustr),
                      *output,
                      surface);
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  EXPECT_EQ(BKE_paint_material_principled_find(*ma, reason), nullptr);
+  EXPECT_EQ(reason, ChannelUnavailableReason::NoPrincipled);
+}
+
+/**
+ * Routes the Principled through a Mix Shader marked as the viewport pass viewer and returns the Mix.
+ * Input 1 is the Principled, as the viewer sync wires it.
+ */
+static bNode *route_through_view_pass_mix(bNodeTree &ntree,
+                                          bNode &principled,
+                                          bNode &output,
+                                          const bool link_principled)
+{
+  bNodeSocket &surface = *bke::node_find_socket(output, SOCK_IN, "Surface"_ustr);
+  bke::node_remove_socket_links(ntree, surface);
+  bNode *mix = bke::node_add_static_node(nullptr, ntree, SH_NODE_MIX_SHADER);
+  bke::paint_layers::prop_int_set(mix->prop, bke::paint_layers::VIEW_PASS_MIX_PROP, 1);
+  if (link_principled) {
+    bke::node_add_link(ntree,
+                       principled,
+                       *bke::node_find_socket(principled, SOCK_OUT, "BSDF"_ustr),
+                       *mix,
+                       *static_cast<bNodeSocket *>(BLI_findlink(&mix->inputs, 1)));
+  }
+  bke::node_add_link(
+      ntree, *mix, *bke::node_find_socket(*mix, SOCK_OUT, "Shader"_ustr), output, surface);
+  return mix;
+}
+
+TEST_F(PaintMaterialResolveTest, view_pass_mix_before_output_is_followed_to_principled)
+{
+  Material *ma = this->add_material_with_principled("ViewPass");
+  bNode *principled = this->find_node(*ma, SH_NODE_BSDF_PRINCIPLED);
+  route_through_view_pass_mix(*ma->nodetree, *principled, *this->find_output(*ma), true);
+
+  ChannelUnavailableReason reason = ChannelUnavailableReason::NoMaterial;
+  EXPECT_EQ(BKE_paint_material_principled_find(*ma, reason), principled);
+  EXPECT_EQ(reason, ChannelUnavailableReason::None);
+}
+
+TEST_F(PaintMaterialResolveTest, view_pass_mix_without_principled_input_reports_no_principled)
+{
+  Material *ma = this->add_material_with_principled("ViewPassDetached");
+  bNode *principled = this->find_node(*ma, SH_NODE_BSDF_PRINCIPLED);
+  route_through_view_pass_mix(*ma->nodetree, *principled, *this->find_output(*ma), false);
+
+  ChannelUnavailableReason reason = ChannelUnavailableReason::None;
+  EXPECT_EQ(BKE_paint_material_principled_find(*ma, reason), nullptr);
+  EXPECT_EQ(reason, ChannelUnavailableReason::NoPrincipled);
+}
+
+TEST_F(PaintMaterialResolveTest, view_pass_mix_only_exempts_the_marked_mix)
+{
+  Material *ma = this->add_material_with_principled("ViewPassStacked");
+  bNodeTree &ntree = *ma->nodetree;
+  bNode *principled = this->find_node(*ma, SH_NODE_BSDF_PRINCIPLED);
+  bNode *output = this->find_output(*ma);
+  bNode *viewer_mix = route_through_view_pass_mix(ntree, *principled, *output, true);
+
+  /* A user Mix Shader behind the viewer's Mix is still ambiguous: the exception covers one hop. */
+  bNode *user_mix = bke::node_add_static_node(nullptr, ntree, SH_NODE_MIX_SHADER);
+  bNodeSocket &viewer_input = *static_cast<bNodeSocket *>(BLI_findlink(&viewer_mix->inputs, 1));
+  bke::node_remove_socket_links(ntree, viewer_input);
+  bke::node_add_link(ntree,
+                     *user_mix,
+                     *bke::node_find_socket(*user_mix, SOCK_OUT, "Shader"_ustr),
+                     *viewer_mix,
+                     viewer_input);
+
   ChannelUnavailableReason reason = ChannelUnavailableReason::None;
   EXPECT_EQ(BKE_paint_material_principled_find(*ma, reason), nullptr);
   EXPECT_EQ(reason, ChannelUnavailableReason::NoPrincipled);

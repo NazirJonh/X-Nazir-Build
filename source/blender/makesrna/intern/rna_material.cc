@@ -258,7 +258,9 @@ const EnumPropertyItem rna_enum_material_paint_layer_color_items[] = {
 #  include "BKE_paint_layers.hh"
 #  include "BKE_paint_layers_composite.hh"
 #  include "BKE_paint_layers_edit.hh"
+#  include "BKE_paint_layers_generate.hh"
 #  include "BKE_paint_layers_target.hh"
+#  include "BKE_paint_material_composite.hh"
 #  include "BKE_report.hh"
 #  include "BKE_scene.hh"
 #  include "BKE_texture.h"
@@ -271,6 +273,7 @@ const EnumPropertyItem rna_enum_material_paint_layer_color_items[] = {
 #  include "ED_image.hh"
 #  include "ED_node.hh"
 #  include "ED_outliner_stack.hh"
+#  include "ED_paint.hh"
 #  include "ED_screen.hh"
 #  include "ED_undo.hh"
 
@@ -1096,7 +1099,7 @@ static void rna_Material_paint_layers_channels_update(Main *bmain,
                                                       Scene * /*scene*/,
                                                       PointerRNA *ptr)
 {
-  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  Material *ma = id_cast<Material *>(ptr->owner_id);
   if (bmain != nullptr && BKE_paint_layers_is_layered(*ma)) {
     for (bScreen &screen : bmain->screens) {
       for (ScrArea &area : screen.areabase) {
@@ -1117,8 +1120,134 @@ static void rna_Material_paint_layers_channels_update(Main *bmain,
         }
       }
     }
+    /* The 3D Viewport's pass may have lost its channel too; the sync resets it to Combined. */
+    BKE_paint_layers_view_pass_sync(bmain, *ma);
   }
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
+}
+
+/** Identifier of a 3D Viewport view pass item. Stable literals: an enum identifier reaches Python
+ * as-is and is copied by reference. */
+static const char *rna_Material_paint_layers_view_pass_identifier(const int pass)
+{
+  switch (pass) {
+    case PAINT_LAYER_PASS_COMBINED:
+      return "COMPOSITE_COMBINED";
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+      return "COMPOSITE_BASE_COLOR";
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+      return "COMPOSITE_METALLIC";
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+      return "COMPOSITE_ROUGHNESS";
+    case PAINT_MATERIAL_CHANNEL_SPECULAR:
+      return "COMPOSITE_SPECULAR";
+    case PAINT_MATERIAL_CHANNEL_NORMAL:
+      return "COMPOSITE_NORMAL";
+    case PAINT_MATERIAL_CHANNEL_HEIGHT:
+      return "COMPOSITE_HEIGHT";
+    case PAINT_MATERIAL_CHANNEL_AO:
+      return "COMPOSITE_AO";
+    case PAINT_MATERIAL_CHANNEL_ALPHA:
+      return "COMPOSITE_ALPHA";
+    case PAINT_MATERIAL_CHANNEL_EMISSION:
+      return "COMPOSITE_EMISSION";
+    case PAINT_LAYER_MAP_MASK:
+      return "COMPOSITE_MASK";
+    default:
+      return "COMPOSITE_COMBINED";
+  }
+}
+
+/**
+ * The passes the 3D Viewport can show for this material: Combined, then every channel of its paint
+ * channel set that has a layer stack. A pass without a stack has nothing to show, so it is left
+ * out rather than offered and silently falling back.
+ */
+static const EnumPropertyItem *rna_Material_paint_layers_view_pass_itemf(bContext *C,
+                                                                        PointerRNA *ptr,
+                                                                        PropertyRNA * /*prop*/,
+                                                                        bool *r_free)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  EnumPropertyItem *item = nullptr;
+  int totitem = 0;
+
+  EnumPropertyItem combined{};
+  combined.value = PAINT_LAYER_PASS_COMBINED;
+  combined.identifier = "COMPOSITE_COMBINED";
+  combined.name = "Combined";
+  combined.description = "Shade every channel together, as the material does";
+  combined.icon = ICON_SHADING_RENDERED;
+  RNA_enum_item_add(&item, &totitem, &combined);
+
+  if (ma != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    for (const int pass : BKE_paint_layers_view_passes()) {
+      if (pass == PAINT_LAYER_PASS_COMBINED || !BKE_paint_layers_view_pass_available(*ma, pass)) {
+        continue;
+      }
+      const bool is_mask = pass == PAINT_LAYER_MAP_MASK;
+      EnumPropertyItem pass_item{};
+      pass_item.value = pass;
+      pass_item.identifier = rna_Material_paint_layers_view_pass_identifier(pass);
+      pass_item.name = is_mask ? "Mask" :
+                                BKE_paint_material_channel_info(eMaterialPaintChannel(pass)).ui_name;
+      pass_item.description = is_mask ? "Show the active layer's mask" :
+                                        "Show only this channel while painting";
+      pass_item.icon = is_mask ? ICON_MOD_MASK : ICON_NODE_COMPOSITING;
+      RNA_enum_item_add(&item, &totitem, &pass_item);
+    }
+
+    /* Last, after a separator: the checkbox that keeps the pass equal with the Image Editor. An
+     * action item, so Ctrl-Wheel steps over it. */
+    EnumPropertyItem separator{};
+    separator.identifier = "";
+    RNA_enum_item_add(&item, &totitem, &separator);
+
+    Main *bmain = (C != nullptr) ? CTX_data_main(C) : G_MAIN;
+    EnumPropertyItem sync{};
+    sync.value = RNA_ENUM_VALUE_ACTION;
+    sync.identifier = "SYNC_VIEW_PASS";
+    sync.name = "Sync Views";
+    sync.description = "Show the same paint pass in the 3D Viewport and in the Image Editor";
+    sync.icon = (bmain != nullptr && ED_paint_view_pass_sync_get(*bmain)) ? ICON_CHECKBOX_HLT :
+                                                                            ICON_CHECKBOX_DEHLT;
+    RNA_enum_item_add(&item, &totitem, &sync);
+  }
+
+  RNA_enum_item_end(&item, &totitem);
+  *r_free = true;
+  return item;
+}
+
+static int rna_Material_paint_layers_view_pass_get(PointerRNA *ptr)
+{
+  const Material *ma = id_cast<Material *>(ptr->owner_id);
+  return (ma != nullptr) ? BKE_paint_layers_view_pass_get(*ma) : PAINT_LAYER_PASS_COMBINED;
+}
+
+static void rna_Material_paint_layers_view_pass_set(PointerRNA *ptr, int value)
+{
+  if (value == RNA_ENUM_VALUE_ACTION) {
+    ED_paint_view_pass_sync_toggle(*G_MAIN);
+    return;
+  }
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma != nullptr) {
+    BKE_paint_layers_view_pass_set(*ma, value);
+  }
+}
+
+static void rna_Material_paint_layers_view_pass_update(Main *bmain,
+                                                       Scene * /*scene*/,
+                                                       PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  Main *bmain_resolved = (bmain != nullptr) ? bmain : G_MAIN;
+  if (ma != nullptr && bmain_resolved != nullptr) {
+    /* The selector belongs to the active material, but a Sculpt Mode stroke can span several
+     * selected objects: the editor gives every one of them the same pass and notifies. */
+    ED_paint_material_view_pass_apply(*bmain_resolved, *ma);
+  }
 }
 
 static bool rna_Material_paint_layers_channel_in_set(Material *ma, int channel)
@@ -5182,6 +5311,22 @@ void RNA_def_material(BlenderRNA *brna)
       "The material's global paint channel set; while unset it is derived from the layer records "
       "and the build default. Base Color may be left out; an empty set is ignored");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_channels_update");
+
+  prop = RNA_def_property(srna, "paint_layers_view_pass", PROP_ENUM, PROP_NONE);
+  /* Dynamic items: the placeholder marks the property for the item callback below. */
+  RNA_def_property_enum_items(prop, rna_enum_dummy_NULL_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_Material_paint_layers_view_pass_get",
+                              "rna_Material_paint_layers_view_pass_set",
+                              "rna_Material_paint_layers_view_pass_itemf");
+  RNA_def_property_ui_text(
+      prop,
+      "View Pass",
+      "The paint pass the 3D Viewport shows this material through while painting, in Material "
+      "Preview shading; Combined shows the shaded material. The pass is stored in the material, so "
+      "final renders show it too until Combined is selected");
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layers_view_pass_update");
 
   {
     FunctionRNA *func = RNA_def_function(

@@ -1248,8 +1248,8 @@ static void view3d_header_region_listener(const wmRegionListenerParams *params)
       }
       break;
     case NC_MATERIAL:
-      /* For the canvas picker. */
-      if (ELEM(wmn->data, ND_SHADING_LINKS, ND_NODES)) {
+      /* For the canvas picker, and the Sculpt Mode paint pass menu, which a key can change. */
+      if (ELEM(wmn->data, ND_SHADING, ND_SHADING_LINKS, ND_NODES)) {
         ED_region_tag_redraw(region);
       }
       break;

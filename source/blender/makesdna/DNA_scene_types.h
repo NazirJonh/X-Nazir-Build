@@ -2229,7 +2229,13 @@ enum ePaintLayerTargetMode : int8_t {
 struct PaintModeSettings {
   /** Source to select canvas from to paint on. */
   ePaintCanvasSource canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
-  char _pad[7] = {};
+  /**
+   * Nonzero when the pass shown for a layered material is NOT kept equal between the 3D Viewport
+   * and the Image Editors. Stored negated, so zero (files saved before the option existed, and a
+   * new scene) means "synced".
+   */
+  char view_pass_sync_off = 0;
+  char _pad[6] = {};
 
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;

@@ -5542,6 +5542,13 @@ def km_sculpt(params):
         # object copy/paste keeps the keys for every other brush.
         ("paint.stack_layer_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
         ("paint.stack_layer_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
+        # Cycle the 3D Viewport's paint pass while the Paint toolbar group paints a layered
+        # material. Ahead of the brush shortcuts below on purpose: the operator polls false for
+        # every other brush, so C / Shift-C keep selecting Clay Strips / Crease Polish there.
+        ("paint.material_view_pass_cycle", {"type": 'C', "value": 'PRESS'},
+         {"properties": [("reverse", False)]}),
+        ("paint.material_view_pass_cycle", {"type": 'C', "value": 'PRESS', "shift": True},
+         {"properties": [("reverse", True)]}),
         # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
         # reads Ctrl itself for the secondary color, so one binding covers both.
         ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},

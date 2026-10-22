@@ -1045,6 +1045,10 @@ bool PaintLayersTreeBuilder::result_interface_create()
       result_outputs_.add(channel, socket);
     }
   }
+  /* The active row's mask, exposed next to the channels for the viewport's Mask pass. It is linked
+   * after the channels (the active row's group may be built by any of them). */
+  mask_output_ = interface.add_socket(
+      "Result Mask", "", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT, nullptr);
   group_output_ = bke::node_add_node(nullptr, tree_, "NodeGroupOutput"_ustr);
   if (group_output_ == nullptr) {
     return false;
@@ -1420,6 +1424,34 @@ void PaintLayersTreeBuilder::build()
     }
     bke::node_add_link(tree_, *end.node, *end.socket, *group_output_, *result_socket);
     location_y += 240.0f;
+  }
+
+  this->root_mask_output_link();
+}
+
+void PaintLayersTreeBuilder::root_mask_output_link()
+{
+  if (mask_output_ == nullptr || mask_output_->identifier == nullptr || group_output_ == nullptr) {
+    return;
+  }
+  bNodeSocket *out = bke::node_find_socket(
+      *group_output_, SOCK_IN, UString::from_ptr_noinline(mask_output_->identifier));
+  if (out == nullptr) {
+    return;
+  }
+  for (const auto item : layer_groups_.items()) {
+    if (!BLI_uuid_equal(item.key->marker, ma_.active_layer_marker)) {
+      continue;
+    }
+    LayerGroup *group = item.value;
+    if (group == nullptr || group->instance == nullptr || group->tree == nullptr) {
+      return;
+    }
+    bNodeSocket *mask_out = instance_output_find(*group->tree, *group->instance, "Mask");
+    if (mask_out != nullptr) {
+      bke::node_add_link(tree_, *group->instance, *mask_out, *group_output_, *out);
+    }
+    return;
   }
 }
 

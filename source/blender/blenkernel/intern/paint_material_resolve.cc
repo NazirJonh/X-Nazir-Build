@@ -12,7 +12,9 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_generate.hh"
 
+#include "BLI_listbase_iterator.hh"
 #include "BLI_string.h"
 
 #include "DNA_image_types.h"
@@ -128,6 +130,26 @@ const bNode *BKE_paint_material_principled_find(const Material &ma,
   }
 
   const bNodeSocket *source = resolve_source_socket(*surface, r_group_path);
+  if (source != nullptr && source->owner_node().type_legacy == SH_NODE_MIX_SHADER &&
+      BKE_paint_layers_is_view_pass_mix(source->owner_node()))
+  {
+    /* The viewport pass preview mixes an Emission over the Principled. The material behind it is
+     * still that Principled: painting into it must keep resolving the channels, so follow the
+     * first shader input rather than reporting the preview as an ambiguous shader. */
+    const bNodeSocket *first_shader = nullptr;
+    for (const bNodeSocket &input : source->owner_node().inputs) {
+      if (input.type == SOCK_SHADER) {
+        first_shader = &input;
+        break;
+      }
+    }
+    if (first_shader != nullptr) {
+      source = resolve_source_socket(*first_shader, r_group_path);
+    }
+    else {
+      source = nullptr;
+    }
+  }
   if (source == nullptr || source->owner_node().type_legacy != SH_NODE_BSDF_PRINCIPLED) {
     /* A Mix/Add Shader has no single Principled to read: picking one of its branches would give
      * an arbitrary answer, so the whole material is reported as unusable instead. */

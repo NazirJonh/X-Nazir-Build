@@ -682,6 +682,14 @@ struct EnumPropertyItem {
 };
 
 /**
+ * Value of an enum item that is an action of the menu, such as a checkbox drawn after the real
+ * choices, rather than a choice itself. Stepping through the items (Ctrl-Wheel) steps over it, so a
+ * wheel turn can never trigger the action. The property's setter receives the value when the item
+ * is clicked and is expected to perform the action instead of storing it.
+ */
+#define RNA_ENUM_VALUE_ACTION (-2147483647 - 1)
+
+/**
  * Heading for RNA enum items (shown in the UI).
  *
  * The description is currently only shown in the Python documentation.

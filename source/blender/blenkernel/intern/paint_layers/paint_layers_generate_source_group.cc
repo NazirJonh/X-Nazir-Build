@@ -99,6 +99,13 @@ static FedSocket source_group_follow_source(const bNodeSocket &input)
   return {&fed->owner_node(), fed};
 }
 
+/** Whether \a node is part of the 3D Viewport pass viewer rather than the source's shading. */
+static bool node_is_view_pass(const bNode &node)
+{
+  return prop_int_get(node.prop, VIEW_PASS_MIX_PROP, 0) != 0 ||
+         prop_int_get(node.prop, VIEW_PASS_EMISSION_PROP, 0) != 0;
+}
+
 /** The nodes and links of \a src copied into \a dst but for the output nodes and \a skip. */
 static bool source_group_copy_nodes(bNodeTree &dst,
                                     const bNodeTree &src,
@@ -107,7 +114,9 @@ static bool source_group_copy_nodes(bNodeTree &dst,
                                     Map<const bNodeSocket *, bNodeSocket *> &r_socket_map)
 {
   for (const bNode &node : src.nodes) {
-    if (node.type_legacy == SH_NODE_OUTPUT_MATERIAL || &node == skip) {
+    if (node.type_legacy == SH_NODE_OUTPUT_MATERIAL || &node == skip ||
+        node_is_view_pass(node))
+    {
       continue;
     }
     bNode *copy = bke::node_copy_with_mapping(

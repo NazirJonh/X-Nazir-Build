@@ -1159,6 +1159,7 @@ void PAINT_OT_material_channel_source_clear(wmOperatorType *ot);
 void PAINT_OT_material_channel_source_image_set(wmOperatorType *ot);
 void PAINT_OT_material_paint_channels_assign_images(wmOperatorType *ot);
 void PAINT_OT_material_canvas_cycle(wmOperatorType *ot);
+void PAINT_OT_material_view_pass_cycle(wmOperatorType *ot);
 void PAINT_OT_texture_paint_toggle(wmOperatorType *ot);
 void PAINT_OT_project_image(wmOperatorType *ot);
 void PAINT_OT_image_from_view(wmOperatorType *ot);

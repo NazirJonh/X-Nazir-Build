@@ -13249,7 +13249,7 @@ void popup_menu_retval_set(const Block *block, const int retval, const bool enab
 /** \name UI Event Handlers
  * \{ */
 
-static int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/)
+int region_handler(bContext *C, const wmEvent *event, void * /*userdata*/)
 {
   /* here we handle buttons at the region level, non-modal */
   ARegion *region = CTX_wm_region(C);

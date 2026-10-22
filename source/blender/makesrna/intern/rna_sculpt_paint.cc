@@ -3430,6 +3430,15 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "Editor while painting the Material canvas");
   RNA_def_property_update(prop, 0, "rna_PaintModeSettings_brush_sync_update");
 
+  prop = RNA_def_property(srna, "use_view_pass_sync", PROP_BOOLEAN, PROP_NONE);
+  /* Stored negated, so scenes and files from before the option read as synced. */
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "view_pass_sync_off", 1);
+  RNA_def_property_ui_text(prop,
+                           "Sync View Pass",
+                           "Show the same paint pass of a layered material in the 3D Viewport and "
+                           "in the Image Editor");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+
   prop = RNA_def_property(srna, "canvas_image", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_funcs(
       prop, nullptr, nullptr, nullptr, "rna_Image_no_renderresult_or_viewer_poll");

@@ -1070,7 +1070,13 @@ struct Material {
   char paint_layers_preview_delay = 0;
   /** #eMaterialPaintPreviewFlag. Zero is immediate, which is what files saved before it read as. */
   char paint_layers_preview_flag = 0;
-  char _pad_paint_layers[6] = {};
+  /**
+   * Index into #BKE_paint_layers_view_passes of the pass the 3D Viewport shows this material through
+   * while painting; zero is Combined. An index rather than a pass value, so that files saved before
+   * the preview existed read as Combined instead of as the first channel.
+   */
+  int16_t paint_layers_view_pass = 0;
+  char _pad_paint_layers[4] = {};
 };
 
 }  // namespace blender

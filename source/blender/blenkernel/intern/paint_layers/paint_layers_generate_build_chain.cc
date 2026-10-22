@@ -567,6 +567,68 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
   return current;
 }
 
+void PaintLayersTreeBuilder::mask_output_ensure(LayerGroup &group, const MaterialPaintLayer &layer)
+{
+  if (mask_outputs_.contains(&layer)) {
+    return;
+  }
+  mask_outputs_.add(&layer);
+  NodeOutput mask = this->mask_factor_ensure(*group.tree, group, layer);
+  if (mask.node == nullptr || mask.socket == nullptr || group.group_output == nullptr) {
+    return;
+  }
+  bNodeTreeInterfaceSocket *iface = layer_group_add_socket(
+      group, "Mask", "NodeSocketColor", NODE_INTERFACE_SOCKET_OUTPUT);
+  if (iface == nullptr || iface->identifier == nullptr) {
+    return;
+  }
+  bNodeSocket *out = bke::node_find_socket(
+      *group.group_output, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+  if (out == nullptr) {
+    return;
+  }
+
+  bNode *combine = bke::node_add_static_node(nullptr, *group.tree, SH_NODE_COMBINE_COLOR);
+  if (combine == nullptr) {
+    return;
+  }
+  combine->location[0] = group.group_output->location[0] - 200.0f;
+  combine->location[1] = group.group_output->location[1];
+  bNodeSocket *red = socket_in(*combine, "Red");
+  bNodeSocket *green = socket_in(*combine, "Green");
+  bNodeSocket *blue = socket_in(*combine, "Blue");
+  bNodeSocket *color = socket_out(*combine, "Color");
+  if (red == nullptr || green == nullptr || blue == nullptr || color == nullptr) {
+    bke::node_remove_node(nullptr, *group.tree, *combine, true, false);
+    return;
+  }
+
+  /* A mask whose corrections were laid ends on a colour socket, a plain one on a float. Both are
+   * grayscale; the red of the former is the value every component gets. */
+  NodeOutput grey = mask;
+  if (mask.socket->type != SOCK_FLOAT) {
+    bNode *separate = bke::node_add_static_node(nullptr, *group.tree, SH_NODE_SEPARATE_COLOR);
+    bNodeSocket *separate_color = (separate != nullptr) ? socket_in(*separate, "Color") : nullptr;
+    bNodeSocket *separate_red = (separate != nullptr) ? socket_out(*separate, "Red") : nullptr;
+    if (separate == nullptr || separate_color == nullptr || separate_red == nullptr) {
+      if (separate != nullptr) {
+        bke::node_remove_node(nullptr, *group.tree, *separate, true, false);
+      }
+      bke::node_remove_node(nullptr, *group.tree, *combine, true, false);
+      return;
+    }
+    separate->location[0] = combine->location[0] - 160.0f;
+    separate->location[1] = combine->location[1];
+    bke::node_add_link(*group.tree, *mask.node, *mask.socket, *separate, *separate_color);
+    grey = {separate, separate_red};
+  }
+
+  bke::node_add_link(*group.tree, *grey.node, *grey.socket, *combine, *red);
+  bke::node_add_link(*group.tree, *grey.node, *grey.socket, *combine, *green);
+  bke::node_add_link(*group.tree, *grey.node, *grey.socket, *combine, *blue);
+  bke::node_add_link(*group.tree, *combine, *color, *group.group_output, *out);
+}
+
 /** A Math node of \a operation over \a a and the constant \a b; null when it cannot be made. */
 static bNode *math_constant_node_add(bNodeTree &tree,
                                      layout::LayoutGrid &grid,
@@ -2202,6 +2264,11 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
    * itself, so it is built like a leaf whatever it is, and none of its corrections or mask. */
   Image *baked_color = nullptr;
   const bool substituted = paint_layer_row_baked_channel(ma_, layer, channel, &baked_color);
+  /* The row's mask is exposed once, for the viewport's Mask pass. A baked row already holds its
+   * mask inside the bake, so it keeps no separate mask output. */
+  if (!substituted) {
+    this->mask_output_ensure(group, layer);
+  }
   /* A Material row is laid like a painted row whose content is what its source supplies in the
    * channel: it keeps its corrections and its mask, which the bake of a subtree would have held.
    */

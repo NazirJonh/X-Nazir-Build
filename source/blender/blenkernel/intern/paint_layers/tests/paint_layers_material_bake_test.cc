@@ -1582,4 +1582,151 @@ TEST_F(PaintLayersMaterialCorrectionTest, an_edit_of_the_source_concerns_the_mat
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name A mask correction that reads a material
+ * \{ */
+
+class PaintLayersMaterialMaskTest : public PaintLayersMaterialBakeTest {
+ public:
+  /** A source whose Base Color is a plain value, which is all a mask correction lays live. */
+  Material *plain = nullptr;
+
+  void SetUp() override
+  {
+    PaintLayersMaterialBakeTest::SetUp();
+    plain = BKE_material_add(bmain, "Plain");
+    principled_source_set_up(*plain, /*graphs=*/false);
+  }
+
+  /** A Fill row named "Base" with a mask correction named "Grey" reading \a from. */
+  MaterialPaintLayer *add_row_with_mask_item(Material *from, MaterialPaintLayer **r_item)
+  {
+    PaintLayerAddParams row_params;
+    row_params.kind = PaintLayerAddKind::Fill;
+    row_params.name = "Base";
+    MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, row_params);
+    EXPECT_NE(row, nullptr);
+    PaintLayerAddParams params;
+    params.kind = PaintLayerAddKind::MaskCorrectionMaterial;
+    params.anchor = row;
+    params.name = "Grey";
+    params.source = from;
+    *r_item = BKE_paint_layers_add_with_policy(*ma, params);
+    EXPECT_NE(*r_item, nullptr);
+    return row;
+  }
+};
+
+TEST_F(PaintLayersMaterialMaskTest, it_makes_the_base_mask_and_owns_no_records)
+{
+  MaterialPaintLayer *item = nullptr;
+  MaterialPaintLayer *row = add_row_with_mask_item(plain, &item);
+  ASSERT_NE(item, nullptr);
+  EXPECT_NE(BKE_paint_layers_mask_base(*row), nullptr) << "made first, as for any mask correction";
+  EXPECT_EQ(item->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(item->source, MA_PAINT_LAYER_SOURCE_MATERIAL);
+  EXPECT_EQ(item->material, plain);
+  EXPECT_EQ(item->channels_num, 0);
+  EXPECT_EQ(BKE_paint_layers_mask_item_owner(*ma, *item), row);
+
+  const int users = plain->id.us;
+  EXPECT_TRUE(BKE_paint_layers_mask_item_remove(*ma, item));
+  EXPECT_EQ(plain->id.us, users - 1) << "the mask correction was a user of its source";
+}
+
+TEST_F(PaintLayersMaterialMaskTest, it_refuses_itself_a_cycle_a_missing_source_and_no_base_mask)
+{
+  PaintLayerAddParams row_params;
+  MaterialPaintLayer *row = BKE_paint_layers_add_with_policy(*ma, row_params);
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_material_add(*ma, row, "Self", ma), nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_material_add(*ma, row, "None", nullptr), nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_material_add(*ma, row, "NoBase", plain), nullptr)
+      << "the Add policy makes the base mask; the kernel call does not";
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskCorrectionMaterial;
+  params.anchor = row;
+  params.source = nullptr;
+  EXPECT_EQ(BKE_paint_layers_add_with_policy(*ma, params), nullptr);
+
+  PaintLayerAddParams source_params;
+  MaterialPaintLayer *source_row = BKE_paint_layers_add_with_policy(*source, source_params);
+  ASSERT_NE(source_row, nullptr);
+  ASSERT_NE(BKE_paint_layers_correction_add_material(*source, source_row, "Back", ma), nullptr);
+  params.source = source;
+  EXPECT_EQ(BKE_paint_layers_add_with_policy(*ma, params), nullptr)
+      << "the source reads this material back";
+}
+
+TEST_F(PaintLayersMaterialMaskTest, it_lays_the_grey_of_a_plain_base_color)
+{
+  MaterialPaintLayer *item = nullptr;
+  MaterialPaintLayer *row = add_row_with_mask_item(plain, &item);
+  ASSERT_NE(item, nullptr);
+  EXPECT_TRUE(paint_layer_mask_reads_source(*ma, *item));
+  EXPECT_TRUE(paint_layer_mask_item_lays(*ma, *item));
+  EXPECT_FALSE(BKE_paint_layers_material_row_needs_render(*ma, *item))
+      << "a plain value is no render";
+
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(
+      BKE_paint_layers_composite_image_layers(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+  ASSERT_GE(layers[0].mask_items.size(), 2) << "the base mask and the correction";
+  const PaintMaterialCompositeMaskItem &described = layers[0].mask_items.last();
+  EXPECT_EQ(described.image, nullptr);
+  EXPECT_NEAR(described.constant_gray, 0.8f, 1e-5f) << "the mean of the default Base Color";
+  UNUSED_VARS(row);
+}
+
+TEST_F(PaintLayersMaterialMaskTest, a_source_whose_transparency_is_a_map_lays_nothing)
+{
+  MaterialPaintLayer *item = nullptr;
+  add_row_with_mask_item(plain, &item);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(paint_layer_mask_item_lays(*ma, *item));
+
+  texture_link(*plain, *add_image("Cutout"), "Alpha", "Alpha");
+  EXPECT_FALSE(paint_layer_mask_item_lays(*ma, *item))
+      << "the mask correction has no coverage of its own to carry a map";
+}
+
+TEST_F(PaintLayersMaterialMaskTest, the_generator_gives_the_mask_correction_a_live_input)
+{
+  MaterialPaintLayer *item = nullptr;
+  add_row_with_mask_item(plain, &item);
+  ASSERT_NE(item, nullptr);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  bNodeTree *group = layer_tree_find(*bmain, "Base");
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(interface_has_socket(*group, "Base Grey Source", false))
+      << "the plain Base Color of the source is an input of the row's group";
+}
+
+TEST_F(PaintLayersMaterialMaskTest, an_edit_of_the_source_concerns_the_material_it_shapes)
+{
+  MaterialPaintLayer *item = nullptr;
+  add_row_with_mask_item(plain, &item);
+  ASSERT_NE(item, nullptr);
+  Vector<Material *> consumers;
+  BKE_paint_layers_source_material_consumers(*bmain, *plain, consumers);
+  ASSERT_EQ(consumers.size(), 1);
+  EXPECT_EQ(consumers[0], ma);
+
+  Vector<const MaterialPaintLayer *> rows;
+  BKE_paint_layers_foreach_source_row(static_cast<const Material &>(*ma),
+                                      [&](const MaterialPaintLayer &row) {
+                                        rows.append(&row);
+                                        return true;
+                                      });
+  ASSERT_EQ(rows.size(), 1);
+  EXPECT_EQ(rows[0], item);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

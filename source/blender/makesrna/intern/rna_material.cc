@@ -856,7 +856,8 @@ static void rna_Material_paint_layer_add_material_do(bContext *C,
     BKE_report(reports, RPT_ERROR, "The material is not a layered material");
     return;
   }
-  const bool correction = kind == PaintLayerAddKind::CorrectionMaterial;
+  const bool correction = kind != PaintLayerAddKind::Material;
+  const bool mask = kind == PaintLayerAddKind::MaskCorrectionMaterial;
   PaintLayerAddParams params;
   params.kind = kind;
   params.source = source;
@@ -877,7 +878,9 @@ static void rna_Material_paint_layer_add_material_do(bContext *C,
    * has to be told the row it now has is the active one -- otherwise the rows it cached before the
    * Add keep the old row lit. */
   ed::outliner::outliner_stack_row_added_sync(*C, ma->id, layer->marker);
-  ED_undo_push(C, correction ? "Add Material Correction" : "Add Material Layer");
+  ED_undo_push(C,
+               mask ? "Add Mask Material Correction" :
+                      (correction ? "Add Material Correction" : "Add Material Layer"));
   WM_main_add_notifier(NC_MATERIAL | ND_SHADING, ptr->owner_id);
 }
 
@@ -889,6 +892,12 @@ static void rna_Material_paint_layer_add_material_update(bContext *C, PointerRNA
 static void rna_Material_paint_layer_add_material_correction_update(bContext *C, PointerRNA *ptr)
 {
   rna_Material_paint_layer_add_material_do(C, ptr, PaintLayerAddKind::CorrectionMaterial);
+}
+
+static void rna_Material_paint_layer_add_material_mask_correction_update(bContext *C,
+                                                                        PointerRNA *ptr)
+{
+  rna_Material_paint_layer_add_material_do(C, ptr, PaintLayerAddKind::MaskCorrectionMaterial);
 }
 
 static void rna_Material_paint_layers_remove(Material *ma,
@@ -1454,6 +1463,22 @@ static void rna_MaterialPaintLayer_marker_get(PointerRNA *ptr, char *value)
 static int rna_MaterialPaintLayer_marker_length(PointerRNA * /*ptr*/)
 {
   return UUID_STRING_SIZE - 1;
+}
+
+static int rna_MaterialPaintLayer_mask_source_channel_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  const int channel = BKE_paint_layers_mask_source_channel_get(*layer);
+  return channel >= 0 ? channel : int(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+static void rna_MaterialPaintLayer_mask_source_channel_set(PointerRNA *ptr, const int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  if (ma != nullptr) {
+    BKE_paint_layers_mask_source_channel_set(*ma, layer, value);
+  }
 }
 
 static void rna_MaterialPaintLayer_row_result_source_get(PointerRNA *ptr, char *value)
@@ -3210,6 +3235,30 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                 nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Marker", "Stable identity of the paint layer");
+
+  /* The channel of its source a mask correction that reads a material takes its grey from. Only
+   * the channels a grey can be taken from are offered. */
+  static const EnumPropertyItem mask_source_channel_items[] = {
+      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", ""},
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metallic", ""},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Roughness", ""},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Specular", ""},
+      {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", ""},
+      {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "Ambient Occlusion", ""},
+      {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emission", ""},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "mask_source_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, mask_source_channel_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_mask_source_channel_get",
+                              "rna_MaterialPaintLayer_mask_source_channel_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Source Channel",
+      "Channel of the source material the grey of this mask correction is taken from");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   /* Read-only: set when "Use Row Result" fills the row's maps, so the row can be updated from the
    * same source. Empty while the maps were not made that way. */
@@ -5042,6 +5091,26 @@ void RNA_def_material(BlenderRNA *brna)
                            "the active layer; reads as none");
   RNA_def_property_update(
       prop, NC_MATERIAL | ND_SHADING, "rna_Material_paint_layer_add_material_correction_update");
+
+  /* And for a mask correction: the grey of the picked material's Base Color over the active
+   * layer's mask. */
+  prop = RNA_def_property(srna, "paint_layer_add_material_mask_correction", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_Material_paint_layer_add_material_get",
+                                 "rna_Material_paint_layer_add_material_set",
+                                 nullptr,
+                                 "rna_Material_paint_layer_add_material_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_HIDDEN);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_override_flag(prop, PROPOVERRIDE_NO_COMPARISON);
+  RNA_def_property_ui_text(prop,
+                           "Add Mask Material Correction",
+                           "Write-only: assigning a material adds a mask correction that lays the "
+                           "grey of its Base Color over the active layer's mask; reads as none");
+  RNA_def_property_update(prop,
+                          NC_MATERIAL | ND_SHADING,
+                          "rna_Material_paint_layer_add_material_mask_correction_update");
 
   prop = RNA_def_property(srna, "paint_layers_is_stale", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_funcs(prop, "rna_Material_paint_layers_is_stale_get", nullptr);

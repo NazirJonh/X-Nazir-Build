@@ -891,7 +891,14 @@ struct MaterialPaintLayer {
   int8_t object_mask_flag = 0;
   /** #eMaterialPaintLayerColorTag: the row's display tag, read by the UI only. */
   int8_t color_tag = MA_PAINT_LAYER_COLOR_NONE;
-  char _pad_object_mask[5] = {};
+  char _pad_mask_source = 0;
+  /**
+   * The channels of the source material a mask correction that reads a material takes its grey from,
+   * as a mask of #eMaterialPaintChannel bits; 0 reads as Base Color. Stored as a mask so that taking
+   * the mean of several channels later needs no new field; the lowest bit is read for now.
+   */
+  uint16_t mask_source_channels = 0;
+  char _pad_object_mask[2] = {};
   /**
    * Per (row, channel) overrides, indexed by #eMaterialPaintChannel. A fixed array so every pair has
    * a value and an RNA path whether or not the row has a #channels record for it; a folder, which

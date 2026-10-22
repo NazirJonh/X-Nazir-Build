@@ -73,7 +73,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 20u);
+  ASSERT_EQ(kinds.size(), 21u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -115,6 +115,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_EQ(kinds[19].identifier, "CORRECTION_MATERIAL");
   EXPECT_EQ(kinds[19].source_id_type, ID_MA);
   EXPECT_TRUE(kinds[19].is_effect) << "listed with the other corrections";
+  EXPECT_EQ(kinds[20].identifier, "MASK_CORRECTION_MATERIAL");
+  EXPECT_EQ(kinds[20].source_id_type, ID_MA);
+  EXPECT_TRUE(kinds[20].is_effect);
   EXPECT_FALSE(kinds[18].is_effect);
   EXPECT_FALSE(kinds[15].takes_color);
 }
@@ -843,6 +846,39 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_dropped_material_may_be_added_as_a_
   }
   ASSERT_GE(material_kind, 0);
   ASSERT_EQ(correction_kind, material_kind + 1) << "row_add dispatches by index";
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest,
+       a_material_mask_correction_is_a_row_with_no_map_to_paint)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  Material *other = BKE_material_add(bmain, "Other");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::MaskCorrectionMaterial;
+  params.anchor = layer;
+  params.name = "Wood";
+  params.source = other;
+  MaterialPaintLayer *item = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(item, nullptr);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 2u);
+  const StackRow &row = rows[0].name == "Wood" ? rows[0] : rows[1];
+  EXPECT_EQ(row.name, "Wood");
+  EXPECT_EQ(row.parent_section_id, "MASK");
+  EXPECT_EQ(row.icon, int(ICON_MATERIAL));
+  EXPECT_TRUE(row.compact);
+  EXPECT_TRUE(row.preview_slots.is_empty()) << "its grey is its source's Base Color";
+  EXPECT_TRUE(row.content_sections.is_empty()) << "and it owns no map to switch the brush to";
+  EXPECT_STREQ(row.value_prop, "opacity");
+  EXPECT_STREQ(row.mode_prop, "blend_type");
+
+  Vector<StackAddKindInfo> kinds;
+  source().editor()->add_kinds(kinds);
+  ASSERT_EQ(kinds.size(), 21u);
+  EXPECT_EQ(kinds[20].identifier, "MASK_CORRECTION_MATERIAL")
+      << "row_add dispatches by index, one past the material correction";
 }
 
 }  // namespace tests

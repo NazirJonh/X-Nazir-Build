@@ -87,15 +87,16 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      PAINT_LAYER_KIND_FLAT_VALUE},
-    /* A material is read, not painted: the row has no records and lays what the source shows. A row
-     * of the stack, or a content correction laid over one; a mask item reading a material comes
-     * with its own rules. */
+    /* A material is read, not painted: the row has no records and lays what the source shows. A
+     * row of the stack, a content correction laid over one, or a mask correction whose grey is the
+     * source's colour. */
     {MA_PAINT_LAYER_SOURCE_MATERIAL,
      0,
      "Material",
      PaintLayerKindCategory::Source,
      uint8_t(paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER) |
-             paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT)),
+             paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
+             paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)),
      nullptr,
      0,
      PAINT_LAYER_KIND_READS_SOURCE},

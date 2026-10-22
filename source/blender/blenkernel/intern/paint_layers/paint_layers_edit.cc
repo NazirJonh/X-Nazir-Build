@@ -224,6 +224,29 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
     return BKE_paint_layers_mask_filter_add(
         ma, owner, eMaterialPaintLayerFilter(params.filter), name.c_str());
   }
+  if (params.kind == PaintLayerAddKind::MaskCorrectionMaterial) {
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+      else if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, *owner)) {
+        owner = item_parent;
+      }
+    }
+    if (owner == nullptr || params.source == nullptr) {
+      return nullptr;
+    }
+    /* Like any mask correction, it lays over the base mask: made first, white. */
+    if (BKE_paint_layers_mask_base(*owner) == nullptr &&
+        BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr)
+    {
+      return nullptr;
+    }
+    const std::string name = (params.name != nullptr) ? std::string(params.name) :
+                                                        std::string(params.source->id.name + 2);
+    return BKE_paint_layers_mask_material_add(ma, owner, name.c_str(), params.source);
+  }
   if (params.kind == PaintLayerAddKind::MaskCorrection ||
       params.kind == PaintLayerAddKind::MaskCorrectionFill)
   {

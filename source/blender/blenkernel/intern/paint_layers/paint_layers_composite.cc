@@ -294,6 +294,46 @@ static void composite_mask_items_describe(const Material &ma,
       r_items.append(filter);
       continue;
     }
+    if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_READS_SOURCE)) {
+      /* The grey of a mask correction that reads a material is the mean of the source's Base
+       * Color, read as a painted item's map is: a plain value, a plain texture or the map rendered
+       * from it. A graph with no map yet is the generator's to show alone, so nothing is carried
+       * until the render lands. A plain transparency folds into the opacity. */
+      if (!paint_layer_mask_item_lays(ma, mask)) {
+        continue;
+      }
+      const int source_channel = paint_layer_mask_source_channel(mask);
+      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+          ma, mask, source_channel, PaintLayerMaterialUse::Composite);
+      const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+          ma, mask, PaintLayerMaterialUse::Composite);
+      if (source.kind == PaintLayerMaterialSourceKind::None ||
+          coverage.kind == PaintLayerMaterialCoverageKind::Pending)
+      {
+        continue;
+      }
+      PaintMaterialCompositeMaskItem item;
+      item.opacity = BKE_paint_layers_effective_opacity(mask);
+      if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+        item.constant_gray = (source.constant[0] + source.constant[1] + source.constant[2]) / 3.0f;
+      }
+      else {
+        item.image = source.image;
+        item.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ? source.iuser :
+                                                                                nullptr;
+        /* Read at the item's UV like a painted item's map is, so the Mapping and its gizmo move
+         * the mask in the Image Editor's composite too. */
+        composite_mapping_describe(ma, mask, source_channel, item.mapping);
+      }
+      if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+        item.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
+      }
+      item.blend = CompositeBlend(
+          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+      item.invert = paint_layer_mask_item_inverted(mask);
+      r_items.append(item);
+      continue;
+    }
     const MaterialPaintLayerChannel *mask_record = paint_layer_channel_find(
         mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (mask_record == nullptr || !paint_layer_mask_item_lays(mask)) {

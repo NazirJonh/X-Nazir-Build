@@ -981,6 +981,27 @@ PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaint
 bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source);
 
 /**
+ * Whether a mask correction that reads a material can take its grey from \a channel: a colour or a
+ * scalar of the source. Normal is a vector, Alpha is the item's weight, and Custom is a vertex
+ * attribute, so none of the three is a grey.
+ */
+bool BKE_paint_layers_mask_source_channel_allowed(int channel);
+
+/**
+ * The channel of the source the mask correction \a item takes its grey from (Base Color by
+ * default), or -1 when \a item is not a mask correction that reads a material.
+ */
+int BKE_paint_layers_mask_source_channel_get(const MaterialPaintLayer &item);
+
+/**
+ * Take the grey of the mask correction \a item from \a channel of its source. The maps rendered
+ * from the source are let go of: they were made for the old channel, and the row renders again.
+ * Refused for an item that is not a mask correction reading a material of \a ma, and for a channel
+ * #BKE_paint_layers_mask_source_channel_allowed refuses.
+ */
+bool BKE_paint_layers_mask_source_channel_set(Material &ma, MaterialPaintLayer *item, int channel);
+
+/**
  * Whether the material \a layer reads is a directly linked source that
  * #BKE_paint_layers_material_source_make_local can take: \a layer is a Material row, or a content
  * correction that reads a material, of an editable, non-override \a ma. A source that is merely an indirect dependency is not the user's to take.
@@ -1242,6 +1263,20 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
                                                 MaterialPaintLayer *owner,
                                                 eMaterialPaintLayerFilter filter,
                                                 const char *name = nullptr);
+
+/**
+ * Add a mask correction to \a layer that lays the grey of what the material \a source shows: the
+ * mean of its Base Color (its plain value or texture, or the map its graph is rendered into), with
+ * the colour's own alpha and the source's plain transparency as the weight. It owns no channel
+ * records. A source whose transparency is a map lays nothing yet. The row needs a base mask first,
+ * as for any mask correction.
+ * \return The new item, or null when \a layer has no base mask, is not in the stack, \a source is
+ * null, or it is the material itself or already reads it (a cycle).
+ */
+MaterialPaintLayer *BKE_paint_layers_mask_material_add(Material &ma,
+                                                       MaterialPaintLayer *layer,
+                                                       const char *name,
+                                                       Material *source);
 
 /**
  * Add a filter to the mask of \a layer, over the items already there: it changes the coverage built

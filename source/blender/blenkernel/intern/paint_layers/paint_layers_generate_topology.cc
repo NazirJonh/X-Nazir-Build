@@ -313,7 +313,15 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     mapping_wrap_hash_mix(hash, ma, item);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-    if (!paint_layer_mask_item_lays(item) || record == nullptr) {
+    if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
+      /* The nodes follow the source, as a Material row's do; the values are inputs. */
+      hash = topology_hash_mix(hash, 0x502);
+      hash = topology_hash_mix(hash,
+                               paint_layer_mask_item_lays(ma, item) ?
+                                   paint_layer_material_live_signature(ma, item) :
+                                   0);
+    }
+    else if (!paint_layer_mask_item_lays(item) || record == nullptr) {
       hash = topology_hash_mix(hash, 0);
     }
     else if (record->image != nullptr) {

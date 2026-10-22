@@ -529,6 +529,12 @@ void paint_layer_row_result_forced_collect(const Material &ma,
       r_markers.append(effect.marker);
     }
   }
+  /* So does a mask correction that reads a material: its grey shapes the row's coverage. */
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if (BKE_paint_layers_material_row_render_forced_wanted(ma, item)) {
+      r_markers.append(item.marker);
+    }
+  }
   for (const MaterialPaintLayer &child : row.children) {
     paint_layer_row_result_forced_collect(ma, child, r_markers);
   }

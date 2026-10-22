@@ -217,14 +217,15 @@ int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
 }
 
 /**
- * Whether \a layer is a row \a ma keeps a bake for: a row of its stack, or a content correction
- * that reads a material, whose maps are rendered from the source like a Material row's.
+ * Whether \a layer is a row \a ma keeps a bake for: a row of its stack, or a content or mask
+ * correction that reads a material, whose maps are rendered from the source like a Material row's.
  */
 static bool bake_row_owned(Material &ma, const MaterialPaintLayer &layer)
 {
   return BKE_paint_layers_owner_list(ma, layer) != nullptr ||
          (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) &&
-          BKE_paint_layers_correction_owner(ma, layer) != nullptr);
+          (BKE_paint_layers_correction_owner(ma, layer) != nullptr ||
+           BKE_paint_layers_mask_item_owner(ma, layer) != nullptr));
 }
 
 bool BKE_paint_layers_bake_mode_set(Material &ma, MaterialPaintLayer &layer, const int mode)
@@ -1198,6 +1199,13 @@ static bool bake_row_is_hidden(const Material &ma, const MaterialPaintLayer &lay
     bake_hidden_find(ma.paint_layers, owner, false, hidden);
     hidden = hidden || (layer.flag & MA_PAINT_LAYER_ENABLED) == 0;
   }
+  else if (const MaterialPaintLayer *owner = BKE_paint_layers_mask_item_owner(
+               const_cast<Material &>(ma), layer))
+  {
+    /* A mask correction is hidden by its own switch or by the row whose mask it shapes. */
+    bake_hidden_find(ma.paint_layers, owner, false, hidden);
+    hidden = hidden || (layer.flag & MA_PAINT_LAYER_ENABLED) == 0;
+  }
   return hidden;
 }
 
@@ -1560,7 +1568,10 @@ bool paint_layer_row_material_shown(const Material &ma, const MaterialPaintLayer
 {
   if (layer.bake == nullptr || layer.material == nullptr ||
       layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER ||
-      !ELEM(layer.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT))
+      !ELEM(layer.role,
+            MA_PAINT_LAYER_ROLE_LAYER,
+            MA_PAINT_LAYER_ROLE_EFFECT,
+            MA_PAINT_LAYER_ROLE_MASK_ITEM))
   {
     return false;
   }
@@ -1710,7 +1721,10 @@ bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
                                                         const MaterialPaintLayer &row)
 {
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
-      !ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
+      !ELEM(row.role,
+            MA_PAINT_LAYER_ROLE_LAYER,
+            MA_PAINT_LAYER_ROLE_EFFECT,
+            MA_PAINT_LAYER_ROLE_MASK_ITEM) ||
       row.material == nullptr || row.material->nodetree == nullptr ||
       BKE_paint_layers_bake_mode_get(row) == MA_PAINT_LAYER_BAKE_NEVER ||
       !BKE_paint_layers_material_row_needs_render(ma, row))
@@ -1737,7 +1751,10 @@ bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
 bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
-      !ELEM(layer.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
+      !ELEM(layer.role,
+            MA_PAINT_LAYER_ROLE_LAYER,
+            MA_PAINT_LAYER_ROLE_EFFECT,
+            MA_PAINT_LAYER_ROLE_MASK_ITEM) ||
       layer.material == nullptr || layer.material->nodetree == nullptr ||
       BKE_paint_layers_bake_mode_get(layer) == MA_PAINT_LAYER_BAKE_NEVER)
   {

@@ -840,7 +840,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
   /* A mask correction has an opacity of its own and, while it has no map, its grey: inputs like the
    * base's, named by the correction's marker so the value sync finds the item they belong to. */
   for (const MaterialPaintLayer &item : layer.mask_stack) {
-    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0 || !paint_layer_mask_item_lays(item)) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0 || !paint_layer_mask_item_lays(ma_, item)) {
       continue;
     }
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
@@ -857,6 +857,38 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     filter_params_create(item, true);
     SNPRINTF(base, "%s %s", layer_name, item_name);
     this->mapping_inputs_create(group, item, base);
+    if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
+      /* A mask correction that reads a material has no record: a plain value of its source's Base
+       * Color is an input, and so is a plain transparency, as for a Material row. */
+      const int source_channel = paint_layer_mask_source_channel(item);
+      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+          ma_, item, source_channel);
+      if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+        SNPRINTF(base, "%s %s Source", layer_name, item_name);
+        bNodeTreeInterfaceSocket *live = layer_group_value_input(
+            group,
+            base,
+            "NodeSocketColor",
+            ROLE_LIVE_CONSTANT,
+            item.marker,
+            source_channel);
+        if (live != nullptr) {
+          group_input_default_set(group, *live, source.constant);
+          live_constant_inputs_.lookup_or_add_default(&item).add(source_channel, live);
+        }
+      }
+      const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma_, item);
+      if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+        SNPRINTF(base, "%s %s Source Coverage", layer_name, item_name);
+        bNodeTreeInterfaceSocket *live = layer_group_value_input(
+            group, base, "NodeSocketFloat", ROLE_LIVE_COVERAGE, item.marker, -1);
+        if (live != nullptr) {
+          group_input_default_set(group, *live, coverage.constant);
+          live_coverage_inputs_.add(&item, live);
+        }
+      }
+      continue;
+    }
     if (paint_layer_kind_is_map_coverage(item)) {
       /* The operator's tolerance and softness: values of its kind's schema, like a filter's. */
       const PaintLayerKindInfo *kind = paint_layer_kind_of(item);

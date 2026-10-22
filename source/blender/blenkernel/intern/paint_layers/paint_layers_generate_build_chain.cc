@@ -355,7 +355,7 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
   NodeOutput current = {mix, result};
   int row = 6;
   for (const MaterialPaintLayer &item : layer.mask_stack) {
-    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0 || !paint_layer_mask_item_lays(item)) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0 || !paint_layer_mask_item_lays(ma_, item)) {
       continue;
     }
     if (paint_layer_effect_is_filter(item)) {
@@ -435,18 +435,57 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       current = product;
       continue;
     }
+    const bool from_source = paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE);
     const MaterialPaintLayerChannel *item_record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     bNodeTreeInterfaceSocket **item_opacity_iface = mask_opacity_inputs_.lookup_ptr(&item);
     bNodeSocket *item_opacity = (item_opacity_iface != nullptr) ?
                                     this->group_input_socket(group, **item_opacity_iface) :
                                     nullptr;
-    if (item_record == nullptr || item_opacity == nullptr) {
+    if ((item_record == nullptr && !from_source) || item_opacity == nullptr) {
       continue;
     }
     NodeOutput item_grey;
     NodeOutput item_alpha;
-    if (item_record->image != nullptr) {
+    if (from_source) {
+      /* A mask correction that reads a material: the mean of the source's Base Color, read as a
+       * painted item's map is, and the colour's own alpha. The source's transparency, a plain
+       * value, weighs the item as well. */
+      const RowEmitContext emit_context{tree,
+                                        group,
+                                        item,
+                                        paint_layer_mask_source_channel(item),
+                                        /*folder=*/false,
+                                        /*adjustment=*/false,
+                                        /*empty_base=*/false,
+                                        /*track_alpha=*/false,
+                                        /*record=*/nullptr,
+                                        /*below=*/nullptr,
+                                        /*below_alpha=*/nullptr,
+                                        /*folder_color=*/nullptr,
+                                        /*folder_alpha=*/nullptr,
+                                        /*baked_color=*/nullptr};
+      const KindEmitResult emitted = this->material_source_emit(emit_context);
+      if (emitted.color.socket == nullptr || emitted.content_alpha.socket == nullptr) {
+        discard();
+        return {};
+      }
+      item_grey = this->rgb_mean_nodes_add(tree, emitted.color, nodes);
+      item_alpha = emitted.content_alpha;
+      if (item_grey.node == nullptr) {
+        discard();
+        return {};
+      }
+      if (emitted.coverage.socket != nullptr) {
+        item_alpha = this->multiply_nodes_add(tree, item_alpha, emitted.coverage);
+        if (item_alpha.node == nullptr) {
+          discard();
+          return {};
+        }
+        nodes.append(item_alpha.node);
+      }
+    }
+    else if (item_record->image != nullptr) {
       bNode *item_map = this->image_map_node_add(tree, *item_record->image);
       if (item_map == nullptr) {
         discard();

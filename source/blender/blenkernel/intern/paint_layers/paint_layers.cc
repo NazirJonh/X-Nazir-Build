@@ -237,6 +237,11 @@ void BKE_paint_layers_foreach_source_row(const Material &ma,
             return false;
           }
         }
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE) && !fn(item)) {
+            return false;
+          }
+        }
         return true;
       });
 }
@@ -589,6 +594,8 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   item_copy->opacity = item.opacity;
   /* Display data, copied like the rest of the row's own state. */
   item_copy->color_tag = item.color_tag;
+  /* The channel of its source a mask correction takes its grey from, kept with the copy. */
+  item_copy->mask_source_channels = item.mask_source_channels;
   /* The row's UV mapping is part of its state, not of its kind: a pasted fill or fill
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
@@ -617,6 +624,8 @@ static void paint_layer_branch_duplicate(Main &bmain,
   /* A display tag travels with the row: a duplicated group has to read like the one it came from,
    * the way a duplicated collection keeps its color. */
   dst.color_tag = src.color_tag;
+  /* Which channel of its source a mask correction reads is part of its state, not of its kind. */
+  dst.mask_source_channels = src.mask_source_channels;
   memcpy(dst.channel_settings, src.channel_settings, sizeof(dst.channel_settings));
   /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
   dst.mapping = dna::shallow_copy(src.mapping);
@@ -1144,6 +1153,35 @@ MaterialPaintLayer *BKE_paint_layers_mask_filter_add(Material &ma,
     }
   }
 
+  BKE_paint_layers_tag_edited(ma);
+  return item;
+}
+
+MaterialPaintLayer *BKE_paint_layers_mask_material_add(Material &ma,
+                                                       MaterialPaintLayer *layer,
+                                                       const char *name,
+                                                       Material *source)
+{
+  /* The same pair check a Material row has, so the descriptions stay acyclic. */
+  if (!paint_layer_in_stack(ma, layer) || BKE_paint_layers_mask_base(*layer) == nullptr ||
+      source == nullptr || BKE_paint_layers_material_depends_on(*source, ma))
+  {
+    return nullptr;
+  }
+  const PaintLayerKindInfo *kind = paint_layer_kind_find(MA_PAINT_LAYER_SOURCE_MATERIAL, 0);
+  if (kind == nullptr ||
+      (kind->allowed_roles & paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)) == 0)
+  {
+    return nullptr;
+  }
+  MaterialPaintLayer *item = paint_layer_alloc(ma, name != nullptr ? name : "Material Mask");
+  item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  item->source = MA_PAINT_LAYER_SOURCE_MATERIAL;
+  item->flag = MA_PAINT_LAYER_ENABLED;
+  /* It owns no channel records: its grey is the mean of its source's Base Color. */
+  item->material = source;
+  id_us_plus(&source->id);
+  BLI_addtail(&layer->mask_stack, item);
   BKE_paint_layers_tag_edited(ma);
   return item;
 }
@@ -2455,12 +2493,49 @@ PaintLayerImageMapIssue BKE_paint_layers_row_image_map_issue(const MaterialPaint
   return PaintLayerImageMapIssue::TakesNoImage;
 }
 
+bool BKE_paint_layers_mask_source_channel_allowed(const int channel)
+{
+  return ELEM(channel,
+              PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+              PAINT_MATERIAL_CHANNEL_METALLIC,
+              PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+              PAINT_MATERIAL_CHANNEL_SPECULAR,
+              PAINT_MATERIAL_CHANNEL_HEIGHT,
+              PAINT_MATERIAL_CHANNEL_AO,
+              PAINT_MATERIAL_CHANNEL_EMISSION);
+}
+
+int BKE_paint_layers_mask_source_channel_get(const MaterialPaintLayer &item)
+{
+  if (item.role != MA_PAINT_LAYER_ROLE_MASK_ITEM || item.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    return -1;
+  }
+  return paint_layer_mask_source_channel(item);
+}
+
+bool BKE_paint_layers_mask_source_channel_set(Material &ma, MaterialPaintLayer *item, const int channel)
+{
+  if (item == nullptr || !paint_layer_owned(ma, item) ||
+      item->role != MA_PAINT_LAYER_ROLE_MASK_ITEM ||
+      item->source != MA_PAINT_LAYER_SOURCE_MATERIAL ||
+      !BKE_paint_layers_mask_source_channel_allowed(channel))
+  {
+    return false;
+  }
+  if (paint_layer_mask_source_channel(*item) == channel && item->mask_source_channels != 0) {
+    return true;
+  }
+  item->mask_source_channels = uint16_t(1u << channel);
+  /* The maps rendered so far are of the old channel; with none the row is due again. */
+  BKE_paint_layers_bake_clear(ma, *item);
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 bool BKE_paint_layers_set_material(Material &ma, MaterialPaintLayer *layer, Material *source)
 {
-  /* A row of the stack or a content correction; a mask item reading a material has no rules yet.
-   */
+  /* A row of the stack, a content correction or a mask correction. */
   if (layer == nullptr || !paint_layer_in_stack_or_effect(ma, layer) ||
-      layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM ||
       layer->source != MA_PAINT_LAYER_SOURCE_MATERIAL)
   {
     return false;

@@ -164,6 +164,23 @@ bool paint_layer_correction_reads_source(const Material &ma,
                                          int channel);
 
 /**
+ * Whether the mask correction \a item, a mask item that reads a material, lays anything: its grey
+ * is the mean of the source's Base Color (its plain value, its plain texture or the map rendered
+ * from it, exactly as a painted item's map is read), and the source's transparency is a plain
+ * value or none. A mask is no channel, so the material's channel set does not decide it. A source
+ * whose transparency is a map (or a graph) lays nothing, on the generator's side and the CPU's
+ * alike.
+ */
+bool paint_layer_mask_reads_source(const Material &ma, const MaterialPaintLayer &item);
+
+/**
+ * The channel of the source whose grey the mask correction \a item lays: the lowest bit of
+ * #MaterialPaintLayer::mask_source_channels, Base Color while none is set or the bit names a
+ * channel a grey cannot be taken from.
+ */
+int paint_layer_mask_source_channel(const MaterialPaintLayer &item);
+
+/**
  * Whether the graph of \a row's source in \a channel can be copied into a group: the Principled
  * BSDF is reached through groups the wrapper can copy (#BKE_paint_layers_source_group_wrappable),
  * and the source supplies the channel as a graph (the Normal as the encoded map the chain reads).
@@ -449,6 +466,19 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
       item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   return paint_layer_channel_live(record) &&
          (record->image != nullptr || paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_FLAT_VALUE));
+}
+
+/**
+ * As above, asked of a material: an item that reads a material has no record, so what it lays is
+ * decided from its source (#paint_layer_mask_reads_source). The generator, the CPU adapter and the
+ * topology hash ask this one.
+ */
+inline bool paint_layer_mask_item_lays(const Material &ma, const MaterialPaintLayer &item)
+{
+  if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
+    return paint_layer_mask_reads_source(ma, item);
+  }
+  return paint_layer_mask_item_lays(item);
 }
 
 /** The Base Color record a map-coverage operator \a item samples, or null when it has none. */

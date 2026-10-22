@@ -966,7 +966,14 @@ static MaterialPaintLayer *paint_layer_source_make_local_layer(bContext *C, Mate
 {
   Object *ob = CTX_data_active_object(C);
   Material *ma = BKE_paint_layers_active_material_get(ob);
-  MaterialPaintLayer *layer = (ma != nullptr) ? BKE_paint_layers_active_layer_get(*ma) : nullptr;
+  /* An active mask correction is asked for itself: the active layer answers its row. */
+  MaterialPaintLayer *layer = nullptr;
+  if (ma != nullptr) {
+    layer = BKE_paint_layers_active_mask_item_get(*ma);
+    if (layer == nullptr || !BKE_paint_layers_material_source_can_make_local(*ma, layer)) {
+      layer = BKE_paint_layers_active_layer_get(*ma);
+    }
+  }
   if (ma == nullptr || layer == nullptr ||
       !BKE_paint_layers_material_source_can_make_local(*ma, layer))
   {

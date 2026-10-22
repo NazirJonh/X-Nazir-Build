@@ -106,6 +106,17 @@ static bool live_image_usable(const ChannelSourceImage &source, const bool alpha
 }
 
 /**
+ * Whether \a channel is left out of the material's set for \a row. A mask item reads the source's
+ * Base Color as its grey, which is no channel of the stack, so the set does not decide it.
+ */
+static bool material_channel_filtered(const Material &ma,
+                                      const MaterialPaintLayer &row,
+                                      const int channel)
+{
+  return row.role != MA_PAINT_LAYER_ROLE_MASK_ITEM && paint_layer_channel_filtered(ma, channel);
+}
+
+/**
  * Whether the row's graph is shown in \a use: only the generated graph can evaluate the source's
  * shader nodes, and the Always mode asks for the render alone.
  */
@@ -121,7 +132,7 @@ bool paint_layer_material_source_group_channel(const Material &ma,
 {
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) || row.material == nullptr ||
       row.material->nodetree == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
-      (channel != PAINT_MATERIAL_CHANNEL_ALPHA && paint_layer_channel_filtered(ma, channel)) ||
+      (channel != PAINT_MATERIAL_CHANNEL_ALPHA && material_channel_filtered(ma, row, channel)) ||
       !BKE_paint_layers_source_group_wrappable(*row.material))
   {
     return false;
@@ -151,11 +162,9 @@ PaintLayerMaterialSource paint_layer_material_channel_source(const Material &ma,
                                                              const PaintLayerMaterialUse use)
 {
   PaintLayerMaterialSource out;
-  if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
-      !ELEM(row.role, MA_PAINT_LAYER_ROLE_LAYER, MA_PAINT_LAYER_ROLE_EFFECT) ||
-      row.material == nullptr || row.material->nodetree == nullptr || channel < 0 ||
-      channel >= PAINT_MATERIAL_CHANNEL_NUM || channel == PAINT_MATERIAL_CHANNEL_ALPHA ||
-      paint_layer_channel_filtered(ma, channel))
+  if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) || row.material == nullptr ||
+      row.material->nodetree == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
+      channel == PAINT_MATERIAL_CHANNEL_ALPHA || material_channel_filtered(ma, row, channel))
   {
     return out;
   }
@@ -277,13 +286,48 @@ bool paint_layer_correction_reads_source(const Material &ma,
               PaintLayerMaterialCoverageKind::LiveConstant);
 }
 
+int paint_layer_mask_source_channel(const MaterialPaintLayer &item)
+{
+  const uint16_t bits = item.mask_source_channels;
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if ((bits & (1u << channel)) != 0 && BKE_paint_layers_mask_source_channel_allowed(channel)) {
+      return channel;
+    }
+  }
+  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+bool paint_layer_mask_reads_source(const Material &ma, const MaterialPaintLayer &item)
+{
+  if (!paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE) ||
+      item.role != MA_PAINT_LAYER_ROLE_MASK_ITEM)
+  {
+    return false;
+  }
+  if (paint_layer_material_channel_source(ma, item, paint_layer_mask_source_channel(item)).kind ==
+      PaintLayerMaterialSourceKind::None)
+  {
+    return false;
+  }
+  const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(ma, item);
+  return ELEM(coverage.kind,
+              PaintLayerMaterialCoverageKind::Full,
+              PaintLayerMaterialCoverageKind::LiveConstant);
+}
+
 bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
                                                     const MaterialPaintLayer &row,
                                                     const int channel)
 {
   if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) || row.material == nullptr ||
       row.material->nodetree == nullptr || channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM ||
-      (channel != PAINT_MATERIAL_CHANNEL_ALPHA && paint_layer_channel_filtered(ma, channel)))
+      (channel != PAINT_MATERIAL_CHANNEL_ALPHA && material_channel_filtered(ma, row, channel)))
+  {
+    return false;
+  }
+  /* A mask correction reads the one channel it was given, as its grey, and the source's alpha. */
+  if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM &&
+      channel != paint_layer_mask_source_channel(row) && channel != PAINT_MATERIAL_CHANNEL_ALPHA)
   {
     return false;
   }
@@ -291,7 +335,7 @@ bool BKE_paint_layers_material_channel_needs_render(const Material &ma,
       *row.material);
   /* A correction lays nothing where the source's transparency is a map or a graph (see
    * #paint_layer_correction_reads_source), so there is nothing of it to render at all. */
-  if (row.role == MA_PAINT_LAYER_ROLE_EFFECT &&
+  if (row.role != MA_PAINT_LAYER_ROLE_LAYER &&
       !ELEM(resolve->channels[PAINT_MATERIAL_CHANNEL_ALPHA],
             ChannelResolution::Unavailable,
             ChannelResolution::Constant))
@@ -334,7 +378,17 @@ uint64_t paint_layer_material_live_signature(const Material &ma, const MaterialP
 {
   uint64_t h = 1469598103934665603ull;
   const auto mix = [&](const uint64_t value) { h = h * 1000003u ^ value; };
+  if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    /* Two channels of the same kind of source (both plain values, say) differ in nothing else, but
+     * the group inputs are named by the channel, so the generated graph does. */
+    mix(0x600u + uint64_t(paint_layer_mask_source_channel(row)));
+  }
   for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    /* A mask correction reads one channel; the others are not its shape. */
+    if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM && channel != paint_layer_mask_source_channel(row))
+    {
+      continue;
+    }
     const PaintLayerMaterialSource source = paint_layer_material_channel_source(ma, row, channel);
     mix(uint64_t(source.kind));
     if (source.image != nullptr) {

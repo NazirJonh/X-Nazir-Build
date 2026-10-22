@@ -79,6 +79,8 @@ enum class PaintLayerAddKind : int8_t {
    * no anchor row, no source, the owner itself and a source that reads the owner.
    */
   CorrectionMaterial,
+  /** A mask correction reading #PaintLayerAddParams::source: the grey of its Base Color. */
+  MaskCorrectionMaterial,
 };
 
 struct PaintLayerAddParams {
@@ -107,7 +109,8 @@ struct PaintLayerAddParams {
   const float *fill_color = nullptr;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
-  /** The material a #PaintLayerAddKind::Material or ::CorrectionMaterial Add reads. */
+  /** The material a #PaintLayerAddKind::Material, ::CorrectionMaterial or ::MaskCorrectionMaterial
+   * Add reads. */
   Material *source = nullptr;
   /**
    * When set, a #PaintLayerAddKind::Material row reads a local copy of \a source made in this

@@ -759,17 +759,30 @@ class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
         if cls._object_mask_editing(context):
             return False
         owner, layer = cls._active_layer(context)
-        if owner is None or layer is None or layer.source != 'MATERIAL':
+        if owner is None or layer is None:
             return False
-        return cls._shown_mask_item(context, owner, layer) is None and layer.material is not None
+        item = cls._shown_mask_item(context, owner, layer)
+        # A mask correction that reads a material is edited here as a Material layer is.
+        subject = item if item is not None else layer
+        return subject.source == 'MATERIAL' and subject.material is not None
 
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
-        _, layer = self._active_layer(context)
-        if layer is None or layer.material is None:
+        owner, layer = self._active_layer(context)
+        if layer is None:
             return
-        source = layer.material
+        item = self._shown_mask_item(context, owner, layer)
+        subject = item if item is not None else layer
+        if subject.material is None:
+            return
+        if item is not None:
+            # A mask takes one grey: which channel of the source it comes from.
+            col = layout.column(align=True)
+            col.label(text="Source Channel")
+            col.prop(item, "mask_source_channel", expand=True)
+            layout.separator()
+        source = subject.material
         if source.library is not None:
             layout.label(text="Linked, not editable", icon='LIBRARY_DATA_DIRECT')
             layout.operator("paint.layer_source_make_local",

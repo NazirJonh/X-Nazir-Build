@@ -471,6 +471,7 @@ StackRow paint_mask_item_row_build(const Material &material,
                                    const int ordinal)
 {
   const bool fill = item.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
+  const bool from_material = item.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
   StackRow row;
   row.ordinal = int16_t(ordinal);
   row.depth = depth;
@@ -479,9 +480,11 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.stable_id = item.marker;
   row.enabled = (item.flag & MA_PAINT_LAYER_ENABLED) != 0;
   row.supported = true;
-  row.name = item.name[0] != '\0' ? item.name : (fill ? "Mask Fill" : "Mask Paint");
+  row.name = item.name[0] != '\0' ?
+                 item.name :
+                 (from_material ? "Material Mask" : (fill ? "Mask Fill" : "Mask Paint"));
   row.name_buffer = const_cast<char *>(item.name);
-  row.icon = fill ? ICON_GP_DRAW_FILL : ICON_MOD_MASK;
+  row.icon = from_material ? ICON_MATERIAL : (fill ? ICON_GP_DRAW_FILL : ICON_MOD_MASK);
   /* A correction reads as a setting of its mask rather than as a member of the stack. */
   row.compact = true;
 
@@ -507,6 +510,10 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.mode_ptr = item_ptr;
   row.mode_prop = "blend_type";
   row.mode_inherited = (item.blend == MA_PAINT_LAYER_BLEND_MIX);
+  if (from_material) {
+    /* Its grey is its source's Base Color and it owns no map: nothing to preview or paint. */
+    return row;
+  }
 
   /* The slot switches the brush to the mask. A Fill is its grey while it has no map, as a Fill layer
    * is its colour; a Paint one, and a Fill once painted, is the mask icon the base's slot shows. */
@@ -1400,6 +1407,17 @@ class PaintLayersStackSource final : public StackSource,
     material_correction.source_browse_prop = "paint_layer_add_material_correction";
     material_correction.is_effect = true;
     r_kinds.append(material_correction);
+    /* And once more for the mask: the grey of what another material shows as its Base Color. */
+    StackAddKindInfo mask_material{
+        "MASK_CORRECTION_MATERIAL",
+        N_("Mask Material Correction"),
+        "The grey of another material's Base Color, laid over the active layer's mask",
+        ICON_MATERIAL};
+    mask_material.source_id_type = ID_MA;
+    /* Picked from the same ID Browser popover as a Material layer. */
+    mask_material.source_browse_prop = "paint_layer_add_material_mask_correction";
+    mask_material.is_effect = true;
+    r_kinds.append(mask_material);
   }
 
   int row_add(bContext &C,
@@ -1417,12 +1435,14 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int coverage_num = int(std::size(paint_coverage_add_kinds));
     constexpr int material_kind = coverage_first_kind + coverage_num;
     constexpr int material_correction_kind = material_kind + 1;
-    if (kind < 0 || kind > material_correction_kind || !this->is_editable(owner)) {
+    constexpr int mask_material_kind = material_correction_kind + 1;
+    if (kind < 0 || kind > mask_material_kind || !this->is_editable(owner)) {
       return -1;
     }
     const bool is_material = kind == material_kind;
     const bool is_material_correction = kind == material_correction_kind;
-    const bool reads_material = is_material || is_material_correction;
+    const bool is_mask_material = kind == mask_material_kind;
+    const bool reads_material = is_material || is_material_correction || is_mask_material;
     const bool is_mask_filter = kind >= mask_filter_first_kind && !reads_material;
     const bool is_adjustment = kind >= adjustment_first_kind && !is_mask_filter && !reads_material;
     /* A filter correction hangs on a layer; an adjustment is a layer. */
@@ -1460,6 +1480,7 @@ class PaintLayersStackSource final : public StackSource,
     }
     params.kind = is_material            ? PaintLayerAddKind::Material :
                   is_material_correction ? PaintLayerAddKind::CorrectionMaterial :
+                  is_mask_material       ? PaintLayerAddKind::MaskCorrectionMaterial :
                   is_mask_filter         ? PaintLayerAddKind::MaskFilter :
                   is_adjustment          ? PaintLayerAddKind::Adjustment :
                   is_filter              ? PaintLayerAddKind::Filter :
@@ -1473,6 +1494,7 @@ class PaintLayersStackSource final : public StackSource,
     const bool is_mask_correction = ELEM(params.kind,
                                          PaintLayerAddKind::MaskCorrection,
                                          PaintLayerAddKind::MaskCorrectionFill,
+                                         PaintLayerAddKind::MaskCorrectionMaterial,
                                          PaintLayerAddKind::MaskFilter);
     const bool is_correction = is_mask_correction || is_filter ||
                                ELEM(params.kind,

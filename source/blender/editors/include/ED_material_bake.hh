@@ -337,8 +337,14 @@ void bake_target_image_normalize_colorspace(Image &image, eMaterialPaintChannel 
  * land. A row whose render for the current state is already running is left to it. Called on the
  * main thread after the depsgraph update, for every layered material of the file.  force_preview
  * asks for the maps of the row being edited as if an Image Editor showed the composite (Update Now).
+ *  forced_rows names Material rows rendered at their own size now, whatever their bake mode and
+ * whether they are being edited (#BKE_paint_layers_material_row_render_forced_wanted): the maps a
+ * consumer needs before it can read them.
  */
-void material_bake_layered_rows_ensure(Main &bmain, Material &ma, bool force_preview = false);
+void material_bake_layered_rows_ensure(Main &bmain,
+                                       Material &ma,
+                                       bool force_preview = false,
+                                       Span<bUUID> forced_rows = {});
 
 /** \} */
 

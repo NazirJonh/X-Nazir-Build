@@ -1687,6 +1687,34 @@ void BKE_paint_layers_material_bake_stamp_get(const Material &ma,
       full, BakeMaterialRuntime::StartedRender{normal, bake_row_maps_partial(ma, layer)});
 }
 
+bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
+                                                        const MaterialPaintLayer &row)
+{
+  if (!paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) ||
+      row.role != MA_PAINT_LAYER_ROLE_LAYER || row.material == nullptr ||
+      row.material->nodetree == nullptr ||
+      BKE_paint_layers_bake_mode_get(row) == MA_PAINT_LAYER_BAKE_NEVER ||
+      !BKE_paint_layers_material_row_needs_render(ma, row))
+  {
+    return false;
+  }
+  if (!paint_layer_row_material_shown(ma, row) || BKE_paint_layers_material_row_stale(ma, row)) {
+    return true;
+  }
+  /* A partial render (Auto, nothing reading the maps) is fresh and still holds the Normal alone. */
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (!BKE_paint_layers_material_channel_needs_render(ma, row, channel)) {
+      continue;
+    }
+    const Image *map = (channel == PAINT_MATERIAL_CHANNEL_ALPHA) ? row.bake->coverage :
+                                                                   row.bake->images[channel];
+    if (map == nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool BKE_paint_layers_material_row_due(const Material &ma, const MaterialPaintLayer &layer)
 {
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
@@ -2390,6 +2418,160 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
 }
 
 void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job)
+{
+  if (job.material_copy != nullptr) {
+    BKE_id_free(nullptr, &job.material_copy->id);
+    job.material_copy = nullptr;
+  }
+  MEM_delete(&job);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Row Result Job
+ * \{ */
+
+struct PaintLayersRowResultJob {
+  Main *bmain = nullptr;
+  Material *material = nullptr;
+  uint32_t material_session_uid = 0;
+  /** Localized on the main thread at creation so the worker never reads a material being edited.
+   */
+  Material *material_copy = nullptr;
+  bUUID source_marker = {};
+  bUUID target_marker = {};
+  int size = 0;
+  struct ChannelResult {
+    int channel = 0;
+    bool is_color = false;
+    Vector<float> color;
+  };
+  Vector<ChannelResult> channels;
+};
+
+PaintLayersRowResultJob *BKE_paint_layers_row_result_job_create(Main &bmain,
+                                                                Material &ma,
+                                                                const bUUID &source_marker,
+                                                                const bUUID &target_marker,
+                                                                const int size)
+{
+  if (!BKE_paint_layers_is_layered(ma) || size <= 0 ||
+      BKE_paint_layers_find(ma, source_marker) == nullptr ||
+      BKE_paint_layers_find(ma, target_marker) == nullptr)
+  {
+    return nullptr;
+  }
+  PaintLayersRowResultJob *job = MEM_new<PaintLayersRowResultJob>(__func__);
+  job->bmain = &bmain;
+  job->material = &ma;
+  job->material_session_uid = ma.id.session_uid;
+  job->source_marker = source_marker;
+  job->target_marker = target_marker;
+  job->size = size;
+  job->material_copy = id_cast<Material *>(
+      BKE_id_copy_ex(nullptr,
+                     &ma.id,
+                     nullptr,
+                     LIB_ID_CREATE_LOCAL | LIB_ID_COPY_LOCALIZE | LIB_ID_COPY_NO_ANIMDATA));
+  if (job->material_copy == nullptr) {
+    MEM_delete(job);
+    return nullptr;
+  }
+  return job;
+}
+
+void BKE_paint_layers_row_result_job_compute(PaintLayersRowResultJob &job)
+{
+  if (job.material_copy == nullptr) {
+    return;
+  }
+  Material &ma = *job.material_copy;
+  const MaterialPaintLayer *source = BKE_paint_layers_find(ma, job.source_marker);
+  if (source == nullptr) {
+    return;
+  }
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    const int channel = int(info.channel);
+    Vector<float> color(int64_t(job.size) * job.size * 4);
+    Vector<float> coverage(int64_t(job.size) * job.size);
+    if (!BKE_paint_layers_bake_render_node(
+            ma, *source, channel, job.size, color.data(), coverage.data()))
+    {
+      continue;
+    }
+    PaintLayersRowResultJob::ChannelResult result;
+    result.channel = channel;
+    result.is_color = info.is_color;
+    result.color = std::move(color);
+    job.channels.append(std::move(result));
+  }
+}
+
+bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job)
+{
+  if (job.bmain == nullptr || job.channels.is_empty()) {
+    return false;
+  }
+  Main &bmain = *job.bmain;
+  Material *ma = nullptr;
+  for (Material &candidate : bmain.materials) {
+    if (candidate.id.session_uid == job.material_session_uid && &candidate == job.material) {
+      ma = &candidate;
+      break;
+    }
+  }
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+    return false;
+  }
+  MaterialPaintLayer *target = BKE_paint_layers_find(*ma, job.target_marker);
+  if (target == nullptr) {
+    return false;
+  }
+  bool any = false;
+  for (PaintLayersRowResultJob::ChannelResult &result : job.channels) {
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+        eMaterialPaintChannel(result.channel));
+    char name[192];
+    SNPRINTF(name, "%s %s", target->name[0] != '\0' ? target->name : "Layer", info.ui_name);
+    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(&bmain,
+                                           job.size,
+                                           job.size,
+                                           name,
+                                           32,
+                                           false,
+                                           IMA_GENTYPE_BLANK,
+                                           black,
+                                           false,
+                                           /*is_data=*/!info.is_color,
+                                           false);
+    if (image == nullptr) {
+      continue;
+    }
+    image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    /* The render is the CPU one the bake planner uses, so the colour's alpha already is the source
+     * row's content alpha. Written through unchanged: the target map then means the same thing any
+     * other paint-layer map does. */
+    bake_write_image(*image, result.color.data(), info.is_color, nullptr);
+    if (BKE_paint_layers_channel_add(*ma, target, eMaterialPaintChannel(result.channel)) ==
+            nullptr ||
+        !BKE_paint_layers_channel_set_image(
+            *ma, target, eMaterialPaintChannel(result.channel), image))
+    {
+      BKE_id_free(&bmain, &image->id);
+      continue;
+    }
+    any = true;
+  }
+  if (any) {
+    /* Remembered so the target can be refreshed from the same row without choosing it again. */
+    target->row_result_source = job.source_marker;
+  }
+  return any;
+}
+
+void BKE_paint_layers_row_result_job_free(PaintLayersRowResultJob &job)
 {
   if (job.material_copy != nullptr) {
     BKE_id_free(nullptr, &job.material_copy->id);

@@ -910,6 +910,12 @@ struct MaterialPaintLayer {
    * the owner or a material that reads the owner.
    */
   Material *material = nullptr;
+  /**
+   * The marker of the row whose result this row's maps were last made from ("Use Row Result"), or
+   * nil. Only a reference for the update button: a marker that no longer names a row means the
+   * source is gone, and nothing else reads it.
+   */
+  bUUID row_result_source = {};
 };
 
 struct Material {

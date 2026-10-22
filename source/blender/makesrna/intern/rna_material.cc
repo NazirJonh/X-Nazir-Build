@@ -1440,6 +1440,22 @@ static int rna_MaterialPaintLayer_marker_length(PointerRNA * /*ptr*/)
   return UUID_STRING_SIZE - 1;
 }
 
+static void rna_MaterialPaintLayer_row_result_source_get(PointerRNA *ptr, char *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (BLI_uuid_is_nil(layer->row_result_source)) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_uuid_format(value, layer->row_result_source);
+}
+
+static int rna_MaterialPaintLayer_row_result_source_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BLI_uuid_is_nil(layer->row_result_source) ? 0 : UUID_STRING_SIZE - 1;
+}
+
 /**
  * The path of \a layer below \a prefix, searching \a list and every folder under it: a row is
  * `<prefix>[i]`, a folder's rows `<prefix>[i].children[j]` and a mask item
@@ -3178,6 +3194,17 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                 nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Marker", "Stable identity of the paint layer");
+
+  /* Read-only: set when "Use Row Result" fills the row's maps, so the row can be updated from the
+   * same source. Empty while the maps were not made that way. */
+  prop = RNA_def_property(srna, "row_result_source", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_row_result_source_get",
+                                "rna_MaterialPaintLayer_row_result_source_length",
+                                nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Row Result Source", "Marker of the row the maps of this row were last made from");
 
   prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_PERCENTAGE);
   RNA_def_property_float_funcs(

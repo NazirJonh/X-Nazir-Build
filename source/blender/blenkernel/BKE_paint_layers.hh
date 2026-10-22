@@ -1074,6 +1074,15 @@ bool BKE_paint_layers_material_channel_render_wanted(const Material &ma,
 bool BKE_paint_layers_material_row_needs_render(const Material &ma, const MaterialPaintLayer &row);
 
 /**
+ * Whether the Material row \a row has to be rendered now although the planner would not ask for
+ * it: its source supplies a channel as a graph, the row's bake mode is not Never, and its maps are
+ * missing or stale. The planner leaves an edited row and a row shown live in Auto to wait; a
+ * consumer that reads the rendered maps ("Use Row Result") cannot.
+ */
+bool BKE_paint_layers_material_row_render_forced_wanted(const Material &ma,
+                                                        const MaterialPaintLayer &row);
+
+/**
  * Whether the maps of the Material row \a layer no longer describe its source: it has none yet, the
  * source's content moved since the render started, or a texture the source reads was painted on.
  * Main thread only.
@@ -1540,6 +1549,35 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job);
 
 /** Release the job and its localized copy. */
 void BKE_paint_layers_bake_job_free(PaintLayersBakeJob &job);
+
+/**
+ * A "Use Row Result" job: render one row (\a source_marker) of the layered \a ma for every channel
+ * it takes part in, and add the results as channel maps of another row (\a target_marker).
+ *
+ * Same split as #PaintLayersBakeJob -- the description is localized at creation, the pixels are
+ * computed on the worker, and the maps are created and written on the main thread -- because a
+ * heavy row at 2048+ pixels is too slow to render inside the operator.
+ */
+struct PaintLayersRowResultJob;
+
+/** Localize \a ma and remember the two rows; null when either is missing or \a ma is not layered.
+ */
+PaintLayersRowResultJob *BKE_paint_layers_row_result_job_create(
+    Main &bmain, Material &ma, const bUUID &source_marker, const bUUID &target_marker, int size);
+
+/** Render \a source_marker's channels from the localized copy. Runs on the worker thread. */
+void BKE_paint_layers_row_result_job_compute(PaintLayersRowResultJob &job);
+
+/**
+ * Create the target row's maps from the computed buffers and link them. Runs on the main thread.
+ *
+ * \return whether any channel was committed; false too when the material or the target row is gone
+ * or the target takes no channel records (a folder or a Material row).
+ */
+bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job);
+
+/** Release the job and its localized copy. */
+void BKE_paint_layers_row_result_job_free(PaintLayersRowResultJob &job);
 
 /** \} */
 

@@ -180,4 +180,11 @@ void paint_layers_blend_callbacks_init();
  */
 void MATERIAL_OT_paint_layers_bake_now(wmOperatorType *ot);
 
+/**
+ * "Use Row Result": bake another row's result for every channel it takes part in into the active
+ * row's channel maps. A heavy row (or a map of 2048 pixels and more) is rendered on a worker, a
+ * light one inline so the operator can report an empty outcome at once.
+ */
+void MATERIAL_OT_paint_layer_use_row_result(wmOperatorType *ot);
+
 }  // namespace blender::ed::material_bake

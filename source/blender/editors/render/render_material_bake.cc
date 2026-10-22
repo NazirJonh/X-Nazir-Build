@@ -2025,7 +2025,10 @@ static bool material_composite_is_shown(Main &bmain, wmWindowManager &wm, const 
   return false;
 }
 
-void material_bake_layered_rows_ensure(Main &bmain, Material &ma, const bool force_preview)
+void material_bake_layered_rows_ensure(Main &bmain,
+                                       Material &ma,
+                                       const bool force_preview,
+                                       const Span<bUUID> forced_rows)
 {
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
   if (wm == nullptr || !BKE_paint_layers_is_layered(ma)) {
@@ -2046,7 +2049,14 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma, const bool for
   });
 
   for (MaterialPaintLayer *row : rows) {
-    if (!BKE_paint_layers_material_row_due(ma, *row)) {
+    /* A forced row is rendered at its own size even while it is edited: a consumer reads the
+     * maps, and a preview-grade map would be scaled up into its result. */
+    bool forced = false;
+    for (const bUUID &marker : forced_rows) {
+      forced = forced || BLI_uuid_equal(marker, row->marker);
+    }
+    forced = forced && BKE_paint_layers_material_row_render_forced_wanted(ma, *row);
+    if (!forced && !BKE_paint_layers_material_row_due(ma, *row)) {
       continue;
     }
     /* The side is the row's own choice; a fresh row takes the default. The structural hash covers
@@ -2065,7 +2075,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma, const bool for
     link.marker = row->marker;
     /* The row being edited is rendered small for the Image Editor and scaled into its maps; the
      * render at the row's own size is for when it is left. */
-    const bool preview = BKE_paint_layers_material_row_preview_active(ma, *row);
+    const bool preview = !forced && BKE_paint_layers_material_row_preview_active(ma, *row);
     const int render_size = preview ? bake_size_clamp(BKE_paint_layers_preview_size_get(ma, size)) :
                                       size;
     link.preview_side = preview ? render_size : 0;
@@ -2130,7 +2140,7 @@ void material_bake_layered_rows_ensure(Main &bmain, Material &ma, const bool for
        * state would only fail the same way, so the row waits for something to change. */
       BKE_paint_layers_material_bake_land(ma, link.marker, link.hash, link.source_hash, false, link.preview_side);
     }
-    else if (BKE_paint_layers_material_row_due(ma, *row)) {
+    else if (forced || BKE_paint_layers_material_row_due(ma, *row)) {
       row_renders_in_flight().add_overwrite(UUID(link.marker), row_render_state(link));
       /* A render is running for \a ma: stamp it before the worker can run, so
        * Material.paint_layers_is_stale never reads fresh while the maps are being written. The

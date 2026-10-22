@@ -2022,6 +2022,12 @@ enum eWM_JobType {
   WM_JOB_TYPE_MATERIAL_IMAGES_BAKE,
   /** Heavy paint-layer bakes, keyed on the material; see `render_paint_layers_bake.cc`. */
   WM_JOB_TYPE_PAINT_LAYERS_BAKE,
+  /**
+   * "Use Row Result" of a layered material, keyed on the material. Separate from
+   * #WM_JOB_TYPE_PAINT_LAYERS_BAKE: a job slot is shared by owner and type, and a result started
+   * while the planner's bake runs would otherwise replace its callbacks.
+   */
+  WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT,
   /* Add as needed, bake, seq proxy build
    * if having hard coded values is a problem. */
 };

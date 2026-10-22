@@ -596,8 +596,12 @@ void paint_stack_rows_append(const Material &material,
     else if (adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
       /* Nothing to show or switch to: the brush has no content to work on in this row. A Material
        * row shows what its source shows and owns no map to paint. With a mask the row does have
-       * two targets, and the slot back to the content (made below) needs its section. */
-      if (BKE_paint_layers_mask_base(layer) != nullptr) {
+       * two targets, and the slot back to the content (made below) needs its section. A Material
+       * row takes corrections, which are listed under this section, so it has it with or without
+       * a mask. */
+      if (BKE_paint_layers_mask_base(layer) != nullptr ||
+          layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL)
+      {
         StackContentSection content;
         content.identifier = "CHANNELS";
         content.name = IFACE_("Content");

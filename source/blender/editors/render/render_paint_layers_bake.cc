@@ -35,9 +35,11 @@
 
 #include "DNA_ID.h"
 #include "DNA_material_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_windowmanager_types.h"
 
 #include "RNA_access.hh"
+#include "RNA_define.hh"
 #include "RNA_prototypes.hh"
 
 #include "WM_api.hh"
@@ -133,7 +135,9 @@ bool paint_layers_bake_jobs_in_flight(const wmWindowManager &wm,
   if (paint_layers_bake_job_test_excluding(
           wm, &ma, WM_JOB_TYPE_PAINT_LAYERS_BAKE, exclude_owner, exclude_job_type) ||
       paint_layers_bake_job_test_excluding(
-          wm, &ma, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE, exclude_owner, exclude_job_type))
+          wm, &ma, WM_JOB_TYPE_MATERIAL_IMAGES_BAKE, exclude_owner, exclude_job_type) ||
+      paint_layers_bake_job_test_excluding(
+          wm, &ma, WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT, exclude_owner, exclude_job_type))
   {
     return true;
   }
@@ -417,6 +421,249 @@ wmOperatorStatus paint_layers_bake_now_exec(bContext *C, wmOperator *op)
   return OPERATOR_FINISHED;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Use Row Result
+ * \{ */
+
+bool paint_layer_row_result_poll(bContext *C)
+{
+  const Material *owner = static_cast<const Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  if (owner == nullptr || !BKE_paint_layers_is_layered(*owner) ||
+      BLI_uuid_is_nil(BKE_paint_layers_active_get(*owner)))
+  {
+    CTX_wm_operator_poll_msg_set(C, "No active paint layer");
+    return false;
+  }
+  return true;
+}
+
+void paint_layer_row_result_start(void *customdata, wmJobWorkerStatus * /*worker_status*/)
+{
+  BKE_paint_layers_row_result_job_compute(*static_cast<PaintLayersRowResultJob *>(customdata));
+}
+
+void paint_layer_row_result_end(void *customdata)
+{
+  if (BKE_paint_layers_row_result_job_commit(*static_cast<PaintLayersRowResultJob *>(customdata)))
+  {
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
+  }
+}
+
+void paint_layer_row_result_free(void *customdata)
+{
+  BKE_paint_layers_row_result_job_free(*static_cast<PaintLayersRowResultJob *>(customdata));
+}
+
+/**
+ * Render the result of \a source into the channel maps of \a target: on a worker for a heavy row or
+ * a map of 2048 pixels and more, inline for a light one so an empty outcome can be reported.
+ *
+ * \return false when nothing was started or committed, with the reason reported to \a reports.
+ */
+bool paint_layer_row_result_run(Main &bmain,
+                                wmWindowManager &wm,
+                                wmWindow *win,
+                                Material &owner,
+                                const bUUID &source_marker,
+                                const bUUID &target_marker,
+                                const int size,
+                                ReportList *reports)
+{
+  PaintLayersRowResultJob *job = BKE_paint_layers_row_result_job_create(
+      bmain, owner, source_marker, target_marker, size);
+  if (job == nullptr) {
+    BKE_report(reports, RPT_ERROR, "No row to take the result from");
+    return false;
+  }
+  /* The threshold the bake planner uses. */
+  const MaterialPaintLayer *source = BKE_paint_layers_find(owner, source_marker);
+  const bool heavy = (source != nullptr && BKE_paint_layers_bake_is_heavy(owner, *source)) ||
+                     size >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
+  if (heavy) {
+    wmJob *wm_job = WM_jobs_get(&wm,
+                                win,
+                                &owner,
+                                "Rendering row result...",
+                                WM_JOB_EXCL_RENDER | WM_JOB_PROGRESS,
+                                WM_JOB_TYPE_PAINT_LAYERS_ROW_RESULT);
+    WM_jobs_customdata_set(wm_job, job, paint_layer_row_result_free);
+    WM_jobs_timer(wm_job, 0.2, NC_MATERIAL, NC_MATERIAL);
+    WM_jobs_callbacks(
+        wm_job, paint_layer_row_result_start, nullptr, nullptr, paint_layer_row_result_end);
+    WM_jobs_start(&wm, wm_job);
+    return true;
+  }
+
+  BKE_paint_layers_row_result_job_compute(*job);
+  const bool any = BKE_paint_layers_row_result_job_commit(*job);
+  BKE_paint_layers_row_result_job_free(*job);
+  if (!any) {
+    BKE_report(reports, RPT_ERROR, "The row contributes to no channel here");
+    return false;
+  }
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &owner.id);
+  return true;
+}
+
+/** The Material rows of \a row and below it whose maps have to be rendered before they are read. */
+void paint_layer_row_result_forced_collect(const Material &ma,
+                                           const MaterialPaintLayer &row,
+                                           Vector<bUUID> &r_markers)
+{
+  if (BKE_paint_layers_material_row_render_forced_wanted(ma, row)) {
+    r_markers.append(row.marker);
+  }
+  for (const MaterialPaintLayer &child : row.children) {
+    paint_layer_row_result_forced_collect(ma, child, r_markers);
+  }
+}
+
+/**
+ * A "Use Row Result" waiting for the renders of the source's maps. The timer owns it; the material
+ * is found again on every tick, since the file or the stack may change meanwhile.
+ */
+struct PaintLayerRowResultWait {
+  Main *bmain = nullptr;
+  Material *material = nullptr;
+  uint32_t material_session_uid = 0;
+  bUUID source_marker = {};
+  bUUID target_marker = {};
+  int size = 0;
+  double deadline = 0.0;
+};
+
+double paint_layer_row_result_wait_tick(uintptr_t /*uuid*/, void *user_data)
+{
+  const PaintLayerRowResultWait &wait = *static_cast<PaintLayerRowResultWait *>(user_data);
+  if (G_MAIN == nullptr || G_MAIN != wait.bmain || G_MAIN->wm.first == nullptr) {
+    return -1.0;
+  }
+  Main &bmain = *G_MAIN;
+  Material *ma = nullptr;
+  for (Material &candidate : bmain.materials) {
+    if (&candidate == wait.material && candidate.id.session_uid == wait.material_session_uid) {
+      ma = &candidate;
+      break;
+    }
+  }
+  if (ma == nullptr) {
+    return -1.0;
+  }
+  wmWindowManager &wm = *static_cast<wmWindowManager *>(bmain.wm.first);
+  if (paint_layers_bake_jobs_in_flight(wm, *ma) && BLI_time_now_seconds() < wait.deadline) {
+    return 0.25;
+  }
+  /* No operator is left to show a failure, so it goes to the status bar. */
+  ReportList reports;
+  BKE_reports_init(&reports, RPT_STORE);
+  if (!paint_layer_row_result_run(bmain,
+                                  wm,
+                                  static_cast<wmWindow *>(wm.windows.first),
+                                  *ma,
+                                  wait.source_marker,
+                                  wait.target_marker,
+                                  wait.size,
+                                  &reports))
+  {
+    for (const Report &report : reports.list) {
+      WM_global_report(eReportType(report.type), report.message);
+    }
+  }
+  BKE_reports_free(&reports);
+  return -1.0;
+}
+
+void paint_layer_row_result_wait_free(uintptr_t /*uuid*/, void *user_data)
+{
+  MEM_delete(static_cast<PaintLayerRowResultWait *>(user_data));
+}
+
+wmOperatorStatus paint_layer_row_result_exec(bContext *C, wmOperator *op)
+{
+  Material *owner = static_cast<Material *>(
+      CTX_data_pointer_get_type(C, "material", RNA_Material).data);
+  Main *bmain = CTX_data_main(C);
+  wmWindowManager *wm = CTX_wm_manager(C);
+  if (owner == nullptr || bmain == nullptr || wm == nullptr ||
+      !BKE_paint_layers_is_layered(*owner))
+  {
+    return OPERATOR_CANCELLED;
+  }
+  MaterialPaintLayer *target = BKE_paint_layers_find(*owner, BKE_paint_layers_active_get(*owner));
+  if (target == nullptr) {
+    BKE_report(op->reports, RPT_ERROR, "No active paint layer");
+    return OPERATOR_CANCELLED;
+  }
+  /* The source is named by its marker, the row's stable identity, so a menu drawn before the stack
+   * changed cannot end up picking another row. Without one the target is updated from the row it
+   * was last made from. */
+  char source_marker_str[UUID_STRING_SIZE];
+  RNA_string_get(op->ptr, "source_marker", source_marker_str);
+  bUUID source_marker = target->row_result_source;
+  if (source_marker_str[0] != '\0' && !BLI_uuid_parse_string(&source_marker, source_marker_str)) {
+    source_marker = {};
+  }
+  const MaterialPaintLayer *source = BLI_uuid_is_nil(source_marker) ?
+                                         nullptr :
+                                         BKE_paint_layers_find(*owner, source_marker);
+  if (source == nullptr) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               BLI_uuid_is_nil(source_marker) ? "No source row was chosen for this layer yet" :
+                                                "The source row no longer exists");
+    return OPERATOR_CANCELLED;
+  }
+
+  int size = 1024;
+  const Scene *scene = CTX_data_scene(C);
+  if (scene != nullptr && scene->toolsettings != nullptr) {
+    size = scene->toolsettings->paint_mode.new_channel_image_size;
+  }
+  if (size <= 0) {
+    size = 1024;
+  }
+
+  /* A Material row the planner keeps live (Auto, or being edited) has rendered nothing but its
+   * Normal, and a graph channel can only be read from a map. Render those maps first, then run
+   * the job once the renders have landed. */
+  Vector<bUUID> forced;
+  paint_layer_row_result_forced_collect(*owner, *source, forced);
+  if (!forced.is_empty()) {
+    material_bake_layered_rows_ensure(*bmain, *owner, /*force_preview=*/true, forced);
+    PaintLayerRowResultWait *wait = MEM_new<PaintLayerRowResultWait>(__func__);
+    wait->bmain = bmain;
+    wait->material = owner;
+    wait->material_session_uid = owner->id.session_uid;
+    wait->source_marker = source->marker;
+    wait->target_marker = target->marker;
+    wait->size = size;
+    wait->deadline = BLI_time_now_seconds() + 300.0;
+    BLI_timer_register(reinterpret_cast<uintptr_t>(wait),
+                       paint_layer_row_result_wait_tick,
+                       wait,
+                       paint_layer_row_result_wait_free,
+                       0.25,
+                       false);
+    BKE_report(op->reports, RPT_INFO, "Rendering the maps of the source, the result follows");
+    return OPERATOR_FINISHED;
+  }
+
+  return paint_layer_row_result_run(*bmain,
+                                    *wm,
+                                    CTX_wm_window(C),
+                                    *owner,
+                                    source->marker,
+                                    target->marker,
+                                    size,
+                                    op->reports) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
+/** \} */
+
 }  // namespace
 
 bool paint_layers_bake_job_is_excluded(const void *owner,
@@ -625,6 +872,25 @@ void paint_layers_bake_debounce_reset()
   /* The blend tier has the same lifetime, and is reset here so every file change that covers the
    * bake debounce covers it too (#ED_editors_exit among them). */
   paint_layers_blend_timer_reset();
+}
+
+void MATERIAL_OT_paint_layer_use_row_result(wmOperatorType *ot)
+{
+  ot->name = "Use Row Result";
+  ot->description =
+      "Bake another row's result for every channel it takes part in into this row's channel maps";
+  ot->idname = "MATERIAL_OT_paint_layer_use_row_result";
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->exec = paint_layer_row_result_exec;
+  ot->poll = paint_layer_row_result_poll;
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "source_marker",
+                                     nullptr,
+                                     UUID_STRING_SIZE,
+                                     "Source Row",
+                                     "Marker of the row whose result is baked");
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 }
 
 void MATERIAL_OT_paint_layers_bake_now(wmOperatorType *ot)

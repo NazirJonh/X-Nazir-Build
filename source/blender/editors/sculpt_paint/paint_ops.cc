@@ -3189,6 +3189,7 @@ void ED_operatortypes_paint()
 
   /* Paint layers bake: start the pending renders now, and clean up after memfile undo. */
   WM_operatortype_append(ed::material_bake::MATERIAL_OT_paint_layers_bake_now);
+  WM_operatortype_append(ed::material_bake::MATERIAL_OT_paint_layer_use_row_result);
   /* Once at startup, so the paint-layer bake undo cleanup is live before the first update. */
   ed::material_bake::paint_layers_bake_undo_callback_init();
 

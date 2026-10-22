@@ -852,6 +852,71 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
             )
 
 
+class LAYER_MT_row_result_source(Menu):
+    """The rows whose result can be baked into the active row's channel maps."""
+
+    bl_label = "Source Row"
+
+    def draw(self, context):
+        layout = self.layout
+        owner = LayerMaterialButtonsPanel._owner_material(context)
+        if owner is None or owner.paint_layers.active is None:
+            return
+        active_marker = owner.paint_layers.active.marker
+        layout.context_pointer_set("material", owner)
+
+        def draw_rows(rows, depth):
+            for row in reversed(list(rows)):
+                if row.marker != active_marker:
+                    op = layout.operator(
+                        "material.paint_layer_use_row_result",
+                        text=("    " * depth) + (row.name or "Layer"),
+                        icon='FILE_FOLDER' if len(row.children) else 'IMAGE_DATA',
+                    )
+                    op.source_marker = row.marker
+                draw_rows(row.children, depth + 1)
+
+        draw_rows(owner.paint_layers, 0)
+
+
+class LAYER_MATERIAL_PT_row_result(LayerMaterialButtonsPanel, Panel):
+    """Bake the result of another row into the maps of the active row."""
+
+    bl_idname = "LAYER_MATERIAL_PT_row_result"
+    bl_label = "Use Row Result"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if not super().poll(context):
+            return False
+        owner, layer = cls._active_layer(context)
+        if owner is None or layer is None:
+            return False
+        return cls._shown_mask_item(context, owner, layer) is None
+
+    def draw(self, context):
+        layout = self.layout
+        owner, layer = self._active_layer(context)
+        if layer is None:
+            return
+        layout.label(text="Bake a row's result into \"{:s}\"".format(layer.name), icon='INFO')
+        layout.context_pointer_set("material", owner)
+        source = owner.paint_layers.find(layer.row_result_source)
+        row = layout.row(align=True)
+        row.menu(
+            "LAYER_MT_row_result_source",
+            text=(source.name or "Layer") if source is not None else "Source Row...",
+            icon='RENDER_RESULT',
+        )
+        sub = row.row(align=True)
+        sub.enabled = source is not None
+        sub.operator("material.paint_layer_use_row_result", text="", icon='FILE_REFRESH')
+        if layer.row_result_source and source is None:
+            layout.label(text="The source row no longer exists", icon='ERROR')
+
+
 class LAYER_MATERIAL_PT_channels(LayerMaterialButtonsPanel, Panel):
     """The settings of the layered material as a whole; its sections are sub-panels."""
 
@@ -1043,6 +1108,8 @@ classes = (
     LAYER_MATERIAL_PT_mapping,
     LAYER_MATERIAL_PT_source_surface,
     LAYER_MATERIAL_PT_bake,
+    LAYER_MT_row_result_source,
+    LAYER_MATERIAL_PT_row_result,
     LAYER_MATERIAL_PT_channels,
     LAYER_MATERIAL_PT_advanced,
     LAYER_MATERIAL_PT_active_channel,

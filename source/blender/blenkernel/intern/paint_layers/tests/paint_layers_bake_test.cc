@@ -367,4 +367,66 @@ TEST_F(PaintLayersBakeTest, a_removed_row_lets_go_of_its_bake)
   EXPECT_EQ(coverage->id.us, coverage_users - 1);
 }
 
+/**
+ * "Use Row Result" renders a source row's channels off the main thread and commits them as the
+ * target row's maps; the BKE job split is what the heavy operator path runs.
+ */
+TEST_F(PaintLayersBakeTest, a_row_result_job_gives_the_target_the_sources_channels)
+{
+  const int size = 4;
+  MaterialPaintLayer *source = add_paint_layer("Source", add_image("SourceImg"));
+  MaterialPaintLayer *target = BKE_paint_layers_add(
+      *ma, "Target", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(target, nullptr);
+
+  PaintLayersRowResultJob *job = BKE_paint_layers_row_result_job_create(
+      *bmain, *ma, source->marker, target->marker, size);
+  ASSERT_NE(job, nullptr);
+  BKE_paint_layers_row_result_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_row_result_job_commit(*job));
+  BKE_paint_layers_row_result_job_free(*job);
+
+  const MaterialPaintLayerChannel *record = nullptr;
+  for (int i = 0; i < target->channels_num; i++) {
+    if (target->channels[i].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
+      record = &target->channels[i];
+    }
+  }
+  ASSERT_NE(record, nullptr);
+  ASSERT_NE(record->image, nullptr);
+  EXPECT_NE(record->image, source->channels[0].image) << "a render, not the source's own map";
+  int width = 0;
+  int height = 0;
+  BKE_image_get_size(record->image, nullptr, &width, &height);
+  EXPECT_EQ(width, size);
+  EXPECT_EQ(height, size);
+  EXPECT_EQ(source->channels_num, 1) << "the source is only read";
+}
+
+TEST_F(PaintLayersBakeTest, a_row_result_job_needs_both_rows_and_a_target_that_still_exists)
+{
+  MaterialPaintLayer *source = add_paint_layer("Source", add_image("SourceImg"));
+  MaterialPaintLayer *target = BKE_paint_layers_add(
+      *ma, "Target", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(target, nullptr);
+
+  EXPECT_EQ(BKE_paint_layers_row_result_job_create(*bmain, *ma, source->marker, BLI_uuid_nil(), 4),
+            nullptr);
+  EXPECT_EQ(BKE_paint_layers_row_result_job_create(*bmain, *ma, BLI_uuid_nil(), target->marker, 4),
+            nullptr);
+  EXPECT_EQ(BKE_paint_layers_row_result_job_create(*bmain, *ma, source->marker, target->marker, 0),
+            nullptr);
+
+  /* The target is removed while the worker renders: the maps have nowhere to go. */
+  PaintLayersRowResultJob *job = BKE_paint_layers_row_result_job_create(
+      *bmain, *ma, source->marker, target->marker, 4);
+  ASSERT_NE(job, nullptr);
+  const bUUID target_marker = target->marker;
+  BKE_paint_layers_row_result_job_compute(*job);
+  ASSERT_TRUE(BKE_paint_layers_remove(*ma, target));
+  EXPECT_FALSE(BKE_paint_layers_row_result_job_commit(*job));
+  EXPECT_EQ(BKE_paint_layers_find(*ma, target_marker), nullptr);
+  BKE_paint_layers_row_result_job_free(*job);
+}
+
 }  // namespace blender::bke::tests

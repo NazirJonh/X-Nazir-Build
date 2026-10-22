@@ -470,6 +470,13 @@ struct PaintStroke : NonCopyable, NonMovable {
   bool stroke_init_ = false;
   /** Check if input variables have been initialized (e.g. cursor position & pressure). */
   bool input_init_ = false;
+  /* Shift+click line continuation: start at the previous stroke's end instead of the press. */
+  bool line_from_last_ = false;
+  float2 line_start_mouse_ = float2(0.0f, 0.0f);
+  bool line_start_valid_ = false;
+  /* Brush whose stroke method this stroke temporarily overrides, and its original value. */
+  Brush *stroke_method_brush_ = nullptr;
+  int saved_stroke_method_ = -1;
   float2 initial_mouse_ = float2(0.0f, 0.0f);
   float cached_size_pressure_ = 0.0f;
   /* last pressure will store last pressure value for use in interpolation for space strokes */
@@ -565,6 +572,12 @@ struct PaintStroke : NonCopyable, NonMovable {
     return stroke_mode_ == BrushStrokeMode::Invert;
   }
 
+  /** Whether this stroke was started as a Shift+click line continuation. */
+  bool stroke_forces_line_from_last() const
+  {
+    return line_from_last_;
+  }
+
   float stroke_distance() const
   {
     return stroke_distance_;
@@ -618,7 +631,7 @@ struct PaintStroke : NonCopyable, NonMovable {
   }
 
  protected:
-  ~PaintStroke() = default;
+  ~PaintStroke();
   PaintStroke(bContext *C, wmOperator *op, int event_type);
 
   /**
@@ -717,8 +730,46 @@ struct PaintStroke : NonCopyable, NonMovable {
   int space_stroke(bContext *C, wmOperator *op, float2 final_mouse, float final_pressure);
 
   void line_end(bContext *C, wmOperator *op, float2 mouse);
+  /**
+   * Extend a Shift+click line stroke to \a mouse, placing only the dabs of the line that the
+   * cursor has not covered yet, so the paint appears while the line is being drawn.
+   * \return the number of dabs that were placed.
+   */
+  int line_stroke_step(bContext *C, wmOperator *op, const float2 &mouse, float pressure);
   bool curve_end(bContext *C, wmOperator *op);
+
+  /** Store the end of this stroke for the next Shift+click line. */
+  void record_last_stroke_end(bContext *C);
+  /** Put back the brush setting a Shift+line stroke temporarily overrode. */
+  void restore_stroke_method();
 };
+
+/**
+ * Whether Shift+click should start a line from the previous stroke instead of the temporary
+ * smooth toggle. Only the Sculpt paint tools whose strokes go through the regular dab pipeline.
+ */
+bool paint_brush_uses_shift_line(const Brush &brush, PaintMode mode);
+
+/**
+ * Whether a finished stroke of this brush becomes the anchor of the next Shift+click line.
+ * A superset of #paint_brush_uses_shift_line: Clone moves the anchor without taking part.
+ */
+bool paint_brush_records_stroke_end(const Brush &brush, PaintMode mode);
+
+/**
+ * Project the stored end of the previous Sculpt paint stroke into region coordinates.
+ * Returns false when there is no usable endpoint (off-screen, behind the camera, ...).
+ */
+bool paint_stroke_line_start_get(const Paint &paint, const ViewContext &vc, float2 &r_mouse);
+
+/**
+ * Store the end of a Sculpt paint stroke for the next Shift+click line.
+ * \param world: world-space surface hit, or null to keep only the region-space fallback.
+ */
+void paint_stroke_line_end_set(Paint &paint,
+                               const float2 &mouse,
+                               const int2 &region_size,
+                               const float world[3]);
 
 float2 paint_stroke_jitter_pos(Paint *paint,
                                PaintMode mode,

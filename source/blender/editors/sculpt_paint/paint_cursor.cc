@@ -1847,6 +1847,66 @@ static void paint_cursor_ensure_material_source_bake(const bContext &C,
       C, *brush_paint.source_material, brush_paint.source_bake_size);
 }
 
+/**
+ * Dashed line from the end of the previous stroke to the cursor while Shift is held.
+ *
+ * Shift+click continues the previous stroke as a line, and the line itself is painted while the
+ * cursor moves, so this is the hint that the mode is armed -- it is visible before the click that
+ * starts the stroke, not only while it runs. Drawn in window space, like #paint_draw_line_cursor in
+ * paint_stroke.cc (the paint-cursor pass leaves the window projection active).
+ */
+static void paint_cursor_draw_shift_line(PaintCursorContext &pcontext, const int2 &xy)
+{
+  if (pcontext.mode != PaintMode::Sculpt || pcontext.region == nullptr ||
+      pcontext.paint == nullptr || pcontext.brush == nullptr || pcontext.win == nullptr)
+  {
+    return;
+  }
+  /* The modifier state of the last event is what the user is holding right now; there is no
+   * "modifiers changed" callback, so the line appears with the next cursor redraw. */
+  const wmEvent *event_state = pcontext.win->runtime->eventstate;
+  if (event_state == nullptr || (event_state->modifier & KM_SHIFT) == 0 ||
+      !paint_brush_uses_shift_line(*pcontext.brush, pcontext.mode))
+  {
+    return;
+  }
+
+  float2 start = float2(0.0f);
+  if (!paint_stroke_line_start_get(*pcontext.paint, pcontext.vc, start)) {
+    return;
+  }
+
+  const ARegion *region = pcontext.region;
+
+  GPU_line_smooth(true);
+  GPU_blend(GPU_BLEND_ALPHA);
+
+  const uint shdr_pos = GPU_vertformat_attr_add(
+      immVertexFormat(), "pos", gpu::VertAttrType::SFLOAT_32_32);
+
+  immBindBuiltinProgram(GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR);
+
+  float4 viewport_size;
+  GPU_viewport_size_get_f(viewport_size);
+  immUniform2f("viewport_size", viewport_size[2], viewport_size[3]);
+
+  immUniform1i("colors_len", 2); /* "advanced" mode */
+  immUniform4f("color", 0.0f, 0.0f, 0.0f, 0.5f);
+  immUniform4f("color2", 1.0f, 1.0f, 1.0f, 0.5f);
+  immUniform1f("dash_width", 6.0f);
+  immUniform1f("udash_factor", 0.5f);
+
+  immBegin(GPU_PRIM_LINES, 2);
+  immVertex2f(shdr_pos, start.x + region->winrct.xmin, start.y + region->winrct.ymin);
+  immVertex2fv(shdr_pos, float2(xy));
+  immEnd();
+
+  immUnbindProgram();
+
+  GPU_blend(GPU_BLEND_NONE);
+  GPU_line_smooth(false);
+}
+
 static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, void * /*unused*/)
 {
   PRF_scope(ProfileCategory::Default);
@@ -1870,6 +1930,11 @@ static void paint_draw_cursor(bContext *C, const int2 &xy, const float2 &tilt, v
       WM_cursor_set(pcontext.win, WM_CURSOR_EYEDROPPER);
     }
   }
+
+  /* Shift+click line-continuation hint. Drawn before the brush-cursor visibility checks: it
+   * reports a mode, not the brush outline, so turning the outline off must not hide it.
+   * Self-gated on mode, brush and the Shift modifier. */
+  paint_cursor_draw_shift_line(pcontext, xy);
 
   /* Before the enabled check below: a brush whose cursor the user turned off still paints, so it
    * still needs its source material baked. */

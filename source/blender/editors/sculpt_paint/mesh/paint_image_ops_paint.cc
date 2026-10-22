@@ -23,6 +23,7 @@
 #include "BLI_vector.hh"
 
 #include <cfloat>
+#include <cmath>
 #include <cstdlib>
 #include <memory>
 
@@ -108,6 +109,20 @@ static TextureFillGesture *texture_fill_gesture_get(const wmOperator *op)
   const wmGesture *gesture = static_cast<const wmGesture *>(op->customdata);
   return gesture ? static_cast<TextureFillGesture *>(gesture->user_data.data) : nullptr;
 }
+
+/**
+ * Shift+click fill continuation in Sculpt Mode: fills along the line from the previous paint
+ * stroke's end to the release point. Held as the operator's customdata while the gesture runs;
+ * the hidden `line_fill` property distinguishes it from #TextureFillGesture's box gesture.
+ */
+struct TextureFillLineGesture {
+  float2 start = float2(0.0f, 0.0f);
+  float2 end = float2(0.0f, 0.0f);
+};
+
+static void texture_fill_record_stroke_end(const bContext *C,
+                                           Paint &paint,
+                                           const float2 &mouse);
 
 /**
  * Resolve the active paint context for the Texture Fill operators.
@@ -266,6 +281,109 @@ static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2]
   }
   ED_image_undo_push_end();
 
+  if (did_fill && CTX_wm_space_image(C) == nullptr) {
+    /* A normal fill is a paint stroke too: the next Shift+click line continues from it. */
+    texture_fill_record_stroke_end(C, *paint, float2(mouse));
+  }
+
+  return did_fill;
+}
+
+/**
+ * Remember where a Sculpt-mode fill ended, so a later Shift+click line can start there.
+ * Uses the viewport depth under the cursor: a fill does not expose a single raycast hit (the
+ * Pixels expansion in particular paints a whole region), and the endpoint only needs to name a
+ * visible surface point, not a topology-stable face.
+ */
+static void texture_fill_record_stroke_end(const bContext *C,
+                                           Paint &paint,
+                                           const float2 &mouse)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr || !(ob->mode & OB_MODE_SCULPT)) {
+    return;
+  }
+  ARegion *region = CTX_wm_region(C);
+  if (region == nullptr) {
+    return;
+  }
+  View3D *v3d = CTX_wm_view3d(C);
+  const int mval[2] = {int(std::lround(mouse[0])), int(std::lround(mouse[1]))};
+  float world[3];
+  const bool world_valid = v3d != nullptr &&
+                           ED_view3d_autodist(region, v3d, mval, world, nullptr);
+  ed::sculpt_paint::paint_stroke_line_end_set(
+      paint, mouse, int2(region->winx, region->winy), world_valid ? world : nullptr);
+}
+
+/**
+ * Fill along a Shift+click line from the previous stroke's end to \a gesture.end.
+ *
+ * Samples at the brush's own Spacing setting, matching the dab spacing of a regular Line
+ * stroke, and wraps every sample in one image-undo step so a single Ctrl+Z removes the line.
+ */
+static bool texture_fill_line(bContext *C,
+                              wmOperator *op,
+                              const TextureFillLineGesture &gesture)
+{
+  Paint *paint;
+  Brush *brush;
+  if (!texture_fill_context_get(C, true, &paint, &brush)) {
+    return false;
+  }
+  Object *ob = CTX_data_active_object(C);
+  if (!texture_fill_canvas_has_texture(C, ob)) {
+    BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
+    return false;
+  }
+
+  if (brush->flag & BRUSH_USE_GRADIENT) {
+    /* Gradient fill is not supported yet; bail out before an empty undo step is pushed. */
+    return false;
+  }
+
+  const bool invert = RNA_boolean_get(op->ptr, "invert");
+  ED_image_undo_push_begin(op->type->name, texture_fill_paint_mode_get(C));
+
+  const float2 delta = gesture.end - gesture.start;
+  const float length = math::length(delta);
+  /* Same spacing meaning as the stroke system: a percentage of the brush diameter, with a
+   * one-pixel floor so a zero spacing cannot produce an unbounded number of samples. */
+  const float spacing = max_ff(1.0f, BKE_brush_radius_get(paint, brush) * brush->spacing / 50.0f);
+  const int steps = (length > 1.0f) ? math::min(int(std::ceil(length / spacing)), 10000) : 0;
+
+  bool did_fill = false;
+  float2 last_filled = gesture.start;
+  if (brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_MESH) {
+    /* Mesh expansion fills every visible face; a single sample at the click is the whole
+     * result, and repeating it per dab would redo the same fill for the whole line. */
+    last_filled = gesture.end;
+    did_fill = paint_image_viewport_fill_at_mouse(
+        C, paint, brush, ob, invert, &last_filled.x);
+    if (!did_fill) {
+      last_filled = gesture.start;
+      did_fill = paint_image_viewport_fill_at_mouse(
+          C, paint, brush, ob, invert, &last_filled.x);
+    }
+  }
+  else if (steps > 0) {
+    /* Starts at the first spacing step, not at `gesture.start`: that point is the previous
+     * stroke's own end, so filling it again would stamp the brush twice over the last stroke and
+     * double an erase. The segment is instead covered outward from where the paint already is. */
+    for (int i = 1; i <= steps; i++) {
+      const float2 mouse = gesture.start + delta * (float(i) / float(steps));
+      if (paint_image_viewport_fill_at_mouse(C, paint, brush, ob, invert, &mouse.x)) {
+        did_fill = true;
+        last_filled = mouse;
+      }
+    }
+  }
+
+  ED_image_undo_push_end();
+
+  if (did_fill) {
+    texture_fill_record_stroke_end(C, *paint, last_filled);
+  }
   return did_fill;
 }
 
@@ -314,6 +432,29 @@ static wmOperatorStatus texture_fill_invoke(bContext *C, wmOperator *op, const w
   }
 
   RNA_boolean_set(op->ptr, "invert", event->modifier & KM_CTRL);
+  RNA_boolean_set(op->ptr, "line_fill", false);
+
+  /* Sculpt Mode Shift+click: fill along the line from the previous paint stroke's end instead of
+   * starting a new box gesture. The box gesture remains available without Shift. */
+  Object *ob = CTX_data_active_object(C);
+  if ((event->modifier & KM_SHIFT) != 0 && ob != nullptr && (ob->mode & OB_MODE_SCULPT) &&
+      CTX_wm_region_view3d(C) != nullptr &&
+      ed::sculpt_paint::paint_brush_uses_shift_line(*brush, PaintMode::Sculpt))
+  {
+    Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+    const ViewContext vc = ED_view3d_viewcontext_init(C, depsgraph);
+    float2 line_start;
+    if (ed::sculpt_paint::paint_stroke_line_start_get(*paint, vc, line_start)) {
+      auto *line_state = MEM_new<TextureFillLineGesture>(__func__);
+      line_state->start = line_start;
+      line_state->end = float2(event->mval);
+      op->customdata = line_state;
+      RNA_boolean_set(op->ptr, "line_fill", true);
+      WM_event_add_modal_handler(C, op);
+      return OPERATOR_RUNNING_MODAL;
+    }
+  }
+
   const wmOperatorStatus status = WM_gesture_box_invoke(C, op, event);
   if (status & OPERATOR_RUNNING_MODAL) {
     wmGesture *gesture = static_cast<wmGesture *>(op->customdata);
@@ -336,6 +477,30 @@ static wmOperatorStatus texture_fill_invoke(bContext *C, wmOperator *op, const w
 
 static wmOperatorStatus texture_fill_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  if (RNA_boolean_get(op->ptr, "line_fill")) {
+    auto *line_state = static_cast<TextureFillLineGesture *>(op->customdata);
+    if (line_state == nullptr) {
+      return OPERATOR_CANCELLED;
+    }
+    if (ISMOUSE_MOTION(event->type)) {
+      line_state->end = float2(event->mval);
+      return OPERATOR_RUNNING_MODAL;
+    }
+    if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
+      line_state->end = float2(event->mval);
+      const bool filled = texture_fill_line(C, op, *line_state);
+      MEM_delete(line_state);
+      op->customdata = nullptr;
+      return filled ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+    }
+    if (ELEM(event->type, EVT_ESCKEY, RIGHTMOUSE)) {
+      MEM_delete(line_state);
+      op->customdata = nullptr;
+      return OPERATOR_CANCELLED;
+    }
+    return OPERATOR_RUNNING_MODAL;
+  }
+
   TextureFillGesture *gesture_state = texture_fill_gesture_get(op);
   if (event->type == MOUSEMOVE && gesture_state != nullptr && !gesture_state->is_drag) {
     /* #WM_event_drag_threshold is DPI-aware, unlike a hardcoded pixel count. */
@@ -384,6 +549,13 @@ static wmOperatorStatus texture_fill_modal(bContext *C, wmOperator *op, const wm
 
 static void texture_fill_cancel(bContext *C, wmOperator *op)
 {
+  if (RNA_boolean_get(op->ptr, "line_fill")) {
+    if (auto *line_state = static_cast<TextureFillLineGesture *>(op->customdata)) {
+      MEM_delete(line_state);
+    }
+    op->customdata = nullptr;
+    return;
+  }
   /* The gesture frees the gesture state through its own destructor. */
   WM_gesture_box_cancel(C, op);
 }
@@ -405,6 +577,12 @@ void PAINT_OT_texture_fill(wmOperatorType *ot)
   WM_operator_properties_border(ot);
   PropertyRNA *prop = RNA_def_boolean(
       ot->srna, "invert", false, "Invert", "Use the secondary brush color");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  prop = RNA_def_boolean(ot->srna,
+                         "line_fill",
+                         false,
+                         "Line Fill",
+                         "Fill along a line from the previous paint stroke");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 

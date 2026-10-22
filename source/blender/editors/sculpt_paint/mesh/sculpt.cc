@@ -7859,6 +7859,15 @@ struct SculptPaintStroke final : public PaintStroke {
    */
   bool uses_image_undo_ = false;
 
+  /* Shift+Line Fill resolves its image canvas once per stroke: the target list can be expensive
+   * to build and the canvas cannot change while the stroke runs. */
+  bool fill_line_canvas_checked_ = false;
+  bool fill_line_canvas_has_image_ = false;
+  /* Set once a fill covers the whole line already: Mesh expansion fills every visible face, so
+   * repeating it per dab only redoes the same work. Deliberately not #StrokeCache.first_time,
+   * which the regular dab pipeline owns and resets on its own schedule. */
+  bool fill_line_filled_ = false;
+
   /* Sculpt layers: Erase Layer transiently arms recording into the recording target layer for
    * the duration of this stroke when REC was not already on (see #test_start / #done). One entry
    * per object that had the Erase Layer brush arm recording this stroke — each sync-group member
@@ -10016,9 +10025,39 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   Depsgraph &depsgraph = *this->depsgraph;
   Sculpt &sd = *sculpt_;
 
-  if (sculpt_brush_is_texture_fill(*BKE_paint_brush_for_read(&sd.paint))) {
+  if (Brush *fill_brush = BKE_paint_brush(&sd.paint);
+      sculpt_brush_is_texture_fill(*fill_brush))
+  {
     SculptSession &ss = *this->object->runtime->sculpt_session;
     RNA_float_get_array(itemptr, "mouse_event", ss.cache->mouse_event);
+    if (this->stroke_forces_line_from_last()) {
+      /* Fill expansion "Pixels" does not use PAINT_OT_texture_fill, so a Shift+Line stroke
+       * reaches this dab loop instead. Fill each spaced dab; the one-shot fill in done() is
+       * skipped for line strokes. Mesh expansion fills every visible face, so repeating it per
+       * dab would redo the same work for the whole line -- the first hit is the whole result. */
+      if (!this->fill_line_canvas_checked_) {
+        this->fill_line_canvas_checked_ = true;
+        this->fill_line_canvas_has_image_ = sculpt_brush_uses_image_canvas(
+            *fill_brush, *this->paint_mode_settings_, sd.paint, *this->object);
+      }
+      if (!this->fill_line_canvas_has_image_) {
+        /* Color-attribute canvases have no fill target, and the Pixel expansion requires an
+         * open image undo step; leave them alone rather than reaching the fill path's assert. */
+        return;
+      }
+      const bool fill_once = fill_brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_MESH;
+      if (!fill_once || !this->fill_line_filled_) {
+        if (paint_image_viewport_fill_at_mouse(this->evil_C,
+                                               &sd.paint,
+                                               fill_brush,
+                                               this->object,
+                                               sd.paint.runtime->draw_inverted,
+                                               ss.cache->mouse_event))
+        {
+          this->fill_line_filled_ = true;
+        }
+      }
+    }
     return;
   }
 
@@ -10550,7 +10589,9 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     }
   }
 
-  if (!is_cancel && stroke_started && sculpt_brush_is_texture_fill(*brush)) {
+  if (!is_cancel && stroke_started && sculpt_brush_is_texture_fill(*brush) &&
+      !this->stroke_forces_line_from_last())
+  {
     paint_image_viewport_fill_at_mouse(
         this->evil_C, &sd.paint, brush, &ob, paint_runtime->draw_inverted, ss.cache->mouse_event);
     flush_update_step(this->vc, ob, UpdateType::Image);
@@ -10813,6 +10854,18 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
 
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   Brush &brush = *BKE_paint_brush(&sd.paint);
+
+  /* For the Sculpt paint tools Shift is the line-continuation shortcut, not the temporary
+   * Smooth toggle. Clear the toggle the keymap passes (a no-op when the keymap does not set
+   * one), then ask for a Line stroke when there is an endpoint to start from. */
+  const PaintMode paint_mode = BKE_paintmode_get_active_from_context(C);
+  RNA_boolean_set(op->ptr, "line_from_last", false);
+  if ((event->modifier & KM_SHIFT) != 0 && paint_brush_uses_shift_line(brush, paint_mode)) {
+    RNA_enum_set(op->ptr, "brush_toggle", int(BrushSwitchMode::None));
+    if (sd.paint.runtime != nullptr && sd.paint.runtime->last_stroke_end.valid) {
+      RNA_boolean_set(op->ptr, "line_from_last", true);
+    }
+  }
 
   /* Selection mask: refresh the face-selection-derived 2D masks of the canvas image at stroke
    * start, exactly like the 2D painter does, so a 3D stroke respects the same face selection

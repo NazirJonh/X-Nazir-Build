@@ -67,6 +67,23 @@ struct PaintRuntime : NonCopyable, NonMovable {
   float2 last_rake = float2(0.0f, 0.0f);
   float last_rake_angle = 0.0f;
 
+  /**
+   * End of the last Sculpt paint stroke, used by Shift+click line continuation.
+   *
+   * `mouse` and `region_size` are region-relative and only a fallback for a viewport without a
+   * usable 3D projection. `world` is the surface hit under the stroke's end, so the line start
+   * can be reprojected if the view changed between the two strokes. Runtime-only, like the rest
+   * of #PaintRuntime: a new file never inherits an endpoint from a previous scene.
+   */
+  struct StrokeEndAnchor {
+    bool valid = false;
+    float2 mouse = float2(0.0f, 0.0f);
+    int2 region_size = int2(0, 0);
+    float3 world = float3(0.0f);
+    bool world_valid = false;
+  };
+  StrokeEndAnchor last_stroke_end;
+
   int last_stroke_valid = false;
   float3 average_stroke_accum = float3(0.0f, 0.0f, 0.0f);
   int average_stroke_counter = 0;

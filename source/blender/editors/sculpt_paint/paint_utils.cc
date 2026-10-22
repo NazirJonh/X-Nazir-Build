@@ -198,6 +198,16 @@ void paint_stroke_operator_properties(wmOperatorType *ot)
   prop = RNA_def_boolean(
       ot->srna, "pen_flip", false, "Pen Flip", "Whether a tablet's eraser mode is being used");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+
+  /* Set by the Sculpt paint tools for Shift+click: draw a Line stroke from the previous
+   * stroke's end instead of the temporary Smooth toggle. Hidden because no other operator sets
+   * it and the keymap decides when it applies. */
+  prop = RNA_def_boolean(ot->srna,
+                         "line_from_last",
+                         false,
+                         "Line From Last Stroke",
+                         "Start a line stroke at the end of the previous paint stroke");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 /* face-select ops */

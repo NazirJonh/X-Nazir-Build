@@ -66,6 +66,89 @@
 
 namespace blender::ed::sculpt_paint {
 
+bool paint_brush_uses_shift_line(const Brush &brush, const PaintMode mode)
+{
+  if (mode != PaintMode::Sculpt) {
+    return false;
+  }
+  /* Clone is deliberately absent: Shift+click is its source picker. */
+  return ELEM(brush.sculpt_brush_type,
+              SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_ERASE,
+              SCULPT_BRUSH_TYPE_TEXTURE_FILL);
+}
+
+bool paint_brush_records_stroke_end(const Brush &brush, const PaintMode mode)
+{
+  /* Clone does not take part in Shift+line, but its strokes still move the anchor so that the next
+   * Paint line does not start from a stale one. */
+  return paint_brush_uses_shift_line(brush, mode) ||
+         (mode == PaintMode::Sculpt && brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE);
+}
+
+bool paint_stroke_line_start_get(const Paint &paint, const ViewContext &vc, float2 &r_mouse)
+{
+  if (paint.runtime == nullptr || vc.region == nullptr) {
+    return false;
+  }
+  const bke::PaintRuntime::StrokeEndAnchor &anchor = paint.runtime->last_stroke_end;
+  if (!anchor.valid) {
+    return false;
+  }
+
+  if (anchor.world_valid && vc.rv3d != nullptr) {
+    /* Blender's view space looks down -Z, so a perspective point at or behind the eye has no usable
+     * projection. Orthographic views are exempt: their depth is not a distance from an eye, and
+     * visible geometry can sit at any view-space Z. Falling back to the stored screen point would
+     * silently draw the line start in the wrong place after a view change, so the caller starts a
+     * normal stroke instead. */
+    if (vc.rv3d->is_persp) {
+      const float3 view_co = math::transform_point(float4x4(vc.rv3d->viewmat),
+                                                   anchor.world);
+      if (view_co.z >= 0.0f) {
+        return false;
+      }
+    }
+    float projected[2];
+    if (ED_view3d_project_float_global(
+            vc.region, &anchor.world.x, projected, V3D_PROJ_TEST_NOP) !=
+        V3D_PROJ_RET_OK)
+    {
+      return false;
+    }
+    r_mouse = float2(projected);
+    return true;
+  }
+
+  /* No 3D hit (image-editor style canvas, or a stroke that ended off the mesh). The screen point
+   * is only meaningful in a region of the same size. */
+  if (anchor.region_size.x == vc.region->winx &&
+      anchor.region_size.y == vc.region->winy)
+  {
+    r_mouse = anchor.mouse;
+    return true;
+  }
+  return false;
+}
+
+void paint_stroke_line_end_set(Paint &paint,
+                               const float2 &mouse,
+                               const int2 &region_size,
+                               const float world[3])
+{
+  if (paint.runtime == nullptr) {
+    return;
+  }
+  bke::PaintRuntime::StrokeEndAnchor &anchor = paint.runtime->last_stroke_end;
+  anchor.valid = true;
+  anchor.mouse = mouse;
+  anchor.region_size = region_size;
+  anchor.world_valid = world != nullptr;
+  if (world != nullptr) {
+    anchor.world = float3(world);
+  }
+}
+
 /*** Cursors ***/
 static void paint_draw_smooth_cursor(bContext *C,
                                      const int2 &xy,
@@ -1145,8 +1228,28 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
   stroke_mode_ = BrushStrokeMode(RNA_enum_get(op->ptr, "mode"));
   brush_switch_mode_ = BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle"));
 
-  original_ = paint_brush_type_raycast_original(*this->brush,
-                                                BKE_paintmode_get_active_from_context(C));
+  const PaintMode mode = BKE_paintmode_get_active_from_context(C);
+  if (PropertyRNA *line_prop = RNA_struct_find_property(op->ptr, "line_from_last")) {
+    line_from_last_ = RNA_property_boolean_get(op->ptr, line_prop);
+  }
+  if (line_from_last_) {
+    if (paint_brush_uses_shift_line(*this->brush, mode) &&
+        paint_stroke_line_start_get(*this->paint, this->vc, line_start_mouse_))
+    {
+      line_start_valid_ = true;
+      /* Drive the whole stroke through the regular Line method: every consumer (spacing,
+       * projection raycasts, the fill hook, cursors) then sees the method it expects. Restored in
+       * done(). */
+      stroke_method_brush_ = this->brush;
+      saved_stroke_method_ = this->brush->stroke_method;
+      this->brush->stroke_method = BRUSH_STROKE_LINE;
+    }
+    else {
+      line_from_last_ = false;
+    }
+  }
+
+  original_ = paint_brush_type_raycast_original(*this->brush, mode);
 
   float zoomx;
   float zoomy;
@@ -1248,6 +1351,11 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   /* The per-dab size random factor must not leak into the next stroke or the cursor. */
   paint_runtime->size_random_value = 1.0f;
 
+  /* Still has the live stroke caches/undo data needed to raycast the end point. */
+  if (!is_cancel) {
+    this->record_last_stroke_end(C);
+  }
+
   /* TODO: Is this stroke_started_ guard necessary? */
   if (stroke_started_) {
     this->redraw(true);
@@ -1257,6 +1365,8 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
 
   this->done(is_cancel, stroke_started_);
   this->post_done(C, is_cancel, stroke_started_);
+
+  this->restore_stroke_method();
 
   if (RegionView3D *rv3d = CTX_wm_region_view3d(C)) {
     rv3d->rflag &= ~RV3D_PAINTING;
@@ -1293,6 +1403,76 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
       WM_paint_cursor_end(static_cast<wmPaintCursor *>(roll_->debug_cursor));
     }
   }
+}
+
+void PaintStroke::record_last_stroke_end(bContext *C)
+{
+  if (!stroke_started_) {
+    return;
+  }
+  if (this->brush == nullptr || this->paint == nullptr || this->paint->runtime == nullptr) {
+    return;
+  }
+  if (!paint_brush_records_stroke_end(*this->brush, BKE_paintmode_get_active_from_context(C))) {
+    return;
+  }
+  const ARegion *region = this->vc.region;
+  if (region == nullptr) {
+    return;
+  }
+
+  bke::PaintRuntime &runtime = *this->paint->runtime;
+  /* The last *dab*, not the release position: the dab is where the paint visibly ends, so the next
+   * line continues from there instead of overlapping the tail this stroke already covered (a
+   * release point can sit up to one spacing past the last dab, or off the mesh entirely). */
+  const float2 end_mouse = this->last_mouse_position;
+  /* get_location() can promote the stroke to the object under the cursor; the endpoint record
+   * must not change what the rest of stroke teardown sees. */
+  Object *saved_object = this->object;
+  Object *saved_obact = this->vc.obact;
+
+  float3 world;
+  bool world_valid = false;
+  if (this->object != nullptr) {
+    float3 location;
+    if (this->get_location(location, end_mouse, false)) {
+      Object *hit_object = this->object;
+      if (hit_object != nullptr) {
+        world = math::transform_point(hit_object->object_to_world(), location);
+        world_valid = true;
+      }
+    }
+  }
+  /* The end can be off the mesh (e.g. a dab the raycast missed). Fall back to the last dab that did
+   * hit, which is the visual stroke end. */
+  if (!world_valid && runtime.last_hit && saved_object != nullptr) {
+    world = math::transform_point(saved_object->object_to_world(), runtime.last_location);
+    world_valid = true;
+  }
+
+  this->object = saved_object;
+  this->vc.obact = saved_obact;
+
+  paint_stroke_line_end_set(*this->paint,
+                            end_mouse,
+                            int2(region->winx, region->winy),
+                            world_valid ? &world.x : nullptr);
+}
+
+PaintStroke::~PaintStroke()
+{
+  /* Safety net: an early-out path that destroys the stroke without #done would otherwise leave the
+   * brush on the temporary Line method, and that would be saved into the file. */
+  this->restore_stroke_method();
+}
+
+void PaintStroke::restore_stroke_method()
+{
+  if (this->stroke_method_brush_ != nullptr && this->saved_stroke_method_ >= 0) {
+    this->stroke_method_brush_->stroke_method = eBrushStrokeType(this->saved_stroke_method_);
+  }
+  this->stroke_method_brush_ = nullptr;
+  this->saved_stroke_method_ = -1;
 }
 
 static bool curves_sculpt_brush_uses_spacing(const eBrushCurvesSculptType tool)
@@ -1630,6 +1810,22 @@ void PaintStroke::lines_spacing(bContext *C,
   *length_residue = length;
 }
 
+int PaintStroke::line_stroke_step(bContext *C,
+                                  wmOperator *op,
+                                  const float2 &mouse,
+                                  const float pressure)
+{
+  /* A Shift+line paints while the cursor moves, so the dabs always continue from the last one that
+   * was placed (#last_mouse_position is updated by #add_step). Moving back toward the anchor leaves
+   * what is already painted alone: re-walking that part would only stack the brush on itself. */
+  if (math::length(mouse - this->line_start_mouse_) <=
+      math::length(this->last_mouse_position - this->line_start_mouse_))
+  {
+    return 0;
+  }
+  return this->space_stroke(C, op, mouse, pressure);
+}
+
 void PaintStroke::line_end(bContext *C, wmOperator *op, const float2 mouse)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -1637,6 +1833,13 @@ void PaintStroke::line_end(bContext *C, wmOperator *op, const float2 mouse)
   bke::PaintRuntime *paint_runtime = this->paint->runtime;
   if (stroke_started_ && br->stroke_method == BRUSH_STROKE_LINE) {
     paint_runtime->overlap_factor = paint_stroke_integrate_overlap(*br, 1.0);
+
+    if (this->line_from_last_) {
+      /* A Shift+line has been painting since the anchor; only its last, sub-spacing residue is
+       * left to place here. */
+      this->line_stroke_step(C, op, mouse, 1.0f);
+      return;
+    }
 
     this->add_step(C, op, this->last_mouse_position, 1.0);
     this->space_stroke(C, op, mouse, 1.0);
@@ -1998,6 +2201,22 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
        * here. */
       br = BKE_paint_brush(paint);
 
+      if (this->line_from_last_ && this->line_start_valid_) {
+        /* The press confirms the stroke over the mesh; the dabs start where the previous stroke
+         * ended. #line_stroke_step and #line_end read last_mouse_position as the start of the
+         * line. */
+        this->last_mouse_position = this->line_start_mouse_;
+        if (paint_stroke_use_scene_spacing(*br, mode) &&
+            this->get_location(last_world_space_position_, this->line_start_mouse_, original_))
+        {
+          /* Scene spacing measures between dabs, so the anchor has to seed it as well --
+           * otherwise the first dab of the line would have no distance to advance over. */
+          last_world_space_position_ = math::transform_point(this->vc.obact->object_to_world(),
+                                                             last_world_space_position_);
+          stroke_over_mesh_ = true;
+        }
+      }
+
       if (paint_supports_smooth_stroke(*br, mode, brush_switch_mode_)) {
 
         stroke_cursor_ = WM_paint_cursor_activate(
@@ -2008,7 +2227,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
         timer_ = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, this->brush->rate);
       }
 
-      if (br->stroke_method == BRUSH_STROKE_LINE) {
+      if (br->stroke_method == BRUSH_STROKE_LINE && !this->line_from_last_) {
         stroke_cursor_ = WM_paint_cursor_activate(
             SPACE_TYPE_ANY, RGN_TYPE_ANY, paint_brush_cursor_poll, paint_draw_line_cursor, this);
       }
@@ -2068,7 +2287,12 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
     if (event->val == KM_RELEASE) {
       mouse = {float(event->mval[0]), float(event->mval[1])};
       if (this->constrain_line) {
-        paint_stroke_line_constrain(this->last_mouse_position, this->constrained_pos, mouse);
+        /* A Shift+line is constrained against its anchor, not against the last dab, so the angle
+         * stays fixed for the whole line. */
+        paint_stroke_line_constrain(this->line_from_last_ ? this->line_start_mouse_ :
+                                                           this->last_mouse_position,
+                                    this->constrained_pos,
+                                    mouse);
       }
       this->line_end(C, op, mouse);
       /* For smooth stroke, finalize the roll spline at the last smoothed position rather than the
@@ -2105,6 +2329,27 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
     this->finish_roll_stroke(C, op, roll_mouse2, pressure);
     this->done(C, false);
     return OPERATOR_FINISHED;
+  }
+  else if (this->line_from_last_ && this->line_start_valid_) {
+    /* Shift+click line: the dabs follow the straight line from the previous stroke's end and are
+     * placed while the cursor moves, so the paint appears immediately instead of at release.
+     * #line_stroke_step advances from the last dab, which keeps the spacing of the stroke and
+     * makes moving back toward the anchor a no-op. */
+    this->constrain_line = (event->modifier & KM_ALT) != 0;
+
+    mouse = {float(event->mval[0]), float(event->mval[1])};
+    if (this->constrain_line) {
+      paint_stroke_line_constrain(this->line_start_mouse_, this->constrained_pos, mouse);
+    }
+    if (stroke_started_ && (first_modal || ISMOUSE_MOTION(event->type))) {
+      /* Deliberately no dab at #line_start_mouse_: that point is the previous stroke's own end, so
+       * it is already painted - stamping a full dab there again doubled the brush strength over the
+       * last stroke. The first dab lands one spacing along the line instead, which is what the
+       * previous stroke's coverage already continues into. */
+      if (this->line_stroke_step(C, op, mouse, pressure)) {
+        needs_redraw = true;
+      }
+    }
   }
   else if (br->stroke_method == BRUSH_STROKE_LINE) {
     if (event->modifier & KM_ALT) {
@@ -2163,7 +2408,12 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
 
   /* we want the stroke to have the first daub at the start location
    * instead of waiting till we have moved the space distance */
-  if (first_dab && paint_space_stroke_enabled(*br, mode) && !(br->flag & BRUSH_SMOOTH_STROKE)) {
+  /* Not for a Shift+line: its dabs are placed from the previous stroke's end by
+   * #line_stroke_step, so a dab here would land between two spaced dabs and stack on top of the
+   * paint the line already put down at the cursor. */
+  if (first_dab && !this->line_from_last_ && paint_space_stroke_enabled(*br, mode) &&
+      !(br->flag & BRUSH_SMOOTH_STROKE))
+  {
     paint_runtime.overlap_factor = paint_stroke_integrate_overlap(*br, 1.0);
     this->add_step(C, op, sample_average.mouse, sample_average.pressure);
     needs_redraw = true;
@@ -2174,7 +2424,9 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
     wmWindow *window = CTX_wm_window(C);
     ARegion *region = CTX_wm_region(C);
 
-    if (region && (paint->flags & PAINT_SHOW_BRUSH)) {
+    /* A Shift+line also needs the cursor redrawn when the brush outline is off: the dashed
+     * line it paints towards is the only feedback that the stroke is being applied. */
+    if (region && ((paint->flags & PAINT_SHOW_BRUSH) || this->line_from_last_)) {
       WM_paint_cursor_tag_redraw(window, region);
     }
   }

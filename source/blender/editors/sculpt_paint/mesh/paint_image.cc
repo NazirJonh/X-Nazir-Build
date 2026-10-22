@@ -368,7 +368,14 @@ static bool image_paint_2d_clone_poll(bContext *C)
 
 bool paint_use_opacity_masking(const Paint *paint, const Brush *brush)
 {
-  return ((ELEM(brush->stroke_method,
+  return paint_use_opacity_masking(paint, brush, eBrushStrokeType(brush->stroke_method));
+}
+
+bool paint_use_opacity_masking(const Paint *paint,
+                               const Brush *brush,
+                               const eBrushStrokeType method)
+{
+  return ((ELEM(method,
                 BRUSH_STROKE_AIRBRUSH,
                 BRUSH_STROKE_DRAG_DOT,
                 BRUSH_STROKE_ANCHORED)) ||

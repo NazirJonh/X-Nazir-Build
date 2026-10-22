@@ -66,24 +66,47 @@
 
 namespace blender::ed::sculpt_paint {
 
+/* Per-mode brush capabilities follow the `switch (mode)` convention of the other
+ * `paint_brush_type_*` predicates in this file: supporting Shift+line in another paint mode is a
+ * new `case` here, nothing else in #PaintStroke changes. */
 bool paint_brush_uses_shift_line(const Brush &brush, const PaintMode mode)
 {
-  if (mode != PaintMode::Sculpt) {
-    return false;
+  switch (mode) {
+    case PaintMode::Sculpt:
+      /* Only plain freehand methods: Anchored, Drag Dot, Curve, Curve Patch and Roll have their own
+       * gesture, which a line cannot stand in for. Those brushes keep Shift as the Smooth toggle,
+       * and no code outside the stroke ever has to tell them apart from a Line stroke. */
+      if (!ELEM(brush.stroke_method,
+                BRUSH_STROKE_DOTS,
+                BRUSH_STROKE_AIRBRUSH,
+                BRUSH_STROKE_SPACE,
+                BRUSH_STROKE_LINE))
+      {
+        return false;
+      }
+      /* Clone is deliberately absent: Shift+click is its source picker. */
+      return ELEM(brush.sculpt_brush_type,
+                  SCULPT_BRUSH_TYPE_PAINT,
+                  SCULPT_BRUSH_TYPE_ERASE,
+                  SCULPT_BRUSH_TYPE_TEXTURE_FILL);
+    default:
+      break;
   }
-  /* Clone is deliberately absent: Shift+click is its source picker. */
-  return ELEM(brush.sculpt_brush_type,
-              SCULPT_BRUSH_TYPE_PAINT,
-              SCULPT_BRUSH_TYPE_ERASE,
-              SCULPT_BRUSH_TYPE_TEXTURE_FILL);
+  return false;
 }
 
 bool paint_brush_records_stroke_end(const Brush &brush, const PaintMode mode)
 {
-  /* Clone does not take part in Shift+line, but its strokes still move the anchor so that the next
-   * Paint line does not start from a stale one. */
-  return paint_brush_uses_shift_line(brush, mode) ||
-         (mode == PaintMode::Sculpt && brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE);
+  switch (mode) {
+    case PaintMode::Sculpt:
+      /* Clone does not take part in Shift+line, but its strokes still move the anchor so that the
+       * next Paint line does not start from a stale one. */
+      return paint_brush_uses_shift_line(brush, mode) ||
+             brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLONE;
+    default:
+      break;
+  }
+  return false;
 }
 
 bool paint_stroke_line_start_get(const Paint &paint, const ViewContext &vc, float2 &r_mouse)
@@ -650,10 +673,10 @@ bool PaintStroke::update(bContext *C,
   return location_success && !is_dry_run;
 }
 
-static bool paint_stroke_use_dash(const Brush &brush)
+static bool paint_stroke_use_dash(const eBrushStrokeType method)
 {
   /* Only these stroke modes support dash lines */
-  return ELEM(brush.stroke_method, BRUSH_STROKE_SPACE, BRUSH_STROKE_LINE, BRUSH_STROKE_CURVE);
+  return ELEM(method, BRUSH_STROKE_SPACE, BRUSH_STROKE_LINE, BRUSH_STROKE_CURVE);
 }
 
 static bool paint_stroke_use_jitter(const PaintMode mode, const Brush &brush, const bool invert)
@@ -832,7 +855,7 @@ void PaintStroke::add_step(bContext *C,
 
   /* Dash */
   bool add_step = true;
-  if (paint_stroke_use_dash(brush)) {
+  if (paint_stroke_use_dash(this->stroke_method())) {
     const int dash_samples = tot_samples_ % brush.dash_samples;
     const float dash = float(dash_samples) / float(brush.dash_samples);
     if (dash > brush.dash_ratio) {
@@ -919,13 +942,14 @@ static bool paint_smooth_stroke(const Brush &brush,
                                 const PaintSample *sample,
                                 const PaintMode mode,
                                 const BrushSwitchMode brush_switch_mode,
+                                const eBrushStrokeType method,
                                 float zoom_2d,
                                 float2 last_mouse_position,
                                 float last_pressure,
                                 float2 &r_mouse,
                                 float &r_pressure)
 {
-  if (paint_supports_smooth_stroke(brush, mode, brush_switch_mode)) {
+  if (paint_supports_smooth_stroke(brush, mode, brush_switch_mode, method)) {
     const float radius = brush.smooth_stroke_radius * zoom_2d;
     const float u = brush.smooth_stroke_factor;
 
@@ -947,6 +971,7 @@ static bool paint_smooth_stroke(const Brush &brush,
 }
 
 static float paint_space_stroke_spacing(const ViewContext &vc,
+                                        const eBrushStrokeType method,
                                         const Paint *paint,
                                         const Brush *brush,
                                         float3 last_world_space_position,
@@ -972,7 +997,7 @@ static float paint_space_stroke_spacing(const ViewContext &vc,
   float spacing = brush->spacing;
 
   /* apply spacing pressure */
-  if (brush->stroke_method == BRUSH_STROKE_SPACE && brush->flag & BRUSH_SPACING_PRESSURE) {
+  if (method == BRUSH_STROKE_SPACE && brush->flag & BRUSH_SPACING_PRESSURE) {
     spacing = spacing * (1.5f - pressure);
   }
 
@@ -1005,6 +1030,7 @@ float paint_stroke_screen_spacing(const Paint &paint, const Brush &brush)
 }
 
 static float paint_space_stroke_spacing_no_pressure(const ViewContext &vc,
+                                                    const eBrushStrokeType method,
                                                     const Paint *paint,
                                                     const Brush *brush,
                                                     float3 last_world_space_position,
@@ -1013,7 +1039,7 @@ static float paint_space_stroke_spacing_no_pressure(const ViewContext &vc,
   /* Unlike many paint pressure curves, spacing assumes that a stroke without pressure (e.g. with
    * the mouse, or with the setting turned off) represents an input of 0.5, not 1.0. */
   return paint_space_stroke_spacing(
-      vc, paint, brush, last_world_space_position, zoom_2d, 1.0f, 0.5f);
+      vc, method, paint, brush, last_world_space_position, zoom_2d, 1.0f, 0.5f);
 }
 
 static float paint_stroke_overlapped_curve(const Brush &br, const float x, const float spacing)
@@ -1064,6 +1090,7 @@ float paint_stroke_integrate_overlap(const Brush &br, const float factor)
 }
 
 static float paint_space_stroke_spacing_variable(ViewContext &vc,
+                                                 const eBrushStrokeType method,
                                                  const Paint *paint,
                                                  const Brush *brush,
                                                  float3 last_world_space_position,
@@ -1079,7 +1106,7 @@ static float paint_space_stroke_spacing_variable(ViewContext &vc,
      * are aligned nicely with no overlap. for this the spacing needs to be
      * the average of the previous and next size. */
     const float s = paint_space_stroke_spacing(
-        vc, paint, brush, last_world_space_position, zoom_2d, max_size_factor, pressure);
+        vc, method, paint, brush, last_world_space_position, zoom_2d, max_size_factor, pressure);
     const float q = s * pressure_delta / (2.0f * length);
     const float pressure_fac = (1.0f + q) / (1.0f - q);
 
@@ -1089,16 +1116,16 @@ static float paint_space_stroke_spacing_variable(ViewContext &vc,
 
     /* average spacing */
     const float last_spacing = paint_space_stroke_spacing(
-        vc, paint, brush, last_world_space_position, zoom_2d, last_size_factor, pressure);
+        vc, method, paint, brush, last_world_space_position, zoom_2d, last_size_factor, pressure);
     const float new_spacing = paint_space_stroke_spacing(
-        vc, paint, brush, last_world_space_position, zoom_2d, new_size_factor, pressure);
+        vc, method, paint, brush, last_world_space_position, zoom_2d, new_size_factor, pressure);
 
     return 0.5f * (last_spacing + new_spacing);
   }
 
   /* no size pressure */
   return paint_space_stroke_spacing(
-      vc, paint, brush, last_world_space_position, zoom_2d, 1.0f, pressure);
+      vc, method, paint, brush, last_world_space_position, zoom_2d, 1.0f, pressure);
 }
 
 /*
@@ -1155,7 +1182,7 @@ int PaintStroke::space_stroke(bContext *C,
   float pressure = last_pressure_;
   float pressure_delta = final_pressure - last_pressure_;
   const float no_pressure_spacing = paint_space_stroke_spacing_no_pressure(
-      this->vc, &paint, &brush, last_world_space_position_, zoom_2d_);
+      this->vc, this->stroke_method(), &paint, &brush, last_world_space_position_, zoom_2d_);
   int count = 0;
   /* Safety cap on iterations. paint_space_stroke_spacing() floors at FLT_EPSILON to avoid division
    * by zero (#129853), but that's not enough to prevent a multi-second hang when pen-lift pressure
@@ -1164,6 +1191,7 @@ int PaintStroke::space_stroke(bContext *C,
   constexpr int max_dabs_per_event = 10000;
   while (length > 0.0f && count < max_dabs_per_event) {
     const float spacing = paint_space_stroke_spacing_variable(this->vc,
+                                                              this->stroke_method(),
                                                               &paint,
                                                               &brush,
                                                               last_world_space_position_,
@@ -1253,11 +1281,9 @@ PaintStroke::PaintStroke(bContext *C, wmOperator *op, int event_type) : event_ty
     if (paint_brush_uses_shift_line(*this->brush, mode) &&
         paint_stroke_line_start_get(*this->paint, this->vc, line_start_mouse_))
     {
+      /* The stroke runs as a Line stroke (see #stroke_method). The brush is shared, saved data and
+       * is deliberately left alone. */
       line_start_valid_ = true;
-      /* Drive the whole stroke through the regular Line method: every consumer (spacing,
-       * projection raycasts, the fill hook, cursors) then sees the method it expects. Restored in
-       * done(), and by the guard if the stroke dies before that. */
-      stroke_method_override_.set(*this->brush, BRUSH_STROKE_LINE);
     }
     else {
       line_from_last_ = false;
@@ -1381,8 +1407,6 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
   this->done(is_cancel, stroke_started_);
   this->post_done(C, is_cancel, stroke_started_);
 
-  stroke_method_override_.restore();
-
   if (RegionView3D *rv3d = CTX_wm_region_view3d(C)) {
     rv3d->rflag &= ~RV3D_PAINTING;
   }
@@ -1418,6 +1442,11 @@ void PaintStroke::done(bContext *C, const bool is_cancel)
       WM_paint_cursor_end(static_cast<wmPaintCursor *>(roll_->debug_cursor));
     }
   }
+}
+
+eBrushStrokeType PaintStroke::stroke_method() const
+{
+  return line_from_last_ ? BRUSH_STROKE_LINE : eBrushStrokeType(this->brush->stroke_method);
 }
 
 void PaintStroke::record_last_stroke_end(bContext *C)
@@ -1474,27 +1503,6 @@ void PaintStroke::record_last_stroke_end(bContext *C)
                             world_valid ? &world.x : nullptr);
 }
 
-ScopedStrokeMethod::~ScopedStrokeMethod()
-{
-  this->restore();
-}
-
-void ScopedStrokeMethod::set(Brush &brush, const int method)
-{
-  BLI_assert(brush_ == nullptr);
-  brush_ = &brush;
-  saved_method_ = brush.stroke_method;
-  brush.stroke_method = eBrushStrokeType(method);
-}
-
-void ScopedStrokeMethod::restore()
-{
-  if (brush_ != nullptr) {
-    brush_->stroke_method = eBrushStrokeType(saved_method_);
-    brush_ = nullptr;
-  }
-}
-
 static bool curves_sculpt_brush_uses_spacing(const eBrushCurvesSculptType tool)
 {
   return ELEM(tool, CURVES_SCULPT_BRUSH_TYPE_ADD, CURVES_SCULPT_BRUSH_TYPE_DENSITY);
@@ -1502,9 +1510,16 @@ static bool curves_sculpt_brush_uses_spacing(const eBrushCurvesSculptType tool)
 
 bool paint_space_stroke_enabled(const Brush &br, const PaintMode mode)
 {
+  return paint_space_stroke_enabled(br, mode, eBrushStrokeType(br.stroke_method));
+}
+
+bool paint_space_stroke_enabled(const Brush &br,
+                                const PaintMode mode,
+                                const eBrushStrokeType method)
+{
   /* Roll is a spaced stroke: dabs are placed along the freehand path by spacing, same as Space.
    * It rides the same #space_stroke() -> #add_step() path, which records the roll polyline. */
-  if (!ELEM(br.stroke_method, BRUSH_STROKE_SPACE, BRUSH_STROKE_ROLL)) {
+  if (!ELEM(method, BRUSH_STROKE_SPACE, BRUSH_STROKE_ROLL)) {
     return false;
   }
 
@@ -1575,6 +1590,15 @@ bool paint_supports_smooth_stroke(const Brush &brush,
                                   const PaintMode mode,
                                   const BrushSwitchMode brush_switch_mode)
 {
+  return paint_supports_smooth_stroke(
+      brush, mode, brush_switch_mode, eBrushStrokeType(brush.stroke_method));
+}
+
+bool paint_supports_smooth_stroke(const Brush &brush,
+                                  const PaintMode mode,
+                                  const BrushSwitchMode brush_switch_mode,
+                                  const eBrushStrokeType method)
+{
   /* The grease pencil draw tool needs to enable this when the `stroke_mode` is set to
    * `BrushSwitchMode::Smooth`. */
   if (mode == PaintMode::GPencil &&
@@ -1584,7 +1608,7 @@ bool paint_supports_smooth_stroke(const Brush &brush,
     return true;
   }
   if (!(brush.flag & BRUSH_SMOOTH_STROKE) ||
-      ELEM(brush.stroke_method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT, BRUSH_STROKE_LINE))
+      ELEM(method, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT, BRUSH_STROKE_LINE))
   {
     return false;
   }
@@ -1785,8 +1809,14 @@ void PaintStroke::lines_spacing(bContext *C,
                           0.0f;
       const float curve_radius = math::interpolate(*old_curve_radius, *new_curve_radius, t);
       const float size_factor = paintcurve_radius_to_size_factor(paint, &brush, curve_radius);
-      dab_spacing = paint_space_stroke_spacing(
-          this->vc, paint, &brush, last_world_space_position_, zoom_2d_, size_factor, 0.5f);
+      dab_spacing = paint_space_stroke_spacing(this->vc,
+                                               this->stroke_method(),
+                                               paint,
+                                               &brush,
+                                               last_world_space_position_,
+                                               zoom_2d_,
+                                               size_factor,
+                                               0.5f);
     }
 
     float spacing_final = dab_spacing - *length_residue;
@@ -1851,7 +1881,7 @@ void PaintStroke::line_end(bContext *C, wmOperator *op, const float2 mouse)
   PRF_scope(ProfileCategory::Editor);
   Brush *br = this->brush;
   bke::PaintRuntime *paint_runtime = this->paint->runtime;
-  if (stroke_started_ && br->stroke_method == BRUSH_STROKE_LINE) {
+  if (stroke_started_ && this->stroke_method() == BRUSH_STROKE_LINE) {
     paint_runtime->overlap_factor = paint_stroke_integrate_overlap(*br, 1.0);
 
     if (this->line_from_last_) {
@@ -1878,7 +1908,7 @@ bool PaintStroke::curve_end(bContext *C, wmOperator *op)
   bke::PaintRuntime *paint_runtime = paint->runtime;
   const PaintMode mode = paint_runtime->paint_mode;
   const float no_pressure_spacing = paint_space_stroke_spacing_no_pressure(
-      this->vc, paint, this->brush, last_world_space_position_, zoom_2d_);
+      this->vc, this->stroke_method(), paint, this->brush, last_world_space_position_, zoom_2d_);
   const PaintCurve *pc = br.paint_curve;
 
   if (!pc) {
@@ -2146,7 +2176,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
   /* see if tablet affects event. Line, anchored and drag dot strokes do not support pressure */
   const float tablet_pressure = WM_event_tablet_data(event, &pen_flip_, nullptr);
   float pressure =
-      ELEM(br->stroke_method, BRUSH_STROKE_LINE, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT) ?
+      ELEM(this->stroke_method(), BRUSH_STROKE_LINE, BRUSH_STROKE_ANCHORED, BRUSH_STROKE_DRAG_DOT) ?
           1.0f :
           tablet_pressure;
 
@@ -2237,17 +2267,17 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
         }
       }
 
-      if (paint_supports_smooth_stroke(*br, mode, brush_switch_mode_)) {
+      if (paint_supports_smooth_stroke(*br, mode, brush_switch_mode_, this->stroke_method())) {
 
         stroke_cursor_ = WM_paint_cursor_activate(
             SPACE_TYPE_ANY, RGN_TYPE_ANY, paint_brush_cursor_poll, paint_draw_smooth_cursor, this);
       }
 
-      if (br->stroke_method == BRUSH_STROKE_AIRBRUSH) {
+      if (this->stroke_method() == BRUSH_STROKE_AIRBRUSH) {
         timer_ = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, this->brush->rate);
       }
 
-      if (br->stroke_method == BRUSH_STROKE_LINE && !this->line_from_last_) {
+      if (this->stroke_method() == BRUSH_STROKE_LINE && !this->line_from_last_) {
         stroke_cursor_ = WM_paint_cursor_activate(
             SPACE_TYPE_ANY, RGN_TYPE_ANY, paint_brush_cursor_poll, paint_draw_line_cursor, this);
       }
@@ -2317,7 +2347,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
       this->line_end(C, op, mouse);
       /* For smooth stroke, finalize the roll spline at the last smoothed position rather than the
        * raw cursor position. */
-      const float2 roll_mouse = paint_supports_smooth_stroke(*br, mode, brush_switch_mode_) ?
+      const float2 roll_mouse = paint_supports_smooth_stroke(*br, mode, brush_switch_mode_, this->stroke_method()) ?
                                     last_smoothed_mouse_ :
                                     mouse;
       this->finish_roll_stroke(C, op, roll_mouse, pressure);
@@ -2343,7 +2373,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
     }
     /* Normal Space behavior: finish line strokes and other non-ANCHORED strokes. */
     this->line_end(C, op, sample_average.mouse);
-    const float2 roll_mouse2 = paint_supports_smooth_stroke(*br, mode, brush_switch_mode_) ?
+    const float2 roll_mouse2 = paint_supports_smooth_stroke(*br, mode, brush_switch_mode_, this->stroke_method()) ?
                                    last_smoothed_mouse_ :
                                    sample_average.mouse;
     this->finish_roll_stroke(C, op, roll_mouse2, pressure);
@@ -2371,7 +2401,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
       }
     }
   }
-  else if (br->stroke_method == BRUSH_STROKE_LINE) {
+  else if (this->stroke_method() == BRUSH_STROKE_LINE) {
     if (event->modifier & KM_ALT) {
       this->constrain_line = true;
     }
@@ -2394,15 +2424,16 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
   }
   else if (first_modal ||
            /* regular dabs */
-           (!(br->stroke_method == BRUSH_STROKE_AIRBRUSH) && ISMOUSE_MOTION(event->type)) ||
+           (!(this->stroke_method() == BRUSH_STROKE_AIRBRUSH) && ISMOUSE_MOTION(event->type)) ||
            /* airbrush */
-           ((br->stroke_method == BRUSH_STROKE_AIRBRUSH) && event->type == TIMER &&
+           ((this->stroke_method() == BRUSH_STROKE_AIRBRUSH) && event->type == TIMER &&
             event->customdata == timer_))
   {
     if (paint_smooth_stroke(*this->brush,
                             &sample_average,
                             mode,
                             brush_switch_mode_,
+                            this->stroke_method(),
                             zoom_2d_,
                             this->last_mouse_position,
                             last_pressure_,
@@ -2411,7 +2442,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
     {
       last_smoothed_mouse_ = mouse;
       if (stroke_started_) {
-        if (paint_space_stroke_enabled(*br, mode)) {
+        if (paint_space_stroke_enabled(*br, mode, this->stroke_method())) {
           if (this->space_stroke(C, op, mouse, pressure)) {
             needs_redraw = true;
           }
@@ -2431,7 +2462,7 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
   /* Not for a Shift+line: its dabs are placed from the previous stroke's end by
    * #line_stroke_step, so a dab here would land between two spaced dabs and stack on top of the
    * paint the line already put down at the cursor. */
-  if (first_dab && !this->line_from_last_ && paint_space_stroke_enabled(*br, mode) &&
+  if (first_dab && !this->line_from_last_ && paint_space_stroke_enabled(*br, mode, this->stroke_method()) &&
       !(br->flag & BRUSH_SMOOTH_STROKE))
   {
     paint_runtime.overlap_factor = paint_stroke_integrate_overlap(*br, 1.0);

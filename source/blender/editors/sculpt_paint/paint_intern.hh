@@ -408,25 +408,6 @@ struct RollStrokeState {
 };
 
 /**
- * Switches a brush to another stroke method for the lifetime of the guard.
- *
- * The brush is shared, saved data, so the original method has to come back on every way out of a
- * stroke, including ones that never reach #PaintStroke::done. Tying that to the destructor makes it
- * hold by construction instead of by each exit path remembering to call a restore function.
- */
-class ScopedStrokeMethod : NonCopyable, NonMovable {
-  Brush *brush_ = nullptr;
-  int saved_method_ = 0;
-
- public:
-  ~ScopedStrokeMethod();
-  /** Override \a brush's stroke method. A second call before #restore is not supported. */
-  void set(Brush &brush, int method);
-  /** Put the original method back now. Safe to call more than once. */
-  void restore();
-};
-
-/**
  * Common structure for various paint operators (e.g. Sculpt, Grease Pencil, Curves Sculpt)
  *
  * Callback functions defined and stored on this struct (e.g. `StrokeGetLocation`) allow each of
@@ -493,8 +474,6 @@ struct PaintStroke : NonCopyable, NonMovable {
   bool line_from_last_ = false;
   float2 line_start_mouse_ = float2(0.0f, 0.0f);
   bool line_start_valid_ = false;
-  /* Holds the temporary Line method of a Shift+line stroke; restores it on every exit path. */
-  ScopedStrokeMethod stroke_method_override_;
   float2 initial_mouse_ = float2(0.0f, 0.0f);
   float cached_size_pressure_ = 0.0f;
   /* last pressure will store last pressure value for use in interpolation for space strokes */
@@ -595,6 +574,14 @@ struct PaintStroke : NonCopyable, NonMovable {
   {
     return line_from_last_;
   }
+
+  /**
+   * The stroke method this stroke runs with. A Shift+line stroke behaves as a Line stroke whatever
+   * the brush is set to; the brush itself is shared, saved data and is never modified for it, so
+   * every decision that depends on the method has to ask here instead of reading
+   * `Brush::stroke_method`.
+   */
+  eBrushStrokeType stroke_method() const;
 
   float stroke_distance() const
   {
@@ -808,6 +795,9 @@ float2 paint_stroke_jitter_pos(Paint *paint,
  * Returns zero if the stroke dots should not be spaced, non-zero otherwise.
  */
 bool paint_space_stroke_enabled(const Brush &br, PaintMode mode);
+/** As above, for a stroke running with \a method instead of the brush's own (see
+ * #PaintStroke::stroke_method). */
+bool paint_space_stroke_enabled(const Brush &br, PaintMode mode, eBrushStrokeType method);
 /**
  * Computes the overlap-compensation factor used to scale brush strength so that closely spaced
  * dabs don't over-apply relative to widely spaced ones. Callers store the result in
@@ -826,6 +816,12 @@ bool paint_supports_dynamic_tex_coords(const Brush &br, PaintMode mode);
 bool paint_supports_smooth_stroke(const Brush &brush,
                                   PaintMode mode,
                                   BrushSwitchMode brush_switch_mode);
+/** As above, for a stroke running with \a method instead of the brush's own (see
+ * #PaintStroke::stroke_method). */
+bool paint_supports_smooth_stroke(const Brush &brush,
+                                  PaintMode mode,
+                                  BrushSwitchMode brush_switch_mode,
+                                  eBrushStrokeType method);
 bool paint_supports_texture(PaintMode mode);
 
 /**
@@ -1079,9 +1075,18 @@ void paint_image_geometry_fill_gesture_resolve(bContext *C,
  */
 struct TextureFillSession;
 
-/** \return null when \a brush cannot fill (no brush/object, gradient fill). */
+/**
+ * \param stroke_method: the method the stroke runs with when it differs from the brush's own
+ * (a Shift+line stroke), see #PaintStroke::stroke_method.
+ * \return null when \a brush cannot fill (no brush/object, gradient fill).
+ */
 TextureFillSession *paint_texture_fill_session_begin(
-    const bContext *C, const Paint *paint, Brush *brush, Object *ob, bool inverted);
+    const bContext *C,
+    const Paint *paint,
+    Brush *brush,
+    Object *ob,
+    bool inverted,
+    std::optional<eBrushStrokeType> stroke_method = std::nullopt);
 /** Fill at \a mouse, reusing everything #paint_texture_fill_session_begin prepared. */
 bool paint_texture_fill_session_step(TextureFillSession &session, const float mouse[2]);
 /** Flush what the steps deferred (GPU texture invalidation). Idempotent. */
@@ -1101,11 +1106,13 @@ bool paint_image_viewport_fill_at_mouse(const bContext *C,
                                         const float mouse[2]);
 void paint_2d_gradient_fill(
     const bContext *C, Brush *br, const float mouse_init[2], const float mouse_final[2], void *ps);
+/** \a stroke_method overrides the brush's own stroke method, for a Shift+line stroke. */
 void *paint_proj_new_stroke(bContext *C,
                             Object *ob,
                             const float mouse[2],
                             BrushStrokeMode mode,
-                            BrushSwitchMode brush_switch_mode);
+                            BrushSwitchMode brush_switch_mode,
+                            std::optional<eBrushStrokeType> stroke_method = std::nullopt);
 void paint_proj_stroke(const bContext *C,
                        void *ps_handle_p,
                        const float prev_pos[2],
@@ -1125,6 +1132,9 @@ void paint_brush_color_get(const Paint *paint,
                            float pressure,
                            float r_color[3]);
 bool paint_use_opacity_masking(const Paint *paint, const Brush *brush);
+/** As above, for a stroke running with \a method instead of the brush's own (see
+ * #PaintStroke::stroke_method). */
+bool paint_use_opacity_masking(const Paint *paint, const Brush *brush, eBrushStrokeType method);
 void paint_brush_init_tex(Brush *brush);
 void paint_brush_exit_tex(Brush *brush);
 

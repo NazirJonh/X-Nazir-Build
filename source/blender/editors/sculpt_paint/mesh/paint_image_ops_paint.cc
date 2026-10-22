@@ -655,6 +655,8 @@ struct TextureFillSession {
   Object *ob = nullptr;
   bool inverted = false;
   bool ended = false;
+  /** Stroke method of a Shift+line stroke; the brush itself keeps its own. */
+  std::optional<eBrushStrokeType> stroke_method;
 
   /* Pixels expansion. */
   bool use_projection = false;
@@ -691,7 +693,12 @@ static bool texture_fill_session_projection_step(TextureFillSession &session, co
     ts->imapaint.mode = ts->paint_mode.canvas_source;
     ts->imapaint.canvas = ts->paint_mode.canvas_image;
     session.proj_handle = paint_proj_new_stroke(
-        C_mut, session.ob, mouse, BrushStrokeMode::Normal, BrushSwitchMode::None);
+        C_mut,
+        session.ob,
+        mouse,
+        BrushStrokeMode::Normal,
+        BrushSwitchMode::None,
+        session.stroke_method);
     ts->imapaint.paint.brush = prev_imapaint_brush;
     ts->imapaint.mode = prev_imapaint_mode;
     ts->imapaint.canvas = prev_imapaint_canvas;
@@ -711,7 +718,8 @@ TextureFillSession *paint_texture_fill_session_begin(const bContext *C,
                                                      const Paint *paint,
                                                      Brush *brush,
                                                      Object *ob,
-                                                     const bool inverted)
+                                                     const bool inverted,
+                                                     const std::optional<eBrushStrokeType> stroke_method)
 {
   if (paint == nullptr || brush == nullptr || ob == nullptr) {
     return nullptr;
@@ -727,6 +735,7 @@ TextureFillSession *paint_texture_fill_session_begin(const bContext *C,
   session->brush = brush;
   session->ob = ob;
   session->inverted = inverted;
+  session->stroke_method = stroke_method;
   session->use_projection = !ELEM(brush->fill_expand,
                                   IMAGE_PAINT_SELECT_EXPAND_FACE,
                                   IMAGE_PAINT_SELECT_EXPAND_ISLAND,

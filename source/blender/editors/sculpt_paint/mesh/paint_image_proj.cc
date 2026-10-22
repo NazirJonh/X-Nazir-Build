@@ -6047,7 +6047,8 @@ static void project_state_init(bContext *C,
                                Object *ob,
                                ProjPaintState *ps,
                                const BrushStrokeMode mode,
-                               const BrushSwitchMode brush_switch_mode)
+                               const BrushSwitchMode brush_switch_mode,
+                               const std::optional<eBrushStrokeType> stroke_method = std::nullopt)
 {
   Scene *scene = CTX_data_scene(C);
   ToolSettings *settings = scene->toolsettings;
@@ -6078,7 +6079,8 @@ static void project_state_init(bContext *C,
     }
 
     /* disable for 3d mapping also because painting on mirrored mesh can create "stripes" */
-    ps->do_masking = paint_use_opacity_masking(ps->paint, brush);
+    ps->do_masking = paint_use_opacity_masking(
+        ps->paint, brush, stroke_method.value_or(eBrushStrokeType(brush->stroke_method)));
     ps->is_texbrush = (brush->mtex.tex && ps->brush_type == IMAGE_PAINT_BRUSH_TYPE_DRAW) ? true :
                                                                                            false;
     ps->is_maskbrush = (brush->mask_mtex.tex) ? true : false;
@@ -6166,7 +6168,8 @@ void *paint_proj_new_stroke(bContext *C,
                             Object *ob,
                             const float mouse[2],
                             const BrushStrokeMode mode,
-                            const BrushSwitchMode brush_switch_mode)
+                            const BrushSwitchMode brush_switch_mode,
+                            const std::optional<eBrushStrokeType> stroke_method)
 {
   ProjStrokeHandle *ps_handle;
   Scene *scene = CTX_data_scene(C);
@@ -6224,7 +6227,7 @@ void *paint_proj_new_stroke(bContext *C,
   for (int i = 0; i < ps_handle->ps_views_tot; i++) {
     ProjPaintState *ps = ps_handle->ps_views[i];
 
-    project_state_init(C, ob, ps, mode, brush_switch_mode);
+    project_state_init(C, ob, ps, mode, brush_switch_mode, stroke_method);
 
     if (ps->ob == nullptr) {
       ps_handle->ps_views_tot = i + 1;

@@ -10083,7 +10083,8 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
                                                                 &sd.paint,
                                                                 fill_brush,
                                                                 this->object,
-                                                                sd.paint.runtime->draw_inverted);
+                                                                sd.paint.runtime->draw_inverted,
+                                                                this->stroke_method());
         }
         if (this->fill_session_ != nullptr &&
             paint_texture_fill_session_step(*this->fill_session_, ss.cache->mouse_event))

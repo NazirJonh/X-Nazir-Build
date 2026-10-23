@@ -89,6 +89,23 @@ struct NodeOutput {
   bNodeSocket *socket = nullptr;
 };
 
+/**
+ * One Anchor Point tap: the outputs the marker was given in its row's group. The marker publishes
+ * the content of its row up to its position (channel >= 0) or the mask up to its position
+ * (channel == -1). A reader in the same row reads the outputs directly; a reader in another row
+ * finds the same interface sockets on the source group's instance.
+ */
+struct AnchorPointTap {
+  bUUID point = {};
+  int channel = -1;
+  /** The group the marker lives in; the outputs below are nodes of its tree, not the Group Output
+   * sockets, which only publish them to readers in other rows. */
+  const LayerGroup *group = nullptr;
+  NodeOutput color;
+  NodeOutput coverage;
+  NodeOutput alpha;
+};
+
 /** The interface inputs of one Color ID colour: its enable flag, its RGB constant and, in Advanced
  * mode, its own tolerance. */
 struct IdColorInputs {
@@ -310,6 +327,52 @@ class PaintLayersTreeBuilder {
   KindEmitResult material_source_emit(const RowEmitContext &ctx);
 
   /**
+   * What an Anchor Point Reader lays in the channel of \a ctx: the tap the marker published, read
+   * from this build's taps when the point is in the same row, or from the source row group's
+   * instance otherwise. Empty when the reference is invalid.
+   */
+  KindEmitResult anchor_point_source_emit(const RowEmitContext &ctx);
+
+  /** The tap of \a point in \a channel (-1 for the mask) published by \a group itself, or null. A
+   * tap of another row's group is not readable here: its nodes live in another tree. */
+  const AnchorPointTap *anchor_point_tap_find(const LayerGroup &group,
+                                              const bUUID &point,
+                                              int channel) const;
+
+  /**
+   * Publish the content of \a group up to \a point as Group Output sockets and record the tap.
+   * Returns false when the sockets cannot be made.
+   */
+  bool anchor_point_content_tap_add(bNodeTree &tree,
+                                    LayerGroup &group,
+                                    const MaterialPaintLayer &point,
+                                    int channel,
+                                    NodeOutput color,
+                                    NodeOutput coverage,
+                                    NodeOutput alpha);
+
+  /** Publish the mask of \a group up to \a point as a Float Group Output socket. */
+  bool anchor_point_mask_tap_add(bNodeTree &tree,
+                                 LayerGroup &group,
+                                 const MaterialPaintLayer &point,
+                                 NodeOutput mask);
+
+  /** The scalar a mask item that reads \a item lays in this row's mask. */
+  NodeOutput anchor_point_mask_item_emit(LayerGroup &group, const MaterialPaintLayer &item);
+
+  /**
+   * Wire the source group's tap outputs to inputs of \a reader_group's instance in the root tree:
+   * a reader in another row cannot link into a node of the source's tree, so the value crosses as
+   * a group input. \a create_inputs adds the interface inputs when the row is built; a reused
+   * reader group already has them and only needs the instance links again.
+   */
+  bool anchor_point_reader_link(LayerGroup &reader_group,
+                                const MaterialPaintLayer &reader,
+                                int channel,
+                                bool create_inputs,
+                                KindEmitResult *r_out);
+
+  /**
    * The output of the Material row's source group for \a channel, instancing the group in \a tree
    * once for the row, outside the frames since every channel of the row shares it. Null when the
    * row has no source group or it has no output for the channel; the caller then reads the row's
@@ -489,6 +552,8 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, bNode *> mapping_nodes_;
   /** The instance of a Material row's source group, with the group, keyed by the row. */
   Map<const MaterialPaintLayer *, std::pair<bNode *, bNodeTree *>> source_group_instances_;
+  /** The taps this build published, one per (point, channel) and one per point for the mask. */
+  Vector<AnchorPointTap> anchor_point_taps_;
   /** The clip factor of a row's UV wrap, built once and shared by every map of the row. */
   Map<const MaterialPaintLayer *, NodeOutput> mapping_clip_masks_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */

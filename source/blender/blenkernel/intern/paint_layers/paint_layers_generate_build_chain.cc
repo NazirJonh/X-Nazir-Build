@@ -355,7 +355,18 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
   NodeOutput current = {mix, result};
   int row = 6;
   for (const MaterialPaintLayer &item : layer.mask_stack) {
-    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0 || !paint_layer_mask_item_lays(ma_, item)) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+      continue;
+    }
+    if (paint_layer_kind_is_anchor_point_marker(item)) {
+      /* The mask slice after the items above the marker, the base included: published here, before
+       * the next item, and independent of the row's visibility. */
+      if (paint_layer_anchor_point_is_read(ma_, item.marker)) {
+        this->anchor_point_mask_tap_add(tree, group, item, current);
+      }
+      continue;
+    }
+    if (!paint_layer_mask_item_lays(ma_, item)) {
       continue;
     }
     if (paint_layer_effect_is_filter(item)) {
@@ -436,18 +447,27 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       continue;
     }
     const bool from_source = paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE);
+    const bool from_anchor = paint_layer_kind_reads_anchor_point(item);
     const MaterialPaintLayerChannel *item_record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     bNodeTreeInterfaceSocket **item_opacity_iface = mask_opacity_inputs_.lookup_ptr(&item);
     bNodeSocket *item_opacity = (item_opacity_iface != nullptr) ?
                                     this->group_input_socket(group, **item_opacity_iface) :
                                     nullptr;
-    if ((item_record == nullptr && !from_source) || item_opacity == nullptr) {
+    if ((item_record == nullptr && !from_source && !from_anchor) || item_opacity == nullptr) {
       continue;
     }
     NodeOutput item_grey;
     NodeOutput item_alpha;
-    if (from_source) {
+    if (from_anchor) {
+      /* The slice a mask item reads: a mask point gives its scalar, a content point the coverage of
+       * its slice. */
+      item_grey = this->anchor_point_mask_item_emit(group, item);
+      if (item_grey.socket == nullptr) {
+        continue;
+      }
+    }
+    else if (from_source) {
       /* A mask correction that reads a material: the mean of the source's Base Color, read as a
        * painted item's map is, and the colour's own alpha. The source's transparency, a plain
        * value, weighs the item as well. */
@@ -1524,7 +1544,9 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   Map<int, bNodeTreeInterfaceSocket *> *by_channel = effect_opacity_inputs_.lookup_ptr(&effect);
   /* A correction that reads a material has no record: its colour and alpha are what the source
    * supplies in the channel, built the way a Material row's are. */
-  const bool from_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
+  const bool from_anchor = paint_layer_kind_reads_anchor_point(effect);
+  const bool from_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE) ||
+                           from_anchor;
   /* A Fill correction with no map in the channel is a flat colour, an input of the group; every
    * other correction reads its map. */
   const bool flat = !from_source && record != nullptr && record->image == nullptr &&
@@ -1561,7 +1583,8 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
                                       /*folder_color=*/nullptr,
                                       /*folder_alpha=*/nullptr,
                                       /*baked_color=*/nullptr};
-    source_emitted = this->material_source_emit(emit_context);
+    source_emitted = from_anchor ? this->anchor_point_source_emit(emit_context) :
+                                    this->material_source_emit(emit_context);
     if (source_emitted.color.socket == nullptr || source_emitted.content_alpha.socket == nullptr) {
       return false;
     }
@@ -2084,6 +2107,366 @@ KindEmitResult PaintLayersTreeBuilder::material_source_emit(const RowEmitContext
   return out;
 }
 
+/** `AnchorPoint <marker> <suffix>`: the one place the tap socket names are made. */
+static void anchor_point_socket_name(char *r_name,
+                                     const size_t size,
+                                     const bUUID &marker,
+                                     const char *suffix)
+{
+  char marker_str[UUID_STRING_SIZE];
+  BLI_uuid_format(marker_str, marker);
+  BLI_snprintf(r_name, size, "AnchorPoint %s %s", marker_str, suffix);
+}
+
+const AnchorPointTap *PaintLayersTreeBuilder::anchor_point_tap_find(const LayerGroup &group,
+                                                                    const bUUID &point,
+                                                                    const int channel) const
+{
+  for (const AnchorPointTap &tap : anchor_point_taps_) {
+    if (tap.group == &group && tap.channel == channel && BLI_uuid_equal(tap.point, point)) {
+      return &tap;
+    }
+  }
+  return nullptr;
+}
+
+bool PaintLayersTreeBuilder::anchor_point_content_tap_add(bNodeTree &tree,
+                                                          LayerGroup &group,
+                                                          const MaterialPaintLayer &point,
+                                                          const int channel,
+                                                          const NodeOutput color,
+                                                          const NodeOutput coverage,
+                                                          const NodeOutput alpha)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  char suffix[128];
+  char name[192];
+  const auto socket_add = [&](const char *type, const char *label) -> bNodeSocket * {
+    SNPRINTF(suffix, "%s %s", label, info.ui_name);
+    anchor_point_socket_name(name, sizeof(name), point.marker, suffix);
+    bNodeTreeInterfaceSocket *iface = layer_group_add_socket(
+        group, name, type, NODE_INTERFACE_SOCKET_OUTPUT);
+    if (iface == nullptr) {
+      return nullptr;
+    }
+    return bke::node_find_socket(
+        *group.group_output, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+  };
+  /* Checked before the sockets exist: a half-made tap would leave outputs a reader in another row
+   * links to and finds unconnected. */
+  if (color.socket == nullptr || coverage.socket == nullptr) {
+    return false;
+  }
+  bNodeSocket *color_out = socket_add("NodeSocketColor", "Color");
+  bNodeSocket *coverage_out = socket_add("NodeSocketFloat", "Coverage");
+  bNodeSocket *alpha_out = (alpha.socket != nullptr) ? socket_add("NodeSocketFloat", "Alpha") :
+                                                       nullptr;
+  if (color_out == nullptr || coverage_out == nullptr) {
+    return false;
+  }
+  bke::node_add_link(tree, *color.node, *color.socket, *group.group_output, *color_out);
+  bke::node_add_link(tree, *coverage.node, *coverage.socket, *group.group_output, *coverage_out);
+  if (alpha_out != nullptr) {
+    bke::node_add_link(tree, *alpha.node, *alpha.socket, *group.group_output, *alpha_out);
+  }
+  AnchorPointTap tap;
+  tap.point = point.marker;
+  tap.channel = channel;
+  tap.group = &group;
+  tap.color = color;
+  tap.coverage = coverage;
+  tap.alpha = alpha;
+  anchor_point_taps_.append(tap);
+  return true;
+}
+
+bool PaintLayersTreeBuilder::anchor_point_mask_tap_add(bNodeTree &tree,
+                                                       LayerGroup &group,
+                                                       const MaterialPaintLayer &point,
+                                                       const NodeOutput mask)
+{
+  if (mask.socket == nullptr) {
+    return false;
+  }
+  char name[192];
+  anchor_point_socket_name(name, sizeof(name), point.marker, "Mask");
+  bNodeTreeInterfaceSocket *iface = layer_group_add_socket(
+      group, name, "NodeSocketFloat", NODE_INTERFACE_SOCKET_OUTPUT);
+  if (iface == nullptr) {
+    return false;
+  }
+  bNodeSocket *out = bke::node_find_socket(
+      *group.group_output, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+  if (out == nullptr) {
+    return false;
+  }
+  bke::node_add_link(tree, *mask.node, *mask.socket, *group.group_output, *out);
+  AnchorPointTap tap;
+  tap.point = point.marker;
+  tap.channel = -1;
+  tap.group = &group;
+  tap.color = mask;
+  tap.coverage = mask;
+  tap.alpha = mask;
+  anchor_point_taps_.append(tap);
+  return true;
+}
+
+/** The output socket of \a group's instance named \a name, or null. */
+static bNodeSocket *anchor_point_instance_output(LayerGroup &group,
+                                                 const char *name,
+                                                 const char *type)
+{
+  bNodeTreeInterfaceSocket *iface = layer_group_socket_find(group, name, type, false);
+  if (iface == nullptr || group.instance == nullptr) {
+    return nullptr;
+  }
+  return bke::node_find_socket(
+      *group.instance, SOCK_OUT, UString::from_ptr_noinline(iface->identifier));
+}
+
+bool PaintLayersTreeBuilder::anchor_point_reader_link(LayerGroup &reader_group,
+                                                     const MaterialPaintLayer &reader,
+                                                     const int channel,
+                                                     const bool create_inputs,
+                                                     KindEmitResult *r_out)
+{
+  if (reader_group.instance == nullptr || reader_group.group_input == nullptr) {
+    return false;
+  }
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma_, reader);
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.point == nullptr ||
+      ref.source_row == nullptr)
+  {
+    return false;
+  }
+  LayerGroup **source_group_found = layer_groups_.lookup_ptr(ref.source_row);
+  if (source_group_found == nullptr || *source_group_found == nullptr ||
+      (*source_group_found)->instance == nullptr)
+  {
+    return false;
+  }
+  LayerGroup *source_group = *source_group_found;
+  if (source_group == &reader_group) {
+    /* The reader sits in the point's own row; it reads the tap directly and never through its own
+     * instance, which would link the group to itself. */
+    return false;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+
+  /* One input of the reader's group per tap output of the source group, linked in the root tree. A
+   * reader's nodes live in its own tree and cannot name a socket of the source's tree directly. */
+  const auto wire = [&](const char *suffix,
+                        const char *type,
+                        bNodeSocket *source_socket) -> bNodeSocket * {
+    if (source_socket == nullptr) {
+      return nullptr;
+    }
+    char name[192];
+    anchor_point_socket_name(name, sizeof(name), ref.point->marker, suffix);
+    bNodeTreeInterfaceSocket *iface = nullptr;
+    if (create_inputs) {
+      iface = layer_group_add_socket(reader_group, name, type, NODE_INTERFACE_SOCKET_INPUT);
+      refresh_layer_group(reader_group);
+    }
+    else {
+      iface = layer_group_socket_find(reader_group, name, type, true);
+    }
+    if (iface == nullptr || iface->identifier == nullptr) {
+      return nullptr;
+    }
+    bNodeSocket *instance_in = bke::node_find_socket(
+        *reader_group.instance, SOCK_IN, UString::from_ptr_noinline(iface->identifier));
+    bNodeSocket *group_in = bke::node_find_socket(
+        *reader_group.group_input, SOCK_OUT, UString::from_ptr_noinline(iface->identifier));
+    if (instance_in == nullptr || group_in == nullptr) {
+      return nullptr;
+    }
+    bke::node_add_link(
+        tree_, *source_group->instance, *source_socket, *reader_group.instance, *instance_in);
+    return group_in;
+  };
+
+  if (ref.target == PaintLayerAnchorPointTarget::Mask) {
+    char name[192];
+    anchor_point_socket_name(name, sizeof(name), ref.point->marker, "Mask");
+    bNodeSocket *source_socket = anchor_point_instance_output(
+        *source_group, name, "NodeSocketFloat");
+    bNodeSocket *group_in = wire("Mask", "NodeSocketFloat", source_socket);
+    if (group_in == nullptr) {
+      return false;
+    }
+    NodeOutput scalar = {reader_group.group_input, group_in};
+    r_out->color = scalar;
+    r_out->coverage = scalar;
+    r_out->content_alpha = scalar;
+    return true;
+  }
+
+  char color_suffix[128];
+  char coverage_suffix[128];
+  char name[192];
+  SNPRINTF(color_suffix, "Color %s", info.ui_name);
+  SNPRINTF(coverage_suffix, "Coverage %s", info.ui_name);
+  anchor_point_socket_name(name, sizeof(name), ref.point->marker, color_suffix);
+  bNodeSocket *source_color = anchor_point_instance_output(
+      *source_group, name, "NodeSocketColor");
+  anchor_point_socket_name(name, sizeof(name), ref.point->marker, coverage_suffix);
+  bNodeSocket *source_coverage = anchor_point_instance_output(
+      *source_group, name, "NodeSocketFloat");
+  if (source_color == nullptr || source_coverage == nullptr) {
+    return false;
+  }
+  bNodeSocket *color_in = wire(color_suffix, "NodeSocketColor", source_color);
+  bNodeSocket *coverage_in = wire(coverage_suffix, "NodeSocketFloat", source_coverage);
+  if (color_in == nullptr || coverage_in == nullptr) {
+    return false;
+  }
+  char suffix[128];
+  r_out->color = {reader_group.group_input, color_in};
+  r_out->coverage = {reader_group.group_input, coverage_in};
+  if (BKE_paint_material_channel_tracks_content_alpha(eMaterialPaintChannel(channel))) {
+    SNPRINTF(suffix, "Alpha %s", info.ui_name);
+    anchor_point_socket_name(name, sizeof(name), ref.point->marker, suffix);
+    bNodeSocket *source_alpha = anchor_point_instance_output(
+        *source_group, name, "NodeSocketFloat");
+    if (source_alpha != nullptr) {
+      bNodeSocket *alpha_in = wire(suffix, "NodeSocketFloat", source_alpha);
+      if (alpha_in != nullptr) {
+        r_out->content_alpha = {reader_group.group_input, alpha_in};
+      }
+    }
+  }
+  return true;
+}
+
+KindEmitResult PaintLayersTreeBuilder::anchor_point_source_emit(const RowEmitContext &ctx)
+{
+  bNodeTree &tree = ctx.tree;
+  KindEmitResult out;
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma_, ctx.layer);
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr ||
+      ref.point == nullptr)
+  {
+    return {};
+  }
+  if (ref.target == PaintLayerAnchorPointTarget::Mask) {
+    /* A mask point read as content: a grey, opaque, covering fully. */
+    NodeOutput mask;
+    if (const AnchorPointTap *tap = anchor_point_tap_find(ctx.group, ref.point->marker, -1)) {
+      mask = tap->color;
+    }
+    else {
+      KindEmitResult linked;
+      if (!this->anchor_point_reader_link(ctx.group, ctx.layer, ctx.channel, true, &linked)) {
+        return {};
+      }
+      mask = linked.color;
+    }
+    if (mask.socket == nullptr) {
+      return {};
+    }
+    bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineColor"_ustr);
+    if (combine == nullptr) {
+      return {};
+    }
+    bNodeSocket *red = socket_in(*combine, "Red");
+    bNodeSocket *green = socket_in(*combine, "Green");
+    bNodeSocket *blue = socket_in(*combine, "Blue");
+    bNodeSocket *result = socket_out(*combine, "Color");
+    if (red == nullptr || green == nullptr || blue == nullptr || result == nullptr) {
+      bke::node_remove_node(nullptr, tree, *combine, true, false);
+      return {};
+    }
+    grid_.place(*combine, layout::Column::Source, 0);
+    bke::node_add_link(tree, *mask.node, *mask.socket, *combine, *red);
+    bke::node_add_link(tree, *mask.node, *mask.socket, *combine, *green);
+    bke::node_add_link(tree, *mask.node, *mask.socket, *combine, *blue);
+    bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+    bNodeSocket *one_out = (one != nullptr) ? socket_out(*one, "Value") : nullptr;
+    if (one_out == nullptr || one_out->default_value == nullptr) {
+      if (one != nullptr) {
+        bke::node_remove_node(nullptr, tree, *one, true, false);
+      }
+      bke::node_remove_node(nullptr, tree, *combine, true, false);
+      return {};
+    }
+    static_cast<bNodeSocketValueFloat *>(one_out->default_value)->value = 1.0f;
+    grid_.place(*one, layout::Column::Source, 1);
+    out.color = {combine, result};
+    out.coverage = {one, one_out};
+    out.content_alpha = {one, one_out};
+    return out;
+  }
+
+  if (const AnchorPointTap *tap = anchor_point_tap_find(ctx.group, ref.point->marker, ctx.channel)) {
+    out.color = tap->color;
+    out.coverage = tap->coverage;
+    out.content_alpha = tap->alpha;
+  }
+  else if (!this->anchor_point_reader_link(ctx.group, ctx.layer, ctx.channel, true, &out)) {
+    return {};
+  }
+  if (out.content_alpha.socket == nullptr) {
+    /* A channel that tracks no content alpha (Normal among them) publishes none, while a
+     * correction multiplies its opacity by one and drops itself without it: the slice is opaque. */
+    bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+    bNodeSocket *one_out = (one != nullptr) ? socket_out(*one, "Value") : nullptr;
+    if (one_out == nullptr || one_out->default_value == nullptr) {
+      if (one != nullptr) {
+        bke::node_remove_node(nullptr, tree, *one, true, false);
+      }
+      return {};
+    }
+    static_cast<bNodeSocketValueFloat *>(one_out->default_value)->value = 1.0f;
+    grid_.place(*one, layout::Column::Source, 1);
+    out.content_alpha = {one, one_out};
+  }
+  return out;
+}
+
+NodeOutput PaintLayersTreeBuilder::anchor_point_mask_item_emit(LayerGroup &group,
+                                                               const MaterialPaintLayer &item)
+{
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma_, item);
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.point == nullptr ||
+      ref.source_row == nullptr)
+  {
+    return {};
+  }
+  if (ref.target == PaintLayerAnchorPointTarget::Mask) {
+    if (const AnchorPointTap *tap = anchor_point_tap_find(group, ref.point->marker, -1)) {
+      return tap->color;
+    }
+    KindEmitResult linked;
+    if (!this->anchor_point_reader_link(group, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, true,
+                                        &linked))
+    {
+      return {};
+    }
+    return linked.color;
+  }
+  /* A content point read as coverage: the coverage the slice lays in Base Color. The row's mask is
+   * built once, with the first channel the row takes part in, so when Base Color is not built yet
+   * the first tap the point has stands in; the mask is the same for every channel. */
+  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  if (const AnchorPointTap *tap = anchor_point_tap_find(group, ref.point->marker, channel)) {
+    return tap->coverage;
+  }
+  for (const AnchorPointTap &tap : anchor_point_taps_) {
+    if (tap.group == &group && tap.channel >= 0 && BLI_uuid_equal(tap.point, ref.point->marker)) {
+      return tap.coverage;
+    }
+  }
+  KindEmitResult linked;
+  if (!this->anchor_point_reader_link(group, item, channel, true, &linked)) {
+    return {};
+  }
+  return linked.coverage;
+}
+
 KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx)
 {
   bNodeTree &tree = ctx.tree;
@@ -2132,6 +2515,9 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
     grid_.place(*no_coverage, layout::Column::Source, 1);
     out.coverage = {no_coverage, no_coverage_out};
     out.content_alpha = out.coverage;
+  }
+  else if (paint_layer_kind_reads_anchor_point(ctx.layer) && !ctx.folder) {
+    out = this->anchor_point_source_emit(ctx);
   }
   else if (paint_layer_kind_has_flag(ctx.layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     out = this->material_source_emit(ctx);
@@ -2273,6 +2659,9 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
    * channel: it keeps its corrections and its mask, which the bake of a subtree would have held.
    */
   const bool material_source = !substituted && paint_layer_row_reads_source(ma_, layer, channel);
+  /* An Anchor Point Reader lays the slice its point publishes, with its own opacity and blend. */
+  const bool anchor_point_source = !substituted && paint_layer_kind_reads_anchor_point(layer) &&
+                                   paint_layer_row_reads_anchor_point(ma_, layer, channel);
   /* A folder owns no record: its source is the isolated result of what it holds. */
   const bool folder = BKE_paint_layers_is_folder(layer) && !substituted;
   /* A Paint row with no map and no value alpha takes part only for the corrections laid over it:
@@ -2286,7 +2675,7 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     return {};
   }
   if (record == nullptr && !folder && !empty_base && !adjustment && !substituted &&
-      !material_source)
+      !material_source && !anchor_point_source)
   {
     return {};
   }
@@ -2438,6 +2827,20 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
     for (const MaterialPaintLayer &effect : layer.effects) {
       if (substituted) {
         break;
+      }
+      if (paint_layer_kind_is_anchor_point_marker(effect)) {
+        /* Publish the content after the corrections above the marker: the tap is the row's slice
+         * and is emitted whether or not the row itself is visible. */
+        if (paint_layer_anchor_point_is_read(ma_, effect.marker)) {
+          this->anchor_point_content_tap_add(tree,
+                                             group,
+                                             effect,
+                                             channel,
+                                             content,
+                                             coverage_in_out,
+                                             track_alpha ? content_alpha : NodeOutput{});
+        }
+        continue;
       }
       this->correction_lay(tree,
                            group,
@@ -2821,6 +3224,55 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
       if (result.folder_alpha == nullptr) {
         return {};
       }
+    }
+  }
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    /* A kept reader group already holds its nodes; only the links from the source instance into
+     * its instance have to be made again in the root tree. */
+    KindEmitResult ignored;
+    this->anchor_point_reader_link(group, layer, channel, false, &ignored);
+  }
+  /* A reader that is a correction or a mask item of a kept group has its inputs in that group, and
+   * the links from the source into them went with the root tree, which every pass starts empty:
+   * without making them again the reader goes dark as soon as its source row is rebuilt. A content
+   * reader links once per channel it lays in. The mask is built once for the row, with the first
+   * channel the row takes part in, so its readers link once, in that channel. */
+  int first_channel = -1;
+  for (const int c : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if (paint_layer_row_participates(ma_, layer, c)) {
+      first_channel = c;
+      break;
+    }
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (!paint_layer_kind_reads_anchor_point(effect) ||
+        !paint_layer_effect_lays(ma_, effect, channel))
+    {
+      continue;
+    }
+    const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma_, effect);
+    /* A point of this very row is read straight from its tap, with nothing to link. */
+    if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == &layer) {
+      continue;
+    }
+    if (ref.target == PaintLayerAnchorPointTarget::Mask && channel != first_channel) {
+      continue;
+    }
+    KindEmitResult ignored;
+    this->anchor_point_reader_link(group, effect, channel, false, &ignored);
+  }
+  if (channel == first_channel) {
+    for (const MaterialPaintLayer &item : layer.mask_stack) {
+      if (!paint_layer_kind_reads_anchor_point(item) || !paint_layer_mask_item_lays(ma_, item)) {
+        continue;
+      }
+      const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma_, item);
+      if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == &layer) {
+        continue;
+      }
+      KindEmitResult ignored;
+      this->anchor_point_reader_link(
+          group, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, &ignored);
     }
   }
   return result;

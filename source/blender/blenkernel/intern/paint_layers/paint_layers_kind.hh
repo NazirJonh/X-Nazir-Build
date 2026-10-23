@@ -116,6 +116,19 @@ enum PaintLayerKindFlag : uint8_t {
    * reads. What it shows is decided from that ID, not from the row.
    */
   PAINT_LAYER_KIND_READS_SOURCE = 1 << 3,
+  /**
+   * An Anchor Point: an inert marker inside a row's effects or mask stack. It produces nothing of
+   * its own; it publishes the slice of the row it sits in to every reader that names its marker.
+   * The list it sits in decides whether it publishes content or the mask.
+   */
+  PAINT_LAYER_KIND_ANCHOR_POINT_MARK = 1 << 4,
+  /**
+   * An Anchor Point Reader: it lays the slice a marker publishes instead of owning a map. Like a
+   * row that reads another material it has no channel records of its own; unlike one it reads the
+   * same material, so it is not #PAINT_LAYER_KIND_READS_SOURCE (which is tied to
+   * #MaterialPaintLayer::material).
+   */
+  PAINT_LAYER_KIND_READS_ANCHOR_POINT = 1 << 5,
 };
 
 struct PaintLayerKindInfo {
@@ -231,6 +244,18 @@ inline bool paint_layer_kind_has_flag(const MaterialPaintLayer &row, const Paint
 inline bool paint_layer_kind_is_map_coverage(const MaterialPaintLayer &row)
 {
   return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_MAP_COVERAGE);
+}
+
+/** Whether \a row is the inert Anchor Point marker. */
+inline bool paint_layer_kind_is_anchor_point_marker(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_ANCHOR_POINT_MARK);
+}
+
+/** Whether \a row reads a slice an Anchor Point publishes. */
+inline bool paint_layer_kind_reads_anchor_point(const MaterialPaintLayer &row)
+{
+  return paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_ANCHOR_POINT);
 }
 
 /** Whether \a row's kind allows its map to be a stroke target; false for an unknown kind. */

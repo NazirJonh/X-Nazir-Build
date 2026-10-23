@@ -81,6 +81,10 @@ enum class PaintLayerAddKind : int8_t {
   CorrectionMaterial,
   /** A mask correction reading #PaintLayerAddParams::source: the grey of its Base Color. */
   MaskCorrectionMaterial,
+  /** The inert Anchor Point marker inside the anchor row's effects or mask. */
+  AnchorPoint,
+  /** An Anchor Point Reader laying a slice named by #PaintLayerAddParams::anchor_point_source. */
+  AnchorPointReader,
 };
 
 struct PaintLayerAddParams {
@@ -118,6 +122,14 @@ struct PaintLayerAddParams {
    * source becomes editable. Null makes the row share \a source.
    */
   Main *bmain = nullptr;
+  /**
+   * Where an #PaintLayerAddKind::AnchorPoint or ::AnchorPointReader lands: the anchor row's list,
+   * its effects or its mask. \a insert_after names the item it follows, or null for the end.
+   */
+  PaintLayerAnchorPointList anchor_point_list = PaintLayerAnchorPointList::Effects;
+  MaterialPaintLayer *insert_after = nullptr;
+  /** The point a #PaintLayerAddKind::AnchorPointReader reads. */
+  bUUID anchor_point_source = {};
 };
 
 /**

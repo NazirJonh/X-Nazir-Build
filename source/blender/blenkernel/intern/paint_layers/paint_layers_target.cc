@@ -151,7 +151,9 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
       return PaintLayersTargetStatus::RowTakesNoStrokes;
     }
     /* Likewise a row that reads a material: it owns no map for a stroke to write into. */
-    if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE) ||
+        paint_layer_kind_reads_anchor_point(*layer) || paint_layer_kind_is_anchor_point_marker(*layer))
+    {
       return PaintLayersTargetStatus::RowTakesNoStrokes;
     }
     /* Cannot paint into a channel that is not in the material's channel set. */

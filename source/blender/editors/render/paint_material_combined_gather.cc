@@ -788,9 +788,25 @@ static const char *gpu_layer_unsupported_reason(const PaintMaterialCompositeImag
     }
   }
   if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&
-      !layer.has_constant_color)
+      layer.anchor_point_color == nullptr && !layer.has_constant_color)
   {
     return "a row has neither a map nor a flat colour";
+  }
+  /* An Anchor Point slice lives in the BKE's slice buffers, not in an Image the GPU path uploads:
+   * the slice is drawn by the CPU composite until the GPU slots are implemented, so the pass falls
+   * back instead of showing a row without its slice. */
+  if (layer.anchor_point_color != nullptr) {
+    return "an Anchor Point slice is read (CPU fallback)";
+  }
+  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+    if (item.anchor_point_slice != nullptr) {
+      return "an Anchor Point mask slice is read (CPU fallback)";
+    }
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.anchor_point_slice != nullptr) {
+      return "an Anchor Point slice is read (CPU fallback)";
+    }
   }
   return nullptr;
 }

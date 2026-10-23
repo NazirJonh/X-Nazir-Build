@@ -594,6 +594,20 @@ enum eMaterialPaintLayerSource : int8_t {
    * 5 is reserved for the Mesh Map source, 7 for the generators.
    */
   MA_PAINT_LAYER_SOURCE_FILTER = 6,
+  /**
+   * An Anchor Point or an Anchor Point Reader: the marker publishes a slice of its row, the reader
+   * lays that slice. The member is #MaterialPaintLayer::kind_subtype
+   * (#eMaterialPaintLayerAnchorPoint). 3, 5 and 7 stay reserved for the source families named above.
+   */
+  MA_PAINT_LAYER_SOURCE_ANCHOR_POINT = 8,
+};
+
+/** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_ANCHOR_POINT row. */
+enum eMaterialPaintLayerAnchorPoint : int16_t {
+  /** The inert marker: it publishes the content or mask of the row it sits in. */
+  MA_PAINT_LAYER_ANCHOR_POINT_MARKER = 0,
+  /** The reader: it lays a slice published by a marker. */
+  MA_PAINT_LAYER_ANCHOR_POINT_READER = 1,
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_FILTER row. */
@@ -923,6 +937,13 @@ struct MaterialPaintLayer {
    * source is gone, and nothing else reads it.
    */
   bUUID row_result_source = {};
+  /**
+   * The marker of the Anchor Point whose slice the row reads, or nil. Only an Anchor Point Reader
+   * uses it: the point itself is a row of the same material, and the slice it publishes is decided
+   * by the list it sits in (#MaterialPaintLayer::effects for content,
+   * #MaterialPaintLayer::mask_stack for the mask).
+   */
+  bUUID anchor_point_source = {};
 };
 
 struct Material {

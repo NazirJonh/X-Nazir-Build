@@ -648,7 +648,17 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
                     for param in item.kind_params:
                         layout.prop(param, "value", text=param.label, slider=True)
                 return
+            if item.source == 'ANCHOR_POINT':
+                # A marker publishes a slice and a reader lays one: no map, no channels to choose.
+                if item.is_anchor_point_reader:
+                    layout.prop(item, "opacity", text="Opacity")
+                    layout.prop(item, "blend_type", text="Blend")
+                return
             draw_material_mask_item(layout, context, item)
+            return
+
+        if layer.source == 'ANCHOR_POINT' and not layer.is_anchor_point_reader:
+            # The marker is a place: it has no opacity, blend or channels of its own.
             return
 
         layout.prop(layer, "opacity", text="Opacity")
@@ -677,6 +687,11 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             for param in layer.kind_params:
                 layout.prop(param, "value", text=param.label, slider=True)
             # The channels it works in, switched like a layer's; Base Color is on to start with.
+            layout.separator()
+            draw_material_layer_channels(layout, context, owner, layer)
+            return
+        # A reader has no map either: its records are only the channels it lays.
+        if layer.source == 'ANCHOR_POINT':
             layout.separator()
             draw_material_layer_channels(layout, context, owner, layer)
             return
@@ -792,6 +807,40 @@ class LAYER_MATERIAL_PT_source_surface(LayerMaterialButtonsPanel, Panel):
             layout.label(text="The source has no nodes", icon='INFO')
             return
         panel_node_draw(layout, source.node_tree, 'OUTPUT_MATERIAL', "Surface")
+
+
+class LAYER_MATERIAL_PT_anchor_point(LayerMaterialButtonsPanel, Panel):
+    """The Anchor Point of the shown row: the point a reader lays, or how many readers a point has."""
+
+    bl_idname = "LAYER_MATERIAL_PT_anchor_point"
+    bl_label = "Anchor Point"
+    bl_parent_id = "LAYER_MATERIAL_PT_layers"
+
+    @classmethod
+    def _shown_row(cls, context):
+        """The mask item the tab shows, or else the active row."""
+        owner, layer = cls._active_layer(context)
+        if owner is None or layer is None:
+            return None
+        item = cls._shown_mask_item(context, owner, layer)
+        return item if item is not None else layer
+
+    @classmethod
+    def poll(cls, context):
+        row = cls._shown_row(context)
+        return row is not None and row.source == 'ANCHOR_POINT'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        row = self._shown_row(context)
+        if row is None:
+            return
+        if row.is_anchor_point_reader:
+            layout.prop(row, "anchor_point_target", text="Reads")
+        else:
+            layout.label(text="Read by: {:d}".format(row.anchor_point_reader_count), icon='LINKED')
 
 
 class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
@@ -1164,6 +1213,7 @@ classes = (
     LAYER_MATERIAL_PT_layers,
     LAYER_MATERIAL_PT_mapping,
     LAYER_MATERIAL_PT_source_surface,
+    LAYER_MATERIAL_PT_anchor_point,
     LAYER_MATERIAL_PT_bake,
     LAYER_MT_row_result_source,
     LAYER_MATERIAL_PT_row_result,

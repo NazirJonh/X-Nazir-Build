@@ -360,6 +360,8 @@ def draw_material_layer_channels(layout, context, material, layer):
     """
     channel_ids = material_layer_visible_channels(material)
     is_filter = layer.source == 'FILTER'
+    # A filter and an Anchor Point Reader have no map or value per channel: the switches are all.
+    switches_only = is_filter or layer.source == 'ANCHOR_POINT'
     if is_filter:
         # A tangent normal is not a colour a filter may change.
         channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']
@@ -387,8 +389,8 @@ def draw_material_layer_channels(layout, context, material, layer):
         op.channel = channel_id
         op.enable = not enabled
 
-    if is_filter:
-        # The switches are the whole choice: a filter has no map or value per channel.
+    if switches_only:
+        # The switches are the whole choice: no map or value per channel.
         return
 
     if material_layer_weight_record_count(

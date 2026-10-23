@@ -160,6 +160,11 @@ static ObjectPaintLayerMask &record_ensure(Main &bmain,
 bool BKE_paint_layer_object_mask_visible_set(
     Main &bmain, Object &ob, Material &ma, MaterialPaintLayer &layer, const bool visible)
 {
+  /* An object mask belongs to a row of the stack: a content correction or a mask item never
+   * carries one, since a slice's object-mask bounds are read from rows alone. */
+  if (!BKE_paint_layers_object_mask_role_allowed(layer)) {
+    return false;
+  }
   /* Showing a row with no record changes nothing: skip the record, the uid and the tagging. */
   if (visible && BKE_paint_layer_object_mask_find(ob, ma.paint_layers_owner_uid, layer.marker) ==
                      nullptr)
@@ -191,6 +196,9 @@ bool BKE_paint_layer_object_mask_tile_set(Main &bmain,
 {
   const int bit = tile - PAINT_LAYER_OBJECT_MASK_TILE_FIRST;
   if (bit < 0 || bit >= PAINT_LAYER_OBJECT_MASK_TILE_NUM) {
+    return false;
+  }
+  if (!BKE_paint_layers_object_mask_role_allowed(layer)) {
     return false;
   }
   if (visible && BKE_paint_layer_object_mask_find(ob, ma.paint_layers_owner_uid, layer.marker) ==

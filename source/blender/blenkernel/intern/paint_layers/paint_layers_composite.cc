@@ -11,8 +11,11 @@
 #include "BKE_paint_layers_composite.hh"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <memory>
+#include <mutex>
 #include <utility>
 
 #include "BLI_index_range.hh"
@@ -20,6 +23,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "BKE_image.hh"
@@ -39,6 +43,9 @@
 #include "IMB_imbuf_types.hh"
 
 namespace blender {
+
+/** Defined with the Anchor Point slice cache below; every description build starts afresh. */
+static void anchor_slice_cache_clear();
 
 /**
  * Restore the unit length of an encoded tangent-space normal the partial factors shortened.
@@ -252,12 +259,44 @@ static bool composite_row_source_describe(const Material &ma,
  */
 static void composite_mask_items_describe(const Material &ma,
                                           const MaterialPaintLayer &layer,
-                                          Vector<PaintMaterialCompositeMaskItem> &r_items)
+                                          Vector<PaintMaterialCompositeMaskItem> &r_items,
+                                          const bUUID *stop_before = nullptr)
 {
   if (BKE_paint_layers_mask_base(layer) == nullptr) {
     return;
   }
   for (const MaterialPaintLayer &mask : layer.mask_stack) {
+    if (stop_before != nullptr && BLI_uuid_equal(mask.marker, *stop_before)) {
+      break;
+    }
+    if (paint_layer_kind_reads_anchor_point(mask)) {
+      /* The slice a mask item reads: a mask point gives its scalar, a content point its coverage.
+       * Both are grey buffers in canvas space, read like a painted map without a mapping. */
+      if (!paint_layer_mask_item_lays(ma, mask)) {
+        continue;
+      }
+      std::shared_ptr<ImBuf> slice_color;
+      std::shared_ptr<ImBuf> slice_coverage;
+      if (!BKE_paint_layers_slice_render(
+              ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &slice_color, &slice_coverage))
+      {
+        continue;
+      }
+      const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
+      PaintMaterialCompositeMaskItem item;
+      item.opacity = BKE_paint_layers_effective_opacity(mask);
+      item.anchor_point_slice = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
+                                    std::move(slice_color) :
+                                    std::move(slice_coverage);
+      item.anchor_point_hash = paint_layer_anchor_point_slice_hash(
+          ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+      BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
+      item.blend = CompositeBlend(
+          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+      item.invert = paint_layer_mask_item_inverted(mask);
+      r_items.append(item);
+      continue;
+    }
     if (paint_layer_kind_is_map_coverage(mask)) {
       /* A map-driven coverage operator: it lays its map's `match` over the coverage below,
        * whether or not it has a map yet (a missing map is `match = 0`, not a pass-through). Its
@@ -376,9 +415,55 @@ static bool composite_image_layer_build(const Material &ma,
                                         const float pass_through_scale,
                                         const bool isolating,
                                         const bool ignore_own_bake,
-                                        PaintMaterialCompositeImageLayer &out)
+                                        PaintMaterialCompositeImageLayer &out,
+                                        const bUUID *stop_before = nullptr)
 {
-  if (!ignore_own_bake && paint_layer_row_substituted(ma, layer)) {
+  /* A reader lays the slice its point publishes, described as a substituted row: the slice's
+   * colour, its coverage and its content alpha, with the reader's own blend. Its own mapping does
+   * not remap the slice. */
+  bool reader_live = false;
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    if (!paint_layer_row_reads_anchor_point(ma, layer, channel)) {
+      return false;
+    }
+    /* A baked reader reads the maps its slice was rendered into; the row itself is never
+     * substituted, since the description decides what the slice is. The bake renders from the live
+     * description (\a ignore_own_bake), so it never reads its own stale maps. */
+    if (!ignore_own_bake && paint_layer_anchor_point_reader_baked(ma, layer) &&
+        layer.bake != nullptr && layer.bake->images[channel] != nullptr &&
+        layer.bake->coverage != nullptr)
+    {
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+      out.color_image = layer.bake->images[channel];
+      out.color_iuser = nullptr;
+      out.mask_image = layer.bake->coverage;
+      out.mask_iuser = nullptr;
+      out.mask_from_alpha = false;
+      out.mask_influence = 1.0f;
+      out.color_alpha_coverage = record != nullptr && record->image != nullptr;
+      out.blend = layer_channel_blend(layer, channel);
+      out.opacity = ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
+                    pass_through_scale;
+      out.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, layer, channel);
+      out.enabled = true;
+      out.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+          eMaterialPaintChannel(channel));
+      /* The bake already holds the reader's corrections, mask and opacity, as a substituted row's
+       * does, so none of them is described again. */
+      return true;
+    }
+    if (!BKE_paint_layers_slice_render(
+            ma, layer, channel, &out.anchor_point_color, &out.anchor_point_coverage))
+    {
+      return false;
+    }
+    out.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, layer, channel);
+    BKE_paint_layers_anchor_point_slice_images(ma, layer, out.anchor_point_images);
+    /* The reader's own corrections and mask go on below like any row's, so a point inside this
+     * row slices them too. */
+    reader_live = true;
+  }
+  if (!reader_live && !ignore_own_bake && paint_layer_row_substituted(ma, layer)) {
     Image *baked_color = nullptr;
     if (!paint_layer_row_baked_channel(ma, layer, channel, &baked_color)) {
       return false;
@@ -403,21 +488,24 @@ static bool composite_image_layer_build(const Material &ma,
         eMaterialPaintChannel(channel));
     return true;
   }
-  if (BKE_paint_layers_is_folder(layer)) {
-    Vector<PaintMaterialCompositeImageLayer> children;
-    composite_image_layers_collect(
-        ma, layer.children, channel, pass_through_scale, children, true);
-    /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
-     * here is not: the correction brings the coverage in over nothing. */
-    if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
+  /* A live reader's slice is described above; every other row describes its own source. */
+  if (!reader_live) {
+    if (BKE_paint_layers_is_folder(layer)) {
+      Vector<PaintMaterialCompositeImageLayer> children;
+      composite_image_layers_collect(
+          ma, layer.children, channel, pass_through_scale, children, true);
+      /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
+       * here is not: the correction brings the coverage in over nothing. */
+      if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
+        return false;
+      }
+      out.is_folder = true;
+      out.children.assign(std::make_move_iterator(children.begin()),
+                          std::make_move_iterator(children.end()));
+    }
+    else if (!composite_row_source_describe(ma, layer, channel, isolating, out)) {
       return false;
     }
-    out.is_folder = true;
-    out.children.assign(std::make_move_iterator(children.begin()),
-                        std::make_move_iterator(children.end()));
-  }
-  else if (!composite_row_source_describe(ma, layer, channel, isolating, out)) {
-    return false;
   }
   out.blend = layer_channel_blend(layer, channel);
   out.opacity = BKE_paint_layers_channel_opacity_effective(layer, channel) * pass_through_scale;
@@ -434,6 +522,9 @@ static bool composite_image_layer_build(const Material &ma,
   /* The corrections lay over the row's colour, in the order they were added. A correction that
    * lays nothing in this channel is not carried, as the generator builds nothing for it. */
   for (const MaterialPaintLayer &effect : layer.effects) {
+    if (stop_before != nullptr && BLI_uuid_equal(effect.marker, *stop_before)) {
+      break;
+    }
     if (paint_layer_effect_filters(ma, effect, channel)) {
       PaintMaterialCompositeCorrection filter;
       filter.filter = effect.kind_subtype;
@@ -450,7 +541,17 @@ static bool composite_image_layer_build(const Material &ma,
     correction.iuser = nullptr;
     correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                          pass_through_scale;
-    if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
+    if (paint_layer_kind_reads_anchor_point(effect)) {
+      /* What the slice shows, laid by the reader's own blend and opacity. */
+      if (!BKE_paint_layers_slice_render(
+              ma, effect, channel, &correction.anchor_point_slice, &correction.anchor_point_coverage))
+      {
+        continue;
+      }
+      correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
+      BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.anchor_point_images);
+    }
+    else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
       /* What the source supplies, as a Material row's colour: its plain value, its plain texture
        * or the map rendered from it. A graph with no map yet is the generator's to show alone, so
        * nothing is carried until the render lands. The correction's transparency is a plain value
@@ -498,7 +599,7 @@ static bool composite_image_layer_build(const Material &ma,
   }
   /* The mask is one for all channels of the row, so the same item reaches every channel's stack,
    * exactly as the generator reads the one set of mask inputs in every channel chain. */
-  composite_mask_items_describe(ma, layer, out.mask_items);
+  composite_mask_items_describe(ma, layer, out.mask_items, stop_before);
   return true;
 }
 
@@ -534,6 +635,9 @@ bool BKE_paint_layers_composite_image_layers(
     const Material &ma, const int channel, Vector<PaintMaterialCompositeImageLayer> &r_layers)
 {
   r_layers.clear();
+  /* Every description build renders its slices afresh: a stroke since the last build changed the
+   * pixels under a marker, and a cached slice would show the canvas before it. */
+  anchor_slice_cache_clear();
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
@@ -688,17 +792,25 @@ bool BKE_paint_layers_composite_image(const Material &ma,
 
 bool BKE_paint_layers_mask_items(const Material &ma,
                                  const MaterialPaintLayer &layer,
-                                 Vector<PaintMaterialCompositeMaskItem> &r_items)
+                                 Vector<PaintMaterialCompositeMaskItem> &r_items,
+                                 const bUUID *stop_before)
 {
   r_items.clear();
-  composite_mask_items_describe(ma, layer, r_items);
+  composite_mask_items_describe(ma, layer, r_items, stop_before);
   return !r_items.is_empty();
 }
 
 PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
-                                               const MaterialPaintLayer &layer)
+                                               const MaterialPaintLayer &layer,
+                                               const bUUID *stop_before)
 {
-  composite_mask_items_describe(ma, layer, items_);
+  if (stop_before == nullptr) {
+    /* A stroke starts here, and the slice cache is keyed by a hash that holds no pixels: an entry
+     * from before the last stroke would show the source as it was. A sampler made while a slice
+     * renders passes a marker and keeps the entries it is building from. */
+    anchor_slice_cache_clear();
+  }
+  composite_mask_items_describe(ma, layer, items_, stop_before);
   /* The evaluator's own form of the description, so #BKE_paint_material_mask_factor_eval reads the
    * same opacity/blend/invert/filter/coverage fields the composite reads. */
   buffers_.resize(items_.size());
@@ -763,7 +875,17 @@ void PaintLayersMaskSampler::tile_acquire(const int tile_number,
   tile.coverage_samples.resize(item_count, nullptr);
   for (const int i : items_.index_range()) {
     const PaintMaterialCompositeMaskItem &item = items_[i];
-    if (item.image != nullptr) {
+    if (item.anchor_point_slice != nullptr) {
+      /* A slice is already in canvas space and the description keeps its buffer alive: take an
+       * ImBuf reference so the tile's destructor can release it like any other acquired map. A
+       * slice of another size than the tile is not sampled, as for a painted map below. */
+      if (item.anchor_point_slice->x == ref_width && item.anchor_point_slice->y == ref_height) {
+        IMB_refImBuf(item.anchor_point_slice.get());
+        tile.items[i] = item.anchor_point_slice.get();
+        tile.item_samples[i] = item.anchor_point_slice->float_data();
+      }
+    }
+    else if (item.image != nullptr) {
       ImBuf *ibuf = BKE_paint_material_mask_map_acquire(
           item.image, tile_number, &item.mapping, ref_width, ref_height);
       /* A buffer that does not match the tile the stroke paints on is not sampled: an item of
@@ -817,6 +939,181 @@ float PaintLayersMaskSampler::sample(const int tile_number, const int x, const i
 }
 
 /**
+ * The slice cache: one pair of buffers per reader, channel and description hash. The cache holds a
+ * reference, never the only one: the description that renders a slice shares the buffers for its
+ * own lifetime, so clearing or evicting an entry can never pull pixels out from under an
+ * evaluation. Since the hash holds no pixels, every description build starts from an empty cache;
+ * what it keeps is the reuse of a slice by the several readers of one build.
+ */
+struct AnchorSliceCacheKey {
+  uint32_t material_uid = 0;
+  bUUID reader = {};
+  int channel = 0;
+  uint64_t hash = 0;
+};
+
+struct AnchorSliceCacheEntry {
+  AnchorSliceCacheKey key;
+  std::shared_ptr<ImBuf> color;
+  std::shared_ptr<ImBuf> coverage;
+};
+
+/** More entries than a stack of readers needs; the oldest is dropped past it. */
+constexpr int ANCHOR_SLICE_CACHE_ENTRIES_MAX = 32;
+
+/**
+ * Guards the container only, never held while a slice renders: a bake job renders on a worker
+ * thread while the main thread describes the composite, and a nested slice re-enters the render.
+ */
+static Vector<AnchorSliceCacheEntry> g_anchor_slice_cache;
+static std::mutex g_anchor_slice_cache_mutex;
+
+static void anchor_slice_cache_clear()
+{
+  std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
+  g_anchor_slice_cache.clear();
+}
+
+static bool anchor_slice_key_equal(const AnchorSliceCacheKey &a, const AnchorSliceCacheKey &b)
+{
+  return a.material_uid == b.material_uid && BLI_uuid_equal(a.reader, b.reader) &&
+         a.channel == b.channel && a.hash == b.hash;
+}
+
+/** An RGBA float buffer of \a width x \a height, or null when it cannot be allocated. */
+static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width, const int height)
+{
+  ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
+  if (ibuf == nullptr) {
+    return {};
+  }
+  return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
+}
+
+bool BKE_paint_layers_slice_render(const Material &ma,
+                                   const MaterialPaintLayer &reader,
+                                   const int channel,
+                                   std::shared_ptr<ImBuf> *r_color,
+                                   std::shared_ptr<ImBuf> *r_coverage)
+{
+  r_color->reset();
+  r_coverage->reset();
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return false;
+  }
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr) {
+    return false;
+  }
+  AnchorSliceCacheKey key;
+  key.material_uid = ma.id.session_uid;
+  key.reader = reader.marker;
+  key.channel = channel;
+  key.hash = paint_layer_anchor_point_slice_hash(ma, reader, channel);
+  {
+    std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
+    for (const AnchorSliceCacheEntry &entry : g_anchor_slice_cache) {
+      if (anchor_slice_key_equal(entry.key, key)) {
+        *r_color = entry.color;
+        *r_coverage = entry.coverage;
+        return true;
+      }
+    }
+  }
+
+  /* The slice is rendered at the source row's resolution, like a bake of that row: the composite
+   * hands it to the evaluator as it is, with no mapping and no resampling. */
+  int width = 0;
+  int height = 0;
+  std::shared_ptr<ImBuf> color;
+  std::shared_ptr<ImBuf> coverage;
+
+  if (ref.target == PaintLayerAnchorPointTarget::Mask) {
+    if (!BKE_paint_layers_row_dimensions(
+            ma, *ref.source_row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, width, height) ||
+        width <= 0 || height <= 0)
+    {
+      return false;
+    }
+    color = anchor_slice_buffer_new(width, height);
+    coverage = anchor_slice_buffer_new(width, height);
+    if (color == nullptr || coverage == nullptr) {
+      return false;
+    }
+    PaintLayersMaskSampler sampler(ma, *ref.source_row, &ref.point->marker);
+    sampler.tile_acquire(0, width, height);
+    float *color_pixels = color->float_data_for_write();
+    float *coverage_pixels = coverage->float_data_for_write();
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        const int64_t index = int64_t(y) * width + x;
+        const float gray = sampler.sample(0, x, y);
+        color_pixels[index * 4 + 0] = gray;
+        color_pixels[index * 4 + 1] = gray;
+        color_pixels[index * 4 + 2] = gray;
+        /* A mask point read as content is opaque grey; read as a mask item it is the scalar. */
+        color_pixels[index * 4 + 3] = 1.0f;
+        coverage_pixels[index * 4 + 0] = 1.0f;
+        coverage_pixels[index * 4 + 1] = 1.0f;
+        coverage_pixels[index * 4 + 2] = 1.0f;
+        coverage_pixels[index * 4 + 3] = 1.0f;
+      }
+    }
+  }
+  else {
+    PaintMaterialCompositeImageLayer entry;
+    if (!composite_image_layer_build(
+            ma, *ref.source_row, channel, 1.0f, false, true, entry, &ref.point->marker))
+    {
+      return false;
+    }
+    /* The slice is the row's content before its opacity, mask, object mask and blend: only what
+     * the corrections above the marker left. */
+    entry.opacity = 1.0f;
+    entry.mask_items.clear();
+    entry.mask_image = nullptr;
+    entry.mask_iuser = nullptr;
+    entry.mask_from_alpha = false;
+    entry.mask_influence = 0.0f;
+    entry.enabled = true;
+    if (!BKE_paint_material_composite_stack_dimensions(
+            Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height) ||
+        width <= 0 || height <= 0)
+    {
+      return false;
+    }
+    color = anchor_slice_buffer_new(width, height);
+    coverage = anchor_slice_buffer_new(width, height);
+    if (color == nullptr || coverage == nullptr ||
+        !BKE_paint_material_composite_eval_row_content(entry,
+                                                       color->float_data_for_write(),
+                                                       coverage->float_data_for_write(),
+                                                       nullptr,
+                                                       channel))
+    {
+      return false;
+    }
+  }
+
+  {
+    /* Keep the cache bounded: every stale hash of a long editing session would otherwise hold a
+     * full canvas. Dropping an entry only releases the cache's reference. */
+    std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
+    if (g_anchor_slice_cache.size() >= ANCHOR_SLICE_CACHE_ENTRIES_MAX) {
+      g_anchor_slice_cache.remove(0);
+    }
+    AnchorSliceCacheEntry new_entry;
+    new_entry.key = key;
+    new_entry.color = color;
+    new_entry.coverage = coverage;
+    g_anchor_slice_cache.append(std::move(new_entry));
+  }
+  *r_color = std::move(color);
+  *r_coverage = std::move(coverage);
+  return true;
+}
+
+/**
  * The live description of \a layer in \a channel, as the evaluator reads one row: what a bake of
  * the row renders. A Pass Through folder has no row of its own to describe.
  */
@@ -844,6 +1141,7 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
   if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
+  anchor_slice_cache_clear();
   PaintMaterialCompositeImageLayer entry;
   if (!composite_bake_entry(ma, layer, channel, entry)) {
     return false;

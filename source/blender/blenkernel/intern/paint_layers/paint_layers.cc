@@ -457,6 +457,111 @@ MaterialPaintLayer *BKE_paint_layers_add(Material &ma,
   return layer;
 }
 
+MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
+                                                      MaterialPaintLayer *owner,
+                                                      const PaintLayerAnchorPointList list,
+                                                      MaterialPaintLayer *insert_after,
+                                                      const bool reader,
+                                                      const char *name,
+                                                      const bUUID &source)
+{
+  if (list != PaintLayerAnchorPointList::Row && !paint_layer_in_stack(ma, owner)) {
+    return nullptr;
+  }
+  if (list == PaintLayerAnchorPointList::Row) {
+    /* A marker only exists inside the effects or mask of a row; a stack row is always a reader. */
+    if (!reader) {
+      return nullptr;
+    }
+    MaterialPaintLayer *row = BKE_paint_layers_add(
+        ma, name, insert_after, PaintLayerPlace::Above);
+    if (row == nullptr) {
+      return nullptr;
+    }
+    row->source = MA_PAINT_LAYER_SOURCE_ANCHOR_POINT;
+    row->kind_subtype = MA_PAINT_LAYER_ANCHOR_POINT_READER;
+    row->anchor_point_source = source;
+    BKE_paint_layers_default_channels_apply(ma, *row);
+    BKE_paint_layers_tag_edited(ma);
+    return row;
+  }
+
+  ListBaseT<MaterialPaintLayer> *target = (list == PaintLayerAnchorPointList::Effects) ?
+                                              &owner->effects :
+                                              &owner->mask_stack;
+  if (insert_after != nullptr && BLI_findindex(target, insert_after) == -1) {
+    return nullptr;
+  }
+  MaterialPaintLayer *item = paint_layer_alloc(ma, name);
+  item->role = (list == PaintLayerAnchorPointList::Effects) ? MA_PAINT_LAYER_ROLE_EFFECT :
+                                                              MA_PAINT_LAYER_ROLE_MASK_ITEM;
+  item->source = MA_PAINT_LAYER_SOURCE_ANCHOR_POINT;
+  item->kind_subtype = reader ? MA_PAINT_LAYER_ANCHOR_POINT_READER :
+                                MA_PAINT_LAYER_ANCHOR_POINT_MARKER;
+  if (reader) {
+    item->anchor_point_source = source;
+  }
+  if (insert_after != nullptr) {
+    BLI_insertlinkafter(target, insert_after, item);
+  }
+  else {
+    BLI_addtail(target, item);
+  }
+  if (reader) {
+    /* The records are the reader's channel switches: it lays a channel only while it has a live
+     * one, and a channel it does not lay costs nothing to evaluate. They are added once the row
+     * is part of the material, which the record edit checks. */
+    BKE_paint_layers_default_channels_apply(ma, *item);
+  }
+  BKE_paint_layers_tag_edited(ma);
+  return item;
+}
+
+/** Old marker -> new marker of a copied branch; linear, a branch is a handful of rows. */
+using PaintLayerMarkerMap = Vector<std::pair<bUUID, bUUID>>;
+
+/** The new marker copied for \a old, or \a old when the copy stayed outside the branch. */
+static bUUID paint_layer_marker_remap(const PaintLayerMarkerMap &map, const bUUID &old)
+{
+  for (const auto &pair : map) {
+    if (BLI_uuid_equal(pair.first, old)) {
+      return pair.second;
+    }
+  }
+  return old;
+}
+
+/** Point the readers of \a row and everything below it at the copied markers in \a map. */
+static void paint_layer_anchor_point_refs_remap(MaterialPaintLayer &row,
+                                                const PaintLayerMarkerMap &map)
+{
+  if (paint_layer_kind_reads_anchor_point(row)) {
+    row.anchor_point_source = paint_layer_marker_remap(map, row.anchor_point_source);
+  }
+  for (MaterialPaintLayer &effect : row.effects) {
+    paint_layer_anchor_point_refs_remap(effect, map);
+  }
+  for (MaterialPaintLayer &item : row.mask_stack) {
+    paint_layer_anchor_point_refs_remap(item, map);
+  }
+  for (MaterialPaintLayer &child : row.children) {
+    paint_layer_anchor_point_refs_remap(child, map);
+  }
+}
+
+/**
+ * Clear the reference of the copied reader \a row when its point is not part of \a ma: a copy
+ * from another material would otherwise show a permanent NotFound issue.
+ */
+static void paint_layer_anchor_point_foreign_ref_clear(Material &ma, MaterialPaintLayer &row)
+{
+  if (paint_layer_kind_reads_anchor_point(row) && !BLI_uuid_is_nil(row.anchor_point_source) &&
+      BKE_paint_layers_find(ma, row.anchor_point_source) == nullptr)
+  {
+    row.anchor_point_source = {};
+  }
+}
+
 /**
  * A copy of the map \a source with its pixels. #BKE_id_copy copies the image's settings but not the
  * buffer behind it, and a painted map is a buffer that exists nowhere else -- unsaved, generated --
@@ -584,7 +689,8 @@ static void paint_layer_material_duplicate(Main &bmain,
  */
 static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
                                                       Material &ma,
-                                                      const MaterialPaintLayer &item)
+                                                      const MaterialPaintLayer &item,
+                                                      PaintLayerMarkerMap *r_map = nullptr)
 {
   MaterialPaintLayer *item_copy = paint_layer_alloc(ma, item.name);
   item_copy->role = item.role;
@@ -593,6 +699,8 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   item_copy->blend = item.blend;
   item_copy->flag = item.flag;
   item_copy->opacity = item.opacity;
+  /* Still names the original point; the caller remaps it once the copies' markers are known. */
+  item_copy->anchor_point_source = item.anchor_point_source;
   /* Display data, copied like the rest of the row's own state. */
   item_copy->color_tag = item.color_tag;
   /* The channel of its source a mask correction takes its grey from, kept with the copy. */
@@ -604,6 +712,9 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   paint_layer_channels_duplicate(bmain, *item_copy, item);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
+  if (r_map != nullptr) {
+    r_map->append({item.marker, item_copy->marker});
+  }
   return item_copy;
 }
 
@@ -615,13 +726,20 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
 static void paint_layer_branch_duplicate(Main &bmain,
                                          Material &ma,
                                          MaterialPaintLayer &dst,
-                                         const MaterialPaintLayer &src)
+                                         const MaterialPaintLayer &src,
+                                         PaintLayerMarkerMap *r_map = nullptr)
 {
   dst.flag = src.flag;
   dst.opacity = src.opacity;
   dst.blend = src.blend;
   dst.source = src.source;
   dst.kind_subtype = src.kind_subtype;
+  /* A reader of a point inside the branch has to read the copied point, not the original; the
+   * caller remaps it once every new marker is known. */
+  dst.anchor_point_source = src.anchor_point_source;
+  if (r_map != nullptr) {
+    r_map->append({src.marker, dst.marker});
+  }
   /* A display tag travels with the row: a duplicated group has to read like the one it came from,
    * the way a duplicated collection keeps its color. */
   dst.color_tag = src.color_tag;
@@ -639,7 +757,7 @@ static void paint_layer_branch_duplicate(Main &bmain,
    * the channel maps. */
   const auto item_duplicate = [&](const MaterialPaintLayer &item,
                                   ListBaseT<MaterialPaintLayer> &r_list) {
-    BLI_addtail(&r_list, paint_layer_item_duplicate(bmain, ma, item));
+    BLI_addtail(&r_list, paint_layer_item_duplicate(bmain, ma, item, r_map));
   };
   for (const MaterialPaintLayer &item : src.mask_stack) {
     item_duplicate(item, dst.mask_stack);
@@ -652,7 +770,7 @@ static void paint_layer_branch_duplicate(Main &bmain,
     for (const MaterialPaintLayer &child : src.children) {
       MaterialPaintLayer *child_copy = paint_layer_alloc(ma, child.name);
       BLI_addtail(&dst.children, child_copy);
-      paint_layer_branch_duplicate(bmain, ma, *child_copy, child);
+      paint_layer_branch_duplicate(bmain, ma, *child_copy, child, r_map);
     }
   }
 }
@@ -686,7 +804,9 @@ MaterialPaintLayer *BKE_paint_layers_duplicate(Main &bmain,
     PaintLayerList *owner = BKE_paint_layers_owner_list(ma, *layer);
     BLI_insertlinkafter(owner, layer, copy);
   }
-  paint_layer_branch_duplicate(bmain, ma, *copy, *layer);
+  PaintLayerMarkerMap marker_map;
+  paint_layer_branch_duplicate(bmain, ma, *copy, *layer, &marker_map);
+  paint_layer_anchor_point_refs_remap(*copy, marker_map);
 
   BKE_paint_layers_tag_edited(ma);
   return copy;
@@ -965,6 +1085,39 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
   return effect;
 }
 
+/**
+ * Release the bake of every reader whose point no longer resolves (the point or a source row was
+ * deleted, or the reference became invalid): a cache for a slice that cannot be shown is stale by
+ * definition, and its maps would otherwise keep the row alive in a later plan pass.
+ */
+static void paint_layer_anchor_point_release_broken_bakes(Material &ma)
+{
+  Vector<MaterialPaintLayer *> broken;
+  BKE_paint_layers_foreach(
+      ma, [&](MaterialPaintLayer &row, MaterialPaintLayer * /*parent*/) -> bool {
+        const auto consider = [&](MaterialPaintLayer &candidate) {
+          if (!paint_layer_kind_reads_anchor_point(candidate) || candidate.bake == nullptr) {
+            return;
+          }
+          const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, candidate);
+          if (ref.issue != PaintLayerAnchorPointIssue::None) {
+            broken.append(&candidate);
+          }
+        };
+        consider(row);
+        for (MaterialPaintLayer &effect : row.effects) {
+          consider(effect);
+        }
+        for (MaterialPaintLayer &item : row.mask_stack) {
+          consider(item);
+        }
+        return true;
+      });
+  for (MaterialPaintLayer *reader : broken) {
+    BKE_paint_layers_bake_clear(ma, *reader);
+  }
+}
+
 bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect)
 {
   if (effect == nullptr) {
@@ -982,6 +1135,7 @@ bool BKE_paint_layers_correction_remove(Material &ma, MaterialPaintLayer *effect
   paint_layer_release_users(*effect);
   BLI_remlink(&owner->effects, effect);
   BKE_material_paint_layer_free(effect);
+  paint_layer_anchor_point_release_broken_bakes(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -1002,6 +1156,7 @@ bool BKE_paint_layers_remove(Material &ma, MaterialPaintLayer *layer)
   paint_layer_release_users(*layer);
   BLI_remlink(BKE_paint_layers_owner_list(ma, *layer), layer);
   BKE_material_paint_layer_free(layer);
+  paint_layer_anchor_point_release_broken_bakes(ma);
 
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -1203,6 +1358,7 @@ bool BKE_paint_layers_mask_item_remove(Material &ma, MaterialPaintLayer *item)
   paint_layer_release_users(*item);
   BLI_remlink(&owner->mask_stack, item);
   BKE_material_paint_layer_free(item);
+  paint_layer_anchor_point_release_broken_bakes(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -1458,8 +1614,13 @@ bool BKE_paint_layers_mask_copy(Main &bmain,
   /* A row has one mask, so the copy replaces whatever the target had. The source's items are read
    * after that, which is safe because the two rows are different. */
   BKE_paint_layers_mask_remove(ma, &target);
+  PaintLayerMarkerMap marker_map;
   for (const MaterialPaintLayer &item : source.mask_stack) {
-    BLI_addtail(&target.mask_stack, paint_layer_item_duplicate(bmain, ma, item));
+    BLI_addtail(&target.mask_stack, paint_layer_item_duplicate(bmain, ma, item, &marker_map));
+  }
+  for (MaterialPaintLayer &item : target.mask_stack) {
+    paint_layer_anchor_point_refs_remap(item, marker_map);
+    paint_layer_anchor_point_foreign_ref_clear(ma, item);
   }
   BKE_paint_layers_tag_edited(ma);
   return true;
@@ -1510,6 +1671,7 @@ MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
   else {
     BLI_addtail(&target->effects, copy);
   }
+  paint_layer_anchor_point_foreign_ref_clear(ma, *copy);
   BKE_paint_layers_tag_edited(ma);
   return copy;
 }
@@ -1776,9 +1938,11 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     return nullptr;
   }
   /* A folder carries no maps of its own: it takes part in a channel through its children. A row
-   * that reads a material has none either: a record would be one the kind never reads. */
+   * that reads a material has none either: a record would be one the kind never reads. An Anchor
+   * Point marker has none; a reader keeps records as switches, like a filter does. */
   if (BKE_paint_layers_is_folder(*layer) ||
-      paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE))
+      paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE) ||
+      paint_layer_kind_is_anchor_point_marker(*layer))
   {
     return nullptr;
   }
@@ -2121,7 +2285,8 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
 bool BKE_paint_layers_row_is_paintable(const MaterialPaintLayer &row)
 {
   return !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE) &&
-         !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE);
+         !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) &&
+         !paint_layer_kind_reads_anchor_point(row) && !paint_layer_kind_is_anchor_point_marker(row);
 }
 
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer)
@@ -2401,7 +2566,9 @@ bool BKE_paint_layers_set_source(Material &ma,
   }
   /* Turning a folder into a layer would orphan what it holds, and ungrouping is the one way out. A
    * Material row has no map to turn into a colour or back: it is added as one, and removed. */
-  if (BKE_paint_layers_is_folder(*layer) || layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+  if (BKE_paint_layers_is_folder(*layer) || layer->source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
+      layer->source == MA_PAINT_LAYER_SOURCE_ANCHOR_POINT)
+  {
     return false;
   }
   if (layer->source == source) {
@@ -2692,6 +2859,40 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
         }
         for (const MaterialPaintLayer &item : layer.mask_stack) {
           check_kind(item, true);
+        }
+        /* A reader whose point is gone or built later takes part nowhere; say why instead of
+         * letting the row disappear silently. */
+        const auto check_anchor_point = [&](const MaterialPaintLayer &row, const bool is_owned) {
+          if (!paint_layer_kind_reads_anchor_point(row)) {
+            return;
+          }
+          PaintLayerAnchorPointIssue reason = paint_layer_anchor_point_resolve(ma, row).issue;
+          /* A slice with an object mask cannot be baked: in Always mode the reader has no way to
+           * show it, so say why instead of laying a slice that ignores the mask. */
+          if (reason == PaintLayerAnchorPointIssue::None &&
+              BKE_paint_layers_bake_mode_get(row) == MA_PAINT_LAYER_BAKE_ALWAYS &&
+              paint_layer_anchor_point_slice_has_object_mask(ma, row))
+          {
+            reason = PaintLayerAnchorPointIssue::ObjectMaskInSlice;
+          }
+          if (reason == PaintLayerAnchorPointIssue::None) {
+            return;
+          }
+          PaintLayersIssue issue;
+          issue.layer = layer.marker;
+          if (is_owned) {
+            issue.correction = row.marker;
+          }
+          issue.code = PaintLayersIssueCode::AnchorPointInvalid;
+          issue.text = paint_layer_anchor_point_issue_text(reason);
+          r_issues.append(issue);
+        };
+        check_anchor_point(layer, false);
+        for (const MaterialPaintLayer &effect : layer.effects) {
+          check_anchor_point(effect, true);
+        }
+        for (const MaterialPaintLayer &item : layer.mask_stack) {
+          check_anchor_point(item, true);
         }
         /* An enabled map-coverage item with no map takes part and matches nothing; say so, or the
          * whole mask seems to vanish for no reason. */

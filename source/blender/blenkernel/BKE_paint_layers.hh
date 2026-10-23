@@ -601,6 +601,167 @@ MaterialPaintLayer *BKE_paint_layers_correction_paste(Main &bmain,
  */
 MaterialPaintLayer *BKE_paint_layers_find(Material &ma, const bUUID &marker);
 
+/** The list an Anchor Point or reader is added to: a row of the stack, a row's effects or its mask. */
+enum class PaintLayerAnchorPointList : int8_t {
+  Row = 0,
+  Effects = 1,
+  MaskStack = 2,
+};
+
+/**
+ * Add an Anchor Point (\a reader false) or an Anchor Point Reader (\a reader true) to \a owner's
+ * effects or mask stack, or as a row of the stack. \a insert_after names the item the new one
+ * follows in its list, or null for the end. A reader keeps \a source as the point it reads.
+ *
+ * \return the new row, or null when \a owner is not part of \a ma or the target list cannot hold it.
+ */
+MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
+                                                      MaterialPaintLayer *owner,
+                                                      PaintLayerAnchorPointList list,
+                                                      MaterialPaintLayer *insert_after,
+                                                      bool reader,
+                                                      const char *name,
+                                                      const bUUID &source);
+
+/* -------------------------------------------------------------------- */
+/** \name Anchor Point
+ *
+ * A marker row inside a row's effects or mask stack publishes a slice of that row: its content
+ * after the corrections above the marker, or its mask after the mask items above it. An Anchor
+ * Point Reader lays that slice. The rules live in `paint_layers_anchor_point.cc`; the generator,
+ * the CPU composite, the bake and the GPU all resolve a reference through the same functions here,
+ * so they cannot disagree about whether a reader takes part or what it reads.
+ * \{ */
+
+/** How many Anchor Points and how many readers a material may use in the live path. */
+constexpr int PAINT_LAYER_ANCHOR_POINT_LIMIT = 12;
+/** How deep a chain of readers over readers may nest in the live path. */
+constexpr int PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX = 3;
+
+/** What a marker publishes, decided by the list it sits in. */
+enum class PaintLayerAnchorPointTarget : int8_t {
+  None = 0,
+  /** The row's content: colour, coverage and content alpha after the corrections above it. */
+  Content = 1,
+  /** The row's mask: one scalar after the mask items above it, the base mask included. */
+  Mask = 2,
+};
+
+/** Why a reader does not lay the slice it names. */
+enum class PaintLayerAnchorPointIssue : int8_t {
+  None = 0,
+  /** No row of the material carries the marker, or no source is set. */
+  NotFound = 1,
+  /** The point is built after the reader. */
+  Forward = 2,
+  /** A correction of a row reads a mask point of that same row; the row's effects are built first. */
+  OrderInRow = 3,
+  /** The readers form a loop. */
+  Cycle = 4,
+  /** The slice contains a row with an active object mask; it cannot be baked. */
+  ObjectMaskInSlice = 5,
+  /** A mask slice in a UDIM material. */
+  UdimUnsupported = 6,
+  /** The chain of readers is deeper than #PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX. */
+  ChainTooDeep = 7,
+  /** The material has more points or readers than the live path is limited to. */
+  LimitExceeded = 8,
+};
+
+/** A short human-readable reason for \a issue; static storage. */
+const char *paint_layer_anchor_point_issue_text(PaintLayerAnchorPointIssue issue);
+
+/** The result of resolving a reader's reference. */
+struct PaintLayerAnchorPointRef {
+  /** The marker that publishes the slice, or null when the reader names none or it is gone. */
+  const MaterialPaintLayer *point = nullptr;
+  /** The row the marker sits in, or null. */
+  const MaterialPaintLayer *source_row = nullptr;
+  /** Content or mask, from the list the marker sits in. */
+  PaintLayerAnchorPointTarget target = PaintLayerAnchorPointTarget::None;
+  /** Why there is no slice, or #PaintLayerAnchorPointIssue::None. */
+  PaintLayerAnchorPointIssue issue = PaintLayerAnchorPointIssue::NotFound;
+  /** The point's position in the generator's build order, or -1. */
+  int rank = -1;
+};
+
+/**
+ * Resolve the reference of \a reader: the marker it names, the row and list the marker sits in,
+ * and whether the reference is allowed. The one place the order rules are written.
+ */
+PaintLayerAnchorPointRef paint_layer_anchor_point_resolve(const Material &ma,
+                                                          const MaterialPaintLayer &reader);
+
+/**
+ * The position of \a marker in the order the generator builds the stack: bottom-up, a folder's
+ * children before the folder, a Pass Through folder expanded in place, and within a row its
+ * effects before its mask stack. -1 when no row carries the marker.
+ */
+int paint_layer_anchor_point_rank(const Material &ma, const bUUID &marker);
+
+/**
+ * Whether \a reader takes part in \a channel through the slice it names: the reference resolves
+ * and the slice supplies the channel. A mask slice read as content is a grey in any colour channel
+ * but Normal, which has no grey.
+ */
+bool paint_layer_row_reads_anchor_point(const Material &ma,
+                                        const MaterialPaintLayer &reader,
+                                        int channel);
+
+/** The readers of the material that name the point \a point, in any role and at any depth. */
+blender::Vector<const MaterialPaintLayer *> paint_layer_anchor_point_readers(
+    const Material &ma, const bUUID &point);
+
+/** Whether the row of \a marker is an Anchor Point with at least one reader. */
+bool paint_layer_anchor_point_is_read(const Material &ma, const bUUID &marker);
+
+/**
+ * Whether the row \a layer is a point that keeps its row live: the bake must not substitute the
+ * row (or any folder above it) while a point inside it is read, or the point would disappear.
+ */
+bool paint_layer_anchor_point_blocks_bake(const Material &ma, const MaterialPaintLayer &layer);
+
+/** The number of points and the number of readers \a ma currently has. */
+void paint_layer_anchor_point_counts(const Material &ma, int &r_points, int &r_readers);
+
+/** Whether the slice of \a reader would contain a row with an active object mask. */
+bool paint_layer_anchor_point_slice_has_object_mask(const Material &ma,
+                                                    const MaterialPaintLayer &reader);
+
+/** How many readers deep the chain of \a reader is: 1 for a reader without nested readers. */
+int paint_layer_anchor_point_chain_depth(const Material &ma, const MaterialPaintLayer &reader);
+
+/**
+ * Whether \a reader may be pointed at \a marker: the marker is a point of this material that is
+ * built before the reader, readable from the reader's list, and creates no loop or chain deeper
+ * than #PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX. The choices the UI offers.
+ */
+bool paint_layer_anchor_point_source_valid(const Material &ma,
+                                           const MaterialPaintLayer &reader,
+                                           const bUUID &marker);
+
+/** Whether \a row is the inert Anchor Point marker (its kind, not a marker field). */
+bool BKE_paint_layers_is_anchor_point(const MaterialPaintLayer &row);
+
+/** Whether \a row reads the slice an Anchor Point publishes. */
+bool BKE_paint_layers_reads_anchor_point(const MaterialPaintLayer &row);
+
+/** Set the marker \a reader reads; nil clears it. Refused for a row that is not a reader. */
+bool BKE_paint_layers_anchor_point_source_set(Material &ma,
+                                              MaterialPaintLayer *reader,
+                                              const bUUID &marker);
+
+/** The marker \a reader reads, nil for every row that is not a reader. */
+bUUID BKE_paint_layers_anchor_point_source_get(const MaterialPaintLayer &reader);
+
+/**
+ * Whether \a layer may carry an object mask: only a row of the stack (never a content correction
+ * or a mask item), since the slice's object-mask bounds are read from rows alone.
+ */
+bool BKE_paint_layers_object_mask_role_allowed(const MaterialPaintLayer &layer);
+
+/** \} */
+
 /** Set the active marker of \a ma; nil clears it. */
 void BKE_paint_layers_active_set(Material &ma, const bUUID &marker);
 
@@ -1328,6 +1489,12 @@ enum class PaintLayersIssueCode : int8_t {
    * no-op; the row may still take part through other channels that carry maps or values.
    */
   FillWithoutBaseColor = 5,
+  /**
+   * A row names an Anchor Point that cannot give it a slice: the point is gone, is built after the
+   * reader, sits in a list the reader cannot read from its row, forms a loop, or the slice cannot
+   * be baked. The row takes part nowhere; the text says which rule failed.
+   */
+  AnchorPointInvalid = 6,
 };
 
 /** One entry #BKE_paint_layers_issues_get reports. */

@@ -98,7 +98,8 @@ bool BKE_paint_layers_composite_image(const Material &ma,
  */
 bool BKE_paint_layers_mask_items(const Material &ma,
                                  const MaterialPaintLayer &layer,
-                                 Vector<PaintMaterialCompositeMaskItem> &r_items);
+                                 Vector<PaintMaterialCompositeMaskItem> &r_items,
+                                 const bUUID *stop_before = nullptr);
 
 /**
  * A CPU sampler of one row's effective mask, for the paint strokes.
@@ -115,7 +116,9 @@ bool BKE_paint_layers_mask_items(const Material &ma,
  */
 class PaintLayersMaskSampler {
  public:
-  PaintLayersMaskSampler(const Material &ma, const MaterialPaintLayer &layer);
+  PaintLayersMaskSampler(const Material &ma,
+                         const MaterialPaintLayer &layer,
+                         const bUUID *stop_before = nullptr);
   ~PaintLayersMaskSampler();
 
   PaintLayersMaskSampler(const PaintLayersMaskSampler &) = delete;

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdio>
+#include <memory>
 
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
@@ -42,6 +43,7 @@ namespace blender {
 
 struct Image;
 struct ImageUser;
+struct ImBuf;
 struct Main;
 struct MaterialPaintLayerBake;
 struct bNode;
@@ -150,6 +152,37 @@ PaintLayerMaterialCoverage paint_layer_material_coverage_source(
  * generator and the CPU composite.
  */
 bool paint_layer_row_reads_source(const Material &ma, const MaterialPaintLayer &row, int channel);
+
+/**
+ * A hash of everything a slice is made from: the source row, the corrections or mask items above
+ * the marker, values, settings, mappings and the images by session uid. No pixels: an edit to a
+ * map does not change it, a change of what the slice is made of does.
+ */
+uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
+                                             const MaterialPaintLayer &reader,
+                                             int channel);
+
+/**
+ * Render the slice \a reader names in \a channel into two buffers: the straight colour with its
+ * content alpha, and the coverage it lays. A mask point read as content gives a grey with alpha
+ * one and full coverage. The buffers are in the source row's pixel space, scene linear.
+ *
+ * The returned pointers share the buffers with the slice cache: the cache may drop its reference
+ * at any time, and the caller's keeps the pixels alive for as long as it holds them.
+ */
+bool BKE_paint_layers_slice_render(const Material &ma,
+                                   const MaterialPaintLayer &reader,
+                                   int channel,
+                                   std::shared_ptr<ImBuf> *r_color,
+                                   std::shared_ptr<ImBuf> *r_coverage);
+
+/**
+ * The maps the slice \a reader reads was rendered from, for the composite cache to subscribe to:
+ * the slice hash holds no pixels, so a stroke on the source reaches the cache through these.
+ */
+void BKE_paint_layers_anchor_point_slice_images(const Material &ma,
+                                                const MaterialPaintLayer &reader,
+                                                blender::Vector<Image *> &r_images);
 
 /**
  * Whether the content correction \a effect, a correction that reads a material, lays anything in
@@ -323,6 +356,10 @@ inline bool paint_layer_effect_lays(const Material &ma,
   if (paint_layer_channel_filtered(ma, channel)) {
     return false;
   }
+  /* A correction that reads an Anchor Point lays the slice it names, exactly as a row does. */
+  if (paint_layer_kind_reads_anchor_point(effect)) {
+    return paint_layer_row_reads_anchor_point(ma, effect, channel);
+  }
   /* A correction that reads a material has no records: what it lays is what its source supplies.
    */
   if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
@@ -420,7 +457,8 @@ inline bool paint_layer_row_participates(const Material &ma,
   return paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) ||
          paint_layer_effects_lay(ma, layer, channel) ||
          paint_layer_adjustment_acts(ma, layer, channel) ||
-         paint_layer_row_reads_source(ma, layer, channel);
+         paint_layer_row_reads_source(ma, layer, channel) ||
+         paint_layer_row_reads_anchor_point(ma, layer, channel);
 }
 
 /**
@@ -435,6 +473,7 @@ inline bool paint_layer_row_empty_base(const Material &ma,
 {
   return !paint_layer_channel_contributes(ma, layer, paint_layer_channel_find(layer, channel)) &&
          !paint_layer_row_reads_source(ma, layer, channel) &&
+         !paint_layer_row_reads_anchor_point(ma, layer, channel) &&
          paint_layer_effects_lay(ma, layer, channel);
 }
 
@@ -475,6 +514,9 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
  */
 inline bool paint_layer_mask_item_lays(const Material &ma, const MaterialPaintLayer &item)
 {
+  if (paint_layer_kind_reads_anchor_point(item)) {
+    return paint_layer_row_reads_anchor_point(ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  }
   if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
     return paint_layer_mask_reads_source(ma, item);
   }
@@ -628,6 +670,14 @@ void paint_layers_blend_tier_prune(Material &ma);
 
 /** The cap on the nodes an AUTO row may cost live; a row that would add more is baked. */
 constexpr int PAINT_LAYERS_AUTO_BAKE_NODES = 36;
+
+/**
+ * Whether the Anchor Point Reader \a reader takes its slice from the bake in its mode right now:
+ * Never stays live, Always bakes, and Auto bakes only over the live limits or with an object mask
+ * in the slice (which Auto keeps live, so the mask follows each object).
+ */
+bool paint_layer_anchor_point_reader_baked(const Material &ma,
+                                           const MaterialPaintLayer &reader);
 
 /** What a child whose valid bake stands in costs its parent's weight: one map, like one channel. */
 constexpr int PAINT_LAYERS_BAKED_CHILD_WEIGHT = 6;

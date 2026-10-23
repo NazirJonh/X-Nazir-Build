@@ -987,6 +987,19 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     r_factor[i] = content;
   }
 
+  /* An Anchor Point slice carries its coverage beside the colour: the content the slice covers, not
+   * the alpha of its colour buffer (which is the content alpha). */
+  Vector<float> anchor_coverage_storage;
+  if (layer.anchor_point_coverage != nullptr) {
+    anchor_coverage_storage.resize(count * 4);
+    composite_decode_tile(
+        layer.anchor_point_coverage.get(), nullptr, tile, anchor_coverage_storage.data());
+    for (int64_t i = 0; i < count; i++) {
+      const float *c = anchor_coverage_storage.data() + i * 4;
+      r_factor[i] = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
+    }
+  }
+
   /* The content corrections adjust the colour the row paints with, and the coverage it lays with.
    * With `a` the coverage so far and `f = opacity * alpha(map)`:
    *   c_eff = lerp(c, blend(S, c), a)   (where the row covers nothing, the correction is its colour)
@@ -1012,10 +1025,27 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       }
       continue;
     }
-    if ((correction.ibuf == nullptr && !correction.has_constant_color) ||
+    if ((correction.ibuf == nullptr && !correction.has_constant_color &&
+         correction.anchor_point_slice == nullptr) ||
         correction.opacity <= 0.0f)
     {
       continue;
+    }
+    Vector<float> anchor_slice_storage;
+    Vector<float> anchor_coverage_tile;
+    const float *anchor_slice = nullptr;
+    const float *anchor_coverage = nullptr;
+    if (correction.anchor_point_slice != nullptr) {
+      anchor_slice_storage.resize(count * 4);
+      composite_decode_tile(
+          correction.anchor_point_slice, nullptr, tile, anchor_slice_storage.data());
+      anchor_slice = anchor_slice_storage.data();
+      if (correction.anchor_point_coverage != nullptr) {
+        anchor_coverage_tile.resize(count * 4);
+        composite_decode_tile(
+            correction.anchor_point_coverage, nullptr, tile, anchor_coverage_tile.data());
+        anchor_coverage = anchor_coverage_tile.data();
+      }
     }
     if (correction.ibuf != nullptr) {
       correction_storage.resize(count * 4);
@@ -1026,11 +1056,18 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       /* A flat colour covers by its opacity alone: its alpha is content alpha, which a Fill row's
        * is too, and is no part of the factor. */
       const float *c = (correction.ibuf != nullptr) ? correction_storage.data() + i * 4 :
-                                                      correction.constant_color;
+                      (anchor_slice != nullptr)   ? anchor_slice + i * 4 :
+                                                    correction.constant_color;
       float *s = r_color + i * 4;
-      const float f = clamp_f(correction.opacity * (correction.ibuf != nullptr ? c[3] : 1.0f),
-                              0.0f,
-                              1.0f);
+      float correction_factor = 1.0f;
+      if (correction.ibuf != nullptr) {
+        correction_factor = c[3];
+      }
+      else if (anchor_coverage != nullptr) {
+        const float *cov = anchor_coverage + i * 4;
+        correction_factor = (cov[0] + cov[1] + cov[2]) / 3.0f;
+      }
+      const float f = clamp_f(correction.opacity * correction_factor, 0.0f, 1.0f);
       const float a = clamp_f(r_factor[i], 0.0f, 1.0f);
 
       float blended[4] = {s[0], s[1], s[2], s[3]};
@@ -1231,6 +1268,11 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
   else if (!composite_layer_has_content(layer, false)) {
     return false;
   }
+  if (layer.anchor_point_coverage != nullptr &&
+      !composite_ibuf_is_rgba(layer.anchor_point_coverage.get(), width, height))
+  {
+    return false;
+  }
   if (layer.mask_ibuf != nullptr && !composite_mask_ibuf_is_valid(layer.mask_ibuf, width, height)) {
     return false;
   }
@@ -1245,9 +1287,24 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
     {
       return false;
     }
+    if (item.anchor_point_slice != nullptr &&
+        !composite_mask_ibuf_is_valid(item.anchor_point_slice, width, height))
+    {
+      return false;
+    }
   }
   for (const PaintMaterialCompositeCorrectionBuffer &correction : layer.content_corrections) {
     if (correction.ibuf != nullptr && !composite_ibuf_is_rgba(correction.ibuf, width, height)) {
+      return false;
+    }
+    if (correction.anchor_point_slice != nullptr &&
+        !composite_ibuf_is_rgba(correction.anchor_point_slice, width, height))
+    {
+      return false;
+    }
+    if (correction.anchor_point_coverage != nullptr &&
+        !composite_ibuf_is_rgba(correction.anchor_point_coverage, width, height))
+    {
       return false;
     }
   }
@@ -1934,7 +1991,9 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       layer.children.assign(std::make_move_iterator(children.begin()),
                             std::make_move_iterator(children.end()));
     }
-    else if (!composite_layer_has_content(image_layer, image_layer.color_image != nullptr)) {
+    else if (!composite_layer_has_content(image_layer, image_layer.color_image != nullptr) &&
+             image_layer.anchor_point_color == nullptr)
+    {
       continue;
     }
     if (image_layer.color_image != nullptr) {
@@ -1947,6 +2006,12 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       /* The buffer's own colorspace, not the Image setting: the two can disagree, and the
        * evaluator has to decode what it is actually handed. */
       layer.color_colorspace_name = composite_buffer_colorspace_name(layer.color_ibuf);
+    }
+    else if (image_layer.anchor_point_color != nullptr) {
+      /* A slice is already in canvas space and scene linear: read it as it is, with no mapping and
+       * no colorspace conversion. The cache owns the buffer, so it is not locked or freed here. */
+      layer.color_ibuf = image_layer.anchor_point_color.get();
+      layer.color_colorspace_name = nullptr;
     }
     if (image_layer.mask_image != nullptr) {
       layer.mask_ibuf = composite_image_acquire(
@@ -1985,6 +2050,11 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         composite_mapped_remap(buffer.ibuf, item.mapping, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
+      else if (item.anchor_point_slice != nullptr) {
+        /* A slice is already in canvas space and scene linear; the cache owns the buffer. */
+        buffer.ibuf = item.anchor_point_slice.get();
+        buffer.colorspace_name = nullptr;
+      }
       buffer.map_coverage = item.map_coverage;
       buffer.coverage_tolerance = item.coverage_tolerance;
       buffer.coverage_softness = item.coverage_softness;
@@ -2005,7 +2075,9 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       layer.mask_items.append(buffer);
     }
     for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
-      if (correction.image == nullptr && !correction.has_constant_color && correction.filter == 0) {
+      if (correction.image == nullptr && !correction.has_constant_color && correction.filter == 0 &&
+          correction.anchor_point_slice == nullptr)
+      {
         continue;
       }
       PaintMaterialCompositeCorrectionBuffer buffer;
@@ -2015,7 +2087,12 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
                 std::begin(buffer.filter_params));
       buffer.blend = correction.blend;
       buffer.opacity = correction.opacity;
-      if (correction.image != nullptr) {
+      if (correction.anchor_point_slice != nullptr) {
+        /* A slice is already in canvas space and scene linear; the cache owns both buffers. */
+        buffer.anchor_point_slice = correction.anchor_point_slice.get();
+        buffer.anchor_point_coverage = correction.anchor_point_coverage.get();
+      }
+      else if (correction.image != nullptr) {
         buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
         if (buffer.ibuf == nullptr) {
           return false;
@@ -2294,6 +2371,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
                             layer.constant_color[3]);
     hash = get_default_hash(hash, layer.color_alpha_coverage, layer.is_folder);
     hash = get_default_hash(hash, layer.empty_base, layer.tracks_content_alpha);
+    /* A slice has no Image to name its contents: the description hash keeps a stale composite from
+     * surviving an edit above the marker. */
+    hash = get_default_hash(hash, layer.anchor_point_hash);
     /* An adjustment is its filter and what it was told. */
     hash = get_default_hash(hash, int(layer.adjustment_filter));
     for (const float param : layer.adjustment_params) {
@@ -2313,6 +2393,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
       for (const float param : correction.filter_params) {
         hash = get_default_hash(hash, param);
       }
+      hash = get_default_hash(hash, correction.anchor_point_hash);
       hash = composite_mapping_hash(get_default_hash(hash, correction.mapping.enabled),
                                     correction.mapping);
       /* A flat colour is not backed by an image, so its value is hashed like a row's. */
@@ -2337,6 +2418,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash = get_default_hash(
           hash, item.image != nullptr ? item.image->id.session_uid : 0, item.opacity);
       hash = get_default_hash(hash, item.constant_gray, int(item.blend), item.invert);
+      hash = get_default_hash(hash, item.anchor_point_hash);
       hash = get_default_hash(hash, int(item.filter));
       for (const float param : item.filter_params) {
         hash = get_default_hash(hash, param);
@@ -2498,13 +2580,18 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     /* Nulls and duplicates are the poll's business, not this function's. */
     r_images.append(layer.color_image);
     r_images.append(layer.mask_image);
+    /* An Anchor Point slice carries no pixels in the hash; a stroke on its source reaches the cache
+     * through the source's maps. */
+    r_images.extend(layer.anchor_point_images);
     for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
       r_images.append(item.image);
+      r_images.extend(item.anchor_point_images);
       /* A coverage operator reads its own map, so an edit to it must be seen by the cache too. */
       r_images.append(item.coverage_image);
     }
     for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
       r_images.append(correction.image);
+      r_images.extend(correction.anchor_point_images);
     }
     if (layer.is_folder) {
       /* The images a folder holds are read through it, so a stroke deep inside still reaches the

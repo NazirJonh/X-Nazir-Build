@@ -264,6 +264,7 @@ set(SRC
   intern/paint_brush_group_override.cc
   intern/paint_canvas.cc
   intern/paint_layers/paint_layers.cc
+  intern/paint_layers/paint_layers_anchor_point.cc
   intern/paint_layers/paint_layers_bake.cc
   intern/paint_layers/paint_layers_blend_tier.cc
   intern/paint_layers/paint_layers_kind.cc
@@ -861,6 +862,7 @@ if(WITH_GTESTS)
     intern/node_socket_value_iter_test.cc
     intern/paint_layers/tests/brush_layer_source_test.cc
     intern/paint_layers/tests/paint_layers_bake_test.cc
+    intern/paint_layers/tests/paint_layers_anchor_point_test.cc
     intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc

@@ -66,9 +66,47 @@ std::string BKE_paint_layers_unique_default_name(const Material &ma, const Strin
 /** \name Add
  * \{ */
 
-MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
-                                                     const PaintLayerAddParams &params)
+static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
+                                                             const PaintLayerAddParams &params)
 {
+  if (params.kind == PaintLayerAddKind::AnchorPoint ||
+      params.kind == PaintLayerAddKind::AnchorPointReader)
+  {
+    const bool reader = params.kind == PaintLayerAddKind::AnchorPointReader;
+    /* Aimed at a correction or mask item, the Add means the row it hangs on. A point added as a
+     * row of the stack has no owner row of its own. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+      else if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, *owner)) {
+        owner = item_parent;
+      }
+    }
+    if (params.anchor_point_list != PaintLayerAnchorPointList::Row) {
+      if (owner == nullptr) {
+        return nullptr;
+      }
+      if (params.anchor_point_list == PaintLayerAnchorPointList::MaskStack &&
+          BKE_paint_layers_mask_base(*owner) == nullptr &&
+          BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr)
+      {
+        return nullptr;
+      }
+    }
+    const char *name_base = reader ? "Anchor Point Reader" : "Anchor Point";
+    const std::string name = (params.name != nullptr) ?
+                                 std::string(params.name) :
+                                 BKE_paint_layers_unique_default_name(ma, name_base);
+    return BKE_paint_layers_anchor_point_add(ma,
+                                             owner,
+                                             params.anchor_point_list,
+                                             params.insert_after,
+                                             reader,
+                                             name.c_str(),
+                                             params.anchor_point_source);
+  }
   if (params.kind == PaintLayerAddKind::Correction ||
       params.kind == PaintLayerAddKind::CorrectionFill)
   {
@@ -352,6 +390,35 @@ MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
   BKE_paint_layers_default_channels_apply(ma, *created);
   if (params.kind == PaintLayerAddKind::Fill && params.fill_color != nullptr) {
     BKE_paint_layers_set_fill_color(ma, created, params.fill_color);
+  }
+  return created;
+}
+
+MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
+                                                     const PaintLayerAddParams &params)
+{
+  MaterialPaintLayer *created = paint_layers_add_with_policy_impl(ma, params);
+  if (created == nullptr || params.anchor == nullptr ||
+      !paint_layer_kind_is_anchor_point_marker(*params.anchor) ||
+      paint_layer_kind_is_anchor_point_marker(*created) || created->role == MA_PAINT_LAYER_ROLE_LAYER)
+  {
+    return created;
+  }
+  /* An Add aimed at an Anchor Point means a correction before it: a point reads what is above it
+   * in its list, so a correction added after it would be left out of the slice the user is
+   * looking at. The new item goes to the end of its list; move it in front of the point when they
+   * share one. */
+  ListBaseT<MaterialPaintLayer> *list = nullptr;
+  if (MaterialPaintLayer *owner = BKE_paint_layers_correction_owner(ma, *params.anchor)) {
+    list = &owner->effects;
+  }
+  else if (MaterialPaintLayer *mask_owner = BKE_paint_layers_mask_item_owner(ma, *params.anchor)) {
+    list = &mask_owner->mask_stack;
+  }
+  if (list != nullptr && BLI_findindex(list, created) != -1) {
+    BLI_remlink(list, created);
+    BLI_insertlinkbefore(list, params.anchor, created);
+    BKE_paint_layers_tag_edited(ma);
   }
   return created;
 }

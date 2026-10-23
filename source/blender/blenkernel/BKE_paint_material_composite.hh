@@ -27,6 +27,7 @@
  */
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "BLI_span.hh"
@@ -183,6 +184,15 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   /** The adjustment's parameters in its kind's schema order. */
   float adjustment_params[8] = {};
   /**
+   * An Anchor Point slice laid as a row: straight colour and content alpha, plus the coverage it
+   * lays (a grey in RGB). Shared with the anchor slice cache, so the buffers live as long as this
+   * description does, whatever the cache drops meanwhile; null for every other row.
+   */
+  std::shared_ptr<ImBuf> anchor_point_color;
+  std::shared_ptr<ImBuf> anchor_point_coverage;
+  /** A description hash of the slice, folded into the stack hash in place of an Image uid. */
+  uint64_t anchor_point_hash = 0;
+  /**
    * The row's UV mapping, applied to its own map while the buffers are acquired. Shared by the
    * image layer and its buffer twin like the rest, though only the image layer's is read.
    */
@@ -211,6 +221,15 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   float opacity = 1.0f;
   /** The correction's UV mapping, applied to its map while the buffers are acquired. */
   PaintMaterialCompositeMapping mapping;
+  /**
+   * An Anchor Point slice read as a correction: straight colour and content alpha, with the
+   * coverage it lays in #anchor_point_coverage. Shared with the anchor slice cache; null otherwise.
+   */
+  std::shared_ptr<ImBuf> anchor_point_slice;
+  std::shared_ptr<ImBuf> anchor_point_coverage;
+  uint64_t anchor_point_hash = 0;
+  /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
+  Vector<Image *> anchor_point_images;
 };
 
 /** A correction as the evaluator reads it: a buffer, or a flat colour when #ibuf is null. */
@@ -223,6 +242,9 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   const char *colorspace_name = nullptr;
   CompositeBlend blend = CompositeBlend::Mix;
   float opacity = 1.0f;
+  /** Borrowed from #PaintMaterialCompositeCorrection::anchor_point_slice, which keeps them alive. */
+  ImBuf *anchor_point_slice = nullptr;
+  ImBuf *anchor_point_coverage = nullptr;
 };
 
 /**
@@ -290,10 +312,24 @@ struct PaintMaterialCompositeMaskItem {
   Vector<PaintMaterialCompositeIdColor> coverage_colors;
   /** The operator's UV mapping, applied to its map while the buffers are acquired. */
   PaintMaterialCompositeMapping coverage_mapping;
+  /**
+   * An Anchor Point slice read as a mask item: the scalar slice as a grey RGBA buffer, shared with
+   * the anchor slice cache. Null for every other item.
+   */
+  std::shared_ptr<ImBuf> anchor_point_slice;
+  uint64_t anchor_point_hash = 0;
+  /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
+  Vector<Image *> anchor_point_images;
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
 struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
+  /**
+   * The maps an Anchor Point slice laid by this layer's reader (the layer itself, its corrections
+   * or its mask items) was rendered from. The slice hash does not hold pixels, so the cache has to
+   * subscribe to these to see a stroke on the source.
+   */
+  Vector<Image *> anchor_point_images;
   /**
    * The row's UV mapping cuts away part of the canvas, and its coverage has to follow: a Material
    * row covers by its source's transparency, not by the alpha of its map, so a map texel that a
@@ -346,6 +382,8 @@ struct PaintMaterialCompositeMaskBuffer {
   /** See #PaintMaterialCompositeMaskItem::coverage_output. */
   float coverage_output = 1.0f;
   Vector<PaintMaterialCompositeIdColor> coverage_colors;
+  /** Borrowed from #PaintMaterialCompositeMaskItem::anchor_point_slice, which keeps it alive. */
+  ImBuf *anchor_point_slice = nullptr;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */

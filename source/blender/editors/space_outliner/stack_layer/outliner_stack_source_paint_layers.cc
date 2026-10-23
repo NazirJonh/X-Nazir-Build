@@ -396,6 +396,20 @@ StackRow paint_correction_row_build(const Material &material,
              from_material ? ICON_MATERIAL :
              fill          ? ICON_GP_DRAW_FILL :
                              ICON_BRUSH_DATA;
+  if (BKE_paint_layers_is_anchor_point(effect)) {
+    /* A marker is a place, not a correction: it publishes a slice and has no opacity, blend or map
+     * of its own, so it is a bare compact row with the icon of its Add entry. */
+    row.name = effect.name[0] != '\0' ? effect.name : "Anchor Point";
+    row.icon = ICON_EMPTY_AXIS;
+    row.compact = true;
+    paint_issue_slots_append(issues, owner_marker, effect.marker, row);
+    return row;
+  }
+  const bool reads_anchor_point = BKE_paint_layers_reads_anchor_point(effect);
+  if (reads_anchor_point) {
+    row.name = effect.name[0] != '\0' ? effect.name : "Anchor Point Reader";
+    row.icon = ICON_LINKED;
+  }
   /* A correction reads as a setting of its layer rather than as a member of the stack. */
   row.compact = true;
 
@@ -414,9 +428,9 @@ StackRow paint_correction_row_build(const Material &material,
   }
   /* The mode column edits the blend of this channel alone, like the value column above. */
   paint_row_mode_target_set(row, material, effect, channel);
-  if (from_material) {
+  if (from_material || reads_anchor_point) {
     /* It shows what its source shows and owns no map: nothing to preview or switch the brush to,
-     * as for a Material layer. */
+     * as for a Material layer. A reader shows the slice its point publishes. */
     paint_issue_slots_append(issues, owner_marker, effect.marker, row);
     return row;
   }
@@ -485,6 +499,17 @@ StackRow paint_mask_item_row_build(const Material &material,
                  (from_material ? "Material Mask" : (fill ? "Mask Fill" : "Mask Paint"));
   row.name_buffer = const_cast<char *>(item.name);
   row.icon = from_material ? ICON_MATERIAL : (fill ? ICON_GP_DRAW_FILL : ICON_MOD_MASK);
+  if (BKE_paint_layers_is_anchor_point(item)) {
+    row.name = item.name[0] != '\0' ? item.name : "Anchor Point";
+    row.icon = ICON_EMPTY_AXIS;
+    row.compact = true;
+    return row;
+  }
+  const bool reads_anchor_point = BKE_paint_layers_reads_anchor_point(item);
+  if (reads_anchor_point) {
+    row.name = item.name[0] != '\0' ? item.name : "Anchor Point Reader";
+    row.icon = ICON_LINKED;
+  }
   /* A correction reads as a setting of its mask rather than as a member of the stack. */
   row.compact = true;
 
@@ -510,8 +535,9 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.mode_ptr = item_ptr;
   row.mode_prop = "blend_type";
   row.mode_inherited = (item.blend == MA_PAINT_LAYER_BLEND_MIX);
-  if (from_material) {
-    /* Its grey is its source's Base Color and it owns no map: nothing to preview or paint. */
+  if (from_material || reads_anchor_point) {
+    /* Its grey is its source's Base Color (or the slice it reads) and it owns no map: nothing to
+     * preview or paint. */
     return row;
   }
 
@@ -1418,6 +1444,21 @@ class PaintLayersStackSource final : public StackSource,
     mask_material.source_browse_prop = "paint_layer_add_material_mask_correction";
     mask_material.is_effect = true;
     r_kinds.append(mask_material);
+    /* Anchor Points last of all, so no index above moves: the marker and its reader. Where they
+     * land is the list the active row belongs to, read back by #row_add. */
+    StackAddKindInfo anchor_point{"ANCHOR_POINT",
+                                  N_("Anchor Point"),
+                                  "Publish the content or mask of the active layer up to this "
+                                  "place, for an Anchor Point Reader",
+                                  ICON_EMPTY_AXIS};
+    anchor_point.is_effect = true;
+    r_kinds.append(anchor_point);
+    StackAddKindInfo anchor_point_reader{"ANCHOR_POINT_READER",
+                                         N_("Anchor Point Reader"),
+                                         "Lay the slice an Anchor Point of this material publishes",
+                                         ICON_LINKED};
+    anchor_point_reader.is_effect = true;
+    r_kinds.append(anchor_point_reader);
   }
 
   int row_add(bContext &C,
@@ -1436,9 +1477,13 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int material_kind = coverage_first_kind + coverage_num;
     constexpr int material_correction_kind = material_kind + 1;
     constexpr int mask_material_kind = material_correction_kind + 1;
-    if (kind < 0 || kind > mask_material_kind || !this->is_editable(owner)) {
+    constexpr int anchor_point_kind = mask_material_kind + 1;
+    constexpr int anchor_point_reader_kind = anchor_point_kind + 1;
+    if (kind < 0 || kind > anchor_point_reader_kind || !this->is_editable(owner)) {
       return -1;
     }
+    const bool is_anchor_point = kind == anchor_point_kind;
+    const bool is_anchor_point_reader = kind == anchor_point_reader_kind;
     const bool is_material = kind == material_kind;
     const bool is_material_correction = kind == material_correction_kind;
     const bool is_mask_material = kind == mask_material_kind;
@@ -1478,7 +1523,9 @@ class PaintLayersStackSource final : public StackSource,
       /* Each Material row reads a material of its own, so its settings are its own. */
       params.bmain = CTX_data_main(&C);
     }
-    params.kind = is_material            ? PaintLayerAddKind::Material :
+    params.kind = is_anchor_point          ? PaintLayerAddKind::AnchorPoint :
+                  is_anchor_point_reader   ? PaintLayerAddKind::AnchorPointReader :
+                  is_material            ? PaintLayerAddKind::Material :
                   is_material_correction ? PaintLayerAddKind::CorrectionMaterial :
                   is_mask_material       ? PaintLayerAddKind::MaskCorrectionMaterial :
                   is_mask_filter         ? PaintLayerAddKind::MaskFilter :
@@ -1491,12 +1538,34 @@ class PaintLayersStackSource final : public StackSource,
                   (kind == 5)            ? PaintLayerAddKind::MaskCorrection :
                   (kind == 6)            ? PaintLayerAddKind::MaskCorrectionFill :
                                            PaintLayerAddKind::Paint;
+    if ((is_anchor_point || is_anchor_point_reader) && anchor == nullptr) {
+      /* No row was named: the point belongs to the row being worked on. */
+      anchor = BKE_paint_layers_active_layer_get(material);
+    }
+    /* Where the point goes is the list the active row belongs to: a row's mask when a mask item is
+     * active, otherwise its effects. A reader is a correction too, so its opacity and blend are
+     * edited like those of any other. */
+    if (is_anchor_point || is_anchor_point_reader) {
+      PaintLayerAnchorPointList list = PaintLayerAnchorPointList::Effects;
+      if (anchor != nullptr && anchor->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+        list = PaintLayerAnchorPointList::MaskStack;
+      }
+      params.anchor_point_list = list;
+      /* Aimed at a layer, the point goes to the end of its list; only an item already in the list
+       * can be followed. */
+      params.insert_after = (list == PaintLayerAnchorPointList::Row || anchor == nullptr ||
+                             anchor->role == MA_PAINT_LAYER_ROLE_LAYER) ?
+                                nullptr :
+                                anchor;
+    }
+    const bool anchor_owned = (is_anchor_point || is_anchor_point_reader) &&
+                              params.anchor_point_list != PaintLayerAnchorPointList::Row;
     const bool is_mask_correction = ELEM(params.kind,
                                          PaintLayerAddKind::MaskCorrection,
                                          PaintLayerAddKind::MaskCorrectionFill,
                                          PaintLayerAddKind::MaskCorrectionMaterial,
                                          PaintLayerAddKind::MaskFilter);
-    const bool is_correction = is_mask_correction || is_filter ||
+    const bool is_correction = is_mask_correction || is_filter || anchor_owned ||
                                ELEM(params.kind,
                                     PaintLayerAddKind::Correction,
                                     PaintLayerAddKind::CorrectionFill,
@@ -1541,6 +1610,9 @@ class PaintLayersStackSource final : public StackSource,
         BKE_report(CTX_wm_reports(&C),
                    RPT_WARNING,
                    "That material cannot be read here: it is this material, or it already reads it");
+      }
+      if (is_anchor_point || is_anchor_point_reader) {
+        BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Select a layer to add an Anchor Point to");
       }
       return -1;
     }

@@ -158,6 +158,29 @@ static const PaintLayerKindInfo kinds[] = {
     /* TODO: Blur filter, needs the row bake (Phase 3). */
     /* TODO: Sharpen filter, needs the row bake (Phase 3). */
     /* TODO: Edge Detect filter, needs the row bake (Phase 3). */
+    /* An Anchor Point is an inert marker inside a row: it publishes the content after the
+     * corrections above it (or the mask after the mask items above it) and lays nothing itself. It
+     * has no parameters and no channel records. */
+    {MA_PAINT_LAYER_SOURCE_ANCHOR_POINT,
+     MA_PAINT_LAYER_ANCHOR_POINT_MARKER,
+     "Anchor Point",
+     PaintLayerKindCategory::Source,
+     uint8_t(paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT) |
+             paint_layer_role_bit(MA_PAINT_LAYER_ROLE_MASK_ITEM)),
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_ANCHOR_POINT_MARK},
+    /* An Anchor Point Reader lays the slice a marker publishes. It owns no map and carries no
+     * channel records; what it shows is decided from the point it names. As a row of the stack, a
+     * content correction or a mask item, it lays the slice with its own opacity and blend. */
+    {MA_PAINT_LAYER_SOURCE_ANCHOR_POINT,
+     MA_PAINT_LAYER_ANCHOR_POINT_READER,
+     "Anchor Point Reader",
+     PaintLayerKindCategory::Source,
+     uint8_t(all_roles),
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_READS_ANCHOR_POINT},
 };
 
 const PaintLayerKindInfo *paint_layer_kind_find(const int8_t source, const int16_t subtype)

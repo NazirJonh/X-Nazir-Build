@@ -223,7 +223,8 @@ int BKE_paint_layers_bake_mode_get(const MaterialPaintLayer &layer)
 static bool bake_row_owned(Material &ma, const MaterialPaintLayer &layer)
 {
   return BKE_paint_layers_owner_list(ma, layer) != nullptr ||
-         (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) &&
+         ((paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE) ||
+           paint_layer_kind_reads_anchor_point(layer)) &&
           (BKE_paint_layers_correction_owner(ma, layer) != nullptr ||
            BKE_paint_layers_mask_item_owner(ma, layer) != nullptr));
 }
@@ -381,6 +382,111 @@ static void bake_source_tree_images(const bNodeTree &tree,
   }
 }
 
+static void bake_collect_slice_images(const Material &ma,
+                                      const MaterialPaintLayer &reader,
+                                      Vector<Image *> &r_images,
+                                      Vector<bUUID> &visited);
+
+/**
+ * Append the maps \a row itself reads to \a r_images: its channel maps and the maps of its bake. A
+ * reader also brings the maps of the slice it reads (see #bake_collect_slice_images).
+ */
+static void bake_collect_row_maps(const Material &ma,
+                                  const MaterialPaintLayer &row,
+                                  Vector<Image *> &r_images,
+                                  Vector<bUUID> &visited)
+{
+  const auto add = [&](Image *image) {
+    if (image != nullptr && !r_images.contains(image)) {
+      r_images.append(image);
+    }
+  };
+  for (int i = 0; i < row.channels_num; i++) {
+    add(row.channels[i].image);
+  }
+  if (row.bake != nullptr) {
+    for (Image *image : row.bake->images) {
+      add(image);
+    }
+    add(row.bake->coverage);
+  }
+  if (paint_layer_kind_reads_anchor_point(row)) {
+    bake_collect_slice_images(ma, row, r_images, visited);
+  }
+}
+
+/** The maps of \a row, its corrections, its mask items and every row below it. */
+static void bake_collect_row_tree_maps(const Material &ma,
+                                       const MaterialPaintLayer &row,
+                                       Vector<Image *> &r_images,
+                                       Vector<bUUID> &visited)
+{
+  bake_collect_row_maps(ma, row, r_images, visited);
+  for (const MaterialPaintLayer &effect : row.effects) {
+    bake_collect_row_maps(ma, effect, r_images, visited);
+  }
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    bake_collect_row_maps(ma, item, r_images, visited);
+  }
+  for (const MaterialPaintLayer &child : row.children) {
+    bake_collect_row_tree_maps(ma, child, r_images, visited);
+  }
+}
+
+/**
+ * The maps \a reader's slice reads: the source row's channels and corrections above the marker,
+ * its mask items above the marker, its children, and the maps of nested readers (recursively).
+ * The pixel edits to any of them have to mark the reader's cache changed.
+ */
+static void bake_collect_slice_images(const Material &ma,
+                                      const MaterialPaintLayer &reader,
+                                      Vector<Image *> &r_images,
+                                      Vector<bUUID> &visited)
+{
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr) {
+    return;
+  }
+  for (const bUUID &marker : visited) {
+    if (BLI_uuid_equal(marker, ref.source_row->marker)) {
+      return;
+    }
+  }
+  visited.append(ref.source_row->marker);
+
+  bake_collect_row_maps(ma, *ref.source_row, r_images, visited);
+  for (const MaterialPaintLayer &effect : ref.source_row->effects) {
+    if (ref.target == PaintLayerAnchorPointTarget::Content && &effect == ref.point) {
+      break;
+    }
+    bake_collect_row_maps(ma, effect, r_images, visited);
+  }
+  for (const MaterialPaintLayer &item : ref.source_row->mask_stack) {
+    if (&item == ref.point) {
+      break;
+    }
+    if (ref.target == PaintLayerAnchorPointTarget::Mask) {
+      /* A mask slice includes the base mask. */
+      bake_collect_row_maps(ma, item, r_images, visited);
+    }
+    else if (paint_layer_kind_reads_anchor_point(item)) {
+      /* A content slice does not read the mask, but a reader there still names a slice. */
+      bake_collect_slice_images(ma, item, r_images, visited);
+    }
+  }
+  for (const MaterialPaintLayer &child : ref.source_row->children) {
+    bake_collect_row_tree_maps(ma, child, r_images, visited);
+  }
+}
+
+void BKE_paint_layers_anchor_point_slice_images(const Material &ma,
+                                                const MaterialPaintLayer &reader,
+                                                Vector<Image *> &r_images)
+{
+  Vector<bUUID> visited;
+  bake_collect_slice_images(ma, reader, r_images, visited);
+}
+
 /**
  * Every map \a layer's bake reads: its own channel maps and those of its corrections, mask items
  * and children. A Material row reads the images of its source's node trees when its own bake is the
@@ -391,6 +497,13 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
                                                  Vector<Image *> &r_images,
                                                  const bool is_child)
 {
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    Vector<bUUID> visited;
+    bake_collect_slice_images(ma, layer, r_images, visited);
+    /* What it lays is the slice alone; its own effects and mask are live over it, as a Material
+     * row's are over its maps. */
+    return;
+  }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     if (!is_child) {
       if (layer.material != nullptr && layer.material->nodetree != nullptr) {
@@ -754,6 +867,13 @@ static uint64_t bake_hash_layer(uint64_t h,
                         layer.bake->coverage != nullptr ? layer.bake->coverage->id.session_uid : 0);
     }
   }
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    /* The slice's description, channel by channel: what it is made of, never its pixels (those are
+     * the subscription's). A cache for one channel therefore follows an edit above its marker. */
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      h = bake_hash_mix(h, paint_layer_anchor_point_slice_hash(ma, layer, channel));
+    }
+  }
   /* A kind's parameters (a filter's, a coverage operator's) change the pixels. */
   h = bake_hash_idprops(h, layer.system_properties);
   /* Effects first, then mask items, then children, each in its own storage order. */
@@ -888,7 +1008,11 @@ static bool bake_object_mask_blocks(const MaterialPaintLayer &layer)
 
 bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer &layer)
 {
-  return bake_mapping_blocks(ma, layer) || bake_object_mask_blocks(layer);
+  /* A row holding a read Anchor Point (or a folder above one) is never substituted: the cache
+   * would swallow the point. A reader whose slice contains an object mask stays live when its mode
+   * allows it; the effective-mode helper decides which. */
+  return bake_mapping_blocks(ma, layer) || bake_object_mask_blocks(layer) ||
+         paint_layer_anchor_point_blocks_bake(ma, layer);
 }
 
 /** \} */
@@ -897,11 +1021,43 @@ bool BKE_paint_layers_bake_blocked(const Material &ma, const MaterialPaintLayer 
 /** \name Substitution
  * \{ */
 
+bool paint_layer_anchor_point_reader_baked(const Material &ma, const MaterialPaintLayer &reader)
+{
+  if (!paint_layer_kind_reads_anchor_point(reader)) {
+    return false;
+  }
+  const int mode = BKE_paint_layers_bake_mode_get(reader);
+  if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+    return false;
+  }
+  if (mode == MA_PAINT_LAYER_BAKE_ALWAYS) {
+    return true;
+  }
+  /* Auto: live while the chain is light. An object mask in the slice keeps it live, since a bake
+   * would show it everywhere. */
+  if (paint_layer_anchor_point_slice_has_object_mask(ma, reader)) {
+    return false;
+  }
+  int points = 0;
+  int readers = 0;
+  paint_layer_anchor_point_counts(ma, points, readers);
+  if (points > PAINT_LAYER_ANCHOR_POINT_LIMIT || readers > PAINT_LAYER_ANCHOR_POINT_LIMIT) {
+    return true;
+  }
+  /* The chain depth counts the reader itself. */
+  return paint_layer_anchor_point_chain_depth(ma, reader) >= PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX;
+}
+
 bool paint_layer_row_substituted(const Material &ma, const MaterialPaintLayer &layer)
 {
   /* A Material row's maps are its source, not a cache of its subtree: it is laid like a painted row
    * (see #paint_layer_row_material_map), with its corrections and mask live over them. */
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+    return false;
+  }
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    /* A reader shows the maps a bake of its slice produced; substituting it would replace the
+     * description that decides what it reads. */
     return false;
   }
   if (layer.bake == nullptr || layer.bake->coverage == nullptr ||
@@ -1305,6 +1461,10 @@ static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
  */
 static bool bake_row_is_candidate(const Material &ma, const MaterialPaintLayer &layer)
 {
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    /* A reader owns its slice's cache; a substitution of the row it reads is blocked separately. */
+    return paint_layer_anchor_point_reader_baked(ma, layer);
+  }
   if (layer.role != MA_PAINT_LAYER_ROLE_LAYER || paint_layer_row_is_adjustment(layer)) {
     return false;
   }
@@ -1338,7 +1498,9 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
   if (folder && BKE_paint_layers_folder_is_pass_through(layer)) {
     return false;
   }
-  if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO) {
+  if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO &&
+      !paint_layer_kind_reads_anchor_point(layer))
+  {
     /* AUTO caches subgraphs: a folder is the heavy thing, a single row is already one map per
      * channel and a cache of it would only double its memory. Always is the way to ask for a row
      * to be baked; a cache carried from an earlier Always keeps standing in while it is valid and
@@ -1377,6 +1539,16 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
     BKE_paint_layers_foreach(ma,
                              [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
                                rows.append(&layer);
+                               for (MaterialPaintLayer &effect : layer.effects) {
+                                 if (paint_layer_kind_reads_anchor_point(effect)) {
+                                   rows.append(&effect);
+                                 }
+                               }
+                               for (MaterialPaintLayer &item : layer.mask_stack) {
+                                 if (paint_layer_kind_reads_anchor_point(item)) {
+                                   rows.append(&item);
+                                 }
+                               }
                                return true;
                              });
     /* Children before their parents: a parent's render composites its children, and a child that is
@@ -2274,6 +2446,16 @@ PaintLayersBakeJob *BKE_paint_layers_bake_job_create(Main &bmain, Material &ma)
   Vector<MaterialPaintLayer *> rows;
   BKE_paint_layers_foreach(ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
     rows.append(&layer);
+    for (MaterialPaintLayer &effect : layer.effects) {
+      if (paint_layer_kind_reads_anchor_point(effect)) {
+        rows.append(&effect);
+      }
+    }
+    for (MaterialPaintLayer &item : layer.mask_stack) {
+      if (paint_layer_kind_reads_anchor_point(item)) {
+        rows.append(&item);
+      }
+    }
     return true;
   });
 

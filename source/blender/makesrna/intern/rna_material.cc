@@ -215,6 +215,14 @@ const EnumPropertyItem rna_enum_material_paint_layer_color_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* Fallback for makesrna, which requires a static item list even when the runtime itemf builds the
+ * real, filtered list. The itemf replaces it in the UI. Kept outside #ifdef RNA_RUNTIME because the
+ * property definition is generated in the other branch. */
+static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_items[] = {
+    {0, "NONE", 0, "None", "This reader lays nothing"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }
 
 #ifdef RNA_RUNTIME
@@ -231,8 +239,10 @@ const EnumPropertyItem rna_enum_material_paint_layer_color_items[] = {
 #  include "DNA_space_types.h"
 
 #  include <fmt/format.h>
+#  include <mutex>
 #  include <optional>
 #  include <string>
+#  include <unordered_set>
 
 #  include "BLI_listbase.h"
 #  include "BLI_math_vector.h"
@@ -1624,6 +1634,180 @@ static int rna_MaterialPaintLayer_row_result_source_length(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return BLI_uuid_is_nil(layer->row_result_source) ? 0 : UUID_STRING_SIZE - 1;
+}
+
+/* The marker of the Anchor Point a reader lays. Empty clears the reference. Setting checks the
+ * row's kind and ownership through the BKE setter, so a plain row cannot acquire one. */
+static void rna_MaterialPaintLayer_anchor_point_source_get(PointerRNA *ptr, char *value)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  const bUUID marker = BKE_paint_layers_anchor_point_source_get(*layer);
+  if (BLI_uuid_is_nil(marker)) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_uuid_format(value, marker);
+}
+
+static int rna_MaterialPaintLayer_anchor_point_source_length(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BLI_uuid_is_nil(BKE_paint_layers_anchor_point_source_get(*layer)) ? 0 :
+                                                                            UUID_STRING_SIZE - 1;
+}
+
+static void rna_MaterialPaintLayer_anchor_point_source_set(PointerRNA *ptr, const char *value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr) {
+    return;
+  }
+  bUUID marker = BLI_uuid_nil();
+  if (value != nullptr && value[0] != '\0' && !BLI_uuid_parse_string(&marker, value)) {
+    return;
+  }
+  BKE_paint_layers_anchor_point_source_set(*ma, layer, marker);
+}
+
+struct RNAAnchorPointTargetEntry {
+  bUUID marker;
+  std::string label;
+};
+
+/** The points this reader may read, in the order the stack lists them. */
+static void rna_anchor_point_targets_get(const Material &ma,
+                                         const MaterialPaintLayer &reader,
+                                         Vector<RNAAnchorPointTargetEntry> &r_entries)
+{
+  if (!BKE_paint_layers_reads_anchor_point(reader)) {
+    return;
+  }
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
+        const auto consider = [&](const MaterialPaintLayer &candidate,
+                                  const PaintLayerAnchorPointTarget target) {
+          if (!BKE_paint_layers_is_anchor_point(candidate) ||
+              !paint_layer_anchor_point_source_valid(ma, reader, candidate.marker))
+          {
+            return;
+          }
+          RNAAnchorPointTargetEntry entry;
+          entry.marker = candidate.marker;
+          entry.label = fmt::format(
+              "{} ({}, {})",
+              candidate.name[0] != '\0' ? candidate.name : "Anchor Point",
+              row.name[0] != '\0' ? row.name : "Layer",
+              target == PaintLayerAnchorPointTarget::Mask ? "Mask" : "Content");
+          r_entries.append(std::move(entry));
+        };
+        for (const MaterialPaintLayer &effect : row.effects) {
+          consider(effect, PaintLayerAnchorPointTarget::Content);
+        }
+        for (const MaterialPaintLayer &item : row.mask_stack) {
+          consider(item, PaintLayerAnchorPointTarget::Mask);
+        }
+        return true;
+      });
+}
+
+/**
+ * A string that outlives the enum items built from it. The items are copied shallowly and the popup
+ * reads them after the callback returned, so a local string would dangle. The set is node based, so
+ * a stored string never moves; the number of distinct labels stays small (point and layer names).
+ */
+static const char *rna_anchor_point_string_intern(const std::string &text)
+{
+  static std::unordered_set<std::string> pool;
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> lock(mutex);
+  return pool.insert(text).first->c_str();
+}
+
+static const EnumPropertyItem *rna_MaterialPaintLayer_anchor_point_target_itemf(
+    bContext * /*C*/, PointerRNA *ptr, PropertyRNA * /*prop*/, bool *r_free)
+{
+  *r_free = true;
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  EnumPropertyItem none = {};
+  none.value = 0;
+  none.identifier = "NONE";
+  none.name = N_("None");
+  none.description = N_("This reader lays nothing");
+  RNA_enum_item_add(&items, &items_num, &none);
+
+  MaterialPaintLayer *reader = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, reader);
+  if (ma != nullptr && BKE_paint_layers_reads_anchor_point(*reader)) {
+    Vector<RNAAnchorPointTargetEntry> entries;
+    rna_anchor_point_targets_get(*ma, *reader, entries);
+    for (const int i : entries.index_range()) {
+      EnumPropertyItem item = {};
+      item.value = i + 1;
+      item.identifier = rna_anchor_point_string_intern(fmt::format("ANCHOR_{}", i + 1));
+      item.name = rna_anchor_point_string_intern(entries[i].label);
+      item.description = N_("Lay the slice this Anchor Point publishes");
+      RNA_enum_item_add(&items, &items_num, &item);
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  return items;
+}
+
+static int rna_MaterialPaintLayer_anchor_point_target_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *reader = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, reader);
+  if (ma == nullptr || !BKE_paint_layers_reads_anchor_point(*reader)) {
+    return 0;
+  }
+  const bUUID source = BKE_paint_layers_anchor_point_source_get(*reader);
+  if (BLI_uuid_is_nil(source)) {
+    return 0;
+  }
+  Vector<RNAAnchorPointTargetEntry> entries;
+  rna_anchor_point_targets_get(*ma, *reader, entries);
+  for (const int i : entries.index_range()) {
+    if (BLI_uuid_equal(entries[i].marker, source)) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
+static void rna_MaterialPaintLayer_anchor_point_target_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *reader = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, reader);
+  if (ma == nullptr) {
+    return;
+  }
+  if (value <= 0) {
+    BKE_paint_layers_anchor_point_source_set(*ma, reader, BLI_uuid_nil());
+    return;
+  }
+  Vector<RNAAnchorPointTargetEntry> entries;
+  rna_anchor_point_targets_get(*ma, *reader, entries);
+  if (value > entries.size()) {
+    return;
+  }
+  BKE_paint_layers_anchor_point_source_set(*ma, reader, entries[value - 1].marker);
+}
+
+static int rna_MaterialPaintLayer_anchor_point_reader_count_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_paint_layer_material(ptr, layer);
+  if (ma == nullptr || !BKE_paint_layers_is_anchor_point(*layer)) {
+    return 0;
+  }
+  return int(paint_layer_anchor_point_readers(*ma, layer->marker).size());
+}
+
+static bool rna_MaterialPaintLayer_is_anchor_point_reader_get(PointerRNA *ptr)
+{
+  return BKE_paint_layers_reads_anchor_point(*static_cast<const MaterialPaintLayer *>(ptr->data));
 }
 
 /**
@@ -3119,6 +3303,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
     {MA_PAINT_LAYER_SOURCE_MATERIAL, "MATERIAL", 0, "Material", "What another material shows"},
     {MA_PAINT_LAYER_SOURCE_STACK, "STACK", 0, "Stack", "A nested stack of layers (a folder)"},
     {MA_PAINT_LAYER_SOURCE_FILTER, "FILTER", 0, "Filter", "A change to the colour below it"},
+    {MA_PAINT_LAYER_SOURCE_ANCHOR_POINT,
+     "ANCHOR_POINT",
+     0,
+     "Anchor Point",
+     "A slice published by an Anchor Point of the same material"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -3399,6 +3588,40 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Row Result Source", "Marker of the row the maps of this row were last made from");
+
+  /* The Anchor Point an Anchor Point Reader lays. Empty for every other kind. */
+  prop = RNA_def_property(srna, "anchor_point_source", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_MaterialPaintLayer_anchor_point_source_get",
+                                "rna_MaterialPaintLayer_anchor_point_source_length",
+                                "rna_MaterialPaintLayer_anchor_point_source_set");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Anchor Point", "Marker of the Anchor Point whose slice this reader lays");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* The reader's choice as a filtered enum: only markers of this material that build before it
+   * and resolve cleanly. The UUID string above stays for scripts. */
+  prop = RNA_def_property(srna, "anchor_point_target", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_anchor_point_target_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_anchor_point_target_get",
+                              "rna_MaterialPaintLayer_anchor_point_target_set",
+                              "rna_MaterialPaintLayer_anchor_point_target_itemf");
+  RNA_def_property_ui_text(prop, "Anchor Point", "Anchor Point whose slice this reader lays");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "anchor_point_reader_count", PROP_INT, PROP_NONE);
+  RNA_def_property_int_funcs(
+      prop, "rna_MaterialPaintLayer_anchor_point_reader_count_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Readers", "How many rows read this Anchor Point");
+
+  prop = RNA_def_property(srna, "is_anchor_point_reader", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_is_anchor_point_reader_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Is Anchor Point Reader", "Whether this row reads a slice");
 
   prop = RNA_def_property(srna, "opacity", PROP_FLOAT, PROP_PERCENTAGE);
   RNA_def_property_float_funcs(

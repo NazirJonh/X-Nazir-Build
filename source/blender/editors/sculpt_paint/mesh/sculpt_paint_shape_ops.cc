@@ -400,6 +400,15 @@ static void shape3d_status_set_edit(bContext *C, const wmOperatorType *ot)
     status.opmodal(IFACE_("Redo"), ot, PAINT_SHAPE_MODAL_REDO);
   }
   status.item(IFACE_("Swap Colors"), ICON_EVENT_X);
+  Object *ob = CTX_data_active_object(C);
+  const shape::ShapeEditSession *edit = ob != nullptr ? shape::paint_shape_session_edit(*ob) :
+                                                        nullptr;
+  if (edit != nullptr && edit->handles_edit()) {
+    status.item(IFACE_("Point Type"), ICON_EVENT_V);
+    status.item(IFACE_("Delete Point"), ICON_EVENT_DEL);
+    status.item(IFACE_("Point Menu"), ICON_MOUSE_RMB);
+    status.item(IFACE_("Add Point"), ICON_EVENT_CTRL, ICON_MOUSE_LMB);
+  }
   status.item(IFACE_("Apply"), ICON_EVENT_RETURN);
   status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
 }
@@ -433,6 +442,35 @@ static wmOperatorStatus shape_draw_invoke(bContext *C, wmOperator *op, const wmE
     editor.handle_event(C, *event, press_px, true, *host);
     ED_region_tag_redraw(region);
     return OPERATOR_CANCELLED;
+  }
+
+  /* Ctrl+LMB adds a point in handle-edit mode, mirroring the Curve stroke method. The running
+   * modal handles it itself while it owns the events; this path is for the first click, when no
+   * modal is up yet. */
+  if (event->type == LEFTMOUSE && (event->modifier & KM_CTRL) != 0) {
+    Object *ob = CTX_data_active_object(C);
+    shape::PaintShapeSession *session = ob != nullptr ? shape::paint_shape_session_get(*ob) :
+                                                        nullptr;
+    shape::ShapeEditSession *edit = ob != nullptr ? shape::paint_shape_session_edit_get(*ob) :
+                                                    nullptr;
+    if (session != nullptr && edit != nullptr && edit->handles_edit() &&
+        !shape::paint_shape_session_modal_active(*session))
+    {
+      std::unique_ptr<shape::VectorEditHost> host = shape::paint_shape_session_host_create(
+          *C, *session, shape::hit_tolerance_px());
+      float2 press_px;
+      if (!shape::paint_shape_session_event_to_shape_px(*session, *region, *event, press_px)) {
+        return OPERATOR_CANCELLED;
+      }
+      if (edit->point_insert(press_px,
+                             shape::hit_tolerance_px() * shape::SHAPE_INSERT_TOLERANCE_SCALE))
+      {
+        host->restamp(C);
+        host->sync_settings_from_active();
+        ED_region_tag_redraw(region);
+      }
+      return OPERATOR_CANCELLED;
+    }
   }
 
   /* F over a live Vector session adjusts its own stroke width: the radial control edits the shared
@@ -1154,6 +1192,90 @@ void ED_paint_shape_cursor_register()
       SPACE_TYPE_ANY, RGN_TYPE_WINDOW, shape_cursor_poll, shape_cursor_draw, nullptr);
   WM_paint_cursor_activate(
       SPACE_TYPE_ANY, RGN_TYPE_WINDOW, shape_insert_cursor_poll, shape_insert_cursor_draw, nullptr);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Point editing (handle mode)
+ * \{ */
+
+static bool shape_edit_point_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr) {
+    return false;
+  }
+  const shape::ShapeEditSession *edit = shape::paint_shape_session_edit(*ob);
+  if (edit == nullptr || !edit->handles_edit()) {
+    return false;
+  }
+  int spline_index, point_index;
+  return edit->selected_point(spline_index, point_index);
+}
+
+/** Re-composite the live preview after a discrete point edit and redraw the overlay. */
+static void shape_edit_point_refresh(bContext *C, shape::PaintShapeSession &session)
+{
+  std::unique_ptr<shape::VectorEditHost> host = shape::paint_shape_session_host_create(
+      *C, session, shape::hit_tolerance_px());
+  shape::shape_point_edit_refresh(C, *host);
+}
+
+static wmOperatorStatus shape_point_type_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  shape::PaintShapeSession *session = ob != nullptr ? shape::paint_shape_session_get(*ob) :
+                                                       nullptr;
+  shape::ShapeEditSession *edit = ob != nullptr ? shape::paint_shape_session_edit_get(*ob) :
+                                                  nullptr;
+  if (session == nullptr || edit == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const shape::ShapePointType type = shape::ShapePointType(RNA_enum_get(op->ptr, "type"));
+  if (!edit->point_type_set(type)) {
+    return OPERATOR_CANCELLED;
+  }
+  shape_edit_point_refresh(C, *session);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus shape_point_delete_exec(bContext *C, wmOperator * /*op*/)
+{
+  Object *ob = CTX_data_active_object(C);
+  shape::PaintShapeSession *session = ob != nullptr ? shape::paint_shape_session_get(*ob) :
+                                                       nullptr;
+  shape::ShapeEditSession *edit = ob != nullptr ? shape::paint_shape_session_edit_get(*ob) :
+                                                  nullptr;
+  if (session == nullptr || edit == nullptr || !edit->point_delete()) {
+    return OPERATOR_CANCELLED;
+  }
+  shape_edit_point_refresh(C, *session);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_paint_shape_point_type(wmOperatorType *ot)
+{
+  ot->name = "Set Shape Point Type";
+  ot->idname = "SCULPT_OT_paint_shape_point_type";
+  ot->description = "Change the selected shape point's handle type";
+
+  ot->exec = shape_point_type_exec;
+  ot->poll = shape_edit_point_poll;
+  ot->flag = 0;
+
+  shape::shape_point_type_property_define(ot);
+}
+
+void SCULPT_OT_paint_shape_point_delete(wmOperatorType *ot)
+{
+  ot->name = "Delete Shape Point";
+  ot->idname = "SCULPT_OT_paint_shape_point_delete";
+  ot->description = "Delete the selected shape point";
+
+  ot->exec = shape_point_delete_exec;
+  ot->poll = shape_edit_point_poll;
+  ot->flag = 0;
 }
 
 /** \} */

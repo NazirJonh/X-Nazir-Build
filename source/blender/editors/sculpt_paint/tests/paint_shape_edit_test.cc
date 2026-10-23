@@ -5,12 +5,34 @@
 #include "../shapes/paint_shape_edit.hh"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 #include "BLI_math_base.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 
+#include "BKE_cpp_types.hh"
+
 #include "testing/testing.h"
+
+namespace {
+
+/* A #VectorItem owns a `bke::CurvesGeometry`, whose construction creates its attribute arrays
+ * through the C++ type registry. Without this the registry is empty and the first
+ * #ShapeEditSession calls a null constructor. */
+class CppTypesEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override
+  {
+    blender::BKE_cpp_types_init();
+  }
+};
+
+[[maybe_unused]] const ::testing::Environment *const cpp_types_environment =
+    ::testing::AddGlobalTestEnvironment(new CppTypesEnvironment());
+
+}  // namespace
 
 namespace blender::ed::sculpt_paint::shape {
 
@@ -678,5 +700,192 @@ TEST(ShapeEdit, ScaleAxisLockUsesGlobalAxes)
   EXPECT_NEAR(session.active()->center.y, 10.0f, 1e-4);
   EXPECT_NEAR(session.active()->half_size.x, 20.0f, 1e-4);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Handle editing
+ * \{ */
+
+static PaintShape test_curve()
+{
+  PaintShape shape;
+  shape.type = PAINT_SHAPE_CURVE;
+  ShapeSpline spline;
+  spline.is_bezier = true;
+  for (const float2 &co : {float2(10.0f, 10.0f), float2(50.0f, 80.0f), float2(90.0f, 10.0f)}) {
+    ShapePoint point;
+    point.co = co;
+    spline.points.append(point);
+  }
+  shape.splines.append(spline);
+  return shape;
+}
+
+/** Nearest flattened point to \a co, for checking where a curved segment actually runs. */
+static float nearest_flat_distance(const PaintShape &shape, const float2 &co)
+{
+  float best = FLT_MAX;
+  for (const ShapePolyline &poly : shape_flatten(shape, 0.5f)) {
+    for (const float2 &p : poly.points) {
+      best = std::min(best, math::distance(p, co));
+    }
+  }
+  return best;
+}
+
+/** Thin stroke coverage, used instead of flattened points for straight segments (which flatten to
+ * their end points only). */
+static bool thin_stroke_covers(const ShapeEditSession &session, const float2 &p)
+{
+  ShapeStyle style;
+  style.flag = PAINT_SHAPE_USE_STROKE;
+  style.stroke_width = 2.0f;
+  style.feather = 0.0f;
+  return session.hit_test(p, style, 0.0f);
+}
+
+TEST(ShapeEdit, PointTypeAutoVector)
+{
+  ShapeEditSession session(Vector<PaintShape>{test_curve()});
+  session.handles_edit_set(true);
+  session.selected_point_set(0, 1);
+
+  ASSERT_EQ(shape_point_type_get(session.active()->splines[0].points[1]),
+            ShapePointType::Auto);
+  /* Auto: the first segment bows away from the chord's midpoint. */
+  EXPECT_FALSE(thin_stroke_covers(session, float2(30.0f, 45.0f)));
+  EXPECT_TRUE(session.point_type_set(ShapePointType::Vector));
+
+  const ShapePoint &vector_point = session.active()->splines[0].points[1];
+  EXPECT_TRUE(vector_point.corner);
+  EXPECT_FALSE(vector_point.auto_handles);
+  EXPECT_TRUE(shape_point_is_vector(vector_point));
+  /* Vector: both adjacent segments collapse onto their chords. */
+  EXPECT_TRUE(thin_stroke_covers(session, float2(30.0f, 45.0f)));
+
+  ASSERT_TRUE(session.point_type_set(ShapePointType::Auto));
+  EXPECT_TRUE(session.active()->splines[0].points[1].auto_handles);
+  EXPECT_FALSE(session.active()->splines[0].points[1].corner);
+  EXPECT_FALSE(thin_stroke_covers(session, float2(30.0f, 45.0f)));
+}
+
+TEST(ShapeEdit, HandleAtFindsKnobsOnlyInHandleMode)
+{
+  const ShapeStyle style = flat_style();
+  ShapeEditSession session(Vector<PaintShape>{test_curve()});
+  ShapeSpline &spline = session.active_for_write()->splines[0];
+  float2 left, right;
+  shape_spline_point_handles_get(spline, 1, left, right);
+
+  /* Handle knobs are invisible / not pickable until the mode is on. */
+  const ShapeHandle off = session.handle_at(right, 4.0f, style);
+  EXPECT_NE(off.type, ShapeHandleType::Handle);
+
+  session.handles_edit_set(true);
+  const ShapeHandle on = session.handle_at(right, 4.0f, style);
+  EXPECT_EQ(on.type, ShapeHandleType::Handle);
+  EXPECT_EQ(on.spline_index, 0);
+  EXPECT_EQ(on.point_index, 1);
+  EXPECT_EQ(on.handle_side, ShapeHandleSide::Right);
+}
+
+TEST(ShapeEdit, HandleDragConvertsAutoToFreeAndMirrors)
+{
+  ShapeEditSession session(Vector<PaintShape>{test_curve()});
+  session.handles_edit_set(true);
+
+  ShapeSpline &spline = session.active_for_write()->splines[0];
+  float2 left, right;
+  shape_spline_point_handles_get(spline, 1, left, right);
+  const float other_length = math::distance(left, spline.points[1].co);
+
+  ShapeHandle handle;
+  handle.type = ShapeHandleType::Handle;
+  handle.shape_index = 0;
+  handle.spline_index = 0;
+  handle.point_index = 1;
+  handle.handle_side = ShapeHandleSide::Right;
+  ASSERT_TRUE(session.handle_drag_begin(handle, right, 4.0f));
+  EXPECT_TRUE(session.is_handle_dragging());
+  ASSERT_TRUE(session.handle_drag_update(right + float2(0.0f, 30.0f)));
+  session.handle_drag_end();
+  EXPECT_FALSE(session.gesture_active());
+
+  const ShapePoint &point = session.active()->splines[0].points[1];
+  EXPECT_FALSE(point.auto_handles);
+  EXPECT_EQ(shape_point_type_get(point), ShapePointType::Free);
+  EXPECT_NEAR(point.handle_right.y, right.y + 30.0f, 1e-4);
+  /* Aligned mirroring keeps the opposite handle collinear and at its grab-time length. */
+  EXPECT_NEAR(math::distance(point.handle_left, point.co), other_length, 1e-4);
+  EXPECT_LT(math::dot(math::normalize(point.handle_left - point.co),
+                      math::normalize(point.handle_right - point.co)),
+            0.0f);
+
+  /* One undo step restores the Auto pose. */
+  ASSERT_TRUE(session.undo_pop());
+  EXPECT_TRUE(session.active()->splines[0].points[1].auto_handles);
+}
+
+TEST(ShapeEdit, LineHandleDragEnablesBezier)
+{
+  const PaintShape line = shape_line(float2(10.0f, 50.0f), float2(110.0f, 50.0f));
+  ShapeEditSession session(Vector<PaintShape>{line});
+  session.handles_edit_set(true);
+
+  ShapeSpline &spline = session.active_for_write()->splines[0];
+  ASSERT_FALSE(spline.is_bezier);
+  float2 left, right;
+  shape_spline_point_handles_get(spline, 0, left, right);
+  /* The Line builder's auto handles sit on the chord, so the knobs are already grabbable. */
+  EXPECT_FALSE(shape_point_is_vector(spline.points[0]));
+  EXPECT_NEAR(right.y, 50.0f, 1e-4);
+
+  ShapeHandle handle;
+  handle.type = ShapeHandleType::Handle;
+  handle.shape_index = 0;
+  handle.spline_index = 0;
+  handle.point_index = 0;
+  handle.handle_side = ShapeHandleSide::Right;
+  ASSERT_TRUE(session.handle_drag_begin(handle, right, 4.0f));
+  ASSERT_TRUE(session.handle_drag_update(right + float2(0.0f, 25.0f)));
+  session.handle_drag_end();
+
+  EXPECT_TRUE(session.active()->splines[0].is_bezier);
+  EXPECT_FALSE(session.active()->splines[0].points[0].auto_handles);
+  EXPECT_GT(nearest_flat_distance(*session.active(), float2(60.0f, 50.0f)), 0.5f);
+}
+
+TEST(ShapeEdit, PointDeleteKeepsValidOutline)
+{
+  ShapeEditSession session(Vector<PaintShape>{test_curve()});
+  session.selected_point_set(0, 1);
+
+  ASSERT_TRUE(session.point_delete());
+  EXPECT_EQ(session.shapes()[0].splines[0].points.size(), 2);
+  /* The selection clamps to the remaining point, and undo restores the deleted one. */
+  int spline_index, point_index;
+  EXPECT_TRUE(session.selected_point(spline_index, point_index));
+  ASSERT_TRUE(session.undo_pop());
+  EXPECT_EQ(session.shapes()[0].splines[0].points.size(), 3);
+
+  /* An open two-point outline cannot lose a point. */
+  ShapeEditSession line_session(
+      Vector<PaintShape>{shape_line(float2(0.0f, 0.0f), float2(10.0f, 0.0f))});
+  line_session.selected_point_set(0, 0);
+  EXPECT_FALSE(line_session.point_delete());
+}
+
+TEST(ShapeEdit, PointInsertSelectsTheNewPoint)
+{
+  ShapeEditSession session(Vector<PaintShape>{test_curve()});
+  /* A cut near the first segment's midpoint. */
+  ASSERT_TRUE(session.point_insert(float2(30.0f, 44.0f), 12.0f));
+  int spline_index, point_index;
+  ASSERT_TRUE(session.selected_point(spline_index, point_index));
+  EXPECT_EQ(spline_index, 0);
+  EXPECT_EQ(point_index, 1);
+  EXPECT_EQ(session.shapes()[0].splines[0].points.size(), 4);
+}
+
+/** \} */
 
 }  // namespace blender::ed::sculpt_paint::shape

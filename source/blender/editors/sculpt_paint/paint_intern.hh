@@ -1399,6 +1399,8 @@ void PAINT_OT_image_shape_vector_cancel(wmOperatorType *ot);
  * Sculpt session; keeps Ctrl+Z on the shape instead of the global stack. */
 void PAINT_OT_image_shape_vector_undo(wmOperatorType *ot);
 void PAINT_OT_image_shape_transform_toggle(wmOperatorType *ot);
+void PAINT_OT_image_shape_point_type(wmOperatorType *ot);
+void PAINT_OT_image_shape_point_delete(wmOperatorType *ot);
 void PAINT_OT_vector_save(wmOperatorType *ot);
 void PAINT_OT_vector_edit(wmOperatorType *ot);
 

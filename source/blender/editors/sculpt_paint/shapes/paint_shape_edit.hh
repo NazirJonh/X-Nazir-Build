@@ -26,6 +26,8 @@
 
 #include "DNA_userdef_types.h" /* UI_SCALE_FAC */
 
+#include "ED_control_points.hh"
+
 #include "paint_shape.hh"
 #include "paint_vector_document.hh"
 
@@ -52,6 +54,13 @@ constexpr float SHAPE_POINT_HIT_SCALE = 3.0f;
  * base tolerance, and the insert preview shows exactly what that snap picks. */
 constexpr float SHAPE_INSERT_TOLERANCE_SCALE = 8.0f;
 
+/** Which side of a control point a #ShapeHandleType::Handle knob edits. */
+enum class ShapeHandleSide : int8_t {
+  None = 0,
+  Left = 1,
+  Right = 2,
+};
+
 /** Editable handle of a shape. */
 enum class ShapeHandleType : int8_t {
   None = 0,
@@ -61,16 +70,20 @@ enum class ShapeHandleType : int8_t {
   Point = 2,
   /** The active shape's origin (the Move/Rotate/Scale pivot marker). */
   Origin = 3,
+  /** A Bézier handle knob of a control point (only when handle editing is on). */
+  Handle = 4,
 };
 
 struct ShapeHandle {
   ShapeHandleType type = ShapeHandleType::None;
   /** Index into the session shapes; -1 when no handle is active. */
   int shape_index = -1;
-  /** Spline of a #ShapeHandleType::Point handle; -1 otherwise. */
+  /** Spline of a Point / Handle; -1 otherwise. */
   int spline_index = -1;
-  /** Control point of a #ShapeHandleType::Point handle; -1 otherwise. */
+  /** Control point of a Point / Handle; -1 otherwise. */
   int point_index = -1;
+  /** Side of a #ShapeHandleType::Handle knob; None otherwise. */
+  ShapeHandleSide handle_side = ShapeHandleSide::None;
 };
 
 /** Whole-shape transform of the active shape (the R/S gestures and the cage gizmo). */
@@ -223,11 +236,41 @@ class ShapeEditSession {
 
   /** Ctrl+RMB cut: insert a control point into the active spline shape's segment nearest to \a p
    * (within \a tolerance_px), splitting a Bézier segment without changing its curve. Records an
-   * undo step; false when \a p is not over a segment or the shape has no splines. */
+   * undo step and selects the new point; false when \a p is not over a segment or the shape has no
+   * splines. */
   bool point_insert(const float2 &p, float tolerance_px);
   /** Where #point_insert would cut for \a p: the point on the segment and its (unnormalized)
    * tangent, both in session pixels. False when nothing would be inserted. */
   bool insert_preview(const float2 &p, float tolerance_px, float2 &r_point, float2 &r_tangent) const;
+  /** Delete the selected control point, keeping a valid outline (two points for an open spline,
+   * three for a cyclic one). Records an undo step; false when nothing is selected or the spline
+   * would become degenerate. */
+  bool point_delete();
+
+  /** Handle editing mode of the Vector session (the header's Handles toggle). Runtime only. */
+  bool handles_edit() const
+  {
+    return handles_edit_;
+  }
+  void handles_edit_set(bool enabled);
+  /** The control point last picked in handle mode; false when none is selected. */
+  bool selected_point(int &r_spline, int &r_point) const;
+  void selected_point_set(int spline, int point);
+  void selected_point_clear();
+  /** Set the selected point's type (Auto / Vector) and make the spline Bézier-editable.
+   * Records an undo step; false without a selected point or when the type did not change. */
+  bool point_type_set(ShapePointType type);
+
+  /** Drag a Bézier handle knob of the active shape (handle-edit mode). The opposite handle keeps
+   * its length and mirrors the drag (aligned handles) unless \a align is false. */
+  bool handle_drag_begin(const ShapeHandle &handle, const float2 &p, float tolerance_px);
+  bool handle_drag_update(const float2 &p, bool align = true);
+  void handle_drag_cancel();
+  void handle_drag_end();
+  bool is_handle_dragging() const
+  {
+    return handle_dragging_;
+  }
 
   /** Drag the active shape's origin (the R/S pivot marker); false without an active
    * shape. The origin follows the cursor and #PaintShape::origin_is_custom is set. */
@@ -246,11 +289,15 @@ class ShapeEditSession {
    * when the origin was not custom. */
   bool origin_reset();
 
-  /** True when any gesture (move, transform, point drag or origin drag) is in flight. */
+  /** True when any gesture (move, transform, point / handle drag or origin drag) is in flight. */
   bool gesture_active() const
   {
-    return dragging_ || transforming_ || point_dragging_ || origin_dragging_;
+    return dragging_ || transforming_ || point_dragging_ || origin_dragging_ || handle_dragging_;
   }
+  /** Drop in-flight gesture flags without reverting the current pose. Recovery for a modal that
+   * vanished mid-gesture (a dead window-modal would otherwise leave every later press consuming
+   * itself just to end the stale gesture). */
+  void gesture_abort();
 
   /** Push the current shapes for #undo_pop (call before each mutating gesture); clears redo. */
   void undo_push();
@@ -305,6 +352,23 @@ class ShapeEditSession {
   bool origin_dragging_ = false;
   /** Cursor-to-origin offset at grab time, so the marker does not jump to the cursor. */
   float2 origin_grab_delta_ = float2(0.0f);
+
+  /** Runtime handle-editing mode (the header's Handles toggle); never persisted. */
+  bool handles_edit_ = false;
+  /** Control point picked in handle mode (spline index / point index), -1 when none. */
+  int selected_spline_ = -1;
+  int selected_point_ = -1;
+
+  bool handle_dragging_ = false;
+  int handle_spline_ = -1;
+  int handle_point_ = -1;
+  ShapeHandleSide handle_side_ = ShapeHandleSide::None;
+  /** Cursor-to-knob offset at grab time, so the handle does not jump to the cursor. */
+  float2 handle_grab_delta_ = float2(0.0f);
+  /** Opposite handle at grab time (resolved for Auto points), kept when not mirrored. */
+  float2 handle_other_start_ = float2(0.0f);
+  /** Length of the opposite handle at grab time: aligned mirroring preserves it. */
+  float handle_other_length_ = 0.0f;
 };
 
 /**
@@ -348,6 +412,39 @@ void shape_draw_dashed_outline(Span<float2> region_points, bool loop);
 /** A thin, muted solid outline: the seam siblings of a 3D shape's contour in the Image Editor
  * (the cage part keeps the animated dashed style). */
 void shape_draw_plain_outline(Span<float2> region_points, bool loop);
+
+/**
+ * Fill the shared screen-space control points of \a shape's splines: one entry per control
+ * point with both handles resolved (the Catmull-Rom auto rule applied), the selection flags
+ * and the `BEZIER_HANDLE_*` type. \a to_screen maps a shape pixel to the target space: region
+ * pixels for the overlay, the identity for a pick in the session's own pixels.
+ *
+ * \a show_handles is the Vector session's Handles toggle: with it off the handles are hidden
+ * from drawing and picking, while the control points stay. A collapsed handle is hidden too,
+ * exactly as the session's own point drawing used to skip it.
+ */
+void shape_control_points_handles_get(
+    const PaintShape &shape,
+    FunctionRef<float2(const PaintShape &, const float2 &)> to_screen,
+    bool show_handles,
+    int selected_spline,
+    int selected_point,
+    const control_points::BuildOptions &options,
+    PaintCurveScreenHandles &r_out);
+
+/**
+ * Closest control point / handle of \a shape under \a p, in the session's own pixels. Fills the
+ * spline / point indices and the picked part; false when nothing is within \a tolerance_px.
+ */
+bool shape_control_point_pick(const PaintShape &shape,
+                              const float2 &p,
+                              float tolerance_px,
+                              bool show_handles,
+                              int selected_spline,
+                              int selected_point,
+                              int &r_spline,
+                              int &r_point,
+                              control_points::Part &r_part);
 
 /** Control-point squares for \a region_cos (already in region pixels): a dark border and a
  * light core per point, drawn in one batch. */

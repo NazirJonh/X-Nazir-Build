@@ -1925,6 +1925,8 @@ void SCULPT_OT_cloth_filter(wmOperatorType *ot);
 namespace ed::sculpt_paint {
 /* sculpt_paint_shape_ops.cc */
 void SCULPT_OT_paint_shape_draw(wmOperatorType *ot);
+void SCULPT_OT_paint_shape_point_type(wmOperatorType *ot);
+void SCULPT_OT_paint_shape_point_delete(wmOperatorType *ot);
 /* Apply / cancel of a live Vector session while no shape modal is running (Enter / Esc of the
  * shape tools' key-map). */
 void SCULPT_OT_paint_shape_vector_apply(wmOperatorType *ot);

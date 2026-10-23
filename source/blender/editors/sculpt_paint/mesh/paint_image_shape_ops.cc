@@ -271,6 +271,14 @@ static void image_shape_status_set_edit(bContext *C, const wmOperatorType *ot)
     status.opmodal(IFACE_("Redo"), ot, PAINT_SHAPE_MODAL_REDO);
     status.item(IFACE_("Reset Origin"), ICON_EVENT_O);
   }
+  const shape::ShapeEditSession *edit = shape::image_shape_vector_edit_get(
+      CTX_wm_space_image(C));
+  if (edit != nullptr && edit->handles_edit()) {
+    status.item(IFACE_("Point Type"), ICON_EVENT_V);
+    status.item(IFACE_("Delete Point"), ICON_EVENT_DEL);
+    status.item(IFACE_("Point Menu"), ICON_MOUSE_RMB);
+    status.item(IFACE_("Add Point"), ICON_EVENT_CTRL, ICON_MOUSE_LMB);
+  }
   status.item(IFACE_("Apply"), ICON_EVENT_RETURN);
   status.item(IFACE_("Cancel"), ICON_EVENT_ESC);
 }
@@ -432,10 +440,24 @@ static wmOperatorStatus image_shape_draw_invoke(bContext *C,
         MEM_delete(state);
         return OPERATOR_CANCELLED;
       }
+      shape::ShapeEditSession *edit = shape::image_shape_vector_edit_get(sima);
       std::unique_ptr<shape::VectorEditHost> host = shape::image_shape_vector_host_create(
           *C, *session, shape::hit_tolerance_px());
       const float2 press_px = image_shape_event_to_px(
           region, event, host->ref_tile(), host->ref_tile_size());
+      /* Ctrl+LMB inserts a point in handle-edit mode (the running modal handles it itself; this
+       * is the first click, before any modal is up). */
+      if (edit != nullptr && edit->handles_edit() && (event->modifier & KM_CTRL) != 0) {
+        if (edit->point_insert(press_px,
+                               shape::hit_tolerance_px() * shape::SHAPE_INSERT_TOLERANCE_SCALE))
+        {
+          host->restamp(C);
+          host->sync_settings_from_active();
+          ED_region_tag_redraw(region);
+        }
+        MEM_delete(state);
+        return OPERATOR_CANCELLED;
+      }
 
       if (!state->vector_editor.start_move_pick(C, press_px, *host)) {
         /* A press outside the shape confirms the session. The commit runs through the apply

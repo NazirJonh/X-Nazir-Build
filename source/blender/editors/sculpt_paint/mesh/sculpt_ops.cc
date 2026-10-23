@@ -2229,6 +2229,8 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_paint_shape_vector_apply);
   WM_operatortype_append(SCULPT_OT_paint_shape_vector_cancel);
   WM_operatortype_append(SCULPT_OT_paint_shape_transform_toggle);
+  WM_operatortype_append(SCULPT_OT_paint_shape_point_type);
+  WM_operatortype_append(SCULPT_OT_paint_shape_point_delete);
   WM_operatortype_append(SCULPT_OT_paint_shape_flush_preview);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_color);
   WM_operatortype_append(mask::SCULPT_OT_mask_by_topology_island);

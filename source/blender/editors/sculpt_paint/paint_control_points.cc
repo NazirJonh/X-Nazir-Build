@@ -191,6 +191,28 @@ Pick pick_point(const Span<PaintCurveHandleDrawData> points,
       ignore_pivot);
 }
 
+Pick pick_point(const Source &source,
+                const float2 pos,
+                const float threshold,
+                const Metric metric,
+                const bool ignore_pivot)
+{
+  return pick_point(
+      source.points_num(),
+      [&](const int i) {
+        PointGeometry point;
+        point.position = source.point_position(i);
+        source.point_handles(i, point.handle_left, point.handle_right);
+        point.show_left = source.handle_visible(i, true);
+        point.show_right = source.handle_visible(i, false);
+        return point;
+      },
+      pos,
+      threshold,
+      metric,
+      ignore_pivot);
+}
+
 bool pick_segment(const Span<PaintCurveSegmentDrawData> segments,
                   const float2 pos,
                   const float threshold,

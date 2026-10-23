@@ -161,6 +161,13 @@ Pick pick_point(Span<PaintCurveHandleDrawData> points,
                 Metric metric,
                 bool ignore_pivot = false);
 
+/** Pick straight from a #Source, without building the draw data first. */
+Pick pick_point(const Source &source,
+                float2 pos,
+                float threshold,
+                Metric metric,
+                bool ignore_pivot = false);
+
 /**
  * The closest segment under \a pos within \a threshold. \a r_t is the normalized position along
  * the picked polyline (0 at its first vertex, 1 at its last). That is an ARC-LENGTH fraction of

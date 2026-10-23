@@ -267,6 +267,28 @@ static void polyline_finalize(ShapePolyline &poly, const bool cyclic)
   }
 }
 
+ShapeSegment shape_spline_segment_get(const ShapeSpline &spline, const int segment)
+{
+  const int i = segment;
+  const int j = (segment + 1) % spline.points.size();
+  const ShapePoint &pi = spline.points[i];
+  const ShapePoint &pj = spline.points[j];
+
+  ShapeSegment result;
+  result.start = pi.co;
+  result.end = pj.co;
+  result.handle_start = pi.co;
+  result.handle_end = pj.co;
+  result.straight = pj.corner || shape_point_is_vector(pi) || shape_point_is_vector(pj) ||
+                    !spline.is_bezier;
+  if (!result.straight) {
+    float2 unused;
+    shape_spline_point_handles_get(spline, i, unused, result.handle_start);
+    shape_spline_point_handles_get(spline, j, result.handle_end, unused);
+  }
+  return result;
+}
+
 static void spline_flatten(const ShapeSpline &spline, const float max_error, ShapePolyline &r_out)
 {
   r_out = {};
@@ -283,28 +305,20 @@ static void spline_flatten(const ShapeSpline &spline, const float max_error, Sha
 
   const int segment_count = spline.cyclic ? count : count - 1;
   for (const int segment : IndexRange(segment_count)) {
-    const int i = segment;
-    const int j = (segment + 1) % count;
-    const ShapePoint &pi = spline.points[i];
-    const ShapePoint &pj = spline.points[j];
-    /* A corner flag makes the incoming segment a straight line; non-Bézier splines are entirely
-     * straight. */
-    const bool straight = pj.corner || !spline.is_bezier;
+    const ShapePoint &pi = spline.points[segment];
+    const ShapePoint &pj = spline.points[(segment + 1) % count];
+    const ShapeSegment seg = shape_spline_segment_get(spline, segment);
+    const bool straight = seg.straight;
+    const float2 handle_right_i = seg.handle_start;
+    const float2 handle_left_j = seg.handle_end;
 
     int steps = 1;
-    float2 handle_right_i = pi.co;
-    float2 handle_left_j = pj.co;
-    if (!straight) {
-      float2 handle_left_i, handle_right_j;
-      shape_spline_point_handles_get(spline, i, handle_left_i, handle_right_i);
-      shape_spline_point_handles_get(spline, j, handle_left_j, handle_right_j);
-      /* Degenerate handles collapse the segment to a line, like the live input. */
-      if (handle_right_i != pi.co || handle_left_j != pj.co) {
-        const float control_length = math::distance(pi.co, handle_right_i) +
-                                     math::distance(handle_right_i, handle_left_j) +
-                                     math::distance(handle_left_j, pj.co);
-        steps = std::clamp(int(control_length / max_error) + 1, 4, 256);
-      }
+    /* Degenerate handles collapse the segment to a line, like the live input. */
+    if (!straight && (handle_right_i != pi.co || handle_left_j != pj.co)) {
+      const float control_length = math::distance(pi.co, handle_right_i) +
+                                   math::distance(handle_right_i, handle_left_j) +
+                                   math::distance(handle_left_j, pj.co);
+      steps = std::clamp(int(control_length / max_error) + 1, 4, 256);
     }
 
     /* The segment points at t = step / steps, from the same evaluation the Curves use. */
@@ -515,13 +529,14 @@ PaintShape shape_line(const float2 &p0, const float2 &p1)
   ShapeSpline spline;
   spline.is_bezier = false;
   spline.cyclic = false;
+  /* Auto handles keep the two-point segment straight when the user later enables Bézier editing
+   * (the line is evaluated as a plain polyline until then); the handles are then already grabbable
+   * in handle-edit mode. */
   ShapePoint a;
   a.co = p0;
-  a.auto_handles = false;
   spline.points.append(a);
   ShapePoint b;
   b.co = p1;
-  b.auto_handles = false;
   spline.points.append(b);
   shape.splines.append(std::move(spline));
   return shape;

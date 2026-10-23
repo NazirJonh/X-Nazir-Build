@@ -189,6 +189,7 @@ bool ED_paint_curve_polyline_closest(const Span<float2> polyline,
 
   r_hit.dist_sq = FLT_MAX;
   float best_arc = 0.0f;
+  float best_param = 0.0f;
   float arc_len = 0.0f;
   for (const int i : IndexRange(polyline.size() - 1)) {
     const float2 a = polyline[i];
@@ -208,10 +209,12 @@ bool ED_paint_curve_polyline_closest(const Span<float2> polyline,
       r_hit.point = closest;
       r_hit.tangent = is_degenerate ? float2(1.0f, 0.0f) : ab / seg_len;
       best_arc = arc_len + seg_t * seg_len;
+      best_param = (float(i) + seg_t) / float(polyline.size() - 1);
     }
     arc_len += seg_len;
   }
   r_hit.arc_t = arc_len > 1e-8f ? best_arc / arc_len : 0.0f;
+  r_hit.param_t = best_param;
   return true;
 }
 

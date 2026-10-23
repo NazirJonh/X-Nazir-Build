@@ -382,6 +382,12 @@ const ShapeEditSession *paint_shape_session_edit(const Object &ob)
   return session != nullptr ? &session->edit : nullptr;
 }
 
+ShapeEditSession *paint_shape_session_edit_get(Object &ob)
+{
+  PaintShapeSession *session = paint_shape_session_get(ob);
+  return session != nullptr ? &session->edit : nullptr;
+}
+
 void paint_shape_session_transform_toggle(Object &ob)
 {
   PaintShapeSession *session = paint_shape_session_get(ob);
@@ -632,6 +638,11 @@ class ShapeVector3DHost : public VectorEditHost {
     if (ARegion *region = CTX_wm_region(C)) {
       ED_region_tag_redraw(region);
     }
+  }
+  void context_menu_open(bContext *C) override
+  {
+    shape_edit_context_menu_open(
+        *C, "SCULPT_OT_paint_shape_point_type", "SCULPT_OT_paint_shape_point_delete");
   }
 
  private:
@@ -1083,6 +1094,26 @@ bool ED_paint_shape_transform_is_available(const Object &ob)
 {
   const shape::PaintShape *active = shape::paint_shape_session_active_shape(ob);
   return active != nullptr && active->is_parametric() && !active->has_analytic_sdf();
+}
+
+bool ED_paint_shape_handles_edit_active(const Object &ob)
+{
+  const shape::ShapeEditSession *edit = shape::paint_shape_session_edit(ob);
+  return edit != nullptr && edit->handles_edit();
+}
+
+void ED_paint_shape_handles_edit_set(Object &ob, const bool enabled)
+{
+  shape::PaintShapeSession *session = shape::paint_shape_session_get(ob);
+  if (session != nullptr) {
+    session->edit.handles_edit_set(enabled);
+  }
+}
+
+bool ED_paint_shape_handles_edit_available(const Object &ob)
+{
+  const shape::PaintShape *active = shape::paint_shape_session_active_shape(ob);
+  return active != nullptr && !active->splines.is_empty();
 }
 
 bool ED_paint_shape_sessions_cancel_all(bContext *C)

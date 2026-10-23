@@ -72,6 +72,16 @@ inline float4 to_scene_linear(const float4 &picked)
   return linear;
 }
 
+/** Editable type of a #ShapePoint, mirroring the Curve stroke method's handles. */
+enum class ShapePointType : int8_t {
+  /** Catmull-Rom handles derived from the neighbors (smooth). */
+  Auto = 0,
+  /** Both handles collapsed: the point is a hard corner and its segments are straight. */
+  Vector = 1,
+  /** Handles stored on the point (dragged by the user), segments curve through them. */
+  Free = 2,
+};
+
 /** One control point of a #ShapeSpline, in reference-tile pixels. */
 struct ShapePoint {
   float2 co = float2(0.0f);
@@ -84,6 +94,22 @@ struct ShapePoint {
   /** Evaluate the handles from the neighbors (Catmull-Rom) instead of using the stored ones. */
   bool auto_handles = true;
 };
+
+/** True for a Vector point: manual, collapsed handles. Its adjacent segments are straight even
+ * when the neighbor carries auto handles, like the Curve stroke method's vector points. */
+inline bool shape_point_is_vector(const ShapePoint &point)
+{
+  return !point.auto_handles && point.handle_left == point.co && point.handle_right == point.co;
+}
+
+/** The editable type of \a point, derived from the stored flags (nothing extra is persisted). */
+inline ShapePointType shape_point_type_get(const ShapePoint &point)
+{
+  if (point.auto_handles) {
+    return ShapePointType::Auto;
+  }
+  return shape_point_is_vector(point) ? ShapePointType::Vector : ShapePointType::Free;
+}
 
 struct ShapeSpline {
   Vector<ShapePoint> points;
@@ -495,6 +521,24 @@ void shape_spline_point_handles_get(const ShapeSpline &spline,
                                     int index,
                                     float2 &r_handle_left,
                                     float2 &r_handle_right);
+
+/** One resolved segment of a spline: the cubic from #start to #end through the two handles, or a
+ * straight line when #straight (then both handles sit on their end points). */
+struct ShapeSegment {
+  float2 start;
+  float2 handle_start;
+  float2 handle_end;
+  float2 end;
+  bool straight = true;
+};
+
+/**
+ * Segment \a segment of \a spline, from point \a segment to the next one (wrapping when cyclic).
+ * A corner flag makes the incoming segment straight, a Vector point makes both of its adjacent
+ * segments straight, and a non-Bézier spline is entirely straight. This is the one place that
+ * rule lives: flattening and every editing operation resolve segments through it.
+ */
+ShapeSegment shape_spline_segment_get(const ShapeSpline &spline, int segment);
 
 /** \} */
 

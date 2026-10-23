@@ -177,6 +177,8 @@ bool paint_shape_session_transform_active(const Object &ob);
 const PaintShape *paint_shape_session_active_shape(const Object &ob);
 /** The session's edit session (for `gesture_active`), or null. */
 const ShapeEditSession *paint_shape_session_edit(const Object &ob);
+/** Mutable edit session of the live session of \a ob, or null. */
+ShapeEditSession *paint_shape_session_edit_get(Object &ob);
 
 /** Toggle the session's runtime "Transform" flag (the UI button). */
 void paint_shape_session_transform_toggle(Object &ob);

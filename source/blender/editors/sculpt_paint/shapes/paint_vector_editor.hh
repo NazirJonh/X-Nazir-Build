@@ -96,6 +96,13 @@ class VectorEditHost {
   }
   /** Redraw what shows the session, without re-stamping. */
   virtual void redraw(bContext *C) = 0;
+  /**
+   * Open the context menu over the selected control point. Each frontend supplies the operator
+   * identifiers of its own space (Image Editor `PAINT_OT_*` vs 3D `SCULPT_OT_*`); a popup can
+   * only invoke operators, never call back into the running modal. Default no-op so unit-test
+   * hosts need no UI.
+   */
+  virtual void context_menu_open(bContext * /*C*/) {}
 
   /* Session lifetime (commit / cancel / is_alive) is deliberately NOT part of this interface: the
    * operator fixes or discards the session through its apply operator / cancel function, which
@@ -114,6 +121,7 @@ class ShapeVectorEditor {
     StrokeOpacity,
     PointDrag,
     OriginDrag,
+    HandleDrag,
   };
 
   enum class Status {
@@ -180,6 +188,7 @@ class ShapeVectorEditor {
   void move_update(bContext *C, VectorEditHost &host, const float2 &px, ShapeAxisLock lock);
   void transform_update(bContext *C, VectorEditHost &host, const float2 &px, ShapeAxisLock lock);
   void point_update(bContext *C, VectorEditHost &host, const float2 &px);
+  void handle_update(bContext *C, VectorEditHost &host, const float2 &px, bool align);
   /** The origin drag only moves the marker, not the geometry, so it redraws the overlay instead
    * of re-stamping the composited preview. */
   void origin_update(bContext *C, VectorEditHost &host, const float2 &px);
@@ -189,6 +198,13 @@ class ShapeVectorEditor {
    * is owned by the session (a gesture started or the origin was picked), false over no handle. */
   bool begin_gesture_at(VectorEditHost &host, const float2 &px);
 
+  /**
+   * Select the control point under the cursor and open its context menu. False when there is no
+   * point there (or the session is mid-gesture / not in handle mode), in which case the caller
+   * keeps its normal behavior.
+   */
+  bool point_menu_open_at(bContext *C, VectorEditHost &host);
+
   Gesture gesture_ = Gesture::None;
   ShapeAxisLock axis_lock_ = ShapeAxisLock::None;
   /** Last cursor in session pixels (key-initiated gestures use it). */
@@ -197,5 +213,27 @@ class ShapeVectorEditor {
   int2 start_mval_ = int2(0);
   float value_start_ = 0.0f;
 };
+
+/**
+ * The point context menu shared by every Vector frontend, modelled on the Curve Patch menu:
+ * a "Point Type" submenu backed by \a point_type_operator and a "Delete Point" entry backed by
+ * \a point_delete_operator. Both operators act on the session's selected point, so the caller
+ * selects the point under the cursor before opening the menu.
+ */
+void shape_edit_context_menu_open(bContext &C,
+                                  const char *point_type_operator,
+                                  const char *point_delete_operator);
+
+/**
+ * Declare the "type" enum property of a point-type operator (the same Auto / Vector / Free set
+ * for every frontend, read back as #ShapePointType).
+ */
+void shape_point_type_property_define(wmOperatorType *ot);
+
+/**
+ * Re-composite the live preview after a discrete point edit (type change, delete) and redraw the
+ * region, so every frontend's point operators finish the same way.
+ */
+void shape_point_edit_refresh(bContext *C, VectorEditHost &host);
 
 }  // namespace blender::ed::sculpt_paint::shape

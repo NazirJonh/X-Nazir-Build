@@ -235,6 +235,10 @@ struct PaintCurvePolylineHit {
   /** Normalized arc-length position of #point along the polyline, in [0, 1]. This is NOT the
    * Bezier parameter of the underlying segment; the two only agree for a uniform tessellation. */
   float arc_t = 0.0f;
+  /** Position along the polyline in vertex-index units over the vertex count: segment `i` at
+   * fraction `u` is `(i + u) / (size - 1)`. For a polyline sampled uniformly in the Bezier
+   * parameter this IS that parameter, which is what a point insertion needs. */
+  float param_t = 0.0f;
 };
 
 /**

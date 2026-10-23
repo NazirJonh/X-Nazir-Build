@@ -2428,6 +2428,24 @@ static bool rna_SpaceImageEditor_paint_shape_transform_active_get(PointerRNA *pt
   return ED_image_shape_transform_is_active(sima);
 }
 
+static bool rna_SpaceImageEditor_paint_shape_handles_active_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  return ED_image_shape_handles_edit_active(sima);
+}
+
+static void rna_SpaceImageEditor_paint_shape_handles_active_set(PointerRNA *ptr, const bool value)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  ED_image_shape_handles_edit_set(sima, value);
+}
+
+static bool rna_SpaceImageEditor_paint_shape_handles_available_get(PointerRNA *ptr)
+{
+  SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
+  return ED_image_shape_handles_edit_available(sima);
+}
+
 static PointerRNA rna_SpaceImageEditor_paint_shape_session_settings_get(PointerRNA *ptr)
 {
   SpaceImage *sima = static_cast<SpaceImage *>(ptr->data);
@@ -8128,6 +8146,24 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Shape Transform Active", "A Polygon/Star/Arc transform cage is shown");
+
+  /* Live Vector shape session handle editing (runtime only). */
+  prop = RNA_def_property(srna, "paint_shape_handles_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_SpaceImageEditor_paint_shape_handles_active_get",
+                                 "rna_SpaceImageEditor_paint_shape_handles_active_set");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_IMAGE, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Shape Handles Active",
+                           "Show and edit the Bézier handles of the live shape session's points");
+
+  prop = RNA_def_property(srna, "paint_shape_handles_available", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_SpaceImageEditor_paint_shape_handles_available_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop,
+                           "Shape Handles Available",
+                           "The live session's active shape has spline points with editable handles");
 
   /* The live Vector shape session's own settings copy. Read-only pointer; its child
    * properties are editable and drive the session, not the shared tool settings. */

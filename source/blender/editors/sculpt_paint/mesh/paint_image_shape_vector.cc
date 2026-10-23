@@ -389,6 +389,12 @@ class ImageShapeVectorHost : public VectorEditHost {
       ED_region_tag_redraw(region);
     }
   }
+  void context_menu_open(bContext *C) override
+  {
+    shape_edit_context_menu_open(*C,
+                                 "PAINT_OT_image_shape_point_type",
+                                 "PAINT_OT_image_shape_point_delete");
+  }
 
   /**
    * Mirror the active shape back into the tool settings (the header/popover feedback) after a
@@ -1007,12 +1013,110 @@ void PAINT_OT_image_shape_vector_undo(wmOperatorType *ot)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Point editing (handle mode)
+ * \{ */
+
+static bool image_shape_point_edit_poll(bContext *C)
+{
+  shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(
+      CTX_wm_space_image(C));
+  if (state == nullptr || !state->edit.handles_edit()) {
+    return false;
+  }
+  int spline_index, point_index;
+  return state->edit.selected_point(spline_index, point_index);
+}
+
+static void image_shape_point_edit_refresh(bContext *C, shape::ImageShapeVectorState &state)
+{
+  std::unique_ptr<shape::VectorEditHost> host = shape::image_shape_vector_host_create(
+      *C, state, shape::hit_tolerance_px());
+  shape::shape_point_edit_refresh(C, *host);
+}
+
+static wmOperatorStatus image_shape_point_type_exec(bContext *C, wmOperator *op)
+{
+  shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(
+      CTX_wm_space_image(C));
+  if (state == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const shape::ShapePointType type = shape::ShapePointType(RNA_enum_get(op->ptr, "type"));
+  if (!state->edit.point_type_set(type)) {
+    return OPERATOR_CANCELLED;
+  }
+  image_shape_point_edit_refresh(C, *state);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus image_shape_point_delete_exec(bContext *C, wmOperator * /*op*/)
+{
+  shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(
+      CTX_wm_space_image(C));
+  if (state == nullptr || !state->edit.point_delete()) {
+    return OPERATOR_CANCELLED;
+  }
+  image_shape_point_edit_refresh(C, *state);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_image_shape_point_type(wmOperatorType *ot)
+{
+  ot->name = "Set Shape Point Type";
+  ot->idname = "PAINT_OT_image_shape_point_type";
+  ot->description = "Change the selected shape point's handle type";
+
+  ot->exec = image_shape_point_type_exec;
+  ot->poll = image_shape_point_edit_poll;
+  ot->flag = 0;
+
+  shape::shape_point_type_property_define(ot);
+}
+
+void PAINT_OT_image_shape_point_delete(wmOperatorType *ot)
+{
+  ot->name = "Delete Shape Point";
+  ot->idname = "PAINT_OT_image_shape_point_delete";
+  ot->description = "Delete the selected shape point";
+
+  ot->exec = image_shape_point_delete_exec;
+  ot->poll = image_shape_point_edit_poll;
+  ot->flag = 0;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Transform-mode toggle
  * \{ */
 
 bool ED_image_shape_transform_is_active(SpaceImage *sima)
 {
   return shape::image_shape_vector_transform_mode_get(sima);
+}
+
+bool ED_image_shape_handles_edit_active(SpaceImage *sima)
+{
+  shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(sima);
+  return state != nullptr && state->edit.handles_edit();
+}
+
+void ED_image_shape_handles_edit_set(SpaceImage *sima, const bool enabled)
+{
+  shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(sima);
+  if (state != nullptr) {
+    state->edit.handles_edit_set(enabled);
+  }
+}
+
+bool ED_image_shape_handles_edit_available(SpaceImage *sima)
+{
+  shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(sima);
+  if (state == nullptr) {
+    return false;
+  }
+  const shape::PaintShape *active = state->edit.active();
+  return active != nullptr && !active->splines.is_empty();
 }
 
 static bool image_shape_transform_toggle_poll(bContext *C)

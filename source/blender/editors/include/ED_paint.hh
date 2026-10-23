@@ -537,6 +537,12 @@ bool ED_image_shape_transform_gizmo_hit(const bContext *C, const int mval[2]);
 /** Runtime "Transform" mode of the live Vector session in \a sima (cage of a parametric shape without an analytic SDF). */
 bool ED_image_shape_transform_is_active(SpaceImage *sima);
 
+/** Handle-edit mode of the live Vector session in \a sima (the Image Editor shape header). */
+bool ED_image_shape_handles_edit_active(SpaceImage *sima);
+void ED_image_shape_handles_edit_set(SpaceImage *sima, bool enabled);
+/** True when the session's active shape has spline points with editable handles. */
+bool ED_image_shape_handles_edit_available(SpaceImage *sima);
+
 /* `paint_shape_gizmo_view3d.cc` */
 
 /** Register the 3D Viewport gizmo group that draws the live Sculpt Vector session's cage. */
@@ -712,6 +718,11 @@ bool ED_paint_shape_session_shows_image(const Object &ob, const Image &image);
 /** True when the live session's active shape supports the Transform cage (a generated
  * parametric shape without an analytic SDF). */
 bool ED_paint_shape_transform_is_available(const Object &ob);
+/** Handle-edit mode of the live 3D session (the shape header's Handles toggle). */
+bool ED_paint_shape_handles_edit_active(const Object &ob);
+void ED_paint_shape_handles_edit_set(Object &ob, bool enabled);
+/** True when the active shape has spline points the handle editor can show. */
+bool ED_paint_shape_handles_edit_available(const Object &ob);
 
 /* `paint_image_select_view3d.cc` — 3D Viewport overlay for image selection mask */
 

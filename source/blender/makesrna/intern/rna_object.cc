@@ -402,6 +402,25 @@ static bool rna_Object_paint_shape_transform_available_get(PointerRNA *ptr)
   return ED_paint_shape_transform_is_available(*ob);
 }
 
+static bool rna_Object_paint_shape_handles_active_get(PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  return ED_paint_shape_handles_edit_active(*ob);
+}
+
+static void rna_Object_paint_shape_handles_active_set(PointerRNA *ptr, const bool value)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  ED_paint_shape_handles_edit_set(*ob, value);
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, ob);
+}
+
+static bool rna_Object_paint_shape_handles_available_get(PointerRNA *ptr)
+{
+  Object *ob = reinterpret_cast<Object *>(ptr->owner_id);
+  return ED_paint_shape_handles_edit_available(*ob);
+}
+
 static int rna_CurvePatchSession_point_count_get(PointerRNA *ptr)
 {
   return ED_curve_patch_session_point_num(rna_curve_patch_session_from_ptr(ptr));
@@ -4065,6 +4084,24 @@ static void rna_def_object(BlenderRNA *brna)
       prop,
       "Paint Shape Transform Available",
       "The live session's active shape is a generated parametric shape that can show a cage");
+
+  prop = RNA_def_property(srna, "paint_shape_handles_active", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_Object_paint_shape_handles_active_get",
+                                 "rna_Object_paint_shape_handles_active_set");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Paint Shape Handles Active",
+                           "Show and edit the Bézier handles of the live shape session's points");
+
+  prop = RNA_def_property(srna, "paint_shape_handles_available", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_Object_paint_shape_handles_available_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Shape Handles Available",
+      "The live session's active shape has spline points with editable handles");
 
   /* Mesh Symmetry Settings */
 

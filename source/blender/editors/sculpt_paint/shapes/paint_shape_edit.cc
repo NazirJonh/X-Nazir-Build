@@ -21,11 +21,15 @@
 #include "BLI_time.h"
 #include "BLI_vector.hh"
 
+#include "BKE_curves.hh"
+
 #include "DNA_userdef_types.h" /* UI_SCALE_FAC */
 
 #include "GPU_immediate.hh"
 #include "GPU_shader_builtin.hh"
 #include "GPU_state.hh"
+
+#include "ED_paint_curve_draw.hh"
 
 #include "paint_shape_render.hh"
 
@@ -111,7 +115,11 @@ const VectorItem *ShapeEditSession::active_item() const
 void ShapeEditSession::active_set(const int index)
 {
   if (!document_.items.is_empty()) {
-    document_.active = std::clamp(index, 0, int(document_.items.size()) - 1);
+    const int clamped = std::clamp(index, 0, int(document_.items.size()) - 1);
+    if (clamped != document_.active) {
+      this->selected_point_clear();
+    }
+    document_.active = clamped;
   }
 }
 
@@ -119,6 +127,7 @@ void ShapeEditSession::active_next()
 {
   if (document_.items.size() > 1) {
     document_.active = (document_.active + 1) % document_.items.size();
+    this->selected_point_clear();
   }
 }
 
@@ -134,6 +143,8 @@ void ShapeEditSession::shapes_set(Vector<PaintShape> shapes, const CanvasTile &t
   dragging_ = false;
   transforming_ = false;
   point_dragging_ = false;
+  handle_dragging_ = false;
+  this->selected_point_clear();
 }
 
 /** True when \a p carries fill or stroke coverage of \a shape within \a tolerance_px of its
@@ -188,6 +199,172 @@ bool ShapeEditSession::hit_test(const float2 &p,
   return hit_shape(p, style, tolerance_px) >= 0;
 }
 
+namespace {
+
+/**
+ * Screen-space view of a shape's splines for the shared control-point layer. Points are
+ * flattened across the splines; the handles come from the shape's own Catmull-Rom rule, so
+ * the shared builder draws and picks exactly what the outline evaluates.
+ */
+class ShapeSplineScreenSource : public control_points::Source {
+ public:
+  ShapeSplineScreenSource(const PaintShape &shape,
+                          FunctionRef<float2(const PaintShape &, const float2 &)> to_screen,
+                          const bool show_handles,
+                          const int selected_spline,
+                          const int selected_point)
+      : shape_(shape),
+        to_screen_(to_screen),
+        show_handles_(show_handles),
+        selected_spline_(selected_spline),
+        selected_point_(selected_point)
+  {
+    for (const int spline_index : shape.splines.index_range()) {
+      const ShapeSpline &spline = shape.splines[spline_index];
+      for (const int point_index : spline.points.index_range()) {
+        point_spline_.append(spline_index);
+        point_spline_point_.append(point_index);
+      }
+    }
+  }
+
+  int points_num() const override
+  {
+    return int(point_spline_.size());
+  }
+
+  float2 point_position(const int point) const override
+  {
+    return to_screen_(shape_, this->shape_point(point).co);
+  }
+
+  void point_handles(const int point, float2 &r_left, float2 &r_right) const override
+  {
+    const ShapeSpline &spline = shape_.splines[point_spline_[point]];
+    float2 left, right;
+    shape_spline_point_handles_get(spline, point_spline_point_[point], left, right);
+    r_left = to_screen_(shape_, left);
+    r_right = to_screen_(shape_, right);
+  }
+
+  int8_t handle_type(const int point, bool /*left*/) const override
+  {
+    const ShapePoint &shape_point = this->shape_point(point);
+    if (shape_point.auto_handles) {
+      return BEZIER_HANDLE_AUTO;
+    }
+    return shape_point_is_vector(shape_point) ? BEZIER_HANDLE_VECTOR : BEZIER_HANDLE_FREE;
+  }
+
+  uint8_t selection(const int point) const override
+  {
+    if (point_spline_[point] == selected_spline_ &&
+        point_spline_point_[point] == selected_point_)
+    {
+      return SEL_F2;
+    }
+    return 0;
+  }
+
+  bool handle_visible(const int point, const bool left) const override
+  {
+    if (!show_handles_) {
+      return false;
+    }
+    const ShapeSpline &spline = shape_.splines[point_spline_[point]];
+    float2 handle_left, handle_right;
+    shape_spline_point_handles_get(
+        spline, point_spline_point_[point], handle_left, handle_right);
+    const float2 &handle = left ? handle_left : handle_right;
+    /* A collapsed handle (a Vector point) is not a grabbable knob; the point itself owns that
+     * spot, exactly as the session's own drawing skipped it. */
+    return math::distance_squared(handle, this->shape_point(point).co) >= 1e-8f;
+  }
+
+  int segments_num() const override
+  {
+    /* The session keeps its dashed outline; solid wires are not drawn, and the insert hit test
+     * has its own exact Bezier parameter. */
+    return 0;
+  }
+
+  void segment_polyline(int /*segment*/, Vector<float2> & /*r_out*/) const override {}
+
+  int point_spline(const int point) const
+  {
+    return point_spline_[point];
+  }
+  int point_index(const int point) const
+  {
+    return point_spline_point_[point];
+  }
+
+ private:
+  const ShapePoint &shape_point(const int point) const
+  {
+    return shape_.splines[point_spline_[point]].points[point_spline_point_[point]];
+  }
+
+  const PaintShape &shape_;
+  FunctionRef<float2(const PaintShape &, const float2 &)> to_screen_;
+  bool show_handles_;
+  int selected_spline_;
+  int selected_point_;
+  Vector<int> point_spline_;
+  Vector<int> point_spline_point_;
+};
+
+}  // namespace
+
+void shape_control_points_handles_get(
+    const PaintShape &shape,
+    FunctionRef<float2(const PaintShape &, const float2 &)> to_screen,
+    const bool show_handles,
+    const int selected_spline,
+    const int selected_point,
+    const control_points::BuildOptions &options,
+    PaintCurveScreenHandles &r_out)
+{
+  if (shape.splines.is_empty()) {
+    r_out.points.clear();
+    r_out.segments.clear();
+    return;
+  }
+  ShapeSplineScreenSource source(
+      shape, to_screen, show_handles, selected_spline, selected_point);
+  control_points::handles_build(source, options, r_out);
+}
+
+bool shape_control_point_pick(const PaintShape &shape,
+                              const float2 &p,
+                              const float tolerance_px,
+                              const bool show_handles,
+                              const int selected_spline,
+                              const int selected_point,
+                              int &r_spline,
+                              int &r_point,
+                              control_points::Part &r_part)
+{
+  r_spline = -1;
+  r_point = -1;
+  r_part = control_points::Part::None;
+  if (shape.splines.is_empty()) {
+    return false;
+  }
+  const auto identity = [](const PaintShape & /*shape*/, const float2 &co) { return co; };
+  ShapeSplineScreenSource source(
+      shape, identity, show_handles, selected_spline, selected_point);
+  const control_points::Pick pick = control_points::pick_point(
+      source, p, tolerance_px, control_points::Metric::Euclidean);
+  if (pick.point < 0) {
+    return false;
+  }
+  r_spline = source.point_spline(pick.point);
+  r_point = source.point_index(pick.point);
+  r_part = pick.part;
+  return true;
+}
+
 ShapeHandle ShapeEditSession::handle_at(const float2 &p,
                                         const float radius_px,
                                         const ShapeStyle &style) const
@@ -196,30 +373,39 @@ ShapeHandle ShapeEditSession::handle_at(const float2 &p,
   const float tol = std::max(radius_px, 0.0f);
   const float tol_sq = tol * tol;
 
-  /* Priority : a control point of the ACTIVE shape, then its origin, then the
-   * whole-shape move handle (which may select another shape by its contour). Points of a
-   * non-active shape never win; grabbing one first requires selecting that shape. */
+  /* Priority : a control point or Bézier handle of the ACTIVE shape (the shared pick rule
+   * decides between the pivot and the two knobs), then its origin, then the whole-shape move
+   * handle (which may select another shape by its contour). Points of a non-active shape never
+   * win; grabbing one first requires selecting that shape. */
   if (const PaintShape *active_shape = this->active()) {
     const int active_i = std::clamp(document_.active, 0, int(document_.items.size()) - 1);
 
-    int best_spline = -1;
-    int best_point = -1;
-    float best_dist_sq = tol_sq * SHAPE_POINT_HIT_SCALE * SHAPE_POINT_HIT_SCALE;
-    for (const int si : active_shape->splines.index_range()) {
-      for (const int pi : active_shape->splines[si].points.index_range()) {
-        const float dist_sq = math::distance_squared(active_shape->splines[si].points[pi].co, p);
-        if (dist_sq <= best_dist_sq) {
-          best_dist_sq = dist_sq;
-          best_spline = si;
-          best_point = pi;
-        }
-      }
-    }
-    if (best_spline >= 0) {
-      handle.type = ShapeHandleType::Point;
+    int selected_spline, selected_point;
+    this->selected_point(selected_spline, selected_point);
+    int nearest_spline = -1;
+    int nearest_point = -1;
+    control_points::Part nearest_part = control_points::Part::None;
+    if (shape_control_point_pick(*active_shape,
+                                 p,
+                                 tol * SHAPE_POINT_HIT_SCALE,
+                                 handles_edit_,
+                                 selected_spline,
+                                 selected_point,
+                                 nearest_spline,
+                                 nearest_point,
+                                 nearest_part))
+    {
       handle.shape_index = active_i;
-      handle.spline_index = best_spline;
-      handle.point_index = best_point;
+      handle.spline_index = nearest_spline;
+      handle.point_index = nearest_point;
+      if (nearest_part == control_points::Part::Point) {
+        handle.type = ShapeHandleType::Point;
+      }
+      else {
+        handle.type = ShapeHandleType::Handle;
+        handle.handle_side = (nearest_part == control_points::Part::Left) ? ShapeHandleSide::Left :
+                                                                           ShapeHandleSide::Right;
+      }
       return handle;
     }
 
@@ -514,6 +700,8 @@ bool ShapeEditSession::point_drag_begin(const float2 &p, const float tolerance_p
   if (best_spline < 0) {
     return false;
   }
+  selected_spline_ = best_spline;
+  selected_point_ = best_point;
   point_dragging_ = true;
   gesture_dirty_ = false;
   point_spline_ = best_spline;
@@ -582,42 +770,34 @@ bool ShapeEditSession::insert_spot_find(const float2 &p,
   int best_segment = -1;
   float best_t = 0.0f;
   float best_dist_sq = tol * tol;
+  Vector<float2> polyline;
   for (const int si : shape->splines.index_range()) {
     const ShapeSpline &spline = shape->splines[si];
     const int count = spline.points.size();
     const int segment_num = spline.cyclic ? count : count - 1;
     for (const int i : IndexRange(std::max(segment_num, 0))) {
-      const int j = (i + 1) % count;
-      const ShapePoint &pi = spline.points[i];
-      const ShapePoint &pj = spline.points[j];
-      const bool straight = pj.corner || !spline.is_bezier;
-      float2 c1 = pi.co;
-      float2 c2 = pj.co;
-      if (!straight) {
-        float2 unused;
-        shape_spline_point_handles_get(spline, i, unused, c1);
-        shape_spline_point_handles_get(spline, j, c2, unused);
+      const ShapeSegment segment = shape_spline_segment_get(spline, i);
+      /* A straight segment is exact with its two end points; a curved one is sampled uniformly in
+       * the Bezier parameter, so the hit's polyline parameter is that parameter. */
+      polyline.resize(segment.straight ? 1 : SAMPLES);
+      if (!segment.straight) {
+        bke::curves::bezier::evaluate_segment(segment.start,
+                                              segment.handle_start,
+                                              segment.handle_end,
+                                              segment.end,
+                                              polyline.as_mutable_span());
       }
-      /* Sample the segment; a straight one is exact with the same loop (its handles sit on the
-       * end points). */
-      float2 prev = pi.co;
-      for (const int s : IndexRange(1, SAMPLES)) {
-        const float t = float(s) / float(SAMPLES);
-        const float mt = 1.0f - t;
-        const float2 cur = pi.co * (mt * mt * mt) + c1 * (3.0f * mt * mt * t) +
-                           c2 * (3.0f * mt * t * t) + pj.co * (t * t * t);
-        const float2 ab = cur - prev;
-        const float len_sq = math::length_squared(ab);
-        const float along = len_sq > 1e-20f ? math::clamp(math::dot(p - prev, ab) / len_sq, 0.0f, 1.0f) :
-                                              0.0f;
-        const float dist_sq = math::distance_squared(p, prev + ab * along);
-        if (dist_sq <= best_dist_sq) {
-          best_dist_sq = dist_sq;
-          best_spline = si;
-          best_segment = i;
-          best_t = (float(s - 1) + along) / float(SAMPLES);
-        }
-        prev = cur;
+      else {
+        polyline[0] = segment.start;
+      }
+      polyline.append(segment.end);
+
+      PaintCurvePolylineHit hit;
+      if (ED_paint_curve_polyline_closest(polyline, p, hit) && hit.dist_sq <= best_dist_sq) {
+        best_dist_sq = hit.dist_sq;
+        best_spline = si;
+        best_segment = i;
+        best_t = hit.param_t;
       }
     }
   }
@@ -632,32 +812,31 @@ bool ShapeEditSession::insert_preview(const float2 &p,
                                       float2 &r_point,
                                       float2 &r_tangent) const
 {
-  int spline_index, segment;
+  int spline_index, segment_index;
   float t;
-  if (!this->insert_spot_find(p, tolerance_px, spline_index, segment, t)) {
+  if (!this->insert_spot_find(p, tolerance_px, spline_index, segment_index, t)) {
     return false;
   }
-  const ShapeSpline &spline = active()->splines[spline_index];
-  const int j = (segment + 1) % spline.points.size();
-  const ShapePoint &pi = spline.points[segment];
-  const ShapePoint &pj = spline.points[j];
-  float2 c1 = pi.co;
-  float2 c2 = pj.co;
-  if (!(pj.corner || !spline.is_bezier)) {
-    float2 unused;
-    shape_spline_point_handles_get(spline, segment, unused, c1);
-    shape_spline_point_handles_get(spline, j, c2, unused);
+  const ShapeSegment segment = shape_spline_segment_get(active()->splines[spline_index],
+                                                        segment_index);
+  const float2 chord = segment.end - segment.start;
+  if (segment.straight) {
+    r_point = math::interpolate(segment.start, segment.end, t);
+    r_tangent = chord;
+    return true;
   }
-  const float mt = 1.0f - t;
-  r_point = pi.co * (mt * mt * mt) + c1 * (3.0f * mt * mt * t) + c2 * (3.0f * mt * t * t) +
-            pj.co * (t * t * t);
-  /* Derivative of the cubic; a degenerate one falls back to the chord. */
-  float2 tangent = (c1 - pi.co) * (3.0f * mt * mt) + (c2 - c1) * (6.0f * mt * t) +
-                   (pj.co - c2) * (3.0f * t * t);
-  if (math::length_squared(tangent) < 1e-12f) {
-    tangent = pj.co - pi.co;
-  }
-  r_tangent = tangent;
+  /* The knot insertion yields the split point and the two new handles around it, which are
+   * collinear with the curve tangent there. */
+  const bke::curves::bezier::Insertion insertion = bke::curves::bezier::insert(
+      float3(segment.start, 0.0f),
+      float3(segment.handle_start, 0.0f),
+      float3(segment.handle_end, 0.0f),
+      float3(segment.end, 0.0f),
+      t);
+  r_point = insertion.position.xy();
+  const float2 tangent = insertion.right_handle.xy() - insertion.left_handle.xy();
+  /* A degenerate tangent falls back to the chord. */
+  r_tangent = math::length_squared(tangent) < 1e-12f ? chord : tangent;
   return true;
 }
 
@@ -678,11 +857,11 @@ bool ShapeEditSession::point_insert(const float2 &p, const float tolerance_px)
   const float t = best_t;
   const ShapePoint pi = spline.points[i];
   const ShapePoint pj = spline.points[j];
-  const bool straight = pj.corner || !spline.is_bezier;
+  const ShapeSegment segment = shape_spline_segment_get(spline, i);
 
   ShapePoint inserted;
   inserted.width_factor = math::interpolate(pi.width_factor, pj.width_factor, t);
-  if (straight) {
+  if (segment.straight) {
     inserted.co = math::interpolate(pi.co, pj.co, t);
     inserted.handle_left = inserted.co;
     inserted.handle_right = inserted.co;
@@ -691,36 +870,299 @@ bool ShapeEditSession::point_insert(const float2 &p, const float tolerance_px)
     inserted.auto_handles = false;
   }
   else {
-    /* De Casteljau split: both halves together trace exactly the original segment. */
-    float2 left_i, right_i, left_j, right_j;
-    shape_spline_point_handles_get(spline, i, left_i, right_i);
-    shape_spline_point_handles_get(spline, j, left_j, right_j);
-    const float2 q0 = math::interpolate(pi.co, right_i, t);
-    const float2 q1 = math::interpolate(right_i, left_j, t);
-    const float2 q2 = math::interpolate(left_j, pj.co, t);
-    const float2 r0 = math::interpolate(q0, q1, t);
-    const float2 r1 = math::interpolate(q1, q2, t);
-    inserted.co = math::interpolate(r0, r1, t);
-    inserted.handle_left = r0;
-    inserted.handle_right = r1;
+    /* Both halves together trace exactly the original segment. The outer handles of the
+     * neighbors are resolved before the points leave auto mode. */
+    float2 left_i, right_j, unused;
+    shape_spline_point_handles_get(spline, i, left_i, unused);
+    shape_spline_point_handles_get(spline, j, unused, right_j);
+    const bke::curves::bezier::Insertion insertion = bke::curves::bezier::insert(
+        float3(segment.start, 0.0f),
+        float3(segment.handle_start, 0.0f),
+        float3(segment.handle_end, 0.0f),
+        float3(segment.end, 0.0f),
+        t);
+    inserted.co = insertion.position.xy();
+    inserted.handle_left = insertion.left_handle.xy();
+    inserted.handle_right = insertion.right_handle.xy();
     inserted.auto_handles = false;
     inserted.corner = false;
 
     ShapePoint &start = spline.points[i];
     start.handle_left = left_i;
-    start.handle_right = q0;
+    start.handle_right = insertion.handle_prev.xy();
     start.auto_handles = false;
     ShapePoint &end = spline.points[j];
-    end.handle_left = q2;
+    end.handle_left = insertion.handle_next.xy();
     end.handle_right = right_j;
     end.auto_handles = false;
   }
   /* The wrap-around segment of a cyclic spline ends at point 0: append instead. */
   const int insert_at = (j == 0) ? int(spline.points.size()) : j;
   spline.points.insert(insert_at, inserted);
+  selected_spline_ = best_spline;
+  selected_point_ = insert_at;
 
   undo_push();
   return true;
+}
+
+bool ShapeEditSession::point_delete()
+{
+  int spline_index, point_index;
+  if (!this->selected_point(spline_index, point_index)) {
+    return false;
+  }
+  PaintShape *shape = active_for_write();
+  if (shape == nullptr || spline_index < 0 || spline_index >= shape->splines.size()) {
+    return false;
+  }
+  ShapeSpline &spline = shape->splines[spline_index];
+  /* An open spline needs two points to stay an outline, a closed one needs three. */
+  const int min_points = spline.cyclic ? 3 : 2;
+  if (point_index < 0 || point_index >= spline.points.size() ||
+      spline.points.size() <= min_points)
+  {
+    return false;
+  }
+  spline.points.remove(point_index);
+  if (spline.points.is_empty()) {
+    this->selected_point_clear();
+  }
+  else {
+    selected_point_ = std::min(point_index, int(spline.points.size()) - 1);
+  }
+  undo_push();
+  return true;
+}
+
+void ShapeEditSession::handles_edit_set(const bool enabled)
+{
+  if (handles_edit_ == enabled) {
+    return;
+  }
+  handles_edit_ = enabled;
+  if (!enabled) {
+    this->selected_point_clear();
+  }
+}
+
+bool ShapeEditSession::selected_point(int &r_spline, int &r_point) const
+{
+  r_spline = selected_spline_;
+  r_point = selected_point_;
+  if (selected_spline_ < 0 || selected_point_ < 0) {
+    return false;
+  }
+  const PaintShape *shape = this->active();
+  if (shape == nullptr || selected_spline_ >= shape->splines.size()) {
+    return false;
+  }
+  return selected_point_ < shape->splines[selected_spline_].points.size();
+}
+
+void ShapeEditSession::selected_point_set(const int spline, const int point)
+{
+  const PaintShape *shape = this->active();
+  if (shape == nullptr || spline < 0 || spline >= shape->splines.size()) {
+    return;
+  }
+  if (point < 0 || point >= shape->splines[spline].points.size()) {
+    return;
+  }
+  selected_spline_ = spline;
+  selected_point_ = point;
+}
+
+void ShapeEditSession::selected_point_clear()
+{
+  selected_spline_ = -1;
+  selected_point_ = -1;
+}
+
+/** Make a non-Bézier spline editable with handles, keeping the current straight outline. The Line
+ * builder leaves its points with zero handles; those would pull the curve to the origin once the
+ * spline is evaluated as Bézier, so collapse them onto their points instead. */
+static void spline_make_bezier_editable(ShapeSpline &spline)
+{
+  if (spline.is_bezier) {
+    return;
+  }
+  spline.is_bezier = true;
+  for (ShapePoint &point : spline.points) {
+    if (!point.auto_handles && point.handle_left == float2(0.0f) &&
+        point.handle_right == float2(0.0f))
+    {
+      point.handle_left = point.co;
+      point.handle_right = point.co;
+    }
+  }
+}
+
+bool ShapeEditSession::point_type_set(const ShapePointType type)
+{
+  int spline_index, point_index;
+  if (!this->selected_point(spline_index, point_index)) {
+    return false;
+  }
+  PaintShape *shape = active_for_write();
+  if (shape == nullptr) {
+    return false;
+  }
+  ShapeSpline &spline = shape->splines[spline_index];
+  ShapePoint &point = spline.points[point_index];
+  /* A non-Bézier spline reports its points as Auto even though its segments are enforced
+   * straight, so choosing Auto there must still convert and smooth it. */
+  if (shape_point_type_get(point) == type && spline.is_bezier &&
+      !(type == ShapePointType::Auto && point.corner))
+  {
+    return false;
+  }
+  spline_make_bezier_editable(spline);
+
+  const int count = int(spline.points.size());
+  const bool has_next = spline.cyclic || point_index + 1 < count;
+  ShapePoint &next = spline.points[(point_index + 1) % count];
+
+  switch (type) {
+    case ShapePointType::Auto:
+      point.auto_handles = true;
+      point.corner = false;
+      /* Smooth both adjacent segments: the outgoing one is straight-gated by the next point's
+       * incoming corner flag. */
+      if (has_next) {
+        next.corner = false;
+      }
+      break;
+    case ShapePointType::Vector:
+      point.auto_handles = false;
+      point.corner = true;
+      point.handle_left = point.co;
+      point.handle_right = point.co;
+      break;
+    case ShapePointType::Free: {
+      /* Free starts from the handles the point has right now: an Auto point keeps its smooth
+       * tangent (stored handles may be zero) and the user then drags them freely. Collapsing to
+       * the pivot instead would silently turn the point into a Vector-like corner. */
+      if (point.auto_handles) {
+        float2 left, right;
+        shape_spline_point_handles_get(spline, point_index, left, right);
+        point.handle_left = left;
+        point.handle_right = right;
+      }
+      point.auto_handles = false;
+      point.corner = false;
+      break;
+    }
+  }
+  undo_push();
+  return true;
+}
+
+bool ShapeEditSession::handle_drag_begin(const ShapeHandle &handle,
+                                         const float2 &p,
+                                         const float /*tolerance_px*/)
+{
+  if (!handles_edit_ || handle.type != ShapeHandleType::Handle ||
+      handle.handle_side == ShapeHandleSide::None)
+  {
+    return false;
+  }
+  PaintShape *shape = active_for_write();
+  if (shape == nullptr || handle.spline_index < 0 ||
+      handle.spline_index >= shape->splines.size())
+  {
+    return false;
+  }
+  ShapeSpline &spline = shape->splines[handle.spline_index];
+  if (handle.point_index < 0 || handle.point_index >= spline.points.size()) {
+    return false;
+  }
+  spline_make_bezier_editable(spline);
+
+  const ShapePoint &point = spline.points[handle.point_index];
+  float2 left, right;
+  shape_spline_point_handles_get(spline, handle.point_index, left, right);
+  const float2 knob = (handle.handle_side == ShapeHandleSide::Left) ? left : right;
+
+  handle_dragging_ = true;
+  gesture_dirty_ = false;
+  handle_spline_ = handle.spline_index;
+  handle_point_ = handle.point_index;
+  handle_side_ = handle.handle_side;
+  handle_grab_delta_ = knob - p;
+  handle_other_start_ = (handle.handle_side == ShapeHandleSide::Left) ? right : left;
+  handle_other_length_ = math::length(handle_other_start_ - point.co);
+  this->selected_point_set(handle.spline_index, handle.point_index);
+  return true;
+}
+
+bool ShapeEditSession::handle_drag_update(const float2 &p, const bool align)
+{
+  if (!handle_dragging_) {
+    return false;
+  }
+  PaintShape *shape = active_for_write();
+  if (shape == nullptr || handle_spline_ < 0 || handle_spline_ >= shape->splines.size()) {
+    return false;
+  }
+  ShapeSpline &spline = shape->splines[handle_spline_];
+  if (handle_point_ < 0 || handle_point_ >= spline.points.size()) {
+    return false;
+  }
+  ShapePoint &point = spline.points[handle_point_];
+  const float2 target = p + handle_grab_delta_;
+  float2 &primary = (handle_side_ == ShapeHandleSide::Left) ? point.handle_left :
+                                                              point.handle_right;
+  if (math::length_squared(target - primary) < 1e-12f) {
+    return false;
+  }
+  const float2 old_primary = primary;
+  primary = target;
+  point.auto_handles = false;
+
+  /* The edited handle only curves its own segment: clear the incoming corner of this point for the
+   * left side, the next point's incoming corner for the right side. */
+  const int count = int(spline.points.size());
+  if (handle_side_ == ShapeHandleSide::Left) {
+    point.corner = false;
+  }
+  else if (spline.cyclic || handle_point_ + 1 < count) {
+    spline.points[(handle_point_ + 1) % count].corner = false;
+  }
+
+  float2 &other = (handle_side_ == ShapeHandleSide::Left) ? point.handle_right :
+                                                            point.handle_left;
+  const float2 dir = primary - point.co;
+  if (align && handle_other_length_ > 1e-6f && math::length_squared(dir) > 1e-12f) {
+    other = point.co - math::normalize(dir) * handle_other_length_;
+  }
+  else {
+    /* Free (non-aligned) or a collapsed opposite handle: keep its resolved grab-time pose
+     * instead of leaving stale (possibly origin) coordinates. */
+    other = handle_other_start_;
+  }
+
+  if (primary == old_primary) {
+    return false;
+  }
+  gesture_dirty_ = true;
+  return true;
+}
+
+void ShapeEditSession::handle_drag_cancel()
+{
+  handle_dragging_ = false;
+  gesture_dirty_ = false;
+  undo_pop_no_redo();
+}
+
+void ShapeEditSession::handle_drag_end()
+{
+  handle_dragging_ = false;
+  if (gesture_dirty_) {
+    undo_push();
+  }
+  gesture_dirty_ = false;
 }
 
 bool ShapeEditSession::origin_drag_begin(const float2 &p)
@@ -756,6 +1198,16 @@ bool ShapeEditSession::origin_drag_update(const float2 &p)
   shape->origin_is_custom = true;
   gesture_dirty_ = true;
   return true;
+}
+
+void ShapeEditSession::gesture_abort()
+{
+  dragging_ = false;
+  transforming_ = false;
+  point_dragging_ = false;
+  origin_dragging_ = false;
+  handle_dragging_ = false;
+  gesture_dirty_ = false;
 }
 
 void ShapeEditSession::origin_drag_cancel()

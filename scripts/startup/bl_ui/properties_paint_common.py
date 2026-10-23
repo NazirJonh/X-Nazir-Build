@@ -3699,6 +3699,58 @@ def paint_shape_settings(context):
     return context.tool_settings.image_paint.shape
 
 
+def paint_shape_handles_owner(context):
+    """(owner, is_image_session) whose live shape session exposes handle editing, or (None, False).
+
+    The live Vector session owns the handle-edit flag: the Image Editor's own session exposes it
+    on ``space_data``, while a 3D Sculpt session (shown directly or linked into an Image Editor)
+    exposes it on the active object."""
+    space = getattr(context, "space_data", None)
+    if space is not None and space.type == 'IMAGE_EDITOR':
+        if getattr(space, "paint_shape_session_settings", None) is not None:
+            if getattr(space, "paint_shape_handles_available", False):
+                return space, True
+            return None, False
+        ob = paint_shape_linked_3d_object(context)
+        if ob is not None and getattr(ob, "paint_shape_handles_available", False):
+            return ob, False
+        return None, False
+    if context.mode == 'SCULPT':
+        ob = getattr(context, "object", None)
+        if (ob is not None and
+                getattr(ob, "paint_shape_session_settings", None) is not None and
+                getattr(ob, "paint_shape_handles_available", False)):
+            return ob, False
+    return None, False
+
+
+def draw_paint_shape_handles_controls(context, layout):
+    """Handles toggle of the live shape session, plus point type / delete while it is on.
+
+    Mirrors the Curve stroke method's editable handles: the toggle shows the Bézier handles of
+    every point of the active shape; the point buttons act on the selected point (V and
+    Del/Backspace do the same in the viewport, Ctrl+Click adds a point on a segment)."""
+    owner, is_image_session = paint_shape_handles_owner(context)
+    if owner is None:
+        return
+
+    layout.prop(owner, "paint_shape_handles_active",
+                text="Handles", icon='IPO_BEZIER', toggle=True)
+    if not owner.paint_shape_handles_active:
+        return
+
+    row = layout.row(align=True)
+    if is_image_session:
+        op_type = "paint.image_shape_point_type"
+        op_delete = "paint.image_shape_point_delete"
+    else:
+        op_type = "sculpt.paint_shape_point_type"
+        op_delete = "sculpt.paint_shape_point_delete"
+    row.operator(op_type, text="Vector", icon='HANDLE_VECTOR').type = 'VECTOR'
+    row.operator(op_type, text="Auto", icon='HANDLE_AUTO').type = 'AUTO'
+    row.operator(op_delete, text="Delete Point", icon='X')
+
+
 def draw_paint_shape_extra_options(context, layout, shape):
     """The rarer Shape settings, shown in the header's Options popover and in the Active Tool's
     Shape Options subpanel: the rectangle/ellipse default size, the stroke alignment, the

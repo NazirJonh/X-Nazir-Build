@@ -41,6 +41,7 @@ from bl_ui.properties_paint_common import (
     _draw_mask_alpha_pair,
     _mask_alpha_channel,
     draw_mask_alpha_source,
+    draw_paint_shape_handles_controls,
     draw_paint_shape_options_subpanel,
     draw_paint_shape_texture_preview_popover,
     draw_shape_color_row,
@@ -3204,6 +3205,8 @@ class _defs_image_paint_shape:
                 layout.separator()
                 layout.prop(shape, "rotation", text="Angle")
             layout.separator()
+            draw_paint_shape_handles_controls(context, layout)
+            layout.separator()
             layout.popover(panel="IMAGE_PT_tools_shape_options", text="Options")
             draw_paint_shape_texture_preview_popover(
                 context, layout, panel="PAINT_PT_shape_texture_preview")
@@ -3296,6 +3299,8 @@ class _defs_sculpt_paint_shape:
             if paint_shape_tool_has_angle(context):
                 layout.separator()
                 layout.prop(shape, "rotation", text="Angle")
+            layout.separator()
+            draw_paint_shape_handles_controls(context, layout)
             layout.separator()
             layout.popover(panel="VIEW3D_PT_tools_shape_options", text="Options")
             draw_paint_shape_texture_preview_popover(

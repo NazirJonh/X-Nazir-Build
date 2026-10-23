@@ -14,6 +14,19 @@
 
 #include "BLI_utildefines.h"
 
+#include "BKE_context.hh"
+
+#include "BLT_translation.hh"
+
+#include "ED_screen.hh"
+
+#include "RNA_define.hh"
+
+#include "UI_interface.hh"
+#include "UI_interface_c.hh"
+#include "UI_interface_icons.hh"
+#include "UI_interface_layout.hh"
+
 #include "WM_types.hh"
 
 #include "../paint_intern.hh"
@@ -52,6 +65,16 @@ void ShapeVectorEditor::point_update(bContext *C, VectorEditHost &host, const fl
   }
 }
 
+void ShapeVectorEditor::handle_update(bContext *C,
+                                      VectorEditHost &host,
+                                      const float2 &px,
+                                      const bool align)
+{
+  if (host.edit().handle_drag_update(px, align)) {
+    host.restamp(C);
+  }
+}
+
 void ShapeVectorEditor::origin_update(bContext *C, VectorEditHost &host, const float2 &px)
 {
   if (host.edit().origin_drag_update(px)) {
@@ -75,6 +98,9 @@ void ShapeVectorEditor::end_gesture(bContext *C, VectorEditHost &host)
       break;
     case Gesture::PointDrag:
       host.edit().point_drag_end();
+      break;
+    case Gesture::HandleDrag:
+      host.edit().handle_drag_end();
       break;
     case Gesture::OriginDrag:
       host.edit().origin_drag_end();
@@ -113,6 +139,12 @@ bool ShapeVectorEditor::begin_gesture_at(VectorEditHost &host, const float2 &px)
         axis_lock_ = ShapeAxisLock::None;
       }
       return true;
+    case ShapeHandleType::Handle:
+      if (host.edit().handle_drag_begin(handle, px, host.hit_tolerance_px())) {
+        gesture_ = Gesture::HandleDrag;
+        axis_lock_ = ShapeAxisLock::None;
+      }
+      return true;
     case ShapeHandleType::Origin:
       /* Drag the pivot marker; only its position and the custom flag change. */
       if (host.edit().origin_drag_begin(px)) {
@@ -130,6 +162,26 @@ bool ShapeVectorEditor::start_move_pick(bContext * /*C*/, const float2 &px, Vect
 {
   cursor_px_ = px;
   return this->begin_gesture_at(host, px);
+}
+
+bool ShapeVectorEditor::point_menu_open_at(bContext *C, VectorEditHost &host)
+{
+  if (!host.edit().handles_edit() || !this->gesture_is_idle(host)) {
+    return false;
+  }
+  const ShapeHandle handle = host.edit().handle_at(
+      cursor_px_, host.hit_tolerance_px(), host.style());
+  /* A hit on either tangent handle counts as a hit on its point: every menu entry acts on the
+   * whole point, the same rule the Curve Patch menu uses. */
+  if (!ELEM(handle.type, ShapeHandleType::Point, ShapeHandleType::Handle)) {
+    return false;
+  }
+  host.edit().selected_point_set(handle.spline_index, handle.point_index);
+  host.redraw(C);
+  if (C != nullptr) {
+    host.context_menu_open(C);
+  }
+  return true;
 }
 
 void ShapeVectorEditor::begin_value_gesture(VectorEditHost &host,
@@ -155,6 +207,12 @@ void ShapeVectorEditor::cancel_gesture(bContext *C, VectorEditHost &host)
     case Gesture::PointDrag:
       if (host.edit().is_point_dragging()) {
         host.edit().point_drag_cancel();
+        host.restamp(C);
+      }
+      break;
+    case Gesture::HandleDrag:
+      if (host.edit().is_handle_dragging()) {
+        host.edit().handle_drag_cancel();
         host.restamp(C);
       }
       break;
@@ -214,6 +272,58 @@ bool ShapeVectorEditor::redo(bContext *C, VectorEditHost &host)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Context menu
+ * \{ */
+
+void shape_point_type_property_define(wmOperatorType *ot)
+{
+  static const EnumPropertyItem type_items[] = {
+      {int(ShapePointType::Auto), "AUTO", 0, "Auto", "Smooth handles derived from the neighbors"},
+      {int(ShapePointType::Vector),
+       "VECTOR",
+       0,
+       "Vector",
+       "Hard corner with straight segments"},
+      {int(ShapePointType::Free),
+       "FREE",
+       0,
+       "Free",
+       "Manual handles: curve through the point with freely dragged tangents"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  PropertyRNA *prop = RNA_def_property(ot->srna, "type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, type_items);
+  RNA_def_property_enum_default(prop, int(ShapePointType::Auto));
+}
+
+void shape_point_edit_refresh(bContext *C, VectorEditHost &host)
+{
+  host.restamp(C);
+  host.sync_settings_from_active();
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+}
+
+void shape_edit_context_menu_open(bContext &C,
+                                  const char *point_type_operator,
+                                  const char *point_delete_operator)
+{
+  ui::PopupMenu *pup = ui::popup_menu_begin(&C, IFACE_("Shape Point"), ICON_NONE);
+  ui::Layout &layout = *ui::popup_menu_layout(pup);
+  layout.operator_context_set(wm::OpCallContext::InvokeDefault);
+  /* A submenu of the operator's enum property, exactly like the Curve Patch's Handle Type
+   * entry: the operator applies to the session's selected point, which the caller has already
+   * set from the right-click hit test. */
+  layout.op_menu_enum(&C, point_type_operator, "type", IFACE_("Point Type"), ICON_NONE);
+  layout.separator();
+  layout.op(point_delete_operator, IFACE_("Delete Point"), ICON_NONE);
+  ui::popup_menu_end(&C, pup);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Event dispatch
  * \{ */
 
@@ -223,7 +333,12 @@ ShapeVectorEditor::Status ShapeVectorEditor::handle_event(bContext *C,
                                                           const bool in_owner,
                                                           VectorEditHost &host)
 {
-  if (in_owner && ELEM(event.type, MOUSEMOVE, INBETWEEN_MOUSEMOVE, LEFTMOUSE, RIGHTMOUSE)) {
+  if (in_owner &&
+      (ELEM(event.type, MOUSEMOVE, INBETWEEN_MOUSEMOVE, LEFTMOUSE, RIGHTMOUSE) ||
+       (event.type == EVT_MODAL_MAP && event.prev_type == RIGHTMOUSE)))
+  {
+    /* The modal map turns RMB into its CANCEL item before it reaches us; keep the cursor the
+     * hit test needs current for that case too. */
     cursor_px_ = event_p;
   }
 
@@ -239,6 +354,24 @@ ShapeVectorEditor::Status ShapeVectorEditor::handle_event(bContext *C,
         return Status::Finished;
       }
       case PAINT_SHAPE_MODAL_CANCEL: {
+        /* The modal keymap binds plain RMB to CANCEL (blender_default.py), so a right-click
+         * arrives here with `prev_type == RIGHTMOUSE` and never reaches the RIGHTMOUSE case
+         * below. Over a control point it must open the point menu instead of ending the
+         * session; Ctrl+RMB keeps its Insert Point meaning. */
+        if (event.prev_type == RIGHTMOUSE && this->gesture_is_idle(host)) {
+          if ((event.modifier & KM_CTRL) != 0) {
+            if (host.edit().point_insert(
+                    cursor_px_, host.hit_tolerance_px() * SHAPE_INSERT_TOLERANCE_SCALE))
+            {
+              host.restamp(C);
+              host.sync_settings_from_active();
+            }
+            return Status::Handled;
+          }
+          if (this->point_menu_open_at(C, host)) {
+            return Status::Handled;
+          }
+        }
         if (!this->gesture_is_idle(host)) {
           /* Esc during a gesture undoes just the gesture; the session stays alive. */
           this->cancel_gesture(C, host);
@@ -338,6 +471,47 @@ ShapeVectorEditor::Status ShapeVectorEditor::handle_event(bContext *C,
     }
   }
 
+  /* Handle-edit mode: V toggles the selected point between Auto and Vector, Del/Backspace
+   * removes it, Ctrl+LMB cuts a point into the segment under the cursor (the Curve stroke
+   * method's point editing). */
+  if (host.edit().handles_edit() && event.val == KM_PRESS) {
+    if (event.type == EVT_VKEY) {
+      int spline_index, point_index;
+      if (this->gesture_is_idle(host) &&
+          host.edit().selected_point(spline_index, point_index))
+      {
+        const ShapePoint &point =
+            host.edit().active()->splines[spline_index].points[point_index];
+        const ShapePointType next_type = (shape_point_type_get(point) == ShapePointType::Auto) ?
+                                             ShapePointType::Vector :
+                                             ShapePointType::Auto;
+        if (host.edit().point_type_set(next_type)) {
+          host.restamp(C);
+          host.sync_settings_from_active();
+        }
+      }
+      return Status::Handled;
+    }
+    if (ELEM(event.type, EVT_DELKEY, EVT_BACKSPACEKEY)) {
+      if (this->gesture_is_idle(host) && host.edit().point_delete()) {
+        host.restamp(C);
+        host.sync_settings_from_active();
+      }
+      return Status::Handled;
+    }
+    if (in_owner && event.type == LEFTMOUSE && (event.modifier & KM_CTRL) != 0 &&
+        this->gesture_is_idle(host))
+    {
+      if (host.edit().point_insert(cursor_px_,
+                                   host.hit_tolerance_px() * SHAPE_INSERT_TOLERANCE_SCALE))
+      {
+        host.restamp(C);
+        host.sync_settings_from_active();
+      }
+      return Status::Handled;
+    }
+  }
+
   if (!in_owner) {
     /* A release anywhere ends the in-flight gesture (only presses are region-gated). */
     if (event.type == LEFTMOUSE && event.val == KM_RELEASE && !this->gesture_is_idle(host)) {
@@ -363,6 +537,11 @@ ShapeVectorEditor::Status ShapeVectorEditor::handle_event(bContext *C,
           break;
         case Gesture::PointDrag:
           this->point_update(C, host, cursor_px_);
+          break;
+        case Gesture::HandleDrag:
+          /* Alt breaks the aligned mirror, so the two handles move independently (the Curve
+           * stroke method's free handles). */
+          this->handle_update(C, host, cursor_px_, (event.modifier & KM_ALT) == 0);
           break;
         case Gesture::OriginDrag:
           this->origin_update(C, host, cursor_px_);
@@ -410,19 +589,29 @@ ShapeVectorEditor::Status ShapeVectorEditor::handle_event(bContext *C,
     }
 
     case RIGHTMOUSE: {
-      /* Ctrl+RMB cuts the contour: inserts a point into the segment under the cursor, like the
-       * Curve stroke method's Insert Point. */
-      if (event.val != KM_PRESS || (event.modifier & KM_CTRL) == 0) {
+      if (event.val != KM_PRESS) {
         return Status::Unhandled;
       }
-      if (this->gesture_is_idle(host) &&
-          host.edit().point_insert(cursor_px_,
-                                   host.hit_tolerance_px() * SHAPE_INSERT_TOLERANCE_SCALE))
-      {
-        host.restamp(C);
-        host.sync_settings_from_active();
+      /* Ctrl+RMB cuts the contour: inserts a point into the segment under the cursor, like the
+       * Curve stroke method's Insert Point. */
+      if ((event.modifier & KM_CTRL) != 0) {
+        if (this->gesture_is_idle(host) &&
+            host.edit().point_insert(cursor_px_,
+                                     host.hit_tolerance_px() * SHAPE_INSERT_TOLERANCE_SCALE))
+        {
+          host.restamp(C);
+          host.sync_settings_from_active();
+        }
+        return Status::Handled;
       }
-      return Status::Handled;
+      /* Plain RMB over a control point opens the point menu. The running modal normally
+       * receives this as CANCEL (see above); this raw path covers the first click, which an
+       * invoke hands to the editor before the modal map exists. Away from a point the event
+       * must reach the paint keymap. */
+      if (this->point_menu_open_at(C, host)) {
+        return Status::Handled;
+      }
+      return Status::Unhandled;
     }
 
     default:

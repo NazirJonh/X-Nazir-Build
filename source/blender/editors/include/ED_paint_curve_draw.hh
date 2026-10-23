@@ -104,6 +104,10 @@ struct PaintCurveHandleDrawData {
   bool selected_right;
   bool selected_center;
   bool hovered_center = false;
+  /** A collapsed handle a document hides (a Vector point of an outline whose handles are off):
+   * its stem and endpoint are skipped, the control point itself is still drawn. */
+  bool show_handle_left = true;
+  bool show_handle_right = true;
 };
 
 struct PaintCurveSegmentDrawData {
@@ -221,6 +225,25 @@ bool ED_paint_curve_slide_is_active();
  * \param r_type: receives the active snap elements (#SCE_SNAP_TO_GEOM subset) for marker styling.
  */
 bool ED_paint_curve_snap_marker_get(float r_world_pos[3], int *r_type);
+
+/** The point of a tessellated curve polyline closest to a screen position. */
+struct PaintCurvePolylineHit {
+  float dist_sq = 0.0f;
+  blender::float2 point = blender::float2(0.0f);
+  /** Unit direction of the polyline segment holding #point. */
+  blender::float2 tangent = blender::float2(1.0f, 0.0f);
+  /** Normalized arc-length position of #point along the polyline, in [0, 1]. This is NOT the
+   * Bezier parameter of the underlying segment; the two only agree for a uniform tessellation. */
+  float arc_t = 0.0f;
+};
+
+/**
+ * The one closest-point-on-polyline implementation every segment hover / pick builds on.
+ * Returns false when \a polyline has fewer than two vertices.
+ */
+bool ED_paint_curve_polyline_closest(blender::Span<blender::float2> polyline,
+                                     blender::float2 mval,
+                                     PaintCurvePolylineHit &r_hit);
 
 /** Squared screen-space distance from \a mval to a tessellated curve polyline. */
 float ED_paint_curve_polyline_distance_sq(blender::Span<blender::float2> polyline,

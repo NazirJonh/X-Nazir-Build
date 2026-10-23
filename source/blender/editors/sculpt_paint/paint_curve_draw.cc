@@ -58,50 +58,10 @@
 namespace blender::ed::sculpt_paint {
 
 /* -------------------------------------------------------------------- */
-/** \name Anonymous helpers (theme colors, radius gate)
+/** \name Anonymous helpers (radius gate)
  * \{ */
 
 namespace {
-
-static void paintcurve_theme_handle_color_draw(const int8_t handle_type,
-                                               const bool selected,
-                                               float r_col[4])
-{
-  int color;
-  if (selected) {
-    switch (handle_type) {
-      case BEZIER_HANDLE_AUTO:
-        color = TH_HANDLE_SEL_AUTO;
-        break;
-      case BEZIER_HANDLE_VECTOR:
-        color = TH_HANDLE_SEL_VECT;
-        break;
-      case BEZIER_HANDLE_ALIGN:
-        color = TH_HANDLE_SEL_ALIGN;
-        break;
-      default:
-        color = TH_HANDLE_SEL_FREE;
-        break;
-    }
-  }
-  else {
-    switch (handle_type) {
-      case BEZIER_HANDLE_AUTO:
-        color = TH_HANDLE_AUTO;
-        break;
-      case BEZIER_HANDLE_VECTOR:
-        color = TH_HANDLE_VECT;
-        break;
-      case BEZIER_HANDLE_ALIGN:
-        color = TH_HANDLE_ALIGN;
-        break;
-      default:
-        color = TH_HANDLE_FREE;
-        break;
-    }
-  }
-  ui::theme::get_color_type_4fv(color, SPACE_VIEW3D, r_col);
-}
 
 static bool should_show_radius_handle_draw_from_geometry(const Sculpt *sculpt,
                                                          const bke::CurvesGeometry &geom,
@@ -156,20 +116,6 @@ static bool should_show_radius_handle_draw(const Sculpt *sculpt,
       sculpt, pc->geometry.wrap(), points, point_index);
 }
 
-static float paintcurve_polyline_distance_sq(const Span<float2> polyline, const float2 mval)
-{
-  if (polyline.size() < 2) {
-    return FLT_MAX;
-  }
-
-  float min_dist_sq = FLT_MAX;
-  for (const int i : IndexRange(polyline.size() - 1)) {
-    const float seg_dist_sq = dist_squared_to_line_segment_v2(mval, polyline[i], polyline[i + 1]);
-    min_dist_sq = min_ff(min_dist_sq, seg_dist_sq);
-  }
-  return min_dist_sq;
-}
-
 static bool paintcurve_polyline_point_and_tangent_at_bezier_param(const Span<float2> polyline,
                                                                   const float bezier_t,
                                                                   float2 &r_point,
@@ -190,63 +136,101 @@ static bool paintcurve_polyline_point_and_tangent_at_bezier_param(const Span<flo
   return true;
 }
 
-static bool paintcurve_polyline_closest_point_and_tangent(const Span<float2> polyline,
-                                                          const float2 mval,
-                                                          float2 &r_point,
-                                                          float2 &r_tangent,
-                                                          float &r_edge_t)
+/** The screen-space points of a Curve Patch / paint curve as a shared control-point source, so
+ * their draw data comes from the same builder as every other Bezier editor's. Segments are not
+ * exposed: they carry point indices the slide / insert logic below depends on. */
+class ScreenPointsSource final : public control_points::Source {
+ public:
+  explicit ScreenPointsSource(const Span<PaintCurvePoint> points) : points_(points) {}
+
+  int points_num() const override
+  {
+    return int(points_.size());
+  }
+  float2 point_position(const int point) const override
+  {
+    return float2(points_[point].bez.vec[1]);
+  }
+  void point_handles(const int point, float2 &r_left, float2 &r_right) const override
+  {
+    r_left = float2(points_[point].bez.vec[0]);
+    r_right = float2(points_[point].bez.vec[2]);
+  }
+  int8_t handle_type(const int point, const bool left) const override
+  {
+    const BezTriple &bez = points_[point].bez;
+    return int8_t(left ? bez.h1 : bez.h2);
+  }
+  uint8_t selection(const int point) const override
+  {
+    const BezTriple &bez = points_[point].bez;
+    return uint8_t((bez.f1 != 0 ? SEL_F1 : 0) | (bez.f2 != 0 ? SEL_F2 : 0) |
+                   (bez.f3 != 0 ? SEL_F3 : 0));
+  }
+  int segments_num() const override
+  {
+    return 0;
+  }
+  void segment_polyline(const int /*segment*/, Vector<float2> & /*r_out*/) const override {}
+
+ private:
+  Span<PaintCurvePoint> points_;
+};
+
+}  // anonymous namespace
+
+bool ED_paint_curve_polyline_closest(const Span<float2> polyline,
+                                     const float2 mval,
+                                     PaintCurvePolylineHit &r_hit)
 {
   if (polyline.size() < 2) {
     return false;
   }
 
-  float best_dist_sq = FLT_MAX;
-  float2 best_point = polyline[0];
-  float2 best_tangent = float2(1.0f, 0.0f);
+  r_hit.dist_sq = FLT_MAX;
   float best_arc = 0.0f;
-
   float arc_len = 0.0f;
   for (const int i : IndexRange(polyline.size() - 1)) {
     const float2 a = polyline[i];
-    const float2 b = polyline[i + 1];
-    const float2 ab = b - a;
+    const float2 ab = polyline[i + 1] - a;
     const float seg_len_sq = math::length_squared(ab);
+    const bool is_degenerate = seg_len_sq < 1e-8f;
+    const float seg_len = is_degenerate ? 0.0f : sqrtf(seg_len_sq);
     float seg_t = 0.0f;
     float2 closest = a;
-    if (seg_len_sq >= 1e-8f) {
+    if (!is_degenerate) {
       seg_t = math::clamp(math::dot(mval - a, ab) / seg_len_sq, 0.0f, 1.0f);
       closest = a + ab * seg_t;
     }
     const float dist_sq = math::distance_squared(mval, closest);
-    if (dist_sq < best_dist_sq) {
-      best_dist_sq = dist_sq;
-      best_point = closest;
-      best_tangent = seg_len_sq >= 1e-8f ? math::normalize(ab) : float2(1.0f, 0.0f);
-      best_arc = arc_len + seg_t * sqrtf(seg_len_sq);
+    if (dist_sq < r_hit.dist_sq) {
+      r_hit.dist_sq = dist_sq;
+      r_hit.point = closest;
+      r_hit.tangent = is_degenerate ? float2(1.0f, 0.0f) : ab / seg_len;
+      best_arc = arc_len + seg_t * seg_len;
     }
-    arc_len += sqrtf(max_ff(seg_len_sq, 0.0f));
+    arc_len += seg_len;
   }
-
-  r_point = best_point;
-  r_tangent = best_tangent;
-  r_edge_t = arc_len > 1e-8f ? best_arc / arc_len : 0.0f;
+  r_hit.arc_t = arc_len > 1e-8f ? best_arc / arc_len : 0.0f;
   return true;
 }
 
-}  // anonymous namespace
-
 float ED_paint_curve_polyline_distance_sq(const Span<float2> polyline, const float2 mval)
 {
-  return paintcurve_polyline_distance_sq(polyline, mval);
+  PaintCurvePolylineHit hit;
+  return ED_paint_curve_polyline_closest(polyline, mval, hit) ? hit.dist_sq : FLT_MAX;
 }
 
 bool ED_paint_curve_polyline_param_at_closest_point(const Span<float2> polyline,
                                                     const float2 mval,
                                                     float &r_edge_t)
 {
-  float2 point;
-  float2 tangent;
-  return paintcurve_polyline_closest_point_and_tangent(polyline, mval, point, tangent, r_edge_t);
+  PaintCurvePolylineHit hit;
+  if (!ED_paint_curve_polyline_closest(polyline, mval, hit)) {
+    return false;
+  }
+  r_edge_t = hit.arc_t;
+  return true;
 }
 
 /** \} */
@@ -518,24 +502,11 @@ void ED_paint_curve_screen_handles_build_from_geometry(
   float hover_segment_dist_sq = square_f(segment_hover_threshold);
   const bool detect_segment_hover = compute_segment_hover || show_insert_preview;
 
-  for (const int i : screen_points.index_range()) {
-    const PaintCurvePoint &pcp = screen_points[i];
-    PaintCurveHandleDrawData hd;
-    hd.position = float2(pcp.bez.vec[1][0], pcp.bez.vec[1][1]);
-    hd.handle_left = float2(pcp.bez.vec[0][0], pcp.bez.vec[0][1]);
-    hd.handle_right = float2(pcp.bez.vec[2][0], pcp.bez.vec[2][1]);
-    hd.h1 = int8_t(pcp.bez.h1);
-    hd.h2 = int8_t(pcp.bez.h2);
-    hd.selected_center = (pcp.bez.f2 != 0);
-    hd.selected_left = (pcp.bez.f1 != 0) || hd.selected_center;
-    hd.selected_right = (pcp.bez.f3 != 0) || hd.selected_center;
-    float lc[4], rc[4];
-    paintcurve_theme_handle_color_draw(hd.h1, hd.selected_left, lc);
-    paintcurve_theme_handle_color_draw(hd.h2, hd.selected_right, rc);
-    copy_v4_v4(hd.color_left, lc);
-    copy_v4_v4(hd.color_right, rc);
-    r_out.points.append(hd);
-  }
+  /* Point draw data (resolved handles, selection promotion, theme colors) comes from the shared
+   * builder. Hover stays below: it has to respect the radius / strength / angle handle priority. */
+  control_points::BuildOptions points_options;
+  control_points::handles_build(
+      ScreenPointsSource(screen_points.as_span()), points_options, r_out);
 
   if (show_radius_handles || curve_patch_visibility.radius_all_points) {
     float hover_radius_dist = PAINT_CURVE_RADIUS_HANDLE_CIRCLE_RADIUS;
@@ -654,7 +625,7 @@ void ED_paint_curve_screen_handles_build_from_geometry(
         copy_v4_v4(seg.wire_color, wire_col);
         seg.outline_color = float4(0.0f, 0.0f, 0.0f, 0.5f);
         if (detect_segment_hover) {
-          const float dist_sq = paintcurve_polyline_distance_sq(seg.polyline, mval_region);
+          const float dist_sq = ED_paint_curve_polyline_distance_sq(seg.polyline, mval_region);
           if (dist_sq < hover_segment_dist_sq) {
             hover_segment_dist_sq = dist_sq;
             hover_segment_index = r_out.segments.size();

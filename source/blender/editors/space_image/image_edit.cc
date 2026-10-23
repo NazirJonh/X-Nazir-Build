@@ -565,7 +565,8 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   }
   static int64_t perf_call_count = 0;
   bke::paint_perf::ScopedTimer perf_total("acquire_composite_buffer");
-  perf_total.note("call=%lld pass=%d", long long(++perf_call_count), sima->material_paint_pass);
+  perf_total.note(
+      "call=%lld pass=%d", static_cast<long long>(++perf_call_count), sima->material_paint_pass);
   Material *ma = nullptr;
   {
     bke::paint_perf::ScopedTimer perf_find("composite_material_find");
@@ -593,7 +594,7 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
         *bmain, *ma, lighting, request, r_revision, r_changed_region);
     if (r_changed_region != nullptr) {
       perf_total.note("call=%lld combined armed=%d clip=%dx%d changed=%dx%d out=%dx%d",
-                      long long(perf_call_count),
+                      static_cast<long long>(perf_call_count),
                       int(request.max_output.x > 0),
                       BLI_rcti_size_x(&request.clip),
                       BLI_rcti_size_y(&request.clip),

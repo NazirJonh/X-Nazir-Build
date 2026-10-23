@@ -25,7 +25,7 @@
 #include "BLI_vector.hh"
 #include "BLI_virtual_array_fwd.hh"
 
-#include "ED_paint_curve_draw.hh"
+#include "ED_control_points.hh"
 
 #include "DNA_brush_types.h"
 
@@ -201,11 +201,8 @@ bool paintcurve_surface_place(bContext *C,
 int paintcurve_find_point_index(Span<PaintCurvePoint> screen_points,
                                 const float pos[2],
                                 float threshold);
-/** Bit values written to `paintcurve_find_in_screen_points()`'s `r_selflag`: left handle,
- * pivot/control point, right handle respectively. */
-#define SEL_F1 (1 << 0)
-#define SEL_F2 (1 << 1)
-#define SEL_F3 (1 << 2)
+/** Bit values of the selection flags live in `ED_control_points.hh`, shared with every
+ * control-point editor. */
 
 /**
  * Closest control point / handle under \a pos within manhattan \a threshold pixels.

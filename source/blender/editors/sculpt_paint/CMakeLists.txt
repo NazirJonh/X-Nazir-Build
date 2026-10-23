@@ -27,6 +27,7 @@ set(SRC
   paint_clone_mesh_source.cc
   paint_clone_source.cc
   paint_clone_stroke.cc
+  paint_control_points.cc
   paint_cursor.cc
   paint_cursor_preview.cc
   paint_curve.cc

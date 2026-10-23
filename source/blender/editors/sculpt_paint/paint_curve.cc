@@ -226,47 +226,22 @@ int paintcurve_find_in_screen_points(const Span<PaintCurvePoint> screen_points,
                                      const float threshold,
                                      char *r_selflag)
 {
-  int found_idx = -1;
-  char found_flag = 0;
-  float closest_dist = threshold;
-
-  for (const int i : screen_points.index_range()) {
-    const PaintCurvePoint &pcp = screen_points[i];
-    const float dist[3] = {
-        len_manhattan_v2v2(pos, pcp.bez.vec[0]),
-        len_manhattan_v2v2(pos, pcp.bez.vec[1]),
-        len_manhattan_v2v2(pos, pcp.bez.vec[2]),
-    };
-    char point_sel = 0;
-    if (dist[1] < closest_dist) {
-      closest_dist = dist[1];
-      point_sel = SEL_F2;
-    }
-    if (dist[0] < closest_dist) {
-      closest_dist = dist[0];
-      point_sel = SEL_F1;
-    }
-    if (dist[2] < closest_dist) {
-      closest_dist = dist[2];
-      point_sel = SEL_F3;
-    }
-    if (point_sel) {
-      found_idx = i;
-      found_flag = point_sel;
-    }
-  }
-
-  if (found_idx >= 0 && ignore_pivot && found_flag == SEL_F2) {
-    const PaintCurvePoint &pcp = screen_points[found_idx];
-    const float d0 = len_manhattan_v2v2(pos, pcp.bez.vec[0]);
-    const float d2 = len_manhattan_v2v2(pos, pcp.bez.vec[2]);
-    found_flag = (d0 < d2) ? SEL_F1 : SEL_F3;
-  }
+  namespace cp = ed::sculpt_paint::control_points;
+  const cp::Pick pick = cp::pick_point(
+      int(screen_points.size()),
+      [&](const int i) {
+        const BezTriple &bez = screen_points[i].bez;
+        return cp::PointGeometry{float2(bez.vec[1]), float2(bez.vec[0]), float2(bez.vec[2])};
+      },
+      float2(pos),
+      threshold,
+      cp::Metric::Manhattan,
+      ignore_pivot);
 
   if (r_selflag) {
-    *r_selflag = found_flag;
+    *r_selflag = char(cp::part_to_sel_flag(pick.part));
   }
-  return found_idx;
+  return pick.point;
 }
 
 bool ED_paintcurve_cursor_on_selected_handle(bContext *C, const float mval[2])

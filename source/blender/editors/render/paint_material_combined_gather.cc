@@ -650,7 +650,7 @@ ImBuf *combined_preview_ensure(Main &bmain,
                   output_width,
                   output_height,
                   stats.elapsed_seconds * 1000.0,
-                  long long(stats.pixels_processed),
+                  static_cast<long long>(stats.pixels_processed),
                   int(dependency_images.size()));
   perf_total.note("canvas=%dx%d out=%dx%d", width, height, output_width, output_height);
   /* The output resolution, not the canvas: it is what the numbers have to be read against. */
@@ -2345,7 +2345,7 @@ void combined_preview_gpu_verify(Main &bmain,
   printf(
       "[PBR-PERF] gpu_verify: blocks=%lld (%dx%d) mean=%.4f max=%.4f over 0.05=%.2f%% worst at "
       "uv=(%.3f, %.3f) gpu=(%.3f, %.3f, %.3f) cpu=(%.3f, %.3f, %.3f)\n",
-      long long(blocks),
+      static_cast<long long>(blocks),
       block,
       block,
       sum / double(blocks),

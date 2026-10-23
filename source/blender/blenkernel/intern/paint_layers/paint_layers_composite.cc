@@ -1202,7 +1202,9 @@ static std::mutex g_anchor_slice_cache_mutex;
 void paint_layer_anchor_point_slice_cache_clear()
 {
   std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-  g_anchor_slice_cache.entries.clear();
+  /* The buffer goes too: the cache is a static, so a kept buffer would outlive the leak check that
+   * runs when the program shuts down, and a cleared cache has nothing to reuse it for. */
+  g_anchor_slice_cache.entries.clear_and_shrink();
   g_anchor_slice_cache.total_bytes = 0;
 }
 

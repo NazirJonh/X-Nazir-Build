@@ -84,7 +84,7 @@ class PaintLayersGraphEvalAnchorPointTest : public PaintLayersGraphEvalTest {
     bNodeTree *found = nullptr;
     for (bNodeTree &tree : bmain->nodetrees) {
       bUUID marker = BLI_uuid_nil();
-      if (!layer_tree_marker_get(tree, marker) || !BLI_uuid_equal(marker, layer.marker)) {
+      if (!paint_layers::layer_tree_marker_get(tree, marker) || !BLI_uuid_equal(marker, layer.marker)) {
         continue;
       }
       EXPECT_EQ(found, nullptr) << "a row has exactly one kept group";
@@ -96,7 +96,7 @@ class PaintLayersGraphEvalAnchorPointTest : public PaintLayersGraphEvalTest {
   /** Remove the interface socket named \a name from \a tree; true when it was there. */
   static bool remove_interface_socket(bNodeTree &tree, const char *name, const bool input)
   {
-    for (bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+    for (bNodeTreeInterfaceItem *item : tree.tree_interface.root_panel.items()) {
       if (item->item_type != NodeTreeInterfaceItemType::Socket) {
         continue;
       }
@@ -114,7 +114,7 @@ class PaintLayersGraphEvalAnchorPointTest : public PaintLayersGraphEvalTest {
 
   static bool interface_has_socket(const bNodeTree &tree, const char *prefix)
   {
-    for (const bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+    for (const bNodeTreeInterfaceItem *item : tree.tree_interface.root_panel.items()) {
       if (item->item_type != NodeTreeInterfaceItemType::Socket) {
         continue;
       }
@@ -129,7 +129,7 @@ class PaintLayersGraphEvalAnchorPointTest : public PaintLayersGraphEvalTest {
   /** Remove one interface input whose name starts with \a prefix; true when it was there. */
   static bool remove_interface_input_prefix(bNodeTree &tree, const char *prefix)
   {
-    for (bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+    for (bNodeTreeInterfaceItem *item : tree.tree_interface.root_panel.items()) {
       if (item->item_type != NodeTreeInterfaceItemType::Socket) {
         continue;
       }
@@ -310,11 +310,10 @@ TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_reader_in_same_row_matches_cpu
   MaterialPaintLayer *point = add_point(*row);
   ASSERT_NE(point, nullptr);
   /* A green correction above the point makes the row's own content differ from the slice. */
-  MaterialPaintLayer *green = BKE_paint_layers_correction_add(*ma, row, "Green");
+  /* A Fill, as a Paint correction without a map lays nothing. */
+  MaterialPaintLayer *green = BKE_paint_layers_correction_add(
+      *ma, row, "Green", MA_PAINT_LAYER_SOURCE_CONSTANT);
   ASSERT_NE(green, nullptr);
-  ASSERT_NE(BKE_paint_layers_channel_add(
-                *ma, green, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
-            nullptr);
   const float green_value[4] = {0.0f, 1.0f, 0.0f, 1.0f};
   ASSERT_TRUE(BKE_paint_layers_channel_set_value(
       *ma, green, PAINT_MATERIAL_CHANNEL_BASE_COLOR, green_value));
@@ -724,4 +723,214 @@ TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_failed_relink_group_is_recreat
       << "the stale group is not instantiated beside the rebuilt one";
 }
 
+/* -------------------------------------------------------------------- */
+/** \name The topology hash catches structural edits
+ *
+ * A kept group is re-linked, never rebuilt, so the hash has to notice every edit that changes the
+ * sockets or inputs the group needs *before* the build. Rebuilding a kept group is only the net
+ * under it (#paint_layers_kept_group_rebuild_count), and a healthy pass never reaches it: each
+ * test makes one such edit between two regenerations, and expects the factory to have cleared the
+ * affected group itself, the graph to match the CPU composite, and the net to stay untouched.
+ * \{ */
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_added_reader)
+{
+  ASSERT_NE(add_layer("Neighbour", add_solid_image("Neighbour", 0, 255, 0, 255)), nullptr);
+  MaterialPaintLayer *point = nullptr;
+  ASSERT_NE(add_source_with_point(&point), nullptr);
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_NE(add_reader(*reader_row, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the point became read and the row gained a reader: both groups are cleared by the hash";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(check_reader_inputs_linked(*ma->paint_layers_tree), 0);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_retargeted_reader)
+{
+  ASSERT_NE(add_layer("Neighbour", add_solid_image("Neighbour", 0, 255, 0, 255)), nullptr);
+  MaterialPaintLayer *first_point = nullptr;
+  ASSERT_NE(add_source_with_point(&first_point), nullptr);
+  MaterialPaintLayer *second_source = add_layer(
+      "Second", add_solid_image("Second", 0, 255, 255, 255));
+  MaterialPaintLayer *second_point = add_point(*second_source);
+  ASSERT_NE(second_point, nullptr);
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  MaterialPaintLayer *reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::Effects, first_point->marker);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, reader, second_point->marker));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the reader names another point: its inputs are other sockets, and the hash moves";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(check_reader_inputs_linked(*ma->paint_layers_tree), 0);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_removed_reader)
+{
+  ASSERT_NE(add_layer("Neighbour", add_solid_image("Neighbour", 0, 255, 0, 255)), nullptr);
+  MaterialPaintLayer *point = nullptr;
+  ASSERT_NE(add_source_with_point(&point), nullptr);
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  MaterialPaintLayer *reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::Effects, point->marker);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_TRUE(BKE_paint_layers_correction_remove(*ma, reader));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the point is no longer read: its group drops the tap, and the reader's group its input";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_source_gaining_a_channel)
+{
+  ASSERT_NE(add_layer("Neighbour", add_solid_image("Neighbour", 0, 255, 0, 255)), nullptr);
+  MaterialPaintLayer *point = nullptr;
+  MaterialPaintLayer *source = add_source_with_point(&point);
+  ASSERT_NE(source, nullptr);
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  ASSERT_NE(add_reader(*reader_row, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The slice now exists in the Normal channel too, so the reader needs inputs it did not have. */
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  Image *normal_image = add_solid_image("Normal", 128, 200, 64, 255);
+  make_image_data(normal_image);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, source, PAINT_MATERIAL_CHANNEL_NORMAL), nullptr);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, source, PAINT_MATERIAL_CHANNEL_NORMAL, normal_image));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the source row takes part in another channel: the hash of the reader covers that set";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(check_reader_inputs_linked(*ma->paint_layers_tree), 0);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_reader_moved_into_folder)
+{
+  /* The source sits below the folder, so a reader moved into it stays above its point. */
+  MaterialPaintLayer *point = nullptr;
+  ASSERT_NE(add_source_with_point(&point), nullptr);
+  MaterialPaintLayer *folder = BKE_paint_layers_add(*ma, "Folder", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 1.0f));
+  MaterialPaintLayer *neighbour = BKE_paint_layers_add(
+      *ma, "Neighbour", folder, PaintLayerPlace::Into);
+  ASSERT_NE(neighbour, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, neighbour, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma,
+                                                 neighbour,
+                                                 PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                 add_solid_image("Neighbour", 0, 255, 0, 255)));
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  ASSERT_NE(add_reader(*reader_row, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* Inside a folder the row is built in the isolated form, with coverage sockets it did not have. */
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_TRUE(BKE_paint_layers_move(*ma, reader_row, folder, PaintLayerPlace::Into));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the row changed its form: the hash of the row covers whether it sits in an isolating folder";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(check_reader_inputs_linked(*ma->paint_layers_tree), 0);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_added_mask_reader)
+{
+  MaterialPaintLayer *source = add_layer("Source", add_solid_image("Source", 255, 0, 0, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, source, 0.0f), nullptr);
+  MaterialPaintLayer *point = add_point(*source, PaintLayerAnchorPointList::MaskStack);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, reader_row, 1.0f), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_NE(add_reader(*reader_row, PaintLayerAnchorPointList::MaskStack, point->marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the mask point became read: its group publishes the mask and the reader takes it in";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(check_reader_inputs_linked(*ma->paint_layers_tree), 0);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_correction_added_to_source_row)
+{
+  MaterialPaintLayer *point = nullptr;
+  MaterialPaintLayer *source = add_source_with_point(&point);
+  ASSERT_NE(source, nullptr);
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  ASSERT_NE(add_reader(*reader_row, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* A correction above the point: the row's nodes change, the tap it publishes does not. */
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  MaterialPaintLayer *green = BKE_paint_layers_correction_add(
+      *ma, source, "Green", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(green, nullptr);
+  const float green_value[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *ma, green, PAINT_MATERIAL_CHANNEL_BASE_COLOR, green_value));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the source row gained a correction: its group is cleared and the reader re-linked";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(check_reader_inputs_linked(*ma->paint_layers_tree), 0);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_hash_catches_marker_moved_within_row)
+{
+  MaterialPaintLayer *source = add_layer("Source", add_solid_image("Source", 255, 0, 0, 255));
+  MaterialPaintLayer *green = BKE_paint_layers_correction_add(
+      *ma, source, "Green", MA_PAINT_LAYER_SOURCE_CONSTANT);
+  ASSERT_NE(green, nullptr);
+  const float green_value[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  ASSERT_TRUE(BKE_paint_layers_channel_set_value(
+      *ma, green, PAINT_MATERIAL_CHANNEL_BASE_COLOR, green_value));
+  /* The point sits above the green correction, so its slice is the green row. */
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *reader_row = add_layer("Reader", add_solid_image("Reader", 0, 0, 255, 255));
+  MaterialPaintLayer *reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::Effects, point->marker);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, reader, 0.5f));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* Below the correction the slice is the plain red row: the tap reads other nodes. */
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  /* The list is edited directly: no public call reorders the corrections of a row. */
+  BLI_remlink(&source->effects, point);
+  BLI_insertlinkbefore(&source->effects, green, point);
+  BKE_paint_layers_tag_edited(*ma);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the marker moved in its row: the hash of the row follows the order of its corrections";
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_GT(check_reader_inputs_linked(*ma->paint_layers_tree), 0);
+}
+
+/** \} */
 }  // namespace blender::bke::tests

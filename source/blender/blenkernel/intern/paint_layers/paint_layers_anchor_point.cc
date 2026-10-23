@@ -528,6 +528,35 @@ uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
 /** \name Participation and counts
  * \{ */
 
+/**
+ * Whether the row \a source takes part in \a channel, as the readers of its own points see it.
+ * A correction of the row that reads one of those points is left out: its slice is what this
+ * answers for, so counting it would ask itself (and never end). Readers of other rows' points
+ * still count, as the order rules keep those acyclic.
+ */
+static bool anchor_point_source_participates(const Material &ma,
+                                             const MaterialPaintLayer &source,
+                                             const int channel)
+{
+  if (paint_layer_channel_contributes(ma, source, paint_layer_channel_find(source, channel)) ||
+      paint_layer_adjustment_acts(ma, source, channel) ||
+      paint_layer_row_reads_source(ma, source, channel))
+  {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : source.effects) {
+    if (paint_layer_kind_reads_anchor_point(effect) &&
+        paint_layer_anchor_point_resolve(ma, effect).source_row == &source)
+    {
+      continue;
+    }
+    if (paint_layer_effect_lays(ma, effect, channel)) {
+      return true;
+    }
+  }
+  return paint_layer_row_reads_anchor_point(ma, source, channel);
+}
+
 bool paint_layer_row_reads_anchor_point(const Material &ma,
                                         const MaterialPaintLayer &reader,
                                         const int channel)
@@ -569,7 +598,7 @@ bool paint_layer_row_reads_anchor_point(const Material &ma,
       return channel != PAINT_MATERIAL_CHANNEL_NORMAL;
     case PaintLayerAnchorPointTarget::Content:
       /* The slice exists in every channel its row takes part in. */
-      return paint_layer_row_participates(ma, *ref.source_row, channel);
+      return anchor_point_source_participates(ma, *ref.source_row, channel);
   }
   return false;
 }

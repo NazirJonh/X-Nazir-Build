@@ -320,6 +320,15 @@ using PaintLayerFormMap = Map<const MaterialPaintLayer *, PaintLayerForm>;
 PaintLayerFormMap paint_layers_form_map(const Material &ma);
 
 /**
+ * How many times a build tore down a kept group because its instance could not be re-linked (see
+ * #PaintLayersTreeBuilder::row_rebuild_kept). The topology hash is what has to notice a structural
+ * edit, before the build and without touching the group; a rebuild is only the net under it, so a
+ * healthy pass leaves this at zero. The tests of the hash read it to prove an edit was caught.
+ */
+int paint_layers_kept_group_rebuild_count();
+void paint_layers_kept_group_rebuild_count_reset();
+
+/**
  * The structure of one row: its source, blend, name and per-channel participation. Never a value.
  * \a forms is #paint_layers_form_map of \a ma, built once by the caller for all its rows.
  */

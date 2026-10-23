@@ -13,6 +13,7 @@
 #include "BKE_paint_layers_generate.hh"
 
 #include <array>
+#include <atomic>
 #include <utility>
 
 #include "BLI_index_range.hh"
@@ -1177,6 +1178,18 @@ static bNode *zero_node_add(bNodeTree &tree, const bool is_color, const float x,
   return node;
 }
 
+static std::atomic<int> g_kept_group_rebuild_count = 0;
+
+int paint_layers_kept_group_rebuild_count()
+{
+  return g_kept_group_rebuild_count.load();
+}
+
+void paint_layers_kept_group_rebuild_count_reset()
+{
+  g_kept_group_rebuild_count = 0;
+}
+
 /**
  * Whether an Anchor Point is part of \a layer: the row is a reader, or one of its corrections or
  * mask items is a marker or a reader. Only such a row can need its kept group rebuilt for a tap or
@@ -1390,6 +1403,7 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
         /* A kept group whose instance cannot be re-linked predates an input this row now needs.
          * Rebuild it from an empty tree (the interface stays) rather than adding a second set
          * beside the kept nodes, or dropping the row silently. */
+        g_kept_group_rebuild_count.fetch_add(1);
         if (ctx_.bmain != nullptr) {
           bool group_ok = false;
           row = row_rebuild_kept(layer, *group, channel, isolated, group_ok);

@@ -215,7 +215,7 @@ class PaintLayersGraphEvalMaterialRowTest : public PaintLayersGraphEvalTest {
     bNodeTree *found = nullptr;
     for (bNodeTree &tree : bmain->nodetrees) {
       bUUID marker = BLI_uuid_nil();
-      if (!layer_tree_marker_get(tree, marker) || !BLI_uuid_equal(marker, layer.marker)) {
+      if (!paint_layers::layer_tree_marker_get(tree, marker) || !BLI_uuid_equal(marker, layer.marker)) {
         continue;
       }
       EXPECT_EQ(found, nullptr) << "a row has exactly one kept group";
@@ -336,7 +336,7 @@ class PaintLayersGraphEvalMaterialRowTest : public PaintLayersGraphEvalTest {
   /** Remove one interface input whose name starts with \a prefix; true when it was there. */
   static bool remove_interface_input_prefix(bNodeTree &tree, const char *prefix)
   {
-    for (bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+    for (bNodeTreeInterfaceItem *item : tree.tree_interface.root_panel.items()) {
       if (item->item_type != NodeTreeInterfaceItemType::Socket) {
         continue;
       }
@@ -355,7 +355,7 @@ class PaintLayersGraphEvalMaterialRowTest : public PaintLayersGraphEvalTest {
   /** Remove one interface socket with the exact \a name; true when it was there. */
   static bool remove_interface_socket(bNodeTree &tree, const char *name, const bool input)
   {
-    for (bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+    for (bNodeTreeInterfaceItem *item : tree.tree_interface.root_panel.items()) {
       if (item->item_type != NodeTreeInterfaceItemType::Socket) {
         continue;
       }
@@ -373,7 +373,7 @@ class PaintLayersGraphEvalMaterialRowTest : public PaintLayersGraphEvalTest {
 
   static bool interface_has_socket_prefix(const bNodeTree &tree, const char *prefix)
   {
-    for (const bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+    for (const bNodeTreeInterfaceItem *item : tree.tree_interface.root_panel.items()) {
       if (item->item_type != NodeTreeInterfaceItemType::Socket) {
         continue;
       }
@@ -418,7 +418,7 @@ class PaintLayersGraphEvalMaterialRowTest : public PaintLayersGraphEvalTest {
         *ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) {
           for (bNodeTree &tree : bmain->nodetrees) {
             bUUID marker = BLI_uuid_nil();
-            if (layer_tree_marker_get(tree, marker) && BLI_uuid_equal(marker, layer.marker)) {
+            if (paint_layers::layer_tree_marker_get(tree, marker) && BLI_uuid_equal(marker, layer.marker)) {
               groups.add(&layer, &tree);
               break;
             }
@@ -464,7 +464,7 @@ TEST_F(PaintLayersGraphEvalMaterialRowTest, graph_material_row_missing_channel_s
   ASSERT_NE(group, nullptr);
   bNode *user_marker = add_user_marker(*group);
   ASSERT_NE(user_marker, nullptr);
-  const int nodes_before = int(group->nodes.size());
+  const int nodes_before = int(group->nodes.count());
 
   /* Make the kept group look like one built before Roughness existed. The row still takes part in
    * the channel, so the relink is what fails; without an Anchor Point the channel must be skipped
@@ -501,7 +501,7 @@ TEST_F(PaintLayersGraphEvalMaterialRowTest, graph_material_row_missing_channel_s
       << "a row without an Anchor Point keeps the HEAD behaviour: the channel is skipped, the "
          "kept group is not invalidated";
   EXPECT_TRUE(group_has_node(*group, user_marker)) << "the kept group was not rebuilt";
-  EXPECT_EQ(int(group->nodes.size()), nodes_before);
+  EXPECT_EQ(int(group->nodes.count()), nodes_before);
   EXPECT_EQ(instance_count(*root, *group), 1);
   EXPECT_TRUE(instance_feeds_result(*root, *group, "Result Base Color"));
   EXPECT_TRUE(instance_feeds_result(*root, *group, "Result Normal"));
@@ -606,7 +606,7 @@ TEST_F(PaintLayersGraphEvalMaterialRowTest, graph_material_row_first_build_and_r
   ASSERT_NE(root, nullptr);
   bNodeTree *group = row_group(*row);
   ASSERT_NE(group, nullptr);
-  const int group_links_first = int(group->links.size());
+  const int group_links_first = int(group->links.count());
   const RGBA base_first = eval_root(*root, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   const RGBA rough_first = eval_root(*root, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
   const RGBA normal_first = eval_root(*root, PAINT_MATERIAL_CHANNEL_NORMAL);
@@ -627,7 +627,7 @@ TEST_F(PaintLayersGraphEvalMaterialRowTest, graph_material_row_first_build_and_r
   ASSERT_NE(root, nullptr);
   group = row_group(*row);
   ASSERT_NE(group, nullptr);
-  EXPECT_EQ(int(group->links.size()), group_links_first)
+  EXPECT_EQ(int(group->links.count()), group_links_first)
       << "the kept row group's own chain is unchanged";
 
   const RGBA base_second = eval_root(*root, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
@@ -1060,5 +1060,80 @@ TEST_F(PaintLayersGraphEvalMaterialRowTest, graph_material_rows_do_not_share_sou
   expect_root_matches_cpu(*root, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   expect_root_matches_cpu(*root, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name The topology hash catches structural edits of a Material source
+ *
+ * The same contract as in the Anchor Point tests: a kept group is only re-linked, so the hash has
+ * to move for each edit below and the factory clears the group before the build. The safety net
+ * (#paint_layers_kept_group_rebuild_count) must stay untouched.
+ * \{ */
+
+TEST_F(PaintLayersGraphEvalMaterialRowTest, graph_hash_catches_mask_source_channel_change)
+{
+  Material *mask_source = add_source_material("MaskSource");
+  const float base[3] = {0.2f, 0.2f, 0.2f};
+  set_source_constants(*mask_source, base, 0.9f);
+  ASSERT_NE(add_underlay(), nullptr);
+  MaterialPaintLayer *row = add_layer("Row", add_solid_image("Row", 255, 0, 0, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_material_add(*ma, row, "Mask", mask_source);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* The grey now comes from Roughness: other group inputs, other values. */
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_TRUE(
+      BKE_paint_layers_mask_source_channel_set(*ma, item, PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the mask item reads another channel: the hash of the row follows it";
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  expect_root_matches_cpu(*root, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+}
+
+TEST_F(PaintLayersGraphEvalMaterialRowTest, graph_hash_catches_source_gaining_a_channel)
+{
+  Material *source = add_source_material("Source");
+  ASSERT_NE(add_underlay(), nullptr);
+  MaterialPaintLayer *paint_source = add_layer(
+      "PaintSource", add_solid_image("PaintSource", 230, 50, 20, 255));
+  MaterialPaintLayer *row = add_material_row(*source);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *point = add_point(*paint_source);
+  ASSERT_NE(point, nullptr);
+  ASSERT_NE(add_reader(*row, point->marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  /* Metallic was an Image Texture with no image, a channel the row could not lay; with a map it is
+   * one more channel to build, with the sockets that come with it. */
+  Image *metallic_image = add_solid_image("Metallic", 200, 200, 200, 255);
+  make_image_data(metallic_image);
+  bNodeTree &source_tree = *source->nodetree;
+  for (bNode &node : source_tree.nodes) {
+    if (node.type_legacy == SH_NODE_TEX_IMAGE && node.id == nullptr) {
+      node.id = &metallic_image->id;
+      break;
+    }
+  }
+  BKE_paint_layers_source_material_hash_forget(*source);
+
+  paint_layers::paint_layers_kept_group_rebuild_count_reset();
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+
+  EXPECT_EQ(paint_layers::paint_layers_kept_group_rebuild_count(), 0)
+      << "the source supplies a channel it did not: the live signature in the hash moves";
+  bNodeTree *root = ma->paint_layers_tree;
+  ASSERT_NE(root, nullptr);
+  bNodeTree *group = row_group(*row);
+  ASSERT_NE(group, nullptr);
+  EXPECT_TRUE(instance_feeds_result(*root, *group, result_name(PAINT_MATERIAL_CHANNEL_METALLIC)));
+  expect_root_matches_cpu(*root, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  expect_root_matches_cpu(*root, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+}
+
+/** \} */
 
 }  // namespace blender::bke::tests

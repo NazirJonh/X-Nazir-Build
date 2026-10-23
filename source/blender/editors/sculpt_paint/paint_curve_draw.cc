@@ -116,25 +116,6 @@ static bool should_show_radius_handle_draw(const Sculpt *sculpt,
       sculpt, pc->geometry.wrap(), points, point_index);
 }
 
-static bool paintcurve_polyline_point_and_tangent_at_bezier_param(const Span<float2> polyline,
-                                                                  const float bezier_t,
-                                                                  float2 &r_point,
-                                                                  float2 &r_tangent)
-{
-  if (polyline.size() < 2) {
-    return false;
-  }
-
-  const float f_index = math::clamp(bezier_t, 0.0f, 1.0f) * float(polyline.size() - 1);
-  const int i0 = min_ii(int(f_index), int(polyline.size()) - 2);
-  const float frac = f_index - float(i0);
-  const float2 a = polyline[i0];
-  const float2 b = polyline[i0 + 1];
-  r_point = math::interpolate(a, b, frac);
-  const float2 ab = b - a;
-  r_tangent = math::length_squared(ab) >= 1e-8f ? math::normalize(ab) : float2(1.0f, 0.0f);
-  return true;
-}
 
 /** The screen-space points of a Curve Patch / paint curve as a shared control-point source, so
  * their draw data comes from the same builder as every other Bezier editor's. Segments are not
@@ -215,6 +196,26 @@ bool ED_paint_curve_polyline_closest(const Span<float2> polyline,
   }
   r_hit.arc_t = arc_len > 1e-8f ? best_arc / arc_len : 0.0f;
   r_hit.param_t = best_param;
+  return true;
+}
+
+bool ED_paint_curve_polyline_at_param(const Span<float2> polyline,
+                                      const float param_t,
+                                      float2 &r_point,
+                                      float2 &r_tangent)
+{
+  if (polyline.size() < 2) {
+    return false;
+  }
+
+  const float f_index = math::clamp(param_t, 0.0f, 1.0f) * float(polyline.size() - 1);
+  const int i0 = min_ii(int(f_index), int(polyline.size()) - 2);
+  const float frac = f_index - float(i0);
+  const float2 a = polyline[i0];
+  const float2 b = polyline[i0 + 1];
+  r_point = math::interpolate(a, b, frac);
+  const float2 ab = b - a;
+  r_tangent = math::length_squared(ab) >= 1e-8f ? math::normalize(ab) : float2(1.0f, 0.0f);
   return true;
 }
 
@@ -672,7 +673,7 @@ void ED_paint_curve_screen_handles_build_from_geometry(
                                                                        hover_point_b,
                                                                        screen_points,
                                                                        bezier_t) &&
-        paintcurve_polyline_point_and_tangent_at_bezier_param(
+        ED_paint_curve_polyline_at_param(
             hover_seg.polyline, bezier_t, preview.point, preview.tangent))
     {
       /* Match #paintcurve_find_insert_segment_from_geometry: do not preview subdivision near

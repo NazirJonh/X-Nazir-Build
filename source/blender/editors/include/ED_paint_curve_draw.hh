@@ -260,6 +260,16 @@ bool ED_paint_curve_polyline_closest(blender::Span<blender::float2> polyline,
                                      blender::float2 mval,
                                      PaintCurvePolylineHit &r_hit);
 
+/**
+ * The inverse of #PaintCurvePolylineHit::param_t: the point and the unit tangent at \a param_t
+ * (0..1, vertex-index units over the vertex count) along \a polyline. Returns false when
+ * \a polyline has fewer than two vertices.
+ */
+bool ED_paint_curve_polyline_at_param(blender::Span<blender::float2> polyline,
+                                      float param_t,
+                                      blender::float2 &r_point,
+                                      blender::float2 &r_tangent);
+
 /** Squared screen-space distance from \a mval to a tessellated curve polyline. */
 float ED_paint_curve_polyline_distance_sq(blender::Span<blender::float2> polyline,
                                           blender::float2 mval);

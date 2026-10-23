@@ -120,6 +120,7 @@ static const PaintShapeGizmoAdapter g_view3d_gizmo_adapter = {
     /*shape_px_to_region=*/view3d_gizmo_shape_px_to_region,
     /*is_3d=*/true,
     /*space_matrix=*/view3d_gizmo_space_matrix,
+    /*recover_stale_modal=*/paint_shape_session_recover_orphaned_modal,
 };
 
 static bool view3d_shape_transform_gizmo_poll(const bContext *C, wmGizmoGroupType * /*gzgt*/)

@@ -83,6 +83,14 @@ struct PaintShapeGizmoAdapter {
    * frame is degenerate; the cage is then skipped this frame.
    */
   bool (*space_matrix)(const bContext *C, const PaintShape &shape, float4x4 &r_space) = nullptr;
+  /**
+   * Called from #paint_shape_gizmo_group_refresh while no handle drag runs. The editor checks
+   * whether its shape-drawing modal is still in the window's modal stack and, when it is not,
+   * clears the session's stale modal flag and in-flight gesture. Without this a modal removed
+   * mid-gesture would hide the cage (gesture active) and make every new invoke refuse (modal flag
+   * stuck), leaving only Apply usable.
+   */
+  void (*recover_stale_modal)(const bContext *C) = nullptr;
 };
 
 /** Create the cage + anchor gizmos on \a gzgroup and store \a adapter for the callbacks. */

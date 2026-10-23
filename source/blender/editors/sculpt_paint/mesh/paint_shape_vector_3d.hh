@@ -94,6 +94,11 @@ std::unique_ptr<VectorEditHost> paint_shape_session_host_create(bContext &C,
 bool paint_shape_session_modal_active(const PaintShapeSession &session);
 void paint_shape_session_modal_set_active(PaintShapeSession &session, bool active);
 
+/** Clear the live 3D session's modal flag / in-flight gesture when its drawing modal is no longer
+ * in the window's modal stack (the handler can disappear without a cancel, e.g. on a context
+ * switch, and would otherwise leave the shape uneditable and its cage hidden). */
+void paint_shape_session_recover_orphaned_modal(const bContext *C);
+
 /** True when the active tool idname still matches the one the session began with; a mismatch ends
  * the session (Apply) so the new tool's events are not swallowed by the shape modal. */
 bool paint_shape_session_tool_matches(const PaintShapeSession &session, const char *tool_id);

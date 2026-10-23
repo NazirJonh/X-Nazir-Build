@@ -299,6 +299,11 @@ void paint_shape_gizmo_group_invoke_prepare(const bContext *C,
   if (shape == nullptr) {
     return;
   }
+  /* A press on a handle always starts a fresh gesture. If the session still reports one, its
+   * owning modal vanished without settling it: clear the stale flags, keep the current pose. */
+  if (!ggd->drag_active && host->edit().gesture_active()) {
+    host->edit().gesture_abort();
+  }
   float2 p;
   if (!ggd->adapter->event_to_shape_px(C, *region, *shape, *event, p)) {
     return;
@@ -462,6 +467,9 @@ void paint_shape_gizmo_group_refresh(const bContext *C, wmGizmoGroup *gzgroup)
     return;
   }
   const bool target = ggd->adapter->target(C) != nullptr;
+  if (!ggd->drag_active && ggd->adapter->recover_stale_modal != nullptr) {
+    ggd->adapter->recover_stale_modal(C);
+  }
   const ShapeEditSession *edit = ggd->adapter->edit(C);
   /* Hide during the operator's own G/R/S gestures, but stay shown during our handle drags. */
   const bool gesture = edit != nullptr && edit->gesture_active();

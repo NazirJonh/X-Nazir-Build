@@ -20,7 +20,10 @@
 
 #pragma once
 
+#include "BLI_function_ref.hh"
 #include "BLI_math_vector_types.hh"
+
+#include "WM_types.hh"
 
 #include "paint_shape.hh"
 #include "paint_shape_edit.hh"
@@ -31,7 +34,9 @@ namespace blender {
 struct ReportList;
 struct bContext;
 struct wmEvent;
+struct wmOperator;
 struct wmOperatorType;
+struct wmWindow;
 
 }  // namespace blender
 
@@ -235,5 +240,30 @@ void shape_point_type_property_define(wmOperatorType *ot);
  * region, so every frontend's point operators finish the same way.
  */
 void shape_point_edit_refresh(bContext *C, VectorEditHost &host);
+
+/**
+ * Shared bodies of the point-type and point-delete operators of every Vector frontend. The
+ * frontend supplies its session's \a edit (null cancels) and \a refresh, which re-composites its
+ * preview and redraws; the operator-status logic is the same for all of them.
+ */
+wmOperatorStatus shape_point_type_exec(wmOperator *op,
+                                       ShapeEditSession *edit,
+                                       FunctionRef<void()> refresh);
+wmOperatorStatus shape_point_delete_exec(ShapeEditSession *edit, FunctionRef<void()> refresh);
+
+/**
+ * Reconcile a session's `modal_active` flag with the window's real modal stack. The flag alone is
+ * no proof: a context / mode / window change can remove the modal handler without settling the
+ * session, which would otherwise refuse every new invoke and leave only Apply.
+ *
+ * With the modal of type \a ot still running nothing changes and the result is the flag, so the
+ * caller refuses a second invoke only while the first one really exists. Without it the flag is
+ * cleared and any in-flight gesture of \a edit (when given) is dropped; the already committed pose
+ * is kept. Returns true when a live modal drives the session.
+ */
+bool shape_modal_reconcile(wmWindow *win,
+                           const wmOperatorType *ot,
+                           bool &modal_active,
+                           ShapeEditSession *edit);
 
 }  // namespace blender::ed::sculpt_paint::shape

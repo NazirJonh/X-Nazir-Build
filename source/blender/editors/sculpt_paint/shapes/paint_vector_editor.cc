@@ -24,6 +24,7 @@
 #include "ED_screen.hh"
 #include "ED_shape_session_overlay.hh"
 
+#include "RNA_access.hh"
 #include "RNA_define.hh"
 
 #include "UI_interface.hh"
@@ -31,6 +32,7 @@
 #include "UI_interface_icons.hh"
 #include "UI_interface_layout.hh"
 
+#include "WM_api.hh"
 #include "WM_types.hh"
 
 #include "../paint_intern.hh"
@@ -307,6 +309,45 @@ void shape_point_edit_refresh(bContext *C, VectorEditHost &host)
   if (ARegion *region = CTX_wm_region(C)) {
     ED_region_tag_redraw(region);
   }
+}
+
+wmOperatorStatus shape_point_type_exec(wmOperator *op,
+                                       ShapeEditSession *edit,
+                                       const FunctionRef<void()> refresh)
+{
+  if (edit == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const ShapePointType type = ShapePointType(RNA_enum_get(op->ptr, "type"));
+  if (!edit->point_type_set(type)) {
+    return OPERATOR_CANCELLED;
+  }
+  refresh();
+  return OPERATOR_FINISHED;
+}
+
+wmOperatorStatus shape_point_delete_exec(ShapeEditSession *edit, const FunctionRef<void()> refresh)
+{
+  if (edit == nullptr || !edit->point_delete()) {
+    return OPERATOR_CANCELLED;
+  }
+  refresh();
+  return OPERATOR_FINISHED;
+}
+
+bool shape_modal_reconcile(wmWindow *win,
+                           const wmOperatorType *ot,
+                           bool &modal_active,
+                           ShapeEditSession *edit)
+{
+  if (win != nullptr && ot != nullptr && WM_operator_find_modal_by_type(win, ot) != nullptr) {
+    return modal_active;
+  }
+  modal_active = false;
+  if (edit != nullptr && edit->gesture_active()) {
+    edit->gesture_abort();
+  }
+  return false;
 }
 
 void shape_edit_context_menu_open(bContext &C,

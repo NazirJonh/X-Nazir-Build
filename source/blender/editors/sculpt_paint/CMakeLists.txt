@@ -408,6 +408,7 @@ if(WITH_GTESTS)
     paint_curve_patch_sampler_test.cc
     paint_image_curve_patch_raster_test.cc
     paint_curve_patch_session_test.cc
+    tests/paint_control_points_test.cc
     tests/paint_shape_blend_test.cc
     tests/paint_shape_edit_test.cc
     tests/paint_shape_pattern_test.cc

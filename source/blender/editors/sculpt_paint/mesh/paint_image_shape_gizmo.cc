@@ -108,6 +108,9 @@ static const PaintShapeGizmoAdapter g_image_gizmo_adapter = {
     /*host_create=*/image_gizmo_host_create,
     /*event_to_shape_px=*/image_gizmo_event_to_shape_px,
     /*shape_px_to_region=*/image_gizmo_shape_px_to_region,
+    /*is_3d=*/false,
+    /*space_matrix=*/nullptr,
+    /*recover_stale_modal=*/image_shape_vector_recover_orphaned_modal,
 };
 
 static bool paint_shape_transform_gizmo_poll(const bContext *C, wmGizmoGroupType * /*gzgt*/)

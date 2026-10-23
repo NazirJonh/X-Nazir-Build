@@ -225,6 +225,17 @@ void image_shape_vector_modal_set_active(ImageShapeVectorState *state, const boo
   state->modal_active = active;
 }
 
+void image_shape_vector_recover_orphaned_modal(const bContext *C)
+{
+  ImageShapeVectorState *state = image_shape_vector_state_get(CTX_wm_space_image(C));
+  if (state == nullptr || (!state->modal_active && !state->edit.gesture_active())) {
+    return;
+  }
+  /* Operator types are registered once at startup, so the lookup is done once. */
+  static wmOperatorType *draw_ot = WM_operatortype_find("PAINT_OT_image_shape_draw", false);
+  shape_modal_reconcile(CTX_wm_window(C), draw_ot, state->modal_active, &state->edit);
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1050,23 +1061,19 @@ static wmOperatorStatus image_shape_point_type_exec(bContext *C, wmOperator *op)
   if (state == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  const shape::ShapePointType type = shape::ShapePointType(RNA_enum_get(op->ptr, "type"));
-  if (!state->edit.point_type_set(type)) {
-    return OPERATOR_CANCELLED;
-  }
-  image_shape_point_edit_refresh(C, *state);
-  return OPERATOR_FINISHED;
+  return shape::shape_point_type_exec(
+      op, &state->edit, [&]() { image_shape_point_edit_refresh(C, *state); });
 }
 
 static wmOperatorStatus image_shape_point_delete_exec(bContext *C, wmOperator * /*op*/)
 {
   shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(
       CTX_wm_space_image(C));
-  if (state == nullptr || !state->edit.point_delete()) {
+  if (state == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  image_shape_point_edit_refresh(C, *state);
-  return OPERATOR_FINISHED;
+  return shape::shape_point_delete_exec(
+      &state->edit, [&]() { image_shape_point_edit_refresh(C, *state); });
 }
 
 void PAINT_OT_image_shape_point_type(wmOperatorType *ot)

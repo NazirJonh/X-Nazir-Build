@@ -153,6 +153,21 @@ void paint_shape_session_modal_set_active(PaintShapeSession &session, const bool
   session.modal_active = active;
 }
 
+void paint_shape_session_recover_orphaned_modal(const bContext *C)
+{
+  if (C == nullptr) {
+    return;
+  }
+  Object *ob = CTX_data_active_object(C);
+  PaintShapeSession *session = ob != nullptr ? paint_shape_session_get(*ob) : nullptr;
+  if (session == nullptr || (!session->modal_active && !session->edit.gesture_active())) {
+    return;
+  }
+  /* Operator types are registered once at startup, so the lookup is done once. */
+  static wmOperatorType *draw_ot = WM_operatortype_find("SCULPT_OT_paint_shape_draw", false);
+  shape_modal_reconcile(CTX_wm_window(C), draw_ot, session->modal_active, &session->edit);
+}
+
 bool paint_shape_session_event_to_shape_px(const PaintShapeSession &session,
                                            const ARegion &region,
                                            const wmEvent &event,

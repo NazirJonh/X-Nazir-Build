@@ -248,6 +248,7 @@ static const PaintShapeGizmoAdapter g_image3d_gizmo_adapter = {
     /*shape_px_to_region=*/image3d_gizmo_shape_px_to_region,
     /*is_3d=*/false,
     /*space_matrix=*/nullptr,
+    /*recover_stale_modal=*/paint_shape_session_recover_orphaned_modal,
 };
 
 static bool image3d_shape_transform_gizmo_poll(const bContext *C, wmGizmoGroupType * /*gzgt*/)

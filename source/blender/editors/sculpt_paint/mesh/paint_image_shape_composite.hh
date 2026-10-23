@@ -384,6 +384,9 @@ void image_shape_vector_session_cancel(bContext *C, SpaceImage *sima);
 void image_shape_vector_state_free(PaintSelectFloatingSession *session);
 bool image_shape_vector_modal_active(const ImageShapeVectorState *state);
 void image_shape_vector_modal_set_active(ImageShapeVectorState *state, bool active);
+/** Clear the session's modal flag / in-flight gesture when its drawing modal is gone from the
+ * window's modal stack, so the cage and the gesture machine cannot stay frozen. */
+void image_shape_vector_recover_orphaned_modal(const bContext *C);
 
 /** \} */
 

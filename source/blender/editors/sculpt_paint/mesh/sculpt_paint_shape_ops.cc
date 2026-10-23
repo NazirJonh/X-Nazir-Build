@@ -536,7 +536,17 @@ static wmOperatorStatus shape_draw_invoke(bContext *C, wmOperator *op, const wmE
     shape::PaintShapeSession *session = ob != nullptr ? shape::paint_shape_session_get(*ob) :
                                                         nullptr;
     if (session != nullptr) {
-      if (shape::paint_shape_session_modal_active(*session)) {
+      shape::ShapeEditSession *edit = shape::paint_shape_session_edit_get(*ob);
+      /* The flag alone is not proof the modal still exists (a window / mode change can remove
+       * the handler without freeing the session). A stale flag would make this invoke refuse and
+       * leave the session uneditable except through Apply. */
+      bool modal_active = shape::paint_shape_session_modal_active(*session);
+      const bool modal_running = shape::shape_modal_reconcile(
+          CTX_wm_window(C), op->type, modal_active, edit);
+      shape::paint_shape_session_modal_set_active(*session, modal_active);
+      if (modal_running) {
+        /* A second invoke while the live modal runs (a search-menu call) would starve it and
+         * double every gesture. */
         MEM_delete(state);
         return OPERATOR_CANCELLED;
       }
@@ -1231,17 +1241,12 @@ static wmOperatorStatus shape_point_type_exec(bContext *C, wmOperator *op)
   Object *ob = CTX_data_active_object(C);
   shape::PaintShapeSession *session = ob != nullptr ? shape::paint_shape_session_get(*ob) :
                                                        nullptr;
-  shape::ShapeEditSession *edit = ob != nullptr ? shape::paint_shape_session_edit_get(*ob) :
-                                                  nullptr;
-  if (session == nullptr || edit == nullptr) {
+  if (session == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  const shape::ShapePointType type = shape::ShapePointType(RNA_enum_get(op->ptr, "type"));
-  if (!edit->point_type_set(type)) {
-    return OPERATOR_CANCELLED;
-  }
-  shape_edit_point_refresh(C, *session);
-  return OPERATOR_FINISHED;
+  return shape::shape_point_type_exec(op,
+                                      shape::paint_shape_session_edit_get(*ob),
+                                      [&]() { shape_edit_point_refresh(C, *session); });
 }
 
 static wmOperatorStatus shape_point_delete_exec(bContext *C, wmOperator * /*op*/)
@@ -1249,13 +1254,11 @@ static wmOperatorStatus shape_point_delete_exec(bContext *C, wmOperator * /*op*/
   Object *ob = CTX_data_active_object(C);
   shape::PaintShapeSession *session = ob != nullptr ? shape::paint_shape_session_get(*ob) :
                                                        nullptr;
-  shape::ShapeEditSession *edit = ob != nullptr ? shape::paint_shape_session_edit_get(*ob) :
-                                                  nullptr;
-  if (session == nullptr || edit == nullptr || !edit->point_delete()) {
+  if (session == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  shape_edit_point_refresh(C, *session);
-  return OPERATOR_FINISHED;
+  return shape::shape_point_delete_exec(shape::paint_shape_session_edit_get(*ob),
+                                        [&]() { shape_edit_point_refresh(C, *session); });
 }
 
 void SCULPT_OT_paint_shape_point_type(wmOperatorType *ot)

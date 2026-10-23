@@ -83,6 +83,7 @@
 #include "paint_material_source.hh"
 #include "paint_shape_texture_preview.hh"
 #include "../shapes/paint_shape_render.hh"
+#include "../shapes/paint_vector_editor.hh"
 
 namespace blender {
 
@@ -438,13 +439,19 @@ static wmOperatorStatus image_shape_draw_invoke(bContext *C,
   {
     shape::ImageShapeVectorState *session = shape::image_shape_vector_state_get(sima);
     if (session != nullptr) {
-      if (shape::image_shape_vector_modal_active(session)) {
+      shape::ShapeEditSession *edit = shape::image_shape_vector_edit_get(sima);
+      /* Validate the flag against the real modal stack: a handler removed without freeing the
+       * session would otherwise leave the session uneditable (every invoke refusing). */
+      bool modal_active = shape::image_shape_vector_modal_active(session);
+      const bool modal_running = shape::shape_modal_reconcile(
+          CTX_wm_window(C), op->type, modal_active, edit);
+      shape::image_shape_vector_modal_set_active(session, modal_active);
+      if (modal_running) {
         /* The live modal already drives this session (a search-menu invoke while it runs):
          * opening a second one would starve it and double every gesture. */
         MEM_delete(state);
         return OPERATOR_CANCELLED;
       }
-      shape::ShapeEditSession *edit = shape::image_shape_vector_edit_get(sima);
       std::unique_ptr<shape::VectorEditHost> host = shape::image_shape_vector_host_create(
           *C, *session, shape::hit_tolerance_px());
       const float2 press_px = image_shape_event_to_px(

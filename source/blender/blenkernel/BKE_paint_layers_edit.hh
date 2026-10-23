@@ -83,8 +83,18 @@ enum class PaintLayerAddKind : int8_t {
   MaskCorrectionMaterial,
   /** The inert Anchor Point marker inside the anchor row's effects or mask. */
   AnchorPoint,
-  /** An Anchor Point Reader laying a slice named by #PaintLayerAddParams::anchor_point_source. */
-  AnchorPointReader,
+  /** An Anchor Point Reader as a row of the stack, reading #PaintLayerAddParams::anchor_point_source. */
+  AnchorPointLayer,
+  /**
+   * An Anchor Point Reader as a content correction of the anchor row, reading
+   * #PaintLayerAddParams::anchor_point_source.
+   */
+  AnchorPointCorrection,
+  /**
+   * An Anchor Point Reader as a mask item of the anchor row, reading
+   * #PaintLayerAddParams::anchor_point_source.
+   */
+  AnchorPointMaskCorrection,
 };
 
 struct PaintLayerAddParams {
@@ -123,12 +133,13 @@ struct PaintLayerAddParams {
    */
   Main *bmain = nullptr;
   /**
-   * Where an #PaintLayerAddKind::AnchorPoint or ::AnchorPointReader lands: the anchor row's list,
-   * its effects or its mask. \a insert_after names the item it follows, or null for the end.
+   * Where an #PaintLayerAddKind::AnchorPoint marker lands: the anchor row's effects or its mask.
+   * The three reader kinds take their list from the kind itself. \a insert_after names the item
+   * the new one follows, or null for the end; it is ignored when it belongs to another list.
    */
   PaintLayerAnchorPointList anchor_point_list = PaintLayerAnchorPointList::Effects;
   MaterialPaintLayer *insert_after = nullptr;
-  /** The point a #PaintLayerAddKind::AnchorPointReader reads. */
+  /** The point an #PaintLayerAddKind::AnchorPointLayer/Correction/MaskCorrection reads. */
   bUUID anchor_point_source = {};
 };
 

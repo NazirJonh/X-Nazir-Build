@@ -2284,8 +2284,24 @@ bool PaintLayersTreeBuilder::anchor_point_reader_link(LayerGroup &reader_group,
     if (instance_in == nullptr || group_in == nullptr) {
       return nullptr;
     }
-    bke::node_add_link(
-        tree_, *source_group->instance, *source_socket, *reader_group.instance, *instance_in);
+    /* A rebuild can run the same link twice (create_inputs false after a reused group). Linking an
+     * already linked input again adds a duplicate edge with the same source, which the group node
+     * then evaluates twice. `tosock->link` is not set until the tree is updated, so the check walks
+     * the links that are actually in the tree. */
+    const bool already_linked = [&]() {
+      for (const bNodeLink &link : tree_.links) {
+        if (link.fromnode == source_group->instance && link.fromsock == source_socket &&
+            link.tonode == reader_group.instance && link.tosock == instance_in)
+        {
+          return true;
+        }
+      }
+      return false;
+    }();
+    if (!already_linked) {
+      bke::node_add_link(
+          tree_, *source_group->instance, *source_socket, *reader_group.instance, *instance_in);
+    }
     return group_in;
   };
 
@@ -2448,10 +2464,11 @@ NodeOutput PaintLayersTreeBuilder::anchor_point_mask_item_emit(LayerGroup &group
     }
     return linked.color;
   }
-  /* A content point read as coverage: the coverage the slice lays in Base Color. The row's mask is
-   * built once, with the first channel the row takes part in, so when Base Color is not built yet
-   * the first tap the point has stands in; the mask is the same for every channel. */
-  const int channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  /* A content point read as coverage: the coverage the slice lays in the channel the CPU composite
+   * reads it from (the first one the source takes part in). The row's mask is built once, with the
+   * first channel this row takes part in, so when that channel is not built yet the first tap the
+   * point has stands in; the mask is the same for every channel. */
+  const int channel = paint_layer_anchor_point_mask_read_channel(ma_, item);
   if (const AnchorPointTap *tap = anchor_point_tap_find(group, ref.point->marker, channel)) {
     return tap->coverage;
   }
@@ -3228,17 +3245,20 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
   }
   if (paint_layer_kind_reads_anchor_point(layer)) {
     /* A kept reader group already holds its nodes; only the links from the source instance into
-     * its instance have to be made again in the root tree. */
+     * its instance have to be made again in the root tree. A missing input means the group predates
+     * a target change; the topology hash treats that as a structural change, so a failure here is a
+     * real error and the row is left out rather than rebuilt on top of its own nodes. */
     KindEmitResult ignored;
-    this->anchor_point_reader_link(group, layer, channel, false, &ignored);
+    if (!this->anchor_point_reader_link(group, layer, channel, false, &ignored)) {
+      return {};
+    }
   }
   /* A reader that is a correction or a mask item of a kept group has its inputs in that group, and
-   * the links from the source into them went with the root tree, which every pass starts empty:
-   * without making them again the reader goes dark as soon as its source row is rebuilt. A content
-   * reader links once per channel it lays in. The mask is built once for the row, with the first
-   * channel the row takes part in, so its readers link once, in that channel. */
+   * the root links into them went with the cleared tree: make them again. A content reader links
+   * once per channel it lays in; the mask is built once for the row, so its readers link once, with
+   * the first channel the row takes part in. */
   int first_channel = -1;
-  for (const int c : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+  for (int c = 0; c < PAINT_MATERIAL_CHANNEL_NUM; c++) {
     if (paint_layer_row_participates(ma_, layer, c)) {
       first_channel = c;
       break;
@@ -3259,6 +3279,8 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
       continue;
     }
     KindEmitResult ignored;
+    /* A reader that cannot be linked is left out alone, as a fresh build leaves it out, instead of
+     * dropping the whole row. */
     this->anchor_point_reader_link(group, effect, channel, false, &ignored);
   }
   if (channel == first_channel) {
@@ -3271,8 +3293,10 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
         continue;
       }
       KindEmitResult ignored;
-      this->anchor_point_reader_link(
-          group, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false, &ignored);
+      const int read_channel = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
+                                   int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
+                                   paint_layer_anchor_point_mask_read_channel(ma_, item);
+      this->anchor_point_reader_link(group, item, read_channel, false, &ignored);
     }
   }
   return result;

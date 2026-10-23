@@ -864,7 +864,10 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
         owner, layer = cls._active_layer(context)
         if owner is None or layer is None:
             return False
-        return cls._shown_mask_item(context, owner, layer) is None
+        item = cls._shown_mask_item(context, owner, layer)
+        # A mask item is normally a coverage item, but a mask Anchor Point Reader has a bake mode
+        # like any other reader and needs this panel.
+        return item is None or (item.source == 'ANCHOR_POINT' and item.is_anchor_point_reader)
 
     def draw(self, context):
         layout = self.layout
@@ -873,9 +876,11 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
         owner, layer = self._active_layer(context)
         if layer is None:
             return
+        item = self._shown_mask_item(context, owner, layer)
+        subject = item if item is not None else layer
 
-        layout.prop(layer, "bake_mode", text="Mode")
-        layout.prop(layer, "bake_size_preset", text="Size")
+        layout.prop(subject, "bake_mode", text="Mode")
+        layout.prop(subject, "bake_size_preset", text="Size")
 
         # What an edited layer that reads another material renders for the Image Editor's composite
         # while it is edited. The settings belong to the material, so they apply to every such layer.
@@ -892,25 +897,25 @@ class LAYER_MATERIAL_PT_bake(LayerMaterialButtonsPanel, Panel):
         if owner.paint_layers_is_stale:
             col.label(text="Updating...", icon='TIME')
 
-        if layer.source == 'MATERIAL':
+        if subject.source == 'MATERIAL':
             # A plain value and a plain texture of the source are shown as they are. What the
             # source supplies as a graph is shown through a copy of that graph (Auto and Never)
             # or from the maps rendered from it (Always); the maps are also what the Image Editor
             # and the paint slots read.
-            if layer.bake_mode == 'NEVER':
+            if subject.bake_mode == 'NEVER':
                 layout.label(text="Nothing is rendered: the graph of the source is shown live", icon='INFO')
             else:
-                if layer.bake_mode == 'AUTO':
+                if subject.bake_mode == 'AUTO':
                     layout.label(text="The graph of the source is shown live", icon='INFO')
                 layout.label(
-                    text="Maps up to date" if layer.bake_is_valid else "Maps rendering or out of date",
-                    icon='CHECKMARK' if layer.bake_is_valid else 'TIME',
+                    text="Maps up to date" if subject.bake_is_valid else "Maps rendering or out of date",
+                    icon='CHECKMARK' if subject.bake_is_valid else 'TIME',
                 )
             return
-        if layer.bake_mode != 'NEVER':
+        if subject.bake_mode != 'NEVER':
             layout.label(
-                text="Baked" if layer.bake_is_valid else "Not baked yet",
-                icon='CHECKMARK' if layer.bake_is_valid else 'TIME',
+                text="Baked" if subject.bake_is_valid else "Not baked yet",
+                icon='CHECKMARK' if subject.bake_is_valid else 'TIME',
             )
 
 

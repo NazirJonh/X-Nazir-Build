@@ -10,6 +10,9 @@
 #include <cfloat>
 #include <climits>
 #include <cstdlib>
+#include <mutex>
+#include <string>
+#include <unordered_set>
 
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
@@ -1912,6 +1915,29 @@ static bool rna_MaterialPaintLayer_object_mask_visible_get(PointerRNA ptr, Objec
     return BKE_paint_layer_object_mask_object_visible_get(*object, *ma, *layer);
   }
   return true;
+}
+
+static int rna_MaterialPaintLayer_object_mask_type_get(PointerRNA *ptr)
+{
+  return static_cast<const MaterialPaintLayer *>(ptr->data)->object_mask_type;
+}
+
+/**
+ * The type decides nodes of the generated graph, so it may only be written on a stack row. A
+ * correction or a mask item has no object mask: the kernel refuses it and clears any value that
+ * reached DNA by another path, and the RNA setter reports the refusal instead of writing it.
+ */
+static void rna_MaterialPaintLayer_object_mask_type_set(PointerRNA *ptr, int value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  Material *ma = rna_MaterialPaintLayer_owner(*ptr, &layer);
+  if (ma == nullptr || layer == nullptr) {
+    return;
+  }
+  if (BKE_paint_layers_object_mask_type_set(*ma, *layer, int8_t(value))) {
+    DEG_id_tag_update(&ma->id, ID_RECALC_SHADING);
+    WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, &ma->id);
+  }
 }
 
 /** Whether \a object and \a ma can take an object-mask edit; reports the reason when not. */
@@ -4115,7 +4141,10 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
   prop = RNA_def_property(srna, "object_mask_type", PROP_ENUM, PROP_NONE);
-  RNA_def_property_enum_sdna(prop, nullptr, "object_mask_type");
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_object_mask_type_get",
+                              "rna_MaterialPaintLayer_object_mask_type_set",
+                              nullptr);
   RNA_def_property_enum_items(prop, object_mask_type_items);
   RNA_def_property_ui_text(prop, "Mask Type", "Limit the layer to some objects or UDIM tiles");
   /* Topology: the generator adds or drops the Attribute nodes. */

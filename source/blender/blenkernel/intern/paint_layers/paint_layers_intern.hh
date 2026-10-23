@@ -164,17 +164,36 @@ uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
 
 /**
  * Render the slice \a reader names in \a channel into two buffers: the straight colour with its
- * content alpha, and the coverage it lays. A mask point read as content gives a grey with alpha
- * one and full coverage. The buffers are in the source row's pixel space, scene linear.
+ * content alpha, and the coverage it lays. A mask point read as content gives a grey with alpha one
+ * and full coverage. The buffers are in the source row's pixel space, scene linear.
  *
- * The returned pointers share the buffers with the slice cache: the cache may drop its reference
- * at any time, and the caller's keeps the pixels alive for as long as it holds them.
+ * The returned shared pointers own the buffers. A complete render (\a dst_rect is null) is also
+ * kept by the slice cache, which hands the same buffers out again for an unchanged description;
+ * the cache holds a reference only, so a caller that keeps the result alive across a cache clear
+ * (or an eviction) still has valid pixels. A partial render writes the requested rectangle and
+ * leaves the rest of the buffer zero; it is never cached, so it lives exactly as long as the
+ * caller's references.
  */
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
                                    int channel,
                                    std::shared_ptr<ImBuf> *r_color,
-                                   std::shared_ptr<ImBuf> *r_coverage);
+                                   std::shared_ptr<ImBuf> *r_coverage,
+                                   const int *dst_rect = nullptr);
+
+/** Drop every cached slice. Buffers still referenced by a description stay alive. For tests,
+ * teardown and the points where an evaluation must not see a previous stroke. */
+void paint_layer_anchor_point_slice_cache_clear();
+
+/** Bytes the cache currently accounts for; for tests of the eviction policy. */
+size_t paint_layer_anchor_point_slice_cache_bytes();
+
+/** Number of entries the cache holds; for tests of the eviction policy. */
+int paint_layer_anchor_point_slice_cache_entry_count();
+
+/** Override the byte budget. Tests use a small one; the cache never frees a buffer a description
+ * still references, it only stops holding it. */
+void paint_layer_anchor_point_slice_cache_set_budget(size_t bytes);
 
 /**
  * The maps the slice \a reader reads was rendered from, for the composite cache to subscribe to:
@@ -515,7 +534,8 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
 inline bool paint_layer_mask_item_lays(const Material &ma, const MaterialPaintLayer &item)
 {
   if (paint_layer_kind_reads_anchor_point(item)) {
-    return paint_layer_row_reads_anchor_point(ma, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    return paint_layer_row_reads_anchor_point(
+        ma, item, paint_layer_anchor_point_mask_read_channel(ma, item));
   }
   if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
     return paint_layer_mask_reads_source(ma, item);
@@ -749,5 +769,8 @@ bool BKE_paint_layers_bake_set_map(Material &ma,
 
 /** \} */
 
+/** Drop the bake of every reader that no longer resolves. Called after an edit that can change a
+ * reference: a point or source row was deleted, or a reader was re-targeted. */
+void paint_layer_anchor_point_release_broken_bakes(Material &ma);
 
 }  // namespace blender

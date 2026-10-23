@@ -157,12 +157,45 @@ static ObjectPaintLayerMask &record_ensure(Main &bmain,
   return *rec;
 }
 
+/**
+ * Close the write path for a role that cannot carry an object mask: drop any value that reached
+ * DNA despite the role. The reset changes what the generator reads, so the graph is rebuilt; an
+ * already clean row changes nothing. Returns whether anything was dropped.
+ */
+static bool object_mask_role_reset(Material &ma, MaterialPaintLayer &layer)
+{
+  const bool changed = layer.object_mask_type != MA_PAINT_LAYER_OBJECT_MASK_MESH ||
+                       (layer.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0;
+  layer.object_mask_type = MA_PAINT_LAYER_OBJECT_MASK_MESH;
+  layer.object_mask_flag &= ~MA_PAINT_LAYER_OBJECT_MASK_ACTIVE;
+  if (changed) {
+    BKE_paint_layers_tag_edited(ma);
+  }
+  return changed;
+}
+
+bool BKE_paint_layers_object_mask_type_set(Material &ma,
+                                           MaterialPaintLayer &layer,
+                                           const int8_t type)
+{
+  if (!BKE_paint_layers_object_mask_role_allowed(layer)) {
+    return object_mask_role_reset(ma, layer);
+  }
+  if (layer.object_mask_type == type) {
+    return false;
+  }
+  layer.object_mask_type = type;
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
 bool BKE_paint_layer_object_mask_visible_set(
     Main &bmain, Object &ob, Material &ma, MaterialPaintLayer &layer, const bool visible)
 {
   /* An object mask belongs to a row of the stack: a content correction or a mask item never
    * carries one, since a slice's object-mask bounds are read from rows alone. */
   if (!BKE_paint_layers_object_mask_role_allowed(layer)) {
+    object_mask_role_reset(ma, layer);
     return false;
   }
   /* Showing a row with no record changes nothing: skip the record, the uid and the tagging. */
@@ -199,9 +232,10 @@ bool BKE_paint_layer_object_mask_tile_set(Main &bmain,
     return false;
   }
   if (!BKE_paint_layers_object_mask_role_allowed(layer)) {
+    object_mask_role_reset(ma, layer);
     return false;
   }
-  if (visible && BKE_paint_layer_object_mask_find(ob, ma.paint_layers_owner_uid, layer.marker) ==
+  if (visible &&BKE_paint_layer_object_mask_find(ob, ma.paint_layers_owner_uid, layer.marker) ==
                      nullptr)
   {
     return false;

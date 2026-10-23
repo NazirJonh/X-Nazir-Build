@@ -1047,6 +1047,14 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         anchor_coverage = anchor_coverage_tile.data();
       }
     }
+    if (correction.anchor_point_coverage_ibuf != nullptr) {
+      anchor_coverage_tile.resize(count * 4);
+      composite_decode_tile(correction.anchor_point_coverage_ibuf,
+                            correction.anchor_point_coverage_colorspace_name,
+                            tile,
+                            anchor_coverage_tile.data());
+      anchor_coverage = anchor_coverage_tile.data();
+    }
     if (correction.ibuf != nullptr) {
       correction_storage.resize(count * 4);
       composite_decode_tile(
@@ -1060,12 +1068,14 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                                                     correction.constant_color;
       float *s = r_color + i * 4;
       float correction_factor = 1.0f;
-      if (correction.ibuf != nullptr) {
-        correction_factor = c[3];
-      }
-      else if (anchor_coverage != nullptr) {
+      if (anchor_coverage != nullptr) {
+        /* A reader's slice covers by the coverage it was rendered with, whether the colour comes
+         * live or from its bake; the colour map's own alpha is content alpha, not coverage. */
         const float *cov = anchor_coverage + i * 4;
         correction_factor = (cov[0] + cov[1] + cov[2]) / 3.0f;
+      }
+      else if (correction.ibuf != nullptr) {
+        correction_factor = c[3];
       }
       const float f = clamp_f(correction.opacity * correction_factor, 0.0f, 1.0f);
       const float a = clamp_f(r_factor[i], 0.0f, 1.0f);
@@ -1304,6 +1314,13 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
     }
     if (correction.anchor_point_coverage != nullptr &&
         !composite_ibuf_is_rgba(correction.anchor_point_coverage, width, height))
+    {
+      return false;
+    }
+    /* A baked reader's coverage map is read tile by tile like the colour map: a bake of another
+     * size or format would be read past its end. */
+    if (correction.anchor_point_coverage_ibuf != nullptr &&
+        !composite_ibuf_is_rgba(correction.anchor_point_coverage_ibuf, width, height))
     {
       return false;
     }
@@ -2009,7 +2026,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     }
     else if (image_layer.anchor_point_color != nullptr) {
       /* A slice is already in canvas space and scene linear: read it as it is, with no mapping and
-       * no colorspace conversion. The cache owns the buffer, so it is not locked or freed here. */
+       * no colorspace conversion. The image-layer description owns the buffer; the evaluator's
+       * layer only borrows it for this call. */
       layer.color_ibuf = image_layer.anchor_point_color.get();
       layer.color_colorspace_name = nullptr;
     }
@@ -2051,7 +2069,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
       else if (item.anchor_point_slice != nullptr) {
-        /* A slice is already in canvas space and scene linear; the cache owns the buffer. */
+        /* A slice is already in canvas space and scene linear; the description owns the buffer. */
         buffer.ibuf = item.anchor_point_slice.get();
         buffer.colorspace_name = nullptr;
       }
@@ -2088,7 +2106,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.blend = correction.blend;
       buffer.opacity = correction.opacity;
       if (correction.anchor_point_slice != nullptr) {
-        /* A slice is already in canvas space and scene linear; the cache owns both buffers. */
+        /* A slice is already in canvas space and scene linear; the description owns both buffers. */
         buffer.anchor_point_slice = correction.anchor_point_slice.get();
         buffer.anchor_point_coverage = correction.anchor_point_coverage.get();
       }
@@ -2101,7 +2119,18 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
             buffer.ibuf, correction.mapping, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
-      else {
+      if (correction.anchor_point_coverage_image != nullptr) {
+        buffer.anchor_point_coverage_ibuf = composite_image_acquire(
+            correction.anchor_point_coverage_image,
+            correction.anchor_point_coverage_iuser,
+            r_locks);
+        if (buffer.anchor_point_coverage_ibuf != nullptr) {
+          buffer.anchor_point_coverage_colorspace_name = composite_buffer_colorspace_name(
+              buffer.anchor_point_coverage_ibuf);
+        }
+      }
+      /* The flat colour belongs to the chain above: a slice or a map has none. */
+      if (correction.anchor_point_slice == nullptr && correction.image == nullptr) {
         buffer.has_constant_color = true;
         copy_v4_v4(buffer.constant_color, correction.constant_color);
       }
@@ -2386,6 +2415,9 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash *= 0x100000001b3ULL;
       hash = get_default_hash(hash,
                               correction.image != nullptr ? correction.image->id.session_uid : 0,
+                              correction.anchor_point_coverage_image != nullptr ?
+                                  correction.anchor_point_coverage_image->id.session_uid :
+                                  0,
                               int(correction.blend),
                               correction.opacity);
       /* Which filter it is, or none, and what it was told. */
@@ -2591,6 +2623,7 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
     }
     for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
       r_images.append(correction.image);
+      r_images.append(correction.anchor_point_coverage_image);
       r_images.extend(correction.anchor_point_images);
     }
     if (layer.is_folder) {

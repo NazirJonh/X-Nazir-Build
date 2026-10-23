@@ -17,6 +17,7 @@
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
+#include "DNA_image_types.h"
 #include "DNA_material_types.h"
 
 #include "BKE_paint_layers.hh"
@@ -133,6 +134,23 @@ static const MaterialPaintLayer *anchor_point_reader_owner(const Material &ma,
   return owner;
 }
 
+static bool anchor_point_lookup(const Material &ma,
+                                const MaterialPaintLayer &reader,
+                                const bUUID &marker,
+                                PaintLayerAnchorPointRef &r_ref);
+
+/** Whether \a reader names a marker that resolves at all; an invalid edge is not part of the
+ * graph the depth and cycle walks follow. */
+static bool anchor_point_reader_has_slice(const Material &ma, const MaterialPaintLayer &reader)
+{
+  if (!paint_layer_kind_reads_anchor_point(reader)) {
+    return false;
+  }
+  PaintLayerAnchorPointRef ref;
+  return anchor_point_lookup(ma, reader, reader.anchor_point_source, ref) &&
+         ref.source_row != nullptr;
+}
+
 /** The readers of the slice of \a reader, without rank checks: the graph the depth walk follows. */
 static void anchor_point_slice_readers(const Material &ma,
                                        const MaterialPaintLayer &source_row,
@@ -144,16 +162,16 @@ static void anchor_point_row_readers(const Material &ma,
                                      const MaterialPaintLayer &row,
                                      Vector<const MaterialPaintLayer *> &r_readers)
 {
-  if (paint_layer_kind_reads_anchor_point(row)) {
+  if (anchor_point_reader_has_slice(ma, row)) {
     r_readers.append(&row);
   }
   for (const MaterialPaintLayer &effect : row.effects) {
-    if (paint_layer_kind_reads_anchor_point(effect)) {
+    if (anchor_point_reader_has_slice(ma, effect)) {
       r_readers.append(&effect);
     }
   }
   for (const MaterialPaintLayer &item : row.mask_stack) {
-    if (paint_layer_kind_reads_anchor_point(item)) {
+    if (anchor_point_reader_has_slice(ma, item)) {
       r_readers.append(&item);
     }
   }
@@ -168,31 +186,34 @@ static void anchor_point_slice_readers(const Material &ma,
                                        const MaterialPaintLayer *stop_before,
                                        Vector<const MaterialPaintLayer *> &r_readers)
 {
+  if (target == PaintLayerAnchorPointTarget::Mask) {
+    /* A mask slice is the mask stack alone: the row's content, corrections and children do not
+     * feed it, and counting them would invent cycles and depth the mask does not have. */
+    for (const MaterialPaintLayer &item : source_row.mask_stack) {
+      if (stop_before != nullptr && &item == stop_before) {
+        break;
+      }
+      if (anchor_point_reader_has_slice(ma, item)) {
+        r_readers.append(&item);
+      }
+    }
+    return;
+  }
   /* A content slice contains the source row's own source, its corrections above the marker and,
    * for a folder, every child: a reader anywhere in there is part of the chain. */
-  if (paint_layer_kind_reads_anchor_point(source_row)) {
+  if (anchor_point_reader_has_slice(ma, source_row)) {
     r_readers.append(&source_row);
   }
   for (const MaterialPaintLayer &effect : source_row.effects) {
     if (stop_before != nullptr && &effect == stop_before) {
       break;
     }
-    if (paint_layer_kind_reads_anchor_point(effect)) {
+    if (anchor_point_reader_has_slice(ma, effect)) {
       r_readers.append(&effect);
     }
   }
   for (const MaterialPaintLayer &child : source_row.children) {
     anchor_point_row_readers(ma, child, r_readers);
-  }
-  if (target == PaintLayerAnchorPointTarget::Mask) {
-    for (const MaterialPaintLayer &item : source_row.mask_stack) {
-      if (stop_before != nullptr && &item == stop_before) {
-        break;
-      }
-      if (paint_layer_kind_reads_anchor_point(item)) {
-        r_readers.append(&item);
-      }
-    }
   }
 }
 
@@ -309,7 +330,10 @@ PaintLayerAnchorPointRef paint_layer_anchor_point_resolve(const Material &ma,
       ref.issue = PaintLayerAnchorPointIssue::Cycle;
       return ref;
     }
-    if (max_depth > PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX) {
+    /* Depths up to the hard limit are valid references; their evaluation mode decides whether
+     * they stay live (Never), move to the baked slice (Auto/Always) or warn. Only a chain that
+     * would explode the graph is an error. */
+    if (max_depth > PAINT_LAYER_ANCHOR_POINT_DEPTH_HARD) {
       ref.issue = PaintLayerAnchorPointIssue::ChainTooDeep;
       return ref;
     }
@@ -429,7 +453,9 @@ static uint64_t anchor_point_hash_row(uint64_t h,
                                              row.mapping.scale[1],
                                              row.mapping.rotation));
   h = anchor_point_hash_mix(h, get_default_hash(int(row.mapping.flag), int(row.mapping.wrap)));
-  /* A content slice never reads the mask, a mask slice never reads the corrections or children. */
+  /* A content slice never reads the mask, a mask slice never reads the corrections or children.
+   * At the top the point that cuts the slice names which half is read; a nested row is fully
+   * inside the slice, so both are. */
   const bool reads_content = !top || stop_mask == nullptr;
   const bool reads_mask = !top || stop_content == nullptr;
   if (reads_content) {
@@ -501,6 +527,20 @@ bool paint_layer_row_reads_anchor_point(const Material &ma,
   if (!paint_layer_channel_live(paint_layer_channel_find(reader, channel))) {
     return false;
   }
+  /* A mask slice in a tiled material is not supported: the sampler and the bake are single-tile. */
+  if (ref.target == PaintLayerAnchorPointTarget::Mask &&
+      paint_layer_anchor_point_slice_is_udim(ma, reader))
+  {
+    return false;
+  }
+  /* Always cannot bake a slice that contains an object mask, and it has no live path to fall back
+   * to: the reader is told to stop taking part (the issue says why). Auto stays live instead. */
+  if (ref.target != PaintLayerAnchorPointTarget::None &&
+      BKE_paint_layers_bake_mode_get(reader) == MA_PAINT_LAYER_BAKE_ALWAYS &&
+      paint_layer_anchor_point_slice_has_object_mask(ma, reader))
+  {
+    return false;
+  }
   switch (ref.target) {
     case PaintLayerAnchorPointTarget::None:
       return false;
@@ -512,6 +552,28 @@ bool paint_layer_row_reads_anchor_point(const Material &ma,
       return paint_layer_row_participates(ma, *ref.source_row, channel);
   }
   return false;
+}
+
+int paint_layer_anchor_point_mask_read_channel(const Material &ma,
+                                               const MaterialPaintLayer &reader)
+{
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr ||
+      ref.target == PaintLayerAnchorPointTarget::Mask)
+  {
+    return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  }
+  /* A mask reader reading a content slice takes its coverage, which exists in every channel the
+   * source row takes part in. Base Color is only the fallback when none does. */
+  for (int channel = 0; channel < PAINT_MATERIAL_CHANNEL_NUM; channel++) {
+    /* A filtered channel is refused by the reader's own participation, so it cannot be the one. */
+    if (!paint_layer_channel_filtered(ma, channel) &&
+        paint_layer_row_participates(ma, *ref.source_row, channel))
+    {
+      return channel;
+    }
+  }
+  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 }
 
 const char *paint_layer_anchor_point_issue_text(const PaintLayerAnchorPointIssue issue)
@@ -576,14 +638,38 @@ void paint_layer_anchor_point_counts(const Material &ma, int &r_points, int &r_r
 {
   r_points = 0;
   r_readers = 0;
+  const auto marker_is_used = [&](const MaterialPaintLayer &marker) {
+    for (const MaterialPaintLayer *reader : paint_layer_anchor_point_readers(ma, marker.marker)) {
+      if ((reader->flag & MA_PAINT_LAYER_ENABLED) == 0) {
+        continue;
+      }
+      if (paint_layer_anchor_point_resolve(ma, *reader).issue ==
+              PaintLayerAnchorPointIssue::None &&
+          !paint_layer_anchor_point_slice_is_udim(ma, *reader))
+      {
+        return true;
+      }
+    }
+    return false;
+  };
   BKE_paint_layers_foreach(
       ma, [&](const MaterialPaintLayer &row, const MaterialPaintLayer * /*parent*/) -> bool {
         const auto consider = [&](const MaterialPaintLayer &candidate) {
+          if ((candidate.flag & MA_PAINT_LAYER_ENABLED) == 0) {
+            return;
+          }
           if (paint_layer_kind_is_anchor_point_marker(candidate)) {
-            r_points++;
+            if (marker_is_used(candidate)) {
+              r_points++;
+            }
           }
           else if (paint_layer_kind_reads_anchor_point(candidate)) {
-            r_readers++;
+            const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, candidate);
+            if (ref.issue == PaintLayerAnchorPointIssue::None &&
+                !paint_layer_anchor_point_slice_is_udim(ma, candidate))
+            {
+              r_readers++;
+            }
           }
         };
         consider(row);
@@ -630,35 +716,224 @@ bool paint_layer_anchor_point_blocks_bake(const Material &ma, const MaterialPain
   return anchor_point_row_blocks(ma, layer);
 }
 
-/** Whether \a row or any row below it has an active object mask. */
-static bool anchor_point_row_has_object_mask(const MaterialPaintLayer &row)
+static bool anchor_point_slice_has_object_mask_walk(const Material &ma,
+                                                    const MaterialPaintLayer &reader,
+                                                    Vector<bUUID> &visited);
+
+/** Whether a nested reader's own slice brings an object mask into the current slice. */
+static bool anchor_point_nested_slice_has_object_mask(const Material &ma,
+                                                      const MaterialPaintLayer &row,
+                                                      Vector<bUUID> &visited)
+{
+  return paint_layer_kind_reads_anchor_point(row) &&
+         anchor_point_slice_has_object_mask_walk(ma, row, visited);
+}
+
+/** Scan a row that is fully inside the slice: itself, its corrections, mask and children. */
+static bool anchor_point_row_tree_has_object_mask(const Material &ma,
+                                                  const MaterialPaintLayer &row,
+                                                  Vector<bUUID> &visited)
 {
   if ((row.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0) {
     return true;
   }
+  if (anchor_point_nested_slice_has_object_mask(ma, row, visited)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : row.effects) {
+    if ((effect.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0 ||
+        anchor_point_nested_slice_has_object_mask(ma, effect, visited))
+    {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &item : row.mask_stack) {
+    if ((item.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0 ||
+        anchor_point_nested_slice_has_object_mask(ma, item, visited))
+    {
+      return true;
+    }
+  }
   for (const MaterialPaintLayer &child : row.children) {
-    if (anchor_point_row_has_object_mask(child)) {
+    if (anchor_point_row_tree_has_object_mask(ma, child, visited)) {
       return true;
     }
   }
   return false;
 }
 
+static bool anchor_point_slice_has_object_mask_walk(const Material &ma,
+                                                    const MaterialPaintLayer &reader,
+                                                    Vector<bUUID> &visited)
+{
+  for (const bUUID &seen : visited) {
+    if (BLI_uuid_equal(seen, reader.marker)) {
+      return false;
+    }
+  }
+  visited.append(reader.marker);
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
+  bool found = false;
+  if (ref.issue == PaintLayerAnchorPointIssue::None && ref.source_row != nullptr) {
+    if (ref.target == PaintLayerAnchorPointTarget::Mask) {
+      for (const MaterialPaintLayer &item : ref.source_row->mask_stack) {
+        if (&item == ref.point) {
+          break;
+        }
+        if ((item.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0 ||
+            anchor_point_nested_slice_has_object_mask(ma, item, visited))
+        {
+          found = true;
+          break;
+        }
+      }
+    }
+    else {
+      /* The source row's own object mask is applied after the slice. Its content (a reader source,
+       * the corrections above the marker, and the children) is inside it. */
+      if (anchor_point_nested_slice_has_object_mask(ma, *ref.source_row, visited)) {
+        found = true;
+      }
+      if (!found) {
+        for (const MaterialPaintLayer &effect : ref.source_row->effects) {
+          if (&effect == ref.point) {
+            break;
+          }
+          if ((effect.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE) != 0 ||
+              anchor_point_nested_slice_has_object_mask(ma, effect, visited))
+          {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) {
+        for (const MaterialPaintLayer &child : ref.source_row->children) {
+          if (anchor_point_row_tree_has_object_mask(ma, child, visited)) {
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+  visited.pop_last();
+  return found;
+}
+
 bool paint_layer_anchor_point_slice_has_object_mask(const Material &ma,
                                                     const MaterialPaintLayer &reader)
 {
-  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
-  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr) {
-    return false;
-  }
-  /* The source row's own object mask is applied after the slice, so it is not part of it. What a
-   * folder holds is: the children are composed into the folder's content. */
-  for (const MaterialPaintLayer &child : ref.source_row->children) {
-    if (anchor_point_row_has_object_mask(child)) {
+  Vector<bUUID> visited;
+  return anchor_point_slice_has_object_mask_walk(ma, reader, visited);
+}
+
+static bool anchor_point_row_has_tiled_image(const MaterialPaintLayer &row)
+{
+  for (int i = 0; i < row.channels_num; i++) {
+    const Image *image = row.channels[i].image;
+    if (image != nullptr && image->source == IMA_SRC_TILED) {
       return true;
     }
   }
   return false;
+}
+
+static bool anchor_point_slice_is_udim_walk(const Material &ma,
+                                            const MaterialPaintLayer &reader,
+                                            Vector<bUUID> &visited);
+
+/** Whether the content a (nested) reader's slice is made of holds a tiled map. */
+static bool anchor_point_content_slice_has_tiled_image(const Material &ma,
+                                                       const MaterialPaintLayer &source_row,
+                                                       const MaterialPaintLayer *stop_before,
+                                                       Vector<bUUID> &visited)
+{
+  if (anchor_point_row_has_tiled_image(source_row)) {
+    return true;
+  }
+  if (paint_layer_kind_reads_anchor_point(source_row) &&
+      anchor_point_slice_is_udim_walk(ma, source_row, visited))
+  {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : source_row.effects) {
+    if (stop_before != nullptr && &effect == stop_before) {
+      break;
+    }
+    if (anchor_point_row_has_tiled_image(effect)) {
+      return true;
+    }
+    if (paint_layer_kind_reads_anchor_point(effect) &&
+        anchor_point_slice_is_udim_walk(ma, effect, visited))
+    {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &child : source_row.children) {
+    if (anchor_point_content_slice_has_tiled_image(ma, child, nullptr, visited)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a slice depends on a tiled map. A mask slice reads only the elements of the source
+ * row's `mask_stack` up to the point -- the base included -- and the slices nested readers among
+ * them read; the row's content maps never reach it. A content slice read by a nested reader does
+ * read its own source's content, so that is followed too.
+ */
+static bool anchor_point_slice_is_udim_walk(const Material &ma,
+                                            const MaterialPaintLayer &reader,
+                                            Vector<bUUID> &visited)
+{
+  for (const bUUID &seen : visited) {
+    if (BLI_uuid_equal(seen, reader.marker)) {
+      return false;
+    }
+  }
+  visited.append(reader.marker);
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
+  bool found = false;
+  if (ref.issue == PaintLayerAnchorPointIssue::None && ref.source_row != nullptr) {
+    if (ref.target == PaintLayerAnchorPointTarget::Mask) {
+      for (const MaterialPaintLayer &item : ref.source_row->mask_stack) {
+        if (&item == ref.point) {
+          break;
+        }
+        if (anchor_point_row_has_tiled_image(item)) {
+          found = true;
+          break;
+        }
+        if (paint_layer_kind_reads_anchor_point(item) &&
+            anchor_point_slice_is_udim_walk(ma, item, visited))
+        {
+          found = true;
+          break;
+        }
+      }
+    }
+    else if (ref.target == PaintLayerAnchorPointTarget::Content) {
+      found = anchor_point_content_slice_has_tiled_image(
+          ma, *ref.source_row, ref.point, visited);
+    }
+  }
+  visited.pop_last();
+  return found;
+}
+
+bool paint_layer_anchor_point_slice_is_udim(const Material &ma,
+                                            const MaterialPaintLayer &reader)
+{
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr ||
+      ref.target != PaintLayerAnchorPointTarget::Mask)
+  {
+    return false;
+  }
+  Vector<bUUID> visited;
+  return anchor_point_slice_is_udim_walk(ma, reader, visited);
 }
 
 int paint_layer_anchor_point_chain_depth(const Material &ma, const MaterialPaintLayer &reader)
@@ -706,6 +981,9 @@ bool BKE_paint_layers_anchor_point_source_set(Material &ma,
     return true;
   }
   reader->anchor_point_source = marker;
+  /* A new target may make an old bake describe a different slice. Release the ones that no longer
+   * resolve; a resolver-valid but changed target is discarded by the planner's hash. */
+  paint_layer_anchor_point_release_broken_bakes(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }

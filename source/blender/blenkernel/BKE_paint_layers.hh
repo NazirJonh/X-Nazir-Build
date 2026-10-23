@@ -611,7 +611,8 @@ enum class PaintLayerAnchorPointList : int8_t {
 /**
  * Add an Anchor Point (\a reader false) or an Anchor Point Reader (\a reader true) to \a owner's
  * effects or mask stack, or as a row of the stack. \a insert_after names the item the new one
- * follows in its list, or null for the end. A reader keeps \a source as the point it reads.
+ * follows in its list, or null for the end; an item that is not in that list is ignored, so the
+ * point is appended. A reader keeps \a source as the point it reads.
  *
  * \return the new row, or null when \a owner is not part of \a ma or the target list cannot hold it.
  */
@@ -637,6 +638,8 @@ MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
 constexpr int PAINT_LAYER_ANCHOR_POINT_LIMIT = 12;
 /** How deep a chain of readers over readers may nest in the live path. */
 constexpr int PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX = 3;
+/** A chain deeper than this is refused outright, not merely moved to the baked path. */
+constexpr int PAINT_LAYER_ANCHOR_POINT_DEPTH_HARD = 6;
 
 /** What a marker publishes, decided by the list it sits in. */
 enum class PaintLayerAnchorPointTarget : int8_t {
@@ -724,9 +727,20 @@ bool paint_layer_anchor_point_blocks_bake(const Material &ma, const MaterialPain
 /** The number of points and the number of readers \a ma currently has. */
 void paint_layer_anchor_point_counts(const Material &ma, int &r_points, int &r_readers);
 
+/**
+ * The channel a mask reader takes its coverage from: a content slice's first participating
+ * channel, or Base Color for a mask slice.
+ */
+int paint_layer_anchor_point_mask_read_channel(const Material &ma,
+                                               const MaterialPaintLayer &reader);
+
 /** Whether the slice of \a reader would contain a row with an active object mask. */
 bool paint_layer_anchor_point_slice_has_object_mask(const Material &ma,
                                                     const MaterialPaintLayer &reader);
+
+/** Whether \a reader reads a mask slice whose source maps are tiled (UDIM). */
+bool paint_layer_anchor_point_slice_is_udim(const Material &ma,
+                                            const MaterialPaintLayer &reader);
 
 /** How many readers deep the chain of \a reader is: 1 for a reader without nested readers. */
 int paint_layer_anchor_point_chain_depth(const Material &ma, const MaterialPaintLayer &reader);
@@ -759,6 +773,15 @@ bUUID BKE_paint_layers_anchor_point_source_get(const MaterialPaintLayer &reader)
  * or a mask item), since the slice's object-mask bounds are read from rows alone.
  */
 bool BKE_paint_layers_object_mask_role_allowed(const MaterialPaintLayer &layer);
+
+/**
+ * Set \a layer's object-mask type. Rejected (and any sticky flag cleared) for EFFECT and
+ * MASK_ITEM roles; only a stack row may carry an object mask.
+ * \return false when the role forbids it or the value is unchanged.
+ */
+bool BKE_paint_layers_object_mask_type_set(Material &ma,
+                                           MaterialPaintLayer &layer,
+                                           int8_t type);
 
 /** \} */
 

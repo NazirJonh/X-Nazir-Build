@@ -34,6 +34,7 @@
 #include "BLI_vector.hh"
 
 #include "DNA_scene_types.h"
+#include "DNA_uuid_types.h"
 
 namespace blender {
 
@@ -133,7 +134,8 @@ struct PaintMaterialCompositeMapping {
 /**
  * What an image layer and its buffer twin share verbatim. The stack builders copy it as one value
  * (`static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer`), so a field added here
- * can never be forgotten in one of the copies. Only plain values belong here, never pointers.
+ * can never be forgotten in one of the copies. The values are plain data or owning pointers; the
+ * slice pointers below are shared because the description owns them, not the cache.
  */
 struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   /**
@@ -185,8 +187,9 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
   float adjustment_params[8] = {};
   /**
    * An Anchor Point slice laid as a row: straight colour and content alpha, plus the coverage it
-   * lays (a grey in RGB). Shared with the anchor slice cache, so the buffers live as long as this
-   * description does, whatever the cache drops meanwhile; null for every other row.
+   * lays (a grey in RGB). The description owns a reference (the slice cache may evict and clear its
+   * own entry at any time), so the buffers live as long as this description; null for every other
+   * row.
    */
   std::shared_ptr<ImBuf> anchor_point_color;
   std::shared_ptr<ImBuf> anchor_point_coverage;
@@ -223,10 +226,17 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   PaintMaterialCompositeMapping mapping;
   /**
    * An Anchor Point slice read as a correction: straight colour and content alpha, with the
-   * coverage it lays in #anchor_point_coverage. Shared with the anchor slice cache; null otherwise.
+   * coverage it lays in #anchor_point_coverage. Owned by this description (see
+   * #PaintMaterialCompositeImageLayer::anchor_point_color); null otherwise.
    */
   std::shared_ptr<ImBuf> anchor_point_slice;
   std::shared_ptr<ImBuf> anchor_point_coverage;
+  /** The reader this correction lays, and whether it reads content or a mask. */
+  bUUID anchor_point_reader = {};
+  int8_t anchor_point_target = 0;
+  /** A baked reader's coverage map; the live path uses #anchor_point_coverage instead. */
+  Image *anchor_point_coverage_image = nullptr;
+  const ImageUser *anchor_point_coverage_iuser = nullptr;
   uint64_t anchor_point_hash = 0;
   /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
   Vector<Image *> anchor_point_images;
@@ -245,6 +255,9 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   /** Borrowed from #PaintMaterialCompositeCorrection::anchor_point_slice, which keeps them alive. */
   ImBuf *anchor_point_slice = nullptr;
   ImBuf *anchor_point_coverage = nullptr;
+  /** See #PaintMaterialCompositeCorrection::anchor_point_coverage_image. */
+  ImBuf *anchor_point_coverage_ibuf = nullptr;
+  const char *anchor_point_coverage_colorspace_name = nullptr;
 };
 
 /**
@@ -313,10 +326,14 @@ struct PaintMaterialCompositeMaskItem {
   /** The operator's UV mapping, applied to its map while the buffers are acquired. */
   PaintMaterialCompositeMapping coverage_mapping;
   /**
-   * An Anchor Point slice read as a mask item: the scalar slice as a grey RGBA buffer, shared with
-   * the anchor slice cache. Null for every other item.
+   * An Anchor Point slice read as a mask item: the scalar slice as a grey RGBA buffer, owned by this
+   * description (see #PaintMaterialCompositeImageLayer::anchor_point_color). Null for every other
+   * item.
    */
   std::shared_ptr<ImBuf> anchor_point_slice;
+  /** The reader this mask item lays, and whether it reads content or a mask. */
+  bUUID anchor_point_reader = {};
+  int8_t anchor_point_target = 0;
   uint64_t anchor_point_hash = 0;
   /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
   Vector<Image *> anchor_point_images;
@@ -330,6 +347,13 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
    * subscribe to these to see a stroke on the source.
    */
   Vector<Image *> anchor_point_images;
+  /** The reader this layer is, and whether it reads content or a mask. */
+  bUUID anchor_point_reader = {};
+  int8_t anchor_point_target = 0;
+  /** Markers of this row whose slices a reader lays: the GPU captures these after the matching
+   * effect/mask step. Empty for every row without a read point. */
+  Vector<bUUID> anchor_point_content_producers;
+  Vector<bUUID> anchor_point_mask_producers;
   /**
    * The row's UV mapping cuts away part of the canvas, and its coverage has to follow: a Material
    * row covers by its source's transparency, not by the alpha of its map, so a map texel that a

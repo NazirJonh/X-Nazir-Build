@@ -73,7 +73,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 21u);
+  ASSERT_EQ(kinds.size(), 25u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -118,6 +118,15 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_EQ(kinds[20].identifier, "MASK_CORRECTION_MATERIAL");
   EXPECT_EQ(kinds[20].source_id_type, ID_MA);
   EXPECT_TRUE(kinds[20].is_effect);
+  /* The marker and the three places its reader can land are last, so no index above moves. */
+  EXPECT_EQ(kinds[21].identifier, "ANCHOR_POINT");
+  EXPECT_TRUE(kinds[21].is_effect);
+  EXPECT_EQ(kinds[22].identifier, "ANCHOR_POINT_LAYER");
+  EXPECT_FALSE(kinds[22].is_effect);
+  EXPECT_EQ(kinds[23].identifier, "ANCHOR_POINT_CORRECTION");
+  EXPECT_TRUE(kinds[23].is_effect);
+  EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT_MASK_CORRECTION");
+  EXPECT_TRUE(kinds[24].is_effect);
   EXPECT_FALSE(kinds[18].is_effect);
   EXPECT_FALSE(kinds[15].takes_color);
 }
@@ -876,9 +885,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
 
   Vector<StackAddKindInfo> kinds;
   source().editor()->add_kinds(kinds);
-  ASSERT_EQ(kinds.size(), 21u);
-  EXPECT_EQ(kinds[20].identifier, "MASK_CORRECTION_MATERIAL")
-      << "row_add dispatches by index, one past the material correction";
+  ASSERT_EQ(kinds.size(), 25u);
+  EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT_MASK_CORRECTION")
+      << "row_add dispatches by index, last of the Anchor Point kinds";
 }
 
 }  // namespace tests

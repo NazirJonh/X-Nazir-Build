@@ -480,9 +480,11 @@ StackRow paint_correction_row_build(const Material &material,
  */
 StackRow paint_mask_item_row_build(const Material &material,
                                    const MaterialPaintLayer &item,
+                                   const bUUID &owner_marker,
                                    const int depth,
                                    const int owner_ordinal,
-                                   const int ordinal)
+                                   const int ordinal,
+                                   const Span<PaintLayersIssue> issues)
 {
   const bool fill = item.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
   const bool from_material = item.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
@@ -503,6 +505,7 @@ StackRow paint_mask_item_row_build(const Material &material,
     row.name = item.name[0] != '\0' ? item.name : "Anchor Point";
     row.icon = ICON_EMPTY_AXIS;
     row.compact = true;
+    paint_issue_slots_append(issues, owner_marker, item.marker, row);
     return row;
   }
   const bool reads_anchor_point = BKE_paint_layers_reads_anchor_point(item);
@@ -530,6 +533,7 @@ StackRow paint_mask_item_row_build(const Material &material,
     else if (item.kind_subtype == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
       row.icon = ICON_UV_ISLANDSEL;
     }
+    paint_issue_slots_append(issues, owner_marker, item.marker, row);
     return row;
   }
   row.mode_ptr = item_ptr;
@@ -537,7 +541,8 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.mode_inherited = (item.blend == MA_PAINT_LAYER_BLEND_MIX);
   if (from_material || reads_anchor_point) {
     /* Its grey is its source's Base Color (or the slice it reads) and it owns no map: nothing to
-     * preview or paint. */
+     * preview or paint. A reader's issues (a bad reference, a UDIM slice) are shown here. */
+    paint_issue_slots_append(issues, owner_marker, item.marker, row);
     return row;
   }
 
@@ -740,7 +745,8 @@ void paint_stack_rows_append(const Material &material,
         overflow = true;
         return;
       }
-      r_rows.append(paint_mask_item_row_build(material, item, depth + 1, row_ordinal, ordinal++));
+      r_rows.append(paint_mask_item_row_build(
+          material, item, layer.marker, depth + 1, row_ordinal, ordinal++, issues));
     }
     if (folder) {
       paint_stack_rows_append(
@@ -1444,21 +1450,38 @@ class PaintLayersStackSource final : public StackSource,
     mask_material.source_browse_prop = "paint_layer_add_material_mask_correction";
     mask_material.is_effect = true;
     r_kinds.append(mask_material);
-    /* Anchor Points last of all, so no index above moves: the marker and its reader. Where they
-     * land is the list the active row belongs to, read back by #row_add. */
-    StackAddKindInfo anchor_point{"ANCHOR_POINT",
-                                  N_("Anchor Point"),
-                                  "Publish the content or mask of the active layer up to this "
-                                  "place, for an Anchor Point Reader",
-                                  ICON_EMPTY_AXIS};
+    /* Anchor Points last of all, so no index above moves: the marker and the three places a
+     * reader can land. A marker picks its list from the active row; a reader's item decides the
+     * list, the way the three Material items do. */
+    StackAddKindInfo anchor_point{
+        "ANCHOR_POINT",
+        N_("Anchor Point"),
+        "Publish the active layer's content in its Effects up to this place; select a mask item "
+        "first to put the point in the mask instead",
+        ICON_EMPTY_AXIS};
     anchor_point.is_effect = true;
     r_kinds.append(anchor_point);
-    StackAddKindInfo anchor_point_reader{"ANCHOR_POINT_READER",
-                                         N_("Anchor Point Reader"),
-                                         "Lay the slice an Anchor Point of this material publishes",
-                                         ICON_LINKED};
-    anchor_point_reader.is_effect = true;
-    r_kinds.append(anchor_point_reader);
+    StackAddKindInfo anchor_point_layer{
+        "ANCHOR_POINT_LAYER",
+        N_("Anchor Point Layer"),
+        "A layer that shows the slice an Anchor Point of this material publishes",
+        ICON_LINKED};
+    r_kinds.append(anchor_point_layer);
+    StackAddKindInfo anchor_point_correction{
+        "ANCHOR_POINT_CORRECTION",
+        N_("Anchor Point Correction"),
+        "The slice an Anchor Point publishes, laid over the active layer's colour, below the "
+        "layer's own blend",
+        ICON_LINKED};
+    anchor_point_correction.is_effect = true;
+    r_kinds.append(anchor_point_correction);
+    StackAddKindInfo anchor_point_mask_correction{
+        "ANCHOR_POINT_MASK_CORRECTION",
+        N_("Anchor Point Mask Correction"),
+        "The slice an Anchor Point publishes, laid over the active layer's mask",
+        ICON_LINKED};
+    anchor_point_mask_correction.is_effect = true;
+    r_kinds.append(anchor_point_mask_correction);
   }
 
   int row_add(bContext &C,
@@ -1478,26 +1501,39 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int material_correction_kind = material_kind + 1;
     constexpr int mask_material_kind = material_correction_kind + 1;
     constexpr int anchor_point_kind = mask_material_kind + 1;
-    constexpr int anchor_point_reader_kind = anchor_point_kind + 1;
-    if (kind < 0 || kind > anchor_point_reader_kind || !this->is_editable(owner)) {
+    constexpr int anchor_point_layer_kind = anchor_point_kind + 1;
+    constexpr int anchor_point_correction_kind = anchor_point_layer_kind + 1;
+    constexpr int anchor_point_mask_correction_kind = anchor_point_correction_kind + 1;
+    if (kind < 0 || kind > anchor_point_mask_correction_kind || !this->is_editable(owner)) {
       return -1;
     }
     const bool is_anchor_point = kind == anchor_point_kind;
-    const bool is_anchor_point_reader = kind == anchor_point_reader_kind;
+    const bool is_anchor_point_layer = kind == anchor_point_layer_kind;
+    const bool is_anchor_point_correction = kind == anchor_point_correction_kind;
+    const bool is_anchor_point_mask_correction = kind == anchor_point_mask_correction_kind;
+    const bool is_anchor_point_reader = is_anchor_point_layer || is_anchor_point_correction ||
+                                        is_anchor_point_mask_correction;
     const bool is_material = kind == material_kind;
     const bool is_material_correction = kind == material_correction_kind;
     const bool is_mask_material = kind == mask_material_kind;
     const bool reads_material = is_material || is_material_correction || is_mask_material;
-    const bool is_mask_filter = kind >= mask_filter_first_kind && !reads_material;
-    const bool is_adjustment = kind >= adjustment_first_kind && !is_mask_filter && !reads_material;
+    /* The kind ranges are contiguous. Bounding each one is what keeps the Material and Anchor
+     * Point kinds from falling into the last filter arrays, whose indices they are past. */
+    const bool is_coverage_filter = kind >= coverage_first_kind && kind < material_kind;
+    const bool is_mask_filter = kind >= mask_filter_first_kind && kind < material_kind;
+    const bool is_adjustment = kind >= adjustment_first_kind && kind < mask_filter_first_kind;
     /* A filter correction hangs on a layer; an adjustment is a layer. */
-    const bool is_filter = kind >= filter_first_kind && !is_adjustment && !is_mask_filter &&
-                           !reads_material;
+    const bool is_filter = kind >= filter_first_kind && kind < adjustment_first_kind;
     Material &material = layers_owner(owner);
     MaterialPaintLayer *anchor = (ordinal < 0) ?
                                      nullptr :
                                      paint_description_row_for_ordinal(material, ordinal);
     if (ordinal >= 0 && anchor == nullptr) {
+      if (is_anchor_point || is_anchor_point_reader) {
+        BKE_report(CTX_wm_reports(&C),
+                   RPT_WARNING,
+                   "The selected row is no longer part of this material");
+      }
       return -1;
     }
     PaintLayerAddParams params;
@@ -1508,7 +1544,7 @@ class PaintLayersStackSource final : public StackSource,
       params.filter = paint_filter_add_kinds[kind - adjustment_first_kind].filter;
     }
     if (is_mask_filter) {
-      params.filter = (kind >= coverage_first_kind) ?
+      params.filter = is_coverage_filter ?
                           paint_coverage_add_kinds[kind - coverage_first_kind].filter :
                           paint_filter_add_kinds[kind - mask_filter_first_kind].filter;
     }
@@ -1523,9 +1559,12 @@ class PaintLayersStackSource final : public StackSource,
       /* Each Material row reads a material of its own, so its settings are its own. */
       params.bmain = CTX_data_main(&C);
     }
-    params.kind = is_anchor_point          ? PaintLayerAddKind::AnchorPoint :
-                  is_anchor_point_reader   ? PaintLayerAddKind::AnchorPointReader :
-                  is_material            ? PaintLayerAddKind::Material :
+    params.kind = is_anchor_point              ? PaintLayerAddKind::AnchorPoint :
+                  is_anchor_point_layer        ? PaintLayerAddKind::AnchorPointLayer :
+                  is_anchor_point_correction   ? PaintLayerAddKind::AnchorPointCorrection :
+                  is_anchor_point_mask_correction ?
+                                                 PaintLayerAddKind::AnchorPointMaskCorrection :
+                  is_material                  ? PaintLayerAddKind::Material :
                   is_material_correction ? PaintLayerAddKind::CorrectionMaterial :
                   is_mask_material       ? PaintLayerAddKind::MaskCorrectionMaterial :
                   is_mask_filter         ? PaintLayerAddKind::MaskFilter :
@@ -1538,38 +1577,101 @@ class PaintLayersStackSource final : public StackSource,
                   (kind == 5)            ? PaintLayerAddKind::MaskCorrection :
                   (kind == 6)            ? PaintLayerAddKind::MaskCorrectionFill :
                                            PaintLayerAddKind::Paint;
-    if ((is_anchor_point || is_anchor_point_reader) && anchor == nullptr) {
-      /* No row was named: the point belongs to the row being worked on. */
-      anchor = BKE_paint_layers_active_layer_get(material);
-    }
-    /* Where the point goes is the list the active row belongs to: a row's mask when a mask item is
-     * active, otherwise its effects. A reader is a correction too, so its opacity and blend are
-     * edited like those of any other. */
     if (is_anchor_point || is_anchor_point_reader) {
-      PaintLayerAnchorPointList list = PaintLayerAnchorPointList::Effects;
-      if (anchor != nullptr && anchor->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
-        list = PaintLayerAnchorPointList::MaskStack;
+      /* The active item decides where the point lands: a layer or a content correction publishes
+       * content, a mask item publishes the mask. Canonicalize the effect/mask item to its owner
+       * row, so a layer inserted beside the active thing is always a stack row. */
+      MaterialPaintLayer *active_item = nullptr;
+      MaterialPaintLayer *active_effect = nullptr;
+      MaterialPaintLayer *active_row = nullptr;
+      if (ordinal >= 0) {
+        if (anchor->role == MA_PAINT_LAYER_ROLE_EFFECT) {
+          active_effect = anchor;
+          active_row = BKE_paint_layers_correction_owner(material, *anchor);
+        }
+        else if (anchor->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+          active_item = anchor;
+          active_row = BKE_paint_layers_mask_item_owner(material, *anchor);
+        }
+        else {
+          active_row = anchor;
+        }
       }
+      else {
+        active_item = BKE_paint_layers_active_mask_item_get(material);
+        MaterialPaintLayer *active = BKE_paint_layers_active_layer_get(material);
+        if (active != nullptr && active->role == MA_PAINT_LAYER_ROLE_EFFECT) {
+          active_effect = active;
+          active_row = BKE_paint_layers_correction_owner(material, *active);
+        }
+        else {
+          active_row = active;
+        }
+      }
+      if (active_item == nullptr && active_effect == nullptr && active_row != nullptr) {
+        /* The mask's base is no Outliner row: selecting its slot leaves the layer active and only
+         * switches the global target to the mask. That is the user pointing at the mask, so the
+         * point goes there, right after the base. */
+        const Scene *scene = CTX_data_scene(&C);
+        if (scene != nullptr && scene->toolsettings != nullptr &&
+            scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK)
+        {
+          active_item = BKE_paint_layers_mask_base(*active_row);
+        }
+      }
+      MaterialPaintLayer *point_owner = active_row;
+      MaterialPaintLayer *insert_after = nullptr;
+      PaintLayerAnchorPointList list = PaintLayerAnchorPointList::Effects;
+      if (is_anchor_point_layer) {
+        /* A reader layer is a row like a Material layer: above the active row, or on top. */
+        list = PaintLayerAnchorPointList::Row;
+        insert_after = active_row;
+      }
+      else if (is_anchor_point_mask_correction) {
+        list = PaintLayerAnchorPointList::MaskStack;
+        insert_after = active_item;
+      }
+      else if (is_anchor_point_correction) {
+        list = PaintLayerAnchorPointList::Effects;
+        insert_after = active_effect;
+      }
+      else {
+        /* Marker: content under the active layer/effect, mask under the active mask item. */
+        if (active_item != nullptr) {
+          list = PaintLayerAnchorPointList::MaskStack;
+          insert_after = active_item;
+        }
+        else if (active_effect != nullptr) {
+          list = PaintLayerAnchorPointList::Effects;
+          insert_after = active_effect;
+        }
+        else {
+          list = PaintLayerAnchorPointList::Effects;
+        }
+      }
+      if (point_owner == nullptr && list != PaintLayerAnchorPointList::Row) {
+        BKE_report(CTX_wm_reports(&C),
+                   RPT_WARNING,
+                   is_anchor_point ? "Select a layer to add an Anchor Point to" :
+                                     "Select a layer to add an Anchor Point Reader to");
+        return -1;
+      }
+      anchor = point_owner;
       params.anchor_point_list = list;
-      /* Aimed at a layer, the point goes to the end of its list; only an item already in the list
-       * can be followed. */
-      params.insert_after = (list == PaintLayerAnchorPointList::Row || anchor == nullptr ||
-                             anchor->role == MA_PAINT_LAYER_ROLE_LAYER) ?
-                                nullptr :
-                                anchor;
+      params.insert_after = insert_after;
     }
-    const bool anchor_owned = (is_anchor_point || is_anchor_point_reader) &&
-                              params.anchor_point_list != PaintLayerAnchorPointList::Row;
     const bool is_mask_correction = ELEM(params.kind,
                                          PaintLayerAddKind::MaskCorrection,
                                          PaintLayerAddKind::MaskCorrectionFill,
                                          PaintLayerAddKind::MaskCorrectionMaterial,
-                                         PaintLayerAddKind::MaskFilter);
-    const bool is_correction = is_mask_correction || is_filter || anchor_owned ||
+                                         PaintLayerAddKind::MaskFilter,
+                                         PaintLayerAddKind::AnchorPointMaskCorrection);
+    const bool is_correction = is_mask_correction || is_filter ||
                                ELEM(params.kind,
                                     PaintLayerAddKind::Correction,
                                     PaintLayerAddKind::CorrectionFill,
-                                    PaintLayerAddKind::CorrectionMaterial);
+                                    PaintLayerAddKind::CorrectionMaterial,
+                                    PaintLayerAddKind::AnchorPointCorrection);
     if (anchor != nullptr && !is_correction) {
       /* A correction is not a place a row can be added next to: the row it hangs on is. */
       if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {
@@ -1601,6 +1703,11 @@ class PaintLayersStackSource final : public StackSource,
     }
     MaterialPaintLayer *created = BKE_paint_layers_add_with_policy(material, params);
     if (created == nullptr) {
+      if (is_anchor_point || is_anchor_point_reader) {
+        BKE_report(CTX_wm_reports(&C),
+                   RPT_WARNING,
+                   "Could not add the Anchor Point to this layer");
+      }
       if (is_adjustment) {
         BKE_report(CTX_wm_reports(&C),
                    RPT_WARNING,
@@ -1618,9 +1725,16 @@ class PaintLayersStackSource final : public StackSource,
     }
     /* A new layer is painted on its content, not on the mask the previous one was edited in; a mask
      * correction is the mask the user means to paint. */
-    layers_target_mode_set(C, is_mask_correction ? PAINT_LAYER_TARGET_MASK :
-                                                   PAINT_LAYER_TARGET_CONTENT);
-    if (is_correction) {
+    const bool anchor_in_mask = (is_anchor_point || is_anchor_point_reader) &&
+                                params.anchor_point_list == PaintLayerAnchorPointList::MaskStack;
+    layers_target_mode_set(C, (is_mask_correction || anchor_in_mask) ? PAINT_LAYER_TARGET_MASK :
+                                                                       PAINT_LAYER_TARGET_CONTENT);
+    if (is_anchor_point || is_anchor_point_reader) {
+      /* The point or reader the user just added is the one they mean to work on. */
+      BKE_paint_layers_active_set(material, created->marker);
+      layers_texpaint_slots_refresh(C);
+    }
+    else if (is_correction) {
       /* The correction the user just added is the one they mean to work on: paint into, or for a
        * filter set the parameters and channels of. A filter has no map, so a stroke on it lands
        * nowhere. */

@@ -1273,8 +1273,17 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
     /* A group the factory kept already holds the row: only its instance is re-linked, so its nodes
      * are never rebuilt and a value-only pass touches nothing. */
     const bool reused = ctx_.layer_unchanged && ctx_.layer_unchanged(layer);
-    const RowResult row = reused ? row_link_reused(layer, *group, channel, isolated) :
-                                   build_row(layer, *group, channel, isolated);
+    RowResult row = reused ? row_link_reused(layer, *group, channel, isolated) : RowResult{};
+    if (!row.valid && reused) {
+      /* A kept group whose instance cannot be re-linked predates an input this row now needs. Its
+       * nodes are not rebuilt here: build_row would add a second set beside the kept ones. The
+       * topology hash covers the reader's reference and the source channel set, so this is only
+       * reached for a group that should already have been cleared. */
+      continue;
+    }
+    if (!reused) {
+      row = build_row(layer, *group, channel, isolated);
+    }
     if (!row.valid) {
       continue;
     }

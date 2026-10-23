@@ -70,9 +70,23 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
                                                              const PaintLayerAddParams &params)
 {
   if (params.kind == PaintLayerAddKind::AnchorPoint ||
-      params.kind == PaintLayerAddKind::AnchorPointReader)
+      params.kind == PaintLayerAddKind::AnchorPointLayer ||
+      params.kind == PaintLayerAddKind::AnchorPointCorrection ||
+      params.kind == PaintLayerAddKind::AnchorPointMaskCorrection)
   {
-    const bool reader = params.kind == PaintLayerAddKind::AnchorPointReader;
+    const bool reader = params.kind != PaintLayerAddKind::AnchorPoint;
+    /* A reader's Add item decides where it lands: a stack row, a content correction or a mask
+     * item. Only a marker picks its list from the row the Add was aimed at. */
+    PaintLayerAnchorPointList list = params.anchor_point_list;
+    if (params.kind == PaintLayerAddKind::AnchorPointLayer) {
+      list = PaintLayerAnchorPointList::Row;
+    }
+    else if (params.kind == PaintLayerAddKind::AnchorPointCorrection) {
+      list = PaintLayerAnchorPointList::Effects;
+    }
+    else if (params.kind == PaintLayerAddKind::AnchorPointMaskCorrection) {
+      list = PaintLayerAnchorPointList::MaskStack;
+    }
     /* Aimed at a correction or mask item, the Add means the row it hangs on. A point added as a
      * row of the stack has no owner row of its own. */
     MaterialPaintLayer *owner = params.anchor;
@@ -84,25 +98,43 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
         owner = item_parent;
       }
     }
-    if (params.anchor_point_list != PaintLayerAnchorPointList::Row) {
+    MaterialPaintLayer *insert_after = params.insert_after;
+    if (list != PaintLayerAnchorPointList::Row) {
       if (owner == nullptr) {
         return nullptr;
       }
-      if (params.anchor_point_list == PaintLayerAnchorPointList::MaskStack &&
+      /* Membership is the policy: a stale insert_after from another row or list must not refuse
+       * the Add, it only means "append to this list". */
+      ListBaseT<MaterialPaintLayer> &target = (list == PaintLayerAnchorPointList::Effects) ?
+                                                   owner->effects :
+                                                   owner->mask_stack;
+      if (insert_after != nullptr && BLI_findindex(&target, insert_after) == -1) {
+        insert_after = nullptr;
+      }
+      if (list == PaintLayerAnchorPointList::MaskStack &&
           BKE_paint_layers_mask_base(*owner) == nullptr &&
           BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr)
       {
         return nullptr;
       }
     }
-    const char *name_base = reader ? "Anchor Point Reader" : "Anchor Point";
+    const char *name_base = "Anchor Point";
+    if (params.kind == PaintLayerAddKind::AnchorPointLayer) {
+      name_base = "Anchor Point Layer";
+    }
+    else if (params.kind == PaintLayerAddKind::AnchorPointCorrection) {
+      name_base = "Anchor Point Correction";
+    }
+    else if (params.kind == PaintLayerAddKind::AnchorPointMaskCorrection) {
+      name_base = "Anchor Point Mask Correction";
+    }
     const std::string name = (params.name != nullptr) ?
                                  std::string(params.name) :
                                  BKE_paint_layers_unique_default_name(ma, name_base);
     return BKE_paint_layers_anchor_point_add(ma,
                                              owner,
-                                             params.anchor_point_list,
-                                             params.insert_after,
+                                             list,
+                                             insert_after,
                                              reader,
                                              name.c_str(),
                                              params.anchor_point_source);

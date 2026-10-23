@@ -44,9 +44,6 @@
 
 namespace blender {
 
-/** Defined with the Anchor Point slice cache below; every description build starts afresh. */
-static void anchor_slice_cache_clear();
-
 /**
  * Restore the unit length of an encoded tangent-space normal the partial factors shortened.
  *
@@ -275,22 +272,47 @@ static void composite_mask_items_describe(const Material &ma,
       if (!paint_layer_mask_item_lays(ma, mask)) {
         continue;
       }
-      std::shared_ptr<ImBuf> slice_color;
-      std::shared_ptr<ImBuf> slice_coverage;
-      if (!BKE_paint_layers_slice_render(
-              ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &slice_color, &slice_coverage))
-      {
-        continue;
-      }
-      const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
       PaintMaterialCompositeMaskItem item;
       item.opacity = BKE_paint_layers_effective_opacity(mask);
-      item.anchor_point_slice = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
-                                    std::move(slice_color) :
-                                    std::move(slice_coverage);
-      item.anchor_point_hash = paint_layer_anchor_point_slice_hash(
-          ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
-      BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
+      item.anchor_point_reader = mask.marker;
+      item.anchor_point_target = int8_t(paint_layer_anchor_point_resolve(ma, mask).target);
+      const int read_channel = paint_layer_anchor_point_mask_read_channel(ma, mask);
+      const bool mask_target = item.anchor_point_target ==
+                               int8_t(PaintLayerAnchorPointTarget::Mask);
+      const bool baked = paint_layer_anchor_point_reader_baked(ma, mask) &&
+                         mask.bake != nullptr &&
+                         (mask_target ? mask.bake->images[read_channel] != nullptr :
+                                        mask.bake->coverage != nullptr);
+      if (baked) {
+        /* A mask point's scalar is the grey the bake holds in its colour map; a content point's
+         * coverage is the coverage map, which already holds the reader's opacity, so only its
+         * visibility stays live (as for a substituted row). Read like a painted grey map. */
+        if (mask_target) {
+          item.image = mask.bake->images[read_channel];
+        }
+        else {
+          item.image = mask.bake->coverage;
+          item.opacity = (mask.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f;
+        }
+        item.iuser = nullptr;
+        item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
+        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
+      }
+      else {
+        std::shared_ptr<ImBuf> slice_color;
+        std::shared_ptr<ImBuf> slice_coverage;
+        if (!BKE_paint_layers_slice_render(
+                ma, mask, read_channel, &slice_color, &slice_coverage))
+        {
+          continue;
+        }
+        const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
+        item.anchor_point_slice = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
+                                      std::move(slice_color) :
+                                      std::move(slice_coverage);
+        item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
+        BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
+      }
       item.blend = CompositeBlend(
           BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
       item.invert = paint_layer_mask_item_inverted(mask);
@@ -426,6 +448,9 @@ static bool composite_image_layer_build(const Material &ma,
     if (!paint_layer_row_reads_anchor_point(ma, layer, channel)) {
       return false;
     }
+    const PaintLayerAnchorPointRef reader_ref = paint_layer_anchor_point_resolve(ma, layer);
+    out.anchor_point_reader = layer.marker;
+    out.anchor_point_target = int8_t(reader_ref.target);
     /* A baked reader reads the maps its slice was rendered into; the row itself is never
      * substituted, since the description decides what the slice is. The bake renders from the live
      * description (\a ignore_own_bake), so it never reads its own stale maps. */
@@ -542,14 +567,34 @@ static bool composite_image_layer_build(const Material &ma,
     correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
                          pass_through_scale;
     if (paint_layer_kind_reads_anchor_point(effect)) {
-      /* What the slice shows, laid by the reader's own blend and opacity. */
-      if (!BKE_paint_layers_slice_render(
-              ma, effect, channel, &correction.anchor_point_slice, &correction.anchor_point_coverage))
-      {
-        continue;
+      correction.anchor_point_reader = effect.marker;
+      correction.anchor_point_target = int8_t(paint_layer_anchor_point_resolve(ma, effect).target);
+      /* What the slice shows, laid by the reader's own blend and opacity. A baked reader reads the
+       * maps its slice was rendered into. Only the row whose bake is being rendered ignores its own
+       * bake; a correction nested in it describes its own bake, which is valid and cheaper than
+       * rendering its slice live again. */
+      const bool baked = paint_layer_anchor_point_reader_baked(ma, effect) &&
+                         effect.bake != nullptr && effect.bake->images[channel] != nullptr &&
+                         effect.bake->coverage != nullptr;
+      if (baked) {
+        correction.image = effect.bake->images[channel];
+        correction.iuser = nullptr;
+        correction.anchor_point_coverage_image = effect.bake->coverage;
+        correction.anchor_point_coverage_iuser = nullptr;
+        correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
+        /* The coverage map already holds the reader's opacity; only its visibility stays live. */
+        correction.opacity = ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
+                             pass_through_scale;
       }
-      correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
-      BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.anchor_point_images);
+      else {
+        if (!BKE_paint_layers_slice_render(
+                ma, effect, channel, &correction.anchor_point_slice, &correction.anchor_point_coverage))
+        {
+          continue;
+        }
+        correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
+        BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.anchor_point_images);
+      }
     }
     else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
       /* What the source supplies, as a Material row's colour: its plain value, its plain texture
@@ -600,6 +645,22 @@ static bool composite_image_layer_build(const Material &ma,
   /* The mask is one for all channels of the row, so the same item reaches every channel's stack,
    * exactly as the generator reads the one set of mask inputs in every channel chain. */
   composite_mask_items_describe(ma, layer, out.mask_items, stop_before);
+  /* Mark the positions the GPU has to capture: a marker is a producer only while at least one
+   * reader lays its slice. A content marker sits in the effects, a mask marker in the mask stack. */
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_kind_is_anchor_point_marker(effect) &&
+        paint_layer_anchor_point_is_read(ma, effect.marker))
+    {
+      out.anchor_point_content_producers.append(effect.marker);
+    }
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if (paint_layer_kind_is_anchor_point_marker(item) &&
+        paint_layer_anchor_point_is_read(ma, item.marker))
+    {
+      out.anchor_point_mask_producers.append(item.marker);
+    }
+  }
   return true;
 }
 
@@ -637,7 +698,7 @@ bool BKE_paint_layers_composite_image_layers(
   r_layers.clear();
   /* Every description build renders its slices afresh: a stroke since the last build changed the
    * pixels under a marker, and a cached slice would show the canvas before it. */
-  anchor_slice_cache_clear();
+  paint_layer_anchor_point_slice_cache_clear();
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
@@ -808,7 +869,7 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     /* A stroke starts here, and the slice cache is keyed by a hash that holds no pixels: an entry
      * from before the last stroke would show the source as it was. A sampler made while a slice
      * renders passes a marker and keeps the entries it is building from. */
-    anchor_slice_cache_clear();
+    paint_layer_anchor_point_slice_cache_clear();
   }
   composite_mask_items_describe(ma, layer, items_, stop_before);
   /* The evaluator's own form of the description, so #BKE_paint_material_mask_factor_eval reads the
@@ -943,7 +1004,9 @@ float PaintLayersMaskSampler::sample(const int tile_number, const int x, const i
  * reference, never the only one: the description that renders a slice shares the buffers for its
  * own lifetime, so clearing or evicting an entry can never pull pixels out from under an
  * evaluation. Since the hash holds no pixels, every description build starts from an empty cache;
- * what it keeps is the reuse of a slice by the several readers of one build.
+ * what it keeps is the reuse of a slice by the several readers of one build. The byte budget
+ * accounts for what the cache itself retains; a buffer still referenced elsewhere temporarily
+ * exceeds it, which is allowed.
  */
 struct AnchorSliceCacheKey {
   uint32_t material_uid = 0;
@@ -952,26 +1015,62 @@ struct AnchorSliceCacheKey {
   uint64_t hash = 0;
 };
 
+/** Total memory the slice cache may hold. One full 4K content slice is ~256 MiB, so this keeps
+ * a handful of recent ones and evicts the least recently used beyond it. */
+constexpr size_t PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES = size_t(512) * 1024 * 1024;
+
+/** The live budget; only tests override it, to make eviction observable without 4K fixtures. */
+static size_t g_anchor_slice_cache_budget = PAINT_LAYER_ANCHOR_SLICE_CACHE_BYTES;
+
 struct AnchorSliceCacheEntry {
   AnchorSliceCacheKey key;
   std::shared_ptr<ImBuf> color;
   std::shared_ptr<ImBuf> coverage;
+  size_t bytes = 0;
 };
 
-/** More entries than a stack of readers needs; the oldest is dropped past it. */
-constexpr int ANCHOR_SLICE_CACHE_ENTRIES_MAX = 32;
+static size_t anchor_slice_ibuf_bytes(const ImBuf *ibuf)
+{
+  return ibuf != nullptr ? size_t(ibuf->x) * size_t(ibuf->y) * sizeof(float[4]) : 0;
+}
 
+/** The cache owns references only; dropping an entry simply releases them. */
+struct AnchorSliceCache {
+  Vector<AnchorSliceCacheEntry> entries;
+  size_t total_bytes = 0;
+};
+
+static AnchorSliceCache g_anchor_slice_cache;
 /**
- * Guards the container only, never held while a slice renders: a bake job renders on a worker
- * thread while the main thread describes the composite, and a nested slice re-enters the render.
+ * Guards the container and the byte count only. A bake job renders on a worker thread while the
+ * main thread describes the composite, and both reach the cache. It is never held while a slice
+ * renders, so nested renders cannot deadlock on it.
  */
-static Vector<AnchorSliceCacheEntry> g_anchor_slice_cache;
 static std::mutex g_anchor_slice_cache_mutex;
 
-static void anchor_slice_cache_clear()
+void paint_layer_anchor_point_slice_cache_clear()
 {
   std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-  g_anchor_slice_cache.clear();
+  g_anchor_slice_cache.entries.clear();
+  g_anchor_slice_cache.total_bytes = 0;
+}
+
+size_t paint_layer_anchor_point_slice_cache_bytes()
+{
+  std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
+  return g_anchor_slice_cache.total_bytes;
+}
+
+void paint_layer_anchor_point_slice_cache_set_budget(const size_t bytes)
+{
+  std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
+  g_anchor_slice_cache_budget = bytes;
+}
+
+int paint_layer_anchor_point_slice_cache_entry_count()
+{
+  std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
+  return int(g_anchor_slice_cache.entries.size());
 }
 
 static bool anchor_slice_key_equal(const AnchorSliceCacheKey &a, const AnchorSliceCacheKey &b)
@@ -980,7 +1079,7 @@ static bool anchor_slice_key_equal(const AnchorSliceCacheKey &a, const AnchorSli
          a.channel == b.channel && a.hash == b.hash;
 }
 
-/** An RGBA float buffer of \a width x \a height, or null when it cannot be allocated. */
+/** An RGBA float buffer of \a width x \a height, owned by the returned shared pointer. */
 static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width, const int height)
 {
   ImBuf *ibuf = IMB_allocImBuf(width, height, ImBufFlags::FloatData);
@@ -990,14 +1089,54 @@ static std::shared_ptr<ImBuf> anchor_slice_buffer_new(const int width, const int
   return std::shared_ptr<ImBuf>(ibuf, [](ImBuf *buffer) { IMB_freeImBuf(buffer); });
 }
 
+/**
+ * The pixels a slice render writes: the whole buffer for a complete render, else \a dst_rect
+ * (x0, y0, x1, y1) clamped to it. False when nothing is left to render.
+ */
+static bool anchor_slice_region_get(const int *dst_rect,
+                                    const int width,
+                                    const int height,
+                                    int &r_x0,
+                                    int &r_y0,
+                                    int &r_x1,
+                                    int &r_y1)
+{
+  r_x0 = 0;
+  r_y0 = 0;
+  r_x1 = width;
+  r_y1 = height;
+  if (dst_rect != nullptr) {
+    r_x0 = clamp_i(dst_rect[0], 0, width);
+    r_y0 = clamp_i(dst_rect[1], 0, height);
+    r_x1 = clamp_i(dst_rect[2], 0, width);
+    r_y1 = clamp_i(dst_rect[3], 0, height);
+  }
+  return r_x1 > r_x0 && r_y1 > r_y0;
+}
+
+/** The unwritten part of a partial render is defined as zero, never uninitialized memory. A
+ * complete render writes every pixel, so it skips the pass. */
+static void anchor_slice_buffers_clear_if_partial(const int *dst_rect,
+                                                  ImBuf &color,
+                                                  ImBuf &coverage)
+{
+  if (dst_rect == nullptr) {
+    return;
+  }
+  const size_t size = size_t(color.x) * color.y * sizeof(float[4]);
+  memset(color.float_data_for_write(), 0, size);
+  memset(coverage.float_data_for_write(), 0, size);
+}
+
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
                                    const int channel,
                                    std::shared_ptr<ImBuf> *r_color,
-                                   std::shared_ptr<ImBuf> *r_coverage)
+                                   std::shared_ptr<ImBuf> *r_coverage,
+                                   const int *dst_rect)
 {
-  r_color->reset();
-  r_coverage->reset();
+  *r_color = {};
+  *r_coverage = {};
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
@@ -1010,10 +1149,18 @@ bool BKE_paint_layers_slice_render(const Material &ma,
   key.reader = reader.marker;
   key.channel = channel;
   key.hash = paint_layer_anchor_point_slice_hash(ma, reader, channel);
-  {
+  /* A partial render is not a cacheable complete slice; it is only produced for a bake job that
+   * writes the requested rectangle into its own full-size map. */
+  const bool cacheable = dst_rect == nullptr;
+  if (cacheable) {
     std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-    for (const AnchorSliceCacheEntry &entry : g_anchor_slice_cache) {
+    for (const int i : g_anchor_slice_cache.entries.index_range()) {
+      const AnchorSliceCacheEntry entry = g_anchor_slice_cache.entries[i];
       if (anchor_slice_key_equal(entry.key, key)) {
+        /* LRU: move the hit to the newest end. The buffers stay alive through the shared pointers
+         * the caller receives, whatever the cache does next. */
+        g_anchor_slice_cache.entries.remove(i);
+        g_anchor_slice_cache.entries.append(entry);
         *r_color = entry.color;
         *r_coverage = entry.coverage;
         return true;
@@ -1040,12 +1187,17 @@ bool BKE_paint_layers_slice_render(const Material &ma,
     if (color == nullptr || coverage == nullptr) {
       return false;
     }
+    int rx0, ry0, rx1, ry1;
+    if (!anchor_slice_region_get(dst_rect, width, height, rx0, ry0, rx1, ry1)) {
+      return false;
+    }
+    anchor_slice_buffers_clear_if_partial(dst_rect, *color, *coverage);
     PaintLayersMaskSampler sampler(ma, *ref.source_row, &ref.point->marker);
     sampler.tile_acquire(0, width, height);
     float *color_pixels = color->float_data_for_write();
     float *coverage_pixels = coverage->float_data_for_write();
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
+    for (int y = ry0; y < ry1; y++) {
+      for (int x = rx0; x < rx1; x++) {
         const int64_t index = int64_t(y) * width + x;
         const float gray = sampler.sample(0, x, y);
         color_pixels[index * 4 + 0] = gray;
@@ -1084,29 +1236,75 @@ bool BKE_paint_layers_slice_render(const Material &ma,
     }
     color = anchor_slice_buffer_new(width, height);
     coverage = anchor_slice_buffer_new(width, height);
-    if (color == nullptr || coverage == nullptr ||
-        !BKE_paint_material_composite_eval_row_content(entry,
-                                                       color->float_data_for_write(),
-                                                       coverage->float_data_for_write(),
-                                                       nullptr,
-                                                       channel))
+    if (color == nullptr || coverage == nullptr) {
+      return false;
+    }
+    int rx0, ry0, rx1, ry1;
+    if (!anchor_slice_region_get(dst_rect, width, height, rx0, ry0, rx1, ry1)) {
+      return false;
+    }
+    anchor_slice_buffers_clear_if_partial(dst_rect, *color, *coverage);
+    const int region_w = rx1 - rx0;
+    const int region_h = ry1 - ry0;
+    const bool full = dst_rect == nullptr;
+    /* A complete render evaluates straight into the colour buffer; only a partial one needs a
+     * region-sized scratch to copy from. The coverage is a scalar plane either way, widened below. */
+    Vector<float> region_color;
+    rcti region;
+    BLI_rcti_init(&region, rx0, rx1, ry0, ry1);
+    float *color_out = color->float_data_for_write();
+    if (!full) {
+      region_color.resize(int64_t(region_w) * region_h * 4);
+      color_out = region_color.data();
+    }
+    Vector<float> region_coverage(int64_t(region_w) * region_h);
+    if (!BKE_paint_material_composite_eval_row_content(
+            entry, color_out, region_coverage.data(), full ? nullptr : &region, channel))
     {
       return false;
     }
+    float *color_pixels = color->float_data_for_write();
+    float *coverage_pixels = coverage->float_data_for_write();
+    for (int y = ry0; y < ry1; y++) {
+      for (int x = rx0; x < rx1; x++) {
+        const int64_t src = int64_t(y - ry0) * region_w + (x - rx0);
+        const int64_t dst = int64_t(y) * width + x;
+        if (!full) {
+          memcpy(color_pixels + dst * 4, region_color.data() + src * 4, sizeof(float[4]));
+        }
+        /* The consumers read the coverage buffer as RGBA with the value in each colour channel. */
+        const float value = region_coverage[src];
+        coverage_pixels[dst * 4 + 0] = value;
+        coverage_pixels[dst * 4 + 1] = value;
+        coverage_pixels[dst * 4 + 2] = value;
+        coverage_pixels[dst * 4 + 3] = 1.0f;
+      }
+    }
   }
 
-  {
-    /* Keep the cache bounded: every stale hash of a long editing session would otherwise hold a
-     * full canvas. Dropping an entry only releases the cache's reference. */
-    std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
-    if (g_anchor_slice_cache.size() >= ANCHOR_SLICE_CACHE_ENTRIES_MAX) {
-      g_anchor_slice_cache.remove(0);
-    }
+  if (cacheable) {
+    /* Bound the cache by memory, not by a number of entries: one 4K pair is far larger than a
+     * handful of small slices, and a stale hash of a long session must not pin a canvas forever.
+     * The oldest entry is the LRU one; a hit moves to the newest end above. Evicting only drops the
+     * cache's reference: a description or a caller that still holds the buffers keeps them alive. */
     AnchorSliceCacheEntry new_entry;
     new_entry.key = key;
     new_entry.color = color;
     new_entry.coverage = coverage;
-    g_anchor_slice_cache.append(std::move(new_entry));
+    new_entry.bytes = anchor_slice_ibuf_bytes(color.get()) + anchor_slice_ibuf_bytes(coverage.get());
+    std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
+    /* A slice larger than the whole budget is not kept: it would evict everything and then stay
+     * pinned after the description that needed it is gone. The caller still receives it. */
+    if (new_entry.bytes <= g_anchor_slice_cache_budget) {
+      while (!g_anchor_slice_cache.entries.is_empty() &&
+             g_anchor_slice_cache.total_bytes + new_entry.bytes > g_anchor_slice_cache_budget)
+      {
+        g_anchor_slice_cache.total_bytes -= g_anchor_slice_cache.entries[0].bytes;
+        g_anchor_slice_cache.entries.remove(0);
+      }
+      g_anchor_slice_cache.total_bytes += new_entry.bytes;
+      g_anchor_slice_cache.entries.append(std::move(new_entry));
+    }
   }
   *r_color = std::move(color);
   *r_coverage = std::move(coverage);
@@ -1141,7 +1339,7 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
   if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
-  anchor_slice_cache_clear();
+  paint_layer_anchor_point_slice_cache_clear();
   PaintMaterialCompositeImageLayer entry;
   if (!composite_bake_entry(ma, layer, channel, entry)) {
     return false;

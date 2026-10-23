@@ -1026,16 +1026,30 @@ bool paint_layer_anchor_point_reader_baked(const Material &ma, const MaterialPai
   if (!paint_layer_kind_reads_anchor_point(reader)) {
     return false;
   }
+  /* Asked per reader on every describe and bake plan: the common Never case answers before any
+   * of the walks below. */
   const int mode = BKE_paint_layers_bake_mode_get(reader);
   if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
     return false;
   }
+  const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
+  if (ref.issue != PaintLayerAnchorPointIssue::None) {
+    return false;
+  }
+  /* A UDIM mask slice is unsupported rather than bake-able: the reader does not take part. */
+  if (ref.target == PaintLayerAnchorPointTarget::Mask &&
+      paint_layer_anchor_point_slice_is_udim(ma, reader))
+  {
+    return false;
+  }
+  const bool has_object_mask = paint_layer_anchor_point_slice_has_object_mask(ma, reader);
   if (mode == MA_PAINT_LAYER_BAKE_ALWAYS) {
-    return true;
+    /* Always asks for a cache, but an object mask cannot be represented in one. */
+    return !has_object_mask;
   }
   /* Auto: live while the chain is light. An object mask in the slice keeps it live, since a bake
-   * would show it everywhere. */
-  if (paint_layer_anchor_point_slice_has_object_mask(ma, reader)) {
+   * would show it everywhere. Over the depth or element limit it moves to the baked slice. */
+  if (has_object_mask) {
     return false;
   }
   int points = 0;
@@ -1044,8 +1058,8 @@ bool paint_layer_anchor_point_reader_baked(const Material &ma, const MaterialPai
   if (points > PAINT_LAYER_ANCHOR_POINT_LIMIT || readers > PAINT_LAYER_ANCHOR_POINT_LIMIT) {
     return true;
   }
-  /* The chain depth counts the reader itself. */
-  return paint_layer_anchor_point_chain_depth(ma, reader) >= PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX;
+  /* The chain depth counts the reader itself; 3 is the last depth that stays live. */
+  return paint_layer_anchor_point_chain_depth(ma, reader) > PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX;
 }
 
 bool paint_layer_row_substituted(const Material &ma, const MaterialPaintLayer &layer)
@@ -1487,6 +1501,14 @@ static bool bake_row_is_candidate(const Material &ma, const MaterialPaintLayer &
 static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer, bool &r_release)
 {
   r_release = false;
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    /* A reader owns a cache only while its effective mode reads one. Switching it back to Live
+     * (Never, or Auto after the slice became light again) releases the maps it no longer reads. */
+    if (!paint_layer_anchor_point_reader_baked(ma, layer)) {
+      r_release = layer.bake != nullptr;
+      return false;
+    }
+  }
   if (!bake_row_is_candidate(ma, layer)) {
     return false;
   }
@@ -1522,9 +1544,13 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
   if (BKE_paint_layers_bake_row_is_deferred(ma, layer) || bake_row_is_hidden(ma, layer)) {
     return false;
   }
-  if (mode == MA_PAINT_LAYER_BAKE_AUTO && bake_subtree_weight(ma, layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
+  if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
+      !paint_layer_kind_reads_anchor_point(layer) &&
+      bake_subtree_weight(ma, layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
   {
-    /* A light subtree is cheaper live; a bake carried over from when it was heavy is released. */
+    /* A light subtree is cheaper live; a bake carried over from when it was heavy is released. A
+     * reader is exempt: its bake is the slice cache the depth rules asked for, not a cache of a
+     * subtree, so a light row deep in a chain still gets one. */
     r_release = layer.bake != nullptr;
     return false;
   }

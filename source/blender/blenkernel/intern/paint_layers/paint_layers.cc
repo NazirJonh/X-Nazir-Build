@@ -490,7 +490,10 @@ MaterialPaintLayer *BKE_paint_layers_anchor_point_add(Material &ma,
                                               &owner->effects :
                                               &owner->mask_stack;
   if (insert_after != nullptr && BLI_findindex(target, insert_after) == -1) {
-    return nullptr;
+    /* The caller named an item that is not in the list this point lands in (a stale UI row, or
+     * an item of another row). Appending is the useful meaning: the Add must not fail because a
+     * position went stale while the description was edited. */
+    insert_after = nullptr;
   }
   MaterialPaintLayer *item = paint_layer_alloc(ma, name);
   item->role = (list == PaintLayerAnchorPointList::Effects) ? MA_PAINT_LAYER_ROLE_EFFECT :
@@ -1090,7 +1093,7 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
  * deleted, or the reference became invalid): a cache for a slice that cannot be shown is stale by
  * definition, and its maps would otherwise keep the row alive in a later plan pass.
  */
-static void paint_layer_anchor_point_release_broken_bakes(Material &ma)
+void paint_layer_anchor_point_release_broken_bakes(Material &ma)
 {
   Vector<MaterialPaintLayer *> broken;
   BKE_paint_layers_foreach(
@@ -1597,6 +1600,9 @@ bool BKE_paint_layers_mask_remove(Material &ma, MaterialPaintLayer *layer)
     BLI_remlink(&layer->mask_stack, &item);
     BKE_material_paint_layer_free(&item);
   }
+  /* Readers that read a point in the removed mask lost their slice: drop their bakes so a later
+   * plan pass cannot keep showing it. */
+  paint_layer_anchor_point_release_broken_bakes(ma);
   BKE_paint_layers_tag_edited(ma);
   return true;
 }
@@ -2866,26 +2872,47 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
           if (!paint_layer_kind_reads_anchor_point(row)) {
             return;
           }
-          PaintLayerAnchorPointIssue reason = paint_layer_anchor_point_resolve(ma, row).issue;
-          /* A slice with an object mask cannot be baked: in Always mode the reader has no way to
-           * show it, so say why instead of laying a slice that ignores the mask. */
-          if (reason == PaintLayerAnchorPointIssue::None &&
-              BKE_paint_layers_bake_mode_get(row) == MA_PAINT_LAYER_BAKE_ALWAYS &&
-              paint_layer_anchor_point_slice_has_object_mask(ma, row))
-          {
-            reason = PaintLayerAnchorPointIssue::ObjectMaskInSlice;
-          }
-          if (reason == PaintLayerAnchorPointIssue::None) {
+          const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, row);
+          const auto add_issue = [&](const PaintLayerAnchorPointIssue reason) {
+            PaintLayersIssue issue;
+            issue.layer = layer.marker;
+            if (is_owned) {
+              issue.correction = row.marker;
+            }
+            issue.code = PaintLayersIssueCode::AnchorPointInvalid;
+            issue.text = paint_layer_anchor_point_issue_text(reason);
+            r_issues.append(issue);
+          };
+          if (ref.issue != PaintLayerAnchorPointIssue::None) {
+            add_issue(ref.issue);
             return;
           }
-          PaintLayersIssue issue;
-          issue.layer = layer.marker;
-          if (is_owned) {
-            issue.correction = row.marker;
+          if (ref.target == PaintLayerAnchorPointTarget::Mask &&
+              paint_layer_anchor_point_slice_is_udim(ma, row))
+          {
+            add_issue(PaintLayerAnchorPointIssue::UdimUnsupported);
+            return;
           }
-          issue.code = PaintLayersIssueCode::AnchorPointInvalid;
-          issue.text = paint_layer_anchor_point_issue_text(reason);
-          r_issues.append(issue);
+          const int mode = BKE_paint_layers_bake_mode_get(row);
+          if (mode == MA_PAINT_LAYER_BAKE_ALWAYS &&
+              paint_layer_anchor_point_slice_has_object_mask(ma, row))
+          {
+            /* Always has no live path to fall back to; say why the reader lays nothing. */
+            add_issue(PaintLayerAnchorPointIssue::ObjectMaskInSlice);
+            return;
+          }
+          if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
+            int points = 0;
+            int readers = 0;
+            paint_layer_anchor_point_counts(ma, points, readers);
+            if (points > PAINT_LAYER_ANCHOR_POINT_LIMIT ||
+                readers > PAINT_LAYER_ANCHOR_POINT_LIMIT ||
+                paint_layer_anchor_point_chain_depth(ma, row) >
+                    PAINT_LAYER_ANCHOR_POINT_DEPTH_MAX)
+            {
+              add_issue(PaintLayerAnchorPointIssue::LimitExceeded);
+            }
+          }
         };
         check_anchor_point(layer, false);
         for (const MaterialPaintLayer &effect : layer.effects) {

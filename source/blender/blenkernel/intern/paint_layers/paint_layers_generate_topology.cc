@@ -146,17 +146,39 @@ static void mapping_wrap_hash_mix(uint64_t &hash, const Material &ma, const Mate
 /**
  * Which point a reader names, and whether the reference resolves: the tap sockets are only built
  * for a valid reference. \a tag tells the places a reader can sit in apart.
+ *
+ * A reader of a content point also hashes which channels the source takes part in, as that is its
+ * interface: a group gets one input per tap the source publishes, and a mask reader wires the
+ * coverage of the first participating channel. A source that gained or lost a channel changes
+ * both, even though the reference itself did not move. \a channels_tag separates those places.
  */
 static void topology_hash_anchor_point_reader(uint64_t &hash,
                                               const Material &ma,
                                               const MaterialPaintLayer &reader,
-                                              const uint64_t tag)
+                                              const Span<int> wired_channels,
+                                              const uint64_t tag,
+                                              const uint64_t channels_tag,
+                                              const bool is_mask_item = false)
 {
   const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
   hash = topology_hash_mix(hash, tag);
   topology_hash_uid(hash, reader.anchor_point_source);
   hash = topology_hash_mix(hash, uint64_t(ref.issue));
   hash = topology_hash_mix(hash, uint64_t(ref.target));
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr ||
+      ref.target != PaintLayerAnchorPointTarget::Content)
+  {
+    return;
+  }
+  hash = topology_hash_mix(hash, channels_tag);
+  if (is_mask_item) {
+    hash = topology_hash_mix(hash,
+                             uint64_t(paint_layer_anchor_point_mask_read_channel(ma, reader)));
+  }
+  for (const int channel : wired_channels) {
+    hash = topology_hash_mix(hash, uint64_t(channel));
+    hash = topology_hash_mix(hash, row_participates(ma, *ref.source_row, channel) ? 1 : 0);
+  }
 }
 
 /** A marker is a Group Output only while something reads it. */
@@ -253,7 +275,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   if (paint_layer_kind_reads_anchor_point(layer)) {
     /* Which point a reader names, and whether the reference resolves: the tap sockets are only
      * built for a valid reference. The values above and below the marker are inputs. */
-    topology_hash_anchor_point_reader(hash, ma, layer, 0x600);
+    topology_hash_anchor_point_reader(hash, ma, layer, wired_channels, 0x600, 0x604);
   }
   /* A content correction is nodes of its own (a map, a Mix and a coverage fold) in each channel it
    * lays a map in, so which ones do, and which map, is structure; its opacity is an input. Its
@@ -286,7 +308,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     }
     const bool reads_anchor_point = paint_layer_kind_reads_anchor_point(effect);
     if (reads_anchor_point) {
-      topology_hash_anchor_point_reader(hash, ma, effect, 0x602);
+      topology_hash_anchor_point_reader(hash, ma, effect, wired_channels, 0x602, 0x605);
     }
     for (const int channel : wired_channels) {
       hash = topology_hash_mix(hash, paint_layer_effect_filters(ma, effect, channel) ? 1 : 0);
@@ -344,7 +366,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
       continue;
     }
     if (paint_layer_kind_reads_anchor_point(item)) {
-      topology_hash_anchor_point_reader(hash, ma, item, 0x604);
+      topology_hash_anchor_point_reader(hash, ma, item, wired_channels, 0x606, 0x607, true);
       continue;
     }
     /* A filter item is nodes of its own, and which filter decides them. */

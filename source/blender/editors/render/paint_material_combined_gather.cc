@@ -799,12 +799,16 @@ static const char *gpu_layer_unsupported_reason(const PaintMaterialCompositeImag
     return "an Anchor Point slice is read (CPU fallback)";
   }
   for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
-    if (item.anchor_point_slice != nullptr) {
+    if (item.anchor_point_slice != nullptr || item.anchor_point_hash != 0) {
       return "an Anchor Point mask slice is read (CPU fallback)";
     }
   }
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-    if (correction.anchor_point_slice != nullptr) {
+    /* A baked reader has no slice buffer but covers by a coverage map the GPU correction pass does
+     * not read, so it would lay as a plain map with the colour map's alpha. */
+    if (correction.anchor_point_slice != nullptr ||
+        correction.anchor_point_coverage_image != nullptr)
+    {
       return "an Anchor Point slice is read (CPU fallback)";
     }
   }

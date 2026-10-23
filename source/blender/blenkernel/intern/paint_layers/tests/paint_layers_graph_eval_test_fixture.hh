@@ -722,14 +722,12 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
 
   static const char *result_name(const eMaterialPaintChannel channel)
   {
-    switch (channel) {
-      case PAINT_MATERIAL_CHANNEL_NORMAL:
-        return "Result Normal";
-      case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
-        return "Result Roughness";
-      default:
-        return "Result Base Color";
-    }
+    /* The generator names the output "Result <ui name of the channel>"; building the name from the
+     * same source keeps every channel (a switch with a default silently read Base Color for any
+     * channel it did not list). The buffer is per thread, valid until the next call. */
+    static thread_local char name[96];
+    SNPRINTF(name, "Result %s", BKE_paint_material_channel_info(channel).ui_name);
+    return name;
   }
 
   /** The generated graph of \a channel evaluated at pixel (1, 1), after a regeneration. */
@@ -750,7 +748,14 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
     Vector<PaintMaterialCompositeImageLayer> layers;
     EXPECT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
     int width = 0, height = 0;
-    EXPECT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+    if (!BKE_paint_material_composite_stack_dimensions(layers, width, height) || width <= 1 ||
+        height <= 1)
+    {
+      /* A stack made only of constants has no size: there is no CPU pixel to compare with, and
+       * reading one would run past the empty buffer. */
+      ADD_FAILURE() << "channel " << int(channel) << " has no stack dimensions to compare";
+      return {};
+    }
     Vector<float> linear(int64_t(width) * height * 4);
     float bottom[4];
     BKE_paint_layers_channel_bottom_color(channel, bottom);

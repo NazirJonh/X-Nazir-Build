@@ -21,9 +21,10 @@ struct bNodeTree;
  * The generator that turns a layered material's DNA description (`Material::paint_layers`) into the
  * node tree that renders it.
  *
- * `BKE_paint_layers_tree_build` is a pure function over an empty tree: it never touches #Main or the
- * context, so the same build can later run at evaluation time. `BKE_paint_layers_regenerate` is the
- * #Main-side wrapper that owns the generated group and wires it into the material.
+ * `BKE_paint_layers_tree_build` builds into an empty tree and only touches #Main when the caller
+ * hands a database in the build context (to rebuild a kept group); otherwise it is a pure function
+ * over the description. `BKE_paint_layers_regenerate` is the #Main-side wrapper that owns the
+ * generated group and wires it into the material.
  *
  * The generated tree holds one node group per row, chained bottom to top for every channel the
  * description wires. The values a row owns (its opacity, the constant of a map-less channel) are
@@ -57,11 +58,23 @@ struct PaintLayersBuildContext {
    */
   FunctionRef<bool(const MaterialPaintLayer &layer)> layer_unchanged;
   /**
+   * Forget that \a layer's group is current: drop its stored topology hash so the next regeneration
+   * rebuilds it. Used when a kept group could not be re-linked and the rebuild failed, leaving an
+   * empty group that must not be taken for unchanged on the next pass.
+   */
+  FunctionRef<void(const MaterialPaintLayer &layer)> layer_invalidate;
+  /**
    * Hands out the group holding a copy of the source's shader graph for the Material row \a layer,
    * filled and current, or null when the source cannot be wrapped. Empty (the default) means no
    * row shows its source's graph and each reads the map rendered from it.
    */
   FunctionRef<bNodeTree *(const MaterialPaintLayer &layer)> source_group_get;
+  /**
+   * The main database the generated groups live in, when the build may tear a group down and
+   * rebuild it (a kept group whose instance can no longer be re-linked). Null in a pure build that
+   * only creates nodes.
+   */
+  Main *bmain = nullptr;
 };
 
 /**

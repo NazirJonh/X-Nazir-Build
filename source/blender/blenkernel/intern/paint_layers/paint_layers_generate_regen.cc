@@ -286,6 +286,20 @@ class LayerTreeFactory {
     return unchanged_.contains(&layer);
   }
 
+  /**
+   * Drop the stored topology hash of \a layer's group so the next regeneration rebuilds it. A
+   * failed rebuild of a kept group leaves an empty tree that must not be taken for current.
+   */
+  void invalidate_layer(const MaterialPaintLayer &layer)
+  {
+    unchanged_.remove(&layer);
+    if (bNodeTree *const *handed = handed_.lookup_ptr(&layer)) {
+      tree_hash_clear(**handed);
+      pending_hashes_.remove_if(
+          [&](const std::pair<bNodeTree *, uint64_t> &item) { return item.first == *handed; });
+    }
+  }
+
   /** The groups handed out so far. */
   Span<bNodeTree *> used() const
   {
@@ -1063,6 +1077,8 @@ bool BKE_paint_layers_regenerate(Main &bmain,
   paint_layers_blend_tier_prune(ma);
 
   PaintLayersBuildContext ctx;
+  /* A kept reader group that no longer matches the row is rebuilt inside this pass. */
+  ctx.bmain = &bmain;
   Vector<int> wired_channels = paint_layers_wired_channels(ma);
   /* The Normal chain needs the shared combine group; create it only when a Normal row exists,
    * whatever folder it sits in. */
@@ -1129,11 +1145,15 @@ bool BKE_paint_layers_regenerate(Main &bmain,
     const auto layer_unchanged = [&](const MaterialPaintLayer &layer) -> bool {
       return factory.is_unchanged(layer);
     };
+    const auto layer_invalidate = [&](const MaterialPaintLayer &layer) {
+      factory.invalidate_layer(layer);
+    };
     const auto source_group_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
       return factory.source_group_get(layer);
     };
     ctx.layer_tree_get = layer_tree_get;
     ctx.layer_unchanged = layer_unchanged;
+    ctx.layer_invalidate = layer_invalidate;
     ctx.source_group_get = source_group_get;
 
     tree_clear(bmain, *tree);

@@ -189,6 +189,10 @@ class PaintLayersTreeBuilder {
   /** The group of \a layer, created on first use: its tree, its instance and its value inputs. */
   LayerGroup *layer_group_ensure(const MaterialPaintLayer &layer, float location_x, float location_y);
 
+  /** Add the Group Input and Output nodes to the empty tree of \a group, at their places. False
+   * when a node cannot be made. */
+  bool layer_group_io_nodes_add(LayerGroup &group);
+
   /** The value inputs of \a layer: one opacity per wired channel the row takes part in, and the
    * constant of every map-less channel; plus the base mask's opacity and, while the mask has no
    * map, its constant. Their values are written where they are created. */
@@ -293,6 +297,27 @@ class PaintLayersTreeBuilder {
                             LayerGroup &group,
                             int channel,
                             bool isolated);
+
+  /**
+   * Throw away a kept group's nodes (its interface stays) and build \a layer's row again. Used when
+   * a kept reader group predates an input the row now needs; the alternative is a row silently
+   * missing from the chain. Clears this builder's caches that named nodes inside the old group.
+   *
+   * \param r_group_ok: whether the group could be restored (every channel it held, and a valid Group
+   * Input/Output). An invalid result with a restored group only means \a channel is not one the row
+   * can lay, which is the plain skip of a channel; without it the group is broken.
+   */
+  RowResult row_rebuild_kept(const MaterialPaintLayer &layer,
+                             LayerGroup &group,
+                             int channel,
+                             bool isolated,
+                             bool &r_group_ok);
+
+  /**
+   * Drop every builder cache entry that names \a layer (or taps published by \a group): the nodes
+   * they point at are about to be cleared with a rebuild.
+   */
+  void row_caches_forget(const MaterialPaintLayer &layer, const LayerGroup &group);
 
   /**
    * Chain the rows of \a list over \a end for \a channel, recursing into folders. A folder builds
@@ -570,6 +595,18 @@ class PaintLayersTreeBuilder {
   layout::LayoutGrid grid_;
   Map<const MaterialPaintLayer *, LayerGroup *> layer_groups_;
   Vector<std::unique_ptr<LayerGroup>> layer_group_storage_;
+  /**
+   * Rows whose kept group was torn down and rebuilt in this pass. A group is shared by every
+   * channel of the row: rebuild once on the first channel that needs it, then call #build_row for
+   * the rest without clearing again.
+   */
+  Set<const MaterialPaintLayer *> rebuilt_rows_;
+  /** The channels each row's group has been built for in this pass: a rebuilt group holds the ones
+   * built before the rebuild, and the later ones are built as their channel comes up. */
+  Map<const MaterialPaintLayer *, Set<int>> built_channels_;
+  /** Rows whose rebuild failed in this pass. The group left in the root cannot be grown again here,
+   * so every later channel skips the row instead of building a half group on top of it. */
+  Set<const MaterialPaintLayer *> failed_rows_;
 };
 
 /* -------------------------------------------------------------------- */

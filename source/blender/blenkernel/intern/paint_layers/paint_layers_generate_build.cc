@@ -968,6 +968,18 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
   }
 }
 
+bool PaintLayersTreeBuilder::layer_group_io_nodes_add(LayerGroup &group)
+{
+  group.group_input = bke::node_add_node(nullptr, *group.tree, "NodeGroupInput"_ustr);
+  group.group_output = bke::node_add_node(nullptr, *group.tree, "NodeGroupOutput"_ustr);
+  if (group.group_input == nullptr || group.group_output == nullptr) {
+    return false;
+  }
+  group.group_input->location[0] = 0.0f;
+  group.group_output->location[0] = float(int(layout::Column::Extra) + 1) * layout::kColumnWidth;
+  return true;
+}
+
 LayerGroup *PaintLayersTreeBuilder::layer_group_ensure(const MaterialPaintLayer &layer,
                                                        const float location_x,
                                                        const float location_y)
@@ -1003,13 +1015,9 @@ LayerGroup *PaintLayersTreeBuilder::layer_group_ensure(const MaterialPaintLayer 
   }
   else {
     /* A fresh (or rebuilt) tree: the Group Input/Output nodes are this build's. */
-    group.group_input = bke::node_add_node(nullptr, *group_tree, "NodeGroupInput"_ustr);
-    group.group_output = bke::node_add_node(nullptr, *group_tree, "NodeGroupOutput"_ustr);
-    if (group.group_input == nullptr || group.group_output == nullptr) {
+    if (!layer_group_io_nodes_add(group)) {
       return nullptr;
     }
-    group.group_input->location[0] = 0.0f;
-    group.group_output->location[0] = float(int(layout::Column::Extra) + 1) * layout::kColumnWidth;
   }
   bNode *instance = bke::node_add_node(nullptr, tree_, tree_.typeinfo->group_idname);
   if (instance == nullptr) {
@@ -1169,6 +1177,32 @@ static bNode *zero_node_add(bNodeTree &tree, const bool is_color, const float x,
   return node;
 }
 
+/**
+ * Whether an Anchor Point is part of \a layer: the row is a reader, or one of its corrections or
+ * mask items is a marker or a reader. Only such a row can need its kept group rebuilt for a tap or
+ * a reader input the group predates; any other row keeps the plain skip of a channel it cannot lay.
+ */
+static bool row_has_anchor_point(const MaterialPaintLayer &layer)
+{
+  if (paint_layer_kind_reads_anchor_point(layer)) {
+    return true;
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (paint_layer_kind_reads_anchor_point(effect) ||
+        paint_layer_kind_is_anchor_point_marker(effect))
+    {
+      return true;
+    }
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if (paint_layer_kind_reads_anchor_point(item) || paint_layer_kind_is_anchor_point_marker(item))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> &list,
                                             ChainEnd end,
                                             const int channel,
@@ -1178,6 +1212,13 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
 {
   for (const MaterialPaintLayer &layer : list) {
     if (!row_participates(ma_, layer, channel)) {
+      continue;
+    }
+    if (failed_rows_.contains(&layer)) {
+      /* The rebuild of this row failed on an earlier channel: the group holds no contract for
+       * this one, and ensuring it again would only add a second instance to the root (or reach a
+       * group whose Group Input/Output never got created). Checked before anything of the row is
+       * built, so a folder's children are not built again to be thrown away. */
       continue;
     }
 
@@ -1198,33 +1239,41 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
     NodeOutput folder_color;
     NodeOutput folder_coverage;
     NodeOutput folder_alpha;
+    /* The folder's own zero/divide nodes in the root tree: kept so a failed row rebuild can drop
+     * them instead of leaving orphans beside the chain. */
+    bNode *folder_p_zero = nullptr;
+    bNode *folder_a_zero = nullptr;
+    bNode *folder_pa_zero = nullptr;
     const bool track_alpha = BKE_paint_material_channel_tracks_content_alpha(
         eMaterialPaintChannel(channel));
     /* A folder whose bake stands in builds nothing of what it holds: its row reads the bake. */
     if (BKE_paint_layers_is_folder(layer) && !paint_layer_row_baked_channel(ma_, layer, channel, nullptr))
     {
-      bNode *p_zero = zero_node_add(tree_, true, location_x, location_y - 140.0f);
-      bNode *a_zero = zero_node_add(tree_, false, location_x, location_y - 260.0f);
+      folder_p_zero = zero_node_add(tree_, true, location_x, location_y - 140.0f);
+      folder_a_zero = zero_node_add(tree_, false, location_x, location_y - 260.0f);
       /* The content alpha is accumulated pre-multiplied beside the colour, from zero. */
-      bNode *pa_zero = track_alpha ? zero_node_add(tree_, false, location_x, location_y - 380.0f) :
+      folder_pa_zero = track_alpha ? zero_node_add(tree_, false, location_x, location_y - 380.0f) :
                                      nullptr;
       /* A folder that cannot be built leaves no half of it behind in the tree. */
       const auto discard = [&](bNode *extra) {
-        for (bNode *node : {p_zero, a_zero, pa_zero, extra}) {
+        for (bNode *node : {folder_p_zero, folder_a_zero, folder_pa_zero, extra}) {
           if (node != nullptr) {
             bke::node_remove_node(nullptr, tree_, *node, true, false);
           }
         }
+        folder_p_zero = folder_a_zero = folder_pa_zero = nullptr;
       };
-      if (p_zero == nullptr || a_zero == nullptr || (track_alpha && pa_zero == nullptr)) {
+      if (folder_p_zero == nullptr || folder_a_zero == nullptr ||
+          (track_alpha && folder_pa_zero == nullptr))
+      {
         discard(nullptr);
         continue;
       }
       ChainEnd inner_start;
-      inner_start.color = {p_zero, socket_out(*p_zero, "Color")};
-      inner_start.coverage = {a_zero, socket_out(*a_zero, "Value")};
-      if (pa_zero != nullptr) {
-        inner_start.alpha = {pa_zero, socket_out(*pa_zero, "Value")};
+      inner_start.color = {folder_p_zero, socket_out(*folder_p_zero, "Color")};
+      inner_start.coverage = {folder_a_zero, socket_out(*folder_a_zero, "Value")};
+      if (folder_pa_zero != nullptr) {
+        inner_start.alpha = {folder_pa_zero, socket_out(*folder_pa_zero, "Value")};
       }
       const ChainEnd inner = this->list_build(
           layer.children, inner_start, channel, location_y, location_x, true);
@@ -1266,25 +1315,114 @@ ChainEnd PaintLayersTreeBuilder::list_build(const ListBaseT<MaterialPaintLayer> 
       location_x += 180.0f;
     }
 
+    /* Folder divide/zero nodes live in the root tree and are linked into the instance below. If the
+     * row is dropped they would stay as orphans: remove them the same way a failed folder build
+     * discards its half-built nodes. Do not touch folder_coverage: that socket belongs to a child.
+     */
+    const auto discard_folder_nodes = [&]() {
+      for (bNode *node :
+           {folder_color.node, folder_alpha.node, folder_p_zero, folder_a_zero, folder_pa_zero})
+      {
+        if (node != nullptr) {
+          bke::node_remove_node(nullptr, tree_, *node, true, false);
+        }
+      }
+      folder_color = {};
+      folder_coverage = {};
+      folder_alpha = {};
+      folder_p_zero = folder_a_zero = folder_pa_zero = nullptr;
+    };
+    /* Leave the row out of the chain for the rest of the pass. \a invalidate also makes the next
+     * pass rebuild its group from the description, for a group that is broken and not just empty
+     * of this channel. */
+    const auto drop_row = [&](const bool invalidate) {
+      failed_rows_.add(&layer);
+      if (invalidate && ctx_.layer_invalidate) {
+        ctx_.layer_invalidate(layer);
+      }
+      discard_folder_nodes();
+    };
+    const bool already_rebuilt = rebuilt_rows_.contains(&layer);
     LayerGroup *group = layer_group_ensure(layer, location_x, location_y);
     if (group == nullptr) {
+      /* A kept group without its Group Input/Output cannot describe the row: let the next pass
+       * build the group from its description instead of keeping a broken one forever. */
+      drop_row(true);
       continue;
     }
     /* A group the factory kept already holds the row: only its instance is re-linked, so its nodes
-     * are never rebuilt and a value-only pass touches nothing. */
+     * are never rebuilt and a value-only pass touches nothing. A group torn down and rebuilt
+     * earlier in this pass holds the channels built before it; a channel that was not built yet is
+     * built now, the rest only re-link their instance sockets.
+     *
+     * Asked only now: the factory decides whether the group is unchanged while it hands the group
+     * out (#layer_group_ensure), so asking earlier answers "changed" for the first channel of every
+     * row and builds a second set of nodes into a group that is kept. */
     const bool reused = ctx_.layer_unchanged && ctx_.layer_unchanged(layer);
-    RowResult row = reused ? row_link_reused(layer, *group, channel, isolated) : RowResult{};
-    if (!row.valid && reused) {
-      /* A kept group whose instance cannot be re-linked predates an input this row now needs. Its
-       * nodes are not rebuilt here: build_row would add a second set beside the kept ones. The
-       * topology hash covers the reader's reference and the source channel set, so this is only
-       * reached for a group that should already have been cleared. */
-      continue;
+    RowResult row{};
+    if (already_rebuilt) {
+      if (group->instance == nullptr) {
+        /* The rebuild of this row failed on an earlier channel, or left no instance: the group in
+         * the root holds nothing to grow here. */
+        drop_row(false);
+        continue;
+      }
+      const Set<int> *built = built_channels_.lookup_ptr(&layer);
+      const bool channel_built = built != nullptr && built->contains(channel);
+      row = channel_built ? row_link_reused(layer, *group, channel, isolated) :
+                            build_row(layer, *group, channel, isolated);
+      if (!row.valid) {
+        /* The rebuild left no contract for this channel: let the next pass rebuild the group from
+         * its description rather than keep a group that can never grow it. */
+        drop_row(true);
+        continue;
+      }
     }
-    if (!reused) {
+    else if (reused) {
+      row = row_link_reused(layer, *group, channel, isolated);
+      if (!row.valid && !row_has_anchor_point(layer)) {
+        /* Not a row an Anchor Point touches: the kept group simply does not lay this channel (a
+         * channel the source supplies nothing for gives no sockets), and that has always meant
+         * skipping it. Tearing the group down for it would drop the row's other channels too. */
+        continue;
+      }
+      if (!row.valid) {
+        /* A kept group whose instance cannot be re-linked predates an input this row now needs.
+         * Rebuild it from an empty tree (the interface stays) rather than adding a second set
+         * beside the kept nodes, or dropping the row silently. */
+        if (ctx_.bmain != nullptr) {
+          bool group_ok = false;
+          row = row_rebuild_kept(layer, *group, channel, isolated, group_ok);
+          rebuilt_rows_.add(&layer);
+          if (!row.valid && group_ok) {
+            /* The group is whole again and this channel is one the row cannot lay: the plain skip
+             * of a channel, not a broken group. */
+            discard_folder_nodes();
+            continue;
+          }
+        }
+        else {
+          /* No Main: cannot rebuild. The group record stays (removing it would let the next
+           * channel's ensure make a second group beside this one, losing the channels already
+           * chained through it), but its instance leaves the root: a row dropped in this pass is
+           * rebuilt from its description on the next one through #layer_invalidate. */
+          rebuilt_rows_.add(&layer);
+          if (group->instance != nullptr) {
+            bke::node_remove_node(nullptr, tree_, *group->instance, true, false);
+            group->instance = nullptr;
+          }
+        }
+        if (!row.valid) {
+          drop_row(true);
+          continue;
+        }
+      }
+    }
+    else {
       row = build_row(layer, *group, channel, isolated);
     }
     if (!row.valid) {
+      discard_folder_nodes();
       continue;
     }
     bke::node_add_link(tree_, *end.color.node, *end.color.socket, *row.instance, *row.below);

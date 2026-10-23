@@ -59,6 +59,136 @@ class PaintLayersGraphEvalAnchorPointTest : public PaintLayersGraphEvalTest {
     return source;
   }
 
+  static int duplicate_link_count(const bNodeTree &tree)
+  {
+    int duplicates = 0;
+    for (const bNodeLink &a : tree.links) {
+      int matches = 0;
+      for (const bNodeLink &b : tree.links) {
+        if (a.fromnode == b.fromnode && a.fromsock == b.fromsock && a.tonode == b.tonode &&
+            a.tosock == b.tosock)
+        {
+          matches++;
+        }
+      }
+      if (matches > 1) {
+        duplicates++;
+      }
+    }
+    return duplicates;
+  }
+
+  /** The one row group of \a layer, found by its marker rather than by its name. */
+  bNodeTree *find_layer_group(const MaterialPaintLayer &layer)
+  {
+    bNodeTree *found = nullptr;
+    for (bNodeTree &tree : bmain->nodetrees) {
+      bUUID marker = BLI_uuid_nil();
+      if (!layer_tree_marker_get(tree, marker) || !BLI_uuid_equal(marker, layer.marker)) {
+        continue;
+      }
+      EXPECT_EQ(found, nullptr) << "a row has exactly one kept group";
+      found = &tree;
+    }
+    return found;
+  }
+
+  /** Remove the interface socket named \a name from \a tree; true when it was there. */
+  static bool remove_interface_socket(bNodeTree &tree, const char *name, const bool input)
+  {
+    for (bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+      if (item->item_type != NodeTreeInterfaceItemType::Socket) {
+        continue;
+      }
+      auto &socket = reinterpret_cast<bNodeTreeInterfaceSocket &>(*item);
+      if (((socket.flag & NODE_INTERFACE_SOCKET_INPUT) != 0) != input ||
+          socket.name == nullptr || !STREQ(socket.name, name))
+      {
+        continue;
+      }
+      tree.tree_interface.remove_item(*item);
+      return true;
+    }
+    return false;
+  }
+
+  static bool interface_has_socket(const bNodeTree &tree, const char *prefix)
+  {
+    for (const bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+      if (item->item_type != NodeTreeInterfaceItemType::Socket) {
+        continue;
+      }
+      const auto &socket = reinterpret_cast<const bNodeTreeInterfaceSocket &>(*item);
+      if (socket.name != nullptr && StringRef(socket.name).startswith(prefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Remove one interface input whose name starts with \a prefix; true when it was there. */
+  static bool remove_interface_input_prefix(bNodeTree &tree, const char *prefix)
+  {
+    for (bNodeTreeInterfaceItem *item : tree.tree_interface.items()) {
+      if (item->item_type != NodeTreeInterfaceItemType::Socket) {
+        continue;
+      }
+      auto &socket = reinterpret_cast<bNodeTreeInterfaceSocket &>(*item);
+      if ((socket.flag & NODE_INTERFACE_SOCKET_INPUT) == 0 || socket.name == nullptr ||
+          !StringRef(socket.name).startswith(prefix))
+      {
+        continue;
+      }
+      tree.tree_interface.remove_item(*item);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The nodes a failed rebuild may duplicate or orphan: the group's own Group Input/Output, the
+   * group's instances in the root, and the divide/zero nodes a folder keeps in the root.
+   */
+  struct NodeCounts {
+    int group_inputs = 0;
+    int group_outputs = 0;
+    int instances = 0;
+    int divide = 0;
+    int zero = 0;
+
+    bool operator==(const NodeCounts &other) const
+    {
+      return group_inputs == other.group_inputs && group_outputs == other.group_outputs &&
+             instances == other.instances && divide == other.divide && zero == other.zero;
+    }
+  };
+
+  static NodeCounts count_nodes(const bNodeTree &root, const bNodeTree &group)
+  {
+    NodeCounts counts;
+    for (const bNode &node : group.nodes) {
+      counts.group_inputs += node.is_group_input() ? 1 : 0;
+      counts.group_outputs += node.is_group_output() ? 1 : 0;
+    }
+    for (const bNode &node : root.nodes) {
+      counts.instances += (node.id == &group.id) ? 1 : 0;
+      if (node.type_legacy == SH_NODE_MATH && node.custom1 == NODE_MATH_DIVIDE) {
+        counts.divide++;
+      }
+      if (node.type_legacy == SH_NODE_VALUE) {
+        for (const bNodeSocket &output : node.outputs) {
+          if (output.default_value != nullptr && output.type == SOCK_FLOAT &&
+              static_cast<const bNodeSocketValueFloat *>(output.default_value)->value == 0.0f)
+          {
+            counts.zero++;
+            break;
+          }
+        }
+      }
+    }
+    return counts;
+  }
+
   /** The reader input that crosses into a row group, matched by its interface name. */
   static bool is_anchor_point_input(const bNodeSocket &socket)
   {
@@ -92,6 +222,41 @@ class PaintLayersGraphEvalAnchorPointTest : public PaintLayersGraphEvalTest {
       }
     }
     return anchors;
+  }
+
+  /**
+   * A source and a reader row that both take part in Base Color and Roughness, the reader laying
+   * its slice over the row's own content at half opacity, so its effect on the pixels is visible.
+   */
+  MaterialPaintLayer *set_up_two_channel_reader()
+  {
+    MaterialPaintLayer *source = add_layer("Source", add_solid_image("Source", 255, 0, 0, 255));
+    EXPECT_NE(BKE_paint_layers_channel_add(*ma, source, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
+              nullptr);
+    EXPECT_TRUE(BKE_paint_layers_channel_set_image(
+        *ma,
+        source,
+        PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+        add_solid_image("Source Rough", 0, 255, 0, 255)));
+    MaterialPaintLayer *point = add_point(*source);
+    EXPECT_NE(point, nullptr);
+    if (point == nullptr) {
+      return nullptr;
+    }
+
+    MaterialPaintLayer *reader_row = add_layer(
+        "Reader", add_solid_image("Reader", 0, 0, 255, 255));
+    EXPECT_NE(BKE_paint_layers_channel_add(*ma, reader_row, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
+              nullptr);
+    EXPECT_TRUE(BKE_paint_layers_channel_set_image(*ma,
+                                                  reader_row,
+                                                  PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+                                                  add_solid_image("Reader Rough", 255, 255, 255, 255)));
+    MaterialPaintLayer *reader = add_reader(
+        *reader_row, PaintLayerAnchorPointList::Effects, point->marker);
+    EXPECT_NE(reader, nullptr);
+    EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, reader, 0.5f));
+    return reader_row;
   }
 };
 
@@ -395,6 +560,168 @@ TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_reader_in_folder_child_matches
   EXPECT_NEAR(with_reader.b, 0.5f, 2e-3f);
   EXPECT_LT(without_reader.r, 0.1f) << "without the reader the row is its own blue";
   EXPECT_GT(without_reader.b, 0.9f);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_failed_relink_rebuilds_group)
+{
+  MaterialPaintLayer *reader_row = set_up_two_channel_reader();
+  ASSERT_NE(reader_row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = find_layer_group(*reader_row);
+  ASSERT_NE(group, nullptr) << "the reader row's group was found by its marker";
+  const NodeCounts clean = count_nodes(*ma->paint_layers_tree, *group);
+  ASSERT_EQ(clean.group_inputs, 1);
+  ASSERT_EQ(clean.group_outputs, 1);
+  ASSERT_EQ(clean.instances, 1);
+
+  /* The kept group looks like one built before the first channel existed: its interface has no
+   * contract sockets for Base Color. The topology hash still matches, so the factory keeps the
+   * group and the relink on the first channel is what fails. */
+  ASSERT_TRUE(remove_interface_socket(*group, "Below Base Color", true));
+  ASSERT_TRUE(remove_interface_socket(*group, "Result Base Color", false));
+  /* A structural edit elsewhere forces the full build that reaches the kept group. The Trigger row
+   * adds no node of this group and no divide/zero node, so the counts stay comparable. */
+  ASSERT_NE(add_layer("Trigger", add_solid_image("Trigger", 0, 0, 0, 0)), nullptr);
+
+  /* Rebuilt from an empty tree rather than dropped, and the channel rebuilt first is not lost. */
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  const RGBA base = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(base.r, 0.5f, 2e-3f) << "the reader's red slice is laid over the blue row";
+  EXPECT_NEAR(base.b, 0.5f, 2e-3f);
+  EXPECT_TRUE(interface_has_socket(*group, "Below Base Color"))
+      << "the removed Base Color input is back after the rebuild";
+  EXPECT_TRUE(interface_has_socket(*group, "Result Base Color"));
+  EXPECT_EQ(duplicate_link_count(*group), 0);
+  EXPECT_EQ(duplicate_link_count(*ma->paint_layers_tree), 0);
+  const NodeCounts recovered = count_nodes(*ma->paint_layers_tree, *group);
+  EXPECT_EQ(recovered.group_inputs, clean.group_inputs) << "no duplicate Group Input";
+  EXPECT_EQ(recovered.group_outputs, clean.group_outputs) << "no duplicate Group Output";
+  EXPECT_EQ(recovered.instances, clean.instances) << "no duplicate instance in the root";
+  EXPECT_EQ(recovered.divide, clean.divide) << "no orphaned divide node";
+  EXPECT_EQ(recovered.zero, clean.zero) << "no orphaned zero node";
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_failed_relink_rebuilds_group_two_channels)
+{
+  MaterialPaintLayer *reader_row = set_up_two_channel_reader();
+  ASSERT_NE(reader_row, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  bNodeTree *group = find_layer_group(*reader_row);
+  ASSERT_NE(group, nullptr) << "the reader row's group was found by its marker";
+  const NodeCounts clean = count_nodes(*ma->paint_layers_tree, *group);
+  ASSERT_EQ(clean.group_inputs, 1);
+  ASSERT_EQ(clean.group_outputs, 1);
+  ASSERT_EQ(clean.instances, 1);
+
+  /* The failure happens on the second channel: the first one has already been chained through the
+   * instance, and the rebuild must not cut it off. */
+  ASSERT_TRUE(remove_interface_socket(*group, "Below Roughness", true));
+  ASSERT_TRUE(remove_interface_socket(*group, "Result Roughness", false));
+  /* A structural edit elsewhere forces the full build that reaches the kept group. */
+  ASSERT_NE(add_layer("Trigger", add_solid_image("Trigger", 0, 0, 0, 0)), nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  expect_graph_matches_cpu(PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  const RGBA base = graph_pixel(PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  EXPECT_NEAR(base.r, 0.5f, 2e-3f) << "Base Color is still the reader over the row's content";
+  EXPECT_NEAR(base.b, 0.5f, 2e-3f);
+  EXPECT_TRUE(interface_has_socket(*group, "Below Roughness"))
+      << "the removed Roughness input is back after the rebuild";
+  EXPECT_TRUE(interface_has_socket(*group, "Result Roughness"));
+  EXPECT_EQ(duplicate_link_count(*group), 0);
+  EXPECT_EQ(duplicate_link_count(*ma->paint_layers_tree), 0);
+  const NodeCounts recovered = count_nodes(*ma->paint_layers_tree, *group);
+  EXPECT_EQ(recovered.group_inputs, clean.group_inputs);
+  EXPECT_EQ(recovered.group_outputs, clean.group_outputs);
+  EXPECT_EQ(recovered.instances, clean.instances);
+  EXPECT_EQ(recovered.divide, clean.divide);
+  EXPECT_EQ(recovered.zero, clean.zero);
+}
+
+TEST_F(PaintLayersGraphEvalAnchorPointTest, graph_failed_relink_group_is_recreated_next_regen)
+{
+  MaterialPaintLayer *reader_row = set_up_two_channel_reader();
+  ASSERT_NE(reader_row, nullptr);
+
+  /* A pure build cannot rebuild a kept group: it is the no-Main branch of the generator, exercised
+   * here so the failure path and the pass after it are both real. */
+  int serial = 0;
+  const auto add_tree = [&](const char *prefix) {
+    char name[64];
+    SNPRINTF(name, "%s %d", prefix, serial++);
+    return bke::node_tree_add_tree(bmain, name, "ShaderNodeTree");
+  };
+  Map<const MaterialPaintLayer *, bNodeTree *> groups;
+  const auto layer_tree_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
+    bNodeTree *&group = groups.lookup_or_add_default(&layer);
+    if (group == nullptr) {
+      group = add_tree("Layer");
+    }
+    return group;
+  };
+  bNodeTree *root = add_tree("Root");
+  ASSERT_NE(root, nullptr);
+  PaintLayersBuildContext initial;
+  initial.layer_tree_get = layer_tree_get;
+  BKE_paint_layers_tree_build(*ma, *root, initial);
+  bNodeTree *group = groups.lookup_default(reader_row, nullptr);
+  ASSERT_NE(group, nullptr);
+
+  /* The kept group lost a required reader input: the relink fails and, without a Main, the row
+   * cannot be rebuilt in this pass. */
+  ASSERT_TRUE(remove_interface_input_prefix(*group, "AnchorPoint "));
+
+  bNodeTree *second_root = add_tree("Root");
+  ASSERT_NE(second_root, nullptr);
+  const MaterialPaintLayer *invalidated = nullptr;
+  /* The context holds function references, not copies: the callables must outlive the build. */
+  const auto kept_unchanged = [](const MaterialPaintLayer & /*layer*/) { return true; };
+  const auto kept_invalidate = [&](const MaterialPaintLayer &layer) { invalidated = &layer; };
+  PaintLayersBuildContext kept;
+  kept.layer_tree_get = layer_tree_get;
+  kept.layer_unchanged = kept_unchanged;
+  kept.layer_invalidate = kept_invalidate;
+  kept.bmain = nullptr;
+  BKE_paint_layers_tree_build(*ma, *second_root, kept);
+  EXPECT_EQ(invalidated, reader_row) << "the failed row asks for a rebuild on the next pass";
+  EXPECT_EQ(count_nodes(*second_root, *group).instances, 0)
+      << "the orphan instance was dropped from the root";
+
+  /* The next pass finds the group invalidated: a fresh one is built, complete and instantiated
+   * exactly once. */
+  Map<const MaterialPaintLayer *, bNodeTree *> renewed;
+  const auto rebuild_tree_get = [&](const MaterialPaintLayer &layer) -> bNodeTree * {
+    if (&layer == invalidated) {
+      bNodeTree *&fresh = renewed.lookup_or_add_default(&layer);
+      if (fresh == nullptr) {
+        fresh = add_tree("Rebuilt Layer");
+      }
+      return fresh;
+    }
+    return groups.lookup_default(&layer, nullptr);
+  };
+  const auto rebuild_unchanged = [&](const MaterialPaintLayer &layer) {
+    return &layer != invalidated;
+  };
+  PaintLayersBuildContext rebuild;
+  rebuild.layer_tree_get = rebuild_tree_get;
+  rebuild.layer_unchanged = rebuild_unchanged;
+  rebuild.bmain = nullptr;
+  bNodeTree *third_root = add_tree("Root");
+  ASSERT_NE(third_root, nullptr);
+  BKE_paint_layers_tree_build(*ma, *third_root, rebuild);
+
+  bNodeTree *rebuilt = renewed.lookup_default(reader_row, nullptr);
+  ASSERT_NE(rebuilt, nullptr);
+  const NodeCounts counts = count_nodes(*third_root, *rebuilt);
+  EXPECT_EQ(counts.group_inputs, 1) << "no duplicate Group Input in the rebuilt group";
+  EXPECT_EQ(counts.group_outputs, 1) << "no duplicate Group Output in the rebuilt group";
+  EXPECT_EQ(counts.instances, 1) << "one instance of the rebuilt group in the root";
+  EXPECT_EQ(count_nodes(*third_root, *group).instances, 0)
+      << "the stale group is not instantiated beside the rebuilt one";
 }
 
 }  // namespace blender::bke::tests

@@ -3172,6 +3172,7 @@ RowResult PaintLayersTreeBuilder::build_row(const MaterialPaintLayer &layer,
       }
     }
   }
+  built_channels_.lookup_or_add_default(&layer).add(channel);
   return result;
 }
 
@@ -3279,9 +3280,11 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
       continue;
     }
     KindEmitResult ignored;
-    /* A reader that cannot be linked is left out alone, as a fresh build leaves it out, instead of
-     * dropping the whole row. */
-    this->anchor_point_reader_link(group, effect, channel, false, &ignored);
+    /* A kept group that predates this reader's input cannot be linked: the row is not valid here,
+     * and the caller rebuilds the group (#row_rebuild_kept). */
+    if (!this->anchor_point_reader_link(group, effect, channel, false, &ignored)) {
+      return {};
+    }
   }
   if (channel == first_channel) {
     for (const MaterialPaintLayer &item : layer.mask_stack) {
@@ -3296,10 +3299,92 @@ RowResult PaintLayersTreeBuilder::row_link_reused(const MaterialPaintLayer &laye
       const int read_channel = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
                                    int(PAINT_MATERIAL_CHANNEL_BASE_COLOR) :
                                    paint_layer_anchor_point_mask_read_channel(ma_, item);
-      this->anchor_point_reader_link(group, item, read_channel, false, &ignored);
+      if (!this->anchor_point_reader_link(group, item, read_channel, false, &ignored)) {
+        return {};
+      }
     }
   }
+  built_channels_.lookup_or_add_default(&layer).add(channel);
   return result;
+}
+
+void PaintLayersTreeBuilder::row_caches_forget(const MaterialPaintLayer &layer,
+                                               const LayerGroup &group)
+{
+  /* The layer's own row and every correction or mask item built into the same group: their map
+   * nodes live in its tree and are about to be cleared. A child row has a group of its own and
+   * its caches stay valid. */
+  const auto forget_row = [&](const MaterialPaintLayer &row) {
+    mask_factors_.remove(&row);
+    object_mask_visible_.remove(&row);
+    mapping_nodes_.remove(&row);
+    mapping_clip_masks_.remove(&row);
+    source_group_instances_.remove(&row);
+  };
+  forget_row(layer);
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    forget_row(effect);
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    forget_row(item);
+  }
+  anchor_point_taps_.remove_if(
+      [&](const AnchorPointTap &tap) { return tap.group == &group; });
+}
+
+RowResult PaintLayersTreeBuilder::row_rebuild_kept(const MaterialPaintLayer &layer,
+                                                   LayerGroup &group,
+                                                   const int channel,
+                                                   const bool isolated,
+                                                   bool &r_group_ok)
+{
+  r_group_ok = false;
+  if (ctx_.bmain == nullptr || group.tree == nullptr || tree_.typeinfo == nullptr ||
+      tree_.typeinfo->group_idname == nullptr)
+  {
+    return {};
+  }
+  /* The caches name nodes inside this group: drop them before the clear, or the next channel
+   * would follow dangling pointers. */
+  this->row_caches_forget(layer, group);
+  /* The interface stays: it is what describes the row, and recreating its sockets would duplicate
+   * them. Only the nodes that implemented the previous shape are thrown away. The instance in the
+   * root stays too: every channel already chained through it keeps its links, and the channel
+   * rebuilt below fills the group again. Removing it would silently cut those channels off. */
+  tree_clear_nodes(*ctx_.bmain, *group.tree);
+  /* The keyed blend nodes went with the nodes; the commit after the build recounts them. */
+  prop_int_set(group.tree->id.properties, BLEND_NODE_COUNT_PROP, -1);
+  if (!layer_group_io_nodes_add(group)) {
+    return {};
+  }
+  refresh_layer_group(group);
+  create_value_inputs(group, layer);
+
+  /* The clear took the nodes of every channel this row had already built, including the ones
+   * before \a channel. Rebuild those and the current one here, once: the later channels are built
+   * as their turn comes (#built_channels_), never twice. */
+  Set<int> built;
+  if (const Set<int> *found = built_channels_.lookup_ptr(&layer)) {
+    built = *found;
+  }
+  RowResult result;
+  bool all_built = true;
+  for (const int other_channel : wired_channels_) {
+    if (other_channel != channel && !built.contains(other_channel)) {
+      continue;
+    }
+    RowResult built_row = this->build_row(layer, group, other_channel, isolated);
+    if (other_channel == channel) {
+      result = built_row;
+    }
+    else if (!built_row.valid) {
+      /* A channel the group held before the rebuild could not be restored: treat the whole
+       * rebuild as failed so the next pass starts the group from its description. */
+      all_built = false;
+    }
+  }
+  r_group_ok = all_built;
+  return all_built ? result : RowResult{};
 }
 
 }  // namespace bke::paint_layers

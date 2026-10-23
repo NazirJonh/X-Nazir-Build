@@ -248,6 +248,8 @@ struct BrushPainter {
    * this is not a Mode=`Material` stroke, or when invert/erase must not read sources.
    */
   std::shared_ptr<ed::sculpt_paint::material::ChannelSourceSet> channel_sources;
+  /** Lookup table of the brush's Mask texture for this stroke. Null without a Mask texture. */
+  std::shared_ptr<bke::BrushMaskLut> mask_lut;
   /**
    * Evaluated-mesh triangles for #MTEX_MAP_MODE_AREA in the Image Editor. Shared by extra
    * material-map painters. Null when this stroke does not use Area Plane, or when the mesh/UV
@@ -2913,7 +2915,8 @@ static float paint_2d_area_sample_mask_factor(const BrushPainter *painter,
       math::transform_point(mask_local_mat, position),
       float2(-1.0f),
       thread,
-      pool);
+      pool,
+      painter->mask_lut.get());
 }
 
 /**
@@ -5008,6 +5011,9 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
         }
       }
       state->painter->channel_sources = channel_sources;
+      if (brush->mask_mtex.tex != nullptr) {
+        state->painter->mask_lut = std::make_shared<bke::BrushMaskLut>();
+      }
       state->painter->area_plane_mesh = area_plane_mesh;
       state->painter->secondary_area_plane_meshes = secondary_area_plane_meshes;
       if (primary == nullptr) {

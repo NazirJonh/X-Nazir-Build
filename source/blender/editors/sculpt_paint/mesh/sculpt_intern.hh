@@ -434,6 +434,10 @@ struct StrokeCache {
   /** Face selection masking state, built lazily on the first dab of the stroke. */
   FaceSelectionMask face_selection_mask;
 
+  /** Lookup table of the brush's Mask texture, filled lazily during the stroke. Created by the
+   * first PBR paint dab whose brush has a Mask texture. */
+  std::shared_ptr<bke::BrushMaskLut> mask_lut;
+
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);

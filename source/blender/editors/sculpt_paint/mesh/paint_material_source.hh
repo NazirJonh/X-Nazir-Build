@@ -17,6 +17,8 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 
+#include "BKE_brush.hh"
+
 #include "DNA_scene_types.h"
 #include "DNA_texture_types.h"
 
@@ -160,6 +162,7 @@ std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterial
  *                texture uses it.
  * \param area_point: the stroke position, already transformed by the brush's own area-plane matrix
  *                    (#StrokeCache::brush_local_mat, or the 2D stroke's object-to-brush matrix).
+ * \param lut: stroke-lifetime Mask table, see #bke::BrushMaskLut; used by the Area mapping only.
  * \param view_point_2d: region-space position for the non-Area modes; a negative component means
  *                       "unavailable", and the Area mapping is used instead.
  * \return coverage in [0, 1]; 1 when no Mask texture is assigned, so an absent Mask never clips.
@@ -170,7 +173,8 @@ float paint_mask_texture_coverage(const Brush &brush,
                                   const float3 &area_point,
                                   const float2 &view_point_2d,
                                   int thread,
-                                  ImagePool *pool);
+                                  ImagePool *pool,
+                                  const bke::BrushMaskLut *lut = nullptr);
 
 /**
  * Final value of a sampled scalar \a channel: clamped to \a range, and mirrored inside it first

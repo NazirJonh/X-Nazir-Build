@@ -157,7 +157,8 @@ float paint_mask_texture_coverage(const Brush &brush,
                                   const float3 &area_point,
                                   const float2 &view_point_2d,
                                   const int thread,
-                                  ImagePool *pool)
+                                  ImagePool *pool,
+                                  const bke::BrushMaskLut *lut)
 {
   const MTex &mask_mtex = brush.mask_mtex;
   if (mask_mtex.tex == nullptr) {
@@ -197,7 +198,8 @@ float paint_mask_texture_coverage(const Brush &brush,
                                           rake_rotation,
                                           aspect_correction,
                                           thread,
-                                          pool);
+                                          pool,
+                                          lut);
 }
 
 float scalar_source_finish(const BrushMaterialPaint &brush_paint,

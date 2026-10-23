@@ -10,8 +10,12 @@
  * General operations for brushes.
  */
 
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <optional>
 
+#include "BLI_array.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 
@@ -327,11 +331,64 @@ float BKE_brush_sample_masktex(
  */
 float BKE_brush_mask_tex_pressure_apply(const Brush &brush, const Paint &paint, float value);
 
+namespace bke {
+
+/**
+ * Stroke-lifetime cache of the Mask image's values in mask-texture space (after size, offset and
+ * aspect, before the pressure curve), so a dab reads a table instead of evaluating the texture per
+ * texel.
+ *
+ * The table is rotation independent: rake/random angles rotate the query, not the table. It is
+ * filled lazily in tiles, by whichever thread first needs a tile; a thread that finds a tile not
+ * ready simply evaluates the texture directly for that sample, so nothing ever blocks on a bake.
+ * Only image textures without a node tree whose table fits the size cap are cached; every other
+ * Mask keeps the direct path. One instance serves one stroke: it assumes the Mask settings do not
+ * change while it lives.
+ */
+class BrushMaskLut {
+ public:
+  /**
+   * Returns the table value at the texture coordinates \a x, \a y (the ones the texture would be
+   * evaluated at) in \a r_value, or false when the caller has to evaluate the texture itself.
+   * Thread safe.
+   */
+  bool sample(const Brush &brush,
+              const float2 &aspect_correction,
+              float x,
+              float y,
+              int thread,
+              ImagePool *pool,
+              float &r_value) const;
+
+ private:
+  static constexpr int tile_size_ = 64;
+
+  void prepare(const Brush &brush, const float2 &aspect_correction) const;
+  void bake_tile(const Brush &brush, int tile_x, int tile_y, int thread, ImagePool *pool) const;
+  bool tile_ready(const Brush &brush, int cell_x, int cell_y, int thread, ImagePool *pool) const;
+
+  mutable std::mutex mutex_;
+  mutable std::atomic<bool> prepared_{false};
+  /* The members below are written once under `mutex_` before `prepared_` is set. */
+  mutable bool usable_ = false;
+  mutable float2 aspect_ = float2(1.0f);
+  /** Half size of the covered texture-space rectangle. */
+  mutable float2 half_extent_ = float2(0.0f);
+  mutable int2 cells_ = int2(0);
+  mutable int2 tiles_ = int2(0);
+  mutable Array<uint16_t> values_;
+  /** 0: empty, 1: being baked, 2: ready. */
+  mutable std::unique_ptr<std::atomic<uint8_t>[]> tile_state_;
+};
+
+}  // namespace bke
+
 /**
  * Mask Texture coverage in the Area Plane frame: \a local is brush-local, [-1, 1] across the
  * footprint. The single implementation behind the PBR strokes, the paint cursor and the radial
  * control preview, so what is previewed is exactly what the stroke skips.
  *
+ * \param lut: Optional stroke-lifetime cache, see #bke::BrushMaskLut; null evaluates directly.
  * \param paint: Provides the pressure curve; null when no #Paint is available (radial control),
  * which skips the curve.
  * \param rake_rotation: The slot's rake/random angle the stroke folded into
@@ -345,7 +402,8 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
                                        float rake_rotation,
                                        const float2 &aspect_correction,
                                        int thread,
-                                       ImagePool *pool);
+                                       ImagePool *pool,
+                                       const bke::BrushMaskLut *lut = nullptr);
 
 /**
  * Scale to apply to the texture sampling coordinates so that a non-square image texture keeps its

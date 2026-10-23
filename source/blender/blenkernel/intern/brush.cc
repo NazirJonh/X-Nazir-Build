@@ -1963,13 +1963,177 @@ float BKE_brush_mask_tex_pressure_apply(const Brush &brush, const Paint &paint, 
   }
 }
 
+namespace bke {
+
+/* -------------------------------------------------------------------- */
+/** \name Mask Texture Lookup Table
+ * \{ */
+
+void BrushMaskLut::prepare(const Brush &brush, const float2 &aspect_correction) const
+{
+  /* Beyond this the table is bigger than evaluating directly is worth (about 19 MB). */
+  constexpr int max_cells_per_axis = 4096;
+  constexpr int64_t max_cells = int64_t(3072) * 3072;
+
+  this->usable_ = false;
+  this->aspect_ = aspect_correction;
+
+  const MTex &mtex = brush.mask_mtex;
+  const Tex *tex = mtex.tex;
+  /* Node trees and procedural textures depend on state a table cannot capture, and the table pitch
+   * is derived from the image resolution. */
+  if (tex == nullptr || tex->type != TEX_IMAGE || tex->ima == nullptr || tex->nodetree != nullptr) {
+    return;
+  }
+
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(tex->ima, const_cast<ImageUser *>(&tex->iuser), &lock);
+  const int2 image_size = ibuf != nullptr ? int2(ibuf->x, ibuf->y) : int2(0);
+  BKE_image_release_ibuf(tex->ima, ibuf, lock);
+  if (image_size.x <= 0 || image_size.y <= 0) {
+    return;
+  }
+
+  /* Every query is `rotate(local) * size + ofs` with `local` inside the footprint square, so its
+   * magnitude per axis stays below `sqrt(2) * size + |ofs|` whatever the rotation. */
+  const float2 half_extent((1.4142136f * math::abs(mtex.size[0]) + math::abs(mtex.ofs[0])) *
+                               math::abs(aspect_correction.x),
+                           (1.4142136f * math::abs(mtex.size[1]) + math::abs(mtex.ofs[1])) *
+                               math::abs(aspect_correction.y));
+  if (!(half_extent.x > 1e-4f) || !(half_extent.y > 1e-4f)) {
+    return;
+  }
+
+  /* The image spans two texture-space units, so this is one cell per image texel. */
+  const double cells_x = std::ceil(double(half_extent.x) * double(image_size.x));
+  const double cells_y = std::ceil(double(half_extent.y) * double(image_size.y));
+  if (cells_x < 1.0 || cells_y < 1.0 || cells_x > max_cells_per_axis ||
+      cells_y > max_cells_per_axis || int64_t(cells_x) * int64_t(cells_y) > max_cells)
+  {
+    return;
+  }
+
+  this->half_extent_ = half_extent;
+  this->cells_ = int2(int(cells_x), int(cells_y));
+  this->tiles_ = int2((this->cells_.x + tile_size_ - 1) / tile_size_,
+                      (this->cells_.y + tile_size_ - 1) / tile_size_);
+  this->values_ = Array<uint16_t>(int64_t(this->cells_.x) * this->cells_.y, NoInitialization());
+  this->tile_state_ = std::make_unique<std::atomic<uint8_t>[]>(
+      size_t(this->tiles_.x) * size_t(this->tiles_.y));
+  this->usable_ = true;
+}
+
+void BrushMaskLut::bake_tile(
+    const Brush &brush, const int tile_x, const int tile_y, const int thread, ImagePool *pool) const
+{
+  const MTex &mtex = brush.mask_mtex;
+  const int x_begin = tile_x * tile_size_;
+  const int y_begin = tile_y * tile_size_;
+  const int x_end = std::min(x_begin + tile_size_, this->cells_.x);
+  const int y_end = std::min(y_begin + tile_size_, this->cells_.y);
+  const float2 pitch(2.0f * this->half_extent_.x / float(this->cells_.x),
+                     2.0f * this->half_extent_.y / float(this->cells_.y));
+  for (int cy = y_begin; cy < y_end; cy++) {
+    for (int cx = x_begin; cx < x_end; cx++) {
+      const float co[3] = {-this->half_extent_.x + (float(cx) + 0.5f) * pitch.x,
+                           -this->half_extent_.y + (float(cy) + 0.5f) * pitch.y,
+                           0.0f};
+      float value = 1.0f;
+      float rgba[4];
+      RE_texture_evaluate(&mtex, co, thread, pool, false, false, &value, rgba);
+      this->values_[int64_t(cy) * this->cells_.x + cx] = uint16_t(
+          math::clamp(value, 0.0f, 1.0f) * 65535.0f + 0.5f);
+    }
+  }
+}
+
+bool BrushMaskLut::tile_ready(
+    const Brush &brush, const int cell_x, const int cell_y, const int thread, ImagePool *pool) const
+{
+  const int tile_x = cell_x / tile_size_;
+  const int tile_y = cell_y / tile_size_;
+  std::atomic<uint8_t> &state = this->tile_state_[size_t(tile_y) * this->tiles_.x + tile_x];
+  if (state.load(std::memory_order_acquire) == 2) {
+    return true;
+  }
+  uint8_t expected = 0;
+  if (state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+    this->bake_tile(brush, tile_x, tile_y, thread, pool);
+    state.store(2, std::memory_order_release);
+    return true;
+  }
+  /* Another thread is baking it: evaluate directly instead of waiting. */
+  return false;
+}
+
+bool BrushMaskLut::sample(const Brush &brush,
+                          const float2 &aspect_correction,
+                          const float x,
+                          const float y,
+                          const int thread,
+                          ImagePool *pool,
+                          float &r_value) const
+{
+  if (!this->prepared_.load(std::memory_order_acquire)) {
+    std::lock_guard lock(this->mutex_);
+    if (!this->prepared_.load(std::memory_order_relaxed)) {
+      this->prepare(brush, aspect_correction);
+      this->prepared_.store(true, std::memory_order_release);
+    }
+  }
+  if (!this->usable_ || this->aspect_ != aspect_correction) {
+    return false;
+  }
+
+  const float fx = (x + this->half_extent_.x) * float(this->cells_.x) /
+                       (2.0f * this->half_extent_.x) -
+                   0.5f;
+  const float fy = (y + this->half_extent_.y) * float(this->cells_.y) /
+                       (2.0f * this->half_extent_.y) -
+                   0.5f;
+  /* Outside the table, or on its edge where the interpolation would need a missing neighbor. */
+  if (!(fx >= 0.0f) || !(fy >= 0.0f) || fx > float(this->cells_.x - 1) ||
+      fy > float(this->cells_.y - 1))
+  {
+    return false;
+  }
+
+  const int x0 = int(fx);
+  const int y0 = int(fy);
+  const int x1 = std::min(x0 + 1, this->cells_.x - 1);
+  const int y1 = std::min(y0 + 1, this->cells_.y - 1);
+  if (!this->tile_ready(brush, x0, y0, thread, pool) ||
+      !this->tile_ready(brush, x1, y0, thread, pool) ||
+      !this->tile_ready(brush, x0, y1, thread, pool) ||
+      !this->tile_ready(brush, x1, y1, thread, pool))
+  {
+    return false;
+  }
+
+  const float tx = fx - float(x0);
+  const float ty = fy - float(y0);
+  const int64_t row0 = int64_t(y0) * this->cells_.x;
+  const int64_t row1 = int64_t(y1) * this->cells_.x;
+  const float bottom = math::interpolate(
+      float(this->values_[row0 + x0]), float(this->values_[row0 + x1]), tx);
+  const float top = math::interpolate(
+      float(this->values_[row1 + x0]), float(this->values_[row1 + x1]), tx);
+  r_value = math::interpolate(bottom, top, ty) * (1.0f / 65535.0f);
+  return true;
+}
+
+/** \} */
+
+}  // namespace bke
+
 float BKE_brush_mask_tex_area_coverage(const Brush &brush,
                                        const Paint *paint,
                                        const float2 &local,
                                        const float rake_rotation,
                                        const float2 &aspect_correction,
                                        const int thread,
-                                       ImagePool *pool)
+                                       ImagePool *pool,
+                                       const bke::BrushMaskLut *lut)
 {
   const MTex &mask_mtex = brush.mask_mtex;
   if (mask_mtex.tex == nullptr) {
@@ -1998,10 +2162,12 @@ float BKE_brush_mask_tex_area_coverage(const Brush &brush,
   x *= aspect_correction.x;
   y *= aspect_correction.y;
 
-  const float co[3] = {x, y, 0.0f};
   float value = 1.0f;
-  float rgba[4];
-  RE_texture_evaluate(&mask_mtex, co, thread, pool, false, false, &value, rgba);
+  if (lut == nullptr || !lut->sample(brush, aspect_correction, x, y, thread, pool, value)) {
+    const float co[3] = {x, y, 0.0f};
+    float rgba[4];
+    RE_texture_evaluate(&mask_mtex, co, thread, pool, false, false, &value, rgba);
+  }
   value = math::clamp(value - brush.texture_sample_bias, 0.0f, 1.0f);
   return paint != nullptr ? BKE_brush_mask_tex_pressure_apply(brush, *paint, value) : value;
 }

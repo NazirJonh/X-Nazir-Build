@@ -1288,6 +1288,10 @@ static Array<RowFactorCache> compute_paint_row_factors(
    * cases (Erase reads no channel source), so it must be able to request the sample contexts on
    * its own. */
   const bool mask_texture_active = brush.mask_mtex.tex != nullptr;
+  if (mask_texture_active && cache.mask_lut == nullptr) {
+    /* Serial, before the row tasks start: the table itself is filled lazily by those tasks. */
+    ss.cache->mask_lut = std::make_shared<bke::BrushMaskLut>();
+  }
   /* Must mirror the sampler actually passed to #apply_paint_channel: computing this from
    * `cache.material_source_sampler` and `invert` again here could silently diverge from it. */
   const bool needs_positions = active_sampler != nullptr || mask_texture_active;
@@ -1451,7 +1455,8 @@ static Array<RowFactorCache> compute_paint_row_factors(
                     math::transform_point(cache.brush_local_mat, contexts[i].symm_point),
                     contexts[i].view_point_2d,
                     thread_id,
-                    ss.tex_pool());
+                    ss.tex_pool(),
+                    cache.mask_lut.get());
               }
             }
 

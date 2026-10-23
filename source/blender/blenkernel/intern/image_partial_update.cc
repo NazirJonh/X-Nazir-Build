@@ -577,11 +577,90 @@ void BKE_image_partial_update_register_free(Image *image)
   image->runtime->partial_update_register = nullptr;
 }
 
-static void image_pixel_version_bump(Image *image)
+/** How many marked edits an image remembers; a reader further behind sees the image as changed. */
+constexpr int PIXEL_JOURNAL_MAX = 64;
+
+/**
+ * Record one edit: draw its version from the global counter, publish it as the image's current
+ * one and keep the rectangle for #BKE_image_pixel_changes_since. \a region is null for an edit
+ * that is not a rectangle of the first tile.
+ */
+static void image_pixel_change_record(Image *image, const rcti *region, const ImBuf *image_buffer)
 {
-  static std::atomic<uint64_t> global_pixel_version = 0;
-  image->runtime->pixel_version.store(global_pixel_version.fetch_add(1) + 1,
-                                      std::memory_order_relaxed);
+  bke::ImageRuntime &runtime = *image->runtime;
+
+  std::lock_guard<Mutex> lock(runtime.pixel_journal_mutex);
+  /* Drawn under the lock: two writers of one image must append in the order of their versions, or
+   * a reader that stopped between them skips the earlier edit for ever. */
+  const uint64_t version = bke::image_pixel_version_next();
+  bke::ImageRuntime::PixelChange change;
+  change.version = version;
+  /* A resized buffer renumbers every texel: what was edited before no longer lines up. */
+  bool resized = false;
+  if (image_buffer != nullptr) {
+    resized = image_buffer->x != runtime.pixel_journal_width ||
+              image_buffer->y != runtime.pixel_journal_height;
+    runtime.pixel_journal_width = image_buffer->x;
+    runtime.pixel_journal_height = image_buffer->y;
+  }
+  if (region == nullptr || resized || BLI_rcti_is_empty(region)) {
+    change.full = true;
+  }
+  else {
+    change.xmin = region->xmin;
+    change.xmax = region->xmax;
+    change.ymin = region->ymin;
+    change.ymax = region->ymax;
+  }
+  runtime.pixel_journal.append(change);
+  if (int(runtime.pixel_journal.size()) > PIXEL_JOURNAL_MAX) {
+    runtime.pixel_journal_floor = runtime.pixel_journal.first().version;
+    runtime.pixel_journal.remove(0);
+  }
+  runtime.pixel_version.store(version, std::memory_order_relaxed);
+}
+
+ePixelChange BKE_image_pixel_changes_since(const Image &image,
+                                           const uint64_t since_version,
+                                           rcti &r_region)
+{
+  BLI_rcti_init(&r_region, 0, 0, 0, 0);
+  bke::ImageRuntime &runtime = *image.runtime;
+  std::lock_guard<Mutex> lock(runtime.pixel_journal_mutex);
+  if (runtime.pixel_version.load(std::memory_order_relaxed) == since_version) {
+    return ePixelChange::None;
+  }
+  if (since_version < runtime.pixel_journal_floor) {
+    return ePixelChange::Full;
+  }
+  bool any = false;
+  for (const bke::ImageRuntime::PixelChange &change : runtime.pixel_journal) {
+    if (change.version <= since_version) {
+      continue;
+    }
+    if (change.full) {
+      return ePixelChange::Full;
+    }
+    rcti region;
+    BLI_rcti_init(&region, change.xmin, change.xmax, change.ymin, change.ymax);
+    if (!any) {
+      r_region = region;
+      any = true;
+    }
+    else {
+      BLI_rcti_union(&r_region, &region);
+    }
+  }
+  /* The version moved but nothing is left to explain it: the history is not trustworthy. */
+  return any ? ePixelChange::Region : ePixelChange::Full;
+}
+
+void BKE_image_pixel_journal_size(const Image &image, int &r_width, int &r_height)
+{
+  bke::ImageRuntime &runtime = *image.runtime;
+  std::lock_guard<Mutex> lock(runtime.pixel_journal_mutex);
+  r_width = runtime.pixel_journal_width;
+  r_height = runtime.pixel_journal_height;
 }
 
 void BKE_image_partial_update_mark_region(Image *image,
@@ -589,7 +668,10 @@ void BKE_image_partial_update_mark_region(Image *image,
                                           const ImBuf *image_buffer,
                                           const rcti *updated_region)
 {
-  image_pixel_version_bump(image);
+  /* Only the first tile is a rectangle of the canvas a cache stores; an edit of another tile can
+   * only be answered by recomputing everything. */
+  const bool first_tile = image_tile == nullptr || image_tile->tile_number == 1001;
+  image_pixel_change_record(image, first_tile ? updated_region : nullptr, image_buffer);
   PartialUpdateRegisterImpl *partial_updater = unwrap(image_partial_update_register_ensure(image));
   partial_updater->update_resolution(image_tile, image_buffer);
   partial_updater->mark_region(image_tile, updated_region);
@@ -597,7 +679,7 @@ void BKE_image_partial_update_mark_region(Image *image,
 
 void BKE_image_partial_update_mark_full_update(Image *image)
 {
-  image_pixel_version_bump(image);
+  image_pixel_change_record(image, nullptr, nullptr);
   PartialUpdateRegisterImpl *partial_updater = unwrap(image_partial_update_register_ensure(image));
   partial_updater->mark_full_update();
 }

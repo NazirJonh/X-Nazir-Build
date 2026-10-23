@@ -836,7 +836,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, slice_cache_same_key_two_inserts_cou
     EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 1)
         << "round " << round << ": the second insert reuses the rendered entry";
     const size_t pair_bytes = size_t(first_color->x) * first_color->y * sizeof(float[4]) +
-                              size_t(first_color->x) * first_color->y * sizeof(float);
+                              size_t(first_color->x) * first_color->y * sizeof(float[4]);
     EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), pair_bytes)
         << "round " << round << ": the bytes are counted once";
   }

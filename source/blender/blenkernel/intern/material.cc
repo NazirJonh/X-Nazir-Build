@@ -73,6 +73,7 @@
 #include "BKE_paint_layers_generate.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_pointcloud.hh"
 #include "BKE_preview_image.hh"
@@ -388,6 +389,7 @@ static void material_free_data(ID *id)
    * sitting in #Main and turn every rebuild into a full re-composite and a full re-shade. */
   if ((material->id.tag & ID_TAG_COPIED_ON_EVAL) == 0) {
     BKE_paint_material_composite_cache_free_material(*material);
+    BKE_paint_layers_slice_cache_free_material(*material);
     /* Legitimate from here because the Combined cache lives in this module too. */
     BKE_paint_material_combined_cache_free_material(*material);
   }

@@ -68,6 +68,13 @@ bool BKE_paint_layers_composite_image_layers(
 void BKE_paint_layers_slice_cache_free_all();
 
 /**
+ * Drop the cached slices of \a ma. Entries are keyed by the material's session UID, which is never
+ * reused, so those of a freed material could not be hit again and would hold their canvases until
+ * the byte budget evicted them.
+ */
+void BKE_paint_layers_slice_cache_free_material(const Material &ma);
+
+/**
  * Composite \a channel of \a ma into \a r_dst, which must be byte RGBA of the stack's dimensions.
  *
  * The result is encoded in \a r_dst's own colorspace; a buffer that names none gets the channel's

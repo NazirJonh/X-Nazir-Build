@@ -5,6 +5,7 @@
 #include "testing/testing.h"
 
 #include "BLI_listbase.h"
+#include "BLI_rect.h"
 #include "BLI_uuid.h"
 
 #include "DNA_image_types.h"
@@ -725,6 +726,130 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_key_follows_source_pixel_version)
   paint_layer_anchor_point_slice_cache_clear();
 }
 
+TEST_F(PaintLayersAnchorPointTest, slice_cache_renders_again_only_the_edited_region)
+{
+  Image *image = add_solid_image("Source");
+  SliceFixture fixture = make_slice_fixture(*this, "Source", image);
+  ASSERT_NE(fixture.reader, nullptr);
+  paint_layer_anchor_point_slice_cache_clear();
+
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, nullptr);
+  ASSERT_NE(ibuf, nullptr);
+  ASSERT_EQ(ibuf->x, 8);
+  ImageTile *tile = static_cast<ImageTile *>(image->tiles.first);
+  /* The first marked edit of an image is "everything" (its size is not known yet); the edits
+   * after it are rectangles. */
+  rcti whole;
+  BLI_rcti_init(&whole, 0, 8, 0, 8);
+  BKE_image_partial_update_mark_region(image, tile, ibuf, &whole);
+
+  std::shared_ptr<ImBuf> before_color;
+  std::shared_ptr<ImBuf> before_coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
+                                            *fixture.reader,
+                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                            &before_color,
+                                            &before_coverage));
+  const auto texel_red = [](const ImBuf &buffer, const int x, const int y) {
+    return buffer.float_data()[(int64_t(y) * buffer.x + x) * 4];
+  };
+  const float edited_before = texel_red(*before_color, 3, 3);
+  const float other_before = texel_red(*before_color, 6, 6);
+
+  /* A 2x2 dab of red, marked as the rectangle it is. */
+  for (int y = 2; y < 4; y++) {
+    for (int x = 2; x < 4; x++) {
+      uchar *texel = ibuf->byte_buffer.data + (int64_t(y) * ibuf->x + x) * 4;
+      texel[0] = 255;
+    }
+  }
+  rcti dab;
+  BLI_rcti_init(&dab, 2, 4, 2, 4);
+  BKE_image_partial_update_mark_region(image, tile, ibuf, &dab);
+  BKE_image_release_ibuf(image, ibuf, nullptr);
+
+  std::shared_ptr<ImBuf> after_color;
+  std::shared_ptr<ImBuf> after_coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
+                                            *fixture.reader,
+                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                            &after_color,
+                                            &after_coverage));
+  EXPECT_GT(texel_red(*after_color, 3, 3), edited_before) << "the dab shows in the slice";
+  EXPECT_FLOAT_EQ(texel_red(*after_color, 6, 6), other_before) << "outside the dab nothing moved";
+  /* The first description still holds its buffers, so the update worked on a copy of them. */
+  EXPECT_NE(after_color.get(), before_color.get());
+  EXPECT_FLOAT_EQ(texel_red(*before_color, 3, 3), edited_before);
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 1);
+  paint_layer_anchor_point_slice_cache_clear();
+}
+
+TEST_F(PaintLayersAnchorPointTest, pixel_journal_answers_region_full_and_none)
+{
+  Image *image = add_solid_image("Journal");
+  ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, nullptr);
+  ASSERT_NE(ibuf, nullptr);
+  ImageTile *tile = static_cast<ImageTile *>(image->tiles.first);
+  rcti reported;
+
+  const uint64_t untouched = image->runtime->pixel_version.load();
+  EXPECT_EQ(BKE_image_pixel_changes_since(*image, untouched, reported), ePixelChange::None);
+
+  /* The first marked edit is everything: the size of the buffer was not known before it. */
+  rcti whole;
+  BLI_rcti_init(&whole, 0, 8, 0, 8);
+  BKE_image_partial_update_mark_region(image, tile, ibuf, &whole);
+  EXPECT_EQ(BKE_image_pixel_changes_since(*image, untouched, reported), ePixelChange::Full);
+  const uint64_t synced = image->runtime->pixel_version.load();
+  EXPECT_GT(synced, untouched);
+
+  rcti first, second;
+  BLI_rcti_init(&first, 1, 3, 1, 3);
+  BLI_rcti_init(&second, 5, 7, 4, 6);
+  BKE_image_partial_update_mark_region(image, tile, ibuf, &first);
+  BKE_image_partial_update_mark_region(image, tile, ibuf, &second);
+  ASSERT_EQ(BKE_image_pixel_changes_since(*image, synced, reported), ePixelChange::Region);
+  EXPECT_EQ(reported.xmin, 1);
+  EXPECT_EQ(reported.xmax, 7);
+  EXPECT_EQ(reported.ymin, 1);
+  EXPECT_EQ(reported.ymax, 6);
+  EXPECT_EQ(BKE_image_pixel_changes_since(*image, untouched, reported), ePixelChange::Full)
+      << "the history from before the first edit contains a full one";
+
+  /* More edits than the journal keeps: a reader that far behind has to treat the image as new. */
+  for (int i = 0; i < 100; i++) {
+    BKE_image_partial_update_mark_region(image, tile, ibuf, &first);
+  }
+  EXPECT_EQ(BKE_image_pixel_changes_since(*image, synced, reported), ePixelChange::Full);
+  BKE_image_release_ibuf(image, ibuf, nullptr);
+}
+
+TEST_F(PaintLayersAnchorPointTest, a_new_image_runtime_starts_with_a_version_of_its_own)
+{
+  /* An undo or a file load builds a fresh runtime; its first version must not repeat one a cache
+   * saw on the runtime it replaced. */
+  Image *first = add_solid_image("First");
+  Image *second = add_solid_image("Second");
+  EXPECT_NE(first->runtime->pixel_version.load(), second->runtime->pixel_version.load());
+  const uint64_t before = first->runtime->pixel_version.load();
+  BKE_image_partial_update_mark_full_update(first);
+  EXPECT_GT(first->runtime->pixel_version.load(), before);
+}
+
+TEST_F(PaintLayersAnchorPointTest, slice_cache_counts_both_buffers_as_allocated)
+{
+  SliceFixture fixture = make_slice_fixture(*this, "Source", add_solid_image("Source"));
+  ASSERT_NE(fixture.reader, nullptr);
+  paint_layer_anchor_point_slice_cache_clear();
+  std::shared_ptr<ImBuf> color;
+  std::shared_ptr<ImBuf> coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(
+      *ma, *fixture.reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), size_t(8) * 8 * 2 * sizeof(float[4]))
+      << "a colour and a coverage buffer of four floats per texel each";
+  paint_layer_anchor_point_slice_cache_clear();
+}
+
 TEST_F(PaintLayersAnchorPointTest, slice_cache_drops_entry_of_older_pixels)
 {
   Image *image = add_solid_image("Source");
@@ -780,7 +905,7 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_evicts_by_bytes)
                                             &color,
                                             &coverage));
   const size_t pair_bytes = size_t(color->x) * color->y * sizeof(float[4]) +
-                            size_t(coverage->x) * coverage->y * sizeof(float);
+                            size_t(coverage->x) * coverage->y * sizeof(float[4]);
   AnchorSliceCacheBudgetGuard guard(pair_bytes);
   paint_layer_anchor_point_slice_cache_clear();
 

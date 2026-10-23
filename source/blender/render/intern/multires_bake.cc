@@ -1633,6 +1633,7 @@ static void finish_images(MultiresBakeRender &bake,
 
     ibuf->userflags |= IB_DISPLAY_BUFFER_INVALID;
     BKE_image_mark_dirty(image, ibuf);
+    BKE_image_partial_update_mark_full_update(image);
 
     if (ibuf->float_data()) {
       ibuf->userflags |= IB_RECT_INVALID;

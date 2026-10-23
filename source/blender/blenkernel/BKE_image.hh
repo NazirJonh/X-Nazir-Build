@@ -141,6 +141,17 @@ struct ImagePaintSlotInfo {
   bool is_used = false;
 };
 
+/**
+ * The next value of the one counter every #ImageRuntime::pixel_version draws from. Global, so no two
+ * images and no two runtimes of one image (undo and file load build a fresh one) ever share a
+ * version.
+ */
+inline uint64_t image_pixel_version_next()
+{
+  static std::atomic<uint64_t> counter = 0;
+  return counter.fetch_add(1) + 1;
+}
+
 struct ImageRuntime {
   /* Mutex used to guarantee thread-safe access to the cached ImBuf of the corresponding image ID.
    */
@@ -171,13 +182,36 @@ struct ImageRuntime {
   /**
    * Changes every time the image's pixels are marked as modified (see
    * #BKE_image_partial_update_mark_region and #BKE_image_partial_update_mark_full_update), which
-   * every paint stroke and reload goes through. Each change draws a value from one global counter,
-   * so no two edits of any images share one; an image never marked reads 0, so a cache has to
-   * identify the image itself (by #ID::session_uid) as well. For caches of data derived from
-   * pixels that need to tell "unchanged" without holding a partial update user. Atomic: strokes
-   * mark from worker threads while a cache reads it. Use relaxed order, it orders nothing else.
+   * every paint stroke and reload goes through. Each change, and each new runtime (it starts with a
+   * value of its own), draws from one global counter, so no two edits of any images share one and a
+   * runtime rebuilt by undo or file load never repeats a version a cache saw before. A cache still
+   * identifies the image itself (by #ID::session_uid). For caches of data derived from pixels that
+   * need to tell "unchanged" without holding a partial update user. Atomic: strokes mark from
+   * worker threads while a cache reads it. Use relaxed order, it orders nothing else; the order of
+   * edits is the one of #pixel_journal, which is appended to under #pixel_journal_mutex together
+   * with the publication of the version.
    */
-  std::atomic<uint64_t> pixel_version = 0;
+  std::atomic<uint64_t> pixel_version{image_pixel_version_next()};
+
+  /** One marked edit of the pixels, kept for #BKE_image_pixel_changes_since. */
+  struct PixelChange {
+    uint64_t version = 0;
+    /** The edited rectangle in the texels of the first tile; unused when #full. */
+    int xmin = 0, xmax = 0, ymin = 0, ymax = 0;
+    /** The edit is not a rectangle of the first tile: a reload, a resize, another tile. */
+    bool full = false;
+  };
+  /**
+   * The most recent marked edits, oldest first. Bounded: an edit older than #pixel_journal_floor is
+   * forgotten and a reader that needs it has to treat the image as wholly changed.
+   */
+  Vector<PixelChange> pixel_journal;
+  /** Versions up to this one may have been dropped from #pixel_journal. */
+  uint64_t pixel_journal_floor = 0;
+  /** The size of the buffer the last marked edit was made on, to tell a resize from an edit. */
+  int pixel_journal_width = 0, pixel_journal_height = 0;
+  /** Guards #pixel_journal and #pixel_journal_floor: strokes mark from worker threads. */
+  Mutex pixel_journal_mutex;
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;
@@ -1001,5 +1035,33 @@ void BKE_image_partial_update_mark_region(Image *image,
                                           const rcti *updated_region);
 /** \brief Mark the whole image to be updated. */
 void BKE_image_partial_update_mark_full_update(Image *image);
+
+/** What happened to the pixels of an image since a version was read. */
+enum class ePixelChange : int8_t {
+  /** Nothing was marked. */
+  None,
+  /** Only the rectangle written to `r_region` (in the texels of the first tile) was edited. */
+  Region,
+  /** Anything may have changed: a reload, a resize, another tile, or more history than is kept. */
+  Full,
+};
+
+/**
+ * What was marked on \a image after \a since_version, a value read from
+ * #ImageRuntime::pixel_version when a derived result was last made.
+ *
+ * Unlike a #PartialUpdateUser this keeps no state per reader and is safe from any thread, which is
+ * what a cache needs when a worker job and the main thread both fill it from the same image.
+ */
+ePixelChange BKE_image_pixel_changes_since(const Image &image,
+                                           uint64_t since_version,
+                                           rcti &r_region);
+
+/**
+ * The size of the buffer the last marked edit of \a image was made on, or 0 x 0 for an image no
+ * edit was ever marked on. For a cache to tell whether a rectangle reported by
+ * #BKE_image_pixel_changes_since lies in the texels of its own result.
+ */
+void BKE_image_pixel_journal_size(const Image &image, int &r_width, int &r_height);
 
 }  // namespace blender

@@ -919,6 +919,8 @@ bool BKE_image_scale(Image *image, int width, int height, ImageUser *iuser)
   if (ibuf) {
     IMB_scale(ibuf, width, height, IMBScaleFilter::Box, false);
     BKE_image_mark_dirty(image, ibuf);
+    /* Every texel and the size moved: a result derived from the pixels is out of date. */
+    BKE_image_partial_update_mark_full_update(image);
   }
 
   BKE_image_release_ibuf(image, ibuf, lock);
@@ -3767,6 +3769,9 @@ void BKE_image_signal(Main *bmain, Image *ima, ImageUser *iuser, int signal)
         image_tag_reload(ima, nullptr, iuser, ima);
       }
       BKE_image_walk_all_users(bmain, ima, image_tag_reload);
+      /* Not only through users: an image nothing shows is reloaded as well, and what was derived
+       * from its pixels is out of date either way. */
+      BKE_image_partial_update_mark_full_update(ima);
       break;
     case IMA_SIGNAL_USER_NEW_IMAGE:
       if (iuser) {
@@ -3779,6 +3784,9 @@ void BKE_image_signal(Main *bmain, Image *ima, ImageUser *iuser, int signal)
       break;
     case IMA_SIGNAL_COLORMANAGE:
       BKE_image_free_buffers(ima);
+      /* The buffers are decoded again with the new settings: the pixels a cache derived its result
+       * from are not the ones it saw. */
+      BKE_image_partial_update_mark_full_update(ima);
       break;
   }
 

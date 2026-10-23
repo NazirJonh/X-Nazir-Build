@@ -46,10 +46,26 @@ struct rcti;
  * of the stack: consumers decide what to do with it (the float export premultiplies by it, a byte
  * export writes it as is). The generated graph's factor follows the same rule.
  *
+ * \param describe_only: describe the stack without rendering any Anchor Point slice: every live
+ *        reader keeps its descriptor and the maps its slice subscribes to, but gains no
+ *        `anchor_point_color`/`anchor_point_coverage`/`anchor_point_slice` buffer. The GPU
+ *        Combined preview asks for this, since it captures the slices into its own slots; a CPU
+ *        caller (the composite, a bake, the Image Editor) must leave it false. The slice cache is
+ *        not populated in this mode.
  * \return false when the channel has no participating row at all.
  */
 bool BKE_paint_layers_composite_image_layers(
-    const Material &ma, int channel, Vector<PaintMaterialCompositeImageLayer> &r_layers);
+    const Material &ma,
+    int channel,
+    Vector<PaintMaterialCompositeImageLayer> &r_layers,
+    bool describe_only = false);
+
+/**
+ * Drop every cached Anchor Point slice. The cache owns float canvases of its own (about 0.5 GiB per
+ * reader and channel at 4K), so it has to be emptied before the leak check at exit, and with the
+ * rest of the session when a file is loaded: its entries name materials of the file going away.
+ */
+void BKE_paint_layers_slice_cache_free_all();
 
 /**
  * Composite \a channel of \a ma into \a r_dst, which must be byte RGBA of the stack's dimensions.
@@ -110,6 +126,9 @@ bool BKE_paint_layers_mask_items(const Material &ma,
  *
  * \param dimensions_only: describe only what the slice is made of, so a caller finding the stack
  * dimensions does not render (or allocate) a single nested slice. The entry must not be evaluated.
+ * \param allow_empty_mask: a mask slice with no item is a valid slice (a factor of one), rather
+ * than a refused one. The GPU capture plan asks for it so the slot can be cleared to one; a bake
+ * still refuses it.
  *
  * \return false when the reference does not resolve or the row cannot be described.
  */
@@ -118,7 +137,167 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                      int channel,
                                      PaintMaterialCompositeImageLayer &r_entry,
                                      const int *slice_rect = nullptr,
-                                     bool dimensions_only = false);
+                                     bool dimensions_only = false,
+                                     bool allow_empty_mask = false);
+
+/**
+ * Render the slice \a reader lays in \a channel at the source row's resolution. The buffers are
+ * reference counted and outlive the slice cache; \a dst_rect limits a partial render to that
+ * rectangle, leaving the rest zero, and is never cached. Used by the developer GPU verification.
+ */
+bool BKE_paint_layers_slice_render(const Material &ma,
+                                   const MaterialPaintLayer &reader,
+                                   int channel,
+                                   std::shared_ptr<ImBuf> *r_color,
+                                   std::shared_ptr<ImBuf> *r_coverage,
+                                   const int *dst_rect = nullptr,
+                                   bool dimensions_only = false);
+
+/**
+ * Why the GPU Combined preview cannot lay \a layer the way the CPU composite does, or null when it
+ * can. Pure: it reads the description only, so it is testable without a GPU. A live Anchor Point
+ * slice is supported (the GPU path captures it into a slot); a *baked* correction with a coverage
+ * map is not, because the correction pass has no coverage map of its own.
+ *
+ * \param mask_slice: \a layer is the description of a mask slice captured for a slot, not a row of
+ *        the stack. Such an entry may consist of mask items alone; an ordinary row may not, and a
+ *        row without a map or colour is still refused.
+ */
+const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
+                                                    bool mask_slice = false);
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Anchor Point Capture Plan
+ *
+ * What the GPU Combined preview has to capture before its channel passes, collected and ordered
+ * without a GPU so the rules are testable. The gather only allocates textures and dispatches.
+ * \{ */
+
+/** What a capture job produces: a content pair, a mask rendered as content, or a mask slot. */
+enum class PaintLayersGpuCaptureKind : uint8_t {
+  Content = 0,
+  MaskContent,
+  MaskItem,
+};
+
+/** One slice to capture before the channel passes, with the description it was resolved from. */
+struct PaintLayersGpuCaptureJob {
+  bUUID reader = {};
+  bUUID point = {};
+  /** The channel enum the slice is read in, never a combined-stack index. */
+  int channel = 0;
+  /** The rank of #point, not of the reader. */
+  int rank = -1;
+  PaintLayersGpuCaptureKind kind = PaintLayersGpuCaptureKind::Content;
+  /** How many readers lay this same slot; the gather compares the slot once per point. */
+  int reader_count = 1;
+  Vector<bUUID> readers;
+  /** A mask slice with no items is a factor of one, not a refused slice. */
+  bool clear_to_one = false;
+  /** Described without rendering: the GPU fills the slot from the description. */
+  PaintMaterialCompositeImageLayer entry;
+};
+
+/**
+ * Collect the Anchor Point slices \a stacks need, recursively, into \a r_jobs.
+ *
+ * Every job's entry is described once (\a stacks themselves are expected to come from
+ * #BKE_paint_layers_composite_image_layers with `describe_only`), and the readers nested inside
+ * that entry are collected from it, so a reader below a point still gets a slot even when its own
+ * row is hidden or lays nothing. A reader on a hidden/zero-opacity row is collected only through
+ * such a nested entry: nothing lays it otherwise.
+ *
+ * Jobs are deduplicated by (point, kind, channel) and sorted by the rank of the point, so a nested
+ * producer is captured before the slice that reads it. A shared primitive point yields one job.
+ *
+ * \param stacks: one stack per entry of \a channels, same length.
+ * \param channels: the channel enum each stack was derived for.
+ * \param r_reason: a static string saying why no plan could be built, or null.
+ */
+bool BKE_paint_layers_gpu_capture_plan(
+    const Material &ma,
+    Span<const Span<const PaintMaterialCompositeImageLayer>> stacks,
+    Span<const int> channels,
+    Vector<PaintLayersGpuCaptureJob> &r_jobs,
+    const char **r_reason = nullptr);
+
+/** The identity of a GPU slice slot: a point read in one channel enum. */
+struct PaintLayersGpuSlotKey {
+  bUUID point = {};
+  int channel = 0;
+};
+
+bool BKE_paint_layers_gpu_slot_key_equal(const PaintLayersGpuSlotKey &a,
+                                         const PaintLayersGpuSlotKey &b);
+
+/** The index of the slot for \a point in \a channel, or -1. */
+int BKE_paint_layers_gpu_slot_find(Span<const PaintLayersGpuSlotKey> slots,
+                                   const bUUID &point,
+                                   int channel);
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Verification
+ * \{ */
+
+/** The outcome of comparing one captured slot with the CPU slice it should hold. */
+struct PaintLayersGpuVerifyDiff {
+  bool ok = true;
+  /** The largest difference of any component of any sample: reported, not judged. */
+  float max_diff = 0.0f;
+  /** The mean over the samples of each sample's largest component difference: what is judged. */
+  float mean_diff = 0.0f;
+  bool has_nan = false;
+  int64_t samples = 0;
+};
+
+/**
+ * Compare paired samples of a captured GPU slot and its CPU slice. The two arrays hold
+ * \a sample_count samples of \a components floats each, already paired by the caller.
+ *
+ * Half-float storage and the different sampling at a slice edge mean a per-pixel comparison is
+ * meaningless; \a tolerance applies to the mean per-sample difference, 1e-2 by default. A NaN in
+ * either array fails the comparison. With no samples \a samples is 0 and nothing was compared.
+ */
+PaintLayersGpuVerifyDiff BKE_paint_layers_gpu_verify_compare_slot(const float *gpu,
+                                                                  const float *cpu,
+                                                                  int64_t sample_count,
+                                                                  int components,
+                                                                  float tolerance = 1e-2f);
+
+/**
+ * Owns the textures a GPU capture slot allocated and releases them in its destructor, however far
+ * the slot got: one allocation that fails must not leak the one before it. The release function is
+ * supplied by the caller, so the guard itself has no GPU dependency and is testable.
+ */
+class PaintLayersGpuSlotGuard {
+ public:
+  using ReleaseFn = void (*)(void *release_data, void *resource);
+
+  PaintLayersGpuSlotGuard() = default;
+  PaintLayersGpuSlotGuard(const PaintLayersGpuSlotGuard &) = delete;
+  PaintLayersGpuSlotGuard &operator=(const PaintLayersGpuSlotGuard &) = delete;
+  PaintLayersGpuSlotGuard(PaintLayersGpuSlotGuard &&other) noexcept;
+  PaintLayersGpuSlotGuard &operator=(PaintLayersGpuSlotGuard &&other) noexcept;
+  ~PaintLayersGpuSlotGuard();
+
+  void set_release(ReleaseFn fn, void *release_data);
+  /** Take ownership of \a resource; null is ignored. */
+  void own(void *resource);
+  /** Release everything now; the destructor does this otherwise. */
+  void release();
+
+  int64_t size() const
+  {
+    return int64_t(resources_.size());
+  }
+
+ private:
+  ReleaseFn release_ = nullptr;
+  void *release_data_ = nullptr;
+  Vector<void *> resources_;
+};
+
+/** \} */
 
 /**
  * A CPU sampler of one row's effective mask, for the paint strokes.

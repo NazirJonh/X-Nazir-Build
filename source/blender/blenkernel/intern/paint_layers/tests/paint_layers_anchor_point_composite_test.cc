@@ -16,6 +16,7 @@
 #include "BLI_listbase.h"
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
+#include "BLI_utildefines.h"
 
 #include "BKE_image.hh"
 #include "BKE_image_partial_update.hh"
@@ -31,9 +32,13 @@
 #include "IMB_imbuf_types.hh"
 
 #include <atomic>
+#include <array>
 #include <cmath>
+#include <limits>
+#include <cstdint>
 #include <functional>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "../paint_layers_generate_intern.hh"
@@ -206,6 +211,38 @@ class PaintLayersAnchorPointCompositeTest : public PaintLayersTestBase {
         {
           return found;
         }
+      }
+    }
+    return nullptr;
+  }
+
+  /**
+   * The GPU capture plan of one channel's stack. The stack is described without rendering any
+   * slice, as the GPU path does.
+   */
+  bool capture_plan_for_channel(const int channel, Vector<PaintLayersGpuCaptureJob> &r_jobs)
+  {
+    Vector<PaintMaterialCompositeImageLayer> stack;
+    BKE_paint_layers_composite_image_layers(*ma, channel, stack, /*describe_only=*/true);
+    std::array<Span<const PaintMaterialCompositeImageLayer>, 1> stacks = {
+        Span<const PaintMaterialCompositeImageLayer>(stack.data(), int64_t(stack.size()))};
+    std::array<int, 1> channels = {channel};
+    const char *reason = nullptr;
+    const Span<const Span<const PaintMaterialCompositeImageLayer>> stack_view(
+        stacks.data(), int64_t(stacks.size()));
+    const Span<const int> channel_view(channels.data(), int64_t(channels.size()));
+    const bool ok = BKE_paint_layers_gpu_capture_plan(
+        *ma, stack_view, channel_view, r_jobs, &reason);
+    EXPECT_TRUE(ok) << (reason != nullptr ? reason : "the plan failed without a reason");
+    return ok;
+  }
+
+  static const PaintLayersGpuCaptureJob *find_job(const Vector<PaintLayersGpuCaptureJob> &jobs,
+                                                  const bUUID &point)
+  {
+    for (const PaintLayersGpuCaptureJob &job : jobs) {
+      if (BLI_uuid_equal(job.point, point)) {
+        return &job;
       }
     }
     return nullptr;
@@ -1747,8 +1784,41 @@ TEST_F(PaintLayersAnchorPointCompositeTest, composite_cache_sees_baked_coverage_
       << "the baked reader's coverage map is a source of its composite";
 }
 
-TEST_F(PaintLayersAnchorPointCompositeTest, gpu_descriptor_carries_reader_reference)
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_unsupported_reason_allows_live_slices_and_refuses_baked_coverage)
 {
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *owner = add_layer_with_image("Owner", add_image("Owner", 4, 0, 0, 255));
+  MaterialPaintLayer *reader = add_reader(
+      *owner, PaintLayerAnchorPointList::Effects, point->marker);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *reader, MA_PAINT_LAYER_BAKE_ALWAYS));
+  bake_plan();
+  ASSERT_NE(reader->bake, nullptr);
+  ASSERT_NE(reader->bake->coverage, nullptr);
+
+  /* A baked correction covers by a coverage map the correction pass cannot read: refused. */
+  Vector<PaintMaterialCompositeImageLayer> baked_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, baked_layers));
+  bool refused = false;
+  for (const PaintMaterialCompositeImageLayer &layer : baked_layers) {
+    refused |= BKE_paint_layers_gpu_unsupported_reason(layer) != nullptr;
+  }
+  EXPECT_TRUE(refused) << "a baked Anchor Point correction is not laid by the GPU path";
+
+  /* The same reader live is a slice slot: every row stays shadable. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *reader, MA_PAINT_LAYER_BAKE_NEVER));
+  Vector<PaintMaterialCompositeImageLayer> live_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, live_layers));
+  for (const PaintMaterialCompositeImageLayer &layer : live_layers) {
+    EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layer), nullptr);
+  }
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_descriptor_carries_reader_reference){
   MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
   MaterialPaintLayer *point = add_point(*source);
   MaterialPaintLayer *reader_row = BKE_paint_layers_add(
@@ -1809,6 +1879,471 @@ TEST_F(PaintLayersAnchorPointCompositeTest, gpu_descriptor_marks_producer_after_
   ASSERT_EQ(source_layer->anchor_point_mask_producers.size(), 1u);
   EXPECT_TRUE(BLI_uuid_equal(source_layer->anchor_point_mask_producers[0], mask_point->marker));
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Describe-only stacks and the GPU capture plan
+ * \{ */
+
+TEST_F(PaintLayersAnchorPointCompositeTest, describe_only_reader_has_descriptor_without_buffers)
+{
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *reader_row = BKE_paint_layers_add(
+      *ma, "Reader", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::Effects, point->marker);
+  ASSERT_NE(reader, nullptr);
+
+  paint_layer_anchor_point_slice_cache_clear();
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, /*describe_only=*/true));
+  const PaintMaterialCompositeImageLayer *layer = find_layer_reader(layers, reader->marker);
+  ASSERT_NE(layer, nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(layer->anchor_point_reader, reader->marker));
+  EXPECT_TRUE(BLI_uuid_equal(layer->anchor_point_point, point->marker));
+  EXPECT_EQ(layer->anchor_point_target, int8_t(PaintLayerAnchorPointTarget::Content));
+  EXPECT_EQ(layer->anchor_point_hash,
+            paint_layer_anchor_point_slice_hash(*ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
+  EXPECT_FALSE(layer->anchor_point_images.is_empty())
+      << "a describe-only reader still subscribes to the maps its slice is rendered from";
+  EXPECT_EQ(layer->anchor_point_color, nullptr) << "no CPU slice is rendered for the GPU path";
+  EXPECT_EQ(layer->anchor_point_coverage, nullptr);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, describe_only_does_not_touch_slice_cache)
+{
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *reader_row = BKE_paint_layers_add(
+      *ma, "Reader", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(add_reader(*reader_row, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+
+  paint_layer_anchor_point_slice_cache_clear();
+  Vector<PaintMaterialCompositeImageLayer> described;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, described, /*describe_only=*/true));
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 0)
+      << "describe-only must not render and cache a slice";
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), 0);
+
+  /* Positive control: a full description still renders and caches the same slice. */
+  Vector<PaintMaterialCompositeImageLayer> full;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, full));
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 1);
+  EXPECT_GT(paint_layer_anchor_point_slice_cache_bytes(), 0u);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, full_description_unchanged_by_describe_only_flag)
+{
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *reader_row = BKE_paint_layers_add(
+      *ma, "Reader", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::Effects, point->marker);
+  ASSERT_NE(reader, nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> full;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, full));
+  const PaintMaterialCompositeImageLayer *full_layer = find_layer_reader(full, reader->marker);
+  ASSERT_NE(full_layer, nullptr);
+  ASSERT_NE(full_layer->anchor_point_color, nullptr);
+  ASSERT_NE(full_layer->anchor_point_coverage, nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> described;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, described, /*describe_only=*/true));
+  const PaintMaterialCompositeImageLayer *described_layer = find_layer_reader(
+      described, reader->marker);
+  ASSERT_NE(described_layer, nullptr);
+  EXPECT_EQ(described_layer->anchor_point_hash, full_layer->anchor_point_hash);
+  EXPECT_EQ(described_layer->anchor_point_images, full_layer->anchor_point_images);
+  EXPECT_EQ(described_layer->opacity, full_layer->opacity);
+  EXPECT_EQ(described_layer->enabled, full_layer->enabled);
+  EXPECT_EQ(described_layer->blend, full_layer->blend);
+  EXPECT_EQ(described_layer->color_image, full_layer->color_image);
+
+  Vector<PaintMaterialCompositeImageLayer> full_after;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, full_after));
+  const PaintMaterialCompositeImageLayer *after_layer = find_layer_reader(
+      full_after, reader->marker);
+  ASSERT_NE(after_layer, nullptr);
+  EXPECT_NE(after_layer->anchor_point_color, nullptr)
+      << "a CPU description after a describe-only pass still renders its slice";
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_capture_plan_collects_nested_reader_of_disabled_source)
+{
+  MaterialPaintLayer *inner = add_layer_with_image("Inner", add_image("Inner", 4, 255, 0, 0));
+  MaterialPaintLayer *inner_point = add_point(*inner);
+  MaterialPaintLayer *outer = add_layer_with_image("Outer", add_image("Outer", 4, 0, 0, 255));
+  ASSERT_NE(inner_point, nullptr);
+  ASSERT_NE(add_reader(*outer, PaintLayerAnchorPointList::Effects, inner_point->marker), nullptr);
+  MaterialPaintLayer *outer_point = add_point(*outer);
+  ASSERT_NE(outer_point, nullptr);
+  MaterialPaintLayer *top = add_layer_with_image("Top", add_image("Top", 4, 120, 80, 40, 255));
+  ASSERT_NE(add_reader(*top, PaintLayerAnchorPointList::Effects, outer_point->marker), nullptr);
+  /* Nothing lays the source row itself: its point is still read by the visible reader. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, outer, false));
+
+  Vector<PaintLayersGpuCaptureJob> jobs;
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  ASSERT_EQ(jobs.size(), 2u);
+  EXPECT_NE(find_job(jobs, outer_point->marker), nullptr);
+  const PaintLayersGpuCaptureJob *nested = find_job(jobs, inner_point->marker);
+  ASSERT_NE(nested, nullptr) << "the reader nested in the disabled source's slice still gets a slot";
+  EXPECT_EQ(nested->kind, PaintLayersGpuCaptureKind::Content);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_capture_plan_orders_by_point_rank_not_reader_rank)
+{
+  /* Stack, bottom to top: row 1 carries J2's point; row 5 carries J1's point; J1's reader is on
+   * row 6, J2's on row 9. The walk meets J1's reader first, so an unsorted plan (or one sorted by
+   * reader rank) is [J1, J2]; only the point rank puts J2 first. */
+  MaterialPaintLayer *row1 = add_layer_with_image("Row1", add_image("Row1", 4, 255, 0, 0));
+  MaterialPaintLayer *point2 = add_point(*row1);
+  ASSERT_NE(point2, nullptr);
+  for (int i = 2; i <= 4; i++) {
+    char name[32];
+    SNPRINTF(name, "Filler %d", i);
+    ASSERT_NE(BKE_paint_layers_add(*ma, name, nullptr, PaintLayerPlace::Above), nullptr);
+  }
+  MaterialPaintLayer *row5 = add_layer_with_image("Row5", add_image("Row5", 4, 0, 255, 0));
+  MaterialPaintLayer *point1 = add_point(*row5);
+  ASSERT_NE(point1, nullptr);
+  MaterialPaintLayer *row6 = add_layer_with_image("Row6", add_image("Row6", 4, 0, 0, 255));
+  MaterialPaintLayer *reader1 = add_reader(
+      *row6, PaintLayerAnchorPointList::Effects, point1->marker);
+  ASSERT_NE(reader1, nullptr);
+  for (int i = 7; i <= 8; i++) {
+    char name[32];
+    SNPRINTF(name, "Filler %d", i);
+    ASSERT_NE(BKE_paint_layers_add(*ma, name, nullptr, PaintLayerPlace::Above), nullptr);
+  }
+  MaterialPaintLayer *row9 = add_layer_with_image("Row9", add_image("Row9", 4, 120, 80, 40, 255));
+  MaterialPaintLayer *reader2 = add_reader(
+      *row9, PaintLayerAnchorPointList::Effects, point2->marker);
+  ASSERT_NE(reader2, nullptr);
+
+  const int point_rank1 = paint_layer_anchor_point_rank(*ma, point1->marker);
+  const int point_rank2 = paint_layer_anchor_point_rank(*ma, point2->marker);
+  const int reader_rank1 = paint_layer_anchor_point_rank(*ma, reader1->marker);
+  const int reader_rank2 = paint_layer_anchor_point_rank(*ma, reader2->marker);
+  EXPECT_LT(point_rank2, point_rank1) << "J2's point is below J1's";
+  EXPECT_LT(reader_rank1, reader_rank2) << "J1's reader is met first";
+
+  Vector<PaintLayersGpuCaptureJob> jobs;
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  ASSERT_EQ(jobs.size(), 2u);
+  EXPECT_TRUE(BLI_uuid_equal(jobs[0].point, point2->marker))
+      << "the plan is sorted by point rank, not by reader rank";
+  EXPECT_TRUE(BLI_uuid_equal(jobs[1].point, point1->marker));
+  EXPECT_EQ(jobs[0].rank, point_rank2);
+  EXPECT_EQ(jobs[1].rank, point_rank1);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_capture_plan_orders_by_point_rank)
+{
+  MaterialPaintLayer *bottom = add_layer_with_image("Bottom", add_image("Bottom", 4, 255, 0, 0));
+  MaterialPaintLayer *bottom_point = add_point(*bottom);
+  MaterialPaintLayer *middle = add_layer_with_image("Middle", add_image("Middle", 4, 0, 255, 0));
+  MaterialPaintLayer *middle_point = add_point(*middle);
+  MaterialPaintLayer *top = add_layer_with_image("Top", add_image("Top", 4, 120, 80, 40, 255));
+  ASSERT_NE(bottom_point, nullptr);
+  ASSERT_NE(middle_point, nullptr);
+  ASSERT_NE(add_reader(*top, PaintLayerAnchorPointList::Effects, middle_point->marker), nullptr);
+  MaterialPaintLayer *top_reader = add_reader(
+      *top, PaintLayerAnchorPointList::Effects, bottom_point->marker, nullptr);
+  ASSERT_NE(top_reader, nullptr);
+
+  Vector<PaintLayersGpuCaptureJob> jobs;
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  ASSERT_EQ(jobs.size(), 2u);
+  EXPECT_LT(jobs[0].rank, jobs[1].rank);
+  EXPECT_TRUE(BLI_uuid_equal(jobs[0].point, bottom_point->marker));
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_capture_plan_dedups_shared_point)
+{
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  MaterialPaintLayer *point = add_point(*source);
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *first = add_layer_with_image("First", add_image("First", 4, 20, 40, 60, 255));
+  MaterialPaintLayer *second = add_layer_with_image("Second", add_image("Second", 4, 60, 40, 20, 255));
+  ASSERT_NE(add_reader(*first, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+  ASSERT_NE(add_reader(*second, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+
+  Vector<PaintLayersGpuCaptureJob> jobs;
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  ASSERT_EQ(jobs.size(), 1u) << "two readers of one point share a single slot";
+  EXPECT_EQ(jobs[0].reader_count, 2);
+  EXPECT_EQ(jobs[0].readers.size(), 2u);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_capture_plan_skips_reader_on_disabled_row_when_unread)
+{
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  MaterialPaintLayer *point = add_point(*source);
+  MaterialPaintLayer *owner = add_layer_with_image("Owner", add_image("Owner", 4, 0, 0, 255));
+  ASSERT_NE(point, nullptr);
+  ASSERT_NE(add_reader(*owner, PaintLayerAnchorPointList::Effects, point->marker), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, owner, false));
+
+  Vector<PaintLayersGpuCaptureJob> jobs;
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  EXPECT_TRUE(jobs.is_empty())
+      << "a reader on a hidden row that nothing reads must not capture a slot";
+
+  /* Positive control: once the owner row is visible the same reader is captured. */
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, owner, true));
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  ASSERT_EQ(jobs.size(), 1u);
+  EXPECT_TRUE(BLI_uuid_equal(jobs[0].point, point->marker));
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_capture_plan_keeps_disabled_reader_read_by_visible_reader)
+{
+  MaterialPaintLayer *inner = add_layer_with_image("Inner", add_image("Inner", 4, 255, 0, 0));
+  MaterialPaintLayer *inner_point = add_point(*inner);
+  MaterialPaintLayer *disabled = add_layer_with_image("Disabled", add_image("Disabled", 4, 0, 0, 255));
+  ASSERT_NE(inner_point, nullptr);
+  ASSERT_NE(add_reader(*disabled, PaintLayerAnchorPointList::Effects, inner_point->marker), nullptr);
+  MaterialPaintLayer *disabled_point = add_point(*disabled);
+  ASSERT_NE(disabled_point, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_enabled(*ma, disabled, false));
+  /* A visible reader reads a point on the hidden row: its slice still lays the nested reader. */
+  MaterialPaintLayer *top = add_layer_with_image("Top", add_image("Top", 4, 120, 80, 40, 255));
+  ASSERT_NE(add_reader(*top, PaintLayerAnchorPointList::Effects, disabled_point->marker), nullptr);
+
+  Vector<PaintLayersGpuCaptureJob> jobs;
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  ASSERT_EQ(jobs.size(), 2u);
+  EXPECT_NE(find_job(jobs, disabled_point->marker), nullptr)
+      << "the job of the point on the disabled row is collected";
+  EXPECT_NE(find_job(jobs, inner_point->marker), nullptr)
+      << "the nested reader on the disabled row is laid by the visible reader's slice";
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_capture_plan_empty_mask_slice_still_has_slot)
+{
+  /* A mask point on a row with no mask base publishes an empty mask stack. It is a factor of one,
+   * not a refused slice. */
+  MaterialPaintLayer *source = add_layer_with_image("Source", add_image("Source", 4, 255, 0, 0));
+  MaterialPaintLayer *point = add_point(*source, PaintLayerAnchorPointList::MaskStack);
+  ASSERT_NE(point, nullptr);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*source), nullptr);
+  MaterialPaintLayer *reader_row = add_layer_with_image(
+      "Reader", add_image("Reader", 4, 0, 255, 0));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, reader_row, 1.0f), nullptr);
+  ASSERT_NE(add_reader(*reader_row, PaintLayerAnchorPointList::MaskStack, point->marker), nullptr);
+
+  Vector<PaintLayersGpuCaptureJob> jobs;
+  ASSERT_TRUE(capture_plan_for_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, jobs));
+  const PaintLayersGpuCaptureJob *job = find_job(jobs, point->marker);
+  ASSERT_NE(job, nullptr) << "an empty mask slice still gets a slot";
+  EXPECT_EQ(job->kind, PaintLayersGpuCaptureKind::MaskItem);
+  EXPECT_TRUE(job->clear_to_one);
+  EXPECT_TRUE(job->entry.mask_items.is_empty());
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_slot_key_uses_channel_enum_not_index)
+{
+  const bUUID point = BLI_uuid_generate_random();
+  /* The combined stack order: Base, Metallic, Roughness, Specular, Normal, AO, Alpha, Emission.
+   * Their channel enums are 0, 1, 2, 3, 4, 8, 7, 9: Alpha and Emission are the pair whose stack
+   * index (6, 7) differs from their enum. */
+  const std::array<PaintLayersGpuSlotKey, 8> slots = {
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_BASE_COLOR},
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_METALLIC},
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_ROUGHNESS},
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_SPECULAR},
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_NORMAL},
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_AO},
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_ALPHA},
+      PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_EMISSION},
+  };
+  /* A reader on Emission finds the Emission slot (index 7), not the Alpha slot (index 6). */
+  const Span<const PaintLayersGpuSlotKey> slot_view(slots.data(), int64_t(slots.size()));
+  EXPECT_EQ(BKE_paint_layers_gpu_slot_find(slot_view, point, PAINT_MATERIAL_CHANNEL_EMISSION), 7);
+  EXPECT_EQ(slots[7].channel, int(PAINT_MATERIAL_CHANNEL_EMISSION));
+  EXPECT_EQ(slots[6].channel, int(PAINT_MATERIAL_CHANNEL_ALPHA));
+  EXPECT_NE(slots[6].channel, slots[7].channel);
+  /* A reader on AO finds the AO slot at stack index 5, whose enum is 8. */
+  EXPECT_EQ(BKE_paint_layers_gpu_slot_find(slot_view, point, PAINT_MATERIAL_CHANNEL_AO), 5);
+  EXPECT_EQ(slots[5].channel, int(PAINT_MATERIAL_CHANNEL_AO));
+  EXPECT_EQ(BKE_paint_layers_gpu_slot_find(slot_view, point, PAINT_MATERIAL_CHANNEL_ALPHA), 6);
+  EXPECT_EQ(BKE_paint_layers_gpu_slot_find(slot_view, point, PAINT_MATERIAL_CHANNEL_BASE_COLOR), 0);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_slot_allocation_failure_releases_allocated_textures)
+{
+  struct Recorder {
+    int released = 0;
+    void *last = nullptr;
+  };
+  Recorder recorder;
+  const auto release = [](void *data, void *resource) {
+    Recorder *count = static_cast<Recorder *>(data);
+    count->released++;
+    count->last = resource;
+  };
+  {
+    PaintLayersGpuSlotGuard guard;
+    guard.set_release(release, &recorder);
+    guard.own(reinterpret_cast<void *>(uintptr_t(0x1)));
+    EXPECT_EQ(guard.size(), 1);
+    /* The second allocation failed: it owns nothing, and the first is still released. */
+    guard.own(nullptr);
+    EXPECT_EQ(guard.size(), 1);
+  }
+  EXPECT_EQ(recorder.released, 1);
+  EXPECT_EQ(recorder.last, reinterpret_cast<void *>(uintptr_t(0x1)));
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_slot_guard_move_releases_each_resource_once)
+{
+  struct Recorder {
+    int released = 0;
+  };
+  Recorder recorder;
+  const auto release = [](void *data, void * /*resource*/) {
+    static_cast<Recorder *>(data)->released++;
+  };
+  Vector<PaintLayersGpuSlotGuard> guards;
+  {
+    PaintLayersGpuSlotGuard first;
+    first.set_release(release, &recorder);
+    first.own(reinterpret_cast<void *>(uintptr_t(0x1)));
+    first.own(reinterpret_cast<void *>(uintptr_t(0x2)));
+    guards.append(std::move(first));
+    EXPECT_EQ(first.size(), 0) << "the moved-from guard owns nothing";
+  }
+  EXPECT_EQ(guards.size(), 1);
+  EXPECT_EQ(recorder.released, 0);
+  guards.clear();
+  EXPECT_EQ(recorder.released, 2) << "exactly one release per resource, not two";
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_unsupported_reason_refuses_baked_coverage_correction_inside_slice)
+{
+  MaterialPaintLayer *inner = add_layer_with_image("Inner", add_image("Inner", 4, 255, 0, 0));
+  MaterialPaintLayer *inner_point = add_point(*inner);
+  MaterialPaintLayer *outer = add_layer_with_image("Outer", add_image("Outer", 4, 0, 0, 255));
+  ASSERT_NE(inner_point, nullptr);
+  MaterialPaintLayer *baked_reader = add_reader(
+      *outer, PaintLayerAnchorPointList::Effects, inner_point->marker);
+  ASSERT_NE(baked_reader, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *baked_reader, MA_PAINT_LAYER_BAKE_ALWAYS));
+  MaterialPaintLayer *outer_point = add_point(*outer);
+  ASSERT_NE(outer_point, nullptr);
+  MaterialPaintLayer *reader_row = add_layer_with_image(
+      "Reader", add_image("Reader", 4, 0, 255, 128, 255));
+  MaterialPaintLayer *reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::Effects, outer_point->marker);
+  ASSERT_NE(reader, nullptr);
+  bake_plan();
+  ASSERT_NE(baked_reader->bake, nullptr);
+  ASSERT_NE(baked_reader->bake->coverage, nullptr);
+
+  PaintMaterialCompositeImageLayer entry;
+  ASSERT_TRUE(BKE_paint_layers_slice_describe(
+      *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, entry));
+  ASSERT_FALSE(entry.content_corrections.is_empty());
+  EXPECT_NE(BKE_paint_layers_gpu_unsupported_reason(entry), nullptr)
+      << "a baked correction inside the slice covers by a map the GPU pass cannot read";
+
+  /* Positive control: with the correction live the same slice is supported. */
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *baked_reader, MA_PAINT_LAYER_BAKE_NEVER));
+  ASSERT_TRUE(BKE_paint_layers_slice_describe(
+      *ma, *reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, entry));
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(entry), nullptr);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, mask_item_descriptor_carries_read_channel)
+{
+  /* The source takes part in Roughness only, so a content point read as a mask must take its
+   * coverage from Roughness rather than falling back to Base Color. */
+  MaterialPaintLayer *source = BKE_paint_layers_add(*ma, "Source", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(source, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, source, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, source, PAINT_MATERIAL_CHANNEL_ROUGHNESS, add_image("Rough", 4, 0, 255, 0, 255)));
+  MaterialPaintLayer *point = add_point(*source);
+  MaterialPaintLayer *reader_row = add_layer_with_image(
+      "Reader", add_image("Reader", 4, 0, 0, 255));
+  ASSERT_NE(point, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, reader_row, 1.0f), nullptr);
+  MaterialPaintLayer *mask_reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::MaskStack, point->marker);
+  ASSERT_NE(mask_reader, nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  const PaintMaterialCompositeMaskItem *item = find_mask_reader(layers, mask_reader->marker);
+  ASSERT_NE(item, nullptr);
+  const int expected = paint_layer_anchor_point_mask_read_channel(*ma, *mask_reader);
+  EXPECT_EQ(expected, int(PAINT_MATERIAL_CHANNEL_ROUGHNESS))
+      << "the source does not take part in Base Color";
+  EXPECT_EQ(item->anchor_point_read_channel, expected);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_verify_compare_accepts_half_float_rounding)
+{
+  const float gpu[6] = {0.5f + 0.0002f, 0.25f, 1.0f, 0.1f, 0.5f + 0.0004f, 0.9f};
+  const float cpu[6] = {0.5f, 0.25f + 0.0001f, 1.0f, 0.1f, 0.5f, 0.9f};
+  const PaintLayersGpuVerifyDiff diff = BKE_paint_layers_gpu_verify_compare_slot(
+      gpu, cpu, 2, 3, 1e-2f);
+  EXPECT_TRUE(diff.ok);
+  EXPECT_EQ(diff.samples, 2);
+  EXPECT_NEAR(diff.max_diff, 0.0004f, 1e-6f);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_verify_compare_reports_mismatch_with_max_diff)
+{
+  const float gpu[6] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+  const float cpu[6] = {0.5f, 0.5f, 0.5f, 0.5f, 0.8f, 0.5f};
+  const PaintLayersGpuVerifyDiff diff = BKE_paint_layers_gpu_verify_compare_slot(
+      gpu, cpu, 2, 3, 1e-2f);
+  EXPECT_FALSE(diff.ok);
+  EXPECT_NEAR(diff.max_diff, 0.3f, 1e-6f);
+  EXPECT_NEAR(diff.mean_diff, 0.15f, 1e-6f) << "judged by the mean of each sample's worst component";
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_verify_compare_tolerates_one_edge_sample)
+{
+  /* A lone sample off by a lot (the edge of a stroke, sampled bilinearly on the GPU) must not fail a
+   * slot that is right everywhere else. */
+  float gpu[300];
+  float cpu[300];
+  for (int i = 0; i < 300; i++) {
+    gpu[i] = cpu[i] = 0.5f;
+  }
+  gpu[0] = 1.0f;
+  const PaintLayersGpuVerifyDiff diff = BKE_paint_layers_gpu_verify_compare_slot(
+      gpu, cpu, 100, 3, 1e-2f);
+  EXPECT_TRUE(diff.ok);
+  EXPECT_NEAR(diff.max_diff, 0.5f, 1e-6f);
+}
+
+TEST_F(PaintLayersAnchorPointCompositeTest, gpu_verify_compare_fails_on_nan)
+{
+  float gpu[3] = {0.5f, std::numeric_limits<float>::quiet_NaN(), 0.5f};
+  const float cpu[3] = {0.5f, 0.5f, 0.5f};
+  const PaintLayersGpuVerifyDiff diff = BKE_paint_layers_gpu_verify_compare_slot(
+      gpu, cpu, 1, 3, 1e-2f);
+  EXPECT_FALSE(diff.ok);
+  EXPECT_TRUE(diff.has_nan);
+}
+
+/** \} */
 
 /** \} */
 

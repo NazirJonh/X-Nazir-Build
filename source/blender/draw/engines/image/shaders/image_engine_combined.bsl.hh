@@ -44,6 +44,9 @@
 #define COMBINED_LAYER_TRACKS_ALPHA 32768
 /* An adjustment: the row's colour is the stack so far with a filter applied. */
 #define COMBINED_LAYER_ADJUSTMENT 65536
+/* The row reads an Anchor Point slice from a screen-space slot: the colour in `layer_tx`, the
+ * coverage in `slot_cov_tx`. */
+#define COMBINED_LAYER_SLOT 524288
 
 /* The `CompositeBlend` values, which are the `MA_RAMP_*` codes of the Mix node. */
 #define COMBINED_BLEND_MIX 0
@@ -387,6 +390,9 @@ float4 sample_map(sampler2D tx,
 #define COMBINED_MASK_COV_COLOR 4
 #define COMBINED_MASK_COV_SCALAR 5
 #define COMBINED_MASK_COV_END 6
+/* Write the factor the mask build just produced into a screen-space slot, grey in rgb and one in
+ * alpha, for a mask Anchor Point slice. */
+#define COMBINED_MASK_SLOT_STORE 7
 
 #define COMBINED_MASK_HAS_MAP 2
 #define COMBINED_MASK_PREMULTIPLIED 8
@@ -395,10 +401,14 @@ float4 sample_map(sampler2D tx,
 #define COMBINED_MASK_REPEAT_V 128
 #define COMBINED_MASK_INVERT 512
 #define COMBINED_MASK_FROM_ALPHA 1024
+/* The item reads an Anchor Point mask slice from a screen-space slot. */
+#define COMBINED_MASK_SLOT 2048
 
 struct MaskResources {
   [[sampler(0)]] sampler2D mask_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D mask_img;
+  /** The destination of #COMBINED_MASK_SLOT_STORE. */
+  [[image(1, write, SFLOAT_16_16_16_16)]] image2D slot_img;
   [[push_constant]] const float4x4 texel_to_uv;
   [[push_constant]] const int2 texture_size;
   [[push_constant]] const float2 mapping_offset;
@@ -432,6 +442,13 @@ void mask_comp([[resource_table]] MaskResources &srt,
   }
   if (srt.mode == COMBINED_MASK_INIT) {
     imageStore(srt.mask_img, texel, float4(1.0f));
+    return;
+  }
+  if (srt.mode == COMBINED_MASK_SLOT_STORE) {
+    /* The factor the build just left, duplicated into rgb with an opaque alpha, so the item that
+     * reads the slot sees the same grey a rendered mask slice carries. */
+    float m = clamp(imageLoad(srt.mask_img, texel).x, 0.0f, 1.0f);
+    imageStore(srt.slot_img, texel, float4(m, m, m, 1.0f));
     return;
   }
 
@@ -505,7 +522,12 @@ void mask_comp([[resource_table]] MaskResources &srt,
     else {
       float gray = clamp(srt.constant_gray, 0.0f, 1.0f);
       float weight = opacity;
-      if ((srt.flags & COMBINED_MASK_HAS_MAP) != 0) {
+      if ((srt.flags & COMBINED_MASK_SLOT) != 0) {
+        /* An Anchor Point mask slice is screen-space and already scene linear: its factor is the
+         * slot's red channel, opaque as every mask map. */
+        gray = clamp(texelFetch(srt.mask_tx, texel, 0).x, 0.0f, 1.0f);
+      }
+      else if ((srt.flags & COMBINED_MASK_HAS_MAP) != 0) {
         float4 c = sample_map(srt.mask_tx,
                               uv,
                               srt.flags,
@@ -554,6 +576,8 @@ struct LayerResources {
   [[sampler(0)]] sampler2D layer_tx;
   /** The row's mask factor in its `x`, read when #COMBINED_LAYER_HAS_MASK is set. */
   [[sampler(1)]] sampler2D mask_tx;
+  /** The coverage of an Anchor Point slice in its `x`, read when #COMBINED_LAYER_SLOT is set. */
+  [[sampler(2)]] sampler2D slot_cov_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D accum_img;
   /** The row's colour and coverage while corrections are laid over it. */
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
@@ -611,6 +635,12 @@ void layer_comp([[resource_table]] LayerResources &srt,
       top = dst;
       top.xyz = apply_filter(srt.filter_kind, dst.xyz, srt.filter_params_0, srt.filter_params_1);
     }
+    else if ((srt.flags & COMBINED_LAYER_SLOT) != 0) {
+      /* An Anchor Point slice: screen-space colour and coverage, no mapping, no lod and no
+       * premultiply. Its alpha is content alpha, the coverage is separate. */
+      top = texelFetch(srt.layer_tx, texel, 0);
+      coverage = clamp(texelFetch(srt.slot_cov_tx, texel, 0).x, 0.0f, 1.0f);
+    }
     else if ((srt.flags & COMBINED_LAYER_HAS_MAP) != 0) {
       top = sample_map(srt.layer_tx,
                        uv,
@@ -623,10 +653,14 @@ void layer_comp([[resource_table]] LayerResources &srt,
         top.y = 1.0f - top.y;
       }
     }
-    if ((srt.flags & COMBINED_LAYER_ALPHA_COVERAGE) != 0) {
+    if ((srt.flags & (COMBINED_LAYER_SLOT | COMBINED_LAYER_ALPHA_COVERAGE)) ==
+        COMBINED_LAYER_ALPHA_COVERAGE)
+    {
       coverage = clamp(top.w, 0.0f, 1.0f);
     }
-    if ((srt.flags & COMBINED_LAYER_EMPTY_BASE) != 0) {
+    if ((srt.flags & COMBINED_LAYER_EMPTY_BASE) != 0 &&
+        (srt.flags & COMBINED_LAYER_SLOT) == 0)
+    {
       coverage = 0.0f;
     }
     if ((srt.flags & COMBINED_LAYER_ROW_STORE) != 0) {
@@ -670,6 +704,8 @@ void layer_comp([[resource_table]] LayerResources &srt,
 
 struct CorrectionResources {
   [[sampler(0)]] sampler2D correction_tx;
+  /** The coverage of an Anchor Point slice in its `x`, read when #COMBINED_LAYER_SLOT is set. */
+  [[sampler(1)]] sampler2D slot_cov_tx;
   [[image(0, read_write, SFLOAT_16_16_16_16)]] image2D row_color_img;
   [[image(1, read_write, SFLOAT_16_16_16_16)]] image2D row_factor_img;
   [[push_constant]] const float4x4 texel_to_uv;
@@ -711,9 +747,13 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
   }
 
   float a = clamp(imageLoad(srt.row_factor_img, texel).x, 0.0f, 1.0f);
-  float4 c = srt.constant_color;
+  bool slot = (srt.flags & COMBINED_LAYER_SLOT) != 0;
   bool has_map = (srt.flags & COMBINED_LAYER_HAS_MAP) != 0;
-  if (has_map) {
+  float4 c = srt.constant_color;
+  if (slot) {
+    c = texelFetch(srt.correction_tx, texel, 0);
+  }
+  else if (has_map) {
     c = sample_map(srt.correction_tx,
                    uv,
                    srt.flags,
@@ -722,8 +762,11 @@ void correction_comp([[resource_table]] CorrectionResources &srt,
                    srt.mapping_rotation,
                    srt.lod);
   }
-  /* A flat colour covers by its opacity alone: its alpha is content alpha, no part of the factor. */
-  float f = clamp(srt.opacity * (has_map ? c.w : 1.0f), 0.0f, 1.0f);
+  /* A slice correction covers by the coverage its reader rendered with; its colour's alpha is
+   * content alpha. A flat colour covers by its opacity alone. */
+  float correction_factor = slot ? clamp(texelFetch(srt.slot_cov_tx, texel, 0).x, 0.0f, 1.0f) :
+                          (has_map ? c.w : 1.0f);
+  float f = clamp(srt.opacity * correction_factor, 0.0f, 1.0f);
 
   float4 blended = s;
   if (srt.blend == COMBINED_BLEND_NORMAL_COMBINE) {

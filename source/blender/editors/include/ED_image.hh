@@ -125,6 +125,8 @@ bool ED_space_image_has_gpu_combined(const SpaceImage *sima);
  * Producing the real one just to read those properties is a full CPU shading.
  */
 ImBuf *ED_space_image_gpu_combined_stand_in();
+/** Release the stand-in's own reference at exit, so it does not reach the leak check. */
+void ED_space_image_gpu_combined_stand_in_free();
 /**
  * Evaluate the Combined preview into \a texture. \a texel_to_uv maps a texel of the
  * texture to the image's UV. False when the material is not one the GPU path lays; the caller then

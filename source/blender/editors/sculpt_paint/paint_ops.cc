@@ -2490,8 +2490,9 @@ static wmOperatorStatus material_canvas_cycle_exec(bContext *C, wmOperator *op)
       if (pass == PAINT_LAYER_PASS_COMBINED) {
         return true;
       }
+      /* Only whether a stack exists is asked: no Anchor Point slice has to be rendered for it. */
       return BKE_paint_layers_is_layered(*ma) ?
-                 BKE_paint_layers_composite_image_layers(*ma, pass, probe) :
+                 BKE_paint_layers_composite_image_layers(*ma, pass, probe, /*describe_only=*/true) :
                  BKE_paint_material_composite_stack_from_material(*bmain, *ma, pass, probe);
     };
     int next = current;

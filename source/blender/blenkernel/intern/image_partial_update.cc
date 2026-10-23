@@ -580,7 +580,8 @@ void BKE_image_partial_update_register_free(Image *image)
 static void image_pixel_version_bump(Image *image)
 {
   static std::atomic<uint64_t> global_pixel_version = 0;
-  image->runtime->pixel_version = global_pixel_version.fetch_add(1) + 1;
+  image->runtime->pixel_version.store(global_pixel_version.fetch_add(1) + 1,
+                                      std::memory_order_relaxed);
 }
 
 void BKE_image_partial_update_mark_region(Image *image,

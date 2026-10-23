@@ -2763,10 +2763,12 @@ static const EnumPropertyItem *rna_SpaceImageEditor_material_paint_canvas_itemf(
     {
       continue;
     }
+    /* Only whether a stack exists is asked, on every redraw of the header: without the pixels of
+     * its Anchor Point slices, which would be rendered here for nothing. */
     const bool resolvable =
         bmain != nullptr && (BKE_paint_layers_is_layered(*ma) ?
                                  BKE_paint_layers_composite_image_layers(
-                                     *ma, pass, composite_layers) :
+                                     *ma, pass, composite_layers, /*describe_only=*/true) :
                                  BKE_paint_material_composite_stack_from_material(
                                      *bmain, *ma, pass, composite_layers));
     EnumPropertyItem pass_item{};

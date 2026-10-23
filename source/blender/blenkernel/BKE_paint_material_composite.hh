@@ -30,6 +30,7 @@
 #include <memory>
 #include <vector>
 
+#include "BLI_function_ref.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 
@@ -339,6 +340,9 @@ struct PaintMaterialCompositeMaskItem {
   /** The point the reader names, the slice's producer. */
   bUUID anchor_point_point = {};
   uint64_t anchor_point_hash = 0;
+  /** The channel a mask reader of a content point takes its coverage from: the first one the
+   * source takes part in (#paint_layer_anchor_point_mask_read_channel). */
+  int anchor_point_read_channel = 0;
   /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
   Vector<Image *> anchor_point_images;
 };
@@ -811,6 +815,14 @@ uint64_t BKE_paint_material_composite_stack_hash(
  * \param channel: a role rather than an #eMaterialPaintChannel: #PAINT_LAYER_MAP_MASK is cached
  *                 like any other pass and is not a channel, which is also why
  *                 #BKE_paint_material_composite_stack_from_material takes an `int`.
+ * \param full_layers: when given, \a image_layers is a description made *without* the pixels of its
+ *                     Anchor Point slices (see `describe_only` of
+ *                     #BKE_paint_layers_composite_image_layers): enough for the hash, the size
+ *                     and the subscriptions, which is all an unchanged composite needs. The
+ *                     function is called, and only then, when the composite has to be evaluated,
+ *                     and fills the same stack with the slices rendered. Rendering them on every
+ *                     call would cost a canvas-sized evaluation per frame for a composite that is
+ *                     served from the cache.
  * \return null when the stack cannot be composited, which is the caller's cue to fall back.
  */
 ImBuf *BKE_paint_material_composite_cache_ensure(
@@ -820,7 +832,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     uint64_t stack_hash,
     uint64_t *r_revision = nullptr,
     PaintMaterialCompositeEvalStats *r_stats = nullptr,
-    rcti *r_changed_region = nullptr);
+    rcti *r_changed_region = nullptr,
+    FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers = {});
 
 /**
  * Mark the whole composite of \a ma out of date, or of every material when \a ma is null.

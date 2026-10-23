@@ -493,23 +493,34 @@ bool ED_space_image_has_gpu_combined(const SpaceImage *sima)
          ed::material_combined::combined_preview_gpu_enabled(ma);
 }
 
+/** Owned here and released at exit by #ED_space_image_gpu_combined_stand_in_free. */
+static ImBuf *g_gpu_combined_stand_in = nullptr;
+
 ImBuf *ED_space_image_gpu_combined_stand_in()
 {
   /* Made like the Combined cache's own buffers, so everything read from it agrees with them. Kept
-   * for the life of the process; a texel is not worth a lifetime to manage. */
-  static ImBuf *stand_in = []() -> ImBuf * {
+   * until exit; a texel is not worth a lifetime to manage, but it must not reach the leak check. */
+  if (g_gpu_combined_stand_in == nullptr) {
     ImBuf *ibuf = IMB_allocImBuf(1, 1, ImBufFlags::FloatData);
     if (ibuf != nullptr) {
       ibuf->channels = 4;
       IMB_colormanagement_assign_float_colorspace(
           ibuf, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
     }
-    return ibuf;
-  }();
-  if (stand_in != nullptr) {
-    IMB_refImBuf(stand_in);
+    g_gpu_combined_stand_in = ibuf;
   }
-  return stand_in;
+  if (g_gpu_combined_stand_in != nullptr) {
+    IMB_refImBuf(g_gpu_combined_stand_in);
+  }
+  return g_gpu_combined_stand_in;
+}
+
+void ED_space_image_gpu_combined_stand_in_free()
+{
+  if (g_gpu_combined_stand_in != nullptr) {
+    IMB_freeImBuf(g_gpu_combined_stand_in);
+    g_gpu_combined_stand_in = nullptr;
+  }
 }
 
 bool ED_space_image_update_gpu_combined(Main *bmain,
@@ -620,17 +631,32 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
     return combined;
   }
 
+  /* A layered stack is described without the pixels of its Anchor Point slices: this runs every
+   * frame, and a composite served from the cache needs only the hash. The cache asks for the full
+   * stack when it has to evaluate. */
+  const bool layered = BKE_paint_layers_is_layered(*ma);
   Vector<PaintMaterialCompositeImageLayer> layers;
-  const bool has_stack = BKE_paint_layers_is_layered(*ma) ?
-                             BKE_paint_layers_composite_image_layers(*ma, pass, layers) :
-                             BKE_paint_material_composite_stack_from_material(
-                                 *bmain, *ma, pass, layers);
+  const bool has_stack = layered ? BKE_paint_layers_composite_image_layers(
+                                       *ma, pass, layers, /*describe_only=*/true) :
+                                   BKE_paint_material_composite_stack_from_material(
+                                       *bmain, *ma, pass, layers);
   if (!has_stack) {
     return nullptr;
   }
   const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);
+  const auto describe_full = [&](Vector<PaintMaterialCompositeImageLayer> &r_full) {
+    return BKE_paint_layers_composite_image_layers(*ma, pass, r_full);
+  };
   ImBuf *ibuf = BKE_paint_material_composite_cache_ensure(
-      *ma, pass, layers, stack_hash, r_revision);
+      *ma,
+      pass,
+      layers,
+      stack_hash,
+      r_revision,
+      nullptr,
+      nullptr,
+      layered ? FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(describe_full) :
+                FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>());
   if (ibuf == nullptr) {
     return nullptr;
   }

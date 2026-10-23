@@ -725,6 +725,45 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_key_follows_source_pixel_version)
   paint_layer_anchor_point_slice_cache_clear();
 }
 
+TEST_F(PaintLayersAnchorPointTest, slice_cache_drops_entry_of_older_pixels)
+{
+  Image *image = add_solid_image("Source");
+  SliceFixture fixture = make_slice_fixture(*this, "Source", image);
+  ASSERT_NE(fixture.reader, nullptr);
+  paint_layer_anchor_point_slice_cache_clear();
+
+  std::shared_ptr<ImBuf> color;
+  std::shared_ptr<ImBuf> coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(
+      *ma, *fixture.reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
+  const size_t pair_bytes = paint_layer_anchor_point_slice_cache_bytes();
+  ASSERT_GT(pair_bytes, 0u);
+
+  for (int round = 0; round < 3; round++) {
+    BKE_image_partial_update_mark_full_update(image);
+    ASSERT_TRUE(BKE_paint_layers_slice_render(
+        *ma, *fixture.reader, PAINT_MATERIAL_CHANNEL_BASE_COLOR, &color, &coverage));
+    EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 1)
+        << "round " << round << ": the pair rendered from older pixels is gone";
+    EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), pair_bytes);
+  }
+  paint_layer_anchor_point_slice_cache_clear();
+}
+
+TEST_F(PaintLayersAnchorPointTest, source_set_to_the_same_value_succeeds_even_when_unresolved)
+{
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *point = add_point(*row);
+  MaterialPaintLayer *reader = add_reader(
+      *row, PaintLayerAnchorPointList::Effects, point->marker);
+  ASSERT_NE(reader, nullptr);
+  /* A reference that names nothing, as a file whose point was deleted by another path holds. */
+  const bUUID stale = BLI_uuid_generate_random();
+  reader->anchor_point_source = stale;
+  EXPECT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, reader, stale))
+      << "writing the value the reader already has is not an edit";
+}
+
 TEST_F(PaintLayersAnchorPointTest, slice_cache_evicts_by_bytes)
 {
   SliceFixture first = make_slice_fixture(*this, "First", add_solid_image("First"));

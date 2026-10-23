@@ -13,6 +13,7 @@
 #include <algorithm>
 
 #include "BLI_hash.hh"
+#include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
@@ -23,6 +24,7 @@
 #include "BKE_paint_layers.hh"
 
 #include "paint_layers_intern.hh"
+#include "paint_layers_kind.hh"
 
 namespace blender {
 
@@ -453,6 +455,22 @@ static uint64_t anchor_point_hash_row(uint64_t h,
                                              row.mapping.scale[1],
                                              row.mapping.rotation));
   h = anchor_point_hash_mix(h, get_default_hash(int(row.mapping.flag), int(row.mapping.wrap)));
+  /* What a filter or a map-coverage operator is set to, and what a Material row reads: values the
+   * description of the slice carries, though they hold no pixels. */
+  if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
+    for (const int i : IndexRange(kind->params_num)) {
+      h = anchor_point_hash_mix(h, get_default_hash(paint_layer_kind_param_get(row, i)));
+    }
+  }
+  for (const MaterialPaintLayerIdColor &color : row.id_colors) {
+    h = anchor_point_hash_mix(
+        h,
+        get_default_hash(color.color[0], color.color[1], color.color[2], color.tolerance, color.flag));
+  }
+  h = anchor_point_hash_mix(h, get_default_hash(int(row.mask_source_channels)));
+  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE)) {
+    h = anchor_point_hash_mix(h, row.material != nullptr ? row.material->id.session_uid : 0);
+  }
   /* A content slice never reads the mask, a mask slice never reads the corrections or children.
    * At the top the point that cuts the slice names which half is read; a nested row is fully
    * inside the slice, so both are. */
@@ -992,6 +1010,11 @@ bool BKE_paint_layers_anchor_point_source_set(Material &ma,
   if (BKE_paint_layers_find(ma, reader->marker) != reader) {
     return false;
   }
+  /* Writing the value it already has is not an edit, even for a reference that no longer
+   * resolves. */
+  if (BLI_uuid_equal(reader->anchor_point_source, marker)) {
+    return true;
+  }
   if (!BLI_uuid_is_nil(marker)) {
     /* Only a marker publishes a slice: a correction or a mask item has a marker of its own, but it
      * names an element to edit, not a slice to read. Refuse it before it becomes a permanent
@@ -1000,9 +1023,6 @@ bool BKE_paint_layers_anchor_point_source_set(Material &ma,
     if (point == nullptr || !paint_layer_kind_is_anchor_point_marker(*point)) {
       return false;
     }
-  }
-  if (BLI_uuid_equal(reader->anchor_point_source, marker)) {
-    return true;
   }
   reader->anchor_point_source = marker;
   /* A new target may make an old bake describe a different slice. Release the ones that no longer

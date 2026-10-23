@@ -11,8 +11,11 @@
 #include "BKE_paint_layers_composite.hh"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -23,6 +26,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
+#include "BLI_time.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -138,6 +142,46 @@ static void composite_mapping_describe(const Material &ma,
 }
 
 /** The parameters of \a row's kind in the schema order the evaluator reads them in. */
+/**
+ * Timing of the Anchor Point paths, printed when a scope takes at least #ANCHOR_PERF_MIN_MS. On by
+ * default while the cost of a slice on a large canvas is being measured; the threshold keeps the
+ * steady state quiet, so a line in the log is a call that was slow. Lines start with
+ * `[PBR][ANCHOR-PERF]`.
+ */
+constexpr double ANCHOR_PERF_MIN_MS = 0.5;
+
+class AnchorPerfScope {
+  const char *label_;
+  double start_;
+  char note_[200];
+
+ public:
+  explicit AnchorPerfScope(const char *label) : label_(label), start_(BLI_time_now_seconds())
+  {
+    note_[0] = '\0';
+  }
+
+  void note(const char *format, ...)
+  {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(note_, sizeof(note_), format, args);
+    va_end(args);
+  }
+
+  ~AnchorPerfScope()
+  {
+    const double ms = (BLI_time_now_seconds() - start_) * 1000.0;
+    if (ms >= ANCHOR_PERF_MIN_MS) {
+      printf("[PBR][ANCHOR-PERF] %-22s %9.3f ms%s%s\n",
+             label_,
+             ms,
+             note_[0] != '\0' ? "  | " : "",
+             note_);
+    }
+  }
+};
+
 template<size_t N> static void composite_filter_params(const MaterialPaintLayer &row, float (&r_params)[N])
 {
   if (const PaintLayerKindInfo *kind = paint_layer_kind_of(row)) {
@@ -259,7 +303,8 @@ static void composite_mask_items_describe(const Material &ma,
                                           Vector<PaintMaterialCompositeMaskItem> &r_items,
                                           const bUUID *stop_before = nullptr,
                                           const int *slice_rect = nullptr,
-                                          const bool dimensions_only = false)
+                                          const bool dimensions_only = false,
+                                          const bool describe_only = false)
 {
   if (BKE_paint_layers_mask_base(layer) == nullptr) {
     return;
@@ -281,6 +326,7 @@ static void composite_mask_items_describe(const Material &ma,
       item.anchor_point_target = int8_t(mask_ref.target);
       item.anchor_point_point = (mask_ref.point != nullptr) ? mask_ref.point->marker : bUUID{};
       const int read_channel = paint_layer_anchor_point_mask_read_channel(ma, mask);
+      item.anchor_point_read_channel = read_channel;
       const bool mask_target = item.anchor_point_target ==
                                int8_t(PaintLayerAnchorPointTarget::Mask);
       const bool baked = paint_layer_anchor_point_reader_baked(ma, mask) &&
@@ -303,17 +349,21 @@ static void composite_mask_items_describe(const Material &ma,
         BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
       }
       else {
-        std::shared_ptr<ImBuf> slice_color;
-        std::shared_ptr<ImBuf> slice_coverage;
-        if (!BKE_paint_layers_slice_render(
-                ma, mask, read_channel, &slice_color, &slice_coverage, slice_rect, dimensions_only))
-        {
-          continue;
+        /* In describe-only mode the reader keeps its descriptor, hash and subscriptions; the
+         * slice buffers belong to the GPU slot pass instead of the CPU cache. */
+        if (!describe_only) {
+          std::shared_ptr<ImBuf> slice_color;
+          std::shared_ptr<ImBuf> slice_coverage;
+          if (!BKE_paint_layers_slice_render(
+                  ma, mask, read_channel, &slice_color, &slice_coverage, slice_rect, dimensions_only))
+          {
+            continue;
+          }
+          const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
+          item.anchor_point_slice = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
+                                        std::move(slice_color) :
+                                        std::move(slice_coverage);
         }
-        const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, mask);
-        item.anchor_point_slice = (ref.target == PaintLayerAnchorPointTarget::Mask) ?
-                                      std::move(slice_color) :
-                                      std::move(slice_coverage);
         item.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, mask, read_channel);
         BKE_paint_layers_anchor_point_slice_images(ma, mask, item.anchor_point_images);
       }
@@ -426,7 +476,8 @@ static void composite_image_layers_collect(const Material &ma,
                                            Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                            bool isolating = false,
                                            const int *slice_rect = nullptr,
-                                           const bool dimensions_only = false);
+                                           const bool dimensions_only = false,
+                                           const bool describe_only = false);
 
 /**
  * Describe the row \a layer (not a Pass Through folder) in \a channel to the evaluator. False when
@@ -446,7 +497,8 @@ static bool composite_image_layer_build(const Material &ma,
                                         PaintMaterialCompositeImageLayer &out,
                                         const bUUID *stop_before = nullptr,
                                         const int *slice_rect = nullptr,
-                                        const bool dimensions_only = false)
+                                        const bool dimensions_only = false,
+                                        const bool describe_only = false)
 {
   /* A reader lays the slice its point publishes, described as a substituted row: the slice's
    * colour, its coverage and its content alpha, with the reader's own blend. Its own mapping does
@@ -486,7 +538,8 @@ static bool composite_image_layer_build(const Material &ma,
        * does, so none of them is described again. */
       return true;
     }
-    if (!BKE_paint_layers_slice_render(ma,
+    if (!describe_only &&
+        !BKE_paint_layers_slice_render(ma,
                                        layer,
                                        channel,
                                        &out.anchor_point_color,
@@ -496,6 +549,10 @@ static bool composite_image_layer_build(const Material &ma,
     {
       return false;
     }
+    /* Describe-only keeps the reader even where #BKE_paint_layers_slice_render would refuse it for
+     * a zero-sized source. The GPU plan captures the slot and the screen-space pass needs no source
+     * size; a caller that later falls back to the CPU rebuilds the full description, which refuses
+     * it there. */
     out.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, layer, channel);
     BKE_paint_layers_anchor_point_slice_images(ma, layer, out.anchor_point_images);
     /* The reader's own corrections and mask go on below like any row's, so a point inside this
@@ -538,7 +595,8 @@ static bool composite_image_layer_build(const Material &ma,
                                      children,
                                      true,
                                      slice_rect,
-                                     dimensions_only);
+                                     dimensions_only,
+                                     describe_only);
       /* An emptied folder is left out, as the generator leaves it; one with a correction that lays
        * here is not: the correction brings the coverage in over nothing. */
       if (children.is_empty() && !paint_layer_effects_lay(ma, layer, channel)) {
@@ -610,7 +668,8 @@ static bool composite_image_layer_build(const Material &ma,
                              pass_through_scale;
       }
       else {
-        if (!BKE_paint_layers_slice_render(ma,
+        if (!describe_only &&
+            !BKE_paint_layers_slice_render(ma,
                                            effect,
                                            channel,
                                            &correction.anchor_point_slice,
@@ -672,7 +731,8 @@ static bool composite_image_layer_build(const Material &ma,
   }
   /* The mask is one for all channels of the row, so the same item reaches every channel's stack,
    * exactly as the generator reads the one set of mask inputs in every channel chain. */
-  composite_mask_items_describe(ma, layer, out.mask_items, stop_before, slice_rect, dimensions_only);
+  composite_mask_items_describe(
+      ma, layer, out.mask_items, stop_before, slice_rect, dimensions_only, describe_only);
   /* Mark the positions the GPU has to capture: a marker is a producer only while at least one
    * reader lays its slice. A content marker sits in the effects, a mask marker in the mask stack. */
   for (const MaterialPaintLayer &effect : layer.effects) {
@@ -704,7 +764,8 @@ static void composite_image_layers_collect(const Material &ma,
                                            Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                            const bool isolating,
                                            const int *slice_rect,
-                                           const bool dimensions_only)
+                                           const bool dimensions_only,
+                                           const bool describe_only)
 {
   for (const MaterialPaintLayer &layer : list) {
     /* A Pass Through folder is flattened into this list, the way the generator expands it in the
@@ -712,8 +773,15 @@ static void composite_image_layers_collect(const Material &ma,
      * on their opacity, accumulated on the way down (the same rule as #paint_layers_form_map). */
     if (BKE_paint_layers_folder_is_pass_through(layer)) {
       const float scale = (layer.flag & MA_PAINT_LAYER_ENABLED) != 0 ? pass_through_scale : 0.0f;
-      composite_image_layers_collect(
-          ma, layer.children, channel, scale, r_layers, isolating, slice_rect, dimensions_only);
+      composite_image_layers_collect(ma,
+                                     layer.children,
+                                     channel,
+                                     scale,
+                                     r_layers,
+                                     isolating,
+                                     slice_rect,
+                                     dimensions_only,
+                                     describe_only);
       continue;
     }
     PaintMaterialCompositeImageLayer out;
@@ -726,21 +794,30 @@ static void composite_image_layers_collect(const Material &ma,
                                    out,
                                    nullptr,
                                    slice_rect,
-                                   dimensions_only))
+                                   dimensions_only,
+                                   describe_only))
     {
       r_layers.append(std::move(out));
     }
   }
 }
 
-bool BKE_paint_layers_composite_image_layers(
-    const Material &ma, const int channel, Vector<PaintMaterialCompositeImageLayer> &r_layers)
+bool BKE_paint_layers_composite_image_layers(const Material &ma,
+                                             const int channel,
+                                             Vector<PaintMaterialCompositeImageLayer> &r_layers,
+                                             const bool describe_only)
 {
   r_layers.clear();
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
-  composite_image_layers_collect(ma, ma.paint_layers, channel, 1.0f, r_layers);
+  AnchorPerfScope perf("describe_stack");
+  composite_image_layers_collect(
+      ma, ma.paint_layers, channel, 1.0f, r_layers, false, nullptr, false, describe_only);
+  perf.note("channel=%d layers=%d describe_only=%d",
+            channel,
+            int(r_layers.size()),
+            int(describe_only));
   return !r_layers.is_empty();
 }
 
@@ -1064,7 +1141,8 @@ static uint64_t anchor_slice_pixels_version(const Material &ma, const MaterialPa
     if (image == nullptr || image->runtime == nullptr) {
       continue;
     }
-    version = (version ^ image->runtime->pixel_version) * 0x100000001b3ull + 0x9e3779b97f4a7c15ull;
+    const uint64_t image_version = image->runtime->pixel_version.load(std::memory_order_relaxed);
+    version = (version ^ image_version) * 0x100000001b3ull + 0x9e3779b97f4a7c15ull;
   }
   return version;
 }
@@ -1118,6 +1196,11 @@ void paint_layer_anchor_point_slice_cache_clear()
   std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
   g_anchor_slice_cache.entries.clear();
   g_anchor_slice_cache.total_bytes = 0;
+}
+
+void BKE_paint_layers_slice_cache_free_all()
+{
+  paint_layer_anchor_point_slice_cache_clear();
 }
 
 size_t paint_layer_anchor_point_slice_cache_bytes()
@@ -1204,7 +1287,8 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                      const int channel,
                                      PaintMaterialCompositeImageLayer &r_entry,
                                      const int *slice_rect,
-                                     const bool dimensions_only)
+                                     const bool dimensions_only,
+                                     const bool allow_empty_mask)
 {
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
@@ -1225,7 +1309,7 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
                                   &ref.point->marker,
                                   slice_rect,
                                   dimensions_only);
-    if (r_entry.mask_items.is_empty()) {
+    if (r_entry.mask_items.is_empty() && !allow_empty_mask) {
       return false;
     }
   }
@@ -1293,17 +1377,24 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                Span<PaintMaterialCompositeImageLayer>(&entry, 1), width, height) &&
            width > 0 && height > 0;
   }
-  const uint64_t hash = paint_layer_anchor_point_slice_hash(ma, reader, channel);
+  AnchorPerfScope perf_total("slice_render");
   AnchorSliceCacheKey key;
-  key.material_uid = ma.id.session_uid;
-  key.reader = reader.marker;
-  /* A mask slice is the same grey for every channel: one cache entry per reader. */
-  key.channel = (ref.target == PaintLayerAnchorPointTarget::Mask) ? -1 : channel;
-  key.hash = hash;
-  key.pixels = anchor_slice_pixels_version(ma, reader);
   /* A partial render is not a cacheable complete slice; it is only produced for a bake job that
-   * writes the requested rectangle into its own full-size map. */
+   * writes the requested rectangle into its own full-size map. It never looks the cache up, so it
+   * skips the walk that finds the maps the key folds. */
   const bool cacheable = dst_rect == nullptr;
+  {
+    AnchorPerfScope perf_key("slice_key");
+    key.material_uid = ma.id.session_uid;
+    key.reader = reader.marker;
+    /* A mask slice is the same grey for every channel: one cache entry per reader. */
+    key.channel = (ref.target == PaintLayerAnchorPointTarget::Mask) ? -1 : channel;
+    key.hash = paint_layer_anchor_point_slice_hash(ma, reader, channel);
+    if (cacheable) {
+      key.pixels = anchor_slice_pixels_version(ma, reader);
+    }
+    perf_key.note("reader=%s", reader.name);
+  }
   if (cacheable) {
     std::lock_guard<std::mutex> lock(g_anchor_slice_cache_mutex);
     for (const int i : g_anchor_slice_cache.entries.index_range()) {
@@ -1315,6 +1406,7 @@ bool BKE_paint_layers_slice_render(const Material &ma,
         g_anchor_slice_cache.entries.append(entry);
         *r_color = entry.color;
         *r_coverage = entry.coverage;
+        perf_total.note("HIT reader=%s channel=%d", reader.name, channel);
         return true;
       }
     }
@@ -1449,6 +1541,17 @@ bool BKE_paint_layers_slice_render(const Material &ma,
         return true;
       }
     }
+    /* The same slice rendered from older pixels can never be hit again: drop it now instead of
+     * letting a stale pair of canvases sit in the budget until it is the least recently used. */
+    for (int i = int(g_anchor_slice_cache.entries.size()) - 1; i >= 0; i--) {
+      const AnchorSliceCacheKey &known = g_anchor_slice_cache.entries[i].key;
+      if (known.material_uid == key.material_uid && BLI_uuid_equal(known.reader, key.reader) &&
+          known.channel == key.channel && known.hash == key.hash)
+      {
+        g_anchor_slice_cache.total_bytes -= g_anchor_slice_cache.entries[i].bytes;
+        g_anchor_slice_cache.entries.remove(i);
+      }
+    }
     /* A slice larger than the whole budget is not kept: it would evict everything and then stay
      * pinned after the description that needed it is gone. The caller still receives it. */
     if (new_entry.bytes <= g_anchor_slice_cache_budget) {
@@ -1462,6 +1565,13 @@ bool BKE_paint_layers_slice_render(const Material &ma,
       g_anchor_slice_cache.entries.append(std::move(new_entry));
     }
   }
+  perf_total.note("MISS reader=%s channel=%d target=%s size=%dx%d%s",
+                  reader.name,
+                  channel,
+                  ref.target == PaintLayerAnchorPointTarget::Mask ? "mask" : "content",
+                  width,
+                  height,
+                  cacheable ? "" : " partial");
   *r_color = std::move(color);
   *r_coverage = std::move(coverage);
   return true;
@@ -1539,16 +1649,12 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
   if (area_w <= 0 || area_h <= 0) {
     return false;
   }
+  /* A partial re-bake only needs the nested slices over the source rectangle the area maps to; a
+   * full one renders them completely. The area is only known from the sizes found above, which is
+   * why the row is described a second time. */
+  const int slice_rect[4] = {area.xmin, area.ymin, area.xmax, area.ymax};
   PaintMaterialCompositeImageLayer entry;
-  if (dst_rect != nullptr) {
-    /* A partial re-bake only needs the nested slices over the source rectangle the area maps to. */
-    const int slice_rect[4] = {area.xmin, area.ymin, area.xmax, area.ymax};
-    if (!composite_bake_entry(ma, layer, channel, entry, slice_rect)) {
-      return false;
-    }
-  }
-  else if (!composite_bake_entry(ma, layer, channel, entry, nullptr)) {
-    /* Full bake: nested slices render completely. */
+  if (!composite_bake_entry(ma, layer, channel, entry, dst_rect != nullptr ? slice_rect : nullptr)) {
     return false;
   }
   Vector<float> content_color(int64_t(area_w) * area_h * 4);
@@ -1586,11 +1692,441 @@ bool BKE_paint_layers_row_dimensions(const Material &ma,
                                      int &r_height)
 {
   PaintMaterialCompositeImageLayer entry;
-  if (!composite_bake_entry(ma, layer, channel, entry)) {
+  /* Only the size is wanted: nested readers must not render and cache their slices for it. */
+  if (!composite_bake_entry(ma, layer, channel, entry, nullptr, true)) {
     return false;
   }
   return BKE_paint_material_composite_stack_dimensions(
       Span<PaintMaterialCompositeImageLayer>(&entry, 1), r_width, r_height);
 }
+
+const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialCompositeImageLayer &layer,
+                                                    const bool mask_slice)
+{
+  if (!layer.enabled || layer.opacity <= 0.0f) {
+    /* The composite skips it as well. */
+    return nullptr;
+  }
+  for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+    if (child.adjustment_filter != 0) {
+      return "an adjustment row is inside a folder";
+    }
+    if (const char *reason = BKE_paint_layers_gpu_unsupported_reason(child, mask_slice)) {
+      return reason;
+    }
+  }
+  const bool reader = !BLI_uuid_is_nil(layer.anchor_point_reader);
+  const bool mask_only_slice = mask_slice && !layer.mask_items.is_empty();
+  if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&
+      layer.anchor_point_color == nullptr && !layer.has_constant_color && !reader &&
+      !mask_only_slice)
+  {
+    return "a row has neither a map, a flat colour nor an Anchor Point slice";
+  }
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    /* A sliced correction reads a captured slot. A baked one has no slice buffer but covers by a
+     * coverage map the GPU correction pass does not read. */
+    if (correction.anchor_point_coverage_image != nullptr) {
+      return "a baked Anchor Point correction is read (no coverage map on the GPU)";
+    }
+  }
+  return nullptr;
+}
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Anchor Point Capture Plan
+ * \{ */
+
+namespace {
+
+bool gpu_entry_has_adjustment(const PaintMaterialCompositeImageLayer &entry)
+{
+  if (entry.adjustment_filter != 0) {
+    return true;
+  }
+  for (const PaintMaterialCompositeImageLayer &child : entry.children) {
+    if (gpu_entry_has_adjustment(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A correction that lays a live Anchor Point slice. */
+bool gpu_correction_is_live_reader(const PaintMaterialCompositeCorrection &correction)
+{
+  return !BLI_uuid_is_nil(correction.anchor_point_reader) && correction.image == nullptr &&
+         !correction.has_constant_color && correction.filter == 0;
+}
+
+/** A mask item that lays a live Anchor Point slice. */
+bool gpu_mask_item_is_live_reader(const PaintMaterialCompositeMaskItem &item)
+{
+  return item.opacity > 0.0f && item.image == nullptr && item.filter == 0 &&
+         !BLI_uuid_is_nil(item.anchor_point_reader);
+}
+
+/** The capture a row or correction reader needs: a mask point read as content is a grey pair. */
+PaintLayersGpuCaptureKind gpu_content_capture_kind(const int8_t target)
+{
+  return target == int8_t(PaintLayerAnchorPointTarget::Mask) ?
+             PaintLayersGpuCaptureKind::MaskContent :
+             PaintLayersGpuCaptureKind::Content;
+}
+
+}  // namespace
+
+bool BKE_paint_layers_gpu_capture_plan(
+    const Material &ma,
+    const Span<const Span<const PaintMaterialCompositeImageLayer>> stacks,
+    const Span<const int> channels,
+    Vector<PaintLayersGpuCaptureJob> &r_jobs,
+    const char **r_reason)
+{
+  r_jobs.clear();
+  if (r_reason != nullptr) {
+    *r_reason = nullptr;
+  }
+  if (stacks.size() != channels.size()) {
+    if (r_reason != nullptr) {
+      *r_reason = "the capture plan's stacks and channels differ in size";
+    }
+    return false;
+  }
+
+  const auto fail = [&](const char *reason) {
+    if (r_reason != nullptr) {
+      *r_reason = reason;
+    }
+    return false;
+  };
+
+  /* One depth per job, parallel to #r_jobs: a job discovered inside another's description is one
+   * level deeper. The hard limit bounds both recursion and work on a malicious description. */
+  Vector<int> depths;
+
+  /* Add \a reader's job unless the same slot is already planned. Returns false only when the plan
+   * cannot be built. */
+  const auto add_job = [&](const bUUID &reader,
+                           const bUUID &point,
+                           const int channel,
+                           const PaintLayersGpuCaptureKind kind,
+                           const int depth) -> bool {
+    if (BLI_uuid_is_nil(reader) || BLI_uuid_is_nil(point)) {
+      return true;
+    }
+    const bool mask_item = kind == PaintLayersGpuCaptureKind::MaskItem;
+    for (PaintLayersGpuCaptureJob &job : r_jobs) {
+      if (job.kind != kind || !BLI_uuid_equal(job.point, point)) {
+        continue;
+      }
+      if (!mask_item && job.channel != channel) {
+        continue;
+      }
+      /* A shared slot is one capture; only count a reader that was not already named for it. */
+      bool seen = false;
+      for (const bUUID &known : job.readers) {
+        if (BLI_uuid_equal(known, reader)) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) {
+        job.readers.append(reader);
+        job.reader_count = int(job.readers.size());
+      }
+      return true;
+    }
+    if (depth > PAINT_LAYER_ANCHOR_POINT_DEPTH_HARD) {
+      return fail("the Anchor Point chain is too deep for the GPU path");
+    }
+    if (int(r_jobs.size()) >= PAINT_LAYER_ANCHOR_POINT_LIMIT * int(channels.size())) {
+      return fail("too many Anchor Point slices for the GPU path");
+    }
+    PaintLayersGpuCaptureJob job;
+    job.reader = reader;
+    job.point = point;
+    job.channel = channel;
+    job.kind = kind;
+    job.rank = paint_layer_anchor_point_rank(ma, point);
+    job.readers.append(reader);
+    r_jobs.append(std::move(job));
+    depths.append(depth);
+    return true;
+  };
+
+  /* The readers a row (or a described slice entry) lays through its corrections and mask items. */
+  const auto collect_corrections_and_mask = [&](const PaintMaterialCompositeImageLayer &row,
+                                                const int channel,
+                                                const int depth) -> bool {
+    for (const PaintMaterialCompositeCorrection &correction : row.content_corrections) {
+      if (correction.opacity <= 0.0f || !gpu_correction_is_live_reader(correction)) {
+        continue;
+      }
+      if (!add_job(correction.anchor_point_reader,
+                   correction.anchor_point_point,
+                   channel,
+                   gpu_content_capture_kind(correction.anchor_point_target),
+                   depth))
+      {
+        return false;
+      }
+    }
+    for (const PaintMaterialCompositeMaskItem &item : row.mask_items) {
+      if (!gpu_mask_item_is_live_reader(item)) {
+        continue;
+      }
+      const bool mask_target = item.anchor_point_target ==
+                               int8_t(PaintLayerAnchorPointTarget::Mask);
+      /* A content point read by a mask item is captured in the channel its coverage comes from. */
+      if (!add_job(item.anchor_point_reader,
+                   item.anchor_point_point,
+                   mask_target ? channel : item.anchor_point_read_channel,
+                   mask_target ? PaintLayersGpuCaptureKind::MaskItem :
+                                 PaintLayersGpuCaptureKind::Content,
+                   depth))
+      {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  /* Collect a row that the passes will lay, including its own reader. A hidden or zero-opacity row
+   * is skipped: nothing reads it unless another reader's slice contains it, which
+   * #collect_nested_entry handles. */
+  std::function<bool(const PaintMaterialCompositeImageLayer &, int, int)> collect_layer;
+  collect_layer = [&](const PaintMaterialCompositeImageLayer &layer,
+                      const int channel,
+                      const int depth) -> bool {
+    if (!layer.enabled || layer.opacity <= 0.0f) {
+      return true;
+    }
+    if (!BLI_uuid_is_nil(layer.anchor_point_reader) && layer.color_image == nullptr &&
+        !add_job(layer.anchor_point_reader,
+                 layer.anchor_point_point,
+                 channel,
+                 gpu_content_capture_kind(layer.anchor_point_target),
+                 depth))
+    {
+      return false;
+    }
+    if (!collect_corrections_and_mask(layer, channel, depth)) {
+      return false;
+    }
+    for (const PaintMaterialCompositeImageLayer &child : layer.children) {
+      if (!collect_layer(child, channel, depth)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  /* The readers inside an already described slice. The entry's own reader is the source row's own
+   * reader, which is a nested reader unless it is the one this job was made for. */
+  const auto collect_nested_entry = [&](const PaintMaterialCompositeImageLayer &entry,
+                                        const int channel,
+                                        const int depth,
+                                        const bUUID &job_reader) -> bool {
+    if (!BLI_uuid_is_nil(entry.anchor_point_reader) && entry.color_image == nullptr &&
+        !BLI_uuid_equal(entry.anchor_point_reader, job_reader) &&
+        !add_job(entry.anchor_point_reader,
+                 entry.anchor_point_point,
+                 channel,
+                 gpu_content_capture_kind(entry.anchor_point_target),
+                 depth))
+    {
+      return false;
+    }
+    if (!collect_corrections_and_mask(entry, channel, depth)) {
+      return false;
+    }
+    for (const PaintMaterialCompositeImageLayer &child : entry.children) {
+      if (!collect_layer(child, channel, depth)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  for (const int stack_index : stacks.index_range()) {
+    const int channel = channels[stack_index];
+    if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+      continue;
+    }
+    for (const PaintMaterialCompositeImageLayer &layer : stacks[stack_index]) {
+      if (!collect_layer(layer, channel, 0)) {
+        return false;
+      }
+    }
+  }
+
+  /* Describe each job once. Jobs discovered while describing are appended and described by the
+   * same loop; the entry stays on the job, so the gather never describes a slice twice. */
+  for (int index = 0; index < int(r_jobs.size()); index++) {
+    const bUUID reader_marker = r_jobs[index].reader;
+    const int channel = r_jobs[index].channel;
+    const PaintLayersGpuCaptureKind kind = r_jobs[index].kind;
+    const int depth = depths[index];
+    Material &ma_mut = const_cast<Material &>(ma);
+    MaterialPaintLayer *reader = BKE_paint_layers_find(ma_mut, reader_marker);
+    if (reader == nullptr) {
+      return fail("an Anchor Point reader cannot be found");
+    }
+    const bool mask_kind = kind != PaintLayersGpuCaptureKind::Content;
+    PaintMaterialCompositeImageLayer entry;
+    if (!BKE_paint_layers_slice_describe(
+            ma, *reader, channel, entry, nullptr, true, mask_kind))
+    {
+      return fail("an Anchor Point slice cannot be described");
+    }
+    const bool clear_to_one = mask_kind && entry.mask_items.is_empty();
+    if (gpu_entry_has_adjustment(entry)) {
+      return fail("an adjustment row is read as an Anchor Point source");
+    }
+    if (!clear_to_one) {
+      if (const char *reason = BKE_paint_layers_gpu_unsupported_reason(entry, mask_kind)) {
+        return fail(reason);
+      }
+    }
+    /* Nested readers are collected from the description before it is moved onto the job: the job
+     * vector may reallocate while they are appended. */
+    if (!collect_nested_entry(entry, channel, depth + 1, reader_marker)) {
+      return false;
+    }
+    r_jobs[index].clear_to_one = clear_to_one;
+    r_jobs[index].entry = std::move(entry);
+  }
+
+  /* A reader nested in a slice sits above the point it names, so its own point must be captured
+   * first. The rank of the point, not of the reader, orders the passes. */
+  std::stable_sort(r_jobs.begin(),
+                   r_jobs.end(),
+                   [](const PaintLayersGpuCaptureJob &a, const PaintLayersGpuCaptureJob &b) {
+                     return a.rank < b.rank;
+                   });
+  return true;
+}
+
+bool BKE_paint_layers_gpu_slot_key_equal(const PaintLayersGpuSlotKey &a,
+                                         const PaintLayersGpuSlotKey &b)
+{
+  /* The channel is the #eMaterialPaintChannel value, never the combined-stack index: Alpha and
+   * Emission occupy the same position in one order and none in the other. */
+  return a.channel == b.channel && BLI_uuid_equal(a.point, b.point);
+}
+
+int BKE_paint_layers_gpu_slot_find(const Span<const PaintLayersGpuSlotKey> slots,
+                                   const bUUID &point,
+                                   const int channel)
+{
+  const PaintLayersGpuSlotKey wanted{point, channel};
+  for (const int i : slots.index_range()) {
+    if (BKE_paint_layers_gpu_slot_key_equal(slots[i], wanted)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name GPU Verification
+ * \{ */
+
+PaintLayersGpuVerifyDiff BKE_paint_layers_gpu_verify_compare_slot(const float *gpu,
+                                                                  const float *cpu,
+                                                                  const int64_t sample_count,
+                                                                  const int components,
+                                                                  const float tolerance)
+{
+  PaintLayersGpuVerifyDiff result;
+  result.ok = true;
+  result.max_diff = 0.0f;
+  result.samples = 0;
+  if (gpu == nullptr || cpu == nullptr || sample_count <= 0 || components <= 0) {
+    return result;
+  }
+  result.samples = sample_count;
+  double sample_diff_sum = 0.0;
+  for (const int64_t sample : IndexRange(sample_count)) {
+    float sample_diff = 0.0f;
+    for (const int component : IndexRange(components)) {
+      const int64_t index = sample * components + component;
+      const float diff = std::abs(gpu[index] - cpu[index]);
+      if (!(diff == diff)) {
+        /* A NaN compares false with everything, so std::max would drop it: a broken slot must not
+         * pass. */
+        result.has_nan = true;
+        continue;
+      }
+      sample_diff = std::max(sample_diff, diff);
+    }
+    result.max_diff = std::max(result.max_diff, sample_diff);
+    sample_diff_sum += double(sample_diff);
+  }
+  /* The GPU slot is sampled bilinearly in screen space and the CPU slice is read at the nearest
+   * texel, so at the edge of a stroke a lone sample can differ by a lot while the slot is right.
+   * Judge the mean of the per-sample worst component; keep the maximum for the report. */
+  result.mean_diff = float(sample_diff_sum / double(sample_count));
+  result.ok = !result.has_nan && result.mean_diff <= tolerance;
+  return result;
+}
+
+PaintLayersGpuSlotGuard::PaintLayersGpuSlotGuard(PaintLayersGpuSlotGuard &&other) noexcept
+    : release_(other.release_),
+      release_data_(other.release_data_),
+      resources_(std::move(other.resources_))
+{
+  other.release_ = nullptr;
+  other.release_data_ = nullptr;
+}
+
+PaintLayersGpuSlotGuard &PaintLayersGpuSlotGuard::operator=(
+    PaintLayersGpuSlotGuard &&other) noexcept
+{
+  if (this == &other) {
+    return *this;
+  }
+  release();
+  release_ = other.release_;
+  release_data_ = other.release_data_;
+  resources_ = std::move(other.resources_);
+  other.release_ = nullptr;
+  other.release_data_ = nullptr;
+  return *this;
+}
+
+PaintLayersGpuSlotGuard::~PaintLayersGpuSlotGuard()
+{
+  release();
+}
+
+void PaintLayersGpuSlotGuard::set_release(const ReleaseFn fn, void *release_data)
+{
+  release();
+  release_ = fn;
+  release_data_ = release_data;
+}
+
+void PaintLayersGpuSlotGuard::own(void *resource)
+{
+  if (resource != nullptr) {
+    resources_.append(resource);
+  }
+}
+
+void PaintLayersGpuSlotGuard::release()
+{
+  if (release_ != nullptr) {
+    for (void *resource : resources_) {
+      release_(release_data_, resource);
+    }
+  }
+  resources_.clear();
+}
+
+/** \} */
 
 }  // namespace blender

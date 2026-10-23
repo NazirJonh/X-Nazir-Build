@@ -382,14 +382,42 @@ static void bake_source_tree_images(const bNodeTree &tree,
   }
 }
 
+/**
+ * Append the textures a row that reads a material shows live: a stroke on one changes the result
+ * at once. A rendered map is not one: it is written by the row's own render, which would then read
+ * as an edit of its source and start the render again.
+ */
+static void bake_collect_live_source_images(const Material &ma,
+                                            const MaterialPaintLayer &layer,
+                                            Vector<Image *> &r_images)
+{
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+        ma, layer, channel, PaintLayerMaterialUse::Composite);
+    if (source.kind == PaintLayerMaterialSourceKind::LiveImage && source.image != nullptr &&
+        !r_images.contains(source.image))
+    {
+      r_images.append(source.image);
+    }
+  }
+  const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+      ma, layer, PaintLayerMaterialUse::Composite);
+  if (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha && coverage.image != nullptr &&
+      !r_images.contains(coverage.image))
+  {
+    r_images.append(coverage.image);
+  }
+}
+
 static void bake_collect_slice_images(const Material &ma,
                                       const MaterialPaintLayer &reader,
                                       Vector<Image *> &r_images,
                                       Vector<bUUID> &visited);
 
 /**
- * Append the maps \a row itself reads to \a r_images: its channel maps and the maps of its bake. A
- * reader also brings the maps of the slice it reads (see #bake_collect_slice_images).
+ * Append the maps \a row itself reads to \a r_images: its channel maps, the maps of its bake and,
+ * for a row that reads a material, the textures that material shows live. A reader also brings the
+ * maps of the slice it reads (see #bake_collect_slice_images).
  */
 static void bake_collect_row_maps(const Material &ma,
                                   const MaterialPaintLayer &row,
@@ -409,6 +437,9 @@ static void bake_collect_row_maps(const Material &ma,
       add(image);
     }
     add(row.bake->coverage);
+  }
+  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE)) {
+    bake_collect_live_source_images(ma, row, r_images);
   }
   if (paint_layer_kind_reads_anchor_point(row)) {
     bake_collect_slice_images(ma, row, r_images, visited);
@@ -521,25 +552,7 @@ void BKE_paint_layers_bake_collect_source_images(const Material &ma,
         r_images.append(layer.bake->coverage);
       }
     }
-    /* The textures it shows live: a stroke on one changes the folder's result at once. A rendered
-     * map is not one: it is written by the row's own render, which would then read as an edit of
-     * its source and start the render again. */
-    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
-          ma, layer, channel, PaintLayerMaterialUse::Composite);
-      if (source.kind == PaintLayerMaterialSourceKind::LiveImage && source.image != nullptr &&
-          !r_images.contains(source.image))
-      {
-        r_images.append(source.image);
-      }
-    }
-    const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
-        ma, layer, PaintLayerMaterialUse::Composite);
-    if (coverage.kind == PaintLayerMaterialCoverageKind::LiveAlpha && coverage.image != nullptr &&
-        !r_images.contains(coverage.image))
-    {
-      r_images.append(coverage.image);
-    }
+    bake_collect_live_source_images(ma, layer, r_images);
     /* What a Material row renders is its source alone: its mask, effects and children stay live
      * over the maps, so a stroke on them is no edit of what the render reads. */
     if (!is_child) {

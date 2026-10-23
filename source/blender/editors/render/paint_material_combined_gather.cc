@@ -15,6 +15,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <utility>
 
 #include "MEM_guardedalloc.h"
 
@@ -39,6 +40,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_memory_utils.hh"
 #include "BLI_rect.h"
+#include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
 #include "DNA_ID.h"
@@ -46,6 +48,7 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_uuid_types.h"
 
 #include "GPU_compute.hh"
 #include "GPU_shader.hh"
@@ -360,9 +363,12 @@ ImBuf *combined_preview_ensure(Main &bmain,
     for (const int i : IndexRange(int64_t(combined_shading_channels.size()))) {
       /* A layered material is read from its description: its generated tree is not a Mix chain
        * the graph walk could follow. */
+      /* Without the pixels of its Anchor Point slices: the hash and the subscriptions are all a
+       * frame that changed nothing needs, and the cache asks for the full stack when it has to
+       * evaluate (see the `full_layers` of #BKE_paint_material_composite_cache_ensure). */
       has_stack[i] = BKE_paint_layers_is_layered(ma) ?
                          BKE_paint_layers_composite_image_layers(
-                             ma, combined_shading_channels[i], stacks[i]) :
+                             ma, combined_shading_channels[i], stacks[i], /*describe_only=*/true) :
                          BKE_paint_material_composite_stack_from_material(
                              bmain, ma, combined_shading_channels[i], stacks[i]);
       stacks_found += has_stack[i] ? 1 : 0;
@@ -495,8 +501,20 @@ ImBuf *combined_preview_ensure(Main &bmain,
       ImBuf *composite = nullptr;
       {
         bke::paint_perf::ScopedTimer perf_channel("gather.channel_composite");
+        const auto describe_full = [&](Vector<PaintMaterialCompositeImageLayer> &r_full) {
+          return BKE_paint_layers_composite_image_layers(ma, channel, r_full);
+        };
         composite = BKE_paint_material_composite_cache_ensure(
-            ma, channel, layers, stack_hash, nullptr, nullptr, &channel_changed);
+            ma,
+            channel,
+            layers,
+            stack_hash,
+            nullptr,
+            nullptr,
+            &channel_changed,
+            BKE_paint_layers_is_layered(ma) ?
+                FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(describe_full) :
+                FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>());
         perf_channel.note("channel=%d layers=%d changed=%dx%d",
                           int(channel),
                           int(layers.size()),
@@ -694,6 +712,8 @@ static constexpr int gpu_layer_row_use = 8192;
 static constexpr int gpu_layer_empty_base = 16384;
 static constexpr int gpu_layer_tracks_alpha = 32768;
 static constexpr int gpu_layer_adjustment = 65536;
+/* The row reads an Anchor Point slice from a screen-space slot. Mirrors the shader. */
+static constexpr int gpu_layer_slot = 524288;
 /* The steps of the folder pass, and how many folders may nest. */
 static constexpr int gpu_folder_init = 0;
 static constexpr int gpu_folder_blend = 1;
@@ -711,8 +731,46 @@ static constexpr int gpu_mask_cov_begin = 3;
 static constexpr int gpu_mask_cov_color = 4;
 static constexpr int gpu_mask_cov_scalar = 5;
 static constexpr int gpu_mask_cov_end = 6;
+/* Write the built mask factor into a screen-space slot for a mask Anchor Point slice. */
+static constexpr int gpu_mask_slot_store = 7;
+/* A mask item reads an Anchor Point slice from a screen-space slot. */
+static constexpr int gpu_mask_slot = 2048;
 /* The ID map is read at its nearest texel. */
 static constexpr int gpu_map_nearest = 131072;
+
+/** A content slice captured for the channel passes: screen-space colour and coverage. */
+struct GpuSliceSlot {
+  bUUID point;
+  int channel;
+  /** The first reader that asked for it, and how many readers share the slot, for the developer
+   * verification. */
+  bUUID reader;
+  int reader_count = 1;
+  gpu::Texture *color = nullptr;
+  gpu::Texture *coverage = nullptr;
+  /** Releases both textures however far the slot got; see #PaintLayersGpuSlotGuard. */
+  PaintLayersGpuSlotGuard guard;
+};
+
+/** A mask slice captured for the channel passes: the factor in `.x`, grey duplicated in rgb. */
+struct GpuMaskSlot {
+  bUUID point;
+  bUUID reader;
+  int reader_count = 1;
+  gpu::Texture *texture = nullptr;
+  PaintLayersGpuSlotGuard guard;
+};
+
+/** What a capture job produces: a content pair, a mask rendered as content, or a mask slot. The
+ * plan itself lives in BKE, so its ordering and dedup rules are testable without a GPU. */
+using GpuCaptureKind = PaintLayersGpuCaptureKind;
+using GpuCaptureJob = PaintLayersGpuCaptureJob;
+
+/**
+ * How much memory the Anchor Point slots may take. A 4K RGBA16F pair is about 132 MiB, so this
+ * holds a few nested readers; past it the pass refuses and the CPU preview takes over.
+ */
+static constexpr size_t gpu_slot_budget_bytes = size_t(512) * 1024 * 1024;
 
 bool combined_preview_gpu_enabled(const Material *ma)
 {
@@ -772,47 +830,15 @@ static void gpu_report_active()
 
 /**
  * Why the GPU path cannot lay \a layer the way the CPU composite does, or null when it can.
+ *
+ * The rule lives in BKE so it is testable without a GPU: see
+ * #BKE_paint_layers_gpu_unsupported_reason. Anchor Point slices are supported through the
+ * screen-space slots captured before the channel passes; a *baked* correction whose coverage lives
+ * in a map at the reader's own UV remains impossible for the correction pass.
  */
 static const char *gpu_layer_unsupported_reason(const PaintMaterialCompositeImageLayer &layer)
 {
-  if (!layer.enabled || layer.opacity <= 0.0f) {
-    /* The composite skips it as well. */
-    return nullptr;
-  }
-  for (const PaintMaterialCompositeImageLayer &child : layer.children) {
-    if (child.adjustment_filter != 0) {
-      return "an adjustment row is inside a folder";
-    }
-    if (const char *reason = gpu_layer_unsupported_reason(child)) {
-      return reason;
-    }
-  }
-  if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&
-      layer.anchor_point_color == nullptr && !layer.has_constant_color)
-  {
-    return "a row has neither a map nor a flat colour";
-  }
-  /* An Anchor Point slice lives in the BKE's slice buffers, not in an Image the GPU path uploads:
-   * the slice is drawn by the CPU composite until the GPU slots are implemented, so the pass falls
-   * back instead of showing a row without its slice. */
-  if (layer.anchor_point_color != nullptr) {
-    return "an Anchor Point slice is read (CPU fallback)";
-  }
-  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
-    if (item.anchor_point_slice != nullptr || item.anchor_point_hash != 0) {
-      return "an Anchor Point mask slice is read (CPU fallback)";
-    }
-  }
-  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
-    /* A baked reader has no slice buffer but covers by a coverage map the GPU correction pass does
-     * not read, so it would lay as a plain map with the colour map's alpha. */
-    if (correction.anchor_point_slice != nullptr ||
-        correction.anchor_point_coverage_image != nullptr)
-    {
-      return "an Anchor Point slice is read (CPU fallback)";
-    }
-  }
-  return nullptr;
+  return BKE_paint_layers_gpu_unsupported_reason(layer);
 }
 
 /**
@@ -947,7 +973,8 @@ bool combined_preview_gpu_update(const Material &ma,
       has_stack[i] = false;
       continue;
     }
-    has_stack[i] = BKE_paint_layers_composite_image_layers(ma, combined_shading_channels[i], stacks[i]);
+    has_stack[i] = BKE_paint_layers_composite_image_layers(
+        ma, combined_shading_channels[i], stacks[i], /*describe_only=*/true);
     if (!has_stack[i]) {
       continue;
     }
@@ -992,9 +1019,16 @@ bool combined_preview_gpu_update(const Material &ma,
   std::array<gpu::Texture *, channels_num> accum;
   accum.fill(nullptr);
   gpu::Texture *dummy = pool.acquire_texture_2d(
-      int2(1), 1, gpu::TextureFormat::SFLOAT_16_16_16_16, GPU_TEXTURE_USAGE_SHADER_READ, "combined_dummy");
+      int2(1),
+      1,
+      gpu::TextureFormat::SFLOAT_16_16_16_16,
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      "combined_dummy");
   /* One factor, rebuilt for every row that has a mask. */
   gpu::Texture *mask_accum = nullptr;
+  /* A placeholder for the mask pass's slot image: never written when no slot is asked for, but a
+   * sampler and an image of one dispatch must not be the same texture. */
+  gpu::Texture *slot_dummy = nullptr;
   /* The colour and coverage of a row while its corrections are laid over it. */
   gpu::Texture *row_color = nullptr;
   gpu::Texture *row_factor = nullptr;
@@ -1004,6 +1038,9 @@ bool combined_preview_gpu_update(const Material &ma,
   std::array<gpu::Texture *, gpu_folder_levels_max> folder_cover;
   folder_premul.fill(nullptr);
   folder_cover.fill(nullptr);
+  /* Anchor Point slices captured before the channel passes, and the mask slices beside them. */
+  Vector<GpuSliceSlot> slice_slots;
+  Vector<GpuMaskSlot> mask_slots;
   BLI_SCOPED_DEFER([&]() {
     for (gpu::Texture *texture : accum) {
       if (texture != nullptr) {
@@ -1029,8 +1066,12 @@ bool combined_preview_gpu_update(const Material &ma,
         pool.release_texture(texture);
       }
     }
+    /* The captured slots release their own textures in their guards. */
     if (dummy != nullptr) {
       pool.release_texture(dummy);
+    }
+    if (slot_dummy != nullptr) {
+      pool.release_texture(slot_dummy);
     }
   });
   mask_accum = pool.acquire_texture_2d(
@@ -1052,6 +1093,15 @@ bool combined_preview_gpu_update(const Material &ma,
   if (dummy == nullptr) {
     return gpu_refuse("the placeholder texture could not be allocated");
   }
+  slot_dummy = pool.acquire_texture_2d(
+      int2(1),
+      1,
+      gpu::TextureFormat::SFLOAT_16_16_16_16,
+      eGPUTextureUsage(GPU_TEXTURE_USAGE_SHADER_READ | GPU_TEXTURE_USAGE_SHADER_WRITE),
+      "combined_slot_dummy");
+  if (slot_dummy == nullptr) {
+    return gpu_refuse("the placeholder slot texture could not be allocated");
+  }
 
   /* An affine 2D map as the mat4 the push constants take: GLSL multiplies columns, so the
    * translation sits in the fourth one. */
@@ -1063,10 +1113,13 @@ bool combined_preview_gpu_update(const Material &ma,
   int dispatches = 0;
   /* The mip level to read a map at: the texels it has per screen pixel, as a power of two. */
   const auto map_lod = [&](gpu::Texture *map, const int flags, const float2 &mapping_scale) {
-    if (map == nullptr || (flags & gpu_layer_alpha_coverage) != 0) {
+    if (map == nullptr || (flags & gpu_layer_alpha_coverage) != 0 ||
+        (flags & gpu_layer_slot) != 0)
+    {
       /* A painted map stores straight colour with black where it is transparent, and its mip
        * levels average that black in: a stroke edge seen from afar would come out several times
-       * darker than the CPU composite reads it. The base level has no such bleed. */
+       * darker than the CPU composite reads it. The base level has no such bleed. A slice slot is
+       * screen-space and has no mip levels at all. */
       return 0.0f;
     }
     const float2 map_size(GPU_texture_width(map), GPU_texture_height(map));
@@ -1092,9 +1145,11 @@ bool combined_preview_gpu_update(const Material &ma,
                        const int blend = int(CompositeBlend::Mix),
                        gpu::Texture *mask = nullptr,
                        const int filter_kind = 0,
-                       const float *filter_params = nullptr) {
+                       const float *filter_params = nullptr,
+                       gpu::Texture *slot_coverage = nullptr) {
     gpu::Texture *sampled = map != nullptr ? map : dummy;
     gpu::Texture *mask_sampled = mask != nullptr ? mask : dummy;
+    gpu::Texture *slot_cov_sampled = slot_coverage != nullptr ? slot_coverage : dummy;
     const float lod = map_lod(map, flags, mapping_scale);
     GPU_shader_bind(layer_shader);
     GPU_shader_uniform_mat4(layer_shader, "texel_to_uv", texel_to_uv_4x4.ptr());
@@ -1123,6 +1178,8 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(layer_shader, "layer_tx"));
     GPU_texture_bind(mask_sampled, GPU_shader_get_sampler_binding(layer_shader, "mask_tx"));
+    GPU_texture_bind(slot_cov_sampled,
+                     GPU_shader_get_sampler_binding(layer_shader, "slot_cov_tx"));
     GPU_texture_image_bind(accum[channel_index],
                            GPU_shader_get_sampler_binding(layer_shader, "accum_img"));
     GPU_texture_image_bind(row_color, GPU_shader_get_sampler_binding(layer_shader, "row_color_img"));
@@ -1132,6 +1189,7 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_texture_image_unbind(row_factor);
     GPU_texture_image_unbind(row_color);
     GPU_texture_image_unbind(accum[channel_index]);
+    GPU_texture_unbind(slot_cov_sampled);
     GPU_texture_unbind(mask_sampled);
     GPU_texture_unbind(sampled);
     dispatches++;
@@ -1147,7 +1205,9 @@ bool combined_preview_gpu_update(const Material &ma,
                              const int blend,
                              const int filter,
                              const float *filter_params,
-                             const PaintMaterialCompositeMapping *mapping) {
+                             const PaintMaterialCompositeMapping *mapping,
+                             gpu::Texture *slot_dst = nullptr,
+                             gpu::Texture *mask_source = nullptr) {
     gpu::Texture *sampled = map != nullptr ? map : dummy;
     int step_flags = flags;
     float2 mapping_offset(0.0f);
@@ -1183,20 +1243,31 @@ bool combined_preview_gpu_update(const Material &ma,
 
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
+    gpu::Texture *mask_target = mask_source != nullptr ? mask_source : mask_accum;
     GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(mask_shader, "mask_tx"));
-    GPU_texture_image_bind(mask_accum, GPU_shader_get_sampler_binding(mask_shader, "mask_img"));
+    GPU_texture_image_bind(mask_target, GPU_shader_get_sampler_binding(mask_shader, "mask_img"));
+    GPU_texture_image_bind(slot_dst != nullptr ? slot_dst : slot_dummy,
+                           GPU_shader_get_sampler_binding(mask_shader, "slot_img"));
     GPU_compute_dispatch(mask_shader, uint(groups.x), uint(groups.y), 1);
-    GPU_texture_image_unbind(mask_accum);
+    GPU_texture_image_unbind(slot_dst != nullptr ? slot_dst : slot_dummy);
+    GPU_texture_image_unbind(mask_target);
     GPU_texture_unbind(sampled);
     dispatches++;
   };
 
   /* One correction laid over the row's colour and coverage. False when its map has no GPU texture. */
   const auto correction_step = [&](const PaintMaterialCompositeCorrection &correction,
-                                   const bool tracks_alpha) {
+                                   const bool tracks_alpha,
+                                   gpu::Texture *slot_color = nullptr,
+                                   gpu::Texture *slot_coverage = nullptr) {
     gpu::Texture *map = nullptr;
     int step_flags = tracks_alpha ? gpu_layer_tracks_alpha : 0;
-    if (correction.filter == 0 && correction.image != nullptr) {
+    if (slot_color != nullptr) {
+      /* A live Anchor Point slice: screen-space, no mapping, coverage in the paired slot. */
+      map = slot_color;
+      step_flags |= gpu_layer_slot;
+    }
+    else if (correction.filter == 0 && correction.image != nullptr) {
       bool premultiplied = false;
       map = gpu_map_texture(correction.image, correction.iuser, premultiplied);
       if (map == nullptr) {
@@ -1207,10 +1278,11 @@ bool combined_preview_gpu_update(const Material &ma,
     float2 mapping_offset(0.0f);
     float2 mapping_scale(1.0f);
     float2 mapping_rotation(1.0f, 0.0f);
-    if (map != nullptr) {
+    if (map != nullptr && slot_color == nullptr) {
       gpu_mapping_setup(correction.mapping, step_flags, mapping_offset, mapping_scale, mapping_rotation);
     }
     gpu::Texture *sampled = map != nullptr ? map : dummy;
+    gpu::Texture *slot_sampled = slot_coverage != nullptr ? slot_coverage : dummy;
     const float4 constant_color(correction.constant_color);
     const float4 params_0(correction.filter_params[0],
                           correction.filter_params[1],
@@ -1240,6 +1312,8 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS);
     GPU_memory_barrier(GPU_BARRIER_TEXTURE_FETCH);
     GPU_texture_bind(sampled, GPU_shader_get_sampler_binding(correction_shader, "correction_tx"));
+    GPU_texture_bind(slot_sampled,
+                     GPU_shader_get_sampler_binding(correction_shader, "slot_cov_tx"));
     GPU_texture_image_bind(row_color,
                            GPU_shader_get_sampler_binding(correction_shader, "row_color_img"));
     GPU_texture_image_bind(row_factor,
@@ -1247,6 +1321,7 @@ bool combined_preview_gpu_update(const Material &ma,
     GPU_compute_dispatch(correction_shader, uint(groups.x), uint(groups.y), 1);
     GPU_texture_image_unbind(row_factor);
     GPU_texture_image_unbind(row_color);
+    GPU_texture_unbind(slot_sampled);
     GPU_texture_unbind(sampled);
     dispatches++;
     return true;
@@ -1301,6 +1376,25 @@ bool combined_preview_gpu_update(const Material &ma,
           size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_folder_cover");
     }
     return folder_premul[level] != nullptr && folder_cover[level] != nullptr;
+  };
+
+  /* The slots captured before the passes. Linear: there are at most PAINT_LAYER_ANCHOR_POINT_LIMIT
+   * points times the shaded channels, so a search is cheaper than a hash of pairs. */
+  const auto slice_slot_find = [&](const bUUID &point, const int channel) -> GpuSliceSlot * {
+    for (GpuSliceSlot &slot : slice_slots) {
+      if (BKE_paint_layers_gpu_slot_key_equal({slot.point, slot.channel}, {point, channel})) {
+        return &slot;
+      }
+    }
+    return nullptr;
+  };
+  const auto mask_slot_find = [&](const bUUID &point) -> GpuMaskSlot * {
+    for (GpuMaskSlot &slot : mask_slots) {
+      if (BLI_uuid_equal(slot.point, point)) {
+        return &slot;
+      }
+    }
+    return nullptr;
   };
 
   /* Build the mask factor of \a layer in the mask accumulator: seeded with one, each item laid over
@@ -1361,7 +1455,28 @@ bool combined_preview_gpu_update(const Material &ma,
         continue;
       }
       gpu::Texture *item_map = nullptr;
-      if (item.filter == 0 && item.image != nullptr) {
+      const bool live_reader = !BLI_uuid_is_nil(item.anchor_point_reader) &&
+                               item.image == nullptr && item.filter == 0;
+      if (live_reader) {
+        if (item.anchor_point_target == int8_t(PaintLayerAnchorPointTarget::Mask)) {
+          GpuMaskSlot *slot = mask_slot_find(item.anchor_point_point);
+          if (slot == nullptr) {
+            return gpu_refuse("an Anchor Point mask slice has no captured slot");
+          }
+          item_map = slot->texture;
+        }
+        else {
+          GpuSliceSlot *slot = slice_slot_find(item.anchor_point_point,
+                                               item.anchor_point_read_channel);
+          if (slot == nullptr) {
+            return gpu_refuse("an Anchor Point Content slice has no captured slot");
+          }
+          /* A content slice read as a mask is its coverage, which the coverage slot holds. */
+          item_map = slot->coverage;
+        }
+        item_flags |= gpu_mask_slot;
+      }
+      else if (item.filter == 0 && item.image != nullptr) {
         bool premultiplied = false;
         item_map = gpu_map_texture(item.image, item.iuser, premultiplied);
         if (item_map == nullptr) {
@@ -1378,7 +1493,7 @@ bool combined_preview_gpu_update(const Material &ma,
                 int(item.blend),
                 int(item.filter),
                 item.filter_params,
-                &item.mapping);
+                live_reader ? nullptr : &item.mapping);
     }
     if (layer.mask_image != nullptr) {
       bool premultiplied = false;
@@ -1408,9 +1523,21 @@ bool combined_preview_gpu_update(const Material &ma,
    * channel's accumulator, and the nesting level of the folder holding it otherwise, whose
    * accumulators the row then goes into. A folder lays its children into accumulators of its own
    * first and then goes on as a row that reads them back like a map. Returns false when the GPU
-   * path has to give up, with the reason already reported. */
-  std::function<bool(const PaintMaterialCompositeImageLayer &, int, int)> row_emit;
-  row_emit = [&](const PaintMaterialCompositeImageLayer &layer, const int i, const int level) {
+   * path has to give up, with the reason already reported.
+   *
+   * \a capture_color and \a capture_coverage, when given, ask for the row's content before its own
+   * opacity, mask and blend: the slice a reader of a point in this row lays. */
+  std::function<bool(const PaintMaterialCompositeImageLayer &,
+                     int,
+                     int,
+                     gpu::Texture *,
+                     gpu::Texture *)>
+      row_emit;
+  row_emit = [&](const PaintMaterialCompositeImageLayer &layer,
+                 const int i,
+                 const int level,
+                 gpu::Texture *capture_color,
+                 gpu::Texture *capture_coverage) {
     if (!layer.enabled || layer.opacity <= 0.0f) {
       /* The composite skips it as well. */
       return true;
@@ -1424,15 +1551,28 @@ bool combined_preview_gpu_update(const Material &ma,
         continue;
       }
       has_corrections |= correction.filter != 0 || correction.image != nullptr ||
-                         correction.has_constant_color;
+                         correction.has_constant_color ||
+                         !BLI_uuid_is_nil(correction.anchor_point_reader);
     }
 
     /* Where the row's colour and coverage are decided: the row textures for a folder, for a row in
      * a folder (its parent reads them there) and for a row with corrections; the map itself
-     * otherwise. */
-    bool row_in_textures = layer.is_folder || in_folder || has_corrections;
+     * otherwise. A capture reads the row textures even when nothing else would. */
+    bool row_in_textures = layer.is_folder || in_folder || has_corrections ||
+                           capture_color != nullptr;
     int flags = 0;
     gpu::Texture *map = nullptr;
+    GpuSliceSlot *reader_slot = nullptr;
+    if (!BLI_uuid_is_nil(layer.anchor_point_reader) && layer.color_image == nullptr) {
+      /* A live reader row: its slice is in a captured slot. A baked reader has a colour map and
+       * no slot. */
+      /* Slots are keyed by the channel enum, which only equals the index in the shaded set for the
+       * first channels. */
+      reader_slot = slice_slot_find(layer.anchor_point_point, int(combined_shading_channels[i]));
+      if (reader_slot == nullptr) {
+        return gpu_refuse("an Anchor Point row slice has no captured slot");
+      }
+    }
     float4 layer_color(layer.constant_color);
     float2 mapping_offset(0.0f);
     float2 mapping_scale(1.0f);
@@ -1446,7 +1586,7 @@ bool combined_preview_gpu_update(const Material &ma,
       }
       folder_step(gpu_folder_init, own_level, 0, 1.0f, int(CompositeBlend::Mix), nullptr);
       for (const PaintMaterialCompositeImageLayer &child : layer.children) {
-        if (!row_emit(child, i, own_level)) {
+        if (!row_emit(child, i, own_level, nullptr, nullptr)) {
           return false;
         }
       }
@@ -1462,7 +1602,11 @@ bool combined_preview_gpu_update(const Material &ma,
       }
       /* A row covers by its own alpha when it says so and no mask map takes the alpha's place. */
       const bool own_alpha = layer.mask_image == nullptr && layer.mask_from_alpha;
-      if (layer.color_image != nullptr) {
+      if (reader_slot != nullptr) {
+        map = reader_slot->color;
+        flags |= gpu_layer_slot;
+      }
+      else if (layer.color_image != nullptr) {
         bool premultiplied = false;
         map = gpu_map_texture(layer.color_image, layer.color_iuser, premultiplied);
         if (map == nullptr) {
@@ -1489,7 +1633,7 @@ bool combined_preview_gpu_update(const Material &ma,
       if (layer.adjustment_filter != 0) {
         flags |= gpu_layer_adjustment;
       }
-      if (map != nullptr) {
+      if (map != nullptr && reader_slot == nullptr) {
         gpu_mapping_setup(layer.mapping, flags, mapping_offset, mapping_scale, mapping_rotation);
       }
       if (row_in_textures) {
@@ -1505,7 +1649,8 @@ bool combined_preview_gpu_update(const Material &ma,
             int(CompositeBlend::Mix),
             nullptr,
             int(layer.adjustment_filter),
-            layer.adjustment_params);
+            layer.adjustment_params,
+            reader_slot != nullptr ? reader_slot->coverage : nullptr);
       }
     }
 
@@ -1514,13 +1659,52 @@ bool combined_preview_gpu_update(const Material &ma,
         if (correction.opacity <= 0.0f) {
           continue;
         }
-        if (correction.filter == 0 && correction.image == nullptr && !correction.has_constant_color) {
+        const bool live_reader = !BLI_uuid_is_nil(correction.anchor_point_reader) &&
+                                 correction.image == nullptr &&
+                                 !correction.has_constant_color && correction.filter == 0;
+        if (correction.filter == 0 && correction.image == nullptr &&
+            !correction.has_constant_color && !live_reader)
+        {
           continue;
         }
-        if (!correction_step(correction, layer.tracks_content_alpha)) {
+        gpu::Texture *slot_color = nullptr;
+        gpu::Texture *slot_coverage = nullptr;
+        if (live_reader) {
+          GpuSliceSlot *slot = slice_slot_find(correction.anchor_point_point,
+                                               int(combined_shading_channels[i]));
+          if (slot == nullptr) {
+            return gpu_refuse("an Anchor Point correction slice has no captured slot");
+          }
+          slot_color = slot->color;
+          slot_coverage = slot->coverage;
+        }
+        if (!correction_step(correction, layer.tracks_content_alpha, slot_color, slot_coverage)) {
           return gpu_refuse("a correction map has no GPU texture");
         }
       }
+    }
+
+    if (capture_color != nullptr) {
+      /* The row's content before its own opacity, mask and blend: what a reader of this point lays.
+       * The row textures hold the corrections already, so only a straight copy is needed. */
+      GPU_memory_barrier(GPU_BARRIER_SHADER_IMAGE_ACCESS | GPU_BARRIER_TEXTURE_UPDATE);
+      GPU_texture_copy(capture_color, row_color);
+      /* The coverage slot is grey in rgb and opaque in alpha; the mask store pass does that from
+       * the row factor's `x`. */
+      mask_step(gpu_mask_slot_store,
+                nullptr,
+                0,
+                1.0f,
+                1.0f,
+                1.0f,
+                int(CompositeBlend::Mix),
+                0,
+                nullptr,
+                nullptr,
+                capture_coverage,
+                row_factor);
+      GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE | GPU_BARRIER_TEXTURE_FETCH);
+      return true;
     }
 
     const int mask_flags = has_mask ? gpu_layer_has_mask : 0;
@@ -1545,9 +1729,176 @@ bool combined_preview_gpu_update(const Material &ma,
         int(layer.blend),
         has_mask ? mask_accum : nullptr,
         int(layer.adjustment_filter),
-        layer.adjustment_params);
+        layer.adjustment_params,
+        reader_slot != nullptr ? reader_slot->coverage : nullptr);
     return true;
   };
+
+  /* -------------------------------------------------------------------- */
+  /* Anchor Point slices: capture the producers before the channel passes. The plan is built in
+   * BKE: it collects the readers nested in each described slice, dedups shared points, skips
+   * readers on rows nothing lays, and orders the captures by point rank. */
+  std::array<Span<const PaintMaterialCompositeImageLayer>, channels_num> stack_spans;
+  std::array<int, channels_num> channel_enums;
+  for (const int i : IndexRange(channels_num)) {
+    stack_spans[i] = Span<const PaintMaterialCompositeImageLayer>(stacks[i].data(),
+                                                                int64_t(stacks[i].size()));
+    channel_enums[i] = int(combined_shading_channels[i]);
+  }
+  Vector<GpuCaptureJob> capture_jobs;
+  const char *capture_reason = nullptr;
+  const Span<const Span<const PaintMaterialCompositeImageLayer>> stack_view(
+      stack_spans.data(), int64_t(stack_spans.size()));
+  const Span<const int> channel_view(channel_enums.data(), int64_t(channel_enums.size()));
+  if (!BKE_paint_layers_gpu_capture_plan(
+          ma, stack_view, channel_view, capture_jobs, &capture_reason))
+  {
+    return gpu_refuse(capture_reason != nullptr ? capture_reason :
+                                                 "the Anchor Point capture plan cannot be built");
+  }
+  for (const GpuCaptureJob &job : capture_jobs) {
+    if (std::find(combined_shading_channels.begin(),
+                  combined_shading_channels.end(),
+                  eMaterialPaintChannel(job.channel)) == combined_shading_channels.end())
+    {
+      return gpu_refuse("an Anchor Point reads a channel the GPU path does not shade");
+    }
+  }
+
+  if (!capture_jobs.is_empty()) {
+    size_t textures = 0;
+    for (const GpuCaptureJob &job : capture_jobs) {
+      textures += job.kind == GpuCaptureKind::MaskItem ? 1 : 2;
+    }
+    if (textures * size_t(size.x) * size.y * 8 > gpu_slot_budget_bytes) {
+      return gpu_refuse("the Anchor Point slots exceed the GPU budget");
+    }
+    /* The guard releases whatever a slot allocated, even when its second texture fails: the slot
+     * does not have to be fully built to be cleaned up. */
+    const auto release_texture = [](void *data, void *resource) {
+      static_cast<gpu::TexturePool *>(data)->release_texture(static_cast<gpu::Texture *>(resource));
+    };
+    for (const GpuCaptureJob &job : capture_jobs) {
+      if (job.kind == GpuCaptureKind::MaskItem) {
+        GpuMaskSlot slot;
+        slot.point = job.point;
+        slot.reader = job.reader;
+        slot.reader_count = job.reader_count;
+        slot.guard.set_release(release_texture, &pool);
+        slot.texture = pool.acquire_texture_2d(
+            size, 1, gpu::TextureFormat::SFLOAT_16_16_16_16, accum_usage, "combined_anchor_mask");
+        slot.guard.own(slot.texture);
+        if (slot.texture == nullptr) {
+          return gpu_refuse("an Anchor Point slot could not be allocated");
+        }
+        mask_slots.append(std::move(slot));
+      }
+      else {
+        GpuSliceSlot slot;
+        slot.point = job.point;
+        slot.channel = job.channel;
+        slot.reader = job.reader;
+        slot.reader_count = job.reader_count;
+        slot.guard.set_release(release_texture, &pool);
+        slot.color = pool.acquire_texture_2d(size,
+                                             1,
+                                             gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                             accum_usage,
+                                             "combined_anchor_slice");
+        slot.guard.own(slot.color);
+        slot.coverage = pool.acquire_texture_2d(size,
+                                                1,
+                                                gpu::TextureFormat::SFLOAT_16_16_16_16,
+                                                accum_usage,
+                                                "combined_anchor_coverage");
+        slot.guard.own(slot.coverage);
+        if (slot.color == nullptr || slot.coverage == nullptr) {
+          return gpu_refuse("an Anchor Point slot could not be allocated");
+        }
+        slice_slots.append(std::move(slot));
+      }
+    }
+
+    for (const GpuCaptureJob &job : capture_jobs) {
+      const PaintMaterialCompositeImageLayer &entry = job.entry;
+      if (job.kind == GpuCaptureKind::MaskItem) {
+        bool has_mask = false;
+        if (!mask_build(entry, has_mask)) {
+          return false;
+        }
+        GpuMaskSlot *slot = mask_slot_find(job.point);
+        if (slot == nullptr) {
+          return gpu_refuse("an Anchor Point mask slot is missing");
+        }
+        if (has_mask) {
+          mask_step(gpu_mask_slot_store,
+                    nullptr,
+                    0,
+                    1.0f,
+                    1.0f,
+                    1.0f,
+                    int(CompositeBlend::Mix),
+                    0,
+                    nullptr,
+                    nullptr,
+                    slot->texture);
+        }
+        else {
+          /* A slice of items that all lay nothing is a factor of one, as on the CPU. */
+          const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+          GPU_texture_clear(slot->texture, GPU_DATA_FLOAT, white);
+        }
+        GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE | GPU_BARRIER_TEXTURE_FETCH);
+      }
+      else if (job.kind == GpuCaptureKind::MaskContent) {
+        /* A mask point read as content: the CPU slice is the mask value as opaque grey with full
+         * coverage. */
+        bool has_mask = false;
+        if (!mask_build(entry, has_mask)) {
+          return false;
+        }
+        GpuSliceSlot *slot = slice_slot_find(job.point, job.channel);
+        if (slot == nullptr) {
+          return gpu_refuse("an Anchor Point slot is missing");
+        }
+        if (has_mask) {
+          mask_step(gpu_mask_slot_store,
+                    nullptr,
+                    0,
+                    1.0f,
+                    1.0f,
+                    1.0f,
+                    int(CompositeBlend::Mix),
+                    0,
+                    nullptr,
+                    nullptr,
+                    slot->color);
+        }
+        else {
+          const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+          GPU_texture_clear(slot->color, GPU_DATA_FLOAT, white);
+        }
+        const float one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        GPU_texture_clear(slot->coverage, GPU_DATA_FLOAT, one);
+        GPU_memory_barrier(GPU_BARRIER_TEXTURE_UPDATE | GPU_BARRIER_TEXTURE_FETCH);
+      }
+      else {
+        GpuSliceSlot *slot = slice_slot_find(job.point, job.channel);
+        if (slot == nullptr) {
+          return gpu_refuse("an Anchor Point slot is missing");
+        }
+        const int emit_index = std::max(
+            0,
+            int(std::find(combined_shading_channels.begin(),
+                          combined_shading_channels.end(),
+                          eMaterialPaintChannel(job.channel)) -
+                combined_shading_channels.begin()));
+        if (!row_emit(entry, emit_index, -1, slot->color, slot->coverage)) {
+          return false;
+        }
+      }
+    }
+  }
 
   for (const int i : IndexRange(channels_num)) {
     if (wanted_channel >= 0 && i != wanted_channel) {
@@ -1564,7 +1915,7 @@ bool combined_preview_gpu_update(const Material &ma,
       continue;
     }
     for (const PaintMaterialCompositeImageLayer &layer : stacks[i]) {
-      if (!row_emit(layer, i, -1)) {
+      if (!row_emit(layer, i, -1, nullptr, nullptr)) {
         return false;
       }
     }
@@ -1606,6 +1957,235 @@ bool combined_preview_gpu_update(const Material &ma,
              pixels,
              size_t(gpu_verify_channels[i].size()) * sizeof(float));
       MEM_delete(pixels);
+    }
+
+    /* The captured Anchor Point slots, against the CPU slice of the same reader. The slots are in
+     * screen space, so a texel maps through the same affine as the passes. The comparison walks a
+     * stride but also the four corners and the centre, and reports every slot, matched or not, so a
+     * run of the developer check shows that it actually ran. */
+    Material &ma_verify = const_cast<Material &>(ma);
+    const auto report = [](const bUUID &point_marker,
+                           const bUUID &reader_marker,
+                           const int channel,
+                           const int reader_count,
+                           const char *label,
+                           const char *reason,
+                           const int64_t samples,
+                           const PaintLayersGpuVerifyDiff &diff) {
+      char point_uuid[64];
+      char reader_uuid[64];
+      BLI_uuid_format(point_uuid, point_marker);
+      BLI_uuid_format(reader_uuid, reader_marker);
+      if (reason != nullptr) {
+        printf("[PBR-PERF] gpu_verify slot: point=%s reader=%s channel=%d readers=%d %s: "
+               "skipped: %s\n",
+               point_uuid,
+               reader_uuid,
+               channel,
+               reader_count,
+               label,
+               reason);
+        fflush(stdout);
+        return;
+      }
+      const char *verdict = (samples <= 0) ? "NO SAMPLES" :
+                            diff.has_nan   ? "MISMATCH (NaN)" :
+                            diff.ok        ? "ok" :
+                                             "MISMATCH";
+      printf(
+          "[PBR-PERF] gpu_verify slot: point=%s reader=%s channel=%d readers=%d %s samples=%lld "
+          "mean=%.4f max=%.4f %s\n",
+          point_uuid,
+          reader_uuid,
+          channel,
+          reader_count,
+          label,
+          (long long)samples,
+          diff.mean_diff,
+          diff.max_diff,
+          verdict);
+      fflush(stdout);
+    };
+
+    /* Compare one captured screen-space texture with \a cpu_ibuf. The caller reads the GPU texture
+     * once for both its colour and coverage halves; \a gray takes the CPU grey of an RGBA texel. */
+    const auto compare_texture = [&](const Vector<float> &gpu_pixels,
+                                     const ImBuf &cpu_ibuf,
+                                     const bool gray,
+                                     const bUUID &point_marker,
+                                     const bUUID &reader_marker,
+                                     const int channel,
+                                     const int reader_count,
+                                     const char *label) {
+      if (cpu_ibuf.float_data() == nullptr || cpu_ibuf.x <= 0 || cpu_ibuf.y <= 0) {
+        report(point_marker, reader_marker, channel, reader_count, label, "no CPU slice buffer", 0, {});
+        return;
+      }
+      Vector<float> gpu_samples;
+      Vector<float> cpu_samples;
+      const int components = gray ? 1 : 3;
+      const auto add_sample = [&](const int x, const int y) {
+        if (x < 0 || y < 0 || x >= size.x || y >= size.y) {
+          return;
+        }
+        const float2 uv = math::transform_point(texel_to_uv, float2(x + 0.5f, y + 0.5f));
+        if (uv.x < 0.0f || uv.y < 0.0f || uv.x >= 1.0f || uv.y >= 1.0f) {
+          return;
+        }
+        const int cx = std::clamp(int(uv.x * cpu_ibuf.x), 0, cpu_ibuf.x - 1);
+        const int cy = std::clamp(int(uv.y * cpu_ibuf.y), 0, cpu_ibuf.y - 1);
+        const float *gpu = &gpu_pixels[(int64_t(y) * size.x + x) * 4];
+        const float *cpu = cpu_ibuf.float_data() + (int64_t(cy) * cpu_ibuf.x + cx) * 4;
+        if (gray) {
+          gpu_samples.append(gpu[0]);
+          cpu_samples.append((cpu[0] + cpu[1] + cpu[2]) / 3.0f);
+        }
+        else {
+          for (const int k : IndexRange(3)) {
+            gpu_samples.append(gpu[k]);
+            cpu_samples.append(cpu[k]);
+          }
+        }
+      };
+      for (int y = 0; y < size.y; y += 8) {
+        for (int x = 0; x < size.x; x += 8) {
+          add_sample(x, y);
+        }
+      }
+      /* The stride can miss a wrong corner or a wrong centre of a small map. */
+      add_sample(0, 0);
+      add_sample(size.x - 1, 0);
+      add_sample(0, size.y - 1);
+      add_sample(size.x - 1, size.y - 1);
+      add_sample(size.x / 2, size.y / 2);
+
+      const int64_t samples = components > 0 ? int64_t(gpu_samples.size()) / components : 0;
+      const PaintLayersGpuVerifyDiff diff = BKE_paint_layers_gpu_verify_compare_slot(
+          gpu_samples.data(), cpu_samples.data(), samples, components, 1e-2f);
+      report(point_marker, reader_marker, channel, reader_count, label, nullptr, samples, diff);
+    };
+
+    const auto slot_check = [&](const bUUID &point_marker,
+                                const bUUID &reader_marker,
+                                const int channel,
+                                const gpu::Texture *color_texture,
+                                const gpu::Texture *coverage_texture,
+                                const bool mask_slot,
+                                const int reader_count) {
+      MaterialPaintLayer *reader = BKE_paint_layers_find(ma_verify, reader_marker);
+      if (reader == nullptr) {
+        report(point_marker,
+               reader_marker,
+               channel,
+               reader_count,
+               "(color)",
+               "reader not found",
+               0,
+               {});
+        return;
+      }
+      if (color_texture == nullptr) {
+        report(point_marker,
+               reader_marker,
+               channel,
+               reader_count,
+               "(color)",
+               "no captured texture",
+               0,
+               {});
+        return;
+      }
+      std::shared_ptr<ImBuf> color;
+      std::shared_ptr<ImBuf> coverage;
+      if (!BKE_paint_layers_slice_render(ma, *reader, channel, &color, &coverage)) {
+        report(point_marker,
+               reader_marker,
+               channel,
+               reader_count,
+               "(color)",
+               "the CPU slice cannot be rendered",
+               0,
+               {});
+        return;
+      }
+      if (color == nullptr || color->float_data() == nullptr) {
+        report(point_marker,
+               reader_marker,
+               channel,
+               reader_count,
+               "(color)",
+               "the CPU slice has no float buffer",
+               0,
+               {});
+        return;
+      }
+
+      /* One read of each captured texture; one CPU render for the whole slot. */
+      Vector<float> gpu_color(int64_t(size.x) * size.y * 4);
+      GPU_texture_read(
+          const_cast<gpu::Texture *>(color_texture), GPU_DATA_FLOAT, 0, gpu_color.data());
+      compare_texture(gpu_color,
+                      *color,
+                      mask_slot,
+                      point_marker,
+                      reader_marker,
+                      channel,
+                      reader_count,
+                      mask_slot ? "(mask)" : "(color)");
+
+      if (coverage_texture != nullptr) {
+        if (coverage == nullptr || coverage->float_data() == nullptr) {
+          report(point_marker,
+                 reader_marker,
+                 channel,
+                 reader_count,
+                 "(coverage)",
+                 "the CPU slice has no coverage buffer",
+                 0,
+                 {});
+          return;
+        }
+        if (coverage->x != color->x || coverage->y != color->y) {
+          report(point_marker,
+                 reader_marker,
+                 channel,
+                 reader_count,
+                 "(coverage)",
+                 "the CPU coverage has a different size",
+                 0,
+                 {});
+          return;
+        }
+        Vector<float> gpu_coverage(int64_t(size.x) * size.y * 4);
+        GPU_texture_read(
+            const_cast<gpu::Texture *>(coverage_texture), GPU_DATA_FLOAT, 0, gpu_coverage.data());
+        compare_texture(gpu_coverage,
+                        *coverage,
+                        true,
+                        point_marker,
+                        reader_marker,
+                        channel,
+                        reader_count,
+                        "(coverage)");
+      }
+    };
+    for (const GpuSliceSlot &slot : slice_slots) {
+      slot_check(slot.point,
+                 slot.reader,
+                 slot.channel,
+                 slot.color,
+                 slot.coverage,
+                 false,
+                 slot.reader_count);
+    }
+    for (const GpuMaskSlot &slot : mask_slots) {
+      slot_check(slot.point,
+                 slot.reader,
+                 int(PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+                 slot.texture,
+                 nullptr,
+                 true,
+                 slot.reader_count);
     }
   }
 

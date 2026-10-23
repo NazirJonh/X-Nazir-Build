@@ -184,8 +184,8 @@ bool BKE_paint_layers_slice_render(const Material &ma,
                                    int channel,
                                    std::shared_ptr<ImBuf> *r_color,
                                    std::shared_ptr<ImBuf> *r_coverage,
-                                   const int *dst_rect = nullptr,
-                                   bool dimensions_only = false);
+                                   const int *dst_rect,
+                                   bool dimensions_only);
 
 /** Drop every cached slice. Buffers still referenced by a description stay alive. For tests and
  * teardown: a stroke on a source map needs no clear, as the cache key holds the pixel versions of

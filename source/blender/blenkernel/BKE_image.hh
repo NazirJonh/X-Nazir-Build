@@ -19,6 +19,7 @@
 
 #include "IMB_imbuf_enums.h"
 
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -170,11 +171,13 @@ struct ImageRuntime {
   /**
    * Changes every time the image's pixels are marked as modified (see
    * #BKE_image_partial_update_mark_region and #BKE_image_partial_update_mark_full_update), which
-   * every paint stroke and reload goes through. Drawn from one global counter, so a value is never
-   * shared by two images or reused after one is freed. For caches of data derived from pixels that
-   * need to tell "unchanged" without holding a partial update user.
+   * every paint stroke and reload goes through. Each change draws a value from one global counter,
+   * so no two edits of any images share one; an image never marked reads 0, so a cache has to
+   * identify the image itself (by #ID::session_uid) as well. For caches of data derived from
+   * pixels that need to tell "unchanged" without holding a partial update user. Atomic: strokes
+   * mark from worker threads while a cache reads it. Use relaxed order, it orders nothing else.
    */
-  uint64_t pixel_version = 0;
+  std::atomic<uint64_t> pixel_version = 0;
 
   float view_offset[2] = {};
   float view_zoom = 1.0f;

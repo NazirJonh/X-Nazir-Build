@@ -2645,7 +2645,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     const uint64_t stack_hash,
     uint64_t *r_revision,
     PaintMaterialCompositeEvalStats *r_stats,
-    rcti *r_changed_region)
+    rcti *r_changed_region,
+    FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers)
 {
   bke::paint_perf::ScopedTimer perf_timer("composite_cache_ensure");
   if (r_changed_region != nullptr) {
@@ -2740,11 +2741,22 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     if (has_bottom) {
       BKE_paint_layers_channel_bottom_color(eMaterialPaintChannel(channel), bottom_color);
     }
+    /* The slices are rendered here and nowhere earlier: the description above was enough to find
+     * out that nothing changed, which is what almost every call is. */
+    Vector<PaintMaterialCompositeImageLayer> evaluated_layers;
+    Span<PaintMaterialCompositeImageLayer> eval_layers = image_layers;
+    if (full_layers) {
+      if (!full_layers(evaluated_layers)) {
+        g_cache.entries.remove(key);
+        return nullptr;
+      }
+      eval_layers = evaluated_layers;
+    }
     bool eval_ok;
     {
       bke::paint_perf::ScopedTimer perf_eval("composite_eval_images");
       eval_ok = BKE_paint_material_composite_eval_images(
-          image_layers, entry.ibuf.get(), region, r_stats, has_bottom ? bottom_color : nullptr);
+          eval_layers, entry.ibuf.get(), region, r_stats, has_bottom ? bottom_color : nullptr);
       perf_eval.note("channel=%d region=%s", channel, region != nullptr ? "partial" : "full");
     }
     if (!eval_ok) {

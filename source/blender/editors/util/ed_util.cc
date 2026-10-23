@@ -29,6 +29,7 @@
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_material_combined.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
 #include "BKE_screen.hh"
@@ -255,6 +256,7 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
     /* Same reasoning for the composite cache, which owns #ImBuf buffers of its own and is keyed
      * on session UIDs the same way. */
     BKE_paint_material_composite_cache_free_all();
+    BKE_paint_layers_slice_cache_free_all();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */
     BKE_paint_material_combined_cache_free_all();
     /* The paint-layers bake debounce keeps its armed timer and pending set as process-static

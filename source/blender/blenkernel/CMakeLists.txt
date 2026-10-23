@@ -863,10 +863,12 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/brush_layer_source_test.cc
     intern/paint_layers/tests/paint_layers_bake_test.cc
     intern/paint_layers/tests/paint_layers_anchor_point_test.cc
+    intern/paint_layers/tests/paint_layers_anchor_point_composite_test.cc
     intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_content_alpha_test.cc
+    intern/paint_layers/tests/paint_layers_graph_eval_anchor_point_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_corrections_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_filters_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_formulas_test.cc

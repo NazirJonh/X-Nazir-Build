@@ -50,15 +50,21 @@ namespace blender::bke::tests {
 class PaintLayersDescription : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
+  /** The cache budget the test found, restored on teardown. */
+  size_t slice_cache_budget_before_ = 0;
 
   void SetUp() override
   {
+    paint_layer_anchor_point_slice_cache_clear();
+    slice_cache_budget_before_ = paint_layer_anchor_point_slice_cache_budget();
     bmain = BKE_main_new();
     G_MAIN = bmain;
   }
 
   void TearDown() override
   {
+    paint_layer_anchor_point_slice_cache_clear();
+    paint_layer_anchor_point_slice_cache_set_budget(slice_cache_budget_before_);
     BKE_main_free(bmain);
     G_MAIN = nullptr;
   }
@@ -3069,6 +3075,161 @@ TEST_F(PaintLayersDescription, mapping_wrap_copies_with_the_row)
   MaterialPaintLayer *duplicate = BKE_paint_layers_duplicate(*bmain, *ma, fill);
   ASSERT_NE(duplicate, nullptr);
   EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*duplicate), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name RNA Anchor Point
+ * \{ */
+
+static PointerRNA rna_anchor_layer_ptr(Material &ma, MaterialPaintLayer &layer)
+{
+  return RNA_pointer_create_discrete(&ma.id, RNA_MaterialPaintLayer, &layer);
+}
+
+TEST_F(PaintLayersDescription, rna_valid_points_lists_only_earlier_points)
+{
+  Material *ma = BKE_material_add(bmain, "RnaAnchorValid");
+  MaterialPaintLayer *lower = BKE_paint_layers_add(*ma, "Lower", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *lower_point = BKE_paint_layers_anchor_point_add(
+      *ma, lower, PaintLayerAnchorPointList::Effects, nullptr, false, "Lower Point", {});
+  ASSERT_NE(lower_point, nullptr);
+  MaterialPaintLayer *upper = BKE_paint_layers_add(*ma, "Upper", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *reader = BKE_paint_layers_anchor_point_add(
+      *ma, upper, PaintLayerAnchorPointList::Effects, nullptr, true, "Reader", {});
+  MaterialPaintLayer *upper_point = BKE_paint_layers_anchor_point_add(
+      *ma, upper, PaintLayerAnchorPointList::Effects, nullptr, false, "Upper Point", {});
+  ASSERT_NE(reader, nullptr);
+  ASSERT_NE(upper_point, nullptr);
+
+  PointerRNA reader_ptr = rna_anchor_layer_ptr(*ma, *reader);
+  PropertyRNA *target = RNA_struct_find_property(&reader_ptr, "anchor_point_target");
+  ASSERT_NE(target, nullptr);
+  const EnumPropertyItem *items = nullptr;
+  int totitem = 0;
+  bool free = false;
+  RNA_property_enum_items(nullptr, &reader_ptr, target, &items, &totitem, &free);
+  const int real_items = (totitem > 0 && items[totitem - 1].identifier == nullptr) ? totitem - 1 :
+                                                                                   totitem;
+  ASSERT_EQ(real_items, 2) << "None plus the one point before the reader";
+  EXPECT_STREQ(items[0].identifier, "NONE");
+  EXPECT_STREQ(items[1].identifier, "ANCHOR_1");
+  EXPECT_STREQ(items[1].name, "Lower Point (Lower, Content)");
+  for (int i = 0; i < real_items; i++) {
+    ASSERT_NE(items[i].name, nullptr);
+    EXPECT_EQ(std::string(items[i].name).find("Upper Point"), std::string::npos)
+        << "a point above the reader is never offered";
+  }
+  if (free) {
+    MEM_freeN(const_cast<EnumPropertyItem *>(items));
+  }
+}
+
+TEST_F(PaintLayersDescription, rna_source_set_rejects_non_marker)
+{
+  Material *ma = BKE_material_add(bmain, "RnaAnchorSource");
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *reader = BKE_paint_layers_anchor_point_add(
+      *ma, row, PaintLayerAnchorPointList::Effects, nullptr, true, "Reader", {});
+  MaterialPaintLayer *correction = BKE_paint_layers_correction_add(*ma, row, "Correction");
+  ASSERT_NE(reader, nullptr);
+  ASSERT_NE(correction, nullptr);
+
+  PointerRNA reader_ptr = rna_anchor_layer_ptr(*ma, *reader);
+  PropertyRNA *source = RNA_struct_find_property(&reader_ptr, "anchor_point_source");
+  ASSERT_NE(source, nullptr);
+  char marker[UUID_STRING_SIZE];
+  BLI_uuid_format(marker, correction->marker);
+  RNA_property_string_set(&reader_ptr, source, marker);
+  EXPECT_TRUE(BLI_uuid_is_nil(BKE_paint_layers_anchor_point_source_get(*reader)))
+      << "a correction is not a marker and the real setter refuses it";
+
+  /* The positive control: a real point's UUID is written through the same property. */
+  MaterialPaintLayer *point = BKE_paint_layers_anchor_point_add(
+      *ma, row, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  ASSERT_NE(point, nullptr);
+  BLI_uuid_format(marker, point->marker);
+  RNA_property_string_set(&reader_ptr, source, marker);
+  EXPECT_TRUE(BLI_uuid_equal(BKE_paint_layers_anchor_point_source_get(*reader), point->marker));
+}
+
+TEST_F(PaintLayersDescription, rna_enum_items_outlive_callback)
+{
+  Material *ma = BKE_material_add(bmain, "RnaAnchorEnum");
+  MaterialPaintLayer *lower = BKE_paint_layers_add(*ma, "Lower", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *point = BKE_paint_layers_anchor_point_add(
+      *ma, lower, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  MaterialPaintLayer *upper = BKE_paint_layers_add(*ma, "Upper", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *reader = BKE_paint_layers_anchor_point_add(
+      *ma, upper, PaintLayerAnchorPointList::Effects, nullptr, true, "Reader", {});
+  ASSERT_NE(point, nullptr);
+  ASSERT_NE(reader, nullptr);
+
+  PointerRNA reader_ptr = rna_anchor_layer_ptr(*ma, *reader);
+  PropertyRNA *target = RNA_struct_find_property(&reader_ptr, "anchor_point_target");
+  const EnumPropertyItem *first = nullptr;
+  int first_count = 0;
+  bool first_free = false;
+  RNA_property_enum_items(nullptr, &reader_ptr, target, &first, &first_count, &first_free);
+  ASSERT_GE(first_count, 2);
+  ASSERT_NE(first[1].name, nullptr);
+  ASSERT_NE(first[1].identifier, nullptr);
+  /* A copy that outlives the callback's array: the second call must produce the same strings. */
+  const std::string first_name(first[1].name);
+  const std::string first_identifier(first[1].identifier);
+  EXPECT_EQ(first_identifier, "ANCHOR_1");
+  EXPECT_EQ(first_name, "Point (Lower, Content)");
+  if (first_free) {
+    MEM_freeN(const_cast<EnumPropertyItem *>(first));
+  }
+
+  const EnumPropertyItem *second = nullptr;
+  int second_count = 0;
+  bool second_free = false;
+  RNA_property_enum_items(nullptr, &reader_ptr, target, &second, &second_count, &second_free);
+  ASSERT_GE(second_count, 2);
+  EXPECT_EQ(std::string(second[1].name), first_name)
+      << "the item strings live in a persistent pool, not in the callback's return value";
+  EXPECT_EQ(std::string(second[1].identifier), first_identifier);
+  if (second_free) {
+    MEM_freeN(const_cast<EnumPropertyItem *>(second));
+  }
+}
+
+TEST_F(PaintLayersDescription, reader_count_matches_resolve)
+{
+  Material *ma = BKE_material_add(bmain, "RnaAnchorReaders");
+  MaterialPaintLayer *source = BKE_paint_layers_add(*ma, "Source", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *point = BKE_paint_layers_anchor_point_add(
+      *ma, source, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  MaterialPaintLayer *first_row = BKE_paint_layers_add(
+      *ma, "First", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *second_row = BKE_paint_layers_add(
+      *ma, "Second", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(BKE_paint_layers_anchor_point_add(*ma,
+                                              first_row,
+                                              PaintLayerAnchorPointList::Effects,
+                                              nullptr,
+                                              true,
+                                              "A",
+                                              point->marker),
+            nullptr);
+  ASSERT_NE(BKE_paint_layers_anchor_point_add(*ma,
+                                              second_row,
+                                              PaintLayerAnchorPointList::Effects,
+                                              nullptr,
+                                              true,
+                                              "B",
+                                              point->marker),
+            nullptr);
+
+  PointerRNA point_ptr = rna_anchor_layer_ptr(*ma, *point);
+  PropertyRNA *count = RNA_struct_find_property(&point_ptr, "anchor_point_reader_count");
+  ASSERT_NE(count, nullptr);
+  const int expected = paint_layer_anchor_point_readers(*ma, point->marker).size();
+  EXPECT_EQ(RNA_property_int_get(&point_ptr, count), expected);
+  EXPECT_EQ(expected, 2);
 }
 
 /** \} */

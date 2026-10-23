@@ -489,8 +489,11 @@ uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
     return 0;
   }
   const bool content = ref.target == PaintLayerAnchorPointTarget::Content;
+  /* A mask slice is the same grey whichever channel a reader lays it in: its hash must not depend
+   * on that channel, or the one cache entry would be rendered once per channel. */
+  const int hash_channel = content ? channel : -1;
   const uint64_t h = anchor_point_hash_uuid(
-      anchor_point_hash_mix(0, get_default_hash(int(ref.target), channel, int(reader.role))),
+      anchor_point_hash_mix(0, get_default_hash(int(ref.target), hash_channel, int(reader.role))),
       ref.source_row->marker);
   return anchor_point_hash_row(h,
                                ma,
@@ -527,10 +530,9 @@ bool paint_layer_row_reads_anchor_point(const Material &ma,
   if (!paint_layer_channel_live(paint_layer_channel_find(reader, channel))) {
     return false;
   }
-  /* A mask slice in a tiled material is not supported: the sampler and the bake are single-tile. */
-  if (ref.target == PaintLayerAnchorPointTarget::Mask &&
-      paint_layer_anchor_point_slice_is_udim(ma, reader))
-  {
+  /* A tiled mask slice is not supported: the sampler and the bake are single-tile. A content
+   * slice is refused only when a nested mask reader in it has that problem. */
+  if (paint_layer_anchor_point_slice_is_udim(ma, reader)) {
     return false;
   }
   /* Always cannot bake a slice that contains an object mask, and it has no live path to fall back
@@ -828,9 +830,20 @@ bool paint_layer_anchor_point_slice_has_object_mask(const Material &ma,
   return anchor_point_slice_has_object_mask_walk(ma, reader, visited);
 }
 
+/**
+ * Whether \a row's mask map is a tiled image. A mask item reads one channel: Base Color for a
+ * painted/fill map, or #paint_layer_mask_source_channel for a Material item. Other channel records
+ * on the item must not trip UDIM.
+ */
 static bool anchor_point_row_has_tiled_image(const MaterialPaintLayer &row)
 {
+  const int channel = (row.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ?
+                          paint_layer_mask_source_channel(row) :
+                          PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   for (int i = 0; i < row.channels_num; i++) {
+    if (row.channels[i].channel != channel) {
+      continue;
+    }
     const Image *image = row.channels[i].image;
     if (image != nullptr && image->source == IMA_SRC_TILED) {
       return true;
@@ -843,15 +856,13 @@ static bool anchor_point_slice_is_udim_walk(const Material &ma,
                                             const MaterialPaintLayer &reader,
                                             Vector<bUUID> &visited);
 
-/** Whether the content a (nested) reader's slice is made of holds a tiled map. */
-static bool anchor_point_content_slice_has_tiled_image(const Material &ma,
-                                                       const MaterialPaintLayer &source_row,
-                                                       const MaterialPaintLayer *stop_before,
-                                                       Vector<bUUID> &visited)
+/** Whether \a row or a nested reader in its content slice contributes a mask slice with a tiled
+ * map. A content slice's own tiled maps are not an issue: only a mask slice is single-tile. */
+static bool anchor_point_content_slice_has_nested_mask_udim(const Material &ma,
+                                                             const MaterialPaintLayer &source_row,
+                                                             const MaterialPaintLayer *stop_before,
+                                                             Vector<bUUID> &visited)
 {
-  if (anchor_point_row_has_tiled_image(source_row)) {
-    return true;
-  }
   if (paint_layer_kind_reads_anchor_point(source_row) &&
       anchor_point_slice_is_udim_walk(ma, source_row, visited))
   {
@@ -861,9 +872,6 @@ static bool anchor_point_content_slice_has_tiled_image(const Material &ma,
     if (stop_before != nullptr && &effect == stop_before) {
       break;
     }
-    if (anchor_point_row_has_tiled_image(effect)) {
-      return true;
-    }
     if (paint_layer_kind_reads_anchor_point(effect) &&
         anchor_point_slice_is_udim_walk(ma, effect, visited))
     {
@@ -871,8 +879,17 @@ static bool anchor_point_content_slice_has_tiled_image(const Material &ma,
     }
   }
   for (const MaterialPaintLayer &child : source_row.children) {
-    if (anchor_point_content_slice_has_tiled_image(ma, child, nullptr, visited)) {
+    /* A child is fully inside the content slice, including its mask stack (as object-mask walks
+     * do): a mask reader with a tiled map there must trip UDIM. */
+    if (anchor_point_content_slice_has_nested_mask_udim(ma, child, nullptr, visited)) {
       return true;
+    }
+    for (const MaterialPaintLayer &item : child.mask_stack) {
+      if (paint_layer_kind_reads_anchor_point(item) &&
+          anchor_point_slice_is_udim_walk(ma, item, visited))
+      {
+        return true;
+      }
     }
   }
   return false;
@@ -915,7 +932,7 @@ static bool anchor_point_slice_is_udim_walk(const Material &ma,
       }
     }
     else if (ref.target == PaintLayerAnchorPointTarget::Content) {
-      found = anchor_point_content_slice_has_tiled_image(
+      found = anchor_point_content_slice_has_nested_mask_udim(
           ma, *ref.source_row, ref.point, visited);
     }
   }
@@ -927,9 +944,7 @@ bool paint_layer_anchor_point_slice_is_udim(const Material &ma,
                                             const MaterialPaintLayer &reader)
 {
   const PaintLayerAnchorPointRef ref = paint_layer_anchor_point_resolve(ma, reader);
-  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr ||
-      ref.target != PaintLayerAnchorPointTarget::Mask)
-  {
+  if (ref.issue != PaintLayerAnchorPointIssue::None || ref.source_row == nullptr) {
     return false;
   }
   Vector<bUUID> visited;
@@ -976,6 +991,15 @@ bool BKE_paint_layers_anchor_point_source_set(Material &ma,
   /* Owned by the material: a row, a content correction or a mask item of it. */
   if (BKE_paint_layers_find(ma, reader->marker) != reader) {
     return false;
+  }
+  if (!BLI_uuid_is_nil(marker)) {
+    /* Only a marker publishes a slice: a correction or a mask item has a marker of its own, but it
+     * names an element to edit, not a slice to read. Refuse it before it becomes a permanent
+     * NotFound issue. */
+    const MaterialPaintLayer *point = BKE_paint_layers_find(ma, marker);
+    if (point == nullptr || !paint_layer_kind_is_anchor_point_marker(*point)) {
+      return false;
+    }
   }
   if (BLI_uuid_equal(reader->anchor_point_source, marker)) {
     return true;

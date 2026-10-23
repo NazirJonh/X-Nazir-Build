@@ -13,10 +13,19 @@
 #include "BKE_material.hh"
 #include "BKE_paint_layers.hh"
 
+#include "../paint_layers_intern.hh"
+
 namespace blender::bke::tests {
 
+/**
+ * The slice cache is process-wide: a slice a previous test rendered must not be found by this one,
+ * and a budget a previous test shrank must not hide a slice here. The budget found is remembered
+ * rather than reset to a constant, so the default lives in one place (the cache itself).
+ */
 void PaintLayersTestBase::SetUp()
 {
+  paint_layer_anchor_point_slice_cache_clear();
+  slice_cache_budget_before_ = paint_layer_anchor_point_slice_cache_budget();
   bmain = BKE_main_new();
   G_MAIN = bmain;
   ma = BKE_material_add(bmain, "Layered");
@@ -25,8 +34,21 @@ void PaintLayersTestBase::SetUp()
 
 void PaintLayersTestBase::TearDown()
 {
+  paint_layer_anchor_point_slice_cache_clear();
+  paint_layer_anchor_point_slice_cache_set_budget(slice_cache_budget_before_);
   BKE_main_free(bmain);
   G_MAIN = nullptr;
+}
+
+AnchorSliceCacheBudgetGuard::AnchorSliceCacheBudgetGuard(const size_t bytes)
+    : previous_(paint_layer_anchor_point_slice_cache_budget())
+{
+  paint_layer_anchor_point_slice_cache_set_budget(bytes);
+}
+
+AnchorSliceCacheBudgetGuard::~AnchorSliceCacheBudgetGuard()
+{
+  paint_layer_anchor_point_slice_cache_set_budget(previous_);
 }
 
 Image *PaintLayersTestBase::add_solid_image(const char *name)

@@ -167,6 +167,15 @@ struct ImageRuntime {
   /* The image's current update count. See deg::set_id_update_count for more information. */
   uint64_t update_count = 0;
 
+  /**
+   * Changes every time the image's pixels are marked as modified (see
+   * #BKE_image_partial_update_mark_region and #BKE_image_partial_update_mark_full_update), which
+   * every paint stroke and reload goes through. Drawn from one global counter, so a value is never
+   * shared by two images or reused after one is freed. For caches of data derived from pixels that
+   * need to tell "unchanged" without holding a partial update user.
+   */
+  uint64_t pixel_version = 0;
+
   float view_offset[2] = {};
   float view_zoom = 1.0f;
 

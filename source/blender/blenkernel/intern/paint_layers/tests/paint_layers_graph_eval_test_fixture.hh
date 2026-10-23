@@ -55,6 +55,7 @@
 #include "IMB_imbuf_types.hh"
 
 #include "../../paint_material_composite_internal.hh"
+#include "../paint_layers_intern.hh"
 
 namespace blender::bke::tests {
 
@@ -627,6 +628,9 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
   Material *ma = nullptr;
+  /** The cache budget the test found, restored on teardown so a test that shrank it cannot hide a
+   * slice in a later one. */
+  size_t slice_cache_budget_before_ = 0;
   /** The value an object-mask Attribute node reads in #graph_pixel, see
    * #GraphInterpreter::object_mask_value. */
   float object_mask_value = 0.0f;
@@ -635,6 +639,9 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
   {
     /* The tier records are file-static; start each graph-evaluation test from the static tier. */
     BKE_paint_layers_blend_tier_clear();
+    /* The slice cache is process-wide: a slice a previous test rendered must not be found here. */
+    paint_layer_anchor_point_slice_cache_clear();
+    slice_cache_budget_before_ = paint_layer_anchor_point_slice_cache_budget();
     bmain = BKE_main_new();
     G_MAIN = bmain;
     ma = BKE_material_add(bmain, "Layered");
@@ -644,6 +651,8 @@ class PaintLayersGraphEvalTest : public bke::BlenderGTestBase {
   void TearDown() override
   {
     BKE_paint_layers_blend_tier_clear();
+    paint_layer_anchor_point_slice_cache_clear();
+    paint_layer_anchor_point_slice_cache_set_budget(slice_cache_budget_before_);
     BKE_main_free(bmain);
     G_MAIN = nullptr;
   }

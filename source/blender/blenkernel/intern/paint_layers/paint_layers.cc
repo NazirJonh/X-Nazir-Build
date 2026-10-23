@@ -2887,9 +2887,9 @@ void BKE_paint_layers_issues_get(const Material &ma, Vector<PaintLayersIssue> &r
             add_issue(ref.issue);
             return;
           }
-          if (ref.target == PaintLayerAnchorPointTarget::Mask &&
-              paint_layer_anchor_point_slice_is_udim(ma, row))
-          {
+          /* UDIM is unsupported for any reader whose slice depends on a tiled mask map: Content
+           * targets too, when a nested mask reader in the content slice has one. */
+          if (paint_layer_anchor_point_slice_is_udim(ma, row)) {
             add_issue(PaintLayerAnchorPointIssue::UdimUnsupported);
             return;
           }

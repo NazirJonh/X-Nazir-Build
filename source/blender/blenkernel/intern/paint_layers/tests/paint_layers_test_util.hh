@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "BKE_gtest_base.hh"
 
 #include "BKE_paint_layers.hh"
@@ -34,6 +36,8 @@ class PaintLayersTestBase : public BlenderGTestBase {
  public:
   Main *bmain = nullptr;
   Material *ma = nullptr;
+  /** The slice-cache budget the test found, restored on teardown. */
+  size_t slice_cache_budget_before_ = 0;
 
   void SetUp() override;
   void TearDown() override;
@@ -43,6 +47,21 @@ class PaintLayersTestBase : public BlenderGTestBase {
 
   /** A Paint row backed by an image on its enabled Base Color channel, added on top. */
   MaterialPaintLayer *add_paint_layer(const char *name, Image *image);
+};
+
+/**
+ * Sets the slice cache budget for one test and restores the previous one on scope exit, so a test
+ * that makes it small cannot change what a later test measures.
+ */
+class AnchorSliceCacheBudgetGuard {
+ public:
+  explicit AnchorSliceCacheBudgetGuard(size_t bytes);
+  ~AnchorSliceCacheBudgetGuard();
+  AnchorSliceCacheBudgetGuard(const AnchorSliceCacheBudgetGuard &) = delete;
+  AnchorSliceCacheBudgetGuard &operator=(const AnchorSliceCacheBudgetGuard &) = delete;
+
+ private:
+  size_t previous_;
 };
 
 }  // namespace blender::bke::tests

@@ -10,15 +10,20 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 
+#include "BKE_image.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_edit.hh"
 
+#include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_intern.hh"
 #include "../paint_layers_kind.hh"
+
+#include "RNA_access.hh"
+#include "RNA_prototypes.hh"
 
 #include "paint_layers_test_util.hh"
 
@@ -77,6 +82,50 @@ TEST_F(PaintLayersAnchorPointTest, object_mask_rejected_on_effect_and_mask_item)
       *ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask");
   ASSERT_NE(item, nullptr);
   EXPECT_FALSE(BKE_paint_layers_object_mask_role_allowed(*item));
+}
+
+TEST_F(PaintLayersAnchorPointTest, object_mask_rejected_on_effect_via_rna_setter)
+{
+  MaterialPaintLayer *row = BKE_paint_layers_add(*ma, "Row", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(row, nullptr);
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(*ma, row, "Effect");
+  ASSERT_NE(effect, nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, row, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask");
+  ASSERT_NE(item, nullptr);
+
+  /* The positive control: a stack row takes the value through the real RNA path. */
+  PointerRNA row_ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, row);
+  PropertyRNA *row_type = RNA_struct_find_property(&row_ptr, "object_mask_type");
+  ASSERT_NE(row_type, nullptr);
+  RNA_property_enum_set(&row_ptr, row_type, MA_PAINT_LAYER_OBJECT_MASK_UV_TILES);
+  EXPECT_EQ(row->object_mask_type, MA_PAINT_LAYER_OBJECT_MASK_UV_TILES);
+
+  const auto reject = [&](MaterialPaintLayer &owned) {
+    PointerRNA ptr = RNA_pointer_create_discrete(&ma->id, RNA_MaterialPaintLayer, &owned);
+    PropertyRNA *prop = RNA_struct_find_property(&ptr, "object_mask_type");
+    ASSERT_NE(prop, nullptr);
+    /* The refused write itself: asking for UV_TILES through RNA must leave a clean MESH row
+     * untouched, which is distinguishable now that MESH is the zero value. */
+    ASSERT_EQ(owned.object_mask_type, int8_t(MA_PAINT_LAYER_OBJECT_MASK_MESH));
+    RNA_property_enum_set(&ptr, prop, MA_PAINT_LAYER_OBJECT_MASK_UV_TILES);
+    EXPECT_EQ(owned.object_mask_type, int8_t(MA_PAINT_LAYER_OBJECT_MASK_MESH));
+    EXPECT_EQ(owned.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE, 0);
+
+    /* A value that reached DNA by another path is dropped too, and the reset reports that it
+     * changed the row so the graph is rebuilt. */
+    owned.object_mask_type = MA_PAINT_LAYER_OBJECT_MASK_UV_TILES;
+    owned.object_mask_flag |= MA_PAINT_LAYER_OBJECT_MASK_ACTIVE;
+    EXPECT_TRUE(BKE_paint_layers_object_mask_type_set(*ma, owned, MA_PAINT_LAYER_OBJECT_MASK_MESH))
+        << "the reset changed the row";
+    EXPECT_EQ(owned.object_mask_type, int8_t(MA_PAINT_LAYER_OBJECT_MASK_MESH));
+    EXPECT_EQ(owned.object_mask_flag & MA_PAINT_LAYER_OBJECT_MASK_ACTIVE, 0);
+    EXPECT_FALSE(BKE_paint_layers_object_mask_type_set(*ma, owned, MA_PAINT_LAYER_OBJECT_MASK_MESH))
+        << "a clean row changes nothing";
+  };
+  reject(*effect);
+  reject(*item);
 }
 
 TEST_F(PaintLayersAnchorPointTest, resolve_not_found)
@@ -640,6 +689,42 @@ TEST_F(PaintLayersAnchorPointTest, slice_buffer_survives_cache_clear_while_refer
   EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), 0);
 }
 
+TEST_F(PaintLayersAnchorPointTest, slice_cache_key_follows_source_pixel_version)
+{
+  Image *image = add_solid_image("Source");
+  SliceFixture fixture = make_slice_fixture(*this, "Source", image);
+  ASSERT_NE(fixture.reader, nullptr);
+  paint_layer_anchor_point_slice_cache_clear();
+
+  std::shared_ptr<ImBuf> first_color;
+  std::shared_ptr<ImBuf> first_coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
+                                            *fixture.reader,
+                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                            &first_color,
+                                            &first_coverage));
+  std::shared_ptr<ImBuf> same_color;
+  std::shared_ptr<ImBuf> same_coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
+                                            *fixture.reader,
+                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                            &same_color,
+                                            &same_coverage));
+  EXPECT_EQ(same_color.get(), first_color.get()) << "an untouched source reuses the entry";
+
+  /* No cache clear in between: the stroke alone has to change what the lookup finds. */
+  BKE_image_partial_update_mark_full_update(image);
+  std::shared_ptr<ImBuf> after_color;
+  std::shared_ptr<ImBuf> after_coverage;
+  ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
+                                            *fixture.reader,
+                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                            &after_color,
+                                            &after_coverage));
+  EXPECT_NE(after_color.get(), first_color.get()) << "a marked source renders the slice again";
+  paint_layer_anchor_point_slice_cache_clear();
+}
+
 TEST_F(PaintLayersAnchorPointTest, slice_cache_evicts_by_bytes)
 {
   SliceFixture first = make_slice_fixture(*this, "First", add_solid_image("First"));
@@ -656,8 +741,8 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_evicts_by_bytes)
                                             &color,
                                             &coverage));
   const size_t pair_bytes = size_t(color->x) * color->y * sizeof(float[4]) +
-                            size_t(coverage->x) * coverage->y * sizeof(float[4]);
-  paint_layer_anchor_point_slice_cache_set_budget(pair_bytes);
+                            size_t(coverage->x) * coverage->y * sizeof(float);
+  AnchorSliceCacheBudgetGuard guard(pair_bytes);
   paint_layer_anchor_point_slice_cache_clear();
 
   ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
@@ -675,15 +760,15 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_evicts_by_bytes)
                                             &second_coverage));
   EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 1)
       << "the older slice no longer fits the budget";
-  EXPECT_LE(paint_layer_anchor_point_slice_cache_bytes(), pair_bytes);
-  paint_layer_anchor_point_slice_cache_set_budget(size_t(512) * 1024 * 1024);
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), pair_bytes);
   paint_layer_anchor_point_slice_cache_clear();
 }
 
 TEST_F(PaintLayersAnchorPointTest, slice_larger_than_limit_is_still_usable)
 {
   SliceFixture fixture = make_slice_fixture(*this, "Source", add_solid_image("Source"));
-  paint_layer_anchor_point_slice_cache_set_budget(1);
+  AnchorSliceCacheBudgetGuard guard(1);
+  paint_layer_anchor_point_slice_cache_clear();
   std::shared_ptr<ImBuf> color;
   std::shared_ptr<ImBuf> coverage;
   ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
@@ -692,15 +777,23 @@ TEST_F(PaintLayersAnchorPointTest, slice_larger_than_limit_is_still_usable)
                                             &color,
                                             &coverage));
   ASSERT_NE(color, nullptr);
-  EXPECT_GT(paint_layer_anchor_point_slice_cache_bytes(), size_t(1));
+  ASSERT_NE(coverage, nullptr);
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 0)
+      << "a slice larger than the budget is not kept";
+  EXPECT_EQ(paint_layer_anchor_point_slice_cache_bytes(), 0);
   EXPECT_NE(color->float_data(), nullptr);
-  paint_layer_anchor_point_slice_cache_set_budget(size_t(512) * 1024 * 1024);
+  EXPECT_FLOAT_EQ(color->float_data()[0], 0.0f);
+  EXPECT_FLOAT_EQ(color->float_data()[3], 1.0f);
   paint_layer_anchor_point_slice_cache_clear();
 }
 
 TEST_F(PaintLayersAnchorPointTest, partial_dst_rect_renders_only_region_and_does_not_leak)
 {
-  SliceFixture fixture = make_slice_fixture(*this, "Source", add_solid_image("Source"));
+  /* A coloured source, so a black buffer cannot pass for a rendered one. */
+  const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      bmain, 8, 8, "Coloured", 32, false, IMA_GENTYPE_BLANK, red, false, false, false);
+  SliceFixture fixture = make_slice_fixture(*this, "Source", image);
   paint_layer_anchor_point_slice_cache_clear();
   const int rect[4] = {2, 2, 4, 4};
 
@@ -720,8 +813,9 @@ TEST_F(PaintLayersAnchorPointTest, partial_dst_rect_renders_only_region_and_does
   EXPECT_EQ(color->float_data()[0], 0.0f);
   EXPECT_EQ(color->float_data()[3], 0.0f);
   EXPECT_EQ(coverage->float_data()[0], 0.0f);
-  /* Inside it the pixel is the same one a full render produces. */
+  /* Inside it the pixel is the same one a full render produces, and it is red. */
   const int64_t inside = (int64_t(2) * color->x + 2) * 4;
+  EXPECT_NEAR(color->float_data()[inside + 0], 1.0f, 1e-5f);
   std::shared_ptr<ImBuf> full_color;
   std::shared_ptr<ImBuf> full_coverage;
   ASSERT_TRUE(BKE_paint_layers_slice_render(*ma,
@@ -789,7 +883,8 @@ TEST_F(PaintLayersAnchorPointTest, graph_reader_target_change_rebuilds_group)
 {
   MaterialPaintLayer *first = add_paint_layer("First", add_solid_image("First"));
   MaterialPaintLayer *first_point = add_point(*first);
-  MaterialPaintLayer *second = add_paint_layer("Second", add_solid_image("Second"));
+  Image *second_image = add_solid_image("Second");
+  MaterialPaintLayer *second = add_paint_layer("Second", second_image);
   MaterialPaintLayer *second_point = add_point(*second);
   MaterialPaintLayer *reader_row = BKE_paint_layers_add(
       *ma, "Reader", nullptr, PaintLayerPlace::Above);
@@ -802,16 +897,42 @@ TEST_F(PaintLayersAnchorPointTest, graph_reader_target_change_rebuilds_group)
     return paint_layers::paint_layers_layer_topology_hash(
         *ma, layer, paint_layers::paint_layers_wired_channels(*ma), forms);
   };
-  const uint64_t before = hash(*reader);
+  /* The generator hashes the row that owns the reader, not the reader element itself: a correction
+   * or a mask item is part of its owner's structure. */
+  const uint64_t before = hash(*reader_row);
   ASSERT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, reader, second_point->marker));
-  const uint64_t after_target = hash(*reader);
+  const uint64_t after_target = hash(*reader_row);
   EXPECT_NE(after_target, before) << "the reader group must be rebuilt, not relinked with defaults";
 
   /* The source row's channel composition decides which taps the reader's group exposes. */
   ASSERT_NE(BKE_paint_layers_channel_add(
                 *ma, second, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
             nullptr);
-  EXPECT_NE(hash(*reader), after_target);
+  EXPECT_NE(hash(*reader_row), after_target);
+
+  /* Values and pixels are inputs, not structure: neither moves the owner row's topology. */
+  const uint64_t after_channels = hash(*reader_row);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, reader, 0.25f));
+  EXPECT_EQ(hash(*reader_row), after_channels);
+  ASSERT_NE(second_image, nullptr);
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(second_image, nullptr, &lock);
+  ASSERT_NE(ibuf, nullptr);
+  uchar *pixels = ibuf->byte_data_for_write();
+  pixels[0] = uchar(255 - pixels[0]);
+  BKE_image_release_ibuf(second_image, ibuf, lock);
+  EXPECT_EQ(hash(*reader_row), after_channels)
+      << "a pixel edit is not a topology change";
+
+  /* A reader in the mask stack is part of the owner row's structure too (the 0x606 hash block). */
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, reader_row, 1.0f), nullptr);
+  MaterialPaintLayer *mask_reader = add_reader(
+      *reader_row, PaintLayerAnchorPointList::MaskStack, first_point->marker);
+  ASSERT_NE(mask_reader, nullptr);
+  const uint64_t before_mask = hash(*reader_row);
+  ASSERT_TRUE(BKE_paint_layers_anchor_point_source_set(*ma, mask_reader, second_point->marker));
+  EXPECT_NE(hash(*reader_row), before_mask)
+      << "a mask reader's target is part of its owner's topology";
 }
 
 /** \} */
@@ -888,10 +1009,12 @@ TEST_F(PaintLayersAnchorPointTest, nested_reader_uses_own_valid_bake_while_outer
   MaterialPaintLayer *outer_point = add_point(*outer);
   ASSERT_NE(outer_point, nullptr);
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *nested, MA_PAINT_LAYER_BAKE_ALWAYS));
-  BKE_paint_layers_bake_struct_ensure(*nested);
+  BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
+  BKE_paint_layers_bake_plan_run(*bmain, *ma);
   ASSERT_NE(nested->bake, nullptr);
-  nested->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR] = add_solid_image("Nested Bake");
-  nested->bake->coverage = add_solid_image("Nested Coverage");
+  ASSERT_NE(nested->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  ASSERT_NE(nested->bake->coverage, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *nested));
   ASSERT_TRUE(paint_layer_anchor_point_reader_baked(*ma, *nested));
 
   paint_layer_anchor_point_slice_cache_clear();
@@ -904,7 +1027,7 @@ TEST_F(PaintLayersAnchorPointTest, nested_reader_uses_own_valid_bake_while_outer
                                                 color,
                                                 coverage));
   EXPECT_EQ(paint_layer_anchor_point_slice_cache_entry_count(), 0)
-      << "the nested reader read its own bake instead of rendering its slice live";
+      << "the nested reader read its own valid bake instead of rendering its slice live";
 }
 
 /** \} */

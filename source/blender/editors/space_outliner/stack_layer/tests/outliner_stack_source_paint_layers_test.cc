@@ -4,20 +4,32 @@
 
 #include "testing/testing.h"
 
+#include "BLI_listbase.h"
 #include "BLI_uuid.h"
 
+#include "BKE_context.hh"
+#include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_image.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_report.hh"
+#include "BKE_scene.hh"
+#include "BKE_wm_runtime.hh"
 
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_space_types.h"
+#include "DNA_windowmanager_types.h"
 
 #include "UI_resources.hh"
+
+#include "../../../../blenkernel/intern/paint_layers/paint_layers_intern.hh"
 
 #include "outliner_stack_source.hh"
 #include "outliner_stack_source_paint_layers_intern.hh"
@@ -34,16 +46,59 @@ class OutlinerStackPaintLayersSourceTest : public bke::BlenderGTestBase {
  public:
   Main *bmain = nullptr;
   Material *material = nullptr;
+  Scene *scene = nullptr;
+  bContext *C = nullptr;
+  wmWindowManager wm{};
+  bke::WindowManagerRuntime wm_runtime{};
+  /** The slice-cache budget the test found, restored on teardown. */
+  size_t slice_cache_budget_before_ = 0;
 
   void SetUp() override
   {
+    paint_layer_anchor_point_slice_cache_clear();
+    slice_cache_budget_before_ = paint_layer_anchor_point_slice_cache_budget();
     bmain = BKE_main_new();
+    G_MAIN = bmain;
     material = BKE_material_add(bmain, "M");
+    scene = static_cast<Scene *>(BKE_id_new(bmain, ID_SCE, "StackScene"));
+    /* The paint settings (and the Mask brush switch) the Add touches need an initialized paint. */
+    BKE_paint_init(bmain, scene, PaintMode::Texture2D, false);
+    C = CTX_create();
+    CTX_data_main_set(C, bmain);
+    CTX_data_scene_set(C, scene);
+    /* Only attached while a call has to report: the entry points report through it, and the
+     * positive paths must not queue window notifiers their checks do not read. */
+    BKE_reports_init(&wm_runtime.reports, RPT_STORE);
+    wm.runtime = &wm_runtime;
   }
 
   void TearDown() override
   {
+    paint_layer_anchor_point_slice_cache_clear();
+    paint_layer_anchor_point_slice_cache_set_budget(slice_cache_budget_before_);
+    BKE_reports_free(&wm_runtime.reports);
+    CTX_free(C);
     BKE_main_free(bmain);
+    G_MAIN = nullptr;
+  }
+
+  /** The real entry point the Add button calls, with \a kind's index in #add_kinds. */
+  int row_add(const int kind, const int ordinal, const StackAddArgs &args = {})
+  {
+    const StackEditor *editor = source().editor();
+    BLI_assert(editor != nullptr);
+    return editor->row_add(*C, StackFocus{}, material->id, kind, ordinal, args);
+  }
+
+  /** The same, with a report list attached so a refusal can be read back. */
+  int row_add_catching_reports(const int kind, const int ordinal, ReportList **r_reports)
+  {
+    BKE_reports_clear(&wm_runtime.reports);
+    CTX_wm_manager_set(C, &wm);
+    const int created = row_add(kind, ordinal);
+    CTX_wm_manager_set(C, nullptr);
+    *r_reports = &wm_runtime.reports;
+    return created;
   }
 
   const StackSource &source()
@@ -888,6 +943,118 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
   ASSERT_EQ(kinds.size(), 25u);
   EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT_MASK_CORRECTION")
       << "row_add dispatches by index, last of the Anchor Point kinds";
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_correction)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  MaterialPaintLayer *first = BKE_paint_layers_correction_add(*material, layer, "First");
+  MaterialPaintLayer *second = BKE_paint_layers_correction_add(*material, layer, "Second");
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  const int ordinal = paint_layers_ordinal_of(*material, first);
+  ASSERT_GE(ordinal, 0);
+
+  /* The Add button's real path: the marker lands right after the active correction. */
+  const int created = row_add(21 /* ANCHOR_POINT */, ordinal);
+  ASSERT_GE(created, 0);
+  MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
+  ASSERT_NE(point, nullptr);
+  EXPECT_EQ(point->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_EQ(BLI_findindex(&layer->effects, point),
+            BLI_findindex(&layer->effects, first) + 1);
+  /* The marker took the place right after `first`, so `second` moved one further. */
+  EXPECT_EQ(BLI_findindex(&layer->effects, second), BLI_findindex(&layer->effects, point) + 1);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_with_active_mask_item)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  ASSERT_NE(BKE_paint_layers_mask_add(*material, layer, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *material, layer, MA_PAINT_LAYER_SOURCE_CONSTANT, "Mask", 1.0f);
+  ASSERT_NE(item, nullptr);
+  const int ordinal = paint_layers_ordinal_of(*material, item);
+  ASSERT_GE(ordinal, 0);
+
+  const int created = row_add(21 /* ANCHOR_POINT */, ordinal);
+  ASSERT_GE(created, 0);
+  MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
+  ASSERT_NE(point, nullptr);
+  EXPECT_EQ(point->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_EQ(BLI_findindex(&layer->mask_stack, point),
+            BLI_findindex(&layer->mask_stack, item) + 1);
+  ASSERT_NE(scene->toolsettings, nullptr);
+  EXPECT_EQ(scene->toolsettings->paint_mode.layer_target_mode, PAINT_LAYER_TARGET_MASK)
+      << "adding into the mask leaves the target in mask mode";
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_layer_creates_a_stack_row)
+{
+  MaterialPaintLayer *source = add_layer("Source");
+  MaterialPaintLayer *point = BKE_paint_layers_anchor_point_add(
+      *material, source, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  ASSERT_NE(point, nullptr);
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::AnchorPointLayer;
+  params.name = "Reader";
+  params.anchor_point_source = point->marker;
+  MaterialPaintLayer *reader = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(reader, nullptr);
+  EXPECT_EQ(reader->role, MA_PAINT_LAYER_ROLE_LAYER);
+  EXPECT_TRUE(BKE_paint_layers_reads_anchor_point(*reader));
+  EXPECT_EQ(BKE_paint_layers_parent(*material, *reader), nullptr);
+  EXPECT_TRUE(BLI_uuid_equal(reader->anchor_point_source, point->marker));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_correction_creates_effect_on_owner)
+{
+  MaterialPaintLayer *source = add_layer("Source");
+  MaterialPaintLayer *point = BKE_paint_layers_anchor_point_add(
+      *material, source, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *owner = add_layer("Owner");
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::AnchorPointCorrection;
+  params.anchor = owner;
+  params.name = "Reader";
+  params.anchor_point_source = point->marker;
+  MaterialPaintLayer *reader = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(reader, nullptr);
+  EXPECT_EQ(reader->role, MA_PAINT_LAYER_ROLE_EFFECT);
+  EXPECT_NE(BLI_findindex(&owner->effects, reader), -1);
+  EXPECT_TRUE(BLI_uuid_equal(reader->anchor_point_source, point->marker));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_mask_correction_creates_mask_item)
+{
+  MaterialPaintLayer *source = add_layer("Source");
+  MaterialPaintLayer *point = BKE_paint_layers_anchor_point_add(
+      *material, source, PaintLayerAnchorPointList::Effects, nullptr, false, "Point", {});
+  ASSERT_NE(point, nullptr);
+  MaterialPaintLayer *owner = add_layer("Owner");
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::AnchorPointMaskCorrection;
+  params.anchor = owner;
+  params.name = "Reader";
+  params.anchor_point_source = point->marker;
+  MaterialPaintLayer *reader = BKE_paint_layers_add_with_policy(*material, params);
+  ASSERT_NE(reader, nullptr);
+  EXPECT_EQ(reader->role, MA_PAINT_LAYER_ROLE_MASK_ITEM);
+  EXPECT_NE(BLI_findindex(&owner->mask_stack, reader), -1);
+  EXPECT_TRUE(BLI_uuid_equal(reader->anchor_point_source, point->marker));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_add_without_a_row_is_refused)
+{
+  ReportList *reports = nullptr;
+  EXPECT_EQ(row_add_catching_reports(21 /* ANCHOR_POINT */, -1, &reports), -1);
+  ASSERT_NE(reports, nullptr);
+  EXPECT_TRUE(BKE_reports_contain(reports, RPT_WARNING))
+      << "the refusal is a warning the user can read, not a silent no-op";
 }
 
 }  // namespace tests

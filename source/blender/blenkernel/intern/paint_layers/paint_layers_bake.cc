@@ -1036,10 +1036,9 @@ bool paint_layer_anchor_point_reader_baked(const Material &ma, const MaterialPai
   if (ref.issue != PaintLayerAnchorPointIssue::None) {
     return false;
   }
-  /* A UDIM mask slice is unsupported rather than bake-able: the reader does not take part. */
-  if (ref.target == PaintLayerAnchorPointTarget::Mask &&
-      paint_layer_anchor_point_slice_is_udim(ma, reader))
-  {
+  /* A UDIM mask slice is unsupported rather than bake-able: the reader does not take part. A
+   * content slice is refused when a nested mask reader in it has a tiled map. */
+  if (paint_layer_anchor_point_slice_is_udim(ma, reader)) {
     return false;
   }
   const bool has_object_mask = paint_layer_anchor_point_slice_has_object_mask(ma, reader);

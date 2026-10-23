@@ -173,16 +173,23 @@ uint64_t paint_layer_anchor_point_slice_hash(const Material &ma,
  * (or an eviction) still has valid pixels. A partial render writes the requested rectangle and
  * leaves the rest of the buffer zero; it is never cached, so it lives exactly as long as the
  * caller's references.
+ *
+ * \param dimensions_only: resolve and size the slice, allocating and rendering nothing; returns
+ * true with both buffers null when the slice exists. A caller finding the stack dimensions uses
+ * this instead of rendering a 1x1 rectangle, whose nested readers would still allocate their whole
+ * buffers.
  */
 bool BKE_paint_layers_slice_render(const Material &ma,
                                    const MaterialPaintLayer &reader,
                                    int channel,
                                    std::shared_ptr<ImBuf> *r_color,
                                    std::shared_ptr<ImBuf> *r_coverage,
-                                   const int *dst_rect = nullptr);
+                                   const int *dst_rect = nullptr,
+                                   bool dimensions_only = false);
 
-/** Drop every cached slice. Buffers still referenced by a description stay alive. For tests,
- * teardown and the points where an evaluation must not see a previous stroke. */
+/** Drop every cached slice. Buffers still referenced by a description stay alive. For tests and
+ * teardown: a stroke on a source map needs no clear, as the cache key holds the pixel versions of
+ * the maps the slice reads (#ImageRuntime::pixel_version). */
 void paint_layer_anchor_point_slice_cache_clear();
 
 /** Bytes the cache currently accounts for; for tests of the eviction policy. */
@@ -194,6 +201,9 @@ int paint_layer_anchor_point_slice_cache_entry_count();
 /** Override the byte budget. Tests use a small one; the cache never frees a buffer a description
  * still references, it only stops holding it. */
 void paint_layer_anchor_point_slice_cache_set_budget(size_t bytes);
+
+/** The byte budget currently in force; for a test guard that restores it. */
+size_t paint_layer_anchor_point_slice_cache_budget();
 
 /**
  * The maps the slice \a reader reads was rendered from, for the composite cache to subscribe to:

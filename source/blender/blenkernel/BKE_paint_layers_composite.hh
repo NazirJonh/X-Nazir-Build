@@ -102,6 +102,25 @@ bool BKE_paint_layers_mask_items(const Material &ma,
                                  const bUUID *stop_before = nullptr);
 
 /**
+ * Describe the slice \a reader lays in \a channel, without rendering it: the same entry
+ * #BKE_paint_layers_slice_render evaluates. A mask target describes the source row's mask stack up
+ * to the point, a content target the row's content up to it. The row's own opacity, mask and
+ * visibility are cleared: a slice is read straight. \a slice_rect limits nested slices to the
+ * rectangle a partial render needs.
+ *
+ * \param dimensions_only: describe only what the slice is made of, so a caller finding the stack
+ * dimensions does not render (or allocate) a single nested slice. The entry must not be evaluated.
+ *
+ * \return false when the reference does not resolve or the row cannot be described.
+ */
+bool BKE_paint_layers_slice_describe(const Material &ma,
+                                     const MaterialPaintLayer &reader,
+                                     int channel,
+                                     PaintMaterialCompositeImageLayer &r_entry,
+                                     const int *slice_rect = nullptr,
+                                     bool dimensions_only = false);
+
+/**
  * A CPU sampler of one row's effective mask, for the paint strokes.
  *
  * The row's mask stack is described once through the same reader the composite uses

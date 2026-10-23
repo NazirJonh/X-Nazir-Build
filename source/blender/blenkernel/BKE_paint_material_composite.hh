@@ -234,6 +234,8 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   /** The reader this correction lays, and whether it reads content or a mask. */
   bUUID anchor_point_reader = {};
   int8_t anchor_point_target = 0;
+  /** The point the reader names, the slice's producer. */
+  bUUID anchor_point_point = {};
   /** A baked reader's coverage map; the live path uses #anchor_point_coverage instead. */
   Image *anchor_point_coverage_image = nullptr;
   const ImageUser *anchor_point_coverage_iuser = nullptr;
@@ -334,6 +336,8 @@ struct PaintMaterialCompositeMaskItem {
   /** The reader this mask item lays, and whether it reads content or a mask. */
   bUUID anchor_point_reader = {};
   int8_t anchor_point_target = 0;
+  /** The point the reader names, the slice's producer. */
+  bUUID anchor_point_point = {};
   uint64_t anchor_point_hash = 0;
   /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
   Vector<Image *> anchor_point_images;
@@ -350,8 +354,11 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   /** The reader this layer is, and whether it reads content or a mask. */
   bUUID anchor_point_reader = {};
   int8_t anchor_point_target = 0;
+  /** The point the reader names, the slice's producer. */
+  bUUID anchor_point_point = {};
   /** Markers of this row whose slices a reader lays: the GPU captures these after the matching
-   * effect/mask step. Empty for every row without a read point. */
+   * effect/mask step. Empty for every row without a read point. Not read by the GPU slots yet: the
+   * slot pass captures by the reader's own #anchor_point_point. */
   Vector<bUUID> anchor_point_content_producers;
   Vector<bUUID> anchor_point_mask_producers;
   /**

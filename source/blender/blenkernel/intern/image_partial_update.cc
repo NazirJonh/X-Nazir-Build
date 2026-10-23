@@ -47,6 +47,7 @@
  * \endcode
  */
 
+#include <atomic>
 #include <optional>
 
 #include "BKE_image.hh"
@@ -576,11 +577,18 @@ void BKE_image_partial_update_register_free(Image *image)
   image->runtime->partial_update_register = nullptr;
 }
 
+static void image_pixel_version_bump(Image *image)
+{
+  static std::atomic<uint64_t> global_pixel_version = 0;
+  image->runtime->pixel_version = global_pixel_version.fetch_add(1) + 1;
+}
+
 void BKE_image_partial_update_mark_region(Image *image,
                                           const ImageTile *image_tile,
                                           const ImBuf *image_buffer,
                                           const rcti *updated_region)
 {
+  image_pixel_version_bump(image);
   PartialUpdateRegisterImpl *partial_updater = unwrap(image_partial_update_register_ensure(image));
   partial_updater->update_resolution(image_tile, image_buffer);
   partial_updater->mark_region(image_tile, updated_region);
@@ -588,6 +596,7 @@ void BKE_image_partial_update_mark_region(Image *image,
 
 void BKE_image_partial_update_mark_full_update(Image *image)
 {
+  image_pixel_version_bump(image);
   PartialUpdateRegisterImpl *partial_updater = unwrap(image_partial_update_register_ensure(image));
   partial_updater->mark_full_update();
 }

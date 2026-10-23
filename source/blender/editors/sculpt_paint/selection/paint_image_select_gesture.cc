@@ -166,6 +166,10 @@ static bool image_paint_selection_should_rasterize_gesture(const Scene *scene,
     case IMAGE_PAINT_SELECT_EXPAND_PIXELS:
     case IMAGE_PAINT_SELECT_EXPAND_MESH:
       return true;
+    case IMAGE_PAINT_SELECT_EXPAND_LOOP:
+      /* Fill-brush only modes (see #Brush::fill_expand): they are never stored as the selection
+       * expansion mode, so the raw gesture is rasterized exactly like in Pixels mode. */
+      return true;
   }
   return true;
 }

@@ -398,6 +398,17 @@ bool BKE_paint_sculpt_face_selection_mask_supported(const Scene *scene,
                                                     const Object *ob,
                                                     const char *active_tool_idname);
 /**
+ * True when the active Texture Paint brush is a Fill brush asking for the mesh wireframe
+ * (#Brush::fill_show_wire). Shared by the 3D and UV overlays so both read one rule.
+ */
+bool BKE_paint_texture_fill_wire_requested(const ToolSettings *ts);
+/**
+ * True when the active Fill brush of \a ob's paint mode (Texture Paint or Sculpt Mode) asks for the
+ * mesh wireframe to be drawn while it is the active tool (#Brush::fill_show_wire). Kept in BKE so
+ * the overlay engine can call it without depending on editor code.
+ */
+bool BKE_paint_fill_wire_overlay_enabled(const Scene *scene, const Object *ob);
+/**
  * Return true when in vertex/weight paint + vertex-select mode?
  */
 bool BKE_paint_select_vert_test(const Object *ob);

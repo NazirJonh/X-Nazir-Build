@@ -170,6 +170,8 @@ struct State {
    * by the engine through #BKE_paint_sculpt_face_selection_mask_supported, so the per-pass code
    * does not need to depend on the editor-side tool policy. */
   bool sculpt_face_selection_mask_supported = false;
+  /** The active Fill brush asks for the mesh wireframe (#BKE_paint_fill_wire_overlay_enabled). */
+  bool fill_tool_wire = false;
   bool xray_enabled = false;
   bool xray_enabled_and_not_wire = false;
   /** Can be true even if X-ray Alpha is 1.0. */

@@ -13,6 +13,11 @@ void main()
   /* The vertices hold the UVs of the active UV map; they are drawn through the Image Editor's view
    * matrix like the other UV overlays. */
   gl_Position = drw_point_world_to_homogenous(float3(au, 0.0f));
+  /* The PBR passepartout writes these faces to the depth buffer (see `overlay_mesh.hh`). Keep them
+   * behind the UV edges (0.2 to 0.4, see `overlay_edit_uv_edges_vert.glsl`), otherwise the UV
+   * guide wireframe fails its depth test inside every face and only the island outlines remain.
+   * `overlay_edit_uv_passepartout.bsl.hh` uses the same depth for the veil. */
+  gl_Position.z = 0.5f;
 
   /* Same rule as the 3D paint overlay (see `overlay_paint_face_vert.glsl`): the face selection is
    * drawn as a veil over the faces a masked stroke leaves out. Faces the flag marks as selected

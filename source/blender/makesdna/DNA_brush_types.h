@@ -843,9 +843,11 @@ struct Brush {
 
   /** #eImagePaint_SelectionExpand — Fill pick mode. */
   char fill_expand = IMAGE_PAINT_SELECT_EXPAND_FACE;
+  /** Draw the mesh wireframe in the viewport while this Fill brush is the active tool. */
+  char fill_show_wire = 1;
   /* Keep #Brush 8-byte aligned: #face_set_color_mtex above ends on an 8-byte
-   * boundary, so this char plus its padding must add up to 8. */
-  char _pad_fill[7] = {};
+   * boundary, so the two chars plus their padding must add up to 8. */
+  char _pad_fill[6] = {};
 
   /** Every Curve Patch setting of this brush. Embedded by value rather than held by pointer
    * (unlike #gpencil_settings and #curves_sculpt_settings): there is no optional lifetime here --

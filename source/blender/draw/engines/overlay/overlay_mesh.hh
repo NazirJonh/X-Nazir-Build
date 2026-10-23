@@ -757,7 +757,12 @@ class MeshUVs : Overlay {
     {
       /* Wireframe UV Overlay. */
       const bool show_wireframe_uv_edit = space_image->flag & SI_DRAWSHADOW;
-      const bool show_wireframe_uv_guide = !(space_image->flag & SI_NO_DRAW_UV_GUIDE) &&
+      /* The Fill tool can ask for the wireframe to see where the faces are, whatever the UV Guide
+       * overlay setting says (see #Brush::fill_show_wire). */
+      const bool fill_tool_wire = space_mode_is_paint &&
+                                  BKE_paint_texture_fill_wire_requested(tool_setting);
+      const bool show_wireframe_uv_guide = (!(space_image->flag & SI_NO_DRAW_UV_GUIDE) ||
+                                            fill_tool_wire) &&
                                            (space_mode_is_paint || space_mode_is_uv);
 
       if (space_mode_is_uv && object_mode_is_edit) {

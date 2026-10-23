@@ -3391,7 +3391,7 @@ def _image_paint_fill_canvas(context, is_sculpt_texture_fill):
 
 
 def draw_image_paint_fill_expand(layout, context, brush):
-    """Horizontal Face / Island / Mesh / Pixels buttons for Image/Texture Paint Fill."""
+    """Horizontal Face / Island / Mesh / Pixels, Loop and wireframe buttons for paint Fill."""
     is_sculpt_texture_fill = getattr(brush, 'sculpt_brush_type', None) == 'TEXTURE_FILL'
     is_image_fill = brush.image_brush_type == 'FILL'
     if not is_image_fill and not is_sculpt_texture_fill:
@@ -3399,9 +3399,16 @@ def draw_image_paint_fill_expand(layout, context, brush):
     is_mask_target = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
     if not is_mask_target and brush.color_type != 'COLOR':
         return False
-    row = layout.row(align=True)
+    row = layout.row()
     row.use_property_split = False
-    row.prop(brush, "fill_expand", text="", expand=True, icon_only=True)
+    modes = row.row(align=True)
+    for mode in ('FACE', 'ISLAND', 'MESH', 'PIXELS'):
+        modes.prop_enum(brush, "fill_expand", mode, text="")
+    # Loop picks edges rather than faces, so it is set apart from the face expansions.
+    row.separator()
+    row.row(align=True).prop_enum(brush, "fill_expand", 'LOOP', text="")
+    row.separator()
+    row.prop(brush, "fill_show_wire", text="", icon='SHADING_WIRE', toggle=True)
 
     # The fill mirrors across the paint object's mesh symmetry -- the same flag the 3D
     # viewport header toggles. The 3D header draws those buttons itself, so surface them

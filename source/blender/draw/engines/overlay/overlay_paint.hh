@@ -113,7 +113,7 @@ class Paints : Overlay {
       return;
     }
 
-    show_wires_ = state.overlay.paint_flag & V3D_OVERLAY_PAINT_WIRE;
+    show_wires_ = (state.overlay.paint_flag & V3D_OVERLAY_PAINT_WIRE) || state.fill_tool_wire;
     show_face_selection_ = (state.overlay.paint_flag & V3D_OVERLAY_PAINT_FACE_SELECTION) &&
                            (state.overlay.paint_face_selection_opacity > 0.0f);
     show_symmetry_contour_ = !state.is_wire() && !state.is_depth_only_drawing &&
@@ -346,9 +346,12 @@ class Paints : Overlay {
         }
       }
       else {
-        if ((draw_face_selection || show_wires_) && !in_texture_paint_mode) {
+        /* Texture Paint has no paint wireframe of its own, but the Fill tool opts in to one so the
+         * faces it picks are visible. */
+        const bool fill_wire = in_texture_paint_mode && state.fill_tool_wire;
+        if ((draw_face_selection || show_wires_) && (!in_texture_paint_mode || fill_wire)) {
           gpu::Batch *geom = DRW_cache_mesh_paint_overlay_edges_get(ob_ref.object);
-          paint_region_edge_ps_->push_constant("use_select", draw_face_selection);
+          paint_region_edge_ps_->push_constant("use_select", draw_face_selection && !fill_wire);
           paint_region_edge_ps_->draw(geom, manager.unique_handle(ob_ref));
         }
         if (draw_face_selection) {

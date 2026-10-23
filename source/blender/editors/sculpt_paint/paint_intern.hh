@@ -30,6 +30,7 @@
 
 #include "ED_view3d.hh"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -92,7 +93,7 @@ struct ImagePaintUVObjectFaces {
   Object *object = nullptr;
   BMesh *bm = nullptr;
   bool owns_bm = false;
-  BMUVOffsets offsets{};
+  BMUVOffsets offsets = BMUVOFFSETS_NONE;
   Vector<int> faces;
   Map<int, Vector<int>> tile_faces;
 };
@@ -119,6 +120,14 @@ struct ImagePaintGeometryFillGestureItem {
 };
 
 /**
+ * Native overlay for fill previews (loop fill, and the mirror of the box gesture highlight). Holds
+ * one original-mesh BMesh per object and draws the selected faces plus loop edges in the 3D
+ * Viewport and in the Image Editor; the view is projected at draw time so panning/zooming while a
+ * preview is alive keeps it aligned with the mesh.
+ */
+struct ImagePaintFillPreview;
+
+/**
  * Overlay state for the geometry-fill box gesture. Faces are projected into region pixel space
  * once at invoke -- the view cannot change while the box gesture runs -- and the faces under the
  * dragged box are highlighted. Resolving never touches image buffers; pixels change only when
@@ -135,8 +144,50 @@ struct ImagePaintGeometryFillGestureState {
   /** Overlay registration, released by the destructor on every exit path. */
   ARegionType *region_type = nullptr;
   void *draw_handle = nullptr;
+  /**
+   * The highlighted faces shown in the other editor (3D Viewport and Image Editor mirror each
+   * other); it skips #gesture_region, which draws the highlight above itself.
+   */
+  ImagePaintFillPreview *mirror = nullptr;
 
   ~ImagePaintGeometryFillGestureState();
+};
+
+/** Loop topology used by the edge-loop fill modes and by `bpy.paint`. */
+enum class PaintFillLoopKind : int8_t {
+  EdgeLoop,
+  EdgeRing,
+  FaceLoop,
+  Boundary,
+};
+
+/** Minimum `abs(dot)` of two edge directions for them to count as parallel (cos 30 degrees). */
+constexpr float PAINT_FILL_PARALLEL_DOT_MIN = 0.866f;
+
+/** Optional delimiters for #paint_image_fill_walk_loop. */
+enum class PaintFillDelimit : uint8_t {
+  None = 0,
+  Seam = 1 << 0,
+  Sharp = 1 << 1,
+  Material = 1 << 2,
+  Ngons = 1 << 3,
+};
+
+struct ImagePaintFillPick {
+  Object *object = nullptr;
+  int edge_index = -1;
+  int face_index = -1;
+  float3 location = float3(0.0f);
+  float2 uv = float2(0.0f);
+  /** Normalized region-space direction of the picked edge (screen in 3D, UV view in 2D). */
+  float2 edge_dir = float2(0.0f);
+  float distance_px = 0.0f;
+};
+
+struct ImagePaintFillLoop {
+  Vector<int> edge_indices;
+  Vector<int> face_indices;
+  bool closed = false;
 };
 
 /* paint_stroke.cc */
@@ -1025,6 +1076,101 @@ bool paint_image_proj_geometry_fill_faces(const bContext *C,
                                           Object *ob,
                                           Span<int> seed_faces,
                                           bool invert = false);
+/**
+ * Fill exactly \a faces: unlike #paint_image_proj_geometry_fill_faces, the brush's
+ * Face/Island/Mesh expansion is bypassed. Face indices refer to \a ob's original mesh.
+ */
+bool paint_image_proj_geometry_fill_faces_exact(const bContext *C,
+                                                const float color[3],
+                                                Brush *br,
+                                                Object *ob,
+                                                Span<int> faces,
+                                                bool invert = false);
+/** Exact face fill for the Image Editor canvas (writes the displayed image or mask target). */
+bool paint_image_2d_geometry_fill_faces_exact(const bContext *C,
+                                              const float color[3],
+                                              Brush *br,
+                                              Object *ob,
+                                              Span<int> faces,
+                                              bool invert = false);
+
+/** Build the original-mesh topology handle used by the loop API. */
+bool paint_image_fill_topology_init(Object *ob, ImagePaintUVObjectFaces &r_item);
+/** Release a topology handle; safe on a zero-initialized item. */
+void paint_image_fill_topology_free(ImagePaintUVObjectFaces &item);
+/**
+ * Resolve the UV layer UV-space picking reads through \a item: the Image Editor canvas map of
+ * \a item.object. Call once after #paint_image_fill_topology_init; without it only the 3D
+ * Viewport pick works.
+ */
+void paint_image_fill_topology_set_uv_layers(const bContext *C, ImagePaintUVObjectFaces &item);
+
+/** Pick the visible edge of the original mesh under \a mouse in the 3D viewport. */
+bool paint_image_fill_pick_edge(const bContext *C,
+                                const float mouse[2],
+                                Span<Object *> objects,
+                                ImagePaintFillPick &r_pick);
+/** Pick the face under \a mouse in the 3D viewport (no BMesh is built). */
+bool paint_image_fill_pick_face(const bContext *C,
+                                const float mouse[2],
+                                Span<Object *> objects,
+                                ImagePaintFillPick &r_pick);
+/**
+ * Pick an edge of \a face_index using an already-built topology handle. Used by interactive
+ * loop modes so each mouse move does not rebuild the BMesh.
+ *
+ * \a parallel_to: when set, only edges whose region-space direction is within
+ * #PAINT_FILL_PARALLEL_DOT_MIN of this (normalized) direction are candidates.
+ */
+bool paint_image_fill_pick_edge_from_item(const bContext *C,
+                                          ImagePaintUVObjectFaces &item,
+                                          int face_index,
+                                          const float mouse[2],
+                                          ImagePaintFillPick &r_pick,
+                                          const float2 *parallel_to = nullptr);
+/** Pick the edge under \a mouse in UV space for the Image Editor. */
+bool paint_image_fill_pick_edge_uv(const bContext *C,
+                                   const float mouse[2],
+                                   ImagePaintFillPick &r_pick);
+/** UV-space pick using an already-built topology handle. */
+bool paint_image_fill_pick_edge_from_item_uv(const bContext *C,
+                                             ImagePaintUVObjectFaces &item,
+                                             const float mouse[2],
+                                             ImagePaintFillPick &r_pick,
+                                             const float2 *parallel_to = nullptr);
+
+/**
+ * Walk a loop/ring/face-strip from \a edge_index.
+ *
+ * \a item must be a topology handle from #paint_image_fill_topology_init. The returned face
+ * indices are the faces to fill: every face incident to the loop for EdgeLoop/EdgeRing/Boundary,
+ * and the walked face strip for FaceLoop.
+ */
+bool paint_image_fill_walk_loop(ImagePaintUVObjectFaces &item,
+                                int edge_index,
+                                PaintFillLoopKind kind,
+                                PaintFillDelimit delimit,
+                                ImagePaintFillLoop &r_loop);
+
+/**
+ * Begin/update/end a native loop-fill preview overlay. `begin` captures the current region; the
+ * preview is valid while that region exists. `set` replaces the faces/edges of one object.
+ */
+/**
+ * The preview is drawn in the 3D Viewport and in the Image Editor (Paint mode) alike. With
+ * \a skip_origin_region the region \a C runs in is left out, for callers that already draw the
+ * selection there themselves.
+ */
+ImagePaintFillPreview *paint_image_fill_preview_begin(const bContext *C,
+                                                      const float color[3],
+                                                      bool skip_origin_region = false);
+void paint_image_fill_preview_set(ImagePaintFillPreview *preview,
+                                  Object *ob,
+                                  Span<int> faces,
+                                  Span<int> edges,
+                                  Span<int> source_edges);
+void paint_image_fill_preview_clear(ImagePaintFillPreview *preview);
+void paint_image_fill_preview_end(ImagePaintFillPreview *preview);
 /**
  * Fill faces whose original-mesh screen-space polygons intersect \a rect.
  *

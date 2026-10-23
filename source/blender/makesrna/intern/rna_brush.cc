@@ -972,6 +972,14 @@ static void rna_Brush_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *pt
   // WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 }
 
+/** The wireframe is drawn by the viewport overlays, so the spaces need a redraw too. */
+static void rna_Brush_fill_show_wire_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  rna_Brush_update(bmain, scene, ptr);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
+}
+
 /**
  * Shared `update` callback for #Brush.sculpt_brush_type and #Brush.cloth_deform_type: both feed
  * #Brush.drag_kind's classification (see #BKE_brush_drag_kind_update), so a write to either must
@@ -5114,6 +5122,11 @@ static void rna_def_brush(BlenderRNA *brna)
        ICON_IMAGE,
        "Pixels",
        "Current color / view fill"},
+      {IMAGE_PAINT_SELECT_EXPAND_LOOP,
+       "LOOP",
+       ICON_EDGESEL,
+       "Loop",
+       "Click an edge to fill the face loop across it; drag to add the loops of parallel edges"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -6416,6 +6429,14 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_fill_expand_items);
   RNA_def_property_ui_text(prop, "Fill Mode", "How a fill click is expanded onto the UV layout");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "fill_show_wire", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "fill_show_wire", 0);
+  RNA_def_property_ui_text(prop,
+                           "Show Wireframe",
+                           "Draw the mesh wireframe while the Fill tool is active, regardless of "
+                           "the viewport overlay setting, to show where the faces are");
+  RNA_def_property_update(prop, 0, "rna_Brush_fill_show_wire_update");
 
   prop = RNA_def_property(srna, "blur_kernel_radius", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "blur_kernel_radius");

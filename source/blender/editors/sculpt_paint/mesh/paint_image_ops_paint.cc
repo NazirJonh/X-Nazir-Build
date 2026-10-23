@@ -10,10 +10,13 @@
 #include "DNA_brush_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_object_enums.h"
+#include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
 
+#include "BLI_map.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
@@ -21,9 +24,11 @@
 #include "BLI_rect.h"
 #include "BLI_utildefines.h"
 #include "BLI_vector.hh"
+#include "BLI_vector_set.hh"
 
 #include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 
@@ -142,7 +147,8 @@ static bool texture_fill_context_get(bContext *C,
       !ELEM(brush->fill_expand,
             IMAGE_PAINT_SELECT_EXPAND_FACE,
             IMAGE_PAINT_SELECT_EXPAND_ISLAND,
-            IMAGE_PAINT_SELECT_EXPAND_MESH))
+            IMAGE_PAINT_SELECT_EXPAND_MESH,
+            IMAGE_PAINT_SELECT_EXPAND_LOOP))
   {
     return false;
   }
@@ -252,6 +258,367 @@ static void texture_fill_color_get(const Paint *paint,
     copy_v3_v3(r_color, BKE_brush_color_get(paint, brush));
   }
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Loop fill mode
+ * \{ */
+
+/** One loop added by the stroke: the edge it was seeded from and what the walker returned. */
+struct TextureFillLoopPick {
+  int source_edge = -1;
+  Vector<int> faces;
+  Vector<int> edges;
+};
+
+struct TextureFillLoopTarget {
+  Object *object = nullptr;
+  ImagePaintUVObjectFaces topology;
+  /** Loops in the order the stroke added them; moving back over an earlier one drops the rest. */
+  Vector<TextureFillLoopPick> picks;
+  /** Walked edge to its index in #picks, to recognize the loop under the cursor. */
+  Map<int, int> edge_pick;
+};
+
+struct TextureFillLoopState {
+  PaintFillDelimit delimit = PaintFillDelimit(uint8_t(PaintFillDelimit::Material) |
+                                              uint8_t(PaintFillDelimit::Ngons));
+  /** True while the left mouse button is held: nothing is highlighted outside a stroke. */
+  bool lmb_down = false;
+  /**
+   * Region-space direction of the first picked edge. Later picks must be parallel to it, so a
+   * drag never turns into a perpendicular loop; that is a separate click for the user.
+   */
+  float2 seed_dir = {0.0f, 0.0f};
+  bool has_seed = false;
+  Vector<TextureFillLoopTarget> targets;
+  ImagePaintFillPreview *preview = nullptr;
+  Brush *brush = nullptr;
+  float color[3] = {0.0f, 0.0f, 0.0f};
+  bool invert = false;
+
+  ~TextureFillLoopState()
+  {
+    if (preview != nullptr) {
+      paint_image_fill_preview_end(preview);
+      preview = nullptr;
+    }
+    for (TextureFillLoopTarget &target : targets) {
+      paint_image_fill_topology_free(target.topology);
+    }
+  }
+};
+
+static TextureFillLoopTarget *texture_fill_loop_target_get(bContext *C,
+                                                           TextureFillLoopState &state,
+                                                           Object *ob)
+{
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return nullptr;
+  }
+  for (TextureFillLoopTarget &target : state.targets) {
+    if (target.object == ob) {
+      return &target;
+    }
+  }
+
+  TextureFillLoopTarget target;
+  target.object = ob;
+  if (!paint_image_fill_topology_init(ob, target.topology)) {
+    return nullptr;
+  }
+  /* UV picking in the Image Editor reads the UV layer through the topology handle. */
+  if (CTX_wm_space_image(C) != nullptr) {
+    target.topology.offsets = image_paint_selection_uv_offsets_get(
+        target.topology.bm, ob, CTX_data_scene(C));
+  }
+  state.targets.append(std::move(target));
+  return &state.targets.last();
+}
+
+static bool texture_fill_loop_add(TextureFillLoopState &state,
+                                  TextureFillLoopTarget &target,
+                                  const int edge_index)
+{
+  ImagePaintFillLoop loop;
+  if (!paint_image_fill_walk_loop(
+          target.topology, edge_index, PaintFillLoopKind::EdgeRing, state.delimit, loop) ||
+      loop.face_indices.is_empty())
+  {
+    return false;
+  }
+
+  const int pick_index = int(target.picks.size());
+  TextureFillLoopPick pick;
+  pick.source_edge = edge_index;
+  pick.faces = std::move(loop.face_indices);
+  pick.edges = std::move(loop.edge_indices);
+  for (const int edge_i : pick.edges) {
+    target.edge_pick.add(edge_i, pick_index);
+  }
+  target.edge_pick.add(edge_index, pick_index);
+  target.picks.append(std::move(pick));
+  return true;
+}
+
+/** Drop the loops added after the first \a keep_num; returns true when any were dropped. */
+static bool texture_fill_loop_truncate(TextureFillLoopTarget &target, const int keep_num)
+{
+  if (keep_num >= int(target.picks.size())) {
+    return false;
+  }
+  while (int(target.picks.size()) > keep_num) {
+    const int pick_index = int(target.picks.size()) - 1;
+    for (const int edge_i : target.picks.last().edges) {
+      const int *owner = target.edge_pick.lookup_ptr(edge_i);
+      if (owner != nullptr && *owner == pick_index) {
+        target.edge_pick.remove(edge_i);
+      }
+    }
+    target.picks.remove_last();
+  }
+  return true;
+}
+
+/** Union of the faces of every loop, in the order they were added. */
+static Vector<int> texture_fill_loop_faces_get(const TextureFillLoopTarget &target)
+{
+  VectorSet<int> faces;
+  for (const TextureFillLoopPick &pick : target.picks) {
+    for (const int face_index : pick.faces) {
+      faces.add(face_index);
+    }
+  }
+  return Vector<int>(faces.as_span());
+}
+
+static void texture_fill_loop_preview_sync(bContext *C, TextureFillLoopState &state)
+{
+  if (state.preview == nullptr) {
+    return;
+  }
+  paint_image_fill_preview_clear(state.preview);
+  for (TextureFillLoopTarget &target : state.targets) {
+    if (target.picks.is_empty()) {
+      continue;
+    }
+    VectorSet<int> edges;
+    Vector<int> source_edges;
+    for (const TextureFillLoopPick &pick : target.picks) {
+      edges.add_multiple(pick.edges);
+      source_edges.append(pick.source_edge);
+    }
+    paint_image_fill_preview_set(state.preview,
+                                 target.object,
+                                 texture_fill_loop_faces_get(target),
+                                 edges.as_span(),
+                                 source_edges);
+  }
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+}
+
+/**
+ * Pick the edge under \a mouse on \a target. Once a seed edge exists only edges parallel to it
+ * are candidates.
+ */
+static void texture_fill_loop_pick_from_mouse(bContext *C,
+                                              const TextureFillLoopState &state,
+                                              TextureFillLoopTarget &target,
+                                              const float mouse[2],
+                                              ImagePaintFillPick &r_pick)
+{
+  const float2 *parallel_to = state.has_seed ? &state.seed_dir : nullptr;
+  if (CTX_wm_space_image(C) != nullptr) {
+    paint_image_fill_pick_edge_from_item_uv(C, target.topology, mouse, r_pick, parallel_to);
+    return;
+  }
+
+  ImagePaintFillPick face_pick;
+  Object *objects[1] = {target.object};
+  if (!paint_image_fill_pick_face(C, mouse, Span<Object *>(objects, 1), face_pick)) {
+    return;
+  }
+  paint_image_fill_pick_edge_from_item(
+      C, target.topology, face_pick.face_index, mouse, r_pick, parallel_to);
+}
+
+/** Add the loop of the edge under the cursor; returns true when the fill set changed. */
+static bool texture_fill_loop_pick_and_add(bContext *C,
+                                           TextureFillLoopState &state,
+                                           const wmEvent *event)
+{
+  const float mouse[2] = {float(event->mval[0]), float(event->mval[1])};
+
+  TextureFillLoopTarget *target = nullptr;
+  if (!state.targets.is_empty()) {
+    target = &state.targets[0];
+  }
+  else if (CTX_wm_space_image(C) != nullptr) {
+    /* The Image Editor canvas has no active-object ray: the object comes from the UV pick. */
+    ImagePaintFillPick uv_pick;
+    if (paint_image_fill_pick_edge_uv(C, mouse, uv_pick)) {
+      target = texture_fill_loop_target_get(C, state, uv_pick.object);
+    }
+  }
+  else {
+    target = texture_fill_loop_target_get(C, state, CTX_data_active_object(C));
+  }
+  if (target == nullptr) {
+    return false;
+  }
+
+  ImagePaintFillPick pick;
+  texture_fill_loop_pick_from_mouse(C, state, *target, mouse, pick);
+  if (pick.edge_index < 0) {
+    return false;
+  }
+
+  if (const int *pick_index = target->edge_pick.lookup_ptr(pick.edge_index)) {
+    /* The cursor is back over a loop added earlier: undo everything added after it, so a stroke
+     * that overshoots can be pulled back instead of restarted. */
+    if (!texture_fill_loop_truncate(*target, *pick_index + 1)) {
+      return false;
+    }
+  }
+  else {
+    if (!texture_fill_loop_add(state, *target, pick.edge_index)) {
+      return false;
+    }
+    if (!state.has_seed) {
+      state.seed_dir = pick.edge_dir;
+      state.has_seed = true;
+    }
+  }
+  texture_fill_loop_preview_sync(C, state);
+  return true;
+}
+
+static bool texture_fill_loop_commit(bContext *C, wmOperator *op, TextureFillLoopState &state)
+{
+  const bool image_editor = CTX_wm_space_image(C) != nullptr;
+  bool has_faces = false;
+  for (const TextureFillLoopTarget &target : state.targets) {
+    if (!target.picks.is_empty()) {
+      has_faces = true;
+      break;
+    }
+  }
+  if (!has_faces) {
+    return false;
+  }
+
+  bool did_fill = false;
+  ED_image_undo_push_begin(op->type->name, texture_fill_paint_mode_get(C));
+  for (TextureFillLoopTarget &target : state.targets) {
+    if (target.picks.is_empty()) {
+      continue;
+    }
+    const Vector<int> faces = texture_fill_loop_faces_get(target);
+
+    const bool did_target =
+        image_editor ?
+            paint_image_2d_geometry_fill_faces_exact(
+                C, state.color, state.brush, target.object, faces, state.invert) :
+            paint_image_proj_geometry_fill_faces_exact(
+                C, state.color, state.brush, target.object, faces, state.invert);
+    did_fill |= did_target;
+  }
+  ED_image_undo_push_end();
+  return did_fill;
+}
+
+static void texture_fill_loop_state_free(wmOperator *op)
+{
+  TextureFillLoopState *state = static_cast<TextureFillLoopState *>(op->customdata);
+  if (state != nullptr) {
+    MEM_delete(state);
+    op->customdata = nullptr;
+  }
+}
+
+static wmOperatorStatus texture_fill_loop_invoke(bContext *C,
+                                                 wmOperator *op,
+                                                 const wmEvent *event,
+                                                 Paint *paint,
+                                                 Brush *brush)
+{
+  if (!texture_fill_canvas_has_texture(C, CTX_data_active_object(C))) {
+    BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
+    return OPERATOR_CANCELLED;
+  }
+
+  const bool invert = (event->modifier & KM_CTRL) != 0;
+  float color[3];
+  texture_fill_color_get(paint, brush, invert, color);
+
+  RNA_boolean_set(op->ptr, "loop_mode", true);
+
+  TextureFillLoopState *state = MEM_new<TextureFillLoopState>(__func__);
+  state->lmb_down = (event->type == LEFTMOUSE && event->val == KM_PRESS);
+  state->brush = brush;
+  state->invert = invert;
+  copy_v3_v3(state->color, color);
+  state->preview = paint_image_fill_preview_begin(C, color);
+  op->customdata = state;
+
+  /* The press itself selects the first loop. */
+  if (state->lmb_down) {
+    texture_fill_loop_pick_and_add(C, *state, event);
+  }
+
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus texture_fill_loop_modal(bContext *C,
+                                                wmOperator *op,
+                                                const wmEvent *event)
+{
+  TextureFillLoopState *state = static_cast<TextureFillLoopState *>(op->customdata);
+  if (state == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The operator uses the "Gesture Box" modal keymap, which replaces the raw mouse button events:
+   * press becomes #GESTURE_MODAL_BEGIN, release becomes #GESTURE_MODAL_SELECT (or
+   * #GESTURE_MODAL_DESELECT with Shift), and Esc / right mouse become #GESTURE_MODAL_CANCEL. */
+  if (event->type == EVT_MODAL_MAP) {
+    switch (event->val) {
+      case GESTURE_MODAL_BEGIN:
+        state->lmb_down = true;
+        texture_fill_loop_pick_and_add(C, *state, event);
+        return OPERATOR_RUNNING_MODAL;
+      case GESTURE_MODAL_SELECT:
+      case GESTURE_MODAL_DESELECT: {
+        /* Releasing ends the stroke: whatever was selected is filled once and the modal
+         * finishes. */
+        state->lmb_down = false;
+        const bool did_fill = texture_fill_loop_commit(C, op, *state);
+        texture_fill_loop_state_free(op);
+        return did_fill ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
+      }
+      case GESTURE_MODAL_CANCEL:
+        texture_fill_loop_state_free(op);
+        return OPERATOR_CANCELLED;
+      default:
+        return OPERATOR_RUNNING_MODAL;
+    }
+  }
+
+  if (event->type == MOUSEMOVE) {
+    /* Faces are only ever highlighted while the stroke is held: a plain cursor move over the
+     * surface must not add loops to the fill. */
+    if (state->lmb_down) {
+      texture_fill_loop_pick_and_add(C, *state, event);
+    }
+    return OPERATOR_RUNNING_MODAL;
+  }
+
+  return OPERATOR_RUNNING_MODAL;
+}
+
+/** \} */
 
 static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2])
 {
@@ -405,6 +772,12 @@ static wmOperatorStatus texture_fill_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
     return OPERATOR_CANCELLED;
   }
+  if (RNA_boolean_get(op->ptr, "loop_mode") ||
+      brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_LOOP)
+  {
+    /* Loop modes are modal: they need the mouse path and an edge pick. */
+    return OPERATOR_CANCELLED;
+  }
 
   rcti rect;
   WM_operator_properties_border_to_rcti(op, &rect);
@@ -440,6 +813,11 @@ static wmOperatorStatus texture_fill_invoke(bContext *C, wmOperator *op, const w
 
   RNA_boolean_set(op->ptr, "invert", event->modifier & KM_CTRL);
   RNA_boolean_set(op->ptr, "line_fill", false);
+  RNA_boolean_set(op->ptr, "loop_mode", false);
+
+  if (brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_LOOP) {
+    return texture_fill_loop_invoke(C, op, event, paint, brush);
+  }
 
   /* Sculpt Mode Shift+click: fill along the line from the previous paint stroke's end instead of
    * starting a new box gesture. The box gesture remains available without Shift. */
@@ -484,6 +862,10 @@ static wmOperatorStatus texture_fill_invoke(bContext *C, wmOperator *op, const w
 
 static wmOperatorStatus texture_fill_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  if (RNA_boolean_get(op->ptr, "loop_mode")) {
+    return texture_fill_loop_modal(C, op, event);
+  }
+
   if (RNA_boolean_get(op->ptr, "line_fill")) {
     auto *line_state = static_cast<TextureFillLineGesture *>(op->customdata);
     if (line_state == nullptr) {
@@ -556,6 +938,10 @@ static wmOperatorStatus texture_fill_modal(bContext *C, wmOperator *op, const wm
 
 static void texture_fill_cancel(bContext *C, wmOperator *op)
 {
+  if (RNA_boolean_get(op->ptr, "loop_mode")) {
+    texture_fill_loop_state_free(op);
+    return;
+  }
   if (RNA_boolean_get(op->ptr, "line_fill")) {
     if (auto *line_state = static_cast<TextureFillLineGesture *>(op->customdata)) {
       MEM_delete(line_state);
@@ -571,7 +957,7 @@ void PAINT_OT_texture_fill(wmOperatorType *ot)
 {
   ot->name = "Texture Fill";
   ot->idname = "PAINT_OT_texture_fill";
-  ot->description = "Fill faces with a click or rectangular gesture";
+  ot->description = "Fill faces with a click, a rectangular gesture or a topology loop";
 
   ot->invoke = texture_fill_invoke;
   ot->modal = texture_fill_modal;
@@ -590,6 +976,9 @@ void PAINT_OT_texture_fill(wmOperatorType *ot)
                          false,
                          "Line Fill",
                          "Fill along a line from the previous paint stroke");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+  prop = RNA_def_boolean(
+      ot->srna, "loop_mode", false, "", "Internal: the modal loop-fill path is active");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
@@ -622,6 +1011,11 @@ void PAINT_OT_texture_fill_mode_set(wmOperatorType *ot)
        0,
        "Pixels",
        "Flood fill connected pixels"},
+      {IMAGE_PAINT_SELECT_EXPAND_LOOP,
+       "LOOP",
+       0,
+       "Loop",
+       "Click an edge to fill the face loop across it; drag to add the loops of parallel edges"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -726,6 +1120,11 @@ TextureFillSession *paint_texture_fill_session_begin(const bContext *C,
   }
   if (brush->flag & BRUSH_USE_GRADIENT) {
     /* v2 — solid fallback for v1 */
+    return nullptr;
+  }
+  if (brush->fill_expand == IMAGE_PAINT_SELECT_EXPAND_LOOP) {
+    /* Loop fill picks an edge and fills on release (see #texture_fill_loop_invoke); it has no
+     * per-dab step, so a stroke reaching here must not silently fall back to a Pixels fill. */
     return nullptr;
   }
 

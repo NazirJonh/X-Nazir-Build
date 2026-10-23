@@ -1790,6 +1790,33 @@ bool BKE_paint_sculpt_brush_type_consumes_face_selection(const eBrushSculptType 
               SCULPT_BRUSH_TYPE_TEXTURE_FILL);
 }
 
+bool BKE_paint_texture_fill_wire_requested(const ToolSettings *ts)
+{
+  if (ts == nullptr) {
+    return false;
+  }
+  const Brush *brush = BKE_paint_brush_for_read(&ts->imapaint.paint);
+  return brush != nullptr && brush->image_brush_type == IMAGE_PAINT_BRUSH_TYPE_FILL &&
+         brush->fill_show_wire != 0;
+}
+
+bool BKE_paint_fill_wire_overlay_enabled(const Scene *scene, const Object *ob)
+{
+  if (scene == nullptr || scene->toolsettings == nullptr || ob == nullptr) {
+    return false;
+  }
+  if (ob->mode & OB_MODE_TEXTURE_PAINT) {
+    return BKE_paint_texture_fill_wire_requested(scene->toolsettings);
+  }
+  const Brush *brush = nullptr;
+  bool is_fill = false;
+  if ((ob->mode & OB_MODE_SCULPT) && scene->toolsettings->sculpt != nullptr) {
+    brush = BKE_paint_brush_for_read(&scene->toolsettings->sculpt->paint);
+    is_fill = brush != nullptr && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_TEXTURE_FILL;
+  }
+  return is_fill && brush->fill_show_wire != 0;
+}
+
 bool BKE_paint_sculpt_face_selection_mask_supported(const Scene *scene,
                                                     const Object *ob,
                                                     const char *active_tool_idname)

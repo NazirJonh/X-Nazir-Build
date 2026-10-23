@@ -36,9 +36,11 @@ struct Passepartout {
                                   [[position]] float4 &out_position)
 {
   const ViewMatrices view = views.get(0);
-  /* Z is zero, exactly the depth the UV face overlay writes. */
   const float2 cell = v_in.pos.xy * 0.5f + 0.5f;
   out_position = view.point_world_to_homogenous(float3(cell + srt.tile_pos.xy, 0.0f));
+  /* Exactly the depth the UV face mask writes (`overlay_edit_uv_face_selection_vert.glsl`), behind
+   * the UV edges so they stay visible inside the faces. */
+  out_position.z = 0.5f;
 }
 
 struct PassepartoutFragOut {

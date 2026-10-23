@@ -86,6 +86,13 @@ void Instance::init()
     state.sculpt_face_selection_mask_supported = BKE_paint_sculpt_face_selection_mask_supported(
         state.scene, ob_orig, state.active_tool_idname);
   }
+  state.fill_tool_wire = false;
+  if ((state.object_mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) && state.scene != nullptr &&
+      state.object_active != nullptr)
+  {
+    state.fill_tool_wire = BKE_paint_fill_wire_overlay_enabled(
+        state.scene, DEG_get_original(state.object_active));
+  }
   state.draw_background = ctx->options.draw_background;
   state.show_text = false;
 

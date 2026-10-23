@@ -3084,7 +3084,12 @@ static void rna_def_brush_texture_slot(BlenderRNA *brna)
 
   static const EnumPropertyItem prop_mask_paint_map_mode_items[] = {
       {MTEX_MAP_MODE_VIEW, "VIEW_PLANE", 0, "View Plane", ""},
+      /* Area Plane is what the PBR strokes project with, so the Mask has to offer it too: the
+       * slot follows the same mapping list as the main texture, minus Roll (which needs the
+       * stroke-path state the mask sampler does not receive). */
+      {MTEX_MAP_MODE_AREA, "AREA_PLANE", 0, "Area Plane", ""},
       {MTEX_MAP_MODE_TILED, "TILED", 0, "Tiled", ""},
+      {MTEX_MAP_MODE_3D, "3D", 0, "3D", ""},
       {MTEX_MAP_MODE_RANDOM, "RANDOM", 0, "Random", ""},
       {MTEX_MAP_MODE_STENCIL, "STENCIL", 0, "Stencil", ""},
       {0, nullptr, 0, nullptr, nullptr},
@@ -4834,9 +4839,9 @@ static void rna_def_brush_material_paint(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(prop, nullptr, "rna_BrushMaterialPaint_use_alpha_stroke_mask_set");
   RNA_def_property_ui_text(
       prop,
-      "Brush Mask",
-      "Sample Alpha to mask other active channels' writes during this stroke when the Alpha "
-      "channel is enabled");
+      "Brush Mask (Legacy)",
+      "Deprecated: the stroke mask is the brush's Mask texture; this toggle no longer affects the "
+      "stroke and is kept for compatibility");
   RNA_def_property_update(prop, 0, "rna_BrushMaterialPaint_alpha_mode_update");
 
   static const EnumPropertyItem prop_erase_mode_items[] = {

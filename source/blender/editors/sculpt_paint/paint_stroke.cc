@@ -383,11 +383,6 @@ static bool paint_stroke_material_paint_active(const Scene &scene,
       return false;
   }
   const BrushMaterialPaint &brush_paint = *brush.material_paint;
-  if (BKE_paint_material_channel_masks_stroke(
-          brush_paint, mode_settings, paint.visible_material_channels))
-  {
-    return true;
-  }
   for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
     if (BKE_paint_material_channel_writes_to_target(
             brush_paint, mode_settings, paint.visible_material_channels, info.channel))

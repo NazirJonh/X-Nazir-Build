@@ -829,41 +829,37 @@ class ImageGridDropTarget : public ui::DropTargetInterface {
   {
     const wmDrag &drag = drag_info.drag_data;
 
-    PointerRNA props = WM_operator_properties_create("IMAGE_GRID_OT_drop_import");
-
-    const char *first_image = nullptr;
+    /* Copied out of the drag: the import below opens a menu, and the paths the drag owns may be
+     * gone by the time the assignment after it runs. */
+    std::string first_image_path;
     for (const std::string &path : WM_drag_get_paths(&drag)) {
       if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
-        first_image = path.c_str();
+        first_image_path = path;
         break;
       }
     }
-    if (first_image) {
-      char dir[FILE_MAX];
-      BLI_path_split_dir_part(first_image, dir, sizeof(dir));
-      RNA_string_set(&props, "directory", dir);
 
-      for (const std::string &path : WM_drag_get_paths(&drag)) {
-        if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
-          continue;
-        }
-        char name[FILE_MAX];
-        BLI_path_split_file_part(path.c_str(), name, sizeof(name));
-        PointerRNA itemptr{};
-        RNA_collection_add(&props, "files", &itemptr);
-        RNA_string_set(&itemptr, "name", name);
+    const bool use_mask_slot = ed::image_grid::image_grid_slot_is_mask(target_ptr_);
+    if (!ed::image_grid::image_grid_import_dropped_images(
+            *C, drag, use_mask_slot, &drag_info.event))
+    {
+      return false;
+    }
+
+    /* The batch import only fills the grid, while a single-image drop also assigns the image it
+     * lands on. Without this, dropping two or more files onto a brush texture slot imports them
+     * and leaves the slot untouched, which reads as if the drop did nothing at all. Do what the
+     * single-image drop does with the first file, so the gesture always lands on its slot. */
+    if (!first_image_path.empty()) {
+      Main *bmain = CTX_data_main(C);
+      /* The import above already loaded this file; #BKE_image_load_exists then only loans the
+       * image it returns, and the assignment takes its own reference. */
+      if (Image *image = BKE_image_load_exists(bmain, first_image_path.c_str(), nullptr)) {
+        id_us_min(&image->id);
+        ed::image_grid::image_grid_assign_dropped_image(*C, target_ptr_, *image);
       }
     }
-    RNA_boolean_set(&props, "use_mask_slot", ed::image_grid::image_grid_slot_is_mask(target_ptr_));
-
-    /* Invoke so the operator can present the mode menu / catalog dialog. */
-    const wmOperatorStatus status = WM_operator_name_call(C,
-                                                          "IMAGE_GRID_OT_drop_import",
-                                                          wm::OpCallContext::InvokeDefault,
-                                                          &props,
-                                                          &drag_info.event);
-    WM_operator_properties_free(&props);
-    return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
+    return true;
   }
 };
 

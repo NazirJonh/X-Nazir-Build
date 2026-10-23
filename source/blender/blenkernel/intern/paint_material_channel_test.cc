@@ -976,7 +976,7 @@ TEST_F(PaintMaterialChannelTest, vertex_canvas_restricts_to_supported_channels)
   }
 }
 
-TEST_F(PaintMaterialChannelTest, alpha_write_and_mask_modes)
+TEST_F(PaintMaterialChannelTest, alpha_write_follows_alpha_map)
 {
   PaintModeSettings mode_settings{};
   const int visible_channels = paint_material_channel_test_default_visibility();
@@ -984,24 +984,15 @@ TEST_F(PaintMaterialChannelTest, alpha_write_and_mask_modes)
   brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA].use = 1;
 
   brush_paint.use_alpha_map = 1;
-  brush_paint.use_alpha_stroke_mask = 0;
   EXPECT_TRUE(BKE_paint_material_channel_writes_to_target(
       brush_paint, mode_settings, visible_channels, PAINT_MATERIAL_CHANNEL_ALPHA));
-  EXPECT_FALSE(BKE_paint_material_channel_masks_stroke(
-      brush_paint, mode_settings, visible_channels));
 
+  /* The retired "Brush Mask" toggle does not turn Alpha into a stroke mask any more, so with the
+   * map off the channel does not write whatever the legacy flag says. */
   brush_paint.use_alpha_map = 0;
   brush_paint.use_alpha_stroke_mask = 1;
   EXPECT_FALSE(BKE_paint_material_channel_writes_to_target(
       brush_paint, mode_settings, visible_channels, PAINT_MATERIAL_CHANNEL_ALPHA));
-  EXPECT_TRUE(BKE_paint_material_channel_masks_stroke(
-      brush_paint, mode_settings, visible_channels));
-
-  brush_paint.use_alpha_map = 1;
-  EXPECT_TRUE(BKE_paint_material_channel_writes_to_target(
-      brush_paint, mode_settings, visible_channels, PAINT_MATERIAL_CHANNEL_ALPHA));
-  EXPECT_TRUE(BKE_paint_material_channel_masks_stroke(
-      brush_paint, mode_settings, visible_channels));
 }
 
 TEST_F(PaintMaterialChannelTest, HeightDoesNotWriteToTarget)

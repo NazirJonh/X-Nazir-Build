@@ -270,6 +270,42 @@ static bool toolsystem_is_texture_erase_tool(const bToolRef *tref)
   return ELEM(paint_mode, PaintMode::Texture2D, PaintMode::Texture3D);
 }
 
+/** The Sculpt Erase tool, which does carry #bToolRef_Runtime::brush_type. */
+static bool toolsystem_is_sculpt_erase_tool(const bToolRef *tref)
+{
+  return tref != nullptr && tref->runtime != nullptr &&
+         (tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES) &&
+         BKE_paintmode_get_from_tool(tref) == PaintMode::Sculpt &&
+         tref->runtime->brush_type == SCULPT_BRUSH_TYPE_ERASE;
+}
+
+/** Whether \a tref is an Erase tool in any editor; both activate the shared material Erase brush. */
+static bool toolsystem_is_erase_tool(const bToolRef *tref)
+{
+  return toolsystem_is_texture_erase_tool(tref) || toolsystem_is_sculpt_erase_tool(tref);
+}
+
+/**
+ * Whether \a win, showing \a workspace, currently displays \a tref in one of its areas. One window
+ * is inspected at a time because the caller is already iterating them; scanning all windows from
+ * here as well would make every tool refresh quadratic in the number of windows.
+ */
+static bool toolsystem_window_shows_tref(const wmWindow &win,
+                                         const WorkSpace *workspace,
+                                         const bToolRef *tref)
+{
+  if (workspace != WM_window_get_active_workspace(&win)) {
+    return false;
+  }
+  const bScreen *screen = WM_window_get_active_screen(&win);
+  for (const ScrArea &area : screen->areabase) {
+    if (area.runtime.tool == tref) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static NamedBrushAssetReference *toolsystem_brush_type_binding_lookup(const Paint *paint,
                                                                       const char *brush_type_name)
 {
@@ -510,7 +546,8 @@ static void toolsystem_mask_brush_activate_for_tool(Main *bmain,
 
 static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
                                                                     const WorkSpace *workspace,
-                                                                    const bToolRef *tref)
+                                                                    const bToolRef *tref,
+                                                                    const bool is_tool_change)
 {
   bToolRef_Runtime *tref_rt = tref->runtime;
 
@@ -518,10 +555,19 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
   BLI_assert(paint_mode != PaintMode::Invalid);
 
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain->wm.first);
+  if (wm == nullptr) {
+    return;
+  }
   for (wmWindow &win : wm->windows) {
     if (workspace != WM_window_get_active_workspace(&win)) {
       continue;
     }
+
+    /* A real tool change always concerns this reference; on refresh only the reference this very
+     * window shows may touch the active brush. */
+    const bool activate_brush = is_tool_change ||
+                                toolsystem_window_shows_tref(win, workspace, tref);
+
     Scene *scene = WM_window_get_active_scene(&win);
     BKE_paint_ensure_from_paintmode(scene, paint_mode);
     Paint *paint = BKE_paint_get_active_from_paintmode(scene, paint_mode);
@@ -547,22 +593,40 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
      * the Erase tool, and leaving it again, must bypass that skip and push the result to the pair
      * explicitly. Otherwise the tool switches but the brush never changes. */
     const bool skip_restore = skip_texture3d_material || skip_image_restore_for_sync;
-    const bool leaving_erase = skip_restore && !toolsystem_is_texture_erase_tool(tref) &&
-                               paint->brush != nullptr &&
-                               BKE_brush_is_material_erase(*paint->brush);
+    const bool is_erase_tool = toolsystem_is_erase_tool(tref);
+    const bool current_is_erase = paint->brush != nullptr &&
+                                  BKE_brush_is_material_erase(*paint->brush);
+    const bool leaving_erase = skip_restore && !is_erase_tool && current_is_erase;
     bool pair_handled = false;
 
-    if (toolsystem_is_texture_erase_tool(tref)) {
-      /* Same fallback as the Sculpt Erase tool below, without a per-brush-type binding. */
-      if (paint->brush == nullptr || !BKE_brush_is_material_erase(*paint->brush)) {
-        Brush *erase_brush = BKE_brush_material_erase_ensure(*bmain, *scene, *paint);
-        BKE_paint_brush_set_synced(*scene, *paint, erase_brush);
+    if (is_erase_tool) {
+      /* #WM_toolsystem_refresh_active() re-links every tool reference after undo, including the
+       * inactive Paint tool. Only a real tool change, or a refresh of the reference an area
+       * actually shows, may put the Erase brush in hand; otherwise refreshing the inactive Erase
+       * tool would steal the brush from Paint. */
+      if (activate_brush) {
+        if (!current_is_erase) {
+          Brush *erase_brush = BKE_brush_material_erase_ensure(*bmain, *scene, *paint);
+          if (BKE_paint_brush_set_synced(*scene, *paint, erase_brush) &&
+              tref_rt->brush_type != -1)
+          {
+            toolsystem_brush_type_binding_update(paint, paint_mode, tref_rt->brush_type);
+          }
+        }
+        if (skip_restore && scene->toolsettings->sculpt != nullptr) {
+          BKE_paint_material_brush_sync_directional(
+              scene, paint, &scene->toolsettings->sculpt->paint);
+          pair_handled = true;
+        }
       }
-      if (skip_restore && scene->toolsettings->sculpt != nullptr) {
-        BKE_paint_material_brush_sync_directional(
-            scene, paint, &scene->toolsettings->sculpt->paint);
+      else {
         pair_handled = true;
       }
+    }
+    else if (current_is_erase && !activate_brush) {
+      /* A refresh of an inactive brush tool must not restore that tool's brush over the active
+       * Erase brush; that would switch the toolbar back to Paint on undo. */
+      pair_handled = true;
     }
     else if (leaving_erase) {
       if (std::optional<AssetWeakReference> brush_asset_reference =
@@ -593,17 +657,6 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
           toolsystem_main_brush_binding_update_from_active(paint);
         }
       }
-
-      /* The Erase tool has no essentials asset to fall back on: when nothing usable is
-       * remembered, adopt (or create) the local Erase brush so Paint <-> Erase always works. */
-      if (paint_mode == PaintMode::Sculpt && tref_rt->brush_type == SCULPT_BRUSH_TYPE_ERASE &&
-          (paint->brush == nullptr || paint->brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_ERASE))
-      {
-        Brush *erase_brush = BKE_brush_material_erase_ensure(*bmain, *scene, *paint);
-        if (BKE_paint_brush_set_synced(*scene, *paint, erase_brush)) {
-          toolsystem_brush_type_binding_update(paint, paint_mode, tref_rt->brush_type);
-        }
-      }
     }
 
     if (pair_handled) {
@@ -628,7 +681,8 @@ static void toolsystem_brush_activate_from_toolref_for_object_paint(Main *bmain,
  */
 static void toolsystem_brush_activate_from_toolref(Main *bmain,
                                                    const WorkSpace *workspace,
-                                                   const bToolRef *tref)
+                                                   const bToolRef *tref,
+                                                   const bool is_tool_change)
 {
   BLI_assert(tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES);
 
@@ -637,12 +691,14 @@ static void toolsystem_brush_activate_from_toolref(Main *bmain,
       toolsystem_brush_activate_from_toolref_for_object_particle(bmain, workspace, tref);
     }
     else {
-      toolsystem_brush_activate_from_toolref_for_object_paint(bmain, workspace, tref);
+      toolsystem_brush_activate_from_toolref_for_object_paint(
+          bmain, workspace, tref, is_tool_change);
     }
   }
   else if (tref->space_type == SPACE_IMAGE) {
     if (tref->mode == SI_MODE_PAINT) {
-      toolsystem_brush_activate_from_toolref_for_object_paint(bmain, workspace, tref);
+      toolsystem_brush_activate_from_toolref_for_object_paint(
+          bmain, workspace, tref, is_tool_change);
     }
   }
 }
@@ -654,8 +710,17 @@ static void toolsystem_brush_activate_from_toolref(Main *bmain,
  */
 static void toolsystem_brush_sync_for_texture_paint(Main *bmain,
                                                     WorkSpace *workspace,
-                                                    bToolRef *tref)
+                                                    bToolRef *tref,
+                                                    const bool is_tool_change)
 {
+  /* Every undo runs #WM_toolsystem_refresh_active(), which re-links every tool reference in the
+   * workspace. Syncing the paired editor from those inactive references would revert the tool the
+   * user selected (Erase back to Paint, but equally Select/Gradient/Shape). Only a real tool change
+   * may propagate. */
+  if (!is_tool_change) {
+    return;
+  }
+
   /* Sculpt PBR Paint and the Image Editor share one Erase brush while the Material brush sync is
    * on, so picking or leaving Erase in one editor must do the same in the other. The tool
    * identifiers are the same on both sides ("builtin_brush.erase"); only the way back differs. */
@@ -751,7 +816,10 @@ static void toolsystem_brush_clear_paint_reference(Main *bmain,
 
 /** \} */
 
-static void toolsystem_ref_link(Main *bmain, WorkSpace *workspace, bToolRef *tref)
+static void toolsystem_ref_link(Main *bmain,
+                                WorkSpace *workspace,
+                                bToolRef *tref,
+                                const bool is_tool_change)
 {
   bToolRef_Runtime *tref_rt = tref->runtime;
   if (tref_rt->gizmo_group[0]) {
@@ -773,8 +841,8 @@ static void toolsystem_ref_link(Main *bmain, WorkSpace *workspace, bToolRef *tre
   }
 
   if (tref_rt->flag & TOOLREF_FLAG_USE_BRUSHES) {
-    toolsystem_brush_activate_from_toolref(bmain, workspace, tref);
-    toolsystem_brush_sync_for_texture_paint(bmain, workspace, tref);
+    toolsystem_brush_activate_from_toolref(bmain, workspace, tref, is_tool_change);
+    toolsystem_brush_sync_for_texture_paint(bmain, workspace, tref, is_tool_change);
   }
   else {
     toolsystem_brush_clear_paint_reference(bmain, workspace, tref);
@@ -786,8 +854,9 @@ static void toolsystem_refresh_ref(const bContext *C, WorkSpace *workspace, bToo
   if (tref->runtime == nullptr) {
     return;
   }
-  /* Currently same operation. */
-  toolsystem_ref_link(CTX_data_main(C), workspace, tref);
+  /* A refresh (mode re-init, startup, and the re-link of every tool after undo) is not a tool
+   * change: it may restore data but must not switch the active brush or the paired editor's tool. */
+  toolsystem_ref_link(CTX_data_main(C), workspace, tref, false);
 }
 void WM_toolsystem_refresh(const bContext *C, WorkSpace *workspace, const bToolKey *tkey)
 {
@@ -909,7 +978,7 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
     tref->runtime->keymap_fallback[0] = '\0';
   }
 
-  toolsystem_ref_link(bmain, workspace, tref);
+  toolsystem_ref_link(bmain, workspace, tref, idname_changed);
 
   toolsystem_refresh_screen_from_active_tool(bmain, workspace, tref);
 
@@ -945,7 +1014,6 @@ void WM_toolsystem_ref_sync_from_context(Main *bmain, WorkSpace *workspace, bToo
     if (workspace != WM_window_get_active_workspace(&win)) {
       continue;
     }
-
     Scene *scene = WM_window_get_active_scene(&win);
     ToolSettings *ts = scene->toolsettings;
     ViewLayer *view_layer = WM_window_get_active_view_layer(&win);

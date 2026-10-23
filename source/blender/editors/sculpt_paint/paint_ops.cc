@@ -2105,6 +2105,10 @@ static wmOperatorStatus material_paint_channels_assign_images_exec(bContext *C, 
       skipped++;
       continue;
     }
+    /* A texture dropped on a channel means that channel is used. Leaving it disabled would make
+     * the assignment invisible: the stroke writes no channel and the brush cursor has nothing to
+     * preview. */
+    RNA_boolean_set(&channel_ptr, "use", true);
     assigned++;
   }
   RNA_END;

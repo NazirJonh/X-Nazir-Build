@@ -70,20 +70,17 @@ struct MaterialPaintLocalData {
 /**
  * Paints one PBVH node's slice of a scalar channel.
  *
- * \a factors, \a alpha and \a source_values are all node-local: element `i` describes
- * `node.verts()[i]`. \a factors is the dab's shared brush falloff (see
- * #StrokeCache::MaterialDabScratch), \a alpha is empty unless the stroke masks with the Alpha
- * channel, and \a source_values is empty unless this channel has a usable source texture, in
- * which case it replaces \a target_value per vertex.
+ * \a factors and \a source_values are node-local: element `i` describes `node.verts()[i]`.
+ * \a factors is the dab's shared brush falloff (see #StrokeCache::MaterialDabScratch), and
+ * \a source_values is empty unless this channel has a usable source texture, in which case it
+ * replaces \a target_value per vertex.
  */
 static void do_paint_scalar_task(Object &object,
-                                 const eMaterialPaintChannel channel,
                                  const int orig_attribute_index,
                                  const float target_value,
                                  const float2 value_range,
                                  const IMB_BlendMode blend_mode,
                                  const float brush_alpha,
-                                 const Span<float> alpha,
                                  const Span<float> factors,
                                  const Span<float> source_values,
                                  bke::pbvh::MeshNode &node,
@@ -109,8 +106,6 @@ static void do_paint_scalar_task(Object &object,
   }
   const Span<float> orig = *orig_lookup;
 
-  const bool use_alpha = channel_uses_alpha_mask(!alpha.is_empty(), channel);
-
   for (const int i : verts.index_range()) {
     const float factor = factors[i];
     if (factor <= 0.0f) {
@@ -119,10 +114,8 @@ static void do_paint_scalar_task(Object &object,
     /* A source texture replaces the slider value; the brush falloff still rides in the blend
      * alpha, so the stroke shape is unchanged. */
     const float target = source_values.is_empty() ? target_value : source_values[i];
-    /* Alpha does not mask its own write; only every other channel's write is scaled. */
-    const float alpha_factor = use_alpha ? alpha[i] : 1.0f;
     float2 &mix = mix_scalars[verts[i]];
-    mix = accumulate_scalar_coverage(mix, target, factor * alpha_factor);
+    mix = accumulate_scalar_coverage(mix, target, factor);
     /* #mix is the stroke's running coverage accumulator and must stay unscaled so later dabs
      * keep converging against the same value; the brush Strength slider only caps how much of
      * that coverage shows through this composite, mirroring the separate `alpha` scale
@@ -141,12 +134,10 @@ static void do_paint_color_task(Object &object,
                                 const Span<int> corner_verts,
                                 const GroupedSpan<int> vert_to_face_map,
                                 const Span<bool> select_poly,
-                                const eMaterialPaintChannel channel,
                                 const float3 &target_rgb,
                                 const IMB_BlendMode blend_mode,
                                 const float brush_alpha,
                                 const int orig_attribute_index,
-                                const Span<float> alpha,
                                 const Span<float> factors,
                                 const Span<float3> source_colors,
                                 bke::pbvh::MeshNode &node,
@@ -177,8 +168,6 @@ static void do_paint_color_task(Object &object,
   }
   const Span<float4> orig = *orig_material;
 
-  const bool use_alpha = channel_uses_alpha_mask(!alpha.is_empty(), channel);
-
   for (const int i : verts.index_range()) {
     const float factor = factors[i];
     if (factor <= 0.0f) {
@@ -186,17 +175,11 @@ static void do_paint_color_task(Object &object,
     }
 
     const float3 target = source_colors.is_empty() ? target_rgb : source_colors[i];
-    /* Alpha does not mask its own write; only every other channel's write is scaled. */
-    const float alpha_factor = use_alpha ? alpha[i] : 1.0f;
     /* Alpha carries brush falloff for IMB blend modes (same convention as color paint); the RGB
      * must be pre-multiplied by that same alpha, since every blend_color_*_float mode expects a
      * pre-multiplied second color (see the "pre-multiplied alpha float blending modes" block
      * comment in BLI_math_color_blend.h/math_color_blend_inline.cc). */
-    const float total_factor = factor * alpha_factor;
-    const float4 paint_color(target.x * total_factor,
-                             target.y * total_factor,
-                             target.z * total_factor,
-                             total_factor);
+    const float4 paint_color(target.x * factor, target.y * factor, target.z * factor, factor);
     float4 &mix = mix_colors[verts[i]];
     IMB_blend_color_float(mix, mix, paint_color, IMB_BLEND_MIX);
 
@@ -343,14 +326,11 @@ static void paint_scalar_channel(Object &ob,
         }
 
         do_paint_scalar_task(ob,
-                             channel,
                              orig_attribute_index,
                              target_value,
                              value_range,
                              blend_mode,
                              brush_alpha,
-                             dab.alpha.is_empty() ? Span<float>() :
-                                                    dab.alpha.as_span().slice(slice),
                              factors,
                              source_values,
                              nodes[i],
@@ -476,13 +456,10 @@ static void paint_color_channel(
                             corner_verts,
                             vert_to_face_map,
                             select_poly,
-                            channel,
                             target_rgb,
                             blend_mode,
                             brush_alpha,
                             orig_attribute_index,
-                            dab.alpha.is_empty() ? Span<float>() :
-                                                   dab.alpha.as_span().slice(slice),
                             factors,
                             source_colors,
                             nodes[i],
@@ -551,10 +528,6 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
   threading::EnumerableThreadSpecific<MaterialPaintLocalData> all_tls;
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 
-  const bool alpha_masking_active = !invert && active_sampler != nullptr &&
-                                    BKE_paint_material_channel_masks_stroke(
-                                        brush_paint, settings, sd.paint.visible_material_channels);
-
   /* Lay out this dab's per-vertex scratch: one contiguous slice per node of \a node_mask, in mask
    * order. The buffers live in the stroke cache and are only ever grown, so a dab that is no
    * bigger than the previous one allocates nothing at all. */
@@ -569,12 +542,10 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
     dab.offsets.last() = offset;
     dab.factors.resize(offset);
     dab.contexts.resize(active_sampler != nullptr ? offset : 0);
-    dab.alpha.resize(alpha_masking_active ? offset : 0);
   }
 
-  /* Brush falloff, the texture-sample coordinates and the Alpha mask are all channel-independent,
-   * so they are built once here and reused by every channel pass below instead of being redone
-   * per channel. */
+  /* Brush falloff and the texture-sample coordinates are channel-independent, so they are built
+   * once here and reused by every channel pass below instead of being redone per channel. */
   node_mask.foreach_index(
       [&](const int i, const int pos) {
         bke::pbvh::MeshNode &node = nodes[i];
@@ -617,21 +588,6 @@ void do_paint_material_brush(const Depsgraph &depsgraph,
           else {
             contexts[vert_i] = {};
           }
-        }
-        if (dab.alpha.is_empty()) {
-          return;
-        }
-        /* Alpha masks every other channel's write, so it is sampled here rather than once per
-         * channel. It is gathered through the same batched call the channel passes use, which
-         * both resolves the texture mapping once per node and skips the zero-factor vertices. */
-        const MutableSpan<float> alpha = dab.alpha.as_mutable_span().slice(slice);
-        active_sampler->gather_scalars(PAINT_MATERIAL_CHANNEL_ALPHA,
-                                       contexts,
-                                       factors,
-                                       BLI_task_parallel_thread_id(nullptr),
-                                       alpha);
-        for (float &value : alpha) {
-          value = math::clamp(value, 0.0f, 1.0f);
         }
       },
       exec_mode::grain_size(1));

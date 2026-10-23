@@ -35,6 +35,7 @@ from bl_ui.properties_paint_common import (
     FalloffPanel,
     DisplayPanel,
     BrushAssetShelf,
+    paint_mask_target_erase_brush,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -1868,7 +1869,10 @@ class IMAGE_PT_paint_color(Panel, ImagePaintPanel):
         if not brush:
             return False
         capabilities = brush.image_paint_capabilities
-        return capabilities.has_color
+        if capabilities.has_color:
+            return True
+        # The Erase brush writes one of the two mask values in Mask mode; those are edited here.
+        return paint_mask_target_erase_brush(context, brush)
 
     def draw(self, context):
         layout = self.layout
@@ -1963,13 +1967,9 @@ class IMAGE_PT_tools_mask_texture(Panel, BrushButtonsPanel, TextureMaskPanel):
 
     @classmethod
     def poll(cls, context):
-        if not BrushButtonsPanel.poll(context):
-            return False
-        brush = context.tool_settings.image_paint.brush
-        return not (
-            context.tool_settings.paint_mode.canvas_source == 'MATERIAL' and
-            brush.material_paint is not None
-        )
+        # Shown on PBR canvases too: the Mask clips the stroke there, and the PBR channels panel
+        # no longer carries its grid (a channel row and the grid were too easy to mix up).
+        return BrushButtonsPanel.poll(context)
 
 
 class IMAGE_PT_paint_stroke(BrushButtonsPanel, Panel, StrokePanel):

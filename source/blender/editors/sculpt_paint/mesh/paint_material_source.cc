@@ -35,6 +35,7 @@
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -148,6 +149,55 @@ std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterial
       break;
   }
   return std::nullopt;
+}
+
+float paint_mask_texture_coverage(const Brush &brush,
+                                  const Paint *paint,
+                                  const float3 &point,
+                                  const float3 &area_point,
+                                  const float2 &view_point_2d,
+                                  const int thread,
+                                  ImagePool *pool)
+{
+  const MTex &mask_mtex = brush.mask_mtex;
+  if (mask_mtex.tex == nullptr) {
+    return 1.0f;
+  }
+  const bke::PaintRuntime *paint_runtime = paint != nullptr ? paint->runtime : nullptr;
+
+  if (mask_mtex.brush_map_mode == MTEX_MAP_MODE_3D && paint_runtime != nullptr) {
+    /* Object space, like the main texture in this mode: size and offset do not apply. */
+    float4 rgba;
+    float value = BKE_brush_sample_tex_3d(paint, &brush, &mask_mtex, point, rgba, thread, pool);
+    value = math::clamp(value, 0.0f, 1.0f);
+    return paint != nullptr ? BKE_brush_mask_tex_pressure_apply(brush, *paint, value) : value;
+  }
+
+  const bool region_available = view_point_2d.x >= 0.0f && view_point_2d.y >= 0.0f;
+  if (mask_mtex.brush_map_mode != MTEX_MAP_MODE_AREA && paint != nullptr &&
+      paint_runtime != nullptr && region_available)
+  {
+    /* Region-space modes keep the stock mask sampler: it already applies this slot's own mouse
+     * offset, angle, aspect correction, clip shape and pressure curve. */
+    return BKE_brush_sample_masktex(
+        paint, const_cast<Brush *>(&brush), view_point_2d, thread, pool);
+  }
+
+  /* Area Plane: the projection the PBR strokes use for the main texture too, with the Mask
+   * slot's own size and offset. The stroke has already folded this slot's rake/random angle into
+   * #bke::PaintRuntime::brush_rotation_sec, so the Mask turns with its own settings and not with
+   * the primary texture's. */
+  const float rake_rotation = paint_runtime != nullptr ? paint_runtime->brush_rotation_sec : 0.0f;
+  const float2 aspect_correction = paint_runtime != nullptr ?
+                                       paint_runtime->mask_tex_aspect_correction :
+                                       float2(1.0f);
+  return BKE_brush_mask_tex_area_coverage(brush,
+                                          paint,
+                                          float2(area_point.x, area_point.y),
+                                          rake_rotation,
+                                          aspect_correction,
+                                          thread,
+                                          pool);
 }
 
 float scalar_source_finish(const BrushMaterialPaint &brush_paint,
@@ -330,18 +380,14 @@ ChannelSourceSet::ChannelSourceSet(const BrushMaterialPaint &brush_paint,
       continue;
     }
     /* The mask channel is picked by #mask_source_channel_get, not by what the brush paints into
-     * the material, so the visibility gate of ordinary strokes must not veto it. Alpha as a stroke
-     * mask is meaningless for a Mask target. */
+     * the material, so the visibility gate of ordinary strokes must not veto it. */
     const bool channel_enabled = mask_mode ? true :
                                              BKE_paint_material_channel_is_enabled(
                                                  brush_paint,
                                                  settings,
                                                  visible_material_channels,
                                                  info.channel);
-    const bool alpha_masks = !mask_mode && info.channel == PAINT_MATERIAL_CHANNEL_ALPHA &&
-                             BKE_paint_material_channel_masks_stroke(
-                                 brush_paint, settings, visible_material_channels);
-    if (!channel_enabled && !alpha_masks) {
+    if (!channel_enabled) {
       continue;
     }
     const BrushMaterialPaintChannel &channel = brush_paint.channels[info.channel];

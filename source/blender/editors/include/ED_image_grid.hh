@@ -38,6 +38,7 @@ struct PointerRNA;
 struct Main;
 struct ARegion;
 struct ARegionType;
+struct wmDrag;
 struct wmEvent;
 struct wmOperatorType;
 
@@ -609,6 +610,21 @@ bool image_grid_set_membership(bContext &C,
                                ImageGridOwner owner,
                                ImageGridSlot grid_slot,
                                ImageGridCatalogMode mode);
+
+/**
+ * Import the image files carried by \a drag into the grid, offering the same Temporary/Library
+ * choice a drop on the grid itself does.
+ *
+ * Shared by #ImageGridDropTarget and the single-slot brush texture drop target: a multi-file drop
+ * on a slot used to keep only the first file and silently discard the rest, while the very same
+ * drag on the grid imported all of them. \a drag must stay alive for the duration of the call.
+ *
+ * \return true when the import ran; the caller still assigns whichever image it wants afterwards.
+ */
+bool image_grid_import_dropped_images(bContext &C,
+                                      const wmDrag &drag,
+                                      bool use_mask_slot,
+                                      const wmEvent *event);
 
 /**
  * Register #IMAGE_GRID_OT_* operators and the numpad-period focus-active pre-button handler.

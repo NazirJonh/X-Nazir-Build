@@ -28,7 +28,7 @@ from bl_ui.properties_paint_common import (
     draw_paint_canvas_row,
     draw_brush_texture_image_grid,
     draw_brush_texture_properties,
-    draw_brush_mask_texture_properties,
+    draw_mask_texture_panel,
     brush_settings,
     brush_settings_advanced,
     draw_color_settings,
@@ -37,6 +37,7 @@ from bl_ui.properties_paint_common import (
     draw_material_paint_sync_toggle,
     material_paint_writable_channels,
     material_paint_has_any_map,
+    paint_mask_target_erase_brush,
 )
 from bl_ui.utils import PresetPanel
 
@@ -541,7 +542,11 @@ class VIEW3D_PT_tools_brush_color(Panel, View3DPaintPanel):
             return capabilities.has_color
         elif context.sculpt_object:
             capabilities = brush.sculpt_capabilities
-            return capabilities.has_color
+            if capabilities.has_color:
+                return True
+            # The Erase brush has no color of its own, but in Mask mode it writes one of the two
+            # mask values, which are edited through the same color-picker panel.
+            return paint_mask_target_erase_brush(context, brush)
 
         return False
 
@@ -1091,7 +1096,7 @@ class VIEW3D_PT_tools_brush_texture(Panel, View3DPaintPanel):
 
 class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
     bl_category = "Tool"
-    bl_context = ".imagepaint"  # dot on purpose (access from topbar)
+    bl_context = ".paint_common"
     bl_parent_id = "VIEW3D_PT_tools_brush_settings"
     bl_label = "Texture Mask"
     bl_options = {'DEFAULT_CLOSED'}
@@ -1100,31 +1105,24 @@ class VIEW3D_PT_tools_mask_texture(Panel, View3DPaintPanel, TextureMaskPanel):
     @classmethod
     def poll(cls, context):
         settings = cls.paint_settings(context)
-        if not (settings and (brush := settings.brush) and context.image_paint_object):
+        if not (settings and (brush := settings.brush)):
             return False
-        return not (
+        # The Texture panel is hidden on PBR canvases, but the Mask is a real stroke-clipping layer
+        # there, so this panel is the one place its slot lives for those brushes as well.
+        is_pbr_paint = (
             context.sculpt_object and
             brush.sculpt_brush_type in {'PAINT', 'ERASE'} and
             context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}
         )
+        if is_pbr_paint:
+            return True
+        return bool(context.sculpt_object or context.image_paint_object)
 
     def draw(self, context):
-        layout = self.layout
-
-        tool_settings = context.tool_settings
-        brush = tool_settings.image_paint.brush
-
-        col = layout.column()
-        mask_tex_slot = brush.mask_texture_slot
-
-        col = draw_brush_texture_image_grid(
-            layout, mask_tex_slot, tool_settings.mask_texture_grid_display_view3d, self.is_popover,
-        )
-
-        draw_brush_mask_texture_properties(
-            col,
-            brush,
-            default_closed=not self.is_popover,
+        settings = self.paint_settings(context)
+        draw_mask_texture_panel(
+            self.layout, context, settings.brush if settings else None,
+            is_popover=self.is_popover,
         )
 
 

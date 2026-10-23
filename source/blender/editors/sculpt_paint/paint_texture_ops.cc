@@ -126,11 +126,10 @@ static bool assign_image_target_get(bContext *C,
     return false;
   }
 
-  bool use_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
-  /* Sculpt brushes only have the primary texture slot. */
-  if (CTX_data_mode_enum(C) == CTX_MODE_SCULPT) {
-    use_mask_slot = false;
-  }
+  /* The Mask slot is a real slot in every mode: #Brush.mask_mtex is what the PBR strokes apply
+   * and what the Mask texture grid is bound to, so a drop on it has to land there instead of
+   * silently falling back to the primary texture. */
+  const bool use_mask_slot = RNA_boolean_get(op->ptr, "use_mask_slot");
 
   *r_brush = brush;
   *r_use_mask_slot = use_mask_slot;

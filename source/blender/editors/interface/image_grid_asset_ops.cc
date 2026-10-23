@@ -18,6 +18,7 @@
 
 #include "BLI_fileops.h"
 #include "BLI_path_utils.hh"
+#include "BLI_span.hh"
 #include "BLI_string.h"
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
@@ -31,6 +32,8 @@
 #include "BKE_main.hh"
 #include "BKE_preferences.h"
 #include "BKE_report.hh"
+
+#include "IMB_imbuf_types.hh"
 
 #include "BLT_translation.hh"
 
@@ -471,6 +474,47 @@ static wmOperatorStatus image_grid_drop_import_invoke(bContext *C,
     return WM_operator_props_dialog_popup(C, op, 400, IFACE_("Add to Catalog"), IFACE_("Add"));
   }
   return op->type->exec(C, op);
+}
+
+bool image_grid_import_dropped_images(bContext &C,
+                                      const wmDrag &drag,
+                                      const bool use_mask_slot,
+                                      const wmEvent *event)
+{
+  const Span<std::string> paths = WM_drag_get_paths(&drag);
+  const char *first_image = nullptr;
+  for (const std::string &path : paths) {
+    if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+      first_image = path.c_str();
+      break;
+    }
+  }
+  if (first_image == nullptr) {
+    return false;
+  }
+
+  PointerRNA props = WM_operator_properties_create("IMAGE_GRID_OT_drop_import");
+  char dir[FILE_MAX];
+  BLI_path_split_dir_part(first_image, dir, sizeof(dir));
+  RNA_string_set(&props, "directory", dir);
+
+  for (const std::string &path : paths) {
+    if (!BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+      continue;
+    }
+    char name[FILE_MAX];
+    BLI_path_split_file_part(path.c_str(), name, sizeof(name));
+    PointerRNA itemptr{};
+    RNA_collection_add(&props, "files", &itemptr);
+    RNA_string_set(&itemptr, "name", name);
+  }
+  RNA_boolean_set(&props, "use_mask_slot", use_mask_slot);
+
+  /* Invoke so the operator can present the mode menu / catalog dialog. */
+  const wmOperatorStatus status = WM_operator_name_call(
+      &C, "IMAGE_GRID_OT_drop_import", wm::OpCallContext::InvokeDefault, &props, event);
+  WM_operator_properties_free(&props);
+  return (status & (OPERATOR_FINISHED | OPERATOR_INTERFACE)) != 0;
 }
 
 /** \} */

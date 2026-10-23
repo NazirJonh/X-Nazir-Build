@@ -322,6 +322,32 @@ float BKE_brush_sample_masktex(
     const Paint *paint, Brush *br, const float2 &point, int thread, ImagePool *pool);
 
 /**
+ * Applies #Brush.mask_pressure to a Mask Texture sample. Shared by #BKE_brush_sample_masktex and
+ * the PBR stroke paths that sample #Brush.mask_mtex with surface-mapped coordinates.
+ */
+float BKE_brush_mask_tex_pressure_apply(const Brush &brush, const Paint &paint, float value);
+
+/**
+ * Mask Texture coverage in the Area Plane frame: \a local is brush-local, [-1, 1] across the
+ * footprint. The single implementation behind the PBR strokes, the paint cursor and the radial
+ * control preview, so what is previewed is exactly what the stroke skips.
+ *
+ * \param paint: Provides the pressure curve; null when no #Paint is available (radial control),
+ * which skips the curve.
+ * \param rake_rotation: The slot's rake/random angle the stroke folded into
+ * #bke::PaintRuntime::brush_rotation_sec; 0 when there is no stroke.
+ * \param aspect_correction: See #BKE_brush_get_aspect_correction for #Brush.mask_mtex.
+ * \return 1 when no Mask texture is assigned.
+ */
+float BKE_brush_mask_tex_area_coverage(const Brush &brush,
+                                       const Paint *paint,
+                                       const float2 &local,
+                                       float rake_rotation,
+                                       const float2 &aspect_correction,
+                                       int thread,
+                                       ImagePool *pool);
+
+/**
  * Scale to apply to the texture sampling coordinates so that a non-square image texture keeps its
  * aspect ratio instead of being stretched to fill the square brush footprint.
  *

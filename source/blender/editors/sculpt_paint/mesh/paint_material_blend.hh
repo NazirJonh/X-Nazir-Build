@@ -56,14 +56,13 @@ inline float3 scalar_as_color(const float value)
 }
 
 /**
- * Whether \a channel's write is scaled by the Alpha channel this stroke.
+ * Whether \a channel's write is scaled by the Alpha channel in a shape stroke.
  *
  * Alpha masks every *other* channel but never its own write - otherwise painting Alpha would
- * multiply by itself. Both engines need this rule and both used to spell it out inline; keep it
- * here so they cannot disagree.
+ * multiply by itself. The brush strokes no longer use this rule (their stroke mask is the Mask
+ * texture); the shape tools still do, and share it here so they cannot disagree.
  *
- * \param alpha_masking_active: whether the stroke uses Alpha as a mask at all (the brush setting
- * plus a usable Alpha source).
+ * \param alpha_masking_active: whether the shape's style paints Alpha.
  */
 inline bool channel_uses_alpha_mask(const bool alpha_masking_active,
                                     const eMaterialPaintChannel channel)

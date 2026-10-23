@@ -948,6 +948,13 @@ void BKE_brush_material_paint_ensure(Brush *brush)
     return;
   }
   brush->material_paint = BKE_brush_material_paint_create_default();
+  /* The Mask is projected like the PBR sources (Area Plane); an untouched slot still holds the
+   * stock View Plane default, which would make the Mask follow the screen instead of the surface. */
+  if (brush->mask_mtex.tex == nullptr &&
+      ELEM(brush->mask_mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_TILED))
+  {
+    brush->mask_mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+  }
 }
 
 /** Replaces the distance falloff points with the stock Erase Hard profile: full strength until
@@ -1036,8 +1043,10 @@ Brush *BKE_brush_material_erase_create_default(Main *bmain, Paint *paint)
   brush->flow = 1.0f;
 
   /* Same placement as the Paint brush sources: the texture lies on the surface in the brush's
-   * Area Plane instead of following the screen. */
+   * Area Plane instead of following the screen. The Mask slot follows the same projection by
+   * default, so a freshly created brush masks in the surface frame like it paints. */
   brush->mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+  brush->mask_mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
 
   BKE_brush_material_erase_mode_apply(brush, BRUSH_MATERIAL_PAINT_ERASE_HARD);
 
@@ -1123,6 +1132,7 @@ Brush *BKE_brush_material_mask_create_default(Main *bmain, Paint *paint)
     brush->alpha = 1.0f;
     brush->flow = 1.0f;
     brush->mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+    brush->mask_mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
   }
   /* A new brush carries the allocation user plus the fake user it gets by default. Nothing holds
    * the first one, and left in place it would keep the brush from ever being purged. */
@@ -1933,19 +1943,67 @@ float BKE_brush_sample_masktex(
 
   CLAMP(intensity, 0.0f, 1.0f);
 
-  switch (br->mask_pressure) {
+  return BKE_brush_mask_tex_pressure_apply(*br, *paint, intensity);
+}
+
+float BKE_brush_mask_tex_pressure_apply(const Brush &brush, const Paint &paint, float value)
+{
+  const bke::PaintRuntime *paint_runtime = paint.runtime;
+  if (paint_runtime == nullptr) {
+    return value;
+  }
+  switch (brush.mask_pressure) {
     case BRUSH_MASK_PRESSURE_CUTOFF:
-      intensity = ((1.0f - intensity) < paint_runtime->size_pressure_value) ? 1.0f : 0.0f;
-      break;
+      return ((1.0f - value) < paint_runtime->size_pressure_value) ? 1.0f : 0.0f;
     case BRUSH_MASK_PRESSURE_RAMP:
-      intensity = paint_runtime->size_pressure_value +
-                  intensity * (1.0f - paint_runtime->size_pressure_value);
-      break;
+      return paint_runtime->size_pressure_value +
+             value * (1.0f - paint_runtime->size_pressure_value);
     default:
-      break;
+      return value;
+  }
+}
+
+float BKE_brush_mask_tex_area_coverage(const Brush &brush,
+                                       const Paint *paint,
+                                       const float2 &local,
+                                       const float rake_rotation,
+                                       const float2 &aspect_correction,
+                                       const int thread,
+                                       ImagePool *pool)
+{
+  const MTex &mask_mtex = brush.mask_mtex;
+  if (mask_mtex.tex == nullptr) {
+    return 1.0f;
   }
 
-  return intensity;
+  float local_x = local.x;
+  float local_y = local.y;
+  const float rotation = -mask_mtex.rot - rake_rotation;
+  if (rotation > 0.001f || rotation < -0.001f) {
+    const float angle = atan2f(local_y, local_x) + rotation;
+    const float len = sqrtf(local_x * local_x + local_y * local_y);
+    local_x = len * cosf(angle);
+    local_y = len * sinf(angle);
+  }
+
+  float x = local_x * mask_mtex.size[0] + mask_mtex.ofs[0];
+  float y = local_y * mask_mtex.size[1] + mask_mtex.ofs[1];
+
+  if (brush.texture_clip_shape == BRUSH_TEXTURE_CLIP_RECTANGLE &&
+      std::max(std::fabs(x), std::fabs(y)) > 1.0f)
+  {
+    return 0.0f;
+  }
+
+  x *= aspect_correction.x;
+  y *= aspect_correction.y;
+
+  const float co[3] = {x, y, 0.0f};
+  float value = 1.0f;
+  float rgba[4];
+  RE_texture_evaluate(&mask_mtex, co, thread, pool, false, false, &value, rgba);
+  value = math::clamp(value - brush.texture_sample_bias, 0.0f, 1.0f);
+  return paint != nullptr ? BKE_brush_mask_tex_pressure_apply(brush, *paint, value) : value;
 }
 
 /* -------------------------------------------------------------------- */
@@ -2501,35 +2559,21 @@ static const MTex *brush_radial_preview_mtex(const Brush *br,
   return &br->mtex;
 }
 
-static const MTex *brush_radial_alpha_mask_mtex(const Brush *br,
-                                                const bool use_secondary,
-                                                MTex &r_storage)
+/**
+ * The Mask layer (#Brush.mask_mtex) that cuts a PBR brush's preview, exactly like it cuts the
+ * stroke. Null for other brushes, where the Mask is the legacy secondary texture previewed on its
+ * own (Ctrl+Alt+F), and when the Mask is the texture being previewed.
+ */
+static const MTex *brush_radial_stroke_mask_mtex(const Brush *br,
+                                                 const bool use_secondary,
+                                                 const MTex *previewed)
 {
-  /* Classic mask-texture preview (Ctrl+Alt+F) is not a PBR Alpha stroke mask. */
-  if (use_secondary && br->mask_mtex.tex != nullptr) {
-    return nullptr;
-  }
-  if (br->material_paint == nullptr) {
-    return nullptr;
-  }
-  const BrushMaterialPaint &brush_paint = *br->material_paint;
-  /* Radial control only has the Brush, so there is no #Paint to take a visibility set from. */
-  const PaintModeSettings mode_settings{};
-  if (!BKE_paint_material_channel_masks_stroke(
-          brush_paint, mode_settings, PAINT_MATERIAL_CHANNELS_VISIBLE_ALL))
+  if (use_secondary || br->material_paint == nullptr || br->mask_mtex.tex == nullptr ||
+      br->mask_mtex.tex == previewed->tex)
   {
     return nullptr;
   }
-  const BrushMaterialPaintChannel &alpha_channel =
-      brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA];
-  if (!BKE_paint_material_channel_has_source(alpha_channel)) {
-    return nullptr;
-  }
-  BKE_paint_material_channel_effective_mtex(brush_paint, alpha_channel, r_storage);
-  if (r_storage.tex == nullptr) {
-    return nullptr;
-  }
-  return &r_storage;
+  return &br->mask_mtex;
 }
 
 /* TODO: should probably be unified with BrushPainter stuff? */
@@ -2542,7 +2586,6 @@ static bool brush_gen_texture(const Brush *br,
                               const MTex *material_source_mtex)
 {
   MTex material_preview = {};
-  MTex alpha_mask_storage = {};
   /* In Source Mode: Material no channel has a #Tex, so the caller resolves the pixels from the
    * bake and hands them over; the #MTex then carries placement only. */
   const bool use_material_source = material_source_ibuf != nullptr &&
@@ -2553,7 +2596,7 @@ static bool brush_gen_texture(const Brush *br,
   if (!use_material_source && mtex->tex == nullptr) {
     return false;
   }
-  const MTex *alpha_mtex = brush_radial_alpha_mask_mtex(br, use_secondary, alpha_mask_storage);
+  const MTex *mask_mtex = brush_radial_stroke_mask_mtex(br, use_secondary, mtex);
   const bool is_color_preview = use_material_source ||
                                 (mtex != &br->mtex && mtex != &br->mask_mtex);
   if (r_is_color != nullptr) {
@@ -2581,6 +2624,9 @@ static bool brush_gen_texture(const Brush *br,
   }
 
   const float2 aspect = BKE_brush_get_aspect_correction(mtex, nullptr);
+  const float2 mask_aspect = mask_mtex != nullptr ? BKE_brush_get_aspect_correction(mask_mtex,
+                                                                                    nullptr) :
+                                                    float2(1.0f);
 
   const float step = 2.0f / side;
   int ix, iy;
@@ -2644,13 +2690,11 @@ static bool brush_gen_texture(const Brush *br,
         px[2] = 1.0f;
         px[3] = intensity;
       }
-      if (alpha_mtex != nullptr) {
-        float mask_intensity;
-        float mask_rgba[4];
-        RE_texture_evaluate(
-            alpha_mtex, co, 0, pool, false, false, &mask_intensity, mask_rgba);
-        CLAMP(mask_intensity, 0.0f, 1.0f);
-        px[3] *= mask_intensity;
+      if (mask_mtex != nullptr) {
+        /* No #Paint here, so no pressure curve and no rake/random angle: the preview shows the
+         * Mask's static placement. */
+        px[3] *= BKE_brush_mask_tex_area_coverage(
+            *br, nullptr, float2(x, y), 0.0f, mask_aspect, 0, pool);
       }
     }
   }

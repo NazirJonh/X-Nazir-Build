@@ -630,6 +630,111 @@ class PBRClonePanel(BrushPanel):
         col.operator("paint.clone_source_reset", text="Reset Source")
 
 
+def mask_texture_grid_display_mode(context):
+    """Which persisted display mode the Mask grid uses in this editor.
+
+    The Image Editor and the 3D View each keep their own mode, so a panel draws the one that
+    belongs to the editor it is in instead of one shared value.
+    """
+    tool_settings = context.tool_settings
+    if getattr(getattr(context, "space_data", None), "type", None) == 'IMAGE_EDITOR':
+        return tool_settings.mask_texture_grid_display_image_editor
+    return tool_settings.mask_texture_grid_display_view3d
+
+
+def draw_mask_texture_panel(layout, context, brush, *, is_popover=False, show_grid=True):
+    """The Mask slot's texture grid and placement settings.
+
+    Shared by the stock Texture Mask panel and the PBR channels panel. The Mask clips the stroke's
+    coverage in every paint mode, and the PBR canvases hide the Texture Mask panel, so both places
+    have to offer the same controls or the two panels drift apart.
+
+    With ``show_grid=False`` only the placement settings are drawn. The PBR panel needs them next
+    to the slot row, but must not put the image grid there: it competed with the channel rows for
+    image drops.
+    """
+    if brush is None:
+        return None
+
+    layout.use_property_split = True
+    layout.use_property_decorate = False
+
+    mask_tex_slot = brush.mask_texture_slot
+    if show_grid:
+        col = draw_brush_texture_image_grid(
+            layout, mask_tex_slot, mask_texture_grid_display_mode(context), is_popover,
+        )
+    else:
+        col = layout.column()
+
+    # map_mode
+    col.row().prop(mask_tex_slot, "mask_map_mode", text="Mask Mapping")
+
+    if mask_tex_slot.map_mode == 'STENCIL':
+        if brush.mask_texture and brush.mask_texture.type == 'IMAGE':
+            col.operator("brush.stencil_fit_image_aspect").mask = True
+        col.operator("brush.stencil_reset_transform").mask = True
+
+    col.prop(brush, "use_pressure_masking", text="Pressure Masking")
+    # angle and texture_angle_source
+    if mask_tex_slot.has_texture_angle:
+        angle_col = col.column()
+        angle_col.prop(mask_tex_slot, "angle", text="Angle")
+        if mask_tex_slot.has_texture_angle_source:
+            angle_col.prop(mask_tex_slot, "use_rake", text="Rake")
+
+            if (brush.brush_capabilities.has_random_texture_angle and
+                    mask_tex_slot.has_random_texture_angle):
+                angle_col.prop(mask_tex_slot, "use_random", text="Random")
+                if mask_tex_slot.use_random:
+                    angle_col.prop(mask_tex_slot, "random_angle", text="Random Angle")
+
+    # scale and offset
+    col.prop(mask_tex_slot, "offset")
+    col.prop(mask_tex_slot, "scale")
+
+    if (brush.mask_texture and brush.mask_texture.type == 'IMAGE' and
+            mask_tex_slot.map_mode != 'STENCIL'):
+        col.prop(mask_tex_slot, "use_preserve_aspect")
+    return col
+
+
+def draw_pbr_mask_slot(layout, context, brush):
+    """The Mask slot as its own channel-style panel.
+
+    Same shape as a PBR channel: a header carrying the slot's socket menu, then the slot source
+    row with its New/Open/Unlink buttons and the placement settings. The overlay opacity and
+    visibility live in the Cursor panel, shared with every other brush. Drawn after the channel rows, never above them: the channels are what a PBR texture
+    set is dropped on, and a Mask widget placed first used to take those drops.
+    """
+    header, panel = layout.panel("pbr_paint_mask", default_closed=False)
+    header.use_property_split = True
+    header.use_property_decorate = False
+    row = header.row(align=True)
+    # Match UI_ITEM_PROP_SEP_DIVIDE (0.4) used by the PBR channel headers.
+    split = row.split(factor=0.4, align=True)
+    split.label(text="Mask")
+    controls = split.row(align=True)
+    controls.context_pointer_set("paint_mask_brush", brush)
+    controls.template_node_socket(
+        color=(0.32, 0.32, 0.32, 1.0), menu="PAINT_MT_material_paint_mask_socket",
+    )
+    # Same affordance as a channel header: the assigned source stays reachable while the panel is
+    # collapsed, and clicking it opens the image browser for the slot.
+    if brush.mask_texture is not None:
+        controls.template_ID_browser(
+            brush.mask_texture_slot, "texture", compact=True,
+            open="brush.texture_image_open", image_filter='PAINT_SOURCE',
+            browse_images=True, use_users=False,
+        )
+    if not panel:
+        return
+
+    draw_texture_drop_row(panel, brush.mask_texture_slot, "texture", "Mask")
+    panel.separator()
+    draw_mask_texture_panel(panel, context, brush, show_grid=False)
+
+
 class TextureMaskPanel(BrushPanel):
     bl_label = "Texture Mask"
     bl_options = {'DEFAULT_CLOSED'}
@@ -643,48 +748,10 @@ class TextureMaskPanel(BrushPanel):
         self.layout.prop_menu_enum(tool_settings, prop_name, text="", icon='DOWNARROW_HLT')
 
     def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-
-        tool_settings = context.tool_settings
-        brush = tool_settings.image_paint.brush
-        mask_tex_slot = brush.mask_texture_slot
-
-        draw_brush_texture_image_grid(
-            layout, mask_tex_slot,
-            tool_settings.mask_texture_grid_display_image_editor,
-            self.is_popover,
+        draw_mask_texture_panel(
+            self.layout, context, context.tool_settings.image_paint.brush,
+            is_popover=self.is_popover,
         )
-
-        # map_mode
-        layout.row().prop(mask_tex_slot, "mask_map_mode", text="Mask Mapping")
-
-        if mask_tex_slot.map_mode == 'STENCIL':
-            if brush.mask_texture and brush.mask_texture.type == 'IMAGE':
-                layout.operator("brush.stencil_fit_image_aspect").mask = True
-            layout.operator("brush.stencil_reset_transform").mask = True
-
-        col = layout.column()
-        col.prop(brush, "use_pressure_masking", text="Pressure Masking")
-        # angle and texture_angle_source
-        if mask_tex_slot.has_texture_angle:
-            col = layout.column()
-            col.prop(mask_tex_slot, "angle", text="Angle")
-            if mask_tex_slot.has_texture_angle_source:
-                col.prop(mask_tex_slot, "use_rake", text="Rake")
-
-                if brush.brush_capabilities.has_random_texture_angle and mask_tex_slot.has_random_texture_angle:
-                    col.prop(mask_tex_slot, "use_random", text="Random")
-                    if mask_tex_slot.use_random:
-                        col.prop(mask_tex_slot, "random_angle", text="Random Angle")
-
-        # scale and offset
-        col.prop(mask_tex_slot, "offset")
-        col.prop(mask_tex_slot, "scale")
-
-        if brush.mask_texture and brush.mask_texture.type == 'IMAGE' and mask_tex_slot.map_mode != 'STENCIL':
-            col.prop(mask_tex_slot, "use_preserve_aspect")
 
 
 def draw_texture_drop_row(layout, data, propname, label):
@@ -1131,7 +1198,8 @@ class DisplayPanel(BrushPanel):
                     icon='HIDE_OFF' if brush.use_primary_overlay else 'HIDE_ON',
                 )
 
-        if mode in {'PAINT_TEXTURE', 'PAINT_2D'}:
+        # A PBR brush previews its Mask together with the texture, so Texture Opacity covers both.
+        if mode in {'PAINT_TEXTURE', 'PAINT_2D'} and brush.material_paint is None:
             row = col.row(align=True)
             row.active = texture_overlay_settings_active
             row.prop(brush, "mask_overlay_alpha", text="Mask Texture Opacity")
@@ -1227,10 +1295,11 @@ class PAINT_MT_material_paint_channel_socket(Menu):
             layout.prop(material_paint, "use_sync_base_color_with_brush", text="Sync with Brush")
             drawn_any = True
         elif channel_id == 'ALPHA':
+            # Alpha is an ordinary painted channel now: the stroke mask is the brush's Mask
+            # texture (its own panel), not an Alpha image sampling other channels' writes.
             layout.label(text="Use For:")
             col = layout.column(align=True)
             col.prop(material_paint, "use_alpha_map", text="Alpha Map")
-            col.prop(material_paint, "use_alpha_stroke_mask", text="Brush Mask")
             drawn_any = True
 
         if channel.source_image is not None:
@@ -1251,9 +1320,30 @@ class PAINT_MT_material_paint_channel_socket(Menu):
         layout.prop(channel, "use_grid_source_picker", text="Source Picker: Grid")
 
 
+class PAINT_MT_material_paint_mask_socket(Menu):
+    """Socket popup for the brush's Mask texture slot (#Brush.mask_mtex).
+
+    Mirrors a PBR channel's socket menu: it offers the same per-slot options the Mask panel body
+    edits, so the two entry points cannot disagree.
+    """
+
+    bl_label = "Mask Texture Slot"
+
+    def draw(self, context):
+        layout = self.layout
+
+        # The brush is handed over through the layout context by the Mask panel header.
+        brush = getattr(context, "paint_mask_brush", None)
+        if brush is None:
+            layout.label(text="Mask Texture Slot", icon='INFO')
+            return
+        mask_tex_slot = brush.mask_texture_slot
+        layout.prop(mask_tex_slot, "mask_map_mode", text="Mapping")
+        layout.prop(brush, "use_pressure_masking", text="Pressure Masking")
+
+
 class PAINT_MT_material_layer_channel_socket(Menu):
     """Socket popup for a layer channel (#MaterialPaintLayerChannel).
-
     The layer counterpart of #PAINT_MT_material_paint_channel_socket, but the layer has none of
     the brush-side options (Sync with Brush, Alpha Use For, Source Picker): those belong to the
     brush's paint semantics, not to a stack row's stored value. What is left is the channel's
@@ -1442,7 +1532,8 @@ def brush_settings(layout, context, brush, popover=False):
             col.operator("sculpt.set_persistent_base")
             layout.separator()
 
-        if capabilities.has_color:
+        is_erase_mask = paint_mask_target_erase_brush(context, brush)
+        if capabilities.has_color or is_erase_mask:
             material_paint = brush.material_paint
             synced_with_material_paint = (
                 material_paint is None or material_paint.use_sync_base_color_with_brush
@@ -1462,7 +1553,8 @@ def brush_settings(layout, context, brush, popover=False):
                 row.separator()
                 row.operator("paint.brush_colors_flip", icon='FILE_REFRESH', text="", emboss=False)
                 row.prop(ups, "use_unified_color", text="", icon='BRUSHES_ALL')
-            layout.prop(brush, "blend", text="Blend Mode")
+            if not is_erase_mask:
+                layout.prop(brush, "blend", text="Blend Mode")
 
         # Per sculpt tool options.
 
@@ -1623,7 +1715,7 @@ def brush_settings(layout, context, brush, popover=False):
         capabilities = brush.image_paint_capabilities
 
         if brush.image_brush_type == 'FILL':
-            is_mask_target = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
+            is_mask_target = paint_mask_target_active(context)
             if brush.color_type == 'COLOR' or is_mask_target:
                 draw_image_paint_fill_expand(layout, context, brush)
                 if brush.fill_expand == 'PIXELS' and mode == 'PAINT_2D':
@@ -2544,8 +2636,10 @@ def _mask_alpha_channel(context, brush):
     """The Alpha channel record when its value pair drives the Mask stroke, else ``None``.
 
     Mirrors #BKE_paint_material_mask_alpha_active: the default Mask brush always owns the pair,
-    any other brush must enable its Alpha channel. While this is set, the brush colors do not
-    decide the written value, so the color pickers give way to the black-and-white pair.
+    any other brush must enable its Alpha channel. The Erase brush always owns it too: its Mask
+    stroke writes one of the two values (white/black by default), picked with the swap button.
+    While this is set, the brush colors do not decide the written value, so the color pickers
+    give way to the black-and-white pair.
     """
     paint_mode = context.tool_settings.paint_mode
     if paint_mode.layer_target_mode != 'MASK' or brush is None:
@@ -2553,9 +2647,10 @@ def _mask_alpha_channel(context, brush):
     material_paint = brush.material_paint
     if material_paint is None or material_paint.mask_source != 'ALPHA':
         return None
+    is_erase = getattr(brush, "sculpt_brush_type", None) == 'ERASE'
     for channel in material_paint.channels:
         if channel.channel == 'ALPHA':
-            if material_paint.is_mask_default or channel.use:
+            if material_paint.is_mask_default or channel.use or is_erase:
                 return channel
             break
     return None
@@ -2601,6 +2696,27 @@ def draw_mask_alpha_source(layout, context, brush, *, channel=None):
     if channel is not None and "use_source_invert" in channel.bl_rna.properties:
         layout.prop(channel, "use_source_invert", text="Invert Source")
     return channel is not None
+
+
+def paint_mask_target_active(context):
+    """True while the paint target is the Mask map itself, not a material channel.
+
+    Mirrors #BKE_paint_layers_target_mode. Every panel that gates on the Mask target goes through
+    here, so they cannot disagree about where the mode lives or how a missing mode is handled.
+    """
+    paint_mode = getattr(context.tool_settings, "paint_mode", None)
+    return paint_mode is not None and paint_mode.layer_target_mode == 'MASK'
+
+
+def paint_mask_target_erase_brush(context, brush):
+    """True when the Erase brush paints the Mask itself.
+
+    The Erase brush has no painted channel of its own in that mode: its stroke writes the Mask
+    value pair, which is why its color controls are the pair rather than a color and a blend mode.
+    """
+    return (brush is not None and
+            getattr(brush, "sculpt_brush_type", None) == 'ERASE' and
+            paint_mask_target_active(context))
 
 
 def mask_target_suppresses_color(context, brush):
@@ -2760,6 +2876,7 @@ def draw_material_paint_channels(
                     )
         sub.prop(material_paint, "source_layout")
         sub.prop(material_paint, "source_bake_size")
+
     if is_erase_brush:
         # Picking a mode applies its stock stroke parameters (falloff, antialiasing, pressure
         # size) as a one-shot preset; tweaks made afterwards are kept.
@@ -2776,7 +2893,7 @@ def draw_material_paint_channels(
                 tex_col, brush, context.sculpt_object, default_closed=True,
             )
     # The Mask reads this value from the brush, so the choice only matters while painting a mask.
-    is_mask_target = paint_mode is not None and paint_mode.layer_target_mode == 'MASK'
+    is_mask_target = paint_mask_target_active(context)
     if is_mask_target:
         layout.prop(material_paint, "mask_source")
     layout.separator()
@@ -2849,9 +2966,16 @@ def draw_material_paint_channels(
 
     # Wrapped rows of fixed-width toggles; see #_draw_material_paint_channel_toggles.
     if is_erase_brush:
-        erase_col = layout.column(align=True)
-        erase_col.label(text="Channels to Erase")
-        _draw_material_paint_channel_toggles(erase_col, channels, toggle_ids, toggle_labels)
+        if is_mask_target:
+            # An Erase stroke in Mask mode writes the mask itself, not material channels. Its
+            # Alpha pair (white/black) is the two-value control the Mask brush uses as well.
+            channel = _mask_alpha_channel(context, brush)
+            if channel is not None:
+                _draw_mask_alpha_pair(layout, channel)
+        else:
+            erase_col = layout.column(align=True)
+            erase_col.label(text="Channels to Erase")
+            _draw_material_paint_channel_toggles(erase_col, channels, toggle_ids, toggle_labels)
     else:
         _draw_material_paint_channel_toggles(layout, channels, toggle_ids, toggle_labels)
 
@@ -2872,6 +2996,8 @@ def draw_material_paint_channels(
     if is_erase_brush:
         # The per-channel value/blend editors are hidden while erasing: an erase stroke removes
         # coverage, it does not paint channel values; configure the values with a Paint brush.
+        layout.separator()
+        draw_pbr_mask_slot(layout, context, brush)
         return
 
     if any(channels[channel_id].use for channel_id in toggle_ids):
@@ -2941,6 +3067,11 @@ def draw_material_paint_channels(
             # so the range its painted values are clamped to is user-defined.
             row = channel_col.row(align=True)
             row.prop(paint_mode, "channel_custom_range", text="Range")
+
+    # Last, so the channel rows keep their position and stay the drop target a PBR texture set is
+    # aimed at.
+    layout.separator()
+    draw_pbr_mask_slot(layout, context, brush)
 
 
 def brush_shared_settings(layout, context, brush, popover=False):
@@ -3396,7 +3527,7 @@ def draw_image_paint_fill_expand(layout, context, brush):
     is_image_fill = brush.image_brush_type == 'FILL'
     if not is_image_fill and not is_sculpt_texture_fill:
         return False
-    is_mask_target = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
+    is_mask_target = paint_mask_target_active(context)
     if not is_mask_target and brush.color_type != 'COLOR':
         return False
     row = layout.row()
@@ -4057,23 +4188,27 @@ def brush_mask_texture_settings(layout, brush):
 def brush_basic_texpaint_settings(layout, context, brush, *, compact=False):
     """Draw Tool Settings header for Vertex Paint and 2D and 3D Texture Paint modes."""
     capabilities = brush.image_paint_capabilities
+    is_mask_target = paint_mask_target_active(context)
+    is_erase_mask = paint_mask_target_erase_brush(context, brush)
 
     draw_image_paint_fill_expand(layout, context, brush)
 
-    if capabilities.has_color and not mask_target_suppresses_color(context, brush):
+    if ((capabilities.has_color or is_erase_mask) and
+            not mask_target_suppresses_color(context, brush)):
         if not draw_mask_alpha_swatches(layout, context, brush):
             material_paint = brush.material_paint
             row = layout.row(align=True)
             # Mask Source Base Color / Coverage reads the brush colors even when the brush paints
             # material channels that are not synced to them, so keep the swatches editable there.
-            if context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+            if not is_mask_target:
                 row.active = (material_paint is None or
                               material_paint.use_sync_base_color_with_brush)
             row.ui_units_x = 4
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
             UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
             row.separator()
-        layout.prop(brush, "blend", text="" if compact else iface_("Blend"), translate=False)
+        if not is_erase_mask:
+            layout.prop(brush, "blend", text="" if compact else iface_("Blend"), translate=False)
 
     UnifiedPaintPanel.prop_unified(
         layout,
@@ -4459,6 +4594,7 @@ classes = (
     PAINT_PT_material_mask_value_secondary,
     PAINT_PT_shape_texture_preview,
     PAINT_MT_material_paint_channel_socket,
+    PAINT_MT_material_paint_mask_socket,
     PAINT_MT_material_layer_channel_socket,
     PAINT_MT_material_paint_brush_sync,
     PAINT_PT_material_paint_channel_visibility,

@@ -69,6 +69,7 @@
 #include "ED_asset_import.hh"
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_menu_utils.hh"
+#include "ED_image_grid.hh"
 #include "ED_paint.hh"
 #include "ED_render.hh"
 #include "ED_screen.hh"
@@ -628,6 +629,21 @@ class BrushTextureSlotDropTarget : public ui::DropTargetInterface {
     }
     RNA_boolean_set(&props, "use_mask_slot", use_mask_slot_);
     RNA_boolean_set(&props, "replace_existing", true);
+
+    /* A multi-file drop carries more images than this single texture slot can take. Import the
+     * whole batch into the grid first, offering the same menu a drop on the grid does, so the
+     * other files are not silently discarded; the slot itself still takes the image under the
+     * cursor below. */
+    int image_num = 0;
+    for (const std::string &path : WM_drag_get_paths(&drag)) {
+      if (BLI_path_extension_check_array(path.c_str(), imb_ext_image)) {
+        image_num++;
+      }
+    }
+    if (image_num > 1) {
+      ed::image_grid::image_grid_import_dropped_images(
+          *C, drag, use_mask_slot_, &drag_info.event);
+    }
 
     /* Invoke (not exec): a packed dropped image on an occupied slot opens a popup menu, which
      * returns #OPERATOR_INTERFACE - still a successful, accepted drop. */
@@ -1307,6 +1323,12 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     if (image_has_extra_user && (RNA_property_flag(target_prop_) & PROP_ID_REFCOUNT)) {
       /* The property setter now owns the real image reference. */
       id_us_min(&image->id);
+    }
+    /* A texture dropped on a paint channel means that channel is used. Leaving it disabled would
+     * make the assignment invisible: the stroke writes no channel and the brush cursor has
+     * nothing to preview. */
+    if (targets_paint_channel() && RNA_struct_find_property(&target_ptr, "use") != nullptr) {
+      RNA_boolean_set(&target_ptr, "use", true);
     }
     RNA_property_update(C, &target_ptr, target_prop_);
     ED_undo_memfile_push(C, "Assign Image");

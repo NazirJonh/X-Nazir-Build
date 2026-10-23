@@ -47,6 +47,7 @@ from bl_ui.properties_paint_common import (
     draw_shape_color_row,
     paint_shape_settings,
     paint_shape_tool_has_angle,
+    paint_mask_target_active,
     paint_shape_tool_flags,
 )
 
@@ -2248,7 +2249,7 @@ class _defs_sculpt:
                     col.prop(settings, "gradient_curve_width")
                     col.prop(settings, "gradient_curve_smooth", slider=True)
                     col.prop(settings, "gradient_curve_distance", text="Distance")
-            is_mask_target = context.tool_settings.paint_mode.layer_target_mode == 'MASK'
+            is_mask_target = paint_mask_target_active(context)
             if is_mask_target:
                 # A Mask stroke writes one grayscale value; the gradient colors and ramp do not
                 # reach it, so the Alpha pair replaces them in place.

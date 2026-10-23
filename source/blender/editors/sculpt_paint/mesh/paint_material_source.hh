@@ -147,6 +147,32 @@ struct DirectSampleLayout {
 std::optional<eMaterialPaintChannel> mask_source_channel_get(const BrushMaterialPaint &brush_paint);
 
 /**
+ * Coverage of the brush's Mask Texture (#Brush.mask_mtex) at a stroke position.
+ *
+ * The Mask follows the same mapping as the main texture: #MTEX_MAP_MODE_AREA is read in the
+ * brush's Area Plane (the PBR projection), every other mode through the stock region-space mask
+ * sampler. In both cases the Mask slot's own #MTex values decide the placement - size, offset,
+ * #MTex.rot and the rake/random angle the stroke already folded into
+ * #bke::PaintRuntime::brush_rotation_sec - so a Mask can sit and rotate differently from the
+ * primary texture while using the same projection.
+ *
+ * \param point: object-space stroke position, used by #MTEX_MAP_MODE_3D exactly as the main
+ *                texture uses it.
+ * \param area_point: the stroke position, already transformed by the brush's own area-plane matrix
+ *                    (#StrokeCache::brush_local_mat, or the 2D stroke's object-to-brush matrix).
+ * \param view_point_2d: region-space position for the non-Area modes; a negative component means
+ *                       "unavailable", and the Area mapping is used instead.
+ * \return coverage in [0, 1]; 1 when no Mask texture is assigned, so an absent Mask never clips.
+ */
+float paint_mask_texture_coverage(const Brush &brush,
+                                  const Paint *paint,
+                                  const float3 &point,
+                                  const float3 &area_point,
+                                  const float2 &view_point_2d,
+                                  int thread,
+                                  ImagePool *pool);
+
+/**
  * Final value of a sampled scalar \a channel: clamped to \a range, and mirrored inside it first
  * when \a channel is Alpha with #BrushMaterialPaintChannel.source_invert set. The single place the
  * Alpha texture inversion happens, shared by every Sculpt and Image 2D scalar read.

@@ -1402,14 +1402,6 @@ uint32_t BKE_paint_shape_target_channels(const Paint &paint,
                                           eShapeTargetKind kind);
 
 /**
- * Returns whether the enabled Alpha channel should mask other channels' writes this stroke
- * (#BrushMaterialPaint::use_alpha_stroke_mask).
- */
-bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
-                                              const PaintModeSettings &mode_settings,
-                                              int visible_material_channels);
-
-/**
  * Returns the scalar paint value for \a channel from \a brush_paint, clamped to the channel range
  * from \a mode_settings.
  * Base Color has no scalar value and returns 0.0f (use #BKE_paint_material_base_color_get).
@@ -1717,11 +1709,12 @@ bool BKE_paint_material_mask_alpha_active(const BrushMaterialPaint &brush_paint)
 
 /**
  * Scalar value written by a Mask stroke, chosen by #BrushMaterialPaint::mask_source.
- * Alpha reads the Alpha channel value (or its secondary value on invert) and falls back to
- * coverage when #BKE_paint_material_mask_alpha_active is false. Base Color is the Rec.709 luminance of
- * #BKE_paint_material_base_color_get. Coverage is the grey level of the primary (or secondary on
- * invert) brush color. This is the only place that decides the Mask value, so Sculpt and
- * Image 2D cannot disagree.
+ * Alpha reads the Alpha channel value (or its secondary value on invert); the pair is always live
+ * for the Erase brush too, whose Mask-mode stroke writes one of the two values. It falls back to
+ * coverage when #BKE_paint_material_mask_alpha_active is false for any other brush. Base Color is
+ * the Rec.709 luminance of #BKE_paint_material_base_color_get. Coverage is the grey level of the
+ * primary (or secondary on invert) brush color. This is the only place that decides the Mask value,
+ * so Sculpt and Image 2D cannot disagree.
  */
 float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
                                         const Paint &paint,

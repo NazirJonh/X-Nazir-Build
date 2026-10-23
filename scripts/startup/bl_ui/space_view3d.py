@@ -27,6 +27,8 @@ from bl_ui.properties_paint_common import (
     draw_material_mask_brush_reset,
     draw_mask_alpha_swatches,
     mask_target_suppresses_color,
+    paint_mask_target_active,
+    paint_mask_target_erase_brush,
 )
 from bl_ui.properties_grease_pencil_common import (
     AnnotationDataPanel,
@@ -454,25 +456,29 @@ class _draw_tool_settings_context_mode:
         if brush.sculpt_brush_type == 'TEXTURE_FILL':
             draw_image_paint_fill_expand(layout, context, brush)
 
-        if ((capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL') and
+        is_mask_target = paint_mask_target_active(context)
+        is_erase_mask = paint_mask_target_erase_brush(context, brush)
+        if ((capabilities.has_color or brush.sculpt_brush_type == 'TEXTURE_FILL' or
+                is_erase_mask) and
                 not mask_target_suppresses_color(context, brush)):
             if not draw_mask_alpha_swatches(layout, context, brush):
                 material_paint = brush.material_paint
                 row = layout.row(align=True)
                 # See #brush_basic_texpaint_settings: a Mask target reads the brush colors for
                 # its Base Color / Coverage source regardless of the material-channel sync.
-                if context.tool_settings.paint_mode.layer_target_mode != 'MASK':
+                if not is_mask_target:
                     row.active = (material_paint is None or
                                   material_paint.use_sync_base_color_with_brush)
                 row.ui_units_x = 4
                 UnifiedPaintPanel.prop_unified_color(row, context, brush, "color", text="")
                 UnifiedPaintPanel.prop_unified_color(row, context, brush, "secondary_color", text="")
                 row.separator()
-            blend_row = layout.row()
-            blend_row.active = context.tool_settings.paint_mode.canvas_source not in {
-                'MATERIAL', 'MATERIAL_PAINT',
-            }
-            blend_row.prop(brush, "blend", text="", expand=False)
+            if not is_erase_mask:
+                blend_row = layout.row()
+                blend_row.active = context.tool_settings.paint_mode.canvas_source not in {
+                    'MATERIAL', 'MATERIAL_PAINT',
+                }
+                blend_row.prop(brush, "blend", text="", expand=False)
 
         size = "size"
         size_owner = ups if ups.use_unified_size else brush

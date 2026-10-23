@@ -275,8 +275,6 @@ struct BrushPainter {
   float3 dab_color_jitter = float3(0.0f, 1.0f, 1.0f);
   /** True when Alpha is set to mask the stroke; other channels' dab coverage is scaled by the
    * Alpha source (or its slider fallback). The Alpha channel itself is never clipped this way. */
-  bool material_alpha_masking = false;
-  float material_alpha_fallback = 1.0f;
   /**
    * True when this painter writes a Mask target and #material_channel is the one channel whose
    * source texture drives the mask value (#material::mask_source_channel_get), not a channel of
@@ -769,12 +767,7 @@ static bool paint_2d_view_dab_material_batch_enabled(const BrushPainter *painter
   if (!painter->use_material_channel_color || painter->channel_sources == nullptr) {
     return false;
   }
-  if (paint_2d_channel_source_usable_2d(painter, painter->material_channel)) {
-    return true;
-  }
-  return painter->material_alpha_masking &&
-         painter->material_channel != PAINT_MATERIAL_CHANNEL_ALPHA &&
-         paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA);
+  return paint_2d_channel_source_usable_2d(painter, painter->material_channel);
 }
 
 static bool paint_2d_color_jitter_active(const BrushPainter *painter)
@@ -850,15 +843,9 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
                                                 PAINT_MATERIAL_CHANNEL_BASE_COLOR,
                                                 PAINT_MATERIAL_CHANNEL_EMISSION,
                                                 PAINT_MATERIAL_CHANNEL_NORMAL);
-  const bool alpha_mask = painter->material_alpha_masking &&
-                          channel != PAINT_MATERIAL_CHANNEL_ALPHA;
-  const bool alpha_usable = alpha_mask &&
-                            paint_2d_channel_source_usable_2d(painter,
-                                                              PAINT_MATERIAL_CHANNEL_ALPHA);
 
   Array<float3> colors(pixel_num);
   Array<float> coverages(pixel_num);
-  Array<float> alpha_factors(pixel_num);
 
   threading::parallel_for(IndexRange(h), 8, [&](const IndexRange y_range) {
     const int thread = BLI_task_parallel_thread_id(nullptr);
@@ -893,20 +880,6 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
         }
         else {
           colors[i] = float3(brush_rgb[0], brush_rgb[1], brush_rgb[2]);
-        }
-
-        if (alpha_usable) {
-          float4 alpha_sampled;
-          alpha_factors[i] = paint_2d_sample_channel_source(painter,
-                                                            PAINT_MATERIAL_CHANNEL_ALPHA,
-                                                            x,
-                                                            y,
-                                                            thread,
-                                                            alpha_sampled,
-                                                            false);
-        }
-        else if (alpha_mask) {
-          alpha_factors[i] = painter->material_alpha_fallback;
         }
 
         coverages[i] = coverage;
@@ -962,12 +935,7 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
       const int y = y0 + local_y;
       const int buf_idx = y * ibuf_stride + x;
 
-      float coverage = coverages[i];
-      if (alpha_mask) {
-        coverage *= math::clamp(alpha_factors[i], 0.0f, 1.0f);
-      }
-
-      float4 rgba(colors[i].x, colors[i].y, colors[i].z, coverage);
+      float4 rgba(colors[i].x, colors[i].y, colors[i].z, coverages[i]);
 
       if (is_float) {
         float *bf = ibuf_float_data + buf_idx * 4;
@@ -997,7 +965,7 @@ static void paint_2d_view_dab_fill_material_batch(BrushPainter *painter,
   });
 }
 
-/** Replace slider RGB with the channel source (canvas colorspace), then clip coverage by Alpha. */
+/** Replace slider RGB with the channel source (canvas colorspace). */
 static void paint_2d_apply_material_sources(const BrushPainter *painter,
                                             const BrushPainterCache *cache,
                                             const int x,
@@ -1032,7 +1000,6 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
     if (painter->material_mask_source) {
       /* Coverage, not value: the brush color already in rgba is what gets written. */
       rgba[3] = coverage * math::clamp(intensity, 0.0f, 1.0f);
-      /* Alpha masking is off for a Mask stroke, so nothing else scales the coverage. */
       return;
     }
     if (is_color) {
@@ -1063,20 +1030,6 @@ static void paint_2d_apply_material_sources(const BrushPainter *painter,
     rgba[3] = coverage;
   }
 
-  if (!painter->material_alpha_masking ||
-      painter->material_channel == PAINT_MATERIAL_CHANNEL_ALPHA)
-  {
-    return;
-  }
-
-  float alpha_factor = painter->material_alpha_fallback;
-  if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
-    float4 sampled;
-    alpha_factor = paint_2d_sample_channel_source(
-        painter, PAINT_MATERIAL_CHANNEL_ALPHA, x, y, thread, sampled, false);
-  }
-  alpha_factor = math::clamp(alpha_factor, 0.0f, 1.0f);
-  rgba[3] *= alpha_factor;
 }
 
 /* create a mask with the mask texture */
@@ -1878,7 +1831,7 @@ static void brush_painter_2d_refresh_cache(ImagePaintState *s,
   /* Source samples change with the dab; never reuse a previous buffer. */
   const bool do_source_rebuild = painter->channel_sources != nullptr &&
                                  painter->use_material_channel_color &&
-                                 (use_2d_channel_source || painter->material_alpha_masking);
+                                 use_2d_channel_source;
 
   /* determine how can update based on textures used */
   if (cache->is_texbrush) {
@@ -2945,44 +2898,46 @@ static void paint_2d_area_sample_channel_color(const BrushPainter *painter,
   }
 }
 
-static float paint_2d_area_sample_alpha_factor(const BrushPainter *painter,
-                                                const float4x4 &alpha_local_mat,
-                                                const float3 &position,
-                                                const float2 &uv,
-                                                const int thread,
-                                                ImagePool *pool)
+/** Texture Mask coverage at a surface position, in the same Area Plane frame the stroke uses. */
+static float paint_2d_area_sample_mask_factor(const BrushPainter *painter,
+                                              const float4x4 &mask_local_mat,
+                                              const float3 &position,
+                                              const int thread,
+                                              ImagePool *pool)
 {
-  float alpha_factor = painter->material_alpha_fallback;
-  if (painter->material_erase) {
-    /* An erase stroke has no channel sources; the brush texture itself scales the strength. */
-    const MTex *mtex = &painter->brush->mtex;
-    const float3 point = math::transform_point(alpha_local_mat, position);
-    float value = 1.0f;
-    float4 sampled;
-    paint_get_tex_pixel(mtex,
-                        point.x * mtex->size[0] + mtex->ofs[0],
-                        point.y * mtex->size[1] + mtex->ofs[1],
-                        pool,
-                        thread,
-                        &value,
-                        sampled);
-    return math::clamp(value - painter->brush->texture_sample_bias, 0.0f, 1.0f);
-  }
-  if (paint_2d_channel_source_usable_2d(painter, PAINT_MATERIAL_CHANNEL_ALPHA)) {
-    float value;
-    float4 sampled;
-    paint_2d_sample_area_mtex(painter,
-                               painter->channel_sources->source(PAINT_MATERIAL_CHANNEL_ALPHA),
-                               alpha_local_mat,
-                               position,
-                               uv,
-                               thread,
-                              pool,
-                              &value,
-                              sampled);
-    alpha_factor = paint_2d_alpha_source_invert(painter, PAINT_MATERIAL_CHANNEL_ALPHA, value);
-  }
-  return math::clamp(alpha_factor, 0.0f, 1.0f);
+  /* The Sculpt engine's sampler: one Mask placement has to read the same in both editors. */
+  return ed::sculpt_paint::material::paint_mask_texture_coverage(
+      *painter->brush,
+      painter->paint,
+      position,
+      math::transform_point(mask_local_mat, position),
+      float2(-1.0f),
+      thread,
+      pool);
+}
+
+/**
+ * Erase strength from the brush texture at \a position. An erase stroke has no channel sources, so
+ * the texture itself scales the strength.
+ */
+static float paint_2d_area_sample_erase_strength(const BrushPainter *painter,
+                                                 const float4x4 &erase_local_mat,
+                                                 const float3 &position,
+                                                 const int thread,
+                                                 ImagePool *pool)
+{
+  const MTex *mtex = &painter->brush->mtex;
+  const float3 point = math::transform_point(erase_local_mat, position);
+  float value = 1.0f;
+  float4 sampled;
+  paint_get_tex_pixel(mtex,
+                      point.x * mtex->size[0] + mtex->ofs[0],
+                      point.y * mtex->size[1] + mtex->ofs[1],
+                      pool,
+                      thread,
+                      &value,
+                      sampled);
+  return math::clamp(value - painter->brush->texture_sample_bias, 0.0f, 1.0f);
 }
 
 static void paint_2d_blend_area_buffer(ImagePaintState *s,
@@ -3094,6 +3049,8 @@ struct AreaPlaneCoveragePixel {
   uint16_t ly = 0;
   uint16_t falloff = 0;
   uint16_t alpha = 65535;
+  /** Texture Mask coverage (#Brush.mask_mtex), independent of the Alpha source factor. */
+  uint16_t mask = 65535;
 };
 
 struct AreaPlaneTriCoverage {
@@ -3296,8 +3253,9 @@ static const AreaPlaneTileCoverage *paint_2d_area_plane_find_tile_coverage(
 static ushort paint_2d_area_plane_pixel_strength(const AreaPlaneCoveragePixel &pixel,
                                                  const bool is_alpha_dest)
 {
-  const uint32_t alpha_mul = is_alpha_dest ? 65535u : uint32_t(pixel.alpha);
-  return ushort((uint32_t(pixel.falloff) * alpha_mul) / 65535u);
+  const uint64_t alpha_mul = is_alpha_dest ? 65535u : uint64_t(pixel.alpha);
+  return ushort((uint64_t(pixel.falloff) * alpha_mul * pixel.mask) /
+                (65535ull * 65535ull));
 }
 
 static void paint_2d_area_plane_write_rgb(float *float_data,
@@ -3388,12 +3346,12 @@ static bool paint_2d_area_plane_build_tri_coverage(
     const BrushPainter *painter,
     const ed::sculpt_paint::AreaPlaneTriangle &tri,
     const float4x4 &object_to_brush,
-    const float4x4 &alpha_local_mat,
+    const float4x4 &erase_local_mat,
     const float4x4 &unfold_mat,
     const float3 &dab_origin,
     const float3 &dab_normal,
     const float radius_object,
-    const bool capture_alpha,
+    const bool capture_erase_strength,
     ImagePool *pool,
     AreaPlaneTriCoverage &r_cov)
 {
@@ -3424,6 +3382,7 @@ static bool paint_2d_area_plane_build_tri_coverage(
   const float uv_origin_x = tile->uv_origin[0];
   const float uv_origin_y = tile->uv_origin[1];
   const Brush *brush = painter->brush;
+  const bool mask_texture_active = brush->mask_mtex.tex != nullptr;
 
   /* One buffer per row, joined in order afterwards: no lock, and the result is the same on every
    * run. The bounding box usually covers far more than the triangle, so nothing is reserved up
@@ -3455,10 +3414,14 @@ static bool paint_2d_area_plane_build_tri_coverage(
           continue;
         }
         float alpha = 1.0f;
-        if (capture_alpha) {
-          alpha = paint_2d_area_sample_alpha_factor(
-              painter, alpha_local_mat, sample_position, uv, thread, pool);
+        if (capture_erase_strength) {
+          alpha = paint_2d_area_sample_erase_strength(
+              painter, erase_local_mat, sample_position, thread, pool);
         }
+        const float mask = mask_texture_active ?
+                               paint_2d_area_sample_mask_factor(
+                                   painter, object_to_brush, sample_position, thread, pool) :
+                               1.0f;
 
         AreaPlaneCoveragePixel pixel;
         pixel.sample_position = sample_position;
@@ -3467,6 +3430,7 @@ static bool paint_2d_area_plane_build_tri_coverage(
         pixel.ly = uint16_t(ly);
         pixel.falloff = ushort(65535.0f * strength);
         pixel.alpha = ushort(65535.0f * alpha);
+        pixel.mask = ushort(65535.0f * mask);
         local.append(pixel);
       }
     }
@@ -3927,18 +3891,19 @@ static void paint_2d_area_plane_apply(ImagePaintState *s,
       canvas_rotation);
   const float4x4 channel_local_mat = ed::sculpt_paint::area_plane_object_to_local(channel_frame);
   /* Erase has no sources, but a brush texture still has to scale its strength. */
-  const bool capture_alpha = painter->material_alpha_masking ||
-                             (painter->material_erase && painter->brush->mtex.tex != nullptr);
-  const float4x4 alpha_local_mat =
-      capture_alpha ? ed::sculpt_paint::area_plane_object_to_local(paint_2d_area_channel_frame(
-                          painter,
-                          PAINT_MATERIAL_CHANNEL_ALPHA,
-                          geom.dab_tri,
-                          geom.hit.position,
-                          geom.radius_object,
-                          geom.flipped,
-                          canvas_rotation)) :
-                      geom.object_to_brush;
+  const bool capture_erase_strength = painter->material_erase &&
+                                      painter->brush->mtex.tex != nullptr;
+  const float4x4 erase_local_mat =
+      capture_erase_strength ?
+          ed::sculpt_paint::area_plane_object_to_local(
+              paint_2d_area_channel_frame(painter,
+                                          PAINT_MATERIAL_CHANNEL_ALPHA,
+                                          geom.dab_tri,
+                                          geom.hit.position,
+                                          geom.radius_object,
+                                          geom.flipped,
+                                          canvas_rotation)) :
+          geom.object_to_brush;
 
   /* An erase stroke has no channel sources, so fall back to the stroke pool; without one every
    * brush-texture sample acquires and releases the ImBuf. The Area Plane path never runs the
@@ -3993,12 +3958,12 @@ static void paint_2d_area_plane_apply(ImagePaintState *s,
                                                painter,
                                                mesh.triangle(geom.accepted[tri_i]),
                                                geom.object_to_brush,
-                                               alpha_local_mat,
+                                               erase_local_mat,
                                                geom.unfold_mats[tri_i],
                                                geom.hit.position,
                                                geom.dab_normal,
                                                geom.footprint_radius_object,
-                                               capture_alpha,
+                                               capture_erase_strength,
                                                pool,
                                                local_cov.tris[tri_i]);
         tri_cov = &local_cov.tris[tri_i];
@@ -4899,16 +4864,6 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
         channel_sources.reset();
       }
     }
-    /* Alpha is the value source of a Mask stroke, never a mask over it. */
-    const bool alpha_masking = paint_mode.layer_target_mode != PAINT_LAYER_TARGET_MASK &&
-                               channel_sources != nullptr &&
-                                BKE_paint_material_channel_masks_stroke(
-                                    brush_paint,
-                                    paint_mode,
-                                    settings->imapaint.paint.visible_material_channels);
-    const float alpha_fallback = BKE_paint_material_channel_value(
-        brush_paint, paint_mode, PAINT_MATERIAL_CHANNEL_ALPHA);
-
     std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh> area_plane_mesh;
     Vector<std::shared_ptr<ed::sculpt_paint::AreaPlaneMesh>> secondary_area_plane_meshes;
     {
@@ -4983,15 +4938,13 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
                                    BKE_paint_mask_erase_fill_get(target.image, mask_fill);
       if (material_erase) {
         /* Clearing alpha would show the mask stack's base over an opaque Black/White Mask, so
-         * that one mixes toward its fill instead. */
+         * that one mixes toward the chosen mask value instead. */
         channel_blend = mask_fill_erase ? IMB_BLEND_MIX : IMB_BLEND_ERASE_ALPHA;
       }
-      if (mask_fill_erase) {
-        value = (mask_fill[0] + mask_fill[1] + mask_fill[2]) / 3.0f;
-      }
-      else if (is_mask_target) {
+      if (is_mask_target) {
         /* Every source goes through the helper, Coverage included, so this engine writes the same
-         * grey as the Sculpt one and a Mask target never falls into the per-channel branches. */
+         * grey as the Sculpt one and a Mask target never falls into the per-channel branches. The
+         * Erase brush reads the same value pair (see #BKE_paint_material_mask_value_get). */
         value = BKE_paint_material_mask_value_get(brush_paint, *paint, *brush, invert);
       }
       else if (target.is_color_channel) {
@@ -5057,8 +5010,6 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
       state->painter->channel_sources = channel_sources;
       state->painter->area_plane_mesh = area_plane_mesh;
       state->painter->secondary_area_plane_meshes = secondary_area_plane_meshes;
-      state->painter->material_alpha_masking = alpha_masking;
-      state->painter->material_alpha_fallback = alpha_fallback;
       if (primary == nullptr) {
         primary = state;
       }

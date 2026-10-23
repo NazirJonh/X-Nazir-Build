@@ -396,7 +396,6 @@ static void blend_tile_region(const TileRegion &region,
                               const Brush &brush,
                               const RasterTarget &target,
                               const material::ChannelUvSampler *channel_sources,
-                              const bool alpha_masking,
                               const float3 &dab_color_jitter,
                               ImagePool &tex_pool,
                               const float2 &tile_uv_origin,
@@ -411,9 +410,6 @@ static void blend_tile_region(const TileRegion &region,
                                    (target.is_color_channel || !target.is_material_channel);
   const bool target_has_source = target.is_material_channel && channel_sources != nullptr &&
                                  channel_sources->has_usable_source(target.channel);
-  const bool target_masked_by_alpha = target.is_material_channel &&
-                                       material::channel_uses_alpha_mask(alpha_masking,
-                                                                         target.channel);
   /* Any gating source (user mask or the derived face-selection masks); the blend sample combines
    * both and reports zero weight where an *active* face selection doesn't cover. */
   const bool has_selection_mask = BKE_image_paint_selection_is_active(&image);
@@ -538,22 +534,8 @@ static void blend_tile_region(const TileRegion &region,
         if (!sample) {
           continue;
         }
-        /* The Alpha channel masks every other channel's write, exactly as it does for a dab and
-         * for the 3D canvas. Sampled in the ribbon's own frame so the mask turns with the curve
-         * together with the color it is masking. A sample with no patch frame has nowhere to read
-         * it from -- the flat canvas has no brush-mapping fallback, having no view state in the
-         * writer at all -- so it goes unmasked rather than guessing. */
-        float alpha_factor = 1.0f;
-        if (target_masked_by_alpha && sample->patch_uv_valid) {
-          alpha_factor = math::clamp(
-              channel_sources->scalar_at_uv(
-                  PAINT_MATERIAL_CHANNEL_ALPHA, sample->patch_uv, thread_id),
-              0.0f,
-              1.0f);
-        }
         float alpha = math::clamp(
-            math::abs(sample->value) * (sample->tex_valid ? sample->tex_color.w : 1.0f) *
-                alpha_factor,
+            math::abs(sample->value) * (sample->tex_valid ? sample->tex_color.w : 1.0f),
             0.0f,
             1.0f);
         const int x_px = region.x0 + i;
@@ -758,7 +740,7 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
   }
 
   /* PBR Paint gives every channel an optional SOURCE texture of its own -- that is the image
-   * assigned in the channel panel -- and an Alpha channel that masks the others. Built once for
+   * assigned in the channel panel. Built once for
    * the whole restamp: it is a property of the brush, and every channel's source is resolved up
    * front.
    *
@@ -768,7 +750,6 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
   std::optional<material::ChannelSourceSet> channel_source_set;
   std::optional<material::ChannelUvSampler> channel_sources;
-  bool alpha_masking = false;
   if (!invert && brush->material_paint != nullptr &&
       paint_mode.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL)
   {
@@ -777,8 +758,6 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
     if (channel_source_set->is_active()) {
       channel_sources.emplace(
           *channel_source_set, *brush->material_paint, paint_mode, *paint, *brush);
-      alpha_masking = BKE_paint_material_channel_masks_stroke(
-          *brush->material_paint, paint_mode, paint->visible_material_channels);
     }
     else {
       channel_source_set.reset();
@@ -870,7 +849,6 @@ void image_curve_patch_raster_draw(bContext *C, ImageCurvePatchSession &session)
                         *brush,
                         target,
                         channel_sources ? &*channel_sources : nullptr,
-                        alpha_masking,
                         dab_color_jitter,
                         tex_pool,
                         tile_uv_origin,

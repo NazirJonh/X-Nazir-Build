@@ -1072,9 +1072,6 @@ struct AcceptedPixel {
    * Normal. Equals the channel's slider color/value when the channel has no usable source, so
    * PHASE 2 can use it unconditionally. */
   float3 source_color;
-  /** The Alpha channel sampled at this texel, or 1 when Alpha masking is off or does not apply
-   * to this channel (Alpha never masks its own write -- #channel_uses_alpha_mask). */
-  float alpha_factor;
   /** Selection-mask weight at this texel: the user-authored and face-derived masks combined, or 1
    * when neither constrains the canvas. Scales the final COVERAGE, not #weight: #weight only shapes
    * the cross-pass average, where a uniform factor would cancel out. */
@@ -1154,7 +1151,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * Built once per pass rather than per canvas: it is a property of the brush, and its
    * per-channel sources are all resolved up front. */
   std::optional<material::ChannelSourceSampler> channel_sources;
-  bool alpha_masking_active = false;
   if (brush.material_paint != nullptr) {
     channel_sources.emplace(ss,
                             brush,
@@ -1165,13 +1161,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
       /* Area Plane mapping depends on the dab's own location and motion, so the matrices are
        * rebuilt per pass -- the patch's equivalent of "per dab". */
       channel_sources->update_area_local_mats(ob);
-      /* Inverting erases toward the channel default, where masking the erase by the Alpha the
-       * stroke is also painting would be circular. Same condition the stroke engine uses. */
-      alpha_masking_active = !cache.toggle_settings.invert &&
-                             BKE_paint_material_channel_masks_stroke(
-                                 *brush.material_paint,
-                                 *paint_mode_settings_,
-                                 cache.paint->visible_material_channels);
     }
     else {
       channel_sources.reset();
@@ -1273,9 +1262,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
    * tangent basis per UV primitive -- the same `tri_tangent` / `bitangent_sign` pair
    * `do_paint_pixels()` builds (`mesh/sculpt_paint_image.cc`). */
   const bool target_paints_normal_source = target.is_normal_channel && target_has_source;
-  const bool target_masked_by_alpha = target.is_material_channel &&
-                                      material::channel_uses_alpha_mask(alpha_masking_active,
-                                                                        target_channel);
   /* Decode a Base Color source once per CHUNK rather than once per pixel.
    *
    * The per-pixel decode goes through `IMB_colormanagement_colorspace_to_scene_linear_v3`, which
@@ -1666,13 +1652,12 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                 continue;
               }
               float3 source_color = target_flat_color;
-              float alpha_factor = 1.0f;
 #if CURVE_PATCH_PROFILING
-              if (target_has_source || target_masked_by_alpha) {
+              if (target_has_source) {
                 local.shaded++;
               }
 #endif
-              if (target_has_source || target_masked_by_alpha) {
+              if (target_has_source) {
                 /* WHERE a channel source is sampled decides whether it turns with the curve.
                  *
                  * The patch reports its own frame (`u` across the ribbon, `v` along it) whenever
@@ -1748,16 +1733,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                               target_channel, *tex_ctx, thread_id));
                   }
                 }
-                if (target_masked_by_alpha) {
-                  const float alpha_sample =
-                      use_patch_frame ? channel_sources->scalar_at_uv(
-                                            PAINT_MATERIAL_CHANNEL_ALPHA,
-                                            sample->patch_uv,
-                                            thread_id) :
-                                        channel_sources->scalar(
-                                            PAINT_MATERIAL_CHANNEL_ALPHA, *tex_ctx, thread_id);
-                  alpha_factor = math::clamp(alpha_sample, 0.0f, 1.0f);
-                }
               }
               accepted.append({li,
                                sample->tex_color,
@@ -1765,7 +1740,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
                                sample->value,
                                sample->weight,
                                source_color,
-                               alpha_factor,
                                selection_weight});
             }
             if (batch_decode_color && !accepted.is_empty()) {
@@ -2012,14 +1986,12 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
         accum.x += pixel.weight;
         accum.y += pixel.weight * pixel.value;
         const float blended = accum.y / accum.x;
-        /* The Alpha channel scales every other channel's write, exactly as it does for a dab. The
-         * selection mask scales the resulting COVERAGE the same way the stroke engine folds its
+        /* The selection mask scales the resulting COVERAGE the same way the stroke engine folds its
          * weight into the brush factor: zero outside the selection, partial on a feathered edge.
          * Applying it here rather than to `pixel.weight` is what keeps a selected-out pixel blank
          * -- a uniform factor on the accumulated weights would cancel in `blended`. */
         const float factor = curve_patch_color_mix_factor(
-                                 blended, pixel.tex_color, pixel.tex_valid, strength) *
-                             pixel.alpha_factor;
+            blended, pixel.tex_color, pixel.tex_valid, strength);
         const float coverage = std::clamp(factor * pixel.selection, 0.0f, 1.0f);
         /* The color a patch paints is a `float3` (`BKE_brush_color_get()`, or a channel color), so
          * the only alpha it contributes is its own coverage. That coverage accumulates onto the

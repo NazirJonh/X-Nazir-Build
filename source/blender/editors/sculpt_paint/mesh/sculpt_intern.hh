@@ -291,8 +291,9 @@ struct ImagePaintTarget {
   /** True when this target is the mask map of a Mask-mode stroke, not a material channel. */
   bool is_mask_target = false;
   /**
-   * The opaque fill a mask map was created with (Black/White Mask), when it has one. Erase paints
-   * back toward it, since clearing alpha would let the mask stack's base (full coverage) show.
+   * The opaque fill a mask map was created with (Black/White Mask), when it has one. Erase uses
+   * Mix with the chosen mask value there, since clearing alpha would let the mask stack's base
+   * (full coverage) show; without a fill it clears the map's alpha.
    */
   std::optional<float4> mask_erase_fill;
   eMaterialPaintChannel channel = PAINT_MATERIAL_CHANNEL_METALLIC;
@@ -800,9 +801,6 @@ struct StrokeCache {
     Vector<float> factors;
     /** Texture-sample coordinates, same layout. Empty when no channel has a usable source. */
     Vector<material::TexelSampleContext> contexts;
-    /** Alpha channel factor masking the other channels' writes, same layout. Empty when the
-     * stroke does not use Alpha as a mask. */
-    Vector<float> alpha;
     /** Slice starts, one per node in the dab's mask, plus a final total. */
     Vector<int> offsets;
 

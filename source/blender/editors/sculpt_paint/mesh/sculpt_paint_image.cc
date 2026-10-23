@@ -32,6 +32,7 @@
 #include "BLI_math_base.hh"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
+#include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_rect.h"
@@ -1081,11 +1082,9 @@ static float4 paint_brush_color(const ImagePaintTarget &target,
                                const float4 &brush_color_default)
 {
   if (target.is_mask_target) {
-    if (cache.material_erase && target.mask_erase_fill) {
-      return *target.mask_erase_fill;
-    }
     /* A mask map is opaque grey: the stroke paints the value the brush's mask source selects.
-     * A fixed white would change nothing on a white Multiply map. */
+     * A fixed white would change nothing on a white Multiply map. Erase reads the same value
+     * pair, so the two chosen mask values (with swap) also drive what it writes. */
     BLI_assert(brush.material_paint != nullptr);
     const float grey = BKE_paint_material_mask_value_get(
         *brush.material_paint, sd.paint, brush, cache.material_invert);
@@ -1258,9 +1257,6 @@ struct RowFactorCache {
   Array<int2> row_span;
   /** Indexed like #UDIMTilePixels::pixel_rows; only entries in #valid_rows are populated. */
   Array<Array<float>> row_factors;
-  /** Brush factors with the optional source alpha mask applied. Kept separately because the Alpha
-   * channel itself must use the unmasked brush factors. */
-  Array<Array<float>> row_alpha_factors;
   /** Object-space texel positions, indexed like #row_factors. Only filled when a channel has a
    * source texture to sample; otherwise left empty so ordinary strokes pay nothing. */
   Array<Array<float3>> row_positions;
@@ -1280,7 +1276,6 @@ static Array<RowFactorCache> compute_paint_row_factors(
     const MaterialPaintFilter &material_filter,
     const FaceSelectionPaintFilter &face_selection_filter,
     const ed::sculpt_paint::material::ChannelSourceSampler *active_sampler,
-    const bool alpha_masking_active,
     const std::optional<eMaterialPaintChannel> mask_coverage_channel,
     const ImageData &layout_image_data,
     const bool needs_baked_target_uv,
@@ -1289,9 +1284,13 @@ static Array<RowFactorCache> compute_paint_row_factors(
 {
   PRF_scope(ProfileCategory::Editor);
   const StrokeCache &cache = *ss.cache;
+  /* The standard Texture Mask scales every dab's coverage. A PBR stroke has no sampler in some
+   * cases (Erase reads no channel source), so it must be able to request the sample contexts on
+   * its own. */
+  const bool mask_texture_active = brush.mask_mtex.tex != nullptr;
   /* Must mirror the sampler actually passed to #apply_paint_channel: computing this from
    * `cache.material_source_sampler` and `invert` again here could silently diverge from it. */
-  const bool needs_positions = active_sampler != nullptr;
+  const bool needs_positions = active_sampler != nullptr || mask_texture_active;
 
   BitVector<> brush_test = init_uv_primitives_brush_test(
       ss, pbvh_data.vert_tris, pixel_node.uv_primitives.tri_indices, positions);
@@ -1316,9 +1315,6 @@ static Array<RowFactorCache> compute_paint_row_factors(
     tile_cache.row_changed = Array<bool>(tile_cache.valid_rows.min_array_size(), false);
     tile_cache.row_span = Array<int2>(tile_cache.valid_rows.min_array_size(), int2(0));
     tile_cache.row_factors.reinitialize(tile_cache.valid_rows.min_array_size());
-    if (alpha_masking_active && active_sampler != nullptr) {
-      tile_cache.row_alpha_factors.reinitialize(tile_cache.valid_rows.min_array_size());
-    }
     if (needs_positions) {
       tile_cache.row_positions.reinitialize(tile_cache.valid_rows.min_array_size());
       tile_cache.row_contexts.reinitialize(tile_cache.valid_rows.min_array_size());
@@ -1386,9 +1382,6 @@ static Array<RowFactorCache> compute_paint_row_factors(
            * construction keeps a consumer that reads the whole row correct in release builds too. */
           Array<float> &row_factors = tile_cache.row_factors[row_i];
           row_factors = Array<float>(row_size, 0.0f);
-          if (alpha_masking_active && active_sampler != nullptr) {
-            tile_cache.row_alpha_factors[row_i] = Array<float>(row_size, 0.0f);
-          }
           if (needs_positions) {
             tile_cache.row_positions[row_i].reinitialize(row_size);
             tile_cache.row_contexts[row_i].reinitialize(row_size);
@@ -1439,6 +1432,29 @@ static Array<RowFactorCache> compute_paint_row_factors(
 
             calc_brush_texture_factors(ss, brush, tls.pixel_positions, factors);
 
+            if (mask_texture_active) {
+              /* A second, independent mask on top of the primary texture: its texels cut the
+               * stroke's coverage, exactly like the stock Texture Mask in image painting. */
+              const Span<material::TexelSampleContext> contexts =
+                  tile_cache.row_contexts[row_i].as_span().slice(range);
+              const int thread_id = BLI_task_parallel_thread_id(nullptr);
+              for (const int i : range.index_range()) {
+                if (factors[i] == 0.0f) {
+                  continue;
+                }
+                /* The Image 2D engine's sampler: one Mask placement has to read the same in both
+                 * editors, so neither path may roll its own texel math. */
+                factors[i] *= material::paint_mask_texture_coverage(
+                    brush,
+                    cache.paint,
+                    contexts[i].point,
+                    math::transform_point(cache.brush_local_mat, contexts[i].symm_point),
+                    contexts[i].view_point_2d,
+                    thread_id,
+                    ss.tex_pool());
+              }
+            }
+
             /* The active row's own mask clips the stroke the way it clips the row in the render:
              * a texel the mask hides keeps a zero factor and is never written. */
             if (mask_sampler != nullptr) {
@@ -1482,22 +1498,6 @@ static Array<RowFactorCache> compute_paint_row_factors(
               }
             }
 
-            if (alpha_masking_active && active_sampler != nullptr) {
-              MutableSpan<float> alpha_factors =
-                  tile_cache.row_alpha_factors[row_i].as_mutable_span().slice(range);
-              const Span<material::TexelSampleContext> contexts =
-                  tile_cache.row_contexts[row_i].as_span().slice(range);
-              const int thread_id = BLI_task_parallel_thread_id(nullptr);
-              for (const int i : range.index_range()) {
-                alpha_factors[i] = factors[i] * math::clamp(
-                                                   active_sampler->scalar(
-                                                       PAINT_MATERIAL_CHANNEL_ALPHA,
-                                                       contexts[i],
-                                                       thread_id),
-                                                   0.0f,
-                                                   1.0f);
-              }
-            }
           });
 
           /* Only the span can hold a non-zero factor; scanning the zeroed rest is wasted work. */
@@ -1555,7 +1555,6 @@ static void apply_paint_channel(ImageData &image_data,
                                 const eMaterialPaintChannel channel,
                                 const bool is_color_channel,
                                 const bool is_normal_channel,
-                                const bool alpha_masking_active,
                                 const float3 &color_jitter,
                                 const float3 &view_right,
                                 const float3 & /*view_up*/,
@@ -1667,12 +1666,7 @@ static void apply_paint_channel(ImageData &image_data,
                 selection_dirty_bounds_tls.local(), Bounds<int2>(start, end));
           }
 
-          Span<float> row_factors = tile_cache.row_factors[row_i];
-          if (material::channel_uses_alpha_mask(alpha_masking_active, channel) &&
-              sampler != nullptr)
-          {
-            row_factors = tile_cache.row_alpha_factors[row_i].as_span();
-          }
+          const Span<float> row_factors = tile_cache.row_factors[row_i];
           const Span<material::TexelSampleContext> row_contexts =
               sampler != nullptr ? tile_cache.row_contexts[row_i].as_span() :
                                    Span<material::TexelSampleContext>();
@@ -1923,7 +1917,6 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
                                       PixelNode &pixel_node,
                                       Span<RowFactorCache> tile_caches,
                                       const material::ChannelSourceSampler *sampler,
-                                      const bool alpha_masking_active,
                                       const float3 &color_jitter)
 {
   const int dest_num = dests.size();
@@ -1947,11 +1940,6 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
       return false;
     }
     if (sampler != nullptr && tile_cache.row_contexts.size() != cache_row_num) {
-      return false;
-    }
-    if (alpha_masking_active && sampler != nullptr &&
-        tile_cache.row_alpha_factors.size() != cache_row_num)
-    {
       return false;
     }
     for (const int dest_i : dests.index_range()) {
@@ -2029,12 +2017,7 @@ static bool apply_paint_channel_group(Span<PaintChannelWriteDest> dests,
             return;
           }
           const PackedPixelRow pixel_row = tile.pixel_rows[row_i];
-          /* No #material::channel_uses_alpha_mask test here: Alpha is excluded from grouping by
-           * #is_pairable_channel, so every channel in this group is masked by it. */
-          Span<float> factors = tile_cache.row_factors[row_i];
-          if (alpha_masking_active && sampler != nullptr) {
-            factors = tile_cache.row_alpha_factors[row_i].as_span();
-          }
+          const Span<float> factors = tile_cache.row_factors[row_i];
           const Span<material::TexelSampleContext> contexts =
               sampler != nullptr ? tile_cache.row_contexts[row_i].as_span() :
                                    Span<material::TexelSampleContext>();
@@ -2453,17 +2436,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
 
-  /* Alpha is the Mask value's source in Mask mode, never a mask over it: its sampler entry is
-   * read per target below. */
-  const bool mask_mode = paint_mode_settings.layer_target_mode == PAINT_LAYER_TARGET_MASK;
-  const bool alpha_masking_active = !mask_mode && !cache.material_invert &&
-                                    !cache.material_erase && active_sampler != nullptr &&
-                                    brush->material_paint != nullptr &&
-                                     BKE_paint_material_channel_masks_stroke(
-                                         *brush->material_paint,
-                                         paint_mode_settings,
-                                         sd.paint.visible_material_channels);
-
   /* Brush falloff/hardness/strength/texture factors are channel-independent: computed once per
    * dab against the shared pixel-node encoding and reused by every enabled Material channel,
    * instead of being re-evaluated per channel (Base Color, Normal, Roughness, ...). Recomputed
@@ -2531,9 +2503,7 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
       BLI_assert(brush->material_paint != nullptr);
       const float mask_grey = BKE_paint_material_mask_value_get(
           *brush->material_paint, sd.paint, *brush, cache.material_invert);
-      brush_color_storage = (cache.material_erase && target.mask_erase_fill) ?
-                                *target.mask_erase_fill :
-                                float4(mask_grey, mask_grey, mask_grey, 1.0f);
+      brush_color_storage = float4(mask_grey, mask_grey, mask_grey, 1.0f);
       brush_color_ptr = &brush_color_storage;
     }
     else if (target.is_color_channel) {
@@ -2720,7 +2690,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                                 material_filter,
                                                                 face_selection_filter,
                                                                 active_sampler,
-                                                                alpha_masking_active,
                                                                 mask_coverage_channel,
                                                                 image_data,
                                                                 active_sampler != nullptr &&
@@ -2757,7 +2726,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                   target.channel,
                                   target.is_color_channel,
                                   target.is_normal_channel,
-                                  alpha_masking_active,
                                   dab_color_jitter,
                                   cache.view_right,
                                   cache.view_up,
@@ -2771,7 +2739,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                                            pixel_nodes[i],
                                                            node_factor_caches[pos],
                                                            active_sampler,
-                                                           alpha_masking_active,
                                                            dab_color_jitter);
             if (!grouped) {
               for (const PaintChannelWriteDest &dest : dests) {
@@ -2787,7 +2754,6 @@ void SCULPT_do_paint_brush_image(const Depsgraph &depsgraph,
                                     dest.channel,
                                     dest.is_color_channel,
                                     false,
-                                    alpha_masking_active,
                                     dab_color_jitter,
                                     cache.view_right,
                                     cache.view_up,

@@ -127,6 +127,9 @@ static bool erase_applies(const OverlayPreviewInput &in)
 static bool erase_resolve(const OverlayPreviewInput &in, PaintCursorContext &pcontext)
 {
   pcontext.material_preview_texel.kind = OverlayTexelMode::Kind::EraseStrength;
+  /* The preview reads the brush's own texture slot as-is: its mapping and placement are what the
+   * stroke uses, so overriding them here would let the two disagree. The default Erase brush is
+   * already Area-mapped, see #BKE_brush_material_erase_create_default. */
   pcontext.material_preview_mtex_storage = dna::shallow_copy(in.brush.mtex);
   return in.brush.mtex.tex != nullptr;
 }

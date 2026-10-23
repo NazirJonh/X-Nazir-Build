@@ -4099,18 +4099,6 @@ uint32_t BKE_paint_shape_target_channels(const Paint &paint,
   return mask;
 }
 
-bool BKE_paint_material_channel_masks_stroke(const BrushMaterialPaint &brush_paint,
-                                              const PaintModeSettings &mode_settings,
-                                              const int visible_material_channels)
-{
-  if (!BKE_paint_material_channel_is_enabled(
-          brush_paint, mode_settings, visible_material_channels, PAINT_MATERIAL_CHANNEL_ALPHA))
-  {
-    return false;
-  }
-  return brush_paint.use_alpha_stroke_mask != 0;
-}
-
 float2 BKE_paint_material_channel_range(const PaintModeSettings &settings,
                                         const eMaterialPaintChannel channel)
 {
@@ -4544,8 +4532,11 @@ float BKE_paint_material_mask_value_get(const BrushMaterialPaint &brush_paint,
   /* Only the Alpha channel is read here; the other channels stay out of the Mask stroke. An
    * Alpha that is off falls back to coverage so a Mask brush never paints nothing. */
   if (source == BRUSH_MATERIAL_PAINT_MASK_SOURCE_ALPHA &&
-      BKE_paint_material_mask_alpha_active(brush_paint))
+      (BKE_paint_material_mask_alpha_active(brush_paint) ||
+       BKE_brush_is_material_erase(brush)))
   {
+    /* The Erase brush in Mask mode writes the same pair: its Mask stroke restores coverage with
+     * one of two chosen values instead of a fixed fill color. */
     if (invert) {
       /* The Alpha pair's own secondary, not the channel default: the Mask brush paints with
        * a configurable second value instead of always erasing to zero. */

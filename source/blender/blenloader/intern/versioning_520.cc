@@ -1133,6 +1133,24 @@ static void version_material_paint_scale_lock_defaults(Main &bmain)
  * pointer are correct at zero (Default kind, Row scope, Auto refresh, no owner), so only the
  * refresh delay's DNA default (0.5 s) needs restoring: zero would mean "immediate" and the user
  * never chose that. */
+/**
+ * The Mask slot of a PBR brush is projected like the PBR sources (Area Plane). A slot that never
+ * received a texture still holds the stock View Plane / Tiled mapping, which would make the first
+ * Mask assigned to an existing brush follow the screen. An empty slot has no mapping to preserve,
+ * so only that case is rewritten; a slot with a texture keeps whatever the user chose.
+ */
+static void version_material_paint_mask_mapping_defaults(Main &bmain)
+{
+  for (Brush &brush : bmain.brushes) {
+    if (brush.material_paint == nullptr || brush.mask_mtex.tex != nullptr) {
+      continue;
+    }
+    if (ELEM(brush.mask_mtex.brush_map_mode, MTEX_MAP_MODE_VIEW, MTEX_MAP_MODE_TILED)) {
+      brush.mask_mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
+    }
+  }
+}
+
 static void version_material_paint_layer_source_defaults_one(BrushMaterialPaint *material_paint)
 {
   if (material_paint != nullptr) {
@@ -2365,6 +2383,10 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
   {
     version_material_paint_layer_source_defaults(*bmain);
   }
+
+  /* NOTE: Fork-only, so it is not keyed on a file subversion (see above). Idempotent: it only
+   * touches PBR brushes whose Mask slot is still empty. */
+  version_material_paint_mask_mapping_defaults(*bmain);
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

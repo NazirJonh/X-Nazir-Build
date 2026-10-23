@@ -137,10 +137,6 @@ struct TexSnapshot {
   /** Falloff curve baked into color overlays (View). Must rebuild when the preset or curve
    * mapping changes. */
   int old_curve_preset;
-  /** Alpha stroke-mask source (#use_alpha_stroke_mask). Null when the overlay is not masked. */
-  const Tex *old_alpha_tex;
-  /** Image sampled from #old_alpha_tex; see #old_tex_image. */
-  const Image *old_alpha_tex_image;
   /** Source Mode: Material identity. #old_tex is null in that mode, so without these a re-bake,
    * or a switch to another channel of the same material, would keep serving the cached overlay. */
   const ImBuf *old_material_ibuf;
@@ -148,6 +144,13 @@ struct TexSnapshot {
   /** Texel conversion baked into the buffer: the same texel turns into different pixels under
    * another kind, Alpha vs Base Color or Source Invert, so any change must invalidate it. */
   OverlayTexelMode old_texel_mode;
+  /** Mask layer (#Brush.mask_mtex) baked into a material preview: it cuts the overlay exactly like
+   * it cuts the stroke, so its texture, image and placement must invalidate the cache. */
+  const Tex *old_mask_tex;
+  const Image *old_mask_tex_image;
+  float old_mask_size[3];
+  float old_mask_ofs[3];
+  float old_mask_rot;
 };
 
 struct CursorSnapshot {
@@ -179,37 +182,6 @@ static bool paint_draw_tex_overlay_3d(
     const MTex *mtex_override,
     const ed::material_bake::MaterialSourcePreview *material_source);
 
-static bool paint_overlay_alpha_mask_mtex(const Paint *paint,
-                                          const Brush *br,
-                                          const ViewContext *vc,
-                                          MTex &r_storage)
-{
-  if (paint == nullptr || br == nullptr || br->material_paint == nullptr || vc == nullptr ||
-      vc->scene == nullptr || vc->scene->toolsettings == nullptr)
-  {
-    return false;
-  }
-  const PaintModeSettings &mode_settings = vc->scene->toolsettings->paint_mode;
-  const BrushMaterialPaint &brush_paint = *br->material_paint;
-  /* The channel set belongs to the paint mode the cursor is drawn for, not to Sculpt Mode: Texture
-   * Paint and Sculpt keep independent visibility. */
-  if (!BKE_paint_material_channel_masks_stroke(
-          brush_paint, mode_settings, paint->visible_material_channels))
-  {
-    return false;
-  }
-  const BrushMaterialPaintChannel &alpha_channel =
-      brush_paint.channels[PAINT_MATERIAL_CHANNEL_ALPHA];
-  if (!BKE_paint_material_channel_has_source(alpha_channel)) {
-    return false;
-  }
-  BKE_paint_material_channel_effective_mtex(brush_paint, alpha_channel, r_storage);
-  if (ELEM(r_storage.brush_map_mode, MTEX_MAP_MODE_AREA, MTEX_MAP_MODE_3D)) {
-    r_storage.brush_map_mode = MTEX_MAP_MODE_VIEW;
-  }
-  return r_storage.tex != nullptr;
-}
-
 /* RAII guard for GPU blend and depth test state during paint cursor drawing. */
 class PaintCursorGPUStateGuard {
  private:
@@ -240,6 +212,28 @@ static const Image *paint_tex_sampled_image(const Tex *tex)
   return (tex != nullptr && tex->type == TEX_IMAGE) ? tex->ima : nullptr;
 }
 
+/**
+ * A PBR brush previews its texture and its Mask as one layered stamp, so the Mask layer follows the
+ * primary layer's visibility toggle and opacity. Other brushes keep the stock per-slot values.
+ */
+static bool paint_tex_overlay_follows_primary(const Brush &brush, const bool primary)
+{
+  return primary || brush.material_paint != nullptr;
+}
+
+static int paint_tex_overlay_alpha_get(const Brush &brush, const bool primary)
+{
+  return paint_tex_overlay_follows_primary(brush, primary) ? brush.texture_overlay_alpha :
+                                                             brush.mask_overlay_alpha;
+}
+
+static bool paint_tex_overlay_flag_enabled(const Brush &brush, const bool primary)
+{
+  return (brush.overlay_flags & (paint_tex_overlay_follows_primary(brush, primary) ?
+                                     BRUSH_OVERLAY_PRIMARY :
+                                     BRUSH_OVERLAY_SECONDARY)) != 0;
+}
+
 static int same_tex_snap(TexSnapshot *snap,
                          const MTex *mtex,
                          const ViewContext *vc,
@@ -248,13 +242,19 @@ static int same_tex_snap(TexSnapshot *snap,
                          Brush *brush,
                          float radius,
                          int curve_preset,
-                         const Tex *alpha_tex,
+                         const MTex *mask_mtex,
                          const ed::material_bake::MaterialSourcePreview *material_source,
                          const OverlayTexelMode &texel_mode)
 {
   if (snap->brush_ptr != brush) {
     return 0;
   }
+
+  const Tex *mask_tex = mask_mtex != nullptr ? mask_mtex->tex : nullptr;
+  const bool mask_placement_same =
+      mask_mtex == nullptr || (equals_v3v3(snap->old_mask_size, mask_mtex->size) &&
+                               equals_v3v3(snap->old_mask_ofs, mask_mtex->ofs) &&
+                               snap->old_mask_rot == mask_mtex->rot);
 
   const ImBuf *material_ibuf = material_source != nullptr ? material_source->ibuf : nullptr;
   const float4 material_constant = material_source != nullptr ? material_source->constant :
@@ -268,8 +268,8 @@ static int same_tex_snap(TexSnapshot *snap,
           snap->old_col == col && snap->old_tex == mtex->tex &&
           snap->old_tex_image == paint_tex_sampled_image(mtex->tex) &&
           snap->old_map_mode == mtex->brush_map_mode && snap->old_rot == mtex->rot &&
-          (!col || snap->old_curve_preset == curve_preset) && snap->old_alpha_tex == alpha_tex &&
-          snap->old_alpha_tex_image == paint_tex_sampled_image(alpha_tex) &&
+          (!col || snap->old_curve_preset == curve_preset) && snap->old_mask_tex == mask_tex &&
+          snap->old_mask_tex_image == paint_tex_sampled_image(mask_tex) && mask_placement_same &&
           snap->old_material_ibuf == material_ibuf &&
           snap->old_material_constant == material_constant &&
           snap->old_texel_mode == texel_mode);
@@ -282,7 +282,7 @@ static void make_tex_snap(TexSnapshot *snap,
                           float radius,
                           const MTex *mtex,
                           int curve_preset,
-                          const Tex *alpha_tex,
+                          const MTex *mask_mtex,
                           const ed::material_bake::MaterialSourcePreview *material_source,
                           const OverlayTexelMode &texel_mode)
 {
@@ -297,8 +297,13 @@ static void make_tex_snap(TexSnapshot *snap,
   snap->old_map_mode = mtex->brush_map_mode;
   snap->old_rot = mtex->rot;
   snap->old_curve_preset = curve_preset;
-  snap->old_alpha_tex = alpha_tex;
-  snap->old_alpha_tex_image = paint_tex_sampled_image(alpha_tex);
+  snap->old_mask_tex = mask_mtex != nullptr ? mask_mtex->tex : nullptr;
+  snap->old_mask_tex_image = paint_tex_sampled_image(snap->old_mask_tex);
+  if (mask_mtex != nullptr) {
+    copy_v3_v3(snap->old_mask_size, mask_mtex->size);
+    copy_v3_v3(snap->old_mask_ofs, mask_mtex->ofs);
+    snap->old_mask_rot = mask_mtex->rot;
+  }
   snap->old_material_ibuf = material_source != nullptr ? material_source->ibuf : nullptr;
   snap->old_material_constant = material_source != nullptr ? material_source->constant :
                                                              float4(0.0f);
@@ -318,9 +323,19 @@ struct LoadTexData {
   int size;
   float rotation;
   float radius;
-  const MTex *alpha_mtex;
+  /**
+   * The brush's Mask layer (#Brush.mask_mtex) as the stroke applies it: it cuts the previewed
+   * texels the same way it cuts the painted ones. Null for the secondary overlay, which previews
+   * the Mask itself.
+   */
+  const MTex *mask_mtex = nullptr;
+  /** Rotation of the Mask slot's own rake/random angle (#bke::PaintRuntime::brush_rotation_sec). */
+  float mask_rotation = 0.0f;
+  float2 mask_aspect_correction = float2(1.0f);
+  /** Provides the Mask's pressure curve; null when no paint is available. */
+  const Paint *paint = nullptr;
   /** Source Mode: Material pixels. Null in Source Mode: Maps, where #mtex carries a #Tex. */
-  const ed::material_bake::MaterialSourcePreview *material_source;
+  const ed::material_bake::MaterialSourcePreview *material_source = nullptr;
   /** How texels become pixels; only meaningful when `col` is set. */
   OverlayTexelMode texel_mode;
 };
@@ -363,6 +378,26 @@ static bool paint_tex_overlay_rect_clip(const Brush &brush, const MTex &mtex)
          !ELEM(mtex.brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL);
 }
 
+/**
+ * Mask layer coverage at brush-local (\a x, \a y), the space the preview texels are built in.
+ * Goes through #BKE_brush_mask_tex_area_coverage, the sampler the stroke uses, so the cursor shows
+ * the texels the stroke will skip instead of a full stamp.
+ */
+static float load_tex_mask_coverage(const LoadTexData &data,
+                                    const float x,
+                                    const float y,
+                                    ImagePool *pool,
+                                    const int thread_id)
+{
+  return BKE_brush_mask_tex_area_coverage(*data.br,
+                                          data.paint,
+                                          float2(x, y),
+                                          data.mask_rotation,
+                                          data.mask_aspect_correction,
+                                          thread_id,
+                                          pool);
+}
+
 static void load_tex_task_cb_ex(void *__restrict userdata,
                                 const int j,
                                 const TaskParallelTLS *__restrict tls)
@@ -403,6 +438,11 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
     float x = float(i) / size;
     float y = float(j) / size;
     float len;
+
+    /* The Mask is placed from the brush's own frame, whatever map mode the preview texture uses:
+     * normalized [-1, 1] brush-local coordinates, before the preview's own rotation. */
+    const float mask_x = (x - 0.5f) * 2.0f;
+    const float mask_y = (y - 0.5f) * 2.0f;
 
     if (mtex->brush_map_mode == MTEX_MAP_MODE_TILED) {
       x *= vc->region->winx / radius;
@@ -472,6 +512,9 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
         /* The erase texture is a strength mask: white shows opaque white, black is invisible,
          * grey is proportional. Premultiplied, so rgb carries the same factor as alpha. */
         const float mask = clamp_f(avg - br->texture_sample_bias, 0.0f, 1.0f) *
+                           (data->mask_mtex != nullptr ?
+                                load_tex_mask_coverage(*data, mask_x, mask_y, pool, thread_id) :
+                                1.0f) *
                            (ELEM(mtex->brush_map_mode, MTEX_MAP_MODE_TILED, MTEX_MAP_MODE_STENCIL) ?
                                 1.0f :
                                 BKE_brush_curve_strength_clamped(br, len, 1.0f));
@@ -506,16 +549,17 @@ static void load_tex_task_cb_ex(void *__restrict userdata,
           rgba[3] *= falloff;
         }
 
-        if (data->alpha_mtex != nullptr && data->alpha_mtex->tex != nullptr) {
-          float mask_intensity;
-          float mask_rgba[4];
-          paint_get_tex_pixel(
-              data->alpha_mtex, x, y, pool, thread_id, &mask_intensity, mask_rgba);
-          CLAMP(mask_intensity, 0.0f, 1.0f);
-          rgba[0] *= mask_intensity;
-          rgba[1] *= mask_intensity;
-          rgba[2] *= mask_intensity;
-          rgba[3] *= mask_intensity;
+        /* The Mask layer cuts the preview exactly like it cuts the stroke, so the pixels the
+         * stroke will skip are transparent in the cursor as well. */
+        if (data->mask_mtex != nullptr &&
+            data->texel_mode.kind == OverlayTexelMode::Kind::Color)
+        {
+          const float mask_coverage = load_tex_mask_coverage(
+              *data, mask_x, mask_y, pool, thread_id);
+          rgba[0] *= mask_coverage;
+          rgba[1] *= mask_coverage;
+          rgba[2] *= mask_coverage;
+          rgba[3] *= mask_coverage;
         }
 
         buffer[index * 4] = rgba[0] * 255;
@@ -579,15 +623,13 @@ static int load_tex(Paint *paint,
   target = (primary) ? &primary_snap : &secondary_snap;
 
   const int curve_preset = br->curve_distance_falloff_preset;
-  MTex alpha_mtex_storage = {};
-  const MTex *alpha_mtex = nullptr;
-  /* The Alpha channel only masks material color strokes: the Erase brush's own texture and a Mask
-   * stroke's source (see #ChannelSourceSet) are not dimmed by it. */
-  if (col && mtex_override != nullptr && texel_mode.kind == OverlayTexelMode::Kind::Color &&
-      paint_overlay_alpha_mask_mtex(paint, br, vc, alpha_mtex_storage))
-  {
-    alpha_mtex = &alpha_mtex_storage;
-  }
+  /* The Mask layer cuts a material preview exactly like it cuts the stroke. The secondary overlay
+   * previews the Mask itself, so it must not be masked again. */
+  const bool mask_applies = primary && mtex_override != nullptr &&
+                            br->material_paint != nullptr && br->mask_mtex.tex != nullptr &&
+                            br->mask_mtex.tex != mtex->tex;
+  const MTex *mask_mtex = mask_applies ? &br->mask_mtex : nullptr;
+  const Tex *mask_tex = mask_mtex != nullptr ? mask_mtex->tex : nullptr;
   refresh = !target->overlay_texture || (invalid != 0) ||
             !same_tex_snap(target,
                            mtex,
@@ -597,7 +639,7 @@ static int load_tex(Paint *paint,
                            br,
                            radius,
                            curve_preset,
-                           alpha_mtex != nullptr ? alpha_mtex->tex : nullptr,
+                           mask_mtex,
                            material_source,
                            texel_mode) ||
             (col && (overlay_flags & PAINT_OVERLAY_INVALID_CURVE));
@@ -620,7 +662,7 @@ static int load_tex(Paint *paint,
                   radius,
                   mtex,
                   curve_preset,
-                  alpha_mtex != nullptr ? alpha_mtex->tex : nullptr,
+                  mask_mtex,
                   material_source,
                   texel_mode);
 
@@ -668,10 +710,9 @@ static int load_tex(Paint *paint,
       /* Has internal flag to detect it only does it once. */
       ntreeTexBeginExecTree(mtex->tex->nodetree);
     }
-    if (alpha_mtex != nullptr && alpha_mtex->tex != nullptr && alpha_mtex->tex->nodetree &&
-        alpha_mtex->tex != mtex->tex)
-    {
-      ntreeTexBeginExecTree(alpha_mtex->tex->nodetree);
+    /* `mask_tex` differs from `mtex->tex` by construction, see `mask_applies`. */
+    if (mask_tex != nullptr && mask_tex->nodetree) {
+      ntreeTexBeginExecTree(mask_tex->nodetree);
     }
 
     LoadTexData data{};
@@ -686,9 +727,14 @@ static int load_tex(Paint *paint,
     data.size = size;
     data.rotation = rotation;
     data.radius = radius;
-    data.alpha_mtex = alpha_mtex;
     data.material_source = material_source;
     data.texel_mode = texel_mode;
+    if (mask_mtex != nullptr) {
+      data.mask_mtex = mask_mtex;
+      data.mask_rotation = paint->runtime != nullptr ? paint->runtime->brush_rotation_sec : 0.0f;
+      data.mask_aspect_correction = BKE_brush_get_aspect_correction(mask_mtex, pool);
+      data.paint = paint;
+    }
 
     TaskParallelSettings settings;
     BLI_parallel_range_settings_defaults(&settings);
@@ -697,10 +743,8 @@ static int load_tex(Paint *paint,
     if (mtex->tex && mtex->tex->nodetree) {
       ntreeTexEndExecTree(mtex->tex->nodetree->runtime->execdata);
     }
-    if (alpha_mtex != nullptr && alpha_mtex->tex != nullptr && alpha_mtex->tex->nodetree &&
-        alpha_mtex->tex != mtex->tex)
-    {
-      ntreeTexEndExecTree(alpha_mtex->tex->nodetree->runtime->execdata);
+    if (mask_tex != nullptr && mask_tex->nodetree) {
+      ntreeTexEndExecTree(mask_tex->nodetree->runtime->execdata);
     }
 
     if (pool) {
@@ -885,9 +929,7 @@ static bool paint_tex_overlay_should_draw(const Brush *brush,
   if (mtex->brush_map_mode == MTEX_MAP_MODE_STENCIL) {
     return !allow_area;
   }
-  const bool valid = ignore_overlay_toggle ||
-                     (primary ? (brush->overlay_flags & BRUSH_OVERLAY_PRIMARY) != 0 :
-                                (brush->overlay_flags & BRUSH_OVERLAY_SECONDARY) != 0);
+  const bool valid = ignore_overlay_toggle || paint_tex_overlay_flag_enabled(*brush, primary);
   if (!valid) {
     return false;
   }
@@ -913,7 +955,9 @@ static bool paint_cursor_is_material_paint(const PaintCursorContext &pcontext)
     return paint_mode_settings.canvas_source == PAINT_CANVAS_SOURCE_MATERIAL;
   }
   return pcontext.mode == PaintMode::Sculpt &&
-         brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+         ELEM(brush.sculpt_brush_type,
+              SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_ERASE) &&
          ELEM(paint_mode_settings.canvas_source,
               PAINT_CANVAS_SOURCE_MATERIAL_PAINT,
               PAINT_CANVAS_SOURCE_MATERIAL);
@@ -935,10 +979,13 @@ const MTex &paint_cursor_placement_mtex(const PaintCursorContext &pcontext)
 /** Whether a surface-aligned (Area) texture overlay has to be drawn by the 3D cursor path. */
 static bool paint_cursor_has_area_tex_overlay(const PaintCursorContext &pcontext)
 {
-  if (pcontext.material_preview_mtex) {
-    return pcontext.material_preview_mtex->brush_map_mode == MTEX_MAP_MODE_AREA;
-  }
   const Brush *brush = pcontext.brush;
+  if (pcontext.material_preview_mtex) {
+    /* The preview owns the primary slot; its mapping alone decides whether the primary needs the
+     * 3D path, but the Mask is a separate layer and may still be Area-mapped. */
+    return pcontext.material_preview_mtex->brush_map_mode == MTEX_MAP_MODE_AREA ||
+           paint_tex_overlay_should_draw(brush, &brush->mask_mtex, pcontext.mode, false, true);
+  }
   return paint_tex_overlay_should_draw(brush, &brush->mtex, pcontext.mode, true, true) ||
          paint_tex_overlay_should_draw(brush, &brush->mask_mtex, pcontext.mode, false, true);
 }
@@ -985,15 +1032,13 @@ static bool paint_draw_tex_overlay(Paint *paint,
   const MTex *mtex = mtex_override ? mtex_override :
                      (primary)     ? &brush->mtex :
                                      &brush->mask_mtex;
-  int overlay_alpha = (primary) ? brush->texture_overlay_alpha : brush->mask_overlay_alpha;
+  int overlay_alpha = paint_tex_overlay_alpha_get(*brush, primary);
 
   /* A material paint channel preview must not be gated by the brush's own texture-overlay toggle:
    * the user needs to see it to position the pattern, the same way Stencil mode itself already
    * ignores this toggle below. The 2D path does not handle surface-aligned Area mode -- that is the
    * 3D path's job (see #paint_draw_tex_overlay_3d / #paint_tex_overlay_should_draw). */
-  const bool valid = mtex_override ? true :
-                     (primary)     ? (brush->overlay_flags & BRUSH_OVERLAY_PRIMARY) != 0 :
-                                     (brush->overlay_flags & BRUSH_OVERLAY_SECONDARY) != 0;
+  const bool valid = mtex_override ? true : paint_tex_overlay_flag_enabled(*brush, primary);
 
   if (mode == PaintMode::Texture3D) {
     if (primary && brush->image_brush_type != IMAGE_PAINT_BRUSH_TYPE_DRAW) {
@@ -1287,10 +1332,12 @@ static bool paint_draw_alpha_overlay(Paint *paint,
                                                     material_source,
                                                     texel_mode);
     }
-    /* Material Paint has no secondary/mask channel equivalent to preview. */
-    if (!(flags & PAINT_OVERLAY_OVERRIDE_SECONDARY) && !material_preview_mtex) {
+    /* A material preview replaces the primary texture, not the secondary Mask texture: both layers
+     * must be shown when a Mask is assigned. */
+    if (!(flags & PAINT_OVERLAY_OVERRIDE_SECONDARY)) {
       alpha_overlay_active = paint_draw_tex_overlay(
-          paint, brush, vc, x, y, zoom, mode, false, false);
+                                 paint, brush, vc, x, y, zoom, mode, false, false) ||
+                             alpha_overlay_active;
     }
     if (!(flags & PAINT_OVERLAY_OVERRIDE_CURSOR)) {
       alpha_overlay_active = paint_draw_cursor_overlay(paint, brush, placement_mtex, x, y, zoom);
@@ -1300,6 +1347,17 @@ static bool paint_draw_alpha_overlay(Paint *paint,
     if (!(flags & PAINT_OVERLAY_OVERRIDE_PRIMARY) && (mode != PaintMode::Weight)) {
       alpha_overlay_active = paint_draw_tex_overlay(
           paint, brush, vc, x, y, zoom, mode, false, true);
+    }
+    /* PBR Sculpt/Erase may have only the Mask assigned (the primary texture is optional), so the
+     * secondary layer has to be drawn here as well. Plain Sculpt is excluded: there `mask_mtex` is
+     * the legacy color texture, not a stroke mask, and the stock cursor never drew it in this
+     * branch. The helper still gates on the brush's overlay switch and on a texture being present. */
+    if (brush->material_paint != nullptr &&
+        !(flags & PAINT_OVERLAY_OVERRIDE_SECONDARY))
+    {
+      alpha_overlay_active = paint_draw_tex_overlay(
+                                 paint, brush, vc, x, y, zoom, mode, false, false) ||
+                             alpha_overlay_active;
     }
     if (!(flags & PAINT_OVERLAY_OVERRIDE_CURSOR)) {
       alpha_overlay_active = paint_draw_cursor_overlay(paint, brush, placement_mtex, x, y, zoom);
@@ -2054,7 +2112,9 @@ void paint_cursor_draw_texture_overlays(PaintCursorContext &pcontext)
   else if (brush.overlay_flags & BRUSH_OVERLAY_PRIMARY) {
     paint_draw_tex_overlay_3d(pcontext, /*primary*/ true, nullptr, nullptr);
   }
-  if (!has_material_preview && (brush.overlay_flags & BRUSH_OVERLAY_SECONDARY)) {
+  /* The Mask is a separate coverage layer and remains drawable when a material preview owns the
+   * primary slot. It is the mask the PBR stroke applies, including the Erase strength. */
+  if (paint_tex_overlay_flag_enabled(brush, /*primary*/ false)) {
     paint_draw_tex_overlay_3d(pcontext, /*primary*/ false, nullptr, nullptr);
   }
 
@@ -2112,7 +2172,7 @@ static bool paint_draw_tex_overlay_3d(
   Brush *brush = pcontext.brush;
   const MTex *mtex = mtex_override ? mtex_override :
                                      (primary ? &brush->mtex : &brush->mask_mtex);
-  const int overlay_alpha = primary ? brush->texture_overlay_alpha : brush->mask_overlay_alpha;
+  const int overlay_alpha = paint_tex_overlay_alpha_get(*brush, primary);
 
   /* The 3D path additionally handles the surface-aligned Area mode. */
   if (!paint_tex_overlay_should_draw(brush,

@@ -15,6 +15,7 @@
 #include <cmath>
 
 #include "BLI_array.hh"
+#include "BLI_map.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_time.h"
 
@@ -26,8 +27,10 @@
 #include "BKE_curve.hh"
 #include "BKE_global.hh" /* U */
 
+#include "ED_control_points.hh"
+#include "ED_shape_session_overlay.hh"
+
 #include "GPU_immediate.hh"
-#include "GPU_immediate_util.hh"
 #include "GPU_shader_builtin.hh"
 #include "GPU_state.hh"
 
@@ -179,6 +182,128 @@ Vector<float2> BezierInput::flatten(const int eval_segments, const bool include_
 /** \name Lifetime and cursor helpers
  * \{ */
 
+/**
+ * The placed points as the shared control-point layer sees them: region-space positions, handles
+ * resolved with the same auto rule the outline uses, and the active point's handles exposed.
+ * Every other point keeps auto handles hidden, matching how the input has always looked: only
+ * the point being shaped shows its tangent.
+ */
+struct BezierInput::ScreenSource : control_points::Source {
+  ScreenSource(const BezierInput &input,
+               const ARegion &region,
+               const Mapping &mapping,
+               const bool can_close)
+      : input_(input), region_(region), mapping_(mapping), can_close_(can_close)
+  {
+  }
+
+  int points_num() const override
+  {
+    return input_.points_.size();
+  }
+
+  float2 point_position(const int point) const override
+  {
+    return mapping_.to_region(region_, input_.points_[point].co);
+  }
+
+  void point_handles(const int point, float2 &r_left, float2 &r_right) const override
+  {
+    float2 left, right;
+    input_.point_handles_get(point, can_close_, left, right);
+    r_left = mapping_.to_region(region_, left);
+    r_right = mapping_.to_region(region_, right);
+  }
+
+  int8_t handle_type(const int point, bool /*left*/) const override
+  {
+    if (flag_is_set(input_.flags_, Flag::ForceStraight)) {
+      return BEZIER_HANDLE_VECTOR;
+    }
+    const BezierInputPoint &input_point = input_.points_[point];
+    if (point == input_.points_.size() - 1 && input_point.handles_set) {
+      /* The dragged handles stay mirrored unless Ctrl collapsed the incoming segment. */
+      return input_point.straight_prev ? BEZIER_HANDLE_VECTOR : BEZIER_HANDLE_ALIGN;
+    }
+    return BEZIER_HANDLE_AUTO;
+  }
+
+  uint8_t selection(const int point) const override
+  {
+    /* The first point doubles as the closing affordance: while a click would close the outline,
+     * it is highlighted like a selected control point. */
+    return (point == 0 && can_close_) ? SEL_F2 : 0;
+  }
+
+  bool handle_visible(const int point, const bool left) const override
+  {
+    if (flag_is_set(input_.flags_, Flag::ForceStraight)) {
+      return false;
+    }
+    const int last = input_.points_.size() - 1;
+    const BezierInputPoint &input_point = input_.points_[point];
+    if (point != last || !input_point.handles_set) {
+      return false;
+    }
+    float2 handle_left, handle_right;
+    input_.point_handles_get(point, can_close_, handle_left, handle_right);
+    return !control_points::handle_is_collapsed(left ? handle_left : handle_right, input_point.co);
+  }
+
+  int segments_num() const override
+  {
+    /* The dashed outline is the input's own contour, drawn by its region callback. */
+    return 0;
+  }
+
+  void segment_polyline(int /*segment*/, Vector<float2> & /*r_out*/) const override {}
+
+ private:
+  const BezierInput &input_;
+  const ARegion &region_;
+  const Mapping &mapping_;
+  bool can_close_;
+};
+
+void BezierInput::overlay_sync(const ARegion &region, const Mapping &mapping)
+{
+  if (points_.is_empty()) {
+    this->overlay_release();
+    return;
+  }
+
+  const bool can_close = hover_close_ && points_.size() >= 3;
+  ScreenSource source(*this, region, mapping, can_close);
+
+  control_points::BuildOptions options;
+  options.cursor = mapping.to_region(region, cursor_user_);
+  options.hover_point = true;
+  options.hover_metric = control_points::Metric::Euclidean;
+
+  PaintCurveScreenHandles handles;
+  control_points::handles_build(source, options, handles);
+  if (!overlay_owner_) {
+    overlay_owner_ = std::make_shared<bool>(true);
+  }
+  shape_overlay::bezier_overlay::handles_set(region, overlay_owner_, handles);
+
+  /* A modal input belongs to one region for its whole life; moving to another region would
+   * leave a stale snapshot behind, so drop the old one first. */
+  if (overlay_region_ != nullptr && overlay_region_ != &region) {
+    shape_overlay::bezier_overlay::handles_clear(*overlay_region_);
+  }
+  overlay_region_ = &region;
+}
+
+void BezierInput::overlay_release()
+{
+  if (overlay_region_ != nullptr) {
+    shape_overlay::bezier_overlay::handles_clear(*overlay_region_);
+    overlay_region_ = nullptr;
+    overlay_owner_.reset();
+  }
+}
+
 BezierInput::BezierInput(const Flag flags) : flags_(flags) {}
 
 void BezierInput::begin(const ARegion &region,
@@ -201,6 +326,7 @@ void BezierInput::begin(const ARegion &region,
   last_press_time_ = BLI_time_now_seconds();
   last_press_xy_ = int2(event.xy[0], event.xy[1]);
   last_press_added_point_ = true;
+  this->overlay_sync(region, mapping);
 }
 
 float BezierInput::point_distance_px(const ARegion &region,
@@ -246,6 +372,17 @@ void BezierInput::undo_last()
 Result BezierInput::handle_event(const ARegion &region,
                                  const wmEvent &event,
                                  const Mapping &mapping)
+{
+  const Result result = this->handle_event_impl(region, event, mapping);
+  /* Publish on every event: motion changes the hover, the rubber band and the dragged handles
+   * even when the result says nothing was committed. */
+  this->overlay_sync(region, mapping);
+  return result;
+}
+
+Result BezierInput::handle_event_impl(const ARegion &region,
+                                      const wmEvent &event,
+                                      const Mapping &mapping)
 {
   if (points_.is_empty()) {
     return Result::None;
@@ -421,17 +558,6 @@ Result BezierInput::handle_event(const ARegion &region,
 /** \name Drawing
  * \{ */
 
-/** Axis-aligned square, the control-point shape of Stroke Method: Curve. */
-static void square_draw(const uint pos, const float2 &center, const float half)
-{
-  immBegin(GPU_PRIM_TRI_FAN, 4);
-  immVertex2f(pos, center.x - half, center.y - half);
-  immVertex2f(pos, center.x + half, center.y - half);
-  immVertex2f(pos, center.x + half, center.y + half);
-  immVertex2f(pos, center.x - half, center.y + half);
-  immEnd();
-}
-
 void BezierInput::draw(const ARegion &region, const Mapping &mapping, const DrawStyle &style) const
 {
   if (points_.is_empty()) {
@@ -485,77 +611,6 @@ void BezierInput::draw(const ARegion &region, const Mapping &mapping, const Draw
     immEnd();
   }
   immUnbindProgram();
-
-  /* Control points and the active point's handles, in plain uniform color. */
-  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-  Vector<float2> point_region(points_.size());
-  for (const int i : points_.index_range()) {
-    point_region[i] = to_region(points_[i].co);
-  }
-
-  /* Handles only for the active (most recently placed) point, and only once the user has shaped
-   * them: every other point stays on auto handles and shows none. */
-  const bool show_handles = points_.last().handles_set && !flag_is_set(flags_, Flag::ForceStraight);
-  if (show_handles) {
-    const float2 &co = point_region.last();
-    const float2 handles[2] = {to_region(points_.last().handle_left),
-                               to_region(points_.last().handle_right)};
-
-    GPU_line_width(3.0f);
-    immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-    for (const float2 &handle : handles) {
-      immBegin(GPU_PRIM_LINES, 2);
-      immVertex2f(pos, co.x, co.y);
-      immVertex2f(pos, handle.x, handle.y);
-      immEnd();
-    }
-    GPU_line_width(1.5f);
-    immUniformColor4f(style.handle.x, style.handle.y, style.handle.z, style.handle.w);
-    for (const float2 &handle : handles) {
-      immBegin(GPU_PRIM_LINES, 2);
-      immVertex2f(pos, co.x, co.y);
-      immVertex2f(pos, handle.x, handle.y);
-      immEnd();
-    }
-
-    immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-    for (const float2 &handle : handles) {
-      imm_draw_circle_fill_2d(pos, handle.x, handle.y, 3.5f, 12);
-    }
-    immUniformColor4f(style.handle.x, style.handle.y, style.handle.z, style.handle.w);
-    for (const float2 &handle : handles) {
-      imm_draw_circle_fill_2d(pos, handle.x, handle.y, 2.5f, 12);
-    }
-  }
-
-  for (const int i : point_region.index_range()) {
-    const bool is_first = (i == 0);
-    const bool is_active = (i == point_region.index_range().last());
-    const float2 &co = point_region[i];
-    /* Control points are squares like Stroke Method: Curve. The movable (most recently placed)
-     * point is drawn largest, and the first point doubles as the close handle: enlarge and tint
-     * it while a click would close the curve so the affordance is visible before committing. */
-    float half = 3.5f;
-    if (is_active) {
-      half = 5.5f;
-    }
-    else if (is_first) {
-      half = can_close ? 5.0f : 4.5f;
-    }
-    immUniformColor4f(
-        style.point_shadow.x, style.point_shadow.y, style.point_shadow.z, style.point_shadow.w);
-    square_draw(pos, co, half);
-    if (is_first && can_close) {
-      immUniformColor4f(style.close.x, style.close.y, style.close.z, style.close.w);
-    }
-    else {
-      immUniformColor4f(style.point.x, style.point.y, style.point.z, style.point.w);
-    }
-    square_draw(pos, co, half - 1.5f);
-  }
-
-  immUnbindProgram();
   GPU_blend(GPU_BLEND_NONE);
   GPU_line_smooth(false);
 }
@@ -584,3 +639,60 @@ Mapping region_pixel_mapping()
 /** \} */
 
 }  // namespace blender::ed::sculpt_paint::bezier_input
+
+/* -------------------------------------------------------------------- */
+/** \name Overlay snapshot registry
+ * \{ */
+
+namespace blender::ed::sculpt_paint::shape_overlay::bezier_overlay {
+
+/** The snapshot of one region's modal input, alive as long as that input is. */
+struct RegistryEntry {
+  std::weak_ptr<bool> owner;
+  PaintCurveScreenHandles handles;
+};
+
+/** The active input of every region. There is at most one modal Bézier input per region, and
+ * the modal replaces its snapshot on every state change. */
+static Map<const ARegion *, RegistryEntry> g_entries;
+
+void handles_set(const ARegion &region,
+                 const OwnerToken &owner,
+                 const PaintCurveScreenHandles &handles)
+{
+  RegistryEntry &entry = g_entries.lookup_or_add_default(&region);
+  entry.owner = owner;
+  entry.handles = handles;
+}
+
+static void entry_remove(const ARegion &region)
+{
+  g_entries.remove(&region);
+  /* A static container must not keep a heap buffer alive to exit (the leak check at shutdown
+   * would report it); #Map::clear frees the table. */
+  if (g_entries.is_empty()) {
+    g_entries.clear();
+  }
+}
+
+void handles_clear(const ARegion &region)
+{
+  entry_remove(region);
+}
+
+const PaintCurveScreenHandles *handles_find(const ARegion &region)
+{
+  RegistryEntry *entry = g_entries.lookup_ptr(&region);
+  if (entry == nullptr) {
+    return nullptr;
+  }
+  if (entry->owner.expired()) {
+    entry_remove(region);
+    return nullptr;
+  }
+  return &entry->handles;
+}
+
+/** \} */
+
+}  // namespace blender::ed::sculpt_paint::shape_overlay::bezier_overlay

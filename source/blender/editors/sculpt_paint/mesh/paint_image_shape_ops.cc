@@ -185,6 +185,10 @@ static void image_shape_state_free(bContext *C, wmOperator *op)
     ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
     state->draw_handle = nullptr;
   }
+  if (state->create) {
+    /* Drop the shared overlay handles of the Bézier input this modal published. */
+    state->create->input().overlay_release();
+  }
   MEM_delete(state);
   op->customdata = nullptr;
   if (wmWindow *win = CTX_wm_window(C)) {

@@ -13,6 +13,7 @@
 
 #include "ED_curve_patch.hh"
 #include "ED_paint_curve_draw.hh"
+#include "ED_shape_session_overlay.hh"
 #include "ED_view3d.hh"
 
 #include "BKE_brush.hh"
@@ -37,8 +38,11 @@
 #include "BLI_math_base.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_time.h"
 
 #include "overlay_base.hh"
+
+#include <cmath>
 
 /* Opt-in measurement for the per-frame batch churn. Handle/point/radius GPU batches are reused
  * across redraws while screen-space geometry is unchanged (hover/selection only retints them);
@@ -66,6 +70,17 @@ class PaintCurveCursor : Overlay {
 
   ed::sculpt_paint::PaintCurveScreenHandles handles_;
   ed::sculpt_paint::PaintCurveScreenSilhouettes silhouettes_;
+  /** The live control-point session of this region, when it has one: a Vector shape session
+   * (outline, origin and handles) or the modal Bézier outline input (handles only). It takes the
+   * whole pass: the user is editing that outline, and the paint-curve overlay would draw a
+   * second set of points over it. */
+  ed::sculpt_paint::shape_overlay::SessionOverlay shape_overlay_;
+  bool session_live_ = false;
+  /** The animated dashed outline of a shape session, and its origin marker. Separate passes
+   * because they use their own shaders; submitted around the shared handle pass to keep the
+   * dash under the points. */
+  PassSimple dash_ps_ = {"PaintShapeDash"};
+  PassSimple marker_ps_ = {"PaintShapeOrigin"};
   /** Reused across syncs; #ED_curve_patch_overlay_data_get clears and refills it.
    * Cleared at the start of every #begin_sync so an early return cannot leave last-frame
    * spline pointers (dangling if the session died between frames). */
@@ -87,6 +102,12 @@ class PaintCurveCursor : Overlay {
   };
   Vector<CachedSilhouetteBatches> silhouette_batches_;
   uint64_t silhouette_batches_key_ = 0;
+
+  /** Persistent GPU batches of the shape session's dashed outline, keyed on the outline
+   * geometry. The dash moves only when a point is edited; the phase advances in the shader. */
+  Vector<gpu::Batch *> dash_batches_;
+  uint64_t dash_batches_key_ = 0;
+  bool dash_batches_valid_ = false;
 
   /**
    * Persistent GPU batches for handles/segments/radius, rebuilt only when screen-space geometry
@@ -133,6 +154,7 @@ class PaintCurveCursor : Overlay {
     free_batches();
     free_silhouette_batches();
     free_handle_gpu();
+    free_dash_batches();
   }
 
   void begin_sync(Resources &res, const State &state) final
@@ -152,21 +174,50 @@ class PaintCurveCursor : Overlay {
 
     if (!state.is_space_v3d() && !state.is_space_image()) {
       free_handle_gpu();
+      free_dash_batches();
       return;
     }
     if (state.hide_overlays || state.is_depth_only_drawing || state.is_material_select) {
       free_handle_gpu();
+      free_dash_batches();
       return;
     }
     if (state.region == nullptr || state.depsgraph == nullptr || state.scene == nullptr ||
         state.view_layer == nullptr)
     {
       free_handle_gpu();
+      free_dash_batches();
       return;
     }
 
     Scene *scene = const_cast<Scene *>(state.scene);
     ViewLayer *view_layer = const_cast<ViewLayer *>(state.view_layer);
+
+    const int2 origin(state.region->winrct.xmin, state.region->winrct.ymin);
+    const float2 mval_region = state.cursor_mval_valid ? float2(state.cursor_mval - origin) :
+                                                         float2(-1.0e6f);
+
+    /* A live control-point session is what the user is editing in this region: it takes the
+     * whole pass, so the paint-curve overlay cannot draw a second set of points over it. It
+     * uses the same control-point drawing and hit rules, so every system looks and behaves
+     * identically. Which source answers (modal Bézier input, Image Editor or 3D Vector session)
+     * is decided in one place, #session_overlay_get. */
+    ed::sculpt_paint::shape_overlay::SessionQuery query;
+    query.region = state.region;
+    query.space_data = state.space_data;
+    query.active_object = BKE_view_layer_active_object_get(view_layer);
+    query.is_space_image = state.is_space_image();
+    query.is_space_v3d = state.is_space_v3d();
+    query.cursor = mval_region;
+    query.cursor_valid = state.cursor_mval_valid;
+    session_live_ = ed::sculpt_paint::shape_overlay::session_overlay_get(query, shape_overlay_);
+    if (session_live_) {
+      enabled_ = true;
+      handles_ = std::move(shape_overlay_.handles);
+      fill_pass_from_pod(res, state);
+      return;
+    }
+    free_dash_batches();
 
     Paint *paint = ed::sculpt_paint::ED_paint_curve_resolve_active_paint(
         state.depsgraph, scene, view_layer, state.space_data, state.space_type);
@@ -207,9 +258,6 @@ class PaintCurveCursor : Overlay {
       }
     }
 
-    const int2 origin(state.region->winrct.xmin, state.region->winrct.ymin);
-    const float2 mval_region = state.cursor_mval_valid ? float2(state.cursor_mval - origin) :
-                                                         float2(-1.0e6f);
     ED_curve_patch_overlay_data_get(vc.obact, patch_overlay_);
     /* Non-empty overlay, not "session has an active item". A half-built session
      * (`active_patch` out of range with patches still present) still draws every spline;
@@ -443,7 +491,15 @@ class PaintCurveCursor : Overlay {
       return;
     }
     GPU_framebuffer_bind(framebuffer);
+    if (session_live_) {
+      /* The dash goes under the points, the origin marker over them: the order the session's
+       * own region callback drew in. */
+      manager.submit(dash_ps_);
+    }
     manager.submit(ps_);
+    if (session_live_) {
+      manager.submit(marker_ps_);
+    }
   }
 
  private:
@@ -464,6 +520,139 @@ class PaintCurveCursor : Overlay {
     }
     silhouette_batches_.clear();
     silhouette_batches_key_ = 0;
+  }
+
+  void free_dash_batches()
+  {
+    for (gpu::Batch *batch : dash_batches_) {
+      if (batch != nullptr) {
+        GPU_batch_discard(batch);
+      }
+    }
+    dash_batches_.clear();
+    dash_batches_key_ = 0;
+    dash_batches_valid_ = false;
+  }
+
+  /** Geometry-only key of the shape session's dashed outline. The dash phase is a push
+   * constant, so it does not invalidate the batches. */
+  uint64_t hash_dash_geometry() const
+  {
+    BLI_HashMurmur2A mm2;
+    BLI_hash_mm2a_init(&mm2, 0);
+    BLI_hash_mm2a_add_int(&mm2, int(shape_overlay_.outlines.size()));
+    for (const Vector<float2> &polyline : shape_overlay_.outlines) {
+      BLI_hash_mm2a_add_int(&mm2, int(polyline.size()));
+      if (!polyline.is_empty()) {
+        BLI_hash_mm2a_add(&mm2,
+                          reinterpret_cast<const unsigned char *>(polyline.data()),
+                          sizeof(float2) * polyline.size());
+      }
+    }
+    return uint64_t(BLI_hash_mm2a_end(&mm2));
+  }
+
+  void ensure_dash_batches()
+  {
+    const uint64_t key = hash_dash_geometry();
+    if (dash_batches_valid_ && key == dash_batches_key_) {
+      return;
+    }
+    free_dash_batches();
+    dash_batches_.reserve(shape_overlay_.outlines.size());
+    for (const int i : shape_overlay_.outlines.index_range()) {
+      const bool cyclic = i < shape_overlay_.outline_cyclic.size() &&
+                          shape_overlay_.outline_cyclic[i];
+      make_dash_batch(shape_overlay_.outlines[i], cyclic);
+    }
+    dash_batches_key_ = key;
+    dash_batches_valid_ = true;
+  }
+
+  /** A line strip in the float3 layout the dashed shader expects (`pos` is a vec3 there;
+   * the polyline shader used for the handles takes a vec2). */
+  gpu::Batch *make_dash_batch(Span<float2> verts, const bool cyclic)
+  {
+    if (verts.size() < 2) {
+      dash_batches_.append(nullptr);
+      return nullptr;
+    }
+    Vector<float3> verts3;
+    verts3.reserve(verts.size() + (cyclic ? 1 : 0));
+    for (const float2 &v : verts) {
+      verts3.append(float3(v.x, v.y, 0.0f));
+    }
+    if (cyclic) {
+      verts3.append(float3(verts[0].x, verts[0].y, 0.0f));
+    }
+    GPUVertFormat format = {};
+    GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+    gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
+    GPU_vertbuf_data_alloc(*vbo, uint(verts3.size()));
+    GPU_vertbuf_attr_fill(vbo, 0, verts3.data());
+    gpu::Batch *batch = GPU_batch_create_ex(GPU_PRIM_LINE_STRIP, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+    dash_batches_.append(batch);
+    return batch;
+  }
+
+  /** The animated dashed outline of the shape session: the same "marching ants" shader and
+   * parameters the session's own region callback used, now drawn under the shared points. */
+  void fill_dash_pass(const State &state)
+  {
+    dash_ps_.init();
+    dash_ps_.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA);
+    dash_ps_.shader_set(
+        GPU_shader_get_builtin_shader(GPU_SHADER_3D_LINE_DASHED_UNIFORM_COLOR_ANIMATED));
+    dash_ps_.push_constant("ModelViewProjectionMatrix", paint_curve_ortho_mvp(state));
+    dash_ps_.push_constant("viewport_size", float2(state.region->winx, state.region->winy));
+    dash_ps_.push_constant("colors_len", 2);
+    dash_ps_.push_constant("color", ed::sculpt_paint::shape_overlay::dash_style::color_a());
+    dash_ps_.push_constant("color2", ed::sculpt_paint::shape_overlay::dash_style::color_b());
+    dash_ps_.push_constant("dash_width", ed::sculpt_paint::shape_overlay::dash_style::WIDTH);
+    dash_ps_.push_constant("udash_factor",
+                           ed::sculpt_paint::shape_overlay::dash_style::UDASH_FACTOR);
+    dash_ps_.push_constant("dash_phase", float(fmod(BLI_time_now_seconds(), 1.0)));
+    for (gpu::Batch *batch : dash_batches_) {
+      if (batch != nullptr) {
+        dash_ps_.draw(batch);
+      }
+    }
+  }
+
+  /** One filled diamond, owned by the ephemeral batch list. */
+  gpu::Batch *make_diamond_batch(const float2 &center, const float radius)
+  {
+    GPUVertFormat format = {};
+    GPU_vertformat_attr_add(&format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+    gpu::VertBuf *vbo = GPU_vertbuf_create_with_format(format);
+    GPU_vertbuf_data_alloc(*vbo, 4);
+    const float3 verts[4] = {{center.x, center.y - radius, 0.0f},
+                             {center.x + radius, center.y, 0.0f},
+                             {center.x, center.y + radius, 0.0f},
+                             {center.x - radius, center.y, 0.0f}};
+    GPU_vertbuf_attr_fill(vbo, 0, verts);
+    gpu::Batch *batch = GPU_batch_create_ex(GPU_PRIM_TRI_FAN, vbo, nullptr, GPU_BATCH_OWNS_VBO);
+    batches_.append(batch);
+    return batch;
+  }
+
+  /** The origin marker of the active shape: the dark diamond with the orange core the region
+   * callback used to draw. */
+  void fill_marker_pass(const State &state)
+  {
+    marker_ps_.init();
+    if (!shape_overlay_.has_origin) {
+      return;
+    }
+    marker_ps_.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA);
+    marker_ps_.shader_set(GPU_shader_get_builtin_shader(GPU_SHADER_3D_UNIFORM_COLOR));
+    marker_ps_.push_constant("ModelViewProjectionMatrix", paint_curve_ortho_mvp(state));
+    gpu::Batch *outer = this->make_diamond_batch(shape_overlay_.origin, 6.0f);
+    marker_ps_.push_constant("color", float4(0.0f, 0.0f, 0.0f, 0.85f));
+    marker_ps_.draw(outer);
+    gpu::Batch *inner = this->make_diamond_batch(shape_overlay_.origin, 4.0f);
+    marker_ps_.push_constant("color", float4(1.0f, 0.55f, 0.1f, 1.0f));
+    marker_ps_.draw(inner);
   }
 
   void free_handle_gpu()
@@ -518,6 +707,8 @@ class PaintCurveCursor : Overlay {
       add_float2(hd.handle_right);
       BLI_hash_mm2a_add_int(&mm2, int(hd.h1));
       BLI_hash_mm2a_add_int(&mm2, int(hd.h2));
+      BLI_hash_mm2a_add_int(&mm2, int(hd.show_handle_left));
+      BLI_hash_mm2a_add_int(&mm2, int(hd.show_handle_right));
     }
     for (const ed::sculpt_paint::PaintCurveSegmentDrawData &seg : handles_.segments) {
       BLI_hash_mm2a_add_int(&mm2, int(seg.polyline.size()));
@@ -632,12 +823,35 @@ class PaintCurveCursor : Overlay {
     handle_gpu_.point_end_left.reserve(handles_.points.size());
     handle_gpu_.point_end_right.reserve(handles_.points.size());
     for (const ed::sculpt_paint::PaintCurveHandleDrawData &hd : handles_.points) {
-      const float2 strip3[3] = {hd.handle_left, hd.position, hd.handle_right};
-      ensure_owned_strip(handle_gpu_.point_underlay, {strip3, 3});
+      const bool has_left = hd.show_handle_left;
+      const bool has_right = hd.show_handle_right;
       const float2 left2[2] = {hd.handle_left, hd.position};
-      ensure_owned_strip(handle_gpu_.point_left, {left2, 2});
       const float2 right2[2] = {hd.position, hd.handle_right};
-      ensure_owned_strip(handle_gpu_.point_right, {right2, 2});
+      if (has_left && has_right) {
+        const float2 strip3[3] = {hd.handle_left, hd.position, hd.handle_right};
+        ensure_owned_strip(handle_gpu_.point_underlay, {strip3, 3});
+      }
+      else if (has_left) {
+        ensure_owned_strip(handle_gpu_.point_underlay, {left2, 2});
+      }
+      else if (has_right) {
+        ensure_owned_strip(handle_gpu_.point_underlay, {right2, 2});
+      }
+      else {
+        handle_gpu_.point_underlay.append(nullptr);
+      }
+      if (has_left) {
+        ensure_owned_strip(handle_gpu_.point_left, {left2, 2});
+      }
+      else {
+        handle_gpu_.point_left.append(nullptr);
+      }
+      if (has_right) {
+        ensure_owned_strip(handle_gpu_.point_right, {right2, 2});
+      }
+      else {
+        handle_gpu_.point_right.append(nullptr);
+      }
 
       const float w = 10.0f * 0.5f;
       const float2 diamond[4] = {{hd.position.x - w, hd.position.y},
@@ -661,8 +875,18 @@ class PaintCurveCursor : Overlay {
           ensure_owned_strip_closed(owner, {box, 4});
         }
       };
-      make_endpoint(hd.handle_left, hd.h1, handle_gpu_.point_end_left);
-      make_endpoint(hd.handle_right, hd.h2, handle_gpu_.point_end_right);
+      if (has_left) {
+        make_endpoint(hd.handle_left, hd.h1, handle_gpu_.point_end_left);
+      }
+      else {
+        handle_gpu_.point_end_left.append(nullptr);
+      }
+      if (has_right) {
+        make_endpoint(hd.handle_right, hd.h2, handle_gpu_.point_end_right);
+      }
+      else {
+        handle_gpu_.point_end_right.append(nullptr);
+      }
     }
 
     constexpr int CIRCLE_SEGS = 16;
@@ -784,6 +1008,10 @@ class PaintCurveCursor : Overlay {
 
   void fill_pass_from_pod(Resources & /*res*/, const State &state)
   {
+    if (session_live_) {
+      this->ensure_dash_batches();
+      this->fill_dash_pass(state);
+    }
     ps_.init();
     ps_.state_set(DRW_STATE_WRITE_COLOR | DRW_STATE_BLEND_ALPHA);
     ps_.shader_set(GPU_shader_get_builtin_shader(GPU_SHADER_3D_POLYLINE_UNIFORM_COLOR));
@@ -1110,6 +1338,10 @@ class PaintCurveCursor : Overlay {
           draw_strip(b);
         }
       }
+    }
+
+    if (session_live_) {
+      this->fill_marker_pass(state);
     }
   }
 };

@@ -46,6 +46,7 @@
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
+#include "ED_shape_session_overlay.hh"
 #include "ED_space_api.hh"
 #include "ED_view3d.hh"
 
@@ -678,6 +679,37 @@ std::unique_ptr<VectorEditHost> paint_shape_session_host_create(bContext & /*C*/
 /** \name Overlay
  * \{ */
 
+}  // namespace blender::ed::sculpt_paint::shape
+
+namespace blender::ed::sculpt_paint::shape_overlay {
+
+bool paint_session_get(const Object &ob,
+                       const ARegion &region,
+                       const float2 cursor,
+                       const bool cursor_valid,
+                       SessionOverlay &r_out)
+{
+  const shape::PaintShapeSession *session = shape::paint_shape_session_get(ob);
+  if (session == nullptr || session->owner_region != &region ||
+      session->edit.items().is_empty())
+  {
+    return false;
+  }
+  shape::shape_session_overlay_fill(
+      session->edit,
+      [session, &region](const shape::PaintShape & /*shape*/, const float2 &p) {
+        return shape::paint_shape_session_shape_px_to_region(*session, region, p);
+      },
+      cursor,
+      cursor_valid,
+      r_out);
+  return true;
+}
+
+}  // namespace blender::ed::sculpt_paint::shape_overlay
+
+namespace blender::ed::sculpt_paint::shape {
+
 static void paint_shape_session_overlay_draw(const bContext *C, ARegion *region, void *arg)
 {
   PaintShapeSession *session = static_cast<PaintShapeSession *>(arg);
@@ -687,20 +719,10 @@ static void paint_shape_session_overlay_draw(const bContext *C, ARegion *region,
   if (CTX_wm_region(C) != session->owner_region) {
     return;
   }
-  /* SurfaceAnchored: the shape lives in tangent-plane pixels; map every outline point through the
-   * session space's live projection (the shared overlay draws in region pixels, above the mesh). */
-  const float4x4 object_to_world(session->object != nullptr ? session->object->object_to_world() :
-                                                             float4x4::identity());
-  const auto to_region = [session, region, &object_to_world](const PaintShape & /*shape*/,
-                                                             const float2 &p) {
-    float2 r_region = p;
-    if (session->space != nullptr) {
-      session->space->to_region(p, *region, object_to_world, r_region);
-    }
-    return r_region;
-  };
-  shape_draw_session_overlay(
-      session->edit.items(), session->edit.active_index(), to_region);
+  /* The dashed outline, the control points and the active shape's handles are drawn by the
+   * shared control-point overlay pass (`PaintCurveCursor`), which also serves the Curve Patch.
+   * This callback keeps only the Curve Pattern crop frame below, which is not a control-point
+   * affordance. */
 
   /* The Curve Pattern crop frame (a square in world XY): projected through the same space so the
    * user sees exactly which slice of the scene the pattern tile cuts out. */
@@ -720,7 +742,7 @@ static void paint_shape_session_overlay_draw(const bContext *C, ARegion *region,
       for (const float2 &corner : corners_world) {
         float2 co;
         if (session->space->project_point(float3(corner.x, corner.y, 0.0f), float3(0.0f), co)) {
-          frame_region.append(to_region(PaintShape{}, co));
+          frame_region.append(paint_shape_session_shape_px_to_region(*session, *region, co));
         }
       }
       if (frame_region.size() == 4) {

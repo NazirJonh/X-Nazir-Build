@@ -132,6 +132,17 @@ struct PaintCurveScreenHandles {
   blender::Vector<PaintCurveAngleHandleDrawData> angle_handles;
   blender::Vector<PaintCurveSegmentDrawData> segments;
   PaintCurveInsertPreviewDrawData insert_preview;
+
+  /** Empty every list, keeping the capacity for the next build. */
+  void clear()
+  {
+    points.clear();
+    radius_handles.clear();
+    strength_handles.clear();
+    angle_handles.clear();
+    segments.clear();
+    insert_preview = {};
+  }
 };
 
 struct PaintCurveCachedObjectSilhouette {

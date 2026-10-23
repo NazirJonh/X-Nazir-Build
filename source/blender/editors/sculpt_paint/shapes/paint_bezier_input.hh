@@ -30,6 +30,8 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_vector.hh"
 
+#include "ED_shape_session_overlay.hh"
+
 namespace blender {
 
 struct ARegion;
@@ -93,20 +95,14 @@ struct Mapping {
  * which project the shape onto the mesh only when it is written). */
 Mapping region_pixel_mapping();
 
-/** Overlay colors (and dash length) the input draws itself with. */
+/** Overlay colors (and dash length) of the in-progress dashed outline. The control points and
+ * handles take their appearance from the shared control-point layer. */
 struct DrawStyle {
   /** Animated dashed outline, alternating between the two colors. */
-  float4 outline = float4(0.4f, 0.4f, 0.4f, 1.0f);
-  float4 outline2 = float4(1.0f, 1.0f, 1.0f, 1.0f);
-  float dash_width = 8.0f;
-  float udash_factor = 0.5f;
-  /** Active point's handles (thin line over a darker fat line) and handle dots. */
-  float4 handle = float4(1.0f, 0.85f, 0.0f, 0.95f);
-  /** First point while a click would close the outline. */
-  float4 close = float4(0.2f, 0.9f, 1.0f, 0.95f);
-  /** Control point squares (white fill over a darker backing square). */
-  float4 point = float4(1.0f, 1.0f, 1.0f, 0.95f);
-  float4 point_shadow = float4(0.0f, 0.0f, 0.0f, 0.7f);
+  float4 outline = shape_overlay::dash_style::color_a();
+  float4 outline2 = shape_overlay::dash_style::color_b();
+  float dash_width = shape_overlay::dash_style::WIDTH;
+  float udash_factor = shape_overlay::dash_style::UDASH_FACTOR;
 };
 
 /**
@@ -135,8 +131,24 @@ class BezierInput {
   /** Feed a modal event; see #Result for the outcomes. */
   Result handle_event(const ARegion &region, const wmEvent &event, const Mapping &mapping);
 
-  /** Draw the in-progress outline, rubber band, control points and active handles. */
+  /**
+   * Draw the in-progress dashed outline and its rubber band.
+   *
+   * The control points and their handles are not drawn here: #overlay_sync publishes them to
+   * the shared control-point overlay (`ED_shape_session_overlay.hh`), so the same GPU pass and
+   * the same appearance serve this input and the Vector shape editor.
+   */
   void draw(const ARegion &region, const Mapping &mapping, const DrawStyle &style) const;
+
+  /**
+   * Publish the placed points' resolved handles to the shared overlay pass. Called on every
+   * state change (placement, handle drag, hover) so the overlay always draws the current
+   * geometry without the modal having to own any GPU code.
+   */
+  void overlay_sync(const ARegion &region, const Mapping &mapping);
+
+  /** Drop the published handles; the owning operator calls this when its modal ends. */
+  void overlay_release();
 
   /** Placed control points. */
   const Vector<BezierInputPoint> &points() const
@@ -183,6 +195,11 @@ class BezierInput {
   Vector<float2> flatten(int eval_segments, bool include_closing) const;
 
  private:
+  /** The control-point screen source of #overlay_sync; nested so it can read the point state. */
+  struct ScreenSource;
+  /** #handle_event without the overlay publish, so every exit path publishes exactly once. */
+  Result handle_event_impl(const ARegion &region, const wmEvent &event, const Mapping &mapping);
+
   /** Resolve both handles of point #index (user-set ones, or auto ones from the neighbors). */
   void point_handles_get(int index, bool closed, float2 &r_handle_left, float2 &r_handle_right) const;
   /** Evaluate placed segments (and optionally the closing one) into \a r_points. */
@@ -213,6 +230,10 @@ class BezierInput {
   /** True once the outline closed; #closed_straight_ records Ctrl at close time. */
   bool closed_ = false;
   bool closed_straight_ = false;
+  /** Region that owns the published overlay snapshot, or null when nothing is published. */
+  const ARegion *overlay_region_ = nullptr;
+  /** Keeps the published snapshot alive; it expires with the input (see #OwnerToken). */
+  shape_overlay::bezier_overlay::OwnerToken overlay_owner_;
 
   /* Double-click detection. Modal operators receive the second press of a double-click as a
    * plain #KM_PRESS (the window manager converts #KM_DBL_CLICK away before dispatch and only

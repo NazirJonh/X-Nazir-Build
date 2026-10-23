@@ -27,6 +27,7 @@
 #include "DNA_userdef_types.h" /* UI_SCALE_FAC */
 
 #include "ED_control_points.hh"
+#include "ED_shape_session_overlay.hh"
 
 #include "paint_shape.hh"
 #include "paint_vector_document.hh"
@@ -399,11 +400,11 @@ void shape_sync_settings_from_active(ShapeEditSession &edit,
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Session Overlay Drawing
+/** \name Session Overlay
  *
- * Shared GPU overlay of the shape drawing tools: the animated dashed outline and the control
- * point squares, common to the Image Editor frontends and the 3D viewport. The functions take
- * points already translated into region pixels; the coordinate mapping stays with the caller.
+ * What the shape tools publish for the shared control-point overlay, plus the outline primitives
+ * of the frontends that are not control points (the Image Editor seam contours and the Curve
+ * Pattern crop frame). Control points and handles are drawn by `PaintCurveCursor`, never here.
  * \{ */
 
 /** Animated dashed outline through \a region_points (already in region pixels). */
@@ -412,6 +413,9 @@ void shape_draw_dashed_outline(Span<float2> region_points, bool loop);
 /** A thin, muted solid outline: the seam siblings of a 3D shape's contour in the Image Editor
  * (the cage part keeps the animated dashed style). */
 void shape_draw_plain_outline(Span<float2> region_points, bool loop);
+
+/** Flattening error (shape pixels) of the live session outline. */
+constexpr float SHAPE_OVERLAY_ERROR_PX = 2.0f;
 
 /**
  * Fill the shared screen-space control points of \a shape's splines: one entry per control
@@ -433,6 +437,18 @@ void shape_control_points_handles_get(
     PaintCurveScreenHandles &r_out);
 
 /**
+ * Fill \a r_out with everything the shared overlay draws for a live Vector session: the flattened
+ * outline of every item, the control points and handles of the active shape and its origin.
+ * \a to_region maps a shape pixel to a region pixel and is the only thing a frontend (Image
+ * Editor, 3D viewport) has to supply; \a cursor drives the point hover.
+ */
+void shape_session_overlay_fill(const ShapeEditSession &edit,
+                                FunctionRef<float2(const PaintShape &, const float2 &)> to_region,
+                                float2 cursor,
+                                bool cursor_valid,
+                                shape_overlay::SessionOverlay &r_out);
+
+/**
  * Closest control point / handle of \a shape under \a p, in the session's own pixels. Fills the
  * spline / point indices and the picked part; false when nothing is within \a tolerance_px.
  */
@@ -445,24 +461,6 @@ bool shape_control_point_pick(const PaintShape &shape,
                               int &r_spline,
                               int &r_point,
                               control_points::Part &r_part);
-
-/** Control-point squares for \a region_cos (already in region pixels): a dark border and a
- * light core per point, drawn in one batch. */
-void shape_draw_control_points(Span<float2> region_cos);
-
-/** Diamond markers for shape origins at \a region_cos (already in region pixels). */
-void shape_draw_origin_markers(Span<float2> region_cos);
-
-/**
- * The live Vector session overlay: the dashed outline of every \a item, then the control points
- * and the origin marker of the active item. \a to_region maps a shape-space pixel (of the given
- * shape) to a region pixel; the caller owns that mapping, so the same code serves the Image
- * Editor and the 3D viewport.
- */
-void shape_draw_session_overlay(
-    Span<VectorItem> items,
-    int active_index,
-    FunctionRef<float2(const PaintShape &, const float2 &)> to_region);
 
 /** \} */
 

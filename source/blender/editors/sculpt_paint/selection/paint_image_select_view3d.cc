@@ -1761,14 +1761,18 @@ static void gesture_draw_preview(const bContext * /*C*/, ARegion *region, void *
     /* The polyline is click-built: draw the committed points plus the segment to the live cursor
      * position (#last_xy, refreshed on every MOUSEMOVE), so the click target is visible. */
     const int extra = (data->kind == GestureKind::Polyline) ? 1 : 0;
-    immBegin(GPU_PRIM_LINE_STRIP, uint(data->path_region.size()) + extra);
-    for (const float2 &p : data->path_region) {
-      immVertex2f(pos, p.x, p.y);
+    /* A line strip needs two vertices: the first lasso point alone has nothing to connect to
+     * yet, and `immBegin` asserts on it. */
+    if (data->path_region.size() + extra >= 2) {
+      immBegin(GPU_PRIM_LINE_STRIP, uint(data->path_region.size()) + extra);
+      for (const float2 &p : data->path_region) {
+        immVertex2f(pos, p.x, p.y);
+      }
+      if (extra != 0) {
+        immVertex2f(pos, data->last_xy.x, data->last_xy.y);
+      }
+      immEnd();
     }
-    if (extra != 0) {
-      immVertex2f(pos, data->last_xy.x, data->last_xy.y);
-    }
-    immEnd();
   }
   else if (data->kind == GestureKind::Circle && data->circle_radius > 0.0f) {
     constexpr int SEGMENTS = 48;

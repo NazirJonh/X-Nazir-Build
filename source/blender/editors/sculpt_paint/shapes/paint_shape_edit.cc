@@ -30,6 +30,7 @@
 #include "GPU_state.hh"
 
 #include "ED_paint_curve_draw.hh"
+#include "ED_shape_session_overlay.hh"
 
 #include "paint_shape_render.hh"
 
@@ -278,7 +279,7 @@ class ShapeSplineScreenSource : public control_points::Source {
     const float2 &handle = left ? handle_left : handle_right;
     /* A collapsed handle (a Vector point) is not a grabbable knob; the point itself owns that
      * spot, exactly as the session's own drawing skipped it. */
-    return math::distance_squared(handle, this->shape_point(point).co) >= 1e-8f;
+    return !control_points::handle_is_collapsed(handle, this->shape_point(point).co);
   }
 
   int segments_num() const override
@@ -363,6 +364,50 @@ bool shape_control_point_pick(const PaintShape &shape,
   r_point = source.point_index(pick.point);
   r_part = pick.part;
   return true;
+}
+
+void shape_session_overlay_fill(
+    const ShapeEditSession &edit,
+    const FunctionRef<float2(const PaintShape &, const float2 &)> to_region,
+    const float2 cursor,
+    const bool cursor_valid,
+    shape_overlay::SessionOverlay &r_out)
+{
+  shape_overlay::session_overlay_clear(r_out);
+
+  for (const VectorItem &item : edit.items()) {
+    for (const ShapePolyline &poly : shape_flatten(item.shape, SHAPE_OVERLAY_ERROR_PX)) {
+      Vector<float2> points(poly.points.size());
+      for (const int i : poly.points.index_range()) {
+        points[i] = to_region(item.shape, poly.points[i]);
+      }
+      r_out.outlines.append(std::move(points));
+      r_out.outline_cyclic.append(poly.cyclic);
+    }
+  }
+
+  const PaintShape *active = edit.active();
+  if (active == nullptr) {
+    return;
+  }
+  int selected_spline = -1, selected_point = -1;
+  edit.selected_point(selected_spline, selected_point);
+  control_points::BuildOptions options;
+  options.cursor = cursor;
+  options.hover_point = cursor_valid;
+  /* The flat canvas picks with Euclidean distance, matching the session's own hit test. */
+  options.hover_metric = control_points::Metric::Euclidean;
+  shape_control_points_handles_get(*active,
+                                   to_region,
+                                   edit.handles_edit(),
+                                   selected_spline,
+                                   selected_point,
+                                   options,
+                                   r_out.handles);
+  if (!active->is_empty()) {
+    r_out.origin = to_region(*active, shape_effective_origin(*active));
+    r_out.has_origin = true;
+  }
 }
 
 ShapeHandle ShapeEditSession::handle_at(const float2 &p,
@@ -1359,10 +1404,12 @@ void shape_draw_dashed_outline(Span<float2> region_points, const bool loop)
   GPU_viewport_size_get_f(viewport_size);
   immUniform2f("viewport_size", viewport_size[2] / UI_SCALE_FAC, viewport_size[3] / UI_SCALE_FAC);
   immUniform1i("colors_len", 2);
-  immUniform4f("color", 0.4f, 0.4f, 0.4f, 1.0f);
-  immUniform4f("color2", 1.0f, 1.0f, 1.0f, 1.0f);
-  immUniform1f("dash_width", 8.0f);
-  immUniform1f("udash_factor", 0.5f);
+  const float4 dash_a = shape_overlay::dash_style::color_a();
+  const float4 dash_b = shape_overlay::dash_style::color_b();
+  immUniform4f("color", dash_a.x, dash_a.y, dash_a.z, dash_a.w);
+  immUniform4f("color2", dash_b.x, dash_b.y, dash_b.z, dash_b.w);
+  immUniform1f("dash_width", shape_overlay::dash_style::WIDTH);
+  immUniform1f("udash_factor", shape_overlay::dash_style::UDASH_FACTOR);
   immUniform1f("dash_phase", float(fmod(BLI_time_now_seconds(), 1.0)));
   GPU_line_width(1.0f);
   immBegin(loop ? GPU_PRIM_LINE_LOOP : GPU_PRIM_LINE_STRIP, int(region_points.size()));
@@ -1406,129 +1453,6 @@ void shape_draw_plain_outline(Span<float2> region_points, const bool loop)
   immUnbindProgram();
   GPU_blend(GPU_BLEND_NONE);
   GPU_line_smooth(false);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Control points
- * \{ */
-
-/** One point square as a triangle fan around \a center. */
-static void point_square_draw(const uint pos, const float2 &center, const float half)
-{
-  immBegin(GPU_PRIM_TRI_FAN, 4);
-  immVertex2f(pos, center.x - half, center.y - half);
-  immVertex2f(pos, center.x + half, center.y - half);
-  immVertex2f(pos, center.x + half, center.y + half);
-  immVertex2f(pos, center.x - half, center.y + half);
-  immEnd();
-}
-
-void shape_draw_control_points(Span<float2> region_cos)
-{
-  if (region_cos.is_empty()) {
-    return;
-  }
-  GPU_blend(GPU_BLEND_ALPHA);
-  GPUVertFormat *format = immVertexFormat();
-  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-  /* The dark border then the light core, all points per batch (the Vector session's per-point
-   * pairs; squares of one point never overlap another's, so the batching is visual-identical). */
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-  for (const float2 &co : region_cos) {
-    point_square_draw(pos, co, 4.5f);
-  }
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.95f);
-  for (const float2 &co : region_cos) {
-    point_square_draw(pos, co, 3.0f);
-  }
-  immUnbindProgram();
-  GPU_blend(GPU_BLEND_NONE);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Origin markers
- * \{ */
-
-/** One upright diamond as a triangle fan around \a center. */
-static void origin_diamond_draw(const uint pos, const float2 &center, const float radius)
-{
-  immBegin(GPU_PRIM_TRI_FAN, 4);
-  immVertex2f(pos, center.x, center.y - radius);
-  immVertex2f(pos, center.x + radius, center.y);
-  immVertex2f(pos, center.x, center.y + radius);
-  immVertex2f(pos, center.x - radius, center.y);
-  immEnd();
-}
-
-void shape_draw_origin_markers(Span<float2> region_cos)
-{
-  if (region_cos.is_empty()) {
-    return;
-  }
-  GPU_blend(GPU_BLEND_ALPHA);
-  GPUVertFormat *format = immVertexFormat();
-  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-  /* Dark diamond outline, then the orange core: distinct from the white control-point squares
-   * so the pivot is readable at a glance. */
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.85f);
-  for (const float2 &co : region_cos) {
-    origin_diamond_draw(pos, co, 6.0f);
-  }
-  immUniformColor4f(1.0f, 0.55f, 0.1f, 1.0f);
-  for (const float2 &co : region_cos) {
-    origin_diamond_draw(pos, co, 4.0f);
-  }
-  immUnbindProgram();
-  GPU_blend(GPU_BLEND_NONE);
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
-/** \name Session overlay
- * \{ */
-
-/** Flattening error (shape pixels) of the live session outline. */
-constexpr float SHAPE_OVERLAY_ERROR_PX = 2.0f;
-
-void shape_draw_session_overlay(
-    Span<VectorItem> items,
-    const int active_index,
-    FunctionRef<float2(const PaintShape &, const float2 &)> to_region)
-{
-  for (const VectorItem &item : items) {
-    for (const ShapePolyline &poly : shape_flatten(item.shape, SHAPE_OVERLAY_ERROR_PX)) {
-      Vector<float2> region_points(poly.points.size());
-      for (const int i : poly.points.index_range()) {
-        region_points[i] = to_region(item.shape, poly.points[i]);
-      }
-      shape_draw_dashed_outline(region_points, poly.cyclic);
-    }
-  }
-
-  if (active_index < 0 || active_index >= items.size()) {
-    return;
-  }
-  const PaintShape &active = items[active_index].shape;
-
-  Vector<float2> region_cos;
-  for (const ShapeSpline &spline : active.splines) {
-    for (const ShapePoint &point : spline.points) {
-      region_cos.append(to_region(active, point.co));
-    }
-  }
-  shape_draw_control_points(region_cos);
-
-  float2 origin_region = to_region(active, shape_effective_origin(active));
-  shape_draw_origin_markers(Span<float2>(&origin_region, 1));
 }
 
 /** \} */

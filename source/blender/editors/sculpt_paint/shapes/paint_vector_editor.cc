@@ -16,9 +16,13 @@
 
 #include "BKE_context.hh"
 
+#include "DNA_object_types.h"
+#include "DNA_space_types.h"
+
 #include "BLT_translation.hh"
 
 #include "ED_screen.hh"
+#include "ED_shape_session_overlay.hh"
 
 #include "RNA_define.hh"
 
@@ -622,3 +626,68 @@ ShapeVectorEditor::Status ShapeVectorEditor::handle_event(bContext *C,
 /** \} */
 
 }  // namespace blender::ed::sculpt_paint::shape
+
+/* -------------------------------------------------------------------- */
+/** \name Shared overlay sources
+ * \{ */
+
+namespace blender::ed::sculpt_paint::shape_overlay {
+
+
+/** One live control-point source of the shared overlay. */
+using SessionProvider = bool (*)(const SessionQuery &query, SessionOverlay &r_out);
+
+static bool bezier_input_provider(const SessionQuery &query, SessionOverlay &r_out)
+{
+  const PaintCurveScreenHandles *handles = bezier_overlay::handles_find(*query.region);
+  if (handles == nullptr) {
+    return false;
+  }
+  r_out.handles = *handles;
+  return true;
+}
+
+static bool image_session_provider(const SessionQuery &query, SessionOverlay &r_out)
+{
+  if (!query.is_space_image || query.space_data == nullptr) {
+    return false;
+  }
+  return image_session_get(*reinterpret_cast<const SpaceImage *>(query.space_data),
+                           *query.region,
+                           query.cursor,
+                           query.cursor_valid,
+                           r_out);
+}
+
+static bool paint_session_provider(const SessionQuery &query, SessionOverlay &r_out)
+{
+  if (!query.is_space_v3d || query.active_object == nullptr) {
+    return false;
+  }
+  return paint_session_get(
+      *query.active_object, *query.region, query.cursor, query.cursor_valid, r_out);
+}
+
+
+bool session_overlay_get(const SessionQuery &query, SessionOverlay &r_out)
+{
+  /* Priority order: a modal Bézier input is the transient creation the user is in the middle of,
+   * so it wins over a Vector session; the two session kinds are exclusive by space type. */
+  static const SessionProvider providers[] = {
+      bezier_input_provider, image_session_provider, paint_session_provider};
+
+  session_overlay_clear(r_out);
+  if (query.region == nullptr) {
+    return false;
+  }
+  for (const SessionProvider provider : providers) {
+    if (provider(query, r_out)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace blender::ed::sculpt_paint::shape_overlay
+
+/** \} */

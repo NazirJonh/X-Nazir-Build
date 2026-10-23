@@ -129,6 +129,7 @@ static void image_select_curve_state_free(bContext *C, wmOperator *op)
     ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
     state->draw_handle = nullptr;
   }
+  state->input.overlay_release();
   MEM_delete(state);
   op->customdata = nullptr;
   if (wmWindow *win = CTX_wm_window(C)) {

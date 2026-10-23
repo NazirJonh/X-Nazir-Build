@@ -24,6 +24,7 @@
 #include <cstdint>
 
 #include "BLI_function_ref.hh"
+#include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -183,6 +184,16 @@ bool pick_segment(Span<PaintCurveSegmentDrawData> segments,
 
 /** Theme color of one handle knob, selected or not, by #BEZIER_HANDLE_* type. */
 void handle_color_get(int8_t handle_type, bool selected, float r_color[4]);
+
+/**
+ * True when \a handle sits on its \a position: a collapsed (Vector) handle, which is neither a
+ * grabbable knob nor worth drawing. Every #Source::handle_visible implementation shares this
+ * threshold so the editors cannot disagree on what "collapsed" means.
+ */
+inline bool handle_is_collapsed(const float2 &handle, const float2 &position)
+{
+  return math::distance_squared(handle, position) < 1e-8f;
+}
 
 /** Translate a picked #Part to the #SEL_F* bit the selection attributes use. */
 inline uint8_t part_to_sel_flag(const Part part)

@@ -226,6 +226,10 @@ static void shape_state_free(bContext *C, wmOperator *op)
     }
   }
   g_surface_ctx.active = false;
+  if (state->create) {
+    /* Drop the shared overlay handles of the Bézier input this modal published. */
+    state->create->input().overlay_release();
+  }
   if (state->draw_handle && state->owner_region_type) {
     ED_region_draw_cb_exit(state->owner_region_type, state->draw_handle);
   }

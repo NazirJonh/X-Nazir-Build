@@ -67,6 +67,7 @@
 
 #include "ED_paint.hh"
 #include "ED_screen.hh"
+#include "ED_shape_session_overlay.hh"
 #include "ED_space_api.hh"
 #include "ED_undo.hh"
 
@@ -464,30 +465,38 @@ static bool image_shape_vector_refresh(Scene *scene, ImageShapeVectorState &stat
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name Overlay drawing
+/** \name Overlay
  * \{ */
 
-static void image_shape_vector_draw(const bContext *C, ARegion *region, void *arg)
-{
-  ImageShapeVectorState *state = static_cast<ImageShapeVectorState *>(arg);
-  if (state == nullptr || state->edit.items().is_empty()) {
-    return;
-  }
-  if (CTX_wm_space_image(C) != state->owner_sima) {
-    return;
-  }
+}  // namespace blender::ed::sculpt_paint::shape
 
-  /* The GPU work (outlines, the active shape's control points and origin) lives in the shared
-   * overlay; this only maps shape-space pixels to Image Editor region pixels, so 3D can
-   * reuse the same code with its own mapping. */
+namespace blender::ed::sculpt_paint::shape_overlay {
+
+bool image_session_get(const SpaceImage &sima,
+                       const ARegion &region,
+                       const float2 cursor,
+                       const bool cursor_valid,
+                       SessionOverlay &r_out)
+{
+  shape::ImageShapeVectorState *state = shape::image_shape_vector_state_get(&sima);
+  if (state == nullptr || state->owner_region != &region || state->edit.items().is_empty()) {
+    return false;
+  }
   const shape::CanvasTile tile = state->edit.canvas_tile();
-  shape::shape_draw_session_overlay(
-      state->edit.items(),
-      state->edit.active_index(),
+  shape::shape_session_overlay_fill(
+      state->edit,
       [&](const shape::PaintShape & /*shape*/, const float2 &p) {
-        return shape::shape_px_to_region(*region, tile, p);
-      });
+        return shape::shape_px_to_region(region, tile, p);
+      },
+      cursor,
+      cursor_valid,
+      r_out);
+  return true;
 }
+
+}  // namespace blender::ed::sculpt_paint::shape_overlay
+
+namespace blender::ed::sculpt_paint::shape {
 
 /** \} */
 
@@ -539,8 +548,8 @@ void image_shape_vector_state_free(PaintSelectFloatingSession *session)
   if (ARegion *region = CTX_wm_region(C)) {
     state->owner_region = region;
     state->owner_region_type = region->runtime->type;
-    state->draw_handle = ED_region_draw_cb_activate(
-        state->owner_region_type, image_shape_vector_draw, state, REGION_DRAW_POST_PIXEL);
+    /* The session overlay is drawn by the shared control-point overlay pass; no region draw
+     * callback is registered. */
   }
 
   image_select_session_set(sima, state);

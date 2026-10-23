@@ -457,12 +457,7 @@ void ED_paint_curve_screen_handles_build_from_geometry(
     PaintCurveScreenHandles &r_out,
     const CurvePatchHandleVisibility &curve_patch_visibility)
 {
-  r_out.points.clear();
-  r_out.radius_handles.clear();
-  r_out.strength_handles.clear();
-  r_out.angle_handles.clear();
-  r_out.segments.clear();
-  r_out.insert_preview = {};
+  r_out.clear();
 
   if (!paintcurve_geometry_is_valid(geometry)) {
     return;
@@ -707,10 +702,7 @@ void ED_paint_curve_screen_handles_build(const ViewContext &vc,
 {
   PaintCurve *pc = brush.paint_curve;
   if (pc == nullptr) {
-    r_out.points.clear();
-    r_out.radius_handles.clear();
-    r_out.segments.clear();
-    r_out.insert_preview = {};
+    r_out.clear();
     return;
   }
   ED_paint_curve_screen_handles_build_from_geometry(vc,

@@ -28,6 +28,7 @@
 #include "BKE_object_types.hh"
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
@@ -257,6 +258,8 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
      * on session UIDs the same way. */
     BKE_paint_material_composite_cache_free_all();
     BKE_paint_layers_slice_cache_free_all();
+    /* The per-object Gradient surfaces are keyed on session UIDs too and own tens of megabytes. */
+    BKE_paint_layers_gradient_surface_cache_clear();
     /* And the Combined preview derived from them, which owns a float buffer of its own. */
     BKE_paint_material_combined_cache_free_all();
     /* The paint-layers bake debounce keeps its armed timer and pending set as process-static
@@ -272,6 +275,9 @@ void ED_editors_exit(Main *bmain, bool do_undo_system)
      * re-render that dropping a bake per Ctrl+Z would. */
     BKE_paint_material_composite_cache_invalidate(nullptr);
     BKE_paint_material_combined_cache_invalidate(nullptr);
+    /* Undo can restore a mesh whose address and counts the key cannot see; rebuilding one surface
+     * is cheaper than sampling positions the step replaced. */
+    BKE_paint_layers_gradient_surface_cache_clear();
   }
 
   /* Either way the #Main the memo's session UIDs were resolved against is being replaced or wound

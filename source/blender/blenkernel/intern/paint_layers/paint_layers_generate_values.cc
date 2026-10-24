@@ -194,7 +194,9 @@ bool values_sync_socket(Material &ma,
     }
     const float *source = STREQ(role, ROLE_GRADIENT_START) ? layer->gradient->start :
                                                              layer->gradient->end;
-    const float value[3] = {source[0], source[1], source[2]};
+    /* A UV line is 2D: the socket carries Z = 0 so the shader ignores whatever the payload holds. */
+    const bool is_uv = layer->gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+    const float value[3] = {source[0], source[1], is_uv ? 0.0f : source[2]};
     copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
     if (iface.socket_data != nullptr) {
       copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);

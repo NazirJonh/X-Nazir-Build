@@ -612,6 +612,7 @@ def draw_material_gradient_layer(layout, context, owner, layer):
     A scalar channel mixes its own two ends, drawn with the channel below.
     """
     col = layout.column(align=True)
+    col.prop(layer, "gradient_space", expand=True)
     col.prop(layer, "gradient_type", expand=True)
     col.prop(layer, "gradient_repeat")
     col.prop(layer, "gradient_midpoint", slider=True)
@@ -620,9 +621,16 @@ def draw_material_gradient_layer(layout, context, owner, layer):
         layout.template_color_ramp(layer, "gradient_ramp", expand=True)
     layout.separator()
     line = layout.column(align=True)
-    line.label(text="Line (Z is ignored in UV space)")
+    line.label(text="Line")
     line.prop(layer, "gradient_start", text="Start")
     line.prop(layer, "gradient_end", text="End")
+    space = layer.gradient_space
+    if space == 'UV':
+        line.label(text="Z is ignored in UV space", icon='INFO')
+    elif space == 'OBJECT':
+        line.label(text="Object units", icon='INFO')
+    elif space == 'GENERATED':
+        line.label(text="0..1, object bounding box", icon='INFO')
     layout.separator()
     draw_material_layer_channels(layout, context, owner, layer)
 

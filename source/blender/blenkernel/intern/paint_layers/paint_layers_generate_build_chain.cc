@@ -2492,6 +2492,7 @@ NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
   if (const NodeOutput *cached = gradient_factors_.lookup_ptr(&layer)) {
     return *cached;
   }
+  BLI_assert(layer.gradient != nullptr);
   if (ctx_.gradient_group == nullptr || tree.typeinfo == nullptr ||
       tree.typeinfo->group_idname == nullptr)
   {
@@ -2512,14 +2513,19 @@ NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
     return {};
   };
 
+  /* The group's Coordinate input reads the Texture Coordinate output the row's space names: UV
+   * rows pass (u, v, 0), Object rows object-space coordinates, Generated rows normalized ones. The
+   * caller has already checked the payload (#gradient_source_emit). */
   bNode *coord = this->uv_coordinate_ensure(tree);
-  bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
-  bNodeSocket *uv_in = bke::node_find_socket(
-      *instance, SOCK_IN, UString::from_ptr_noinline(GRADIENT_GROUP_ID_UV));
-  if (uv == nullptr || uv_in == nullptr) {
+  bNodeSocket *coordinate = (coord != nullptr) ?
+                                this->gradient_coordinate_socket(*coord, *layer.gradient) :
+                                nullptr;
+  bNodeSocket *coordinate_in = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(GRADIENT_GROUP_ID_COORDINATE));
+  if (coord == nullptr || coordinate == nullptr || coordinate_in == nullptr) {
     return discard();
   }
-  bke::node_add_link(tree, *coord, *uv, *instance, *uv_in);
+  bke::node_add_link(tree, *coord, *coordinate, *instance, *coordinate_in);
 
   struct GradientInput {
     Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *inputs;

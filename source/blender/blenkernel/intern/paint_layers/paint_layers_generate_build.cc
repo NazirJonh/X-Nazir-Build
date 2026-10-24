@@ -31,6 +31,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "NOD_socket.hh"
@@ -249,6 +250,21 @@ bNode *PaintLayersTreeBuilder::uv_coordinate_ensure(bNodeTree &tree)
     grid_.place_extra(*coord);
   }
   return coord;
+}
+
+bNodeSocket *PaintLayersTreeBuilder::gradient_coordinate_socket(
+    bNode &coord, const MaterialPaintLayerGradient &gradient)
+{
+  switch (eMaterialPaintLayerGradientSpace(gradient.space)) {
+    case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
+      return socket_out(coord, "Object");
+    case MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED:
+      return socket_out(coord, "Generated");
+    case MA_PAINT_LAYER_GRADIENT_SPACE_UV:
+      break;
+  }
+  /* An unknown space is the safe UV default, not a discarded row. */
+  return socket_out(coord, "UV");
 }
 
 /** The socket of \a group_input that stands for \a iface, or null. */
@@ -618,7 +634,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     bNodeTreeInterfaceSocket *start = layer_group_value_input(
         group, base, "NodeSocketVector", ROLE_GRADIENT_START, layer.marker, -1);
     if (start != nullptr) {
-      const float value[3] = {layer.gradient->start[0], layer.gradient->start[1], layer.gradient->start[2]};
+      const float value[3] = {
+          layer.gradient->start[0],
+          layer.gradient->start[1],
+          BKE_paint_layers_gradient_line_z(*layer.gradient, layer.gradient->start[2])};
       group_input_vector_default_set(group, *start, value);
       gradient_start_inputs_.add(&layer, start);
     }
@@ -626,7 +645,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     bNodeTreeInterfaceSocket *end = layer_group_value_input(
         group, base, "NodeSocketVector", ROLE_GRADIENT_END, layer.marker, -1);
     if (end != nullptr) {
-      const float value[3] = {layer.gradient->end[0], layer.gradient->end[1], 0.0f};
+      const float value[3] = {
+          layer.gradient->end[0],
+          layer.gradient->end[1],
+          BKE_paint_layers_gradient_line_z(*layer.gradient, layer.gradient->end[2])};
       group_input_vector_default_set(group, *end, value);
       gradient_end_inputs_.add(&layer, end);
     }

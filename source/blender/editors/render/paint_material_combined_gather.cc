@@ -319,7 +319,8 @@ ImBuf *combined_preview_ensure(Main &bmain,
                                const CombinedPreviewRequest &request,
                                uint64_t *r_revision,
                                rcti *r_changed_region,
-                               CombinedEvalStats *r_stats)
+                               CombinedEvalStats *r_stats,
+                               std::shared_ptr<const PaintMaterialCompositeSurface> surface)
 {
   if (r_revision != nullptr) {
     *r_revision = 0;
@@ -368,7 +369,11 @@ ImBuf *combined_preview_ensure(Main &bmain,
        * evaluate (see the `full_layers` of #BKE_paint_material_composite_cache_ensure). */
       has_stack[i] = BKE_paint_layers_is_layered(ma) ?
                          BKE_paint_layers_composite_image_layers(
-                             ma, combined_shading_channels[i], stacks[i], /*describe_only=*/true) :
+                             ma,
+                             combined_shading_channels[i],
+                             stacks[i],
+                             /*describe_only=*/true,
+                             surface) :
                          BKE_paint_material_composite_stack_from_material(
                              bmain, ma, combined_shading_channels[i], stacks[i]);
       stacks_found += has_stack[i] ? 1 : 0;

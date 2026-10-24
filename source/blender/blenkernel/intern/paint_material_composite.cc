@@ -1006,8 +1006,30 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       const float v = (float(tile.ymin + ty) + 0.5f) / float(height);
       for (int tx = 0; tx < BLI_rcti_size_x(&tile); tx++) {
         const float u = (float(tile.xmin + tx) + 0.5f) / float(width);
-        const float t = BKE_paint_layers_gradient_factor(layer.gradient.payload, float3(u, v, 0.0f));
         float *p = r_color + (int64_t(ty) * BLI_rcti_size_x(&tile) + tx) * 4;
+        float3 coordinate;
+        bool valid = true;
+        if (layer.gradient.approximate || layer.gradient.surface == nullptr) {
+          /* No surface: the texel's own UV is the coordinate. A UV row always reads this way. */
+          coordinate = float3(u, v, 0.0f);
+        }
+        else if (layer.gradient.payload.space == MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED) {
+          /* Generated reads the texel's orco, which is not the object-space position once a
+           * deformer moved it; #sample_generated prefers the stored CD_ORCO and only falls back
+           * to the bbox normalization. */
+          if (!layer.gradient.surface->sample_generated(float2(u, v), coordinate)) {
+            valid = false;
+          }
+        }
+        else if (!layer.gradient.surface->sample(float2(u, v), coordinate)) {
+          valid = false;
+        }
+        if (!valid) {
+          /* Outside the UV islands: transparent, so the row covers nothing there. */
+          p[0] = p[1] = p[2] = p[3] = 0.0f;
+          continue;
+        }
+        const float t = BKE_paint_layers_gradient_factor(layer.gradient.payload, coordinate);
         if (layer.gradient.color_channel) {
           BKE_paint_layers_gradient_color(layer.gradient.payload, t, p);
         }
@@ -1052,9 +1074,9 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
                            (mask == nullptr && layer.mask_from_alpha);
     float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
     if (layer.gradient.enabled) {
-      /* A colour gradient covers by the ramp's alpha; a scalar gradient is opaque and blends by
-       * its opacity alone. */
-      content = layer.gradient.color_channel ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
+      /* A gradient covers by the alpha the evaluation left: the ramp's alpha for a colour channel,
+       * one for a valid scalar texel and zero outside the UV islands. */
+      content = clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f);
     }
     else if (layer.is_folder) {
       /* A folder covers by what its contents covered, not by the alpha of the colour it reads. */
@@ -2484,14 +2506,24 @@ static uint64_t composite_gradient_hash(uint64_t hash, const PaintMaterialCompos
   }
   hash = get_default_hash(hash,
                           gradient.color_channel,
+                          int(gradient.payload.space),
                           int(gradient.payload.type),
                           int(gradient.payload.repeat));
   hash = get_default_hash(hash,
                           gradient.payload.start[0],
                           gradient.payload.start[1],
-                          gradient.payload.end[0],
+                          gradient.payload.start[2],
+                          gradient.payload.end[0]);
+  hash = get_default_hash(hash,
                           gradient.payload.end[1],
+                          gradient.payload.end[2],
                           gradient.payload.midpoint);
+  /* The approximate and exact variants must not share a cache entry. The content revision, unlike
+   * the identity key, changes when a notifier forces the same object/UV/size surface to rebuild. */
+  hash = get_default_hash(hash,
+                          gradient.surface_key,
+                          gradient.approximate,
+                          gradient.surface ? gradient.surface->revision : 0);
   hash = get_default_hash(hash,
                           gradient.scalar_start,
                           gradient.scalar_end,

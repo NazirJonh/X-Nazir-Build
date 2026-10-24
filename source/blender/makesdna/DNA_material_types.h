@@ -631,11 +631,13 @@ enum eMaterialPaintLayerGenerator : int16_t {
   MA_PAINT_LAYER_GENERATOR_GRADIENT = 1,
 };
 
-/** #MaterialPaintLayerGradient::space: which coordinates the line is defined in. */
+/** #MaterialPaintLayerGradient::space: the space the gradient's line is defined in. */
 enum eMaterialPaintLayerGradientSpace : int8_t {
-  /** The stack's render-active UV map; Z of the line points is ignored. */
+  /** The gradient line is in the active UV map; X/Y used, Z ignored. */
   MA_PAINT_LAYER_GRADIENT_SPACE_UV = 0,
+  /** The gradient line is in object space, in object units. */
   MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT = 1,
+  /** The gradient line is in generated coordinates, normalized to 0..1 by the object bounding box. */
   MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED = 2,
 };
 
@@ -666,19 +668,18 @@ enum eMaterialPaintLayerGradientRepeat : int8_t {
  * #MaterialPaintLayerChannel::value[0..1] instead (metallic and roughness want different ends, and
  * a colour ramp has no meaning there).
  *
- * The line is in the space selected by #MaterialPaintLayerGradient::space: the stack's
- * render-active UV map (Z ignored), object space, or the 0..1 generated bounding box.
- * `start` is the centre of a radial gradient and `|end - start|` its radius. The two points are
- * what the gradient tool writes; no map resolution is involved.
+ * The line is in #space: the active UV map (X/Y used, Z ignored), object space, or normalized
+ * generated coordinates. `start` is the centre of a radial gradient and `|end - start|` its
+ * radius. The two points are what the gradient tool writes; no map resolution is involved.
  */
 struct MaterialPaintLayerGradient {
   DNA_DEFINE_CXX_METHODS(MaterialPaintLayerGradient)
 
   /** The colours a colour channel reads, evaluated at the folded ramp position. */
   struct ColorBand ramp;
-  /** Start of the line (or centre of a radial gradient) in the gradient's space. */
+  /** Start of the line / centre of a radial gradient, in #space. */
   float start[3] = {0.0f, 0.5f, 0.0f};
-  /** End of the line (or the radius point of a radial gradient) in the gradient's space. */
+  /** End of the line / radius point of a radial gradient, in #space. */
   float end[3] = {1.0f, 0.5f, 0.0f};
   /** Where the ramp's 0.5 lands (0..1); 0.5 is the unbent ramp. */
   float midpoint = 0.5f;

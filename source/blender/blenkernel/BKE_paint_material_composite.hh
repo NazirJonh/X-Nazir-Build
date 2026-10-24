@@ -26,13 +26,20 @@
  * Free of GPU and of #Object, like the resolver it builds on.
  */
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "BLI_function_ref.hh"
+#include "BLI_index_range.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
+
+#include "BKE_paint_material_composite_surface.hh"
 
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
@@ -154,6 +161,16 @@ struct PaintMaterialCompositeGradient {
   /** The description's payload: line, midpoint, type, repeat and ramp. Its DNA type has deleted
    * copy operations, so the two methods below copy it shallowly like every other DNA value. */
   MaterialPaintLayerGradient payload;
+  /**
+   * The per-object surface used for the exact 2D preview of Object/Generated rows. Null for a UV
+   * row and while the approximate preview is shown; the shared pointer lets a layer outlive a cache
+   * replacement.
+   */
+  std::shared_ptr<const PaintMaterialCompositeSurface> surface;
+  /** #surface's key, also carried when the pointer has already been dropped; moves the stack hash. */
+  uint64_t surface_key = 0;
+  /** True when the coordinate is the UV texel itself rather than a surface sample. */
+  bool approximate = true;
 
   PaintMaterialCompositeGradient() = default;
   PaintMaterialCompositeGradient(const PaintMaterialCompositeGradient &other)
@@ -163,7 +180,10 @@ struct PaintMaterialCompositeGradient {
         scalar_end(other.scalar_end),
         width(other.width),
         height(other.height),
-        payload(dna::shallow_copy(other.payload))
+        payload(dna::shallow_copy(other.payload)),
+        surface(other.surface),
+        surface_key(other.surface_key),
+        approximate(other.approximate)
   {
   }
   PaintMaterialCompositeGradient(PaintMaterialCompositeGradient &&other) noexcept
@@ -173,7 +193,10 @@ struct PaintMaterialCompositeGradient {
         scalar_end(other.scalar_end),
         width(other.width),
         height(other.height),
-        payload(dna::shallow_copy(other.payload))
+        payload(dna::shallow_copy(other.payload)),
+        surface(std::move(other.surface)),
+        surface_key(other.surface_key),
+        approximate(other.approximate)
   {
   }
   PaintMaterialCompositeGradient &operator=(const PaintMaterialCompositeGradient &other)
@@ -186,6 +209,9 @@ struct PaintMaterialCompositeGradient {
       width = other.width;
       height = other.height;
       payload = dna::shallow_copy(other.payload);
+      surface = other.surface;
+      surface_key = other.surface_key;
+      approximate = other.approximate;
     }
     return *this;
   }
@@ -199,6 +225,9 @@ struct PaintMaterialCompositeGradient {
       width = other.width;
       height = other.height;
       payload = dna::shallow_copy(other.payload);
+      surface = std::move(other.surface);
+      surface_key = other.surface_key;
+      approximate = other.approximate;
     }
     return *this;
   }
@@ -821,10 +850,11 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain);
 bool BKE_paint_material_is_blend_group(const bNode &node);
 
 /**
- * The shared group that turns a UV coordinate and a gradient's line into its ramp position:
- * `Factor(UV, Start, End, Midpoint, Type, Repeat)`. Built once per file and shared by every
+ * The shared group that turns a 3D coordinate and a gradient's line into its ramp position:
+ * `Factor(Coordinate, Start, End, Midpoint, Type, Repeat)`. Built once per file and shared by every
  * Gradient row, so the Hermite midpoint and the repeat folding exist in one place; the generated
- * graph and the CPU composite use the same formula.
+ * graph and the CPU composite use the same formula. The socket's identifier stays `Socket_0` for
+ * compatibility with the groups already in files; UV rows pass `(u, v, 0)`.
  */
 bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain);
 

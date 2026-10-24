@@ -159,6 +159,8 @@ static bool composite_row_source_describe(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const int channel,
                                           const bool isolating,
+                                          const std::shared_ptr<const PaintMaterialCompositeSurface>
+                                              &context_surface,
                                           PaintMaterialCompositeImageLayer &out)
 {
   if (paint_layer_row_is_adjustment(layer)) {
@@ -187,6 +189,29 @@ static bool composite_row_source_describe(const Material &ma,
     const int size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) : 4096;
     out.gradient.width = size;
     out.gradient.height = size;
+    if (layer.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
+      /* A UV line already reads the texel's own UV: no surface and no approximation. */
+      out.gradient.surface = nullptr;
+      out.gradient.surface_key = 0;
+      out.gradient.approximate = false;
+    }
+    else {
+      /* The 2D preview needs the texel's object-space position. Without one the evaluator falls
+       * back to `(u, v, 0)`, the approximate view. Whether to hand out a surface while the active
+       * row is being dragged is the caller's call (#ED_space_image_gradient_preview_sync): it
+       * passes none then, so this stays the single place that reads "no surface". */
+      /* The layer owns a reference to the surface: a cache replacement drops its own pointer but
+       * the described row still evaluates against the same pixels. A Generated row has a coordinate
+       * when it either stored CD_ORCO samples or has a usable bbox to normalize the position with;
+       * with neither it falls back to the approximate UV preview rather than an empty layer. */
+      const bool coordinate_usable =
+          layer.gradient->space != MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED ||
+          (context_surface && (context_surface->generated_bbox_valid ||
+                               !context_surface->generated_positions.is_empty()));
+      out.gradient.surface = context_surface;
+      out.gradient.surface_key = context_surface ? context_surface->key : 0;
+      out.gradient.approximate = !context_surface || !coordinate_usable;
+    }
     if (!info.is_color) {
       const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
       if (record == nullptr) {
@@ -455,6 +480,8 @@ static void composite_image_layers_collect(const Material &ma,
                                            const ListBaseT<MaterialPaintLayer> &list,
                                            int channel,
                                            float pass_through_scale,
+                                           const std::shared_ptr<const PaintMaterialCompositeSurface>
+                                               &context_surface,
                                            Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                            bool isolating = false,
                                            const int *slice_rect = nullptr,
@@ -596,7 +623,9 @@ static bool composite_image_layer_build(const Material &ma,
                                         const bUUID *stop_before = nullptr,
                                         const int *slice_rect = nullptr,
                                         const bool dimensions_only = false,
-                                        const bool describe_only = false)
+                                        const bool describe_only = false,
+                                        const std::shared_ptr<const PaintMaterialCompositeSurface>
+                                            &context_surface = nullptr)
 {
   /* A reader lays the slice its point publishes, described as a substituted row: the slice's
    * colour, its coverage and its content alpha, with the reader's own blend. Its own mapping does
@@ -690,6 +719,7 @@ static bool composite_image_layer_build(const Material &ma,
                                      layer.children,
                                      channel,
                                      pass_through_scale,
+                                     context_surface,
                                      children,
                                      true,
                                      slice_rect,
@@ -704,7 +734,9 @@ static bool composite_image_layer_build(const Material &ma,
       out.children.assign(std::make_move_iterator(children.begin()),
                           std::make_move_iterator(children.end()));
     }
-    else if (!composite_row_source_describe(ma, layer, channel, isolating, out)) {
+    else if (!composite_row_source_describe(
+                 ma, layer, channel, isolating, context_surface, out))
+    {
       return false;
     }
   }
@@ -761,6 +793,8 @@ static void composite_image_layers_collect(const Material &ma,
                                            const ListBaseT<MaterialPaintLayer> &list,
                                            const int channel,
                                            const float pass_through_scale,
+                                           const std::shared_ptr<const PaintMaterialCompositeSurface>
+                                               &context_surface,
                                            Vector<PaintMaterialCompositeImageLayer> &r_layers,
                                            const bool isolating,
                                            const int *slice_rect,
@@ -777,6 +811,7 @@ static void composite_image_layers_collect(const Material &ma,
                                      layer.children,
                                      channel,
                                      scale,
+                                     context_surface,
                                      r_layers,
                                      isolating,
                                      slice_rect,
@@ -795,24 +830,27 @@ static void composite_image_layers_collect(const Material &ma,
                                    nullptr,
                                    slice_rect,
                                    dimensions_only,
-                                   describe_only))
+                                   describe_only,
+                                   context_surface))
     {
       r_layers.append(std::move(out));
     }
   }
 }
 
-bool BKE_paint_layers_composite_image_layers(const Material &ma,
-                                             const int channel,
-                                             Vector<PaintMaterialCompositeImageLayer> &r_layers,
-                                             const bool describe_only)
+bool BKE_paint_layers_composite_image_layers(
+    const Material &ma,
+    const int channel,
+    Vector<PaintMaterialCompositeImageLayer> &r_layers,
+    const bool describe_only,
+    std::shared_ptr<const PaintMaterialCompositeSurface> surface)
 {
   r_layers.clear();
   if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
     return false;
   }
   composite_image_layers_collect(
-      ma, ma.paint_layers, channel, 1.0f, r_layers, false, nullptr, false, describe_only);
+      ma, ma.paint_layers, channel, 1.0f, surface, r_layers, false, nullptr, false, describe_only);
   return !r_layers.is_empty();
 }
 
@@ -1812,6 +1850,11 @@ bool BKE_paint_layers_bake_render_node(const Material &ma,
   if (size <= 0 || r_color_rgba == nullptr || r_coverage_gray == nullptr) {
     return false;
   }
+  /* A row's bake is a shared, object-independent map. An Object/Generated Gradient reads geometry
+   * the map cannot carry, and a folder containing one has the same problem for its whole subtree. */
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+    return false;
+  }
   /* Learn the stack dimensions without rendering or allocating a single nested slice. */
   PaintMaterialCompositeImageLayer dims_entry;
   if (!composite_bake_entry(ma, layer, channel, dims_entry, nullptr, true)) {
@@ -1921,6 +1964,13 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
   }
   const bool reader = !BLI_uuid_is_nil(layer.anchor_point_reader);
   const bool mask_only_slice = mask_slice && !layer.mask_items.is_empty();
+  /* A Gradient generator has no map and no flat colour of its own: its pixels come from the ramp at
+   * a coordinate the CPU evaluator computes. Stated explicitly rather than left to the map/constant
+   * check below, so a future shader that gains a Gradient branch cannot silently shade a different
+   * approximation than the CPU exact preview. The caller falls back to the CPU display override. */
+  if (layer.gradient.enabled) {
+    return "a Gradient generator row is not laid by the GPU path";
+  }
   if (!layer.is_folder && layer.adjustment_filter == 0 && layer.color_image == nullptr &&
       layer.anchor_point_color == nullptr && !layer.has_constant_color && !reader &&
       !mask_only_slice)

@@ -16,6 +16,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "BLI_math_vector.h"
@@ -24,6 +25,8 @@
 
 #include <array>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <utility>
 
 #include "DNA_image_types.h"
@@ -2579,6 +2582,384 @@ TEST_F(PaintLayersCompositeTest, the_wrap_moves_the_stack_hash_only_while_the_ma
       BKE_paint_layers_mapping_set_wrap(*ma, correction, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X));
   EXPECT_NE(stack_hash(), clipped);
   EXPECT_NE(stack_hash(), repeated);
+}
+
+/** A 4x4 surface whose every valid texel carries \a position. */
+static std::shared_ptr<PaintMaterialCompositeSurface> gradient_test_surface(const float3 position,
+                                                                            const uint64_t key)
+{
+  auto surface = std::make_shared<PaintMaterialCompositeSurface>();
+  surface->width = 4;
+  surface->height = 4;
+  surface->key = key;
+  surface->positions.resize(16, position);
+  surface->valid.resize(16, uint8_t(1));
+  surface->generated_bbox_valid = true;
+  surface->generated_bbox_min = float3(0.0f);
+  surface->generated_bbox_max = float3(1.0f);
+  return surface;
+}
+
+TEST_F(PaintLayersCompositeTest, a_gradient_surface_is_approximate_on_the_active_row_and_exact_below_it)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+
+  const uint64_t key = 0x1234;
+  auto surface = gradient_test_surface(float3(0.25f, 0.0f, 0.0f), key);
+  auto eval = [](const Vector<PaintMaterialCompositeImageLayer> &layers,
+                 const int x,
+                 const int y) {
+    int width = 0, height = 0;
+    EXPECT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+    Vector<float> linear(int64_t(width) * height * 4);
+    EXPECT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers, PaintMaterialCompositeLinearTarget::frame(linear, width)));
+    const float *p = linear.data() + (int64_t(y) * width + x) * 4;
+    return std::array<float, 4>{p[0], p[1], p[2], p[3]};
+  };
+
+  /* The active row reads the texel's own UV: the surface is not used. */
+  ma->active_layer_marker = gradient->marker;
+  Vector<PaintMaterialCompositeImageLayer> approximate_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, approximate_layers, surface));
+  ASSERT_EQ(approximate_layers.size(), 1);
+  EXPECT_TRUE(approximate_layers[0].gradient.approximate);
+  EXPECT_EQ(approximate_layers[0].gradient.surface_key, key);
+  EXPECT_NEAR(eval(approximate_layers, 0, 0)[0], 0.125f, 1e-4f);
+  EXPECT_NEAR(eval(approximate_layers, 3, 0)[0], 0.875f, 1e-4f);
+
+  /* Leaving the row switches to the per-object exact preview. */
+  ma->active_layer_marker = {};
+  Vector<PaintMaterialCompositeImageLayer> exact_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, exact_layers, surface));
+  ASSERT_EQ(exact_layers.size(), 1);
+  EXPECT_FALSE(exact_layers[0].gradient.approximate);
+  EXPECT_EQ(exact_layers[0].gradient.surface.get(), surface.get());
+  EXPECT_NEAR(eval(exact_layers, 0, 0)[0], 0.25f, 1e-4f);
+  EXPECT_NEAR(eval(exact_layers, 3, 0)[0], 0.25f, 1e-4f);
+
+  /* No surface at all is the approximate fallback. */
+  Vector<PaintMaterialCompositeImageLayer> fallback_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, fallback_layers, nullptr));
+  ASSERT_EQ(fallback_layers.size(), 1);
+  EXPECT_TRUE(fallback_layers[0].gradient.approximate);
+  EXPECT_EQ(fallback_layers[0].gradient.surface, nullptr);
+  EXPECT_NEAR(eval(fallback_layers, 0, 0)[0], 0.125f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, an_invalid_gradient_surface_texel_lays_nothing)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+  ma->active_layer_marker = {};
+
+  auto surface = gradient_test_surface(float3(0.5f, 0.0f, 0.0f), 0x5678);
+  surface->valid[0] = 0;
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+  ASSERT_EQ(layers.size(), 1);
+  int width = 0, height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  Vector<float> linear(int64_t(width) * height * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width)));
+  const float *invalid = linear.data();
+  EXPECT_FLOAT_EQ(invalid[0], 0.0f);
+  EXPECT_FLOAT_EQ(invalid[1], 0.0f);
+  EXPECT_FLOAT_EQ(invalid[2], 0.0f);
+  EXPECT_FLOAT_EQ(invalid[3], 0.0f);
+  /* The valid texel next to it still reads the surface position. */
+  EXPECT_NEAR(linear[4], 0.5f, 1e-4f);
+  EXPECT_NEAR(linear[7], 1.0f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, a_uv_gradient_never_takes_a_surface)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_EQ(gradient->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_UV);
+
+  auto surface = gradient_test_surface(float3(0.75f), 0x7777);
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_EQ(layers[0].gradient.surface, nullptr);
+  EXPECT_EQ(layers[0].gradient.surface_key, 0);
+  EXPECT_FALSE(layers[0].gradient.approximate);
+
+  /* The supplied surface must not move a single pixel of a UV row. */
+  Vector<PaintMaterialCompositeImageLayer> without_surface;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, without_surface));
+  int width = 0, height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  Vector<float> with_linear(int64_t(width) * height * 4);
+  Vector<float> without_linear(int64_t(width) * height * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(with_linear, width)));
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      without_surface, PaintMaterialCompositeLinearTarget::frame(without_linear, width)));
+  for (const int64_t i : IndexRange(with_linear.size())) {
+    EXPECT_FLOAT_EQ(with_linear[i], without_linear[i]);
+  }
+}
+
+TEST_F(PaintLayersCompositeTest, a_generated_gradient_normalizes_the_exact_bbox)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+  ma->active_layer_marker = {};
+
+  auto surface = gradient_test_surface(float3(0.75f, 0.5f, 0.5f), 0x8888);
+  /* The position sits in the middle of the bbox, even though its raw X is 0.75. */
+  surface->generated_bbox_min = float3(0.25f, 0.0f, 0.0f);
+  surface->generated_bbox_max = float3(1.25f, 1.0f, 1.0f);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+  ASSERT_EQ(layers.size(), 1);
+  int width = 0, height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  Vector<float> linear(int64_t(width) * height * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width)));
+  /* x = 0, y = 0 and x = 3, y = 0; the normalized X is the same everywhere. */
+  EXPECT_NEAR(linear[0], 0.5f, 1e-4f);
+  EXPECT_NEAR(linear[3 * 4], 0.5f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, a_generated_gradient_without_a_bbox_stays_approximate)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+  ma->active_layer_marker = {};
+
+  auto surface = gradient_test_surface(float3(0.75f), 0xaabb);
+  surface->generated_bbox_valid = false;
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_TRUE(layers[0].gradient.approximate)
+      << "a generated row without a bbox cannot normalize and must not go empty";
+  int width = 0, height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  Vector<float> linear(int64_t(width) * height * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width)));
+  EXPECT_NEAR(linear[0], 0.125f, 1e-4f);
+  EXPECT_NEAR(linear[3], 1.0f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, a_generated_gradient_with_orco_needs_no_bbox)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+  ma->active_layer_marker = {};
+
+  auto surface = gradient_test_surface(float3(0.75f), 0xccdd);
+  /* The orco grid is a complete generated coordinate source; the texspace bbox is only fallback. */
+  surface->generated_bbox_valid = false;
+  surface->generated_positions.resize(16, float3(-1.0f, -1.0f, 0.0f));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_FALSE(layers[0].gradient.approximate)
+      << "stored orco samples make a generated row exact without a bbox";
+  EXPECT_EQ(layers[0].gradient.surface.get(), surface.get());
+
+  int width = 0, height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  Vector<float> linear(int64_t(width) * height * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width)));
+  /* orco (-1, -1, 0) becomes (0, 0, 0.5), so the X line from 0 to 1 evaluates at its start. */
+  EXPECT_NEAR(linear[0], 0.0f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, an_object_gradient_without_a_bbox_stays_exact)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+  ma->active_layer_marker = {};
+
+  /* Object space reads the sampled positions only; the generated bbox belongs to Generated rows. */
+  auto surface = gradient_test_surface(float3(0.25f, 0.0f, 0.0f), 0xbbcc);
+  surface->generated_bbox_valid = false;
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+  ASSERT_EQ(layers.size(), 1);
+  EXPECT_FALSE(layers[0].gradient.approximate)
+      << "an Object row needs no generated bbox and must stay exact";
+  EXPECT_EQ(layers[0].gradient.surface.get(), surface.get());
+  int width = 0, height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  Vector<float> linear(int64_t(width) * height * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width)));
+  EXPECT_NEAR(linear[0], 0.25f, 1e-4f);
+}
+
+TEST_F(PaintLayersCompositeTest, a_scalar_gradient_invalid_texel_has_zero_alpha)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, gradient, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  ma->active_layer_marker = {};
+
+  auto surface = gradient_test_surface(float3(0.5f, 0.0f, 0.0f), 0x9999);
+  surface->valid[0] = 0;
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_METALLIC, layers, surface));
+  ASSERT_EQ(layers.size(), 1);
+  int width = 0, height = 0;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
+  Vector<float> linear(int64_t(width) * height * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers, PaintMaterialCompositeLinearTarget::frame(linear, width)));
+  EXPECT_FLOAT_EQ(linear[3], 0.0f);
+  EXPECT_FLOAT_EQ(linear[7], 1.0f);
+
+  /* The row's own coverage is zero on the invalid texel too. */
+  Vector<float> row_color(int64_t(width) * height * 4);
+  Vector<float> row_coverage(int64_t(width) * height);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_row_content(
+      layers[0], row_color.data(), row_coverage.data(), nullptr, PAINT_MATERIAL_CHANNEL_METALLIC));
+  EXPECT_FLOAT_EQ(row_coverage[0], 0.0f);
+  EXPECT_FLOAT_EQ(row_coverage[1], 1.0f);
+  EXPECT_FLOAT_EQ(row_color[3], 0.0f);
+}
+
+TEST(PaintMaterialCompositeSurface, generated_flat_bbox_lands_at_half)
+{
+  PaintMaterialCompositeSurface surface;
+  surface.width = 1;
+  surface.height = 1;
+  surface.positions.append(float3(0.5f, 0.5f, 0.0f));
+  surface.valid.append(1);
+  surface.generated_bbox_valid = true;
+  surface.generated_bbox_min = float3(0.0f);
+  surface.generated_bbox_max = float3(1.0f, 1.0f, 0.0f);
+
+  float3 position;
+  ASSERT_TRUE(surface.sample_generated(float2(0.5f, 0.5f), position));
+  EXPECT_NEAR(position.x, 0.5f, 1e-6f);
+  EXPECT_NEAR(position.y, 0.5f, 1e-6f);
+  /* Blender's orco divides a zero extent by one, which puts the flat axis at the middle. */
+  EXPECT_NEAR(position.z, 0.5f, 1e-6f);
+}
+
+TEST(PaintMaterialCompositeSurface, sample_rejects_uv_outside_the_unit_square_and_nan)
+{
+  PaintMaterialCompositeSurface surface;
+  surface.width = 2;
+  surface.height = 2;
+  surface.positions.resize(4, float3(0.5f));
+  surface.valid.resize(4, uint8_t(1));
+
+  float3 position;
+  EXPECT_FALSE(surface.sample(float2(-0.1f, 0.5f), position));
+  EXPECT_FALSE(surface.sample(float2(1.0f, 0.5f), position));
+  EXPECT_FALSE(surface.sample(float2(0.5f, -0.1f), position));
+  EXPECT_FALSE(surface.sample(float2(0.5f, 1.0f), position));
+  EXPECT_FALSE(surface.sample(float2(std::numeric_limits<float>::quiet_NaN(), 0.5f), position));
+  EXPECT_FALSE(surface.sample(float2(0.5f, std::numeric_limits<float>::quiet_NaN()), position));
+  EXPECT_TRUE(surface.sample(float2(0.0f, 0.0f), position));
+  EXPECT_TRUE(surface.sample(float2(0.999f, 0.999f), position));
+}
+
+TEST_F(PaintLayersCompositeTest, stack_hash_tracks_the_gradient_surface_and_approximation)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+
+  auto hash_with = [&](std::shared_ptr<const PaintMaterialCompositeSurface> surface) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, std::move(surface)));
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+
+  auto surface_a = gradient_test_surface(float3(0.25f), 0xaaaa);
+  auto surface_b = gradient_test_surface(float3(0.25f), 0xbbbb);
+
+  ma->active_layer_marker = gradient->marker;
+  const uint64_t approximate = hash_with(surface_a);
+  ma->active_layer_marker = {};
+  const uint64_t exact_a = hash_with(surface_a);
+  const uint64_t exact_b = hash_with(surface_b);
+  EXPECT_NE(approximate, exact_a);
+  EXPECT_NE(exact_a, exact_b);
 }
 
 /** \} */

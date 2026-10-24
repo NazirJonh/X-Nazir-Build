@@ -16,6 +16,7 @@
  */
 
 #include <cstdint>
+#include <memory>
 
 #include "BKE_paint_material_combined.hh"
 
@@ -25,6 +26,7 @@ namespace blender {
 struct ImBuf;
 struct Main;
 struct Material;
+struct PaintMaterialCompositeSurface;
 struct bContext;
 namespace gpu {
 class Texture;
@@ -70,6 +72,10 @@ struct CombinedPreviewRequest {
  *                          was shaded at, so a consumer turns this into UV by dividing by the
  *                          dimensions of the buffer it is reading, and canvas texels would be
  *                          wrong by exactly that factor.
+ * \param surface: the active object's UV surface for exact Object/Generated Gradient rows, or
+ *                 null. Its key is part of the stack hash, so an exact and an approximate preview
+ *                 never share a cache entry. The GPU path does not read it (see
+ *                 #combined_preview_gpu_update).
  * \return null when nothing resolves, which is the caller's cue to fall back to the plain image.
  */
 ImBuf *combined_preview_ensure(Main &bmain,
@@ -78,7 +84,9 @@ ImBuf *combined_preview_ensure(Main &bmain,
                                const CombinedPreviewRequest &request = {},
                                uint64_t *r_revision = nullptr,
                                rcti *r_changed_region = nullptr,
-                               CombinedEvalStats *r_stats = nullptr);
+                               CombinedEvalStats *r_stats = nullptr,
+                               std::shared_ptr<const PaintMaterialCompositeSurface> surface =
+                                   nullptr);
 
 /**
  * Start an async bake of \a ma if any channel of the Combined preview would need one.

@@ -14,6 +14,7 @@
 #include "BKE_node_tree_interface.hh"
 
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include "../paint_layers_generate_intern.hh"
 #include "../paint_layers_generate_layout.hh"
@@ -1302,6 +1303,55 @@ TEST_F(PaintLayersGenerateTest, a_clipped_correction_and_mask_item_each_get_thei
   EXPECT_EQ(count_type(*group, SH_NODE_MAPPING), 2);
   EXPECT_EQ(math_node_count(*group, NODE_MATH_FLOOR), 4);
   EXPECT_EQ(math_node_count(*group, NODE_MATH_COMPARE), 4);
+}
+
+TEST_F(PaintLayersGenerateTest, gradient_space_feeds_the_matching_coordinate_output)
+{
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  const Vector<int> wired = {PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+  const paint_layers::PaintLayerFormMap forms = paint_layers::paint_layers_form_map(*ma);
+
+  struct SpaceCase {
+    eMaterialPaintLayerGradientSpace space;
+    const char *output;
+  };
+  const SpaceCase cases[] = {
+      {MA_PAINT_LAYER_GRADIENT_SPACE_UV, "UV"},
+      {MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT, "Object"},
+      {MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED, "Generated"},
+  };
+  uint64_t hashes[ARRAY_SIZE(cases)];
+  for (const int i : IndexRange(ARRAY_SIZE(cases))) {
+    ASSERT_TRUE(BKE_paint_layers_gradient_set_space(*ma, *gradient, cases[i].space));
+    ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
+    bNodeTree *group = layer_tree_find(*bmain, "Gradient");
+    ASSERT_NE(group, nullptr);
+    group->ensure_topology_cache();
+
+    bNode *factor = nullptr;
+    for (bNode &node : group->nodes) {
+      if (node.is_group() && node.id != nullptr && BKE_paint_material_is_gradient_group(node)) {
+        factor = &node;
+        break;
+      }
+    }
+    ASSERT_NE(factor, nullptr);
+    bNodeSocket *coordinate = bke::node_find_socket(
+        *factor, SOCK_IN, UString::from_ptr_noinline(GRADIENT_GROUP_ID_COORDINATE));
+    ASSERT_NE(coordinate, nullptr);
+    ASSERT_EQ(coordinate->directly_linked_links().size(), 1);
+    const bNodeLink &link = *coordinate->directly_linked_links()[0];
+    EXPECT_EQ(link.fromnode->type_legacy, SH_NODE_TEX_COORD);
+    EXPECT_STREQ(link.fromsock->identifier, cases[i].output);
+
+    hashes[i] = paint_layers::paint_layers_layer_topology_hash(*ma, *gradient, wired, forms);
+  }
+  /* The coordinate source is structure: every space is a different topology. */
+  EXPECT_NE(hashes[0], hashes[1]);
+  EXPECT_NE(hashes[0], hashes[2]);
+  EXPECT_NE(hashes[1], hashes[2]);
 }
 
 /** \} */

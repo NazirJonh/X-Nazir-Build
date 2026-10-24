@@ -113,6 +113,20 @@ ImBuf *ED_space_image_acquire_buffer(SpaceImage *sima,
  */
 bool ED_space_image_has_composite(const SpaceImage *sima);
 /**
+ * Resolve the per-object surface the 2D preview of an Object/Generated Gradient samples, and
+ * record whether the preview is exact, approximate or not a 3D Gradient at all.
+ *
+ * Called once per draw, before the image engine acquires the composite. Cheap in the steady state:
+ * the surface itself is cached in BKE, and only the active row, the active object and its UV map
+ * are inspected here. Never blocks on a bake.
+ */
+void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima);
+/**
+ * #GradientPreviewState of \a sima as an integer, for RNA. Zero when the space has no runtime yet,
+ * or when the preview is not a 3D Gradient.
+ */
+int ED_space_image_gradient_preview_state(const SpaceImage *sima);
+/**
  * Whether the Combined preview of \a sima is to be evaluated on the GPU straight into
  * the display texture (see #ED_space_image_update_gpu_combined). Cheap by contract, like
  * #ED_space_image_has_composite.

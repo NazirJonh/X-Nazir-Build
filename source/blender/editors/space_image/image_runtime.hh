@@ -11,8 +11,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 
 #include "BLI_math_vector_types.hh"
+
+#include "BKE_paint_material_composite.hh"
 
 #include "DNA_vec_types.h"
 
@@ -41,6 +44,16 @@ struct PaintSelectFloatingSession;
  * from the sculpt_paint module. */
 struct PaintSelectSession {
   PaintSelectFloatingSession *active = nullptr;
+};
+
+/** How the 2D preview of an Object/Generated Gradient is produced right now. */
+enum class GradientPreviewState : int {
+  /** No 3D Gradient row, no composite, or no layered material. */
+  None = 0,
+  /** The 3D coordinate is the texel's UV, because the exact per-object surface is unavailable. */
+  Approximate = 1,
+  /** The texel is sampled through the active object's UV-to-object-space surface. */
+  Exact = 2,
 };
 
 namespace ed::image {
@@ -108,6 +121,15 @@ struct SpaceImage_Runtime {
    * happens before the preview is produced within a frame either way. */
   int2 combined_preview_canvas = int2(0);
   uint32_t combined_preview_canvas_image_uid = 0;
+
+  /* The per-object surface the 2D preview of an Object/Generated Gradient samples, or null while
+   * the preview is approximate. Shared so a cache replacement cannot pull it out from under a
+   * composite that is already being evaluated.
+   *
+   * Resolved by #ED_space_image_gradient_preview_sync at the start of a draw, and owned by the
+   * editor: the surface cache is only the source of the shared pointer. */
+  std::shared_ptr<const PaintMaterialCompositeSurface> gradient_surface;
+  GradientPreviewState gradient_preview_state = GradientPreviewState::None;
 };
 
 } /* namespace ed::image */

@@ -6,6 +6,9 @@
  * \ingroup spimage
  */
 
+#include <algorithm>
+#include <memory>
+
 #include "DNA_brush_types.h"
 #include "DNA_mask_types.h"
 #include "DNA_object_types.h"
@@ -16,6 +19,7 @@
 #include "BLI_math_base.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
+#include "BLI_string_ref.hh"
 #include "BLI_uuid.h"
 
 #include "BKE_colortools.hh"
@@ -26,14 +30,21 @@
 #include "BKE_layer.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
+#include "BKE_mesh.hh"
+#include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_scene.hh"
+
+#include "DEG_depsgraph_query.hh"
 
 #include "DNA_material_types.h"
 
@@ -459,6 +470,179 @@ static Material *space_image_composite_material_find(Main &bmain, const Image &i
   return nullptr;
 }
 
+/** Which 3D Gradient spaces a material's rows use, at any depth of the row tree. */
+struct GradientSpaces {
+  bool object = false;
+  bool generated = false;
+
+  bool any() const
+  {
+    return this->object || this->generated;
+  }
+};
+
+/**
+ * Collect the 3D Gradient spaces of \a layers.
+ *
+ * Folders are the only rows that own children today, but effects and mask items are the same
+ * #MaterialPaintLayer type and a future generator role could put a Gradient there, so all three
+ * lists are walked. A Gradient row has no nested lists of its own, which ends the recursion.
+ */
+static void paint_layers_collect_gradient_spaces(const ListBaseT<MaterialPaintLayer> &layers,
+                                                 GradientSpaces &r_spaces)
+{
+  for (const MaterialPaintLayer &layer : layers) {
+    /* A disabled or non-Gradient generator row contributes no pixels, so it must not force a
+     * surface build or an approximate indicator. */
+    if ((layer.flag & MA_PAINT_LAYER_ENABLED) != 0 && layer.gradient != nullptr &&
+        BKE_paint_layers_gradient_supported(layer))
+    {
+      switch (layer.gradient->space) {
+        case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
+          r_spaces.object = true;
+          break;
+        case MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED:
+          r_spaces.generated = true;
+          break;
+        default:
+          break;
+      }
+    }
+    paint_layers_collect_gradient_spaces(layer.children, r_spaces);
+    paint_layers_collect_gradient_spaces(layer.effects, r_spaces);
+    paint_layers_collect_gradient_spaces(layer.mask_stack, r_spaces);
+  }
+}
+
+/** Whether \a object has \a ma in one of its material slots. */
+static bool object_uses_material(const Object &object, const Material &ma)
+{
+  Object *object_mut = const_cast<Object *>(&object);
+  for (int slot = 0; slot < object.totcol; slot++) {
+    if (BKE_object_material_get(object_mut, short(slot + 1)) == &ma) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
+{
+  ed::image::SpaceImage_Runtime *runtime = sima.runtime;
+  if (runtime == nullptr) {
+    return;
+  }
+
+  runtime->gradient_surface.reset();
+  runtime->gradient_preview_state = GradientPreviewState::None;
+
+  if (!ED_space_image_has_composite(&sima) || sima.image == nullptr) {
+    return;
+  }
+  Main *bmain = CTX_data_main(&C);
+  if (bmain == nullptr) {
+    return;
+  }
+  Material *ma = space_image_composite_material_find(*bmain, *sima.image);
+  if (ma == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+    return;
+  }
+  /* A material with no 3D Gradient row has nothing to resolve, and must not build a surface. */
+  GradientSpaces spaces;
+  paint_layers_collect_gradient_spaces(ma->paint_layers, spaces);
+  if (!spaces.any()) {
+    return;
+  }
+
+  /* While the user is editing the 3D Gradient row, the row's own line is live and must not be
+   * sampled through a surface that would lag behind the drag: the texel's UV is the coordinate. */
+  MaterialPaintLayer *active = BKE_paint_layers_active_layer_get(*ma);
+  if (active != nullptr && active->gradient != nullptr &&
+      active->gradient->space != MA_PAINT_LAYER_GRADIENT_SPACE_UV)
+  {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+
+  Object *object = CTX_data_active_object(&C);
+  if (object == nullptr || object->type != OB_MESH || !object_uses_material(*object, *ma)) {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+  const Depsgraph *depsgraph = CTX_data_expect_evaluated_depsgraph(&C);
+  if (depsgraph == nullptr) {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+  const Object *object_eval = DEG_get_evaluated<Object>(depsgraph, object);
+  if (object_eval == nullptr) {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+  const Mesh *mesh = BKE_object_get_evaluated_mesh(object_eval);
+  if (mesh == nullptr) {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+  /* Match `Texture Coordinate.UV`: the render-active/default map, not the editable active map. */
+  StringRefNull uv_name = mesh->default_uv_map_name();
+  if (uv_name.is_empty()) {
+    uv_name = mesh->active_or_default_uv_map_name();
+  }
+  if (uv_name.is_empty()) {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+
+  /* The surface resolution follows the material's own map size, then the canvas the Combined
+   * preview last resolved for *this* image. Never #ED_space_image_get_size or
+   * #BKE_image_get_size here: the former acquires the composite (building an approximate pass only
+   * to throw it away), and neither belongs on the draw path. */
+  int width = ma->paint_layers_image_size;
+  int height = ma->paint_layers_image_size;
+  if (width <= 0) {
+    if (runtime->combined_preview_canvas.x > 0 &&
+        runtime->combined_preview_canvas.y > 0 &&
+        sima.image != nullptr &&
+        runtime->combined_preview_canvas_image_uid == sima.image->id.session_uid)
+    {
+      width = std::max(runtime->combined_preview_canvas.x, 1024);
+      height = std::max(runtime->combined_preview_canvas.y, 1024);
+    }
+    else {
+      width = 1024;
+      height = 1024;
+    }
+  }
+  const int size = std::clamp(std::max(width, height), 256, 1024);
+  std::shared_ptr<const PaintMaterialCompositeSurface> surface =
+      BKE_paint_layers_gradient_surface_get(*object_eval, *mesh, uv_name.c_str(), size);
+  if (!surface) {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+  /* Object space only reads the sampled positions. Generated rows need either a stored CD_ORCO
+   * sample or, for an undeformed/test surface, the texspace bbox; without both they cannot make a
+   * generated coordinate. */
+  if (spaces.generated && surface->generated_positions.is_empty() &&
+      !surface->generated_bbox_valid)
+  {
+    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    return;
+  }
+
+  runtime->gradient_surface = surface;
+  runtime->gradient_preview_state = GradientPreviewState::Exact;
+}
+
+int ED_space_image_gradient_preview_state(const SpaceImage *sima)
+{
+  if (sima == nullptr || sima->runtime == nullptr) {
+    return int(GradientPreviewState::None);
+  }
+  return int(sima->runtime->gradient_preview_state);
+}
+
 void ED_space_image_composite_material_memo_clear()
 {
   g_composite_material_memo = CompositeMaterialMemo{};
@@ -590,8 +774,13 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
       request.clip = sima->runtime->combined_preview_draw.clip;
       request.max_output = sima->runtime->combined_preview_draw.display_size;
     }
+    /* The per-object surface resolved by #ED_space_image_gradient_preview_sync. Null outside a
+     * draw, or while the preview is approximate; the Combined gather then keeps the 3D Gradient
+     * rows approximate, exactly as a channel pass does. */
+    const std::shared_ptr<const PaintMaterialCompositeSurface> surface =
+        sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
     ImBuf *combined = ed::material_combined::combined_preview_ensure(
-        *bmain, *ma, lighting, request, r_revision, r_changed_region);
+        *bmain, *ma, lighting, request, r_revision, r_changed_region, nullptr, surface);
     if (r_changed_region != nullptr) {
       perf_total.note("call=%lld combined armed=%d clip=%dx%d changed=%dx%d out=%dx%d",
                       static_cast<long long>(perf_call_count),
@@ -637,10 +826,13 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
    * stack when it has to evaluate. */
   const bool layered = BKE_paint_layers_is_layered(*ma);
   Vector<PaintMaterialCompositeImageLayer> layers;
-  const bool has_stack = layered ? BKE_paint_layers_composite_image_layers(
-                                       *ma, pass, layers, /*describe_only=*/true) :
-                                   BKE_paint_material_composite_stack_from_material(
-                                       *bmain, *ma, pass, layers);
+  const std::shared_ptr<const PaintMaterialCompositeSurface> surface =
+      sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
+  const bool has_stack = layered ?
+                             BKE_paint_layers_composite_image_layers(
+                                 *ma, pass, layers, /*describe_only=*/true, surface) :
+                             BKE_paint_material_composite_stack_from_material(
+                                 *bmain, *ma, pass, layers);
   if (!has_stack) {
     return nullptr;
   }

@@ -1107,6 +1107,12 @@ bool paint_layer_row_substituted(const Material &ma, const MaterialPaintLayer &l
      * description that decides what it reads. */
     return false;
   }
+  /* Object/Generated Gradients read per-object geometry. Even a stale shared bake must not stand
+   * in for one; the generated graph and the CPU composite both fall back to the live row. A folder
+   * that contains one cannot substitute its cache either. */
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+    return false;
+  }
   if (layer.bake == nullptr || layer.bake->coverage == nullptr ||
       layer.bake->mode == MA_PAINT_LAYER_BAKE_NEVER)
   {
@@ -1520,6 +1526,12 @@ static bool bake_row_is_candidate(const Material &ma, const MaterialPaintLayer &
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     return false;
   }
+  /* Object/Generated Gradients read per-object geometry; a shared row map cannot hold them, and a
+   * folder that contains one (in a child, correction or mask item) would bake the same
+   * object-specific result into a shared map. */
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+    return false;
+  }
   return !BKE_paint_layers_bake_blocked(ma, layer);
 }
 
@@ -1541,6 +1553,12 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
       r_release = layer.bake != nullptr;
       return false;
     }
+  }
+  /* A shared bake that no longer describes the row -- the usual case being a switch from UV to
+   * Object/Generated -- has to be dropped, not kept as an approximate stand-in. */
+  if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(layer)) {
+    r_release = layer.bake != nullptr;
+    return false;
   }
   if (!bake_row_is_candidate(ma, layer)) {
     return false;

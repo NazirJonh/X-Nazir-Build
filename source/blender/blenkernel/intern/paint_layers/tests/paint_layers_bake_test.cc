@@ -13,6 +13,7 @@
 
 #include "BKE_lib_id.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include "../paint_layers_intern.hh"
 
@@ -129,6 +130,134 @@ TEST_F(PaintLayersBakeTest, the_hash_ignores_the_lock_of_the_row_itself)
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
   ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, false));
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+}
+
+TEST_F(PaintLayersBakeTest, a_uv_gradient_can_be_row_baked)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_EQ(layer->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_UV);
+  EXPECT_TRUE(BKE_paint_layers_gradient_is_shared_bakeable(*layer));
+  EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  ASSERT_NE(layer->bake, nullptr);
+  EXPECT_NE(layer->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr);
+  EXPECT_NE(layer->bake->coverage, nullptr);
+}
+
+TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_bake)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+  ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
+  ASSERT_NE(layer->bake, nullptr);
+
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(layer->bake, nullptr) << "a shared UV bake cannot stand in for a 3D row";
+
+  /* A later pass has nothing to create again. */
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(layer->bake, nullptr);
+}
+
+TEST_F(PaintLayersBakeTest, an_object_or_generated_gradient_is_never_shared_baked)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *object = BKE_paint_layers_gradient_add(
+      *ma, "Object", nullptr, PaintLayerPlace::Above);
+  MaterialPaintLayer *generated = BKE_paint_layers_gradient_add(
+      *ma, "Generated", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(object, nullptr);
+  ASSERT_NE(generated, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *object, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *generated, MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED));
+
+  for (MaterialPaintLayer *layer : {object, generated}) {
+    EXPECT_FALSE(BKE_paint_layers_gradient_is_shared_bakeable(*layer));
+    EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  }
+  clear_active();
+
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  for (MaterialPaintLayer *layer : {object, generated}) {
+    EXPECT_EQ(layer->bake, nullptr) << "no shared maps are made for a 3D gradient";
+    Vector<float> color(8 * 8 * 4);
+    Vector<float> coverage(8 * 8);
+    EXPECT_FALSE(BKE_paint_layers_bake_render_node(*ma,
+                                                   *layer,
+                                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                   8,
+                                                   color.data(),
+                                                   coverage.data()));
+  }
+}
+
+TEST_F(PaintLayersBakeTest, a_folder_with_a_3d_gradient_is_not_shared_baked)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+
+  MaterialPaintLayer *members[] = {gradient};
+  MaterialPaintLayer *folder = BKE_paint_layers_group(*ma, Span<MaterialPaintLayer *>(members, 1));
+  ASSERT_NE(folder, nullptr);
+  /* Isolating, so the folder would normally be a bake candidate. */
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, folder, 0.9f));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *folder, MA_PAINT_LAYER_BAKE_ALWAYS));
+  clear_active();
+
+  bool changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(folder->bake, nullptr) << "an object-specific child keeps the whole folder live";
+  EXPECT_EQ(gradient->bake, nullptr);
+
+  Vector<float> color(8 * 8 * 4);
+  Vector<float> coverage(8 * 8);
+  EXPECT_FALSE(BKE_paint_layers_bake_render_node(*ma,
+                                                 *folder,
+                                                 PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                 8,
+                                                 color.data(),
+                                                 coverage.data()))
+      << "a folder holding a 3D gradient has no shared render";
+
+  /* Control: the same folder shape without a 3D gradient still renders into a shared map. */
+  MaterialPaintLayer *plain = add_paint_layer("Plain", add_image("Plain"));
+  MaterialPaintLayer *plain_members[] = {plain};
+  MaterialPaintLayer *plain_folder = BKE_paint_layers_group(
+      *ma, Span<MaterialPaintLayer *>(plain_members, 1));
+  ASSERT_NE(plain_folder, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_opacity(*ma, plain_folder, 0.9f));
+  EXPECT_TRUE(BKE_paint_layers_bake_render_node(*ma,
+                                                *plain_folder,
+                                                PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                8,
+                                                color.data(),
+                                                coverage.data()));
 }
 
 TEST_F(PaintLayersBakeTest, the_planner_bakes_a_requested_row_and_it_stands_in)

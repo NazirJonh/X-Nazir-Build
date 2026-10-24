@@ -75,6 +75,37 @@ bool BKE_paint_layers_gradient_supported(const MaterialPaintLayer &layer)
          layer.kind_subtype == MA_PAINT_LAYER_GENERATOR_GRADIENT;
 }
 
+bool BKE_paint_layers_gradient_is_shared_bakeable(const MaterialPaintLayer &layer)
+{
+  return BKE_paint_layers_gradient_supported(layer) && layer.gradient != nullptr &&
+         layer.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+}
+
+bool BKE_paint_layers_gradient_subtree_is_shared_bakeable(const MaterialPaintLayer &layer)
+{
+  if (BKE_paint_layers_gradient_supported(layer) &&
+      !BKE_paint_layers_gradient_is_shared_bakeable(layer))
+  {
+    return false;
+  }
+  for (const MaterialPaintLayer &child : layer.children) {
+    if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(child)) {
+      return false;
+    }
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(effect)) {
+      return false;
+    }
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if (!BKE_paint_layers_gradient_subtree_is_shared_bakeable(item)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void BKE_paint_layers_gradient_init(MaterialPaintLayerGradient &gradient)
 {
   /* Black at the line start to white at its end: a full, visible ramp rather than the tool
@@ -161,16 +192,31 @@ float BKE_paint_layers_gradient_ramp_position(const MaterialPaintLayerGradient &
       gradient.midpoint);
 }
 
+float BKE_paint_layers_gradient_line_z(const MaterialPaintLayerGradient &gradient, const float z)
+{
+  return gradient.space == MA_PAINT_LAYER_GRADIENT_SPACE_UV ? 0.0f : z;
+}
+
 float BKE_paint_layers_gradient_factor(const MaterialPaintLayerGradient &gradient,
                                        const float3 &coordinate)
 {
-  /* Z of the line points only matters in the 3D spaces; in UV it is zeroed on write and read
-   * alike, so one 3D formula serves every space. */
-  const float3 delta = float3(gradient.end) - float3(gradient.start);
+  /* A UV line lives in 2D: Z of the coordinate and of both ends is ignored, so a UV row reads the
+   * same factor however the payload's Z was left by a switch from another space. An unknown space
+   * is treated as UV: it is the safe default and never drops the row. */
+  const bool is_uv = gradient.space != MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT &&
+                     gradient.space != MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED;
+  float3 start(gradient.start);
+  float3 end(gradient.end);
+  float3 point = coordinate;
+  if (is_uv) {
+    start.z = end.z = point.z = 0.0f;
+  }
+
+  const float3 delta = end - start;
   const float len_sq = math::dot(delta, delta);
   float t = 0.0f;
   if (len_sq > 1e-12f) {
-    const float3 offset = coordinate - float3(gradient.start);
+    const float3 offset = point - start;
     if (gradient.type == MA_PAINT_LAYER_GRADIENT_RADIAL) {
       t = math::length(offset) * (1.0f / sqrtf(len_sq));
     }
@@ -324,6 +370,74 @@ bool BKE_paint_layers_gradient_set_midpoint(Material &ma,
   return true;
 }
 
+bool BKE_paint_layers_gradient_set_space(Material &ma,
+                                         MaterialPaintLayer &layer,
+                                         const eMaterialPaintLayerGradientSpace space)
+{
+  if (!gradient_owned(ma, layer) ||
+      !ELEM(space,
+            MA_PAINT_LAYER_GRADIENT_SPACE_UV,
+            MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT,
+            MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED))
+  {
+    return false;
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  if (gradient->space == space) {
+    return true;
+  }
+  /* The numbers stay as they are and are read in the new space: the source of the coordinate is
+   * graph structure, not a value. */
+  gradient->space = space;
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_gradient_set_start(Material &ma,
+                                         MaterialPaintLayer &layer,
+                                         const float start[3])
+{
+  if (!gradient_owned(ma, layer)) {
+    return false;
+  }
+  for (const int i : IndexRange(3)) {
+    if (!std::isfinite(start[i])) {
+      return false;
+    }
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  copy_v3_v3(gradient->start, start);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_gradient_set_end(Material &ma,
+                                       MaterialPaintLayer &layer,
+                                       const float end[3])
+{
+  if (!gradient_owned(ma, layer)) {
+    return false;
+  }
+  for (const int i : IndexRange(3)) {
+    if (!std::isfinite(end[i])) {
+      return false;
+    }
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  copy_v3_v3(gradient->end, end);
+  BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
 bool BKE_paint_layers_gradient_set_line(Material &ma,
                                         MaterialPaintLayer &layer,
                                         const float start[3],
@@ -343,11 +457,6 @@ bool BKE_paint_layers_gradient_set_line(Material &ma,
   }
   copy_v3_v3(gradient->start, start);
   copy_v3_v3(gradient->end, end);
-  if (gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
-    /* The UV space has no third axis: whatever wrote the line keeps it flat. */
-    gradient->start[2] = 0.0f;
-    gradient->end[2] = 0.0f;
-  }
   BKE_paint_layers_tag_value_edited(ma);
   return true;
 }

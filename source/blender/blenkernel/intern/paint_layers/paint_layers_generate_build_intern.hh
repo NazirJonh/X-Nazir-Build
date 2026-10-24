@@ -33,6 +33,7 @@ namespace blender {
 struct Image;
 struct Material;
 struct MaterialPaintLayer;
+struct MaterialPaintLayerGradient;
 struct PaintLayersBuildContext;
 struct bNode;
 struct bNodeSocket;
@@ -533,6 +534,13 @@ class PaintLayersTreeBuilder {
 
   /** The Texture Coordinate node of \a tree whose `UV` output feeds a Mapping, made once. */
   bNode *uv_coordinate_ensure(bNodeTree &tree);
+
+  /**
+   * The Texture Coordinate output matching \a gradient's space: `UV` (Z ignored), `Object` or
+   * `Generated`. Null when the node or its output cannot be created.
+   */
+  bNodeSocket *gradient_coordinate_socket(bNode &coord,
+                                          const MaterialPaintLayerGradient &gradient);
 
   /**
    * Re-orient a tangent-space Normal map that \a row reads through its Mapping: returns the

@@ -2912,6 +2912,12 @@ static bool rna_SpaceImageEditor_is_material_paint_combined_get(PointerRNA *ptr)
          sima->material_paint_pass == PAINT_LAYER_PASS_COMBINED;
 }
 
+static int rna_SpaceImageEditor_gradient_preview_state_get(PointerRNA *ptr)
+{
+  const SpaceImage *sima = static_cast<const SpaceImage *>(ptr->data);
+  return ED_space_image_gradient_preview_state(sima);
+}
+
 static bool rna_SpaceImageEditor_is_material_paint_canvas_get(PointerRNA *ptr)
 {
   const SpaceImage *sima = static_cast<const SpaceImage *>(ptr->data);
@@ -7735,6 +7741,25 @@ static void rna_def_space_image(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  static const EnumPropertyItem gradient_preview_state_items[] = {
+      {0,
+       "NONE",
+       0,
+       "None",
+       "No Object or Generated Gradient row is shown by the 2D preview"},
+      {1,
+       "APPROXIMATE",
+       0,
+       "Approximate",
+       "The Object/Generated Gradient is shown in UV space, without a per-object surface"},
+      {2,
+       "EXACT",
+       0,
+       "Exact",
+       "The Object/Generated Gradient is sampled through the active object's UV surface"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem image_filter_mode_items[] = {
       {ui::TEMPLATE_ID_FILTER_ALL, "ALL", ICON_IMAGE, "All", "Show all images"},
       {ui::TEMPLATE_ID_FILTER_CURRENT_MATERIAL,
@@ -7797,6 +7822,19 @@ static void rna_def_space_image(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Show Combined Preview",
                            "The Combined preview is the pass currently shown in this editor");
+
+  /* Read-only state of the 2D preview of an Object/Generated Gradient. The Image Editor header
+   * reads it to tell the user that the shown texels are UV-space approximations. */
+  prop = RNA_def_property(srna, "gradient_preview_state", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, gradient_preview_state_items);
+  RNA_def_property_enum_funcs(
+      prop, "rna_SpaceImageEditor_gradient_preview_state_get", nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Gradient Preview State",
+      "Whether the shown Gradient preview is exact for the active object, approximate in UV space, "
+      "or not a 3D Gradient at all");
 
   /* A layered material's maps carry no #Image::paint_layer_id, so the UI cannot tell them from
    * any other image by that; the material lookup the composite uses answers instead. */

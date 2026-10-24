@@ -16,6 +16,8 @@
  * GPU graph and this one a CPU stack.
  */
 
+#include <memory>
+
 #include "BKE_paint_material_composite.hh"
 
 namespace blender {
@@ -52,13 +54,20 @@ struct rcti;
  *        Combined preview asks for this, since it captures the slices into its own slots; a CPU
  *        caller (the composite, a bake, the Image Editor) must leave it false. The slice cache is
  *        not populated in this mode.
+ * \param surface: a Gradient row in Object or Generated space needs the per-object surface to
+ *        turn a texel into the coordinate the shader reads. \a surface supplies it for the exact
+ *        preview; when it is empty, or the row is the active one, the layer keeps
+ *        `approximate = true` and the evaluator uses the texel's own UV. A UV Gradient never uses
+ *        a surface. The layer holds the shared pointer, so its lifetime is extended even if the
+ *        caller's cache replaces its own entry.
  * \return false when the channel has no participating row at all.
  */
 bool BKE_paint_layers_composite_image_layers(
     const Material &ma,
     int channel,
     Vector<PaintMaterialCompositeImageLayer> &r_layers,
-    bool describe_only = false);
+    bool describe_only = false,
+    std::shared_ptr<const PaintMaterialCompositeSurface> surface = nullptr);
 
 /**
  * Drop every cached Anchor Point slice. The cache owns float canvases of its own (about 0.5 GiB per

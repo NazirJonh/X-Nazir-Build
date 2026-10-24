@@ -49,10 +49,11 @@ constexpr const char *BLEND_GROUP_ID_RESULT = "Socket_4";
 
 /**
  * Interface-socket identifiers of the shared Gradient Factor group, fixed by the creation order in
- * #BKE_paint_material_gradient_group_ensure: UV, Start, End, Midpoint, Type, Repeat and the Factor
- * output. The same identifier-versus-name rule as above applies.
+ * #BKE_paint_material_gradient_group_ensure: Coordinate (the first socket keeps the legacy `UV`
+ * identifier), Start, End, Midpoint, Type, Repeat and the Factor output. The same
+ * identifier-versus-name rule as above applies.
  */
-constexpr const char *GRADIENT_GROUP_ID_UV = "Socket_0";
+constexpr const char *GRADIENT_GROUP_ID_COORDINATE = "Socket_0";
 constexpr const char *GRADIENT_GROUP_ID_START = "Socket_1";
 constexpr const char *GRADIENT_GROUP_ID_END = "Socket_2";
 constexpr const char *GRADIENT_GROUP_ID_MIDPOINT = "Socket_3";

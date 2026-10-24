@@ -209,7 +209,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     /* A ColorRamp node holds the ramp in its storage, not in a socket: a stop or an interpolation
      * edit is a different node, so the group is rebuilt rather than synced in place. */
     hash = topology_hash_mix(hash, 0x600);
-    /* The space decides which coordinate socket the group reads, even while only UV exists. */
+    /* The space decides which Texture Coordinate output the Gradient Factor reads: topology. */
     hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.gradient->space)));
     hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(layer.gradient->ramp));
   }

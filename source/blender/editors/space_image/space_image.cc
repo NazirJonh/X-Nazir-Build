@@ -1060,6 +1060,13 @@ static void image_main_region_draw(const bContext *C, ARegion *region)
     ed::material_combined::combined_preview_bake_ensure(*C, *combined_material);
   }
 
+  /* Resolve the exact per-object surface for an inactive Object/Generated Gradient before the
+   * engine acquires the composite, so this frame already samples it. Cached in BKE, so the steady
+   * state costs a key comparison. */
+  if (sima != nullptr) {
+    ED_space_image_gradient_preview_sync(*C, *sima);
+  }
+
   if (show_viewer) {
     BLI_thread_lock(LOCK_DRAW_IMAGE);
   }

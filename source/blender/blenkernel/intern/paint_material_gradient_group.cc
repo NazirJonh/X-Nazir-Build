@@ -300,8 +300,10 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
   }
   paint_material_group_marker_set(*group, GRADIENT_MARKER_VALUE);
 
+  /* The identifier stays `Socket_0` for the groups already in files; the name says what the socket
+   * really carries: a 3D coordinate, with UV rows passing Z = 0. */
   bNodeTreeInterfaceSocket *uv = group->tree_interface.add_socket(
-      DATA_("UV"), "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
+      DATA_("Coordinate"), "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
   bNodeTreeInterfaceSocket *start = group->tree_interface.add_socket(
       DATA_("Start"), "", "NodeSocketVector", NODE_INTERFACE_SOCKET_INPUT, nullptr);
   bNodeTreeInterfaceSocket *end = group->tree_interface.add_socket(
@@ -345,12 +347,12 @@ bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain)
     return nullptr;
   }
 
-  /* d = End - Start; v = UV - Start. */
+  /* d = End - Start; v = Coordinate - Start. The group is 3D; a UV row hands it (u, v, 0). */
   bNode *d = builder.vector_math(NODE_VECTOR_MATH_SUBTRACT);
   builder.link_input(GRADIENT_GROUP_ID_END, d, "Vector");
   builder.link_input(GRADIENT_GROUP_ID_START, d, "Vector_001");
   bNode *v = builder.vector_math(NODE_VECTOR_MATH_SUBTRACT);
-  builder.link_input(GRADIENT_GROUP_ID_UV, v, "Vector");
+  builder.link_input(GRADIENT_GROUP_ID_COORDINATE, v, "Vector");
   builder.link_input(GRADIENT_GROUP_ID_START, v, "Vector_001");
 
   bNode *dot_vd = builder.vector_math(NODE_VECTOR_MATH_DOT_PRODUCT);

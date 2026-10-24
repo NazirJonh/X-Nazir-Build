@@ -244,6 +244,11 @@ struct PaintMaterialCompositeRowParams : PaintMaterialCompositeConstant {
    */
   bool empty_base = false;
   /**
+   * The side of the square canvas of an #empty_base row whose corrections own no map to say it (Fill
+   * and Material ones); 0 leaves the size to the first map found.
+   */
+  int empty_base_size = 0;
+  /**
    * Whether the row's fourth component is its content alpha, raised by each correction by the over
    * model (`a = a + f * (1 - a)`), rather than the coverage it blends by. The Normal channel keeps
    * the colour's own, and the generated graph tracks the same quantity (see

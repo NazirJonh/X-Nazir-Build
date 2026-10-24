@@ -125,6 +125,31 @@ bool BKE_paint_layers_mask_items(const Material &ma,
                                  const bUUID *stop_before = nullptr);
 
 /**
+ * Whether the correction \a effect lays in \a channel with the plain blend: Mix, or the combine
+ * Normal means by it. Anything else reads the colour below it, which a bake of the correction on its
+ * own does not have.
+ */
+bool BKE_paint_layers_correction_blend_is_normal(const MaterialPaintLayer &effect, int channel);
+
+/**
+ * Describe \a corrections (bottom to top, one row's, none a filter or an Anchor Point) as one row
+ * kept only for them, so that rendering it with #BKE_paint_material_composite_eval_row_content gives
+ * what they lay together, over nothing: their straight colour and the coverage they bring.
+ *
+ * \param size: the side of the square canvas, for a set that owns no map to say it.
+ * \param iuser: the ImageUser naming \a tile_number, given to every map; it must outlive the row. A
+ * correction whose map has no such tile lays nothing on it and is left out.
+ * \return false when no correction lays anything in \a channel on that tile.
+ */
+bool BKE_paint_layers_corrections_row_describe(const Material &ma,
+                                               Span<MaterialPaintLayer *> corrections,
+                                               int channel,
+                                               int size,
+                                               const ImageUser *iuser,
+                                               int tile_number,
+                                               PaintMaterialCompositeImageLayer &r_row);
+
+/**
  * Describe the slice \a reader lays in \a channel, without rendering it: the same entry
  * #BKE_paint_layers_slice_render evaluates. A mask target describes the source row's mask stack up
  * to the point, a content target the row's content up to it. The row's own opacity, mask and

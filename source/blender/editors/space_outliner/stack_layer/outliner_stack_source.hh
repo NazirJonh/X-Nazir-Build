@@ -853,6 +853,33 @@ class StackGroupingEditor {
   }
 
   /**
+   * What baking the rows at \a ordinals into one texture row would be: 0 when it cannot be done to
+   * them, 1 for converting a single row that is not a texture yet, 2 for merging several. A shape
+   * test for polls and menus; the reasons of a refusal are reported by #rows_correction_bake.
+   */
+  virtual int rows_correction_bake_kind(bContext & /*C*/,
+                                        const StackFocus & /*focus*/,
+                                        ID & /*owner*/,
+                                        Span<int> /*ordinals*/) const
+  {
+    return 0;
+  }
+
+  /**
+   * Bake the rows at \a ordinals (corrections of one row, next to each other) into one texture row
+   * that lays what they laid together. One-way: the caller owns the warning and the undo history.
+   *
+   * \return the ordinal of the new row, or -1 when nothing was baked.
+   */
+  virtual int rows_correction_bake(bContext & /*C*/,
+                                   const StackFocus & /*focus*/,
+                                   ID & /*owner*/,
+                                   Span<int> /*ordinals*/) const
+  {
+    return -1;
+  }
+
+  /**
    * Wrap the rows \a from_ordinal .. \a to_ordinal into one group row.
    *
    * \return the ordinal of the group row, or -1 when nothing was made.

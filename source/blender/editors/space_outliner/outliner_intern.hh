@@ -895,6 +895,14 @@ wmOperatorStatus stack_rows_group_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_group_add_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_ungroup_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_merge_down_exec(bContext *C, wmOperator *op);
+/** Bake the selected content corrections into a Paint correction texture; one-way. */
+wmOperatorStatus stack_corrections_bake_exec(bContext *C, wmOperator *op);
+wmOperatorStatus stack_corrections_merge_invoke(bContext *C, wmOperator *op, const wmEvent *event);
+wmOperatorStatus stack_correction_texture_invoke(bContext *C,
+                                                wmOperator *op,
+                                                const wmEvent *event);
+bool stack_corrections_merge_poll(bContext *C);
+bool stack_correction_texture_poll(bContext *C);
 wmOperatorStatus stack_row_rename_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_rename_invoke(bContext *C, wmOperator *op, const wmEvent *event);
 const EnumPropertyItem *stack_sub_index_itemf(bContext *C,
@@ -1029,6 +1037,8 @@ void OUTLINER_OT_stack_layer_group(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_group_add(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_ungroup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_corrections_merge(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_correction_to_texture(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_paste(wmOperatorType *ot);

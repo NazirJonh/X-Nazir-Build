@@ -32,6 +32,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
 #include "BKE_report.hh"
+#include "BKE_undo_system.hh"
 
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_map.hh"
@@ -750,6 +751,124 @@ wmOperatorStatus stack_row_merge_down_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
   outliner_stack_row_activate(C, *space_outliner, new_ordinal);
+  return OPERATOR_FINISHED;
+}
+
+/** The rows a bake acts on: the selection, else the active row. */
+static void stack_corrections_bake_rows(bContext &C,
+                                        SpaceOutliner &space_outliner,
+                                        Vector<int> &r_ordinals)
+{
+  stack_selected_ordinals_get(space_outliner, r_ordinals);
+  if (!r_ordinals.is_empty()) {
+    return;
+  }
+  const int active = outliner_stack_active_ordinal_get(outliner_stack_read_context(C),
+                                                       space_outliner);
+  if (active >= 0) {
+    r_ordinals.append(active);
+  }
+}
+
+/** Whether baking the rows a menu would act on is of \a wanted kind (see the grouping editor). */
+static bool stack_corrections_bake_poll(bContext *C, const int wanted)
+{
+  if (!stack_row_add_poll(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  ID *owner = outliner_stack_owner_get(outliner_stack_read_context(*C), *space_outliner);
+  const StackEditor *editor = stack_source_for_space(*space_outliner)->editor();
+  const StackGroupingEditor *grouping = (editor != nullptr) ? editor->grouping() : nullptr;
+  if (owner == nullptr || grouping == nullptr) {
+    return false;
+  }
+  Vector<int> ordinals;
+  stack_corrections_bake_rows(*C, *space_outliner, ordinals);
+  return !ordinals.is_empty() &&
+         grouping->rows_correction_bake_kind(
+             *C, space_outliner->runtime->stack_focus, *owner, ordinals) == wanted;
+}
+
+bool stack_corrections_merge_poll(bContext *C)
+{
+  return stack_corrections_bake_poll(C, 2);
+}
+
+bool stack_correction_texture_poll(bContext *C)
+{
+  return stack_corrections_bake_poll(C, 1);
+}
+
+wmOperatorStatus stack_corrections_merge_invoke(bContext *C,
+                                                wmOperator *op,
+                                                const wmEvent * /*event*/)
+{
+  return WM_operator_confirm_ex(
+      C,
+      op,
+      IFACE_("Merge Corrections"),
+      IFACE_("The selected corrections will be baked into one Paint correction, stacked as they "
+             "look now. Fill and Material corrections among them become textures. This cannot be "
+             "undone: the whole undo history of this file is cleared."),
+      IFACE_("Merge"),
+      ui::AlertIcon::Warning,
+      true);
+}
+
+wmOperatorStatus stack_correction_texture_invoke(bContext *C,
+                                                 wmOperator *op,
+                                                 const wmEvent * /*event*/)
+{
+  return WM_operator_confirm_ex(
+      C,
+      op,
+      IFACE_("Convert to Texture"),
+      IFACE_("The correction will be baked into a Paint correction texture and stop being a "
+             "flat colour or a material. This cannot be undone: the whole undo history of this "
+             "file is cleared."),
+      IFACE_("Convert"),
+      ui::AlertIcon::Warning,
+      true);
+}
+
+wmOperatorStatus stack_corrections_bake_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  Vector<int> ordinals;
+  stack_corrections_bake_rows(*C, *space_outliner, ordinals);
+  if (ordinals.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+  int new_ordinal = -1;
+  const bool ok = stack_mutate(
+      *C,
+      *space_outliner,
+      true,
+      [&](const StackSource & /*source*/,
+          const StackEditor &editor,
+          const StackFocus &focus,
+          ID &owner,
+          int &r_select_ordinal) {
+        const StackGroupingEditor *grouping = editor.grouping();
+        if (grouping == nullptr) {
+          return false;
+        }
+        r_select_ordinal = grouping->rows_correction_bake(*C, focus, owner, ordinals);
+        return r_select_ordinal >= 0;
+      },
+      &new_ordinal);
+  if (!ok) {
+    return OPERATOR_CANCELLED;
+  }
+  outliner_stack_row_activate(C, *space_outliner, new_ordinal);
+  /* The bake removed rows and let go of maps behind the undo system's back, so the steps it still
+   * holds would restore a stack that no longer exists. The whole history goes, exactly what the
+   * dialog promised. */
+  if (UndoStack *undo_stack = ED_undo_stack_get()) {
+    BKE_undosys_stack_clear(undo_stack);
+  }
+  BKE_report(op->reports, RPT_INFO, "Corrections baked into a texture (not undoable)");
   return OPERATOR_FINISHED;
 }
 

@@ -744,6 +744,33 @@ void OUTLINER_OT_stack_layer_merge_down(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+void OUTLINER_OT_stack_layer_corrections_merge(wmOperatorType *ot)
+{
+  ot->name = "Merge Corrections";
+  ot->idname = "OUTLINER_OT_stack_layer_corrections_merge";
+  ot->description =
+      "Bake the selected corrections of a layer into one Paint correction texture, stacked as they "
+      "look now. Irreversible: the undo history is cleared";
+  ot->invoke = stack_corrections_merge_invoke;
+  ot->exec = stack_corrections_bake_exec;
+  ot->poll = stack_corrections_merge_poll;
+  /* No OPTYPE_UNDO: the bake invalidates every undo step rather than adding one. */
+  ot->flag = OPTYPE_REGISTER;
+}
+
+void OUTLINER_OT_stack_layer_correction_to_texture(wmOperatorType *ot)
+{
+  ot->name = "Convert to Texture";
+  ot->idname = "OUTLINER_OT_stack_layer_correction_to_texture";
+  ot->description =
+      "Bake a Fill or Material correction into a Paint correction texture. Irreversible: the "
+      "undo history is cleared";
+  ot->invoke = stack_correction_texture_invoke;
+  ot->exec = stack_corrections_bake_exec;
+  ot->poll = stack_correction_texture_poll;
+  ot->flag = OPTYPE_REGISTER;
+}
+
 void OUTLINER_OT_stack_layer_copy(wmOperatorType *ot)
 {
   ot->name = "Copy Stack Layers";

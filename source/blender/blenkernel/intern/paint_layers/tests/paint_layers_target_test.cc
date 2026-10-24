@@ -91,6 +91,53 @@ class PaintLayersTargetTest : public PaintLayersTestBase {
     BKE_image_release_ibuf(&image, ibuf, lock);
   }
 
+  /** The first pixel of \a image's byte buffer, read from UDIM \a tile_number. */
+  static void tile_byte_pixel(Image &image, const int tile_number, uchar r_rgba[4])
+  {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = tile_number;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, &iuser, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    const uchar *pixels = ibuf->byte_data();
+    for (const int i : IndexRange(4)) {
+      r_rgba[i] = pixels[i];
+    }
+    BKE_image_release_ibuf(&image, ibuf, lock);
+  }
+
+  /** A Non-Color byte mask map, every texel the opaque grey \a gray; \a size x \a size, optionally
+   * tiled (UDIM, tile 1001 only). */
+  Image *add_gray_mask(const char *name, const int size, const uchar gray, const bool tiled = false)
+  {
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, clear, false, true, tiled);
+    EXPECT_NE(image, nullptr);
+    fill_tile_gray(*image, 1001, gray);
+    return image;
+  }
+
+  /** Fill every texel of \a image's UDIM \a tile_number with the opaque grey \a gray. */
+  static void fill_tile_gray(Image &image, const int tile_number, const uchar gray)
+  {
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = tile_number;
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(&image, &iuser, &lock);
+    ASSERT_NE(ibuf, nullptr);
+    uchar *pixels = ibuf->byte_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(ibuf->x) * ibuf->y)) {
+      pixels[i * 4 + 0] = gray;
+      pixels[i * 4 + 1] = gray;
+      pixels[i * 4 + 2] = gray;
+      pixels[i * 4 + 3] = 255;
+    }
+    BKE_image_release_ibuf(&image, ibuf, lock);
+  }
+
   /** An object with a mesh and \a materials in its slots, the first one active. */
   Object *add_object_with(const Span<Material *> materials)
   {
@@ -1050,6 +1097,179 @@ TEST_F(PaintLayersTargetTest, lock_of_a_folder_or_a_mask_item_protects_what_it_h
   BKE_paint_layers_active_set(*ma, paint->marker);
   EXPECT_TRUE(BKE_paint_layers_target_get(
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Mask stack merge
+ * \{ */
+
+TEST_F(PaintLayersTargetTest, merge_folds_the_stack_into_one_base_map)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 0.5f);
+  MaterialPaintLayer *flat = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_CONSTANT, "Flat", 0.25f);
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(flat, nullptr);
+
+  Image *merged = BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr);
+  ASSERT_NE(merged, nullptr);
+
+  /* The base alone is left, reading the merged map with the settings a fresh base mask has. */
+  EXPECT_EQ(layer->mask_stack.first, layer->mask_stack.last);
+  EXPECT_EQ(BKE_paint_layers_mask_base(*layer), base);
+  EXPECT_EQ(paint_layer_channel_find(*base, PAINT_MATERIAL_CHANNEL_BASE_COLOR)->image, merged);
+  EXPECT_EQ(base->blend, MA_PAINT_LAYER_BLEND_MULTIPLY);
+  EXPECT_FLOAT_EQ(base->opacity, 1.0f);
+  EXPECT_FALSE(BKE_paint_layers_mapping_applies(*ma, *base));
+
+  /* The base's 0.5 laid over by the Mix constant 0.25 is 0.25, the grey every texel holds. */
+  uchar pixel[4];
+  first_byte_pixel(*merged, pixel);
+  EXPECT_EQ(pixel[0], 64);
+  EXPECT_EQ(pixel[3], 255);
+}
+
+TEST_F(PaintLayersTargetTest, merge_reads_back_what_the_sampler_read)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  MaterialPaintLayer *corr = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(corr, nullptr);
+  Image *base_map = add_gray_mask("BaseMap", 8, 128);
+  Image *corr_map = add_gray_mask("CorrMap", 8, 64);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_map));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, corr_map));
+
+  /* What a stroke saw before the merge: the base's grey laid over by the correction's Mix grey. */
+  PaintLayersMaskSampler before(*ma, *layer);
+  before.tile_acquire(1001, 8, 8);
+  const float factor_before = before.sample(1001, 4, 4);
+
+  Image *merged = BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr);
+  ASSERT_NE(merged, nullptr);
+
+  /* The base alone answers the same, to the byte the merged map was quantized to. */
+  PaintLayersMaskSampler after(*ma, *layer);
+  after.tile_acquire(1001, 8, 8);
+  const float factor_after = after.sample(1001, 4, 4);
+  EXPECT_NEAR(factor_after, factor_before, 1.0f / 255.0f + 1e-6);
+}
+
+TEST_F(PaintLayersTargetTest, merge_refuses_locks_sizes_and_a_stack_without_corrections)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  ASSERT_NE(base, nullptr);
+  /* The base alone has nothing to fold. */
+  EXPECT_EQ(BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr), nullptr);
+
+  MaterialPaintLayer *corr = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  ASSERT_NE(corr, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_gray_mask("BaseMap", 8, 128)));
+
+  /* A locked row or a locked correction refuses the merge and leaves the stack whole. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, true));
+  EXPECT_EQ(BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, false));
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, corr, true));
+  EXPECT_EQ(BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, corr, false));
+
+  /* A map read at its own size has to agree with the others, or the merge would drop it. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_gray_mask("CorrMap", 16, 64)));
+  EXPECT_EQ(BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr), nullptr);
+  EXPECT_NE(layer->mask_stack.first, layer->mask_stack.last);
+
+  /* The refusal left the maps in place, so the agreeing merge still runs. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, add_gray_mask("CorrMap8", 8, 64)));
+  EXPECT_NE(BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr), nullptr);
+  EXPECT_EQ(layer->mask_stack.first, layer->mask_stack.last);
+}
+
+TEST_F(PaintLayersTargetTest, merge_refuses_a_folder_lock_above_the_row)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(*ma, "F", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  MaterialPaintLayer *child = BKE_paint_layers_add(*ma, "C", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  BKE_paint_layers_active_set(*ma, child->marker);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, child, 1.0f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_item_add(
+                *ma, child, MA_PAINT_LAYER_SOURCE_CONSTANT, "Flat", 0.5f),
+            nullptr);
+
+  /* A locked folder protects the whole subtree, the merge the same as a stroke. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, folder, true));
+  EXPECT_EQ(BKE_paint_layers_mask_stack_merge(*bmain, *ma, *child, nullptr), nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, folder, false));
+  EXPECT_NE(BKE_paint_layers_mask_stack_merge(*bmain, *ma, *child, nullptr), nullptr);
+}
+
+TEST_F(PaintLayersTargetTest, merge_covers_every_udim_tile_of_the_stack)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  MaterialPaintLayer *corr = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(corr, nullptr);
+
+  /* A tiled correction map: tile 1001 grey 32, tile 1010 grey 224; the base stays a constant. */
+  Image *corr_map = add_gray_mask("CorrMap", 8, 32, /*tiled=*/true);
+  ASSERT_TRUE(BKE_paint_layers_map_coverage_tile_ensure(*corr_map, 1010));
+  fill_tile_gray(*corr_map, 1010, 224);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, corr_map));
+
+  Image *merged = BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr);
+  ASSERT_NE(merged, nullptr);
+  EXPECT_EQ(merged->source, IMA_SRC_TILED);
+
+  /* Each tile holds the grey the correction's own tile laid over the base's constant one. */
+  uchar pixel[4];
+  tile_byte_pixel(*merged, 1001, pixel);
+  EXPECT_EQ(pixel[0], 32);
+  tile_byte_pixel(*merged, 1010, pixel);
+  EXPECT_EQ(pixel[0], 224);
+}
+
+TEST_F(PaintLayersTargetTest, merge_lets_go_of_the_old_maps)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, layer, 1.0f);
+  MaterialPaintLayer *corr = BKE_paint_layers_mask_item_add(
+      *ma, layer, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(corr, nullptr);
+  Image *base_map = add_gray_mask("BaseMap", 8, 128);
+  Image *corr_map = add_gray_mask("CorrMap", 8, 64);
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_map));
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, corr, PAINT_MATERIAL_CHANNEL_BASE_COLOR, corr_map));
+  /* Each map holds its newborn user and its record's before the merge. */
+  const int base_users = base_map->id.us;
+  const int corr_users = corr_map->id.us;
+
+  Image *merged = BKE_paint_layers_mask_stack_merge(*bmain, *ma, *layer, nullptr);
+  ASSERT_NE(merged, nullptr);
+
+  /* The merged map is the base's record's own; the old ones are orphans the purge takes. */
+  EXPECT_EQ(merged->id.us, 1);
+  EXPECT_EQ(base_map->id.us, base_users - 1);
+  EXPECT_EQ(corr_map->id.us, corr_users - 1);
 }
 
 /** \} */

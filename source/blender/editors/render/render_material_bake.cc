@@ -56,6 +56,7 @@
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_target.hh"
 #include "BKE_scene.hh"
 
 #include "BLI_assert.h"
@@ -2043,8 +2044,11 @@ static bool material_composite_is_shown(Main &bmain, wmWindowManager &wm, const 
 void material_bake_layered_rows_ensure(Main &bmain,
                                        Material &ma,
                                        const bool force_preview,
-                                       const Span<bUUID> forced_rows)
+                                       const Span<bUUID> forced_rows,
+                                       const bool blocking)
 {
+  /* The shader tree of a one-way merge has been rebuilt by now: the maps it held can go. */
+  BKE_paint_layers_orphan_maps_purge(bmain);
   wmWindowManager *wm = static_cast<wmWindowManager *>(bmain.wm.first);
   if (wm == nullptr || !BKE_paint_layers_is_layered(ma)) {
     return;
@@ -2132,7 +2136,7 @@ void material_bake_layered_rows_ensure(Main &bmain,
     params.set_material = &ma;
     params.targets = targets;
     params.size = render_size;
-    params.blocking = false;
+    params.blocking = blocking;
     params.job_owner = row;
     params.row = link;
     /* Named: #FunctionRef does not own the callable, so a temporary lambda would dangle. */
@@ -2154,7 +2158,8 @@ void material_bake_layered_rows_ensure(Main &bmain,
        * state would only fail the same way, so the row waits for something to change. */
       BKE_paint_layers_material_bake_land(ma, link.marker, link.hash, link.source_hash, false, link.preview_side);
     }
-    else if (forced || BKE_paint_layers_material_row_due(ma, *row)) {
+    else if (!blocking && (forced || BKE_paint_layers_material_row_due(ma, *row))) {
+      /* A blocking render is over by now: nothing is in flight to remember or to mark. */
       row_renders_in_flight().add_overwrite(UUID(link.marker), row_render_state(link));
       /* A render is running for \a ma: stamp it before the worker can run, so
        * Material.paint_layers_is_stale never reads fresh while the maps are being written. The

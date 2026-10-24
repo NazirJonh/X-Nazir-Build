@@ -348,12 +348,15 @@ void bake_target_image_normalize_colorspace(Image &image, eMaterialPaintChannel 
  * asks for the maps of the row being edited as if an Image Editor showed the composite (Update Now).
  *  forced_rows names Material rows rendered at their own size now, whatever their bake mode and
  * whether they are being edited (#BKE_paint_layers_material_row_render_forced_wanted): the maps a
- * consumer needs before it can read them.
+ * consumer needs before it can read them. \a blocking renders on the calling thread and returns with
+ * the maps landed, for a one-way consumer (a bake of the row into a texture) that reads them at
+ * once.
  */
 void material_bake_layered_rows_ensure(Main &bmain,
                                        Material &ma,
                                        bool force_preview = false,
-                                       Span<bUUID> forced_rows = {});
+                                       Span<bUUID> forced_rows = {},
+                                       bool blocking = false);
 
 /** \} */
 

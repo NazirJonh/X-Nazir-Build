@@ -2421,6 +2421,10 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
       }
     }
     if (size_image == nullptr) {
+      if (layer.empty_base && layer.empty_base_size > 0) {
+        r_width = r_height = layer.empty_base_size;
+        return true;
+      }
       continue;
     }
     Vector<CompositeImageLock> locks;

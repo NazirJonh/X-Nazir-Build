@@ -332,6 +332,17 @@ class OUTLINER_MT_context_menu(Menu):
                     layout.operator(
                         "outliner.stack_layer_mask_paste", text="Paste Mask", icon='PASTEDOWN')
                 layout.separator()
+                # The verbs below bake and cannot be undone; each poll answers for the rows the
+                # menu would act on, so only the one that fits is listed.
+                if bpy.ops.paint.mask_merge.poll():
+                    layout.operator("paint.mask_merge", text="Merge Mask Stack", icon='MOD_MASK')
+                if bpy.ops.outliner.stack_layer_corrections_merge.poll():
+                    layout.operator(
+                        "outliner.stack_layer_corrections_merge", text="Merge Corrections", icon='AUTOMERGE_ON')
+                if bpy.ops.outliner.stack_layer_correction_to_texture.poll():
+                    layout.operator(
+                        "outliner.stack_layer_correction_to_texture", text="Convert to Texture", icon='TEXTURE')
+                layout.separator()
                 layout.operator(
                     "outliner.stack_layer_group_add", text="New Group", icon='NEWFOLDER')
                 # Only a folder can be unwrapped; the operator's poll answers for the row.

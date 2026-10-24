@@ -462,6 +462,122 @@ static void composite_image_layers_collect(const Material &ma,
                                            const bool describe_only = false);
 
 /**
+ * Append the content correction \a effect to \a out as the evaluator reads it in \a channel: a filter,
+ * or a map, flat colour, source or slice laid by the correction's own blend and opacity. Nothing is
+ * appended for a correction that lays nothing here, as the generator builds nothing for it.
+ */
+static void composite_effect_append(const Material &ma,
+                                    const MaterialPaintLayer &effect,
+                                    const int channel,
+                                    const float pass_through_scale,
+                                    const int *slice_rect,
+                                    const bool dimensions_only,
+                                    const bool describe_only,
+                                    PaintMaterialCompositeImageLayer &out)
+{
+  if (paint_layer_effect_filters(ma, effect, channel)) {
+    PaintMaterialCompositeCorrection filter;
+    filter.filter = effect.kind_subtype;
+    composite_filter_params(effect, filter.filter_params);
+    filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                     pass_through_scale;
+    out.content_corrections.append(filter);
+    return;
+  }
+  if (!paint_layer_effect_lays(ma, effect, channel)) {
+    return;
+  }
+  PaintMaterialCompositeCorrection correction;
+  correction.iuser = nullptr;
+  correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
+                       pass_through_scale;
+  if (paint_layer_kind_reads_anchor_point(effect)) {
+    correction.anchor_point_reader = effect.marker;
+    const PaintLayerAnchorPointRef effect_ref = paint_layer_anchor_point_resolve(ma, effect);
+    correction.anchor_point_target = int8_t(effect_ref.target);
+    correction.anchor_point_point = (effect_ref.point != nullptr) ? effect_ref.point->marker :
+                                                                      bUUID{};
+    /* What the slice shows, laid by the reader's own blend and opacity. A baked reader reads the
+     * maps its slice was rendered into. Only the row whose bake is being rendered ignores its own
+     * bake; a correction nested in it describes its own bake, which is valid and cheaper than
+     * rendering its slice live again. */
+    const bool baked = paint_layer_anchor_point_reader_baked(ma, effect) &&
+                       effect.bake != nullptr && effect.bake->images[channel] != nullptr &&
+                       effect.bake->coverage != nullptr;
+    if (baked) {
+      correction.image = effect.bake->images[channel];
+      correction.iuser = nullptr;
+      correction.anchor_point_coverage_image = effect.bake->coverage;
+      correction.anchor_point_coverage_iuser = nullptr;
+      correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
+      /* The coverage map already holds the reader's opacity; only its visibility stays live. */
+      correction.opacity = ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
+                           pass_through_scale;
+    }
+    else {
+      if (!describe_only &&
+          !BKE_paint_layers_slice_render(ma,
+                                         effect,
+                                         channel,
+                                         &correction.anchor_point_slice,
+                                         &correction.anchor_point_coverage,
+                                         slice_rect,
+                                         dimensions_only))
+      {
+        return;
+      }
+      correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
+      BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.anchor_point_images);
+    }
+  }
+  else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
+    /* What the source supplies, as a Material row's colour: its plain value, its plain texture
+     * or the map rendered from it. A graph with no map yet is the generator's to show alone, so
+     * nothing is carried until the render lands. The correction's transparency is a plain value
+     * or none (see #paint_layer_correction_reads_source), and a value folds into the opacity. */
+    const PaintLayerMaterialSource source = paint_layer_material_channel_source(
+        ma, effect, channel, PaintLayerMaterialUse::Composite);
+    const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
+        ma, effect, PaintLayerMaterialUse::Composite);
+    if (source.kind == PaintLayerMaterialSourceKind::None ||
+        coverage.kind == PaintLayerMaterialCoverageKind::Pending)
+    {
+      return;
+    }
+    if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
+      copy_v4_v4(correction.constant_color, source.constant);
+      correction.has_constant_color = true;
+    }
+    else {
+      correction.image = source.image;
+      correction.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ?
+                             source.iuser :
+                             nullptr;
+      /* The source is read at the correction's UV, as the generator's source wrapper does and as
+       * a Material row's map is: the Image Editor's composite and the gizmo go through this. */
+      composite_mapping_describe(ma, effect, channel, correction.mapping);
+    }
+    if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
+      correction.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
+    }
+  }
+  else {
+    const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
+    if (effect_record->image != nullptr) {
+      correction.image = effect_record->image;
+      composite_mapping_describe(ma, effect, channel, correction.mapping);
+    }
+    else {
+      /* Only a Fill correction lays without a map: its flat colour. */
+      copy_v4_v4(correction.constant_color, effect_record->value);
+      correction.has_constant_color = true;
+    }
+  }
+  correction.blend = layer_channel_blend(effect, channel);
+  out.content_corrections.append(correction);
+}
+
+/**
  * Describe the row \a layer (not a Pass Through folder) in \a channel to the evaluator. False when
  * the row takes no part, which the generator leaves out as well.
  *
@@ -610,106 +726,8 @@ static bool composite_image_layer_build(const Material &ma,
     if (stop_before != nullptr && BLI_uuid_equal(effect.marker, *stop_before)) {
       break;
     }
-    if (paint_layer_effect_filters(ma, effect, channel)) {
-      PaintMaterialCompositeCorrection filter;
-      filter.filter = effect.kind_subtype;
-      composite_filter_params(effect, filter.filter_params);
-      filter.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
-                       pass_through_scale;
-      out.content_corrections.append(filter);
-      continue;
-    }
-    if (!paint_layer_effect_lays(ma, effect, channel)) {
-      continue;
-    }
-    PaintMaterialCompositeCorrection correction;
-    correction.iuser = nullptr;
-    correction.opacity = BKE_paint_layers_channel_opacity_effective(effect, channel) *
-                         pass_through_scale;
-    if (paint_layer_kind_reads_anchor_point(effect)) {
-      correction.anchor_point_reader = effect.marker;
-      const PaintLayerAnchorPointRef effect_ref = paint_layer_anchor_point_resolve(ma, effect);
-      correction.anchor_point_target = int8_t(effect_ref.target);
-      correction.anchor_point_point = (effect_ref.point != nullptr) ? effect_ref.point->marker :
-                                                                        bUUID{};
-      /* What the slice shows, laid by the reader's own blend and opacity. A baked reader reads the
-       * maps its slice was rendered into. Only the row whose bake is being rendered ignores its own
-       * bake; a correction nested in it describes its own bake, which is valid and cheaper than
-       * rendering its slice live again. */
-      const bool baked = paint_layer_anchor_point_reader_baked(ma, effect) &&
-                         effect.bake != nullptr && effect.bake->images[channel] != nullptr &&
-                         effect.bake->coverage != nullptr;
-      if (baked) {
-        correction.image = effect.bake->images[channel];
-        correction.iuser = nullptr;
-        correction.anchor_point_coverage_image = effect.bake->coverage;
-        correction.anchor_point_coverage_iuser = nullptr;
-        correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
-        /* The coverage map already holds the reader's opacity; only its visibility stays live. */
-        correction.opacity = ((effect.flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f) *
-                             pass_through_scale;
-      }
-      else {
-        if (!describe_only &&
-            !BKE_paint_layers_slice_render(ma,
-                                           effect,
-                                           channel,
-                                           &correction.anchor_point_slice,
-                                           &correction.anchor_point_coverage,
-                                           slice_rect,
-                                           dimensions_only))
-        {
-          continue;
-        }
-        correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
-        BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.anchor_point_images);
-      }
-    }
-    else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
-      /* What the source supplies, as a Material row's colour: its plain value, its plain texture
-       * or the map rendered from it. A graph with no map yet is the generator's to show alone, so
-       * nothing is carried until the render lands. The correction's transparency is a plain value
-       * or none (see #paint_layer_correction_reads_source), and a value folds into the opacity. */
-      const PaintLayerMaterialSource source = paint_layer_material_channel_source(
-          ma, effect, channel, PaintLayerMaterialUse::Composite);
-      const PaintLayerMaterialCoverage coverage = paint_layer_material_coverage_source(
-          ma, effect, PaintLayerMaterialUse::Composite);
-      if (source.kind == PaintLayerMaterialSourceKind::None ||
-          coverage.kind == PaintLayerMaterialCoverageKind::Pending)
-      {
-        continue;
-      }
-      if (source.kind == PaintLayerMaterialSourceKind::LiveConstant) {
-        copy_v4_v4(correction.constant_color, source.constant);
-        correction.has_constant_color = true;
-      }
-      else {
-        correction.image = source.image;
-        correction.iuser = (source.kind == PaintLayerMaterialSourceKind::LiveImage) ?
-                               source.iuser :
-                               nullptr;
-        /* The source is read at the correction's UV, as the generator's source wrapper does and as
-         * a Material row's map is: the Image Editor's composite and the gizmo go through this. */
-        composite_mapping_describe(ma, effect, channel, correction.mapping);
-      }
-      if (coverage.kind == PaintLayerMaterialCoverageKind::LiveConstant) {
-        correction.opacity *= clamp_f(coverage.constant, 0.0f, 1.0f);
-      }
-    }
-    else {
-      const MaterialPaintLayerChannel *effect_record = paint_layer_channel_find(effect, channel);
-      if (effect_record->image != nullptr) {
-        correction.image = effect_record->image;
-        composite_mapping_describe(ma, effect, channel, correction.mapping);
-      }
-      else {
-        /* Only a Fill correction lays without a map: its flat colour. */
-        copy_v4_v4(correction.constant_color, effect_record->value);
-        correction.has_constant_color = true;
-      }
-    }
-    correction.blend = layer_channel_blend(effect, channel);
-    out.content_corrections.append(correction);
+    composite_effect_append(
+        ma, effect, channel, pass_through_scale, slice_rect, dimensions_only, describe_only, out);
   }
   /* The mask is one for all channels of the row, so the same item reaches every channel's stack,
    * exactly as the generator reads the one set of mask inputs in every channel chain. */
@@ -2314,5 +2332,71 @@ void PaintLayersGpuSlotGuard::release()
 }
 
 /** \} */
+
+bool BKE_paint_layers_correction_blend_is_normal(const MaterialPaintLayer &effect,
+                                                 const int channel)
+{
+  const CompositeBlend blend = layer_channel_blend(effect, channel);
+  /* Normal has no Mix of its own: combining the normals is what its plain blend means. */
+  return ELEM(blend, CompositeBlend::Mix, CompositeBlend::NormalCombine);
+}
+
+bool BKE_paint_layers_corrections_row_describe(const Material &ma,
+                                               const Span<MaterialPaintLayer *> corrections,
+                                               const int channel,
+                                               const int size,
+                                               const ImageUser *iuser,
+                                               const int tile_number,
+                                               PaintMaterialCompositeImageLayer &r_row)
+{
+  r_row = PaintMaterialCompositeImageLayer();
+  /* The same shape a Paint row kept only for its corrections takes (#composite_row_source_describe):
+   * it covers nothing of its own, so the corrections bring the coverage in. */
+  r_row.enabled = true;
+  r_row.has_constant_color = true;
+  r_row.empty_base = true;
+  r_row.empty_base_size = size;
+  r_row.tracks_content_alpha = BKE_paint_material_channel_tracks_content_alpha(
+      eMaterialPaintChannel(channel));
+  for (const MaterialPaintLayer *effect : corrections) {
+    const int64_t before = r_row.content_corrections.size();
+    composite_effect_append(ma, *effect, channel, 1.0f, nullptr, false, false, r_row);
+    if (r_row.content_corrections.size() == before) {
+      continue;
+    }
+    PaintMaterialCompositeCorrection &correction = r_row.content_corrections.last();
+    if (correction.image == nullptr) {
+      continue;
+    }
+    /* A map without this tile lays nothing on it. */
+    const bool has_tile = (correction.image->source == IMA_SRC_TILED) ?
+                              BKE_image_get_tile(correction.image, tile_number) != nullptr :
+                              tile_number == 1001;
+    if (has_tile) {
+      /* A Material correction reads the map its source was rendered into, at the render's own side:
+       * unlike a painted map it need not be the canvas's. An identity mapping resamples it to the
+       * canvas, where the evaluator would refuse the mismatch. */
+      if (paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_READS_SOURCE) &&
+          !correction.mapping.enabled)
+      {
+        ImageUser probe_user;
+        BKE_imageuser_default(&probe_user);
+        probe_user.tile = tile_number;
+        void *lock = nullptr;
+        const ImBuf *probe = BKE_image_acquire_ibuf(correction.image, &probe_user, &lock);
+        if (probe != nullptr && (probe->x != size || probe->y != size)) {
+          correction.mapping.enabled = true;
+          correction.mapping.tangent_normal = false;
+        }
+        BKE_image_release_ibuf(correction.image, const_cast<ImBuf *>(probe), lock);
+      }
+      correction.iuser = iuser;
+    }
+    else {
+      r_row.content_corrections.remove_last();
+    }
+  }
+  return !r_row.content_corrections.is_empty();
+}
 
 }  // namespace blender

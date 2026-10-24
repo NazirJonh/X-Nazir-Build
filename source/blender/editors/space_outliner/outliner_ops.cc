@@ -67,6 +67,8 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_group_add);
   WM_operatortype_append(OUTLINER_OT_stack_layer_ungroup);
   WM_operatortype_append(OUTLINER_OT_stack_layer_merge_down);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_corrections_merge);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_correction_to_texture);
   WM_operatortype_append(OUTLINER_OT_stack_layer_copy);
   WM_operatortype_append(OUTLINER_OT_stack_layer_use_as_brush_source);
   WM_operatortype_append(OUTLINER_OT_stack_layer_paste);

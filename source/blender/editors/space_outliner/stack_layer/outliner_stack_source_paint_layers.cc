@@ -65,6 +65,7 @@
 
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_import.hh"
+#include "ED_material_bake.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
@@ -1976,6 +1977,75 @@ class PaintLayersStackSource final : public StackSource,
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
     return paint_layers_ordinal_of(material, folder);
+  }
+
+  /** The corrections at \a ordinals; empty when one of them is not a row of the description. */
+  static Vector<MaterialPaintLayer *> corrections_for_ordinals(Material &material,
+                                                               const Span<int> ordinals)
+  {
+    Vector<MaterialPaintLayer *> rows;
+    for (const int ordinal : ordinals) {
+      MaterialPaintLayer *row = paint_description_row_for_ordinal(material, ordinal);
+      if (row == nullptr) {
+        return {};
+      }
+      rows.append_non_duplicates(row);
+    }
+    return rows;
+  }
+
+  int rows_correction_bake_kind(bContext & /*C*/,
+                                const StackFocus & /*focus*/,
+                                ID &owner,
+                                const Span<int> ordinals) const override
+  {
+    Material &material = layers_owner(owner);
+    Vector<MaterialPaintLayer *> rows = corrections_for_ordinals(material, ordinals);
+    return rows.is_empty() ? 0 : BKE_paint_layers_corrections_bake_kind(material, rows);
+  }
+
+  int rows_correction_bake(bContext &C,
+                           const StackFocus & /*focus*/,
+                           ID &owner,
+                           const Span<int> ordinals) const override
+  {
+    Material &material = layers_owner(owner);
+    Main *bmain = CTX_data_main(&C);
+    Vector<MaterialPaintLayer *> rows = corrections_for_ordinals(material, ordinals);
+    if (bmain == nullptr || rows.is_empty()) {
+      return -1;
+    }
+    /* A correction being painted in Mask mode would be left pointing at a row that is gone. */
+    for (MaterialPaintLayer *row : rows) {
+      if (MaterialPaintLayer *row_owner = BKE_paint_layers_correction_owner(material, *row)) {
+        layers_mask_edit_end_if_active(C, material, *row_owner);
+      }
+    }
+    /* The refusals that need no render come first: a render is the expensive part. */
+    if (!BKE_paint_layers_corrections_bake_precheck(material, rows, CTX_wm_reports(&C))) {
+      return -1;
+    }
+    /* A Material correction shows most of its channels live through the shader graph, which the CPU
+     * bake cannot read: only the maps of a render do. Render them now, at the row's own size, and
+     * wait: the bake below reads them at once. */
+    Vector<bUUID> render_rows;
+    for (const MaterialPaintLayer *row : rows) {
+      if (row->source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+        render_rows.append(row->marker);
+      }
+    }
+    if (!render_rows.is_empty()) {
+      material_bake::material_bake_layered_rows_ensure(
+          *bmain, material, /*force_preview=*/true, render_rows, /*blocking=*/true);
+    }
+    MaterialPaintLayer *merged = BKE_paint_layers_corrections_bake(
+        *bmain, material, rows, CTX_wm_reports(&C));
+    if (merged == nullptr) {
+      return -1;
+    }
+    layers_texpaint_slots_refresh(C);
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return paint_layers_ordinal_of(material, merged);
   }
 
   int rows_group(bContext &C,

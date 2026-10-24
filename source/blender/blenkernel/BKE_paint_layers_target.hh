@@ -26,6 +26,8 @@
 
 #include <cstdint>
 
+#include "BLI_span.hh"
+
 namespace blender {
 
 struct Image;
@@ -35,6 +37,7 @@ struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
 struct Object;
 struct PaintModeSettings;
+struct ReportList;
 
 /**
  * Where a description references one image: the row whose `channels` carries it and the
@@ -290,4 +293,79 @@ Image *BKE_paint_layers_map_coverage_map_ensure(Main &bmain,
  */
 bool BKE_paint_layers_map_coverage_tile_ensure(Image &image, int tile_number);
 
+/**
+ * Collapse the mask stack of \a layer (its base mask and every correction over it) into one map,
+ * which becomes the base's own: the corrections are removed, and the base reads the merged map
+ * with the canonical base settings restored -- Multiply, full opacity, no invert, identity
+ * mapping. The map holds the factor the strokes and the composite read (#PaintLayersMaskSampler),
+ * 8-bit like every other mask map, so the row's look changes only by that quantization.
+ *
+ * Refused, with the reason reported to \a reports, when there is nothing to fold (no corrections),
+ * when the base is a filter or a coverage operator (its kind has no map to read), when a lock
+ * blocks the row -- its own, a mask item's, or a folder's above, the same lock a stroke answers --
+ * or when maps that are read at their own size disagree on that size. A mapped item is resampled
+ * to the merged size, so its own never conflicts. UDIM stacks merge tile by tile: the union of the
+ * stack's tiles becomes the merged map's tiles, and a tile an item's map does not have reads as
+ * that item's constant, the same fallback the render shows for it.
+ *
+ * Nothing of the description changes until the merged map is written and attached, so a refusal
+ * leaves the material exactly as it was. The maps the stack held lose their records' users and
+ * become orphans the usual way. The merge is one-way and this API never opens undo: the caller
+ * owns that story.
+ *
+ * \return the merged map, or null on refusal.
+ */
+Image *BKE_paint_layers_mask_stack_merge(Main &bmain,
+                                         Material &ma,
+                                         MaterialPaintLayer &layer,
+                                         ReportList *reports);
+
+/**
+ * What baking \a selected asks of the user: 0 when it cannot be baked as selected (not corrections
+ * of one row, not next to each other, a kind with no colour of its own, or a Paint correction on its
+ * own, which is a texture already), 1 for a single Fill or Material correction (a conversion to a
+ * texture), 2 for two or more (a merge). A shape test for menus: locks and blends are left to
+ * #BKE_paint_layers_corrections_bake, which reports them.
+ */
+int BKE_paint_layers_corrections_bake_kind(Material &ma, Span<MaterialPaintLayer *> selected);
+
+/**
+ * The refusals of #BKE_paint_layers_corrections_bake that need no render, answered up front: shape,
+ * locks, a Paint correction on its own, the blend of the lowest correction of a channel. A caller
+ * that renders Material corrections first asks this before paying for the render. A refusal is
+ * reported to \a reports. A Material correction that is not rendered yet is not a refusal here.
+ */
+bool BKE_paint_layers_corrections_bake_precheck(Material &ma,
+                                                Span<MaterialPaintLayer *> selected,
+                                                ReportList *reports);
+/**
+ * Bake the content corrections \a selected (one row's, next to each other) into a single Paint
+ * correction: a map per channel they lay in, holding what they lay together over nothing, stacked so
+ * that the upper covers the lower as the render shows it. Fill and Material corrections become
+ * textures this way, and so does one of them on its own.
+ *
+ * The new correction takes the place of the topmost of \a selected, blends with Normal at full
+ * opacity, and becomes the active row; the corrections it replaces are removed and their maps become
+ * orphans. UDIM maps are baked tile by tile.
+ *
+ * Refused, with the reason reported to \a reports, when the shape is wrong (see
+ * #BKE_paint_layers_corrections_bake_kind), a lock blocks one of them (the same lock a stroke
+ * answers to), the lowest correction of a channel is not blended with Normal (baked, it would lose
+ * the colour it read below), or the maps cannot be read at one size. Nothing of the description
+ * changes until every map is written, so a refusal leaves the material as it was. The bake is
+ * one-way and this API never opens undo: the caller owns that story.
+ *
+ * \return the new correction, or null on refusal.
+ */
+MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
+                                                      Material &ma,
+                                                      Span<MaterialPaintLayer *> selected,
+                                                      ReportList *reports);
+
+/**
+ * Free the maps a one-way bake or merge left without a user once the shader tree that still held
+ * them has been rebuilt (see #BKE_paint_layers_corrections_bake). Cheap when nothing is waiting:
+ * call it on the main thread after the depsgraph update.
+ */
+void BKE_paint_layers_orphan_maps_purge(Main &bmain);
 }  // namespace blender

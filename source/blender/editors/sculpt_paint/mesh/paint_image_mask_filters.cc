@@ -21,6 +21,8 @@
 #include <memory>
 #include <utility>
 
+#include "BLT_translation.hh"
+
 #include "BLI_array.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_listbase.h"
@@ -68,6 +70,7 @@
 #include "BKE_paint_material_composite.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
+#include "BKE_undo_system.hh"
 
 #include "bmesh.hh"
 
@@ -82,6 +85,7 @@
 #include "RNA_access.hh"
 #include "RNA_define.hh"
 
+#include "UI_interface_icons.hh"
 #include "UI_view2d.hh"
 
 #include "WM_api.hh"
@@ -91,6 +95,7 @@
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_select_utils.hh"
+#include "ED_undo.hh"
 #include "ED_space_api.hh"
 #include "ED_view3d.hh"
 
@@ -1533,6 +1538,112 @@ void PAINT_OT_mask_item_bake(wmOperatorType *ot)
   ot->exec = mask_item_bake_exec;
   ot->poll = mask_item_bake_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/** \} */
+/* -------------------------------------------------------------------- */
+/** \name Merge mask stack
+ *
+ * Collapse the row's mask items into one map, so the non-destructive stack becomes a single base
+ * mask. The write is #BKE_paint_layers_mask_stack_merge; the operator owns the one-way part: the
+ * confirm dialog of #mask_merge_invoke, and the undo stack the merge invalidates.
+ * \{ */
+
+/** The row whose mask the operator merges: the active row, or the row a correction hangs on. */
+static MaterialPaintLayer *mask_merge_owner(Material &ma)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(ma);
+  if (layer == nullptr) {
+    return nullptr;
+  }
+  if (layer->role == MA_PAINT_LAYER_ROLE_EFFECT) {
+    layer = BKE_paint_layers_correction_owner(ma, *layer);
+  }
+  else if (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    layer = BKE_paint_layers_mask_item_owner(ma, *layer);
+  }
+  return layer;
+}
+
+static bool mask_merge_target_get(bContext *C, Material **r_ma, MaterialPaintLayer **r_layer)
+{
+  Object *ob = CTX_data_active_object(C);
+  Material *ma = (ob != nullptr) ? BKE_paint_layers_active_material_get(ob) : nullptr;
+  if (ma == nullptr) {
+    return false;
+  }
+  MaterialPaintLayer *layer = mask_merge_owner(*ma);
+  if (layer == nullptr || BKE_paint_layers_mask_base(*layer) == nullptr) {
+    return false;
+  }
+  /* One item is the base alone: nothing lays over it to fold in. */
+  if (layer->mask_stack.first == layer->mask_stack.last) {
+    return false;
+  }
+  *r_ma = ma;
+  *r_layer = layer;
+  return true;
+}
+
+static bool mask_merge_poll(bContext *C)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *layer = nullptr;
+  return mask_merge_target_get(C, &ma, &layer);
+}
+
+static wmOperatorStatus mask_merge_invoke(bContext *C, wmOperator *op, const wmEvent * /*event*/)
+{
+  return WM_operator_confirm_ex(
+      C,
+      op,
+      IFACE_("Merge Mask Stack"),
+      IFACE_("All mask corrections will be baked into one map and removed. The base mask's "
+             "blend, opacity, mapping and invert are reset to make the merged map read as the "
+             "stack does. This cannot be undone: the whole undo history of this file is "
+             "cleared."),
+      IFACE_("Merge"),
+      ui::AlertIcon::Warning,
+      true);
+}
+
+static wmOperatorStatus mask_merge_exec(bContext *C, wmOperator *op)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *layer = nullptr;
+  if (!mask_merge_target_get(C, &ma, &layer)) {
+    return OPERATOR_CANCELLED;
+  }
+  Image *merged = BKE_paint_layers_mask_stack_merge(*CTX_data_main(C), *ma, *layer, op->reports);
+  if (merged == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  /* The merge removed rows and let go of maps behind the undo system's back, so the steps it
+   * still holds would restore a stack that no longer exists. The whole history goes, exactly what
+   * the dialog promised. */
+  if (UndoStack *undo_stack = ED_undo_stack_get()) {
+    BKE_undosys_stack_clear(undo_stack);
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+  WM_event_add_notifier(C, NC_IMAGE | NA_ADDED, merged);
+  BKE_reportf(
+      op->reports, RPT_INFO, "Merged mask stack into \"%s\" (not undoable)", merged->id.name + 2);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_mask_merge(wmOperatorType *ot)
+{
+  ot->name = "Merge Mask Stack";
+  ot->idname = "PAINT_OT_mask_merge";
+  ot->description =
+      "Bake the row's mask items into one map and replace the stack with that base mask. "
+      "Irreversible: the undo history is cleared";
+
+  ot->invoke = mask_merge_invoke;
+  ot->exec = mask_merge_exec;
+  ot->poll = mask_merge_poll;
+  /* No OPTYPE_UNDO: the merge invalidates every undo step rather than adding one. */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */

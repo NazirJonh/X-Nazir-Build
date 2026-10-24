@@ -11,19 +11,28 @@
 
 #include "BKE_paint_layers_target.hh"
 
+#include <cstdio>
+
 #include "BLI_index_range.hh"
+#include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_vector.h"
+#include "BLI_rect.h"
 #include "BLI_string.h"
+#include "BLI_task.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_report.hh"
 
 #include "paint_layers_intern.hh"
 
@@ -599,5 +608,802 @@ int BKE_paint_layers_active_maps_ensure(Main &bmain, Material &ma, const int ima
   }
   return created;
 }
+
+/** Append the maps \a layer holds a user on to \a r_images: its channel maps and its bake's. */
+static void paint_layer_maps_collect(const MaterialPaintLayer &layer, Vector<Image *> &r_images)
+{
+  const auto add = [&](Image *image) {
+    if (image != nullptr) {
+      r_images.append_non_duplicates(image);
+    }
+  };
+  for (const int i : IndexRange(layer.channels_num)) {
+    add(layer.channels[i].image);
+  }
+  if (layer.bake != nullptr) {
+    for (Image *image : layer.bake->images) {
+      add(image);
+    }
+    add(layer.bake->coverage);
+  }
+}
+
+/**
+ * Maps a one-way edit left behind that something still held a user on when it ended: the generated
+ * shader tree lets go of its Image Texture nodes only when it is rebuilt, which happens after the
+ * edit. They are identified by session UID (a freed ID's address could be reused) and purged by
+ * #BKE_paint_layers_orphan_maps_purge once nothing holds them. Main thread only.
+ */
+struct PendingOrphanMap {
+  uint32_t session_uid;
+  /** Purge passes left before the map is given up on, so a map that lives on does not stay listed. */
+  int tries_left;
+};
+
+static Vector<PendingOrphanMap> &pending_orphan_maps()
+{
+  static Vector<PendingOrphanMap> pending;
+  return pending;
+}
+
+/**
+ * Whether \a image is a map this system may free once nothing uses it: one with no file behind it
+ * (a paint canvas, a rendered material map or any generated image), so a copy nothing uses is memory
+ * with no way back. A file-backed texture stays, however it was dropped in.
+ */
+static bool paint_layers_orphan_map_eligible(const Image &image)
+{
+  ImageMaterialSource source;
+  return (image.flag & IMA_PAINT_CANVAS) != 0 || image.source == IMA_SRC_GENERATED ||
+         BKE_image_material_source_get(image, source);
+}
+
+/** Whether \a image is held by nothing at all: no user, no fake user, not linked. */
+static bool paint_layers_orphan_map_unused(const Image &image)
+{
+  return image.id.us <= 0 && ID_FAKE_USERS(&image.id) == 0 && !ID_IS_LINKED(&image.id);
+}
+
+/**
+ * Free the maps of \a candidates that nothing uses any more, after a one-way edit: the maps a
+ * merge folded into a new one. Such an edit clears the undo history, so nothing can bring the rows
+ * back, and a 4K map is 64 MiB of pixels that would otherwise stay in memory as an orphan until the
+ * file is saved and reopened or purged by hand.
+ *
+ * A map something still holds a user on is not freed now but listed, and purged later.
+ */
+static void paint_layers_orphan_maps_free(Main &bmain, const Span<Image *> candidates)
+{
+  int freed = 0;
+  int deferred = 0;
+  for (Image *image : candidates) {
+    if (!paint_layers_orphan_map_eligible(*image) || ID_IS_LINKED(&image->id) ||
+        ID_FAKE_USERS(&image->id) != 0)
+    {
+      continue;
+    }
+    if (paint_layers_orphan_map_unused(*image)) {
+      BKE_id_delete(&bmain, image);
+      freed++;
+    }
+    else {
+      pending_orphan_maps().append({image->id.session_uid, 8});
+      deferred++;
+    }
+  }
+  printf("[paint-layers orphan maps] freed=%d deferred=%d\n", freed, deferred);
+}
+
+void BKE_paint_layers_orphan_maps_purge(Main &bmain)
+{
+  Vector<PendingOrphanMap> &pending = pending_orphan_maps();
+  if (pending.is_empty()) {
+    return;
+  }
+  Vector<Image *> to_delete;
+  for (Image &image : bmain.images) {
+    for (PendingOrphanMap &entry : pending) {
+      if (entry.session_uid == image.id.session_uid && paint_layers_orphan_map_unused(image)) {
+        to_delete.append(&image);
+        entry.tries_left = 0;
+      }
+    }
+  }
+  for (Image *image : to_delete) {
+    BKE_id_delete(&bmain, image);
+  }
+  /* Entries that were deleted or ran out of passes are done with; the rest wait for the next. */
+  Vector<PendingOrphanMap> kept;
+  for (PendingOrphanMap &entry : pending) {
+    if (entry.tries_left > 0 && --entry.tries_left > 0) {
+      kept.append(entry);
+    }
+  }
+  printf("[paint-layers orphan maps] purged=%d waiting=%d\n", int(to_delete.size()), int(kept.size()));
+  pending = std::move(kept);
+}
+Image *BKE_paint_layers_mask_stack_merge(Main &bmain,
+                                         Material &ma,
+                                         MaterialPaintLayer &layer,
+                                         ReportList *reports)
+{
+  MaterialPaintLayer *base = BKE_paint_layers_mask_base(layer);
+  if (base == nullptr) {
+    BKE_report(reports, RPT_ERROR, "The row has no mask to merge");
+    return nullptr;
+  }
+  /* One item is the base alone: nothing lays over it to fold in. */
+  if (layer.mask_stack.first == layer.mask_stack.last) {
+    BKE_report(reports, RPT_ERROR, "The row has no mask corrections to merge");
+    return nullptr;
+  }
+  /* The merge writes a plain coverage map into the base's Base Color record. A filter -- a mask
+   * filter or a map-coverage operator alike -- reads its own kind and params instead, so folding
+   * the stack into that record would leave the base showing something other than the merge. A base
+   * like that only comes from a pasted mask item. */
+  if (base->source == MA_PAINT_LAYER_SOURCE_FILTER) {
+    BKE_report(
+        reports, RPT_ERROR, "The base mask is a filter or a coverage operator and cannot be merged");
+    return nullptr;
+  }
+  /* The same lock a stroke answers to: the row itself, any of its mask items, or a folder above. */
+  if (const MaterialPaintLayer *blocker = BKE_paint_layers_lock_blocker(ma, layer)) {
+    BKE_reportf(reports,
+                RPT_ERROR,
+                "\"%s\" is locked; unlock it before merging",
+                blocker->name[0] != '\0' ? blocker->name : "Layer");
+    return nullptr;
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) != 0) {
+      continue;
+    }
+    /* The row and the folders above it were checked with it; what is left is the item's own lock. */
+    if (BKE_paint_layers_is_locked(item)) {
+      BKE_reportf(reports,
+                  RPT_ERROR,
+                  "The mask correction \"%s\" is locked; unlock it before merging",
+                  item.name[0] != '\0' ? item.name : "Mask");
+      return nullptr;
+    }
+  }
+
+  const int material_size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) :
+                                                               1024;
+  int size = material_size;
+  /* Prefer the size of an existing mask map: maps made by this material share it, and imported
+   * masks may be smaller than the material's default. Refuse a stack that would silently lose
+   * maps: an item read at its own size has to be square and to agree with the other such maps,
+   * because the sampler keeps only buffers of the one size the merge reads, and a dropped map
+   * would be lost from a stack the merge then deletes. */
+  bool found_size = false;
+  bool found_fallback = false;
+  Vector<int> tiles;
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    const MaterialPaintLayerChannel *item_record = paint_layer_channel_find(
+        item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    Image *image = (item_record != nullptr) ? item_record->image : nullptr;
+    if (image == nullptr) {
+      continue;
+    }
+    /* The merged map covers what the stack covers: the union of the maps' tiles, with 1001
+     * standing in for a map that is not tiled at all. */
+    if (image->source == IMA_SRC_TILED) {
+      for (const ImageTile &tile : image->tiles) {
+        const int number = tile.tile_number == 0 ? 1001 : tile.tile_number;
+        if (!tiles.contains(number)) {
+          tiles.append(number);
+        }
+      }
+    }
+    else if (!tiles.contains(1001)) {
+      tiles.append(1001);
+    }
+    /* A filter owns no map to read, and a coverage operator's map is resampled to the merged size
+     * whatever it is (its per-tile `match` is computed from the resampled buffer): neither
+     * constrains the size. An Anchor Point reader owns a slice in canvas space, never a map. */
+    if (paint_layer_effect_is_filter(item) || paint_layer_kind_is_map_coverage(item) ||
+        paint_layer_kind_reads_anchor_point(item))
+    {
+      continue;
+    }
+    /* The map's own size, read the way the sampler reads the map itself: its first tile. */
+    int first_tile = 1001;
+    if (image->source == IMA_SRC_TILED && image->tiles.first != nullptr) {
+      const ImageTile *first = static_cast<const ImageTile *>(image->tiles.first);
+      first_tile = first->tile_number == 0 ? 1001 : first->tile_number;
+    }
+    int width = 0;
+    int height = 0;
+    if (ImBuf *probe = BKE_paint_material_mask_map_acquire(image, first_tile, nullptr, 0, 0)) {
+      width = probe->x;
+      height = probe->y;
+      IMB_freeImBuf(probe);
+    }
+    /* A mapped item is resampled to the size the merge writes, so its own size never conflicts.
+     * An item read at its own size has to be square and to agree with the other such maps. */
+    if (!BKE_paint_layers_mapping_applies(ma, item)) {
+      if (width <= 0 || height <= 0) {
+        BKE_report(reports, RPT_ERROR, "A mask map's size cannot be read; merging is refused");
+        return nullptr;
+      }
+      if (width != height) {
+        BKE_report(
+            reports, RPT_ERROR, "A mask map is not square; map it or make it square before merging");
+        return nullptr;
+      }
+      if (!found_size) {
+        size = width;
+        found_size = true;
+      }
+      else if (width != size) {
+        BKE_report(reports,
+                   RPT_ERROR,
+                   "The mask items use maps of different sizes; resize them before merging");
+        return nullptr;
+      }
+    }
+    else if (!found_size && !found_fallback && width > 0 && width == height) {
+      /* Every map is mapped: keep the first square size instead of the material's default. */
+      size = width;
+      found_fallback = true;
+    }
+  }
+
+  PaintLayersMaskSampler sampler(ma, layer);
+  if (sampler.is_empty()) {
+    return nullptr;
+  }
+  if (tiles.is_empty()) {
+    tiles.append(1001);
+  }
+  /* #tile_acquire is not thread safe, so every tile is acquired here, before the parallel loops
+   * that sample them. A tile a map does not have is not an error: the sampler reads such an item
+   * at its constant, the same fallback the render shows for that tile. */
+  for (const int tile_number : tiles) {
+    sampler.tile_acquire(tile_number, size, size);
+  }
+
+  char name[192];
+  BLI_snprintf(name, sizeof(name), "%s Mask Merge", layer.name[0] != '\0' ? layer.name : "Layer");
+  const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  /* A map that is not tile 1001 alone has to be tiled, or the other tiles have nowhere to go. */
+  const bool tiled = tiles.size() > 1 || tiles[0] != 1001;
+  Image *merged = paint_layers_map_create(
+      bmain, name, size, /*is_color=*/false, clear, tiled);
+  if (merged == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Cannot create the merged mask image");
+    return nullptr;
+  }
+
+  /* A tile that cannot be written would silently drop what the stack covers there, and the merge
+   * then deletes the stack: it is refused whole, with the description untouched. */
+  for (const int tile_number : tiles) {
+    if (tiled && !BKE_paint_layers_map_coverage_tile_ensure(*merged, tile_number)) {
+      BKE_id_free(&bmain, merged);
+      BKE_reportf(reports, RPT_ERROR, "Cannot add UDIM tile %d to the merged mask", tile_number);
+      return nullptr;
+    }
+    ImageUser iuser;
+    BKE_imageuser_default(&iuser);
+    iuser.tile = tile_number;
+    void *lock = nullptr;
+    ImBuf *dst = BKE_image_acquire_ibuf(merged, &iuser, &lock);
+    uchar *pixels = (dst != nullptr) ? dst->byte_data_for_write() : nullptr;
+    if (pixels == nullptr) {
+      BKE_image_release_ibuf(merged, dst, lock);
+      BKE_id_free(&bmain, merged);
+      BKE_reportf(reports, RPT_ERROR, "Cannot write UDIM tile %d of the merged mask", tile_number);
+      return nullptr;
+    }
+    /* One coverage byte per texel: the factor the whole stack folds into, as grey RGB with an
+     * opaque alpha -- the shape the base's Multiply reads back at full weight. */
+    threading::parallel_for(IndexRange(dst->y), 8, [&](const IndexRange rows) {
+      for (const int y : rows) {
+        for (const int x : IndexRange(dst->x)) {
+          const float factor = clamp_f(sampler.sample(tile_number, x, y), 0.0f, 1.0f);
+          const uchar value = uchar(factor * 255.0f + 0.5f);
+          uchar *pixel = pixels + (int64_t(y) * dst->x + x) * 4;
+          pixel[0] = value;
+          pixel[1] = value;
+          pixel[2] = value;
+          pixel[3] = 255;
+        }
+      }
+    });
+    dst->userflags |= IB_DISPLAY_BUFFER_INVALID;
+    BKE_image_mark_dirty(merged, dst);
+    BKE_image_release_ibuf(merged, dst, lock);
+  }
+  BKE_image_partial_update_mark_full_update(merged);
+  /* The maps the merge replaces, freed once it has succeeded: the base's own and the corrections'. */
+  Vector<Image *> replaced_maps;
+  paint_layer_maps_collect(*base, replaced_maps);
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) == 0) {
+      paint_layer_maps_collect(item, replaced_maps);
+    }
+  }
+
+  MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+      ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (record == nullptr ||
+      !BKE_paint_layers_channel_set_image(ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, merged))
+  {
+    BKE_id_free(&bmain, merged);
+    BKE_report(reports, RPT_ERROR, "Cannot write the merged mask into the base mask");
+    return nullptr;
+  }
+  /* The record took its own user; the creation reference goes. */
+  id_us_min(&merged->id);
+  record->value[0] = record->value[1] = record->value[2] = record->value[3] = 1.0f;
+
+  /* The merged map already holds every item's contribution -- the base's own blend, opacity,
+   * invert and mapping included, which the sampler applied while it read the stack. The base goes
+   * back to the settings a fresh base mask has, so the map reads as the stack did (Multiply over
+   * an opaque grey is the identity the factor was written for), and no leftover value surprises
+   * the next time the mapping is switched on. */
+  base->opacity = 1.0f;
+  base->blend = MA_PAINT_LAYER_BLEND_MULTIPLY;
+  base->flag |= MA_PAINT_LAYER_ENABLED;
+  BKE_paint_layers_channel_set_invert(ma, base, PAINT_MATERIAL_CHANNEL_BASE_COLOR, false);
+  const float no_offset[2] = {0.0f, 0.0f};
+  const float unit_scale[2] = {1.0f, 1.0f};
+  BKE_paint_layers_mapping_set_offset(ma, base, no_offset);
+  BKE_paint_layers_mapping_set_scale(ma, base, unit_scale);
+  BKE_paint_layers_mapping_set_rotation(ma, base, 0.0f);
+  BKE_paint_layers_mapping_set_wrap(ma, base, MA_PAINT_LAYER_MAPPING_WRAP_REPEAT);
+  BKE_paint_layers_mapping_set_enabled(ma, base, false);
+
+  /* The base survives; every correction over it is folded into the merged map. */
+  Vector<MaterialPaintLayer *> corrections;
+  for (MaterialPaintLayer &item : layer.mask_stack) {
+    if ((item.flag & MA_PAINT_LAYER_MASK_BASE) == 0) {
+      corrections.append(&item);
+    }
+  }
+  for (MaterialPaintLayer *item : corrections) {
+    BKE_paint_layers_mask_item_remove(ma, item);
+  }
+  BKE_paint_layers_tag_edited(ma);
+  /* The merged map is not among them: its record holds a user. */
+  paint_layers_orphan_maps_free(bmain, replaced_maps);
+
+  return merged;
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Bake corrections into a Paint correction
+ * \{ */
+
+/** Rows of a bake handled at a time: keeps the float scratch small on a 4K canvas. */
+constexpr int CORRECTIONS_BAKE_STRIP_ROWS = 1024;
+
+/**
+ * The corrections of one row to bake, bottom to top. False, with the reason reported, when they
+ * cannot be baked as one: they hang on different rows, are not next to each other, or one of them is
+ * a kind that has no colour of its own to bake (a filter, an Anchor Point, a generator).
+ */
+static bool corrections_bake_collect(Material &ma,
+                                     const Span<MaterialPaintLayer *> selected,
+                                     const bool check_locks,
+                                     ReportList *reports,
+                                     MaterialPaintLayer *&r_owner,
+                                     Vector<MaterialPaintLayer *> &r_run)
+{
+  r_owner = nullptr;
+  r_run.clear();
+  if (selected.is_empty()) {
+    BKE_report(reports, RPT_ERROR, "No corrections selected");
+    return false;
+  }
+  r_owner = BKE_paint_layers_correction_owner(ma, *selected.first());
+  if (r_owner == nullptr) {
+    BKE_report(reports, RPT_ERROR, "Only content corrections can be baked into a texture");
+    return false;
+  }
+  for (MaterialPaintLayer *effect : selected) {
+    if (BKE_paint_layers_correction_owner(ma, *effect) != r_owner) {
+      BKE_report(reports, RPT_ERROR, "Only corrections of one layer can be merged");
+      return false;
+    }
+  }
+  /* Stacked, the upper one covers the lower: a gap would leave a row between them that the merged
+   * correction could not stay on both sides of. */
+  bool in_run = false;
+  bool run_ended = false;
+  for (MaterialPaintLayer &effect : r_owner->effects) {
+    if (!selected.contains(&effect)) {
+      run_ended |= in_run;
+      continue;
+    }
+    if (run_ended) {
+      BKE_report(reports, RPT_ERROR, "Only corrections next to each other can be merged");
+      return false;
+    }
+    in_run = true;
+    r_run.append(&effect);
+  }
+  for (const MaterialPaintLayer *effect : r_run) {
+    const char *name = effect->name[0] != '\0' ? effect->name : "Correction";
+    /* A filter changes the colour below it, which includes the row's own where the corrections
+     * cover nothing: no texture holds that. An Anchor Point is a live link to a slice of the row,
+     * which a bake would freeze, and a marker publishes the row's content up to its place.
+     * TODO: a Gradient correction (PAINT_LAYER_KIND_GENERATES, once the Gradient series lands) is
+     * bakeable in UV space through the same row description; Object and Generated spaces need the
+     * object's surface, so they stay refused until the bake can be given one. */
+    if (paint_layer_effect_is_filter(*effect) || paint_layer_kind_reads_anchor_point(*effect) ||
+        paint_layer_kind_is_anchor_point_marker(*effect) ||
+        paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_GENERATES) ||
+        !ELEM(effect->source,
+              MA_PAINT_LAYER_SOURCE_IMAGE,
+              MA_PAINT_LAYER_SOURCE_CONSTANT,
+              MA_PAINT_LAYER_SOURCE_MATERIAL))
+    {
+      BKE_reportf(reports,
+                  RPT_ERROR,
+                  "\"%s\" cannot be baked into a texture: only Paint, Fill and Material "
+                  "corrections can",
+                  name);
+      return false;
+    }
+    if (!check_locks) {
+      continue;
+    }
+    /* The same lock a stroke answers to: the correction, its row, or a folder above. */
+    if (const MaterialPaintLayer *blocker = BKE_paint_layers_lock_blocker(ma, *effect)) {
+      BKE_reportf(reports,
+                  RPT_ERROR,
+                  "\"%s\" is locked; unlock it before baking",
+                  blocker->name[0] != '\0' ? blocker->name : "Layer");
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The channels the corrections of \a run lay in, for the bake. Refused, with the reason reported,
+ * when the lowest correction of a channel is not blended with Normal (it goes over the row's colour
+ * with the merged blend, so what it did to that colour cannot be kept), when nothing lays, or --
+ * with \a require_rendered -- when a Material correction lays in a channel its source has no
+ * rendered map for: the CPU cannot read a shader graph, and baking it as empty would change the
+ * look silently.
+ */
+static bool corrections_bake_channels(Material &ma,
+                                      const Span<MaterialPaintLayer *> run,
+                                      const bool require_rendered,
+                                      ReportList *reports,
+                                      Vector<int> &r_channels)
+{
+  r_channels.clear();
+  for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
+    if (!info.supports_image_paint) {
+      continue;
+    }
+    const int channel = int(info.channel);
+    bool lowest_found = false;
+    for (const MaterialPaintLayer *effect : run) {
+      if (!paint_layer_effect_lays(ma, *effect, channel)) {
+        continue;
+      }
+      const char *name = effect->name[0] != '\0' ? effect->name : "Correction";
+      if (!lowest_found) {
+        lowest_found = true;
+        r_channels.append(channel);
+        if (!BKE_paint_layers_correction_blend_is_normal(*effect, channel)) {
+          BKE_reportf(reports,
+                      RPT_ERROR,
+                      "\"%s\" is not blended with Normal in %s: baked, it would no longer read "
+                      "the colour below it. Set its blend to Normal first",
+                      name,
+                      info.ui_name);
+          return false;
+        }
+      }
+      if (require_rendered && paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_READS_SOURCE) &&
+          (paint_layer_material_channel_source(
+               ma, *effect, channel, PaintLayerMaterialUse::Composite)
+                   .kind == PaintLayerMaterialSourceKind::None ||
+           paint_layer_material_coverage_source(ma, *effect, PaintLayerMaterialUse::Composite)
+                   .kind == PaintLayerMaterialCoverageKind::Pending))
+      {
+        BKE_reportf(reports,
+                    RPT_ERROR,
+                    "The Material correction \"%s\" has no rendered map in %s yet; render it "
+                    "(Bake Now) and try again",
+                    name,
+                    info.ui_name);
+        return false;
+      }
+    }
+  }
+  if (r_channels.is_empty()) {
+    BKE_report(reports, RPT_ERROR, "The corrections lay nothing that could be baked");
+    return false;
+  }
+  return true;
+}
+
+bool BKE_paint_layers_corrections_bake_precheck(Material &ma,
+                                                const Span<MaterialPaintLayer *> selected,
+                                                ReportList *reports)
+{
+  MaterialPaintLayer *owner = nullptr;
+  Vector<MaterialPaintLayer *> run;
+  Vector<int> channels;
+  if (!corrections_bake_collect(ma, selected, true, reports, owner, run)) {
+    return false;
+  }
+  if (run.size() == 1 && run.first()->source == MA_PAINT_LAYER_SOURCE_IMAGE) {
+    BKE_report(reports, RPT_ERROR, "A Paint correction is a texture already");
+    return false;
+  }
+  if (corrections_bake_channels(ma, run, false, nullptr, channels)) {
+    return true;
+  }
+  /* Before a Material correction is rendered its channels do not all lay yet, so a failure here may
+   * be only that; the bake checks again once the render landed. */
+  for (const MaterialPaintLayer *effect : run) {
+    if (effect->source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      return true;
+    }
+  }
+  corrections_bake_channels(ma, run, false, reports, channels);
+  return false;
+}
+int BKE_paint_layers_corrections_bake_kind(Material &ma, const Span<MaterialPaintLayer *> selected)
+{
+  MaterialPaintLayer *owner = nullptr;
+  Vector<MaterialPaintLayer *> run;
+  if (!corrections_bake_collect(ma, selected, false, nullptr, owner, run)) {
+    return 0;
+  }
+  if (run.size() >= 2) {
+    return 2;
+  }
+  /* A Paint correction is a texture already. */
+  return run.first()->source == MA_PAINT_LAYER_SOURCE_IMAGE ? 0 : 1;
+}
+
+MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
+                                                      Material &ma,
+                                                      const Span<MaterialPaintLayer *> selected,
+                                                      ReportList *reports)
+{
+  MaterialPaintLayer *owner = nullptr;
+  Vector<MaterialPaintLayer *> run;
+  if (!corrections_bake_collect(ma, selected, true, reports, owner, run)) {
+    return nullptr;
+  }
+  if (run.size() == 1 && run.first()->source == MA_PAINT_LAYER_SOURCE_IMAGE) {
+    BKE_report(reports, RPT_ERROR, "A Paint correction is a texture already");
+    return nullptr;
+  }
+
+  Vector<int> channels;
+  if (!corrections_bake_channels(ma, run, /*require_rendered=*/true, reports, channels)) {
+    return nullptr;
+  }
+
+  /* The canvas: the size of the maps the set paints at, the material's otherwise. As in the mask
+   * merge, a map read at its own size has to be square and to agree with the others, or the bake
+   * would silently resample it. */
+  int size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) : 1024;
+  bool found_size = false;
+  Vector<int> tiles;
+  for (const MaterialPaintLayer *effect : run) {
+    if (paint_layer_kind_has_flag(*effect, PAINT_LAYER_KIND_READS_SOURCE)) {
+      continue;
+    }
+    for (const int channel : channels) {
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(*effect, channel);
+      Image *image = (record != nullptr) ? record->image : nullptr;
+      if (image == nullptr) {
+        continue;
+      }
+      int first_tile = 1001;
+      if (image->source == IMA_SRC_TILED) {
+        for (const ImageTile &tile : image->tiles) {
+          const int number = tile.tile_number == 0 ? 1001 : tile.tile_number;
+          if (!tiles.contains(number)) {
+            tiles.append(number);
+          }
+        }
+        if (const ImageTile *first = static_cast<const ImageTile *>(image->tiles.first)) {
+          first_tile = first->tile_number == 0 ? 1001 : first->tile_number;
+        }
+      }
+      else if (!tiles.contains(1001)) {
+        tiles.append(1001);
+      }
+      if (BKE_paint_layers_mapping_applies(ma, *effect)) {
+        continue;
+      }
+      int width = 0;
+      int height = 0;
+      if (ImBuf *probe = BKE_paint_material_mask_map_acquire(image, first_tile, nullptr, 0, 0)) {
+        width = probe->x;
+        height = probe->y;
+        IMB_freeImBuf(probe);
+      }
+      if (width <= 0 || width != height) {
+        BKE_report(reports, RPT_ERROR, "A correction map is not square or cannot be read");
+        return nullptr;
+      }
+      if (found_size && width != size) {
+        BKE_report(reports,
+                   RPT_ERROR,
+                   "The corrections use maps of different sizes; resize them before merging");
+        return nullptr;
+      }
+      size = width;
+      found_size = true;
+    }
+  }
+  if (tiles.is_empty()) {
+    tiles.append(1001);
+  }
+  /* A map that is not tile 1001 alone has to be tiled, or the other tiles have nowhere to go. */
+  const bool tiled = tiles.size() > 1 || tiles[0] != 1001;
+
+  char merged_name[MAX_NAME];
+  BLI_strncpy(merged_name,
+              (run.size() == 1 && run.first()->name[0] != '\0') ? run.first()->name :
+                                                                  "Merged Correction",
+              sizeof(merged_name));
+
+  /* Everything is built before the description is touched, so a failure leaves the material as it
+   * was. The maps are owned here until the new correction takes them. */
+  struct BakedMap {
+    int channel;
+    Image *image;
+  };
+  Vector<BakedMap> baked;
+  const auto free_baked = [&]() {
+    for (const BakedMap &map : baked) {
+      BKE_id_free(&bmain, map.image);
+    }
+    baked.clear();
+  };
+
+  for (const int channel : channels) {
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+        eMaterialPaintChannel(channel));
+    /* Transparent: a texel no correction reached lays nothing. A Normal map reads flat there. */
+    float fill[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+      fill[0] = fill[1] = 0.5f;
+      fill[2] = 1.0f;
+    }
+    char name[192];
+    BLI_snprintf(name, sizeof(name), "%s %s", merged_name, info.ui_name);
+    Image *image = paint_layers_map_create(bmain, name, size, info.is_color, fill, tiled);
+    if (image == nullptr) {
+      BKE_report(reports, RPT_ERROR, "Cannot create the baked texture");
+      free_baked();
+      return nullptr;
+    }
+    baked.append({channel, image});
+
+    bool wrote_any = false;
+    for (const int tile_number : tiles) {
+      ImageUser iuser;
+      BKE_imageuser_default(&iuser);
+      iuser.tile = tile_number;
+      PaintMaterialCompositeImageLayer row;
+      if (!BKE_paint_layers_corrections_row_describe(
+              ma, run, channel, size, &iuser, tile_number, row))
+      {
+        continue;
+      }
+      if (tiled && !BKE_paint_layers_map_coverage_tile_ensure(*image, tile_number)) {
+        BKE_report(reports, RPT_ERROR, "Cannot add a UDIM tile to the baked texture");
+        free_baked();
+        return nullptr;
+      }
+      void *lock = nullptr;
+      ImBuf *dst = BKE_image_acquire_ibuf(image, &iuser, &lock);
+      bool ok = dst != nullptr && dst->byte_data_for_write() != nullptr;
+      for (int y = 0; ok && y < dst->y; y += CORRECTIONS_BAKE_STRIP_ROWS) {
+        rcti area;
+        BLI_rcti_init(&area, 0, dst->x, y, min_ii(y + CORRECTIONS_BAKE_STRIP_ROWS, dst->y));
+        const int64_t count = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
+        Vector<float> color(count * 4);
+        Vector<float> coverage(count);
+        ok = BKE_paint_material_composite_eval_row_content(
+            row, color.data(), coverage.data(), &area, channel);
+        if (!ok) {
+          break;
+        }
+        /* The map's alpha is the coverage the corrections brought: the merged correction lays by
+         * its opacity times that, as the originals did one after the other. */
+        for (const int64_t i : IndexRange(count)) {
+          color[i * 4 + 3] = coverage[i];
+        }
+        BKE_paint_material_composite_linear_to_byte(color, area, *dst);
+      }
+      if (ok) {
+        dst->userflags |= IB_DISPLAY_BUFFER_INVALID;
+        BKE_image_mark_dirty(image, dst);
+      }
+      BKE_image_release_ibuf(image, dst, lock);
+      if (!ok) {
+        BKE_reportf(reports,
+                    RPT_ERROR,
+                    "Cannot bake the corrections in %s (the maps may differ in size)",
+                    info.ui_name);
+        free_baked();
+        return nullptr;
+      }
+      wrote_any = true;
+    }
+    BKE_image_partial_update_mark_full_update(image);
+    if (!wrote_any) {
+      /* Nothing lays here on any tile: no map, so the merged correction has no record's worth in it. */
+      BKE_id_free(&bmain, image);
+      baked.remove_last();
+    }
+  }
+  if (baked.is_empty()) {
+    BKE_report(reports, RPT_ERROR, "The corrections lay nothing that could be baked");
+    return nullptr;
+  }
+
+  MaterialPaintLayer *merged = BKE_paint_layers_correction_add(ma, owner, merged_name);
+  bool attached = merged != nullptr;
+  for (const BakedMap &map : baked) {
+    if (!attached) {
+      break;
+    }
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(map.channel);
+    attached = (paint_layer_channel_find(*merged, map.channel) != nullptr ||
+                BKE_paint_layers_channel_add(ma, merged, channel) != nullptr) &&
+               BKE_paint_layers_channel_set_image(ma, merged, channel, map.image);
+    if (attached) {
+      /* The record took its own user; the one the map was born with goes, or it could never become
+       * an orphan once its correction is removed. */
+      id_us_min(&map.image->id);
+    }
+  }
+  if (!attached) {
+    if (merged != nullptr) {
+      BKE_paint_layers_correction_remove(ma, merged);
+    }
+    free_baked();
+    BKE_report(reports, RPT_ERROR, "Cannot attach the baked textures to a new correction");
+    return nullptr;
+  }
+  /* Normal Replace is a choice of the lowest correction that lays there; the merged one keeps it. */
+  for (const MaterialPaintLayer *effect : run) {
+    if (paint_layer_effect_lays(ma, *effect, PAINT_MATERIAL_CHANNEL_NORMAL)) {
+      if (BKE_paint_layers_normal_replace(*effect)) {
+        BKE_paint_layers_channel_blend_set(
+            ma, *merged, PAINT_MATERIAL_CHANNEL_NORMAL, MA_PAINT_LAYER_BLEND_NORMAL_REPLACE);
+      }
+      break;
+    }
+  }
+
+  /* The merged correction takes the place of the topmost one it replaces, so the stack reads as it
+   * did. */
+  BLI_remlink(&owner->effects, merged);
+  BLI_insertlinkafter(&owner->effects, run.last(), merged);
+  /* Their maps and the renders a Material correction was baked from: nothing reads them once the
+   * corrections are gone. */
+  Vector<Image *> replaced_maps;
+  for (const MaterialPaintLayer *effect : run) {
+    paint_layer_maps_collect(*effect, replaced_maps);
+  }
+  for (MaterialPaintLayer *effect : run) {
+    BKE_paint_layers_correction_remove(ma, effect);
+  }
+  BKE_paint_layers_active_set(ma, merged->marker);
+  BKE_paint_layers_tag_edited(ma);
+  paint_layers_orphan_maps_free(bmain, replaced_maps);
+  return merged;
+}
+
+/** \} */
 
 }  // namespace blender

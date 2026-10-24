@@ -654,6 +654,12 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             layout.label(text="No active layer", icon='INFO')
             return
 
+        # More than the base alone means corrections the merge can fold into one map. The
+        # operator asks for confirmation: the merge cannot be undone.
+        if len(layer.mask_items) > 1:
+            layout.operator("paint.mask_merge", text="Merge Mask Stack", icon='MOD_MASK')
+            layout.separator()
+
         # A mask item has one map and no colour channels, which the row's channel widget would show
         # as filled; only its own settings are drawn.
         item = self._shown_mask_item(context, owner, layer)

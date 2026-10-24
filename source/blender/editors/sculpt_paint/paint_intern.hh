@@ -1460,6 +1460,7 @@ void PAINT_OT_image_select_warp_undo_step(wmOperatorType *ot);
 void PAINT_OT_id_color_pick(wmOperatorType *ot);
 void PAINT_OT_uv_island_pick(wmOperatorType *ot);
 void PAINT_OT_mask_item_bake(wmOperatorType *ot);
+void PAINT_OT_mask_merge(wmOperatorType *ot);
 
 /* Selection masks in the 3D Viewport (Sculpt texture painting): the operators live in
  * selection/paint_image_select_view3d.hh (declared in `blender::ed::sculpt_paint` next to the rest of

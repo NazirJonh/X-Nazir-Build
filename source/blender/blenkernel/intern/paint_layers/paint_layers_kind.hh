@@ -34,6 +34,13 @@ enum class PaintLayerDependencyKind : uint8_t {
   BakeCache = 1,
   /** The material a Material row reads: a user of that material, never a map to paint. */
   SourceMaterial = 2,
+  /**
+   * The PaintVector container a Curve Patch row owns: its curves are the row's content, so it is
+   * a dependency the way a source is, and the row's bake digests it.
+   */
+  CurvePatchVectors = 3,
+  /** The brush snapshot a Curve Patch row owns (the row's tool state, digested by the bake). */
+  BrushPreset = 4,
 };
 
 /** What a change to the dependency invalidates. */
@@ -291,6 +298,26 @@ inline void paint_layer_dependencies(MaterialPaintLayer &row,
                              -1};
     fn(dep);
   }
+  /* A Curve Patch row owns its curve container and brush snapshot outright: both are reported
+   * with owner semantics, like the material of a Material row. */
+  if (row.curve_patch != nullptr) {
+    if (row.curve_patch->vectors != nullptr) {
+      PaintLayerDependency dep{reinterpret_cast<ID **>(&row.curve_patch->vectors),
+                               PaintLayerDependencyKind::CurvePatchVectors,
+                               PAINT_LAYER_DEP_TOPOLOGY | PAINT_LAYER_DEP_PIXELS |
+                                   PAINT_LAYER_DEP_OWNERSHIP,
+                               -1};
+      fn(dep);
+    }
+    if (row.curve_patch->brush != nullptr) {
+      PaintLayerDependency dep{reinterpret_cast<ID **>(&row.curve_patch->brush),
+                               PaintLayerDependencyKind::BrushPreset,
+                               PAINT_LAYER_DEP_TOPOLOGY | PAINT_LAYER_DEP_PIXELS |
+                                   PAINT_LAYER_DEP_OWNERSHIP,
+                               -1};
+      fn(dep);
+    }
+  }
   /* The bake cache: the colour maps by channel, then the shared coverage map. */
   if (row.bake != nullptr) {
     for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
@@ -350,6 +377,8 @@ inline LibraryForeachIDCallbackFlag paint_layer_dependency_foreach_flag(const Pa
     case PaintLayerDependencyKind::ImageMap:
     case PaintLayerDependencyKind::BakeCache:
     case PaintLayerDependencyKind::SourceMaterial:
+    case PaintLayerDependencyKind::CurvePatchVectors:
+    case PaintLayerDependencyKind::BrushPreset:
       return IDWALK_CB_USER;
   }
   return IDWALK_CB_NOP;

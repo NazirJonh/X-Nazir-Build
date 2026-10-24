@@ -410,14 +410,17 @@ StackRow paint_correction_row_build(const Material &material,
   row.supported = true;
   const bool fill = effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
   const bool from_material = effect.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
+  const bool curve_patch = effect.source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH;
   row.name = effect.name[0] != '\0' ?
                  effect.name :
                  (from_material ? "Material Correction" :
-                                  (fill ? "Correction Fill" : "Correction Paint"));
+                                  (curve_patch ? "Curve Patch" :
+                                                 (fill ? "Correction Fill" : "Correction Paint")));
   row.name_buffer = const_cast<char *>(effect.name);
   const bool filter = effect.source == MA_PAINT_LAYER_SOURCE_FILTER;
   row.icon = filter        ? ICON_ARROW_LEFTRIGHT :
              from_material ? ICON_MATERIAL :
+             curve_patch   ? ICON_CURVE_BEZCURVE :
              fill          ? ICON_GP_DRAW_FILL :
                              ICON_BRUSH_DATA;
   if (BKE_paint_layers_is_anchor_point(effect)) {
@@ -1300,6 +1303,15 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
                 "A procedural ramp's grey laid over the active layer's mask",
                 ICON_MOD_MASK}),
         PaintLayerAddKind::MaskGradient);
+
+    /* 3D control curves stamped through a brush snapshot of the effect's own. Only an effect: there
+     * is no Curve Patch layer. */
+    add(effect({"CURVE_PATCH_CORRECTION",
+                N_("Curve Patch"),
+                "3D control curves stamped through the effect's own brush snapshot, laid over the "
+                "active layer's colour, below the layer's own blend",
+                ICON_CURVE_BEZCURVE}),
+        PaintLayerAddKind::CurvePatchEffect);
     return table;
   }();
   return entries.as_span();
@@ -1821,6 +1833,17 @@ class PaintLayersStackSource final : public StackSource,
       params.bmain = CTX_data_main(&C);
     }
     params.kind = entry.kind;
+    if (params.kind == PaintLayerAddKind::CurvePatchEffect) {
+      /* The payload is created with the effect: a database for its two IDs, and the active brush as
+       * the snapshot source (a fresh default stands in when none is active). */
+      params.bmain = CTX_data_main(&C);
+      const Scene *scene = CTX_data_scene(&C);
+      if (scene != nullptr && scene->toolsettings != nullptr &&
+          scene->toolsettings->sculpt != nullptr)
+      {
+        params.curve_patch_brush = BKE_paint_brush(&scene->toolsettings->sculpt->paint);
+      }
+    }
     if (is_anchor_point || is_anchor_point_reader) {
       /* The active item decides where the point lands: a layer or a content correction publishes
        * content, a mask item publishes the mask. Canonicalize the effect/mask item to its owner
@@ -1917,7 +1940,8 @@ class PaintLayersStackSource final : public StackSource,
                                     PaintLayerAddKind::CorrectionFill,
                                     PaintLayerAddKind::CorrectionMaterial,
                                     PaintLayerAddKind::AnchorPointCorrection,
-                                    PaintLayerAddKind::GradientCorrection);
+                                    PaintLayerAddKind::GradientCorrection,
+                                    PaintLayerAddKind::CurvePatchEffect);
     if (anchor != nullptr && !is_correction) {
       /* A correction is not a place a row can be added next to: the row it hangs on is. */
       if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {

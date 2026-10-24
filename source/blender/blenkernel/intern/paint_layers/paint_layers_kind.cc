@@ -194,6 +194,22 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      PAINT_LAYER_KIND_READS_ANCHOR_POINT},
+    /* A Curve Patch owns the channel maps its 3D control curves are stamped into, through a
+     * private brush snapshot. It is therefore paintable like an Image row (NOT
+     * #PAINT_LAYER_KIND_READS_SOURCE, which means "owns no map"): its maps are both the stroke
+     * target during a session and the output of its bake. It exists only as a content effect: it
+     * lays the stamped maps over the row it hangs on, below the row's own blend, and is never a
+     * layer of the stack. The kind has no float parameters of its own: the tool settings live in
+     * the snapshot. */
+    {MA_PAINT_LAYER_SOURCE_CURVE_PATCH,
+     0,
+     "Curve Patch",
+     PaintLayerKindCategory::Source,
+     uint8_t(paint_layer_role_bit(MA_PAINT_LAYER_ROLE_EFFECT)),
+     nullptr,
+     0,
+     0,
+     true},
 };
 
 const PaintLayerKindInfo *paint_layer_kind_find(const int8_t source, const int16_t subtype)

@@ -4,7 +4,12 @@
 
 #include "testing/testing.h"
 
+#include <cstring>
+
 #include "BKE_appdir.hh"
+#include "BKE_attribute.hh"
+#include "BKE_curve_patch.hh"
+#include "BKE_curves.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -230,6 +235,321 @@ TEST_F(PaintVectorTest, SaveReloadKeepsAllItems)
   BLO_blendfiledata_free(bfd);
   BLI_delete(filepath, false, false);
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch serialization
+ * \{ */
+
+/** A 3-point bezier curve with the required attributes (positions, handles + types, radius) and,
+ * when \a with_optional is set, the full optional `paintcurve_*` attribute set of a Curve Patch
+ * control curve. Handle types stay free / vector / align so no auto-handle pass is involved. */
+static bke::CurvesGeometry make_curve_patch_curve(const bool with_optional)
+{
+  constexpr int point_num = 3;
+  bke::CurvesGeometry geom(point_num, 1);
+  geom.offsets_for_write()[0] = 0;
+  geom.offsets_for_write()[1] = point_num;
+  geom.fill_curve_types(CURVE_TYPE_BEZIER);
+  geom.resolution_for_write().fill(12);
+  geom.cyclic_for_write()[0] = true;
+
+  const MutableSpan<float3> positions = geom.positions_for_write();
+  positions[0] = float3(0.0f, 0.0f, 0.0f);
+  positions[1] = float3(1.0f, 0.5f, 0.25f);
+  positions[2] = float3(2.0f, 0.0f, 0.0f);
+  const MutableSpan<float3> handles_left = geom.handle_positions_left_for_write();
+  const MutableSpan<float3> handles_right = geom.handle_positions_right_for_write();
+  handles_left[0] = float3(-0.5f, -0.25f, 0.0f);
+  handles_right[0] = float3(0.5f, 0.25f, 0.0f);
+  handles_left[1] = float3(0.5f, 0.5f, 0.25f);
+  handles_right[1] = float3(1.5f, 0.5f, 0.25f);
+  handles_left[2] = float3(1.5f, 0.25f, 0.0f);
+  handles_right[2] = float3(2.5f, -0.25f, 0.0f);
+  const MutableSpan<int8_t> types_left = geom.handle_types_left_for_write();
+  const MutableSpan<int8_t> types_right = geom.handle_types_right_for_write();
+  types_left[0] = BEZIER_HANDLE_FREE;
+  types_right[0] = BEZIER_HANDLE_FREE;
+  types_left[1] = BEZIER_HANDLE_ALIGN;
+  types_right[1] = BEZIER_HANDLE_ALIGN;
+  types_left[2] = BEZIER_HANDLE_VECTOR;
+  types_right[2] = BEZIER_HANDLE_VECTOR;
+  const MutableSpan<float> radii = geom.radius_for_write();
+  radii[0] = 0.25f;
+  radii[1] = 0.5f;
+  radii[2] = 0.75f;
+
+  if (with_optional) {
+    bke::MutableAttributeAccessor attrs = geom.attributes_for_write();
+    bke::SpanAttributeWriter<float3> normals = attrs.lookup_or_add_for_write_span<float3>(
+        bke::CURVE_PATCH_ATTR_SURFACE_NORMAL, bke::AttrDomain::Point);
+    normals.span[0] = float3(0.0f, 0.0f, 1.0f);
+    normals.span[1] = float3(0.1f, 0.0f, 0.9f);
+    normals.span[2] = float3(0.0f, 0.2f, 0.8f);
+    normals.finish();
+    bke::SpanAttributeWriter<float> strength = attrs.lookup_or_add_for_write_span<float>(
+        bke::CURVE_PATCH_ATTR_STAMP_STRENGTH, bke::AttrDomain::Point);
+    strength.span[0] = 0.8f;
+    strength.span[1] = 0.6f;
+    strength.span[2] = 1.0f;
+    strength.finish();
+    bke::SpanAttributeWriter<float> angle = attrs.lookup_or_add_for_write_span<float>(
+        bke::CURVE_PATCH_ATTR_STAMP_ANGLE, bke::AttrDomain::Point);
+    angle.span[0] = 0.25f;
+    angle.span[1] = -0.5f;
+    angle.span[2] = 1.5f;
+    angle.finish();
+    bke::SpanAttributeWriter<int> texture = attrs.lookup_or_add_for_write_span<int>(
+        bke::CURVE_PATCH_ATTR_STAMP_TEXTURE, bke::AttrDomain::Point);
+    texture.span[0] = -1;
+    texture.span[1] = 2;
+    texture.span[2] = 0;
+    texture.finish();
+    bke::SpanAttributeWriter<int> seed = attrs.lookup_or_add_for_write_span<int>(
+        bke::CURVE_PATCH_ATTR_STAMP_SEED, bke::AttrDomain::Point);
+    seed.span[0] = 11;
+    seed.span[1] = 22;
+    seed.span[2] = 33;
+    seed.finish();
+  }
+
+  geom.tag_topology_changed();
+  geom.tag_positions_changed();
+  return geom;
+}
+
+/** A frozen parameter set with every field off its default, for the round-trip tests. */
+static bke::CurvePatchParams make_curve_patch_params()
+{
+  bke::CurvePatchParams params;
+  params.radius = 0.35f;
+  params.radius_per_size = 0.01f;
+  params.swap_axis = true;
+  params.length_mode = bke::CurvePatchLengthMode::Repeat;
+  params.length_repeat = 3;
+  params.end_falloff_mode = bke::CurvePatchEndFalloff::Smooth;
+  params.end_falloff_percent = 15;
+  params.start_point_shape = bke::CurvePatchPointShape::Round;
+  params.end_point_shape = bke::CurvePatchPointShape::Triangle;
+  params.stamp_mode = bke::CurvePatchStampMode::Stamps;
+  params.stamp_layout = bke::CurvePatchStampLayout::Points;
+  params.stamp_projection = bke::CurvePatchStampProjection::Planar;
+  params.stamp_use_random_angle = true;
+  params.stamp_size_random = 0.2f;
+  params.stamp_strength_random = 0.3f;
+  params.stamp_seed = 42;
+  params.spacing_frac = 0.15f;
+  params.jitter_amount = 0.05f;
+  params.base_angle = 0.75f;
+  params.random_angle = 1.25f;
+  params.plane_normal = float3(0.2f, 0.3f, 0.9f);
+  params.final_quality = true;
+  return params;
+}
+
+TEST_F(PaintVectorTest, CurvePatchParamsConvertRoundTrip)
+{
+  const PaintVectorCurveParams dna = BKE_paint_vector_curve_params_encode(make_curve_patch_params());
+
+  const bke::CurvePatchParams decoded = BKE_paint_vector_curve_params_decode(dna);
+  EXPECT_TRUE(decoded == make_curve_patch_params());
+
+  const PaintVectorCurveParams reencoded = BKE_paint_vector_curve_params_encode(decoded);
+  EXPECT_EQ(std::memcmp(&dna, &reencoded, sizeof(PaintVectorCurveParams)), 0);
+}
+
+TEST_F(PaintVectorTest, CurvePatchParamsDecodeDefaults)
+{
+  PaintVectorCurveParams zeroed{};
+  const bke::CurvePatchParams decoded = BKE_paint_vector_curve_params_decode(zeroed);
+  /* The DNA zero state decodes to the source struct's defaults (radius 0, ribbon/fill/curve
+   * stamping, no falloff). */
+  EXPECT_FLOAT_EQ(decoded.radius, 0.0f);
+  EXPECT_FALSE(decoded.swap_axis);
+  EXPECT_EQ(decoded.length_mode, bke::CurvePatchLengthMode::Default);
+  EXPECT_EQ(decoded.length_repeat, 0);
+  EXPECT_EQ(decoded.end_falloff_mode, bke::CurvePatchEndFalloff::None);
+  EXPECT_EQ(decoded.stamp_mode, bke::CurvePatchStampMode::Ribbon);
+  EXPECT_EQ(decoded.stamp_layout, bke::CurvePatchStampLayout::Fill);
+  EXPECT_EQ(decoded.stamp_projection, bke::CurvePatchStampProjection::Curve);
+  EXPECT_EQ(decoded.stamp_seed, 0u);
+  EXPECT_FLOAT_EQ(decoded.plane_normal.z, 0.0f);
+  EXPECT_FALSE(decoded.final_quality);
+}
+
+/** A container holding a Shape item and a full Curve Patch item, saved and reloaded. */
+TEST_F(PaintVectorTest, SaveReloadKeepsCurvePatchItems)
+{
+  PaintVector *pv = BKE_paint_vector_add(bmain, "PVCurvePatchSave");
+  id_fake_user_set(&pv->id);
+
+  PaintVectorItem &shape = BKE_paint_vector_item_add(*pv);
+  shape.type = PAINT_VECTOR_ITEM_SHAPE;
+  shape.shape_type = PAINT_SHAPE_RECT;
+  BKE_paint_vector_item_style_init(shape);
+
+  const bke::CurvesGeometry reference_curve = make_curve_patch_curve(true);
+  const bke::CurvePatchParams reference_params = make_curve_patch_params();
+  PaintVectorItem &curve = BKE_paint_vector_item_add(*pv);
+  curve.type = PAINT_VECTOR_ITEM_CURVE_PATCH;
+  curve.curve_patch_geometry.wrap() = reference_curve;
+  curve.curve_patch_params = BKE_paint_vector_curve_params_encode(reference_params);
+  BLI_strncpy(curve.curve_name, "Curve A", sizeof(curve.curve_name));
+  curve.surface_binding.topology_hash = 0xC0FFEE11u;
+  curve.surface_binding.verts_num = 42;
+  curve.surface_binding.corner_tris_num = 80;
+  curve.surface_binding.state = PAINT_VECTOR_BIND_BOUND;
+  pv->active_item = 1;
+
+  char filepath[FILE_MAX];
+  BLI_path_join(filepath, sizeof(filepath), BKE_tempdir_session(), "paint_vector_cp_test.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  /* Saving must not disturb the live document: the write prepares a temporary copy, so the item
+   * stays readable for the next tool entry (this used to leave a null geometry runtime and crash
+   * the first Curve Patch edit after any undo push). */
+  ASSERT_TRUE(BKE_paint_vector_item_curve_geometry_is_valid(curve));
+  const bke::CurvesGeometry &live_geom = curve.curve_patch_geometry.wrap();
+  ASSERT_EQ(live_geom.points_num(), 3);
+  EXPECT_EQ(live_geom.positions()[1], float3(1.0f, 0.5f, 0.25f));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  PaintVector *loaded = nullptr;
+  for (PaintVector &cur : bfd->main->paint_vectors) {
+    if (STREQ(cur.id.name + 2, "PVCurvePatchSave")) {
+      loaded = &cur;
+      break;
+    }
+  }
+  ASSERT_NE(loaded, nullptr);
+  ASSERT_EQ(loaded->items_num, 2);
+
+  /* The Shape item survives next to the curve, untouched. */
+  EXPECT_EQ(loaded->items[0].type, PAINT_VECTOR_ITEM_SHAPE);
+  EXPECT_EQ(loaded->items[0].shape_type, PAINT_SHAPE_RECT);
+
+  PaintVectorItem &loaded_curve = loaded->items[1];
+  ASSERT_EQ(loaded_curve.type, PAINT_VECTOR_ITEM_CURVE_PATCH);
+  EXPECT_STREQ(loaded_curve.curve_name, "Curve A");
+  EXPECT_EQ(loaded->active_item, 1);
+  /* The surface binding signature is plain item data and survives the round trip. */
+  EXPECT_EQ(loaded_curve.surface_binding.topology_hash, 0xC0FFEE11u);
+  EXPECT_EQ(loaded_curve.surface_binding.verts_num, 42);
+  EXPECT_EQ(loaded_curve.surface_binding.corner_tris_num, 80);
+  EXPECT_EQ(loaded_curve.surface_binding.state, PAINT_VECTOR_BIND_BOUND);
+
+  PaintVectorCurveParams reencoded = BKE_paint_vector_curve_params_encode(reference_params);
+  EXPECT_EQ(std::memcmp(&loaded_curve.curve_patch_params,
+                        &reencoded,
+                        sizeof(PaintVectorCurveParams)),
+            0);
+
+  const bke::CurvesGeometry &geom = loaded_curve.curve_patch_geometry.wrap();
+  ASSERT_EQ(geom.curves_num(), 1);
+  ASSERT_EQ(geom.points_num(), 3);
+  EXPECT_EQ(geom.curve_types()[0], CURVE_TYPE_BEZIER);
+  EXPECT_TRUE(geom.cyclic()[0]);
+  EXPECT_EQ(geom.resolution()[0], 12);
+
+  const Span<float3> positions = geom.positions();
+  EXPECT_EQ(positions[0], float3(0.0f, 0.0f, 0.0f));
+  EXPECT_EQ(positions[1], float3(1.0f, 0.5f, 0.25f));
+  const std::optional<Span<float3>> handles_left = geom.handle_positions_left();
+  const std::optional<Span<float3>> handles_right = geom.handle_positions_right();
+  ASSERT_TRUE(handles_left.has_value());
+  ASSERT_TRUE(handles_right.has_value());
+  EXPECT_EQ((*handles_left)[1], float3(0.5f, 0.5f, 0.25f));
+  EXPECT_EQ((*handles_right)[2], float3(2.5f, -0.25f, 0.0f));
+  EXPECT_EQ(geom.handle_types_left()[0], BEZIER_HANDLE_FREE);
+  EXPECT_EQ(geom.handle_types_right()[2], BEZIER_HANDLE_VECTOR);
+
+  const VArray<float> radii = geom.radius();
+  EXPECT_FLOAT_EQ(radii[0], 0.25f);
+  EXPECT_FLOAT_EQ(radii[2], 0.75f);
+
+  const bke::AttributeAccessor attrs = geom.attributes();
+  const bke::AttributeReader<float3> normals = attrs.lookup_or_default<float3>(
+      bke::CURVE_PATCH_ATTR_SURFACE_NORMAL, bke::AttrDomain::Point, float3(0.0f, 0.0f, 1.0f));
+  EXPECT_EQ(normals.varray[1], float3(0.1f, 0.0f, 0.9f));
+  const bke::AttributeReader<float> strength = attrs.lookup_or_default<float>(
+      bke::CURVE_PATCH_ATTR_STAMP_STRENGTH, bke::AttrDomain::Point, 1.0f);
+  EXPECT_FLOAT_EQ(strength.varray[0], 0.8f);
+  const bke::AttributeReader<float> angle = attrs.lookup_or_default<float>(
+      bke::CURVE_PATCH_ATTR_STAMP_ANGLE, bke::AttrDomain::Point, 0.0f);
+  EXPECT_FLOAT_EQ(angle.varray[2], 1.5f);
+  const bke::AttributeReader<int> texture = attrs.lookup_or_default<int>(
+      bke::CURVE_PATCH_ATTR_STAMP_TEXTURE, bke::AttrDomain::Point, -1);
+  EXPECT_EQ(texture.varray[1], 2);
+  const bke::AttributeReader<int> seed = attrs.lookup_or_default<int>(
+      bke::CURVE_PATCH_ATTR_STAMP_SEED, bke::AttrDomain::Point, 0);
+  EXPECT_EQ(seed.varray[2], 33);
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
+/** Optional attributes stay absent on read (their defaults apply lazily), and an empty geometry
+ * is a valid persisted Curve Patch item. */
+TEST_F(PaintVectorTest, CurvePatchDefaultsAndEmptyGeometry)
+{
+  PaintVector *pv = BKE_paint_vector_add(bmain, "PVCurvePatchDefaults");
+  id_fake_user_set(&pv->id);
+
+  const bke::CurvesGeometry reference_curve = make_curve_patch_curve(false);
+  PaintVectorItem &bare = BKE_paint_vector_item_add(*pv);
+  bare.type = PAINT_VECTOR_ITEM_CURVE_PATCH;
+  bare.curve_patch_geometry.wrap() = reference_curve;
+  BLI_strncpy(bare.curve_name, "Bare", sizeof(bare.curve_name));
+
+  PaintVectorItem &empty = BKE_paint_vector_item_add(*pv);
+  empty.type = PAINT_VECTOR_ITEM_CURVE_PATCH;
+  BLI_strncpy(empty.curve_name, "Empty", sizeof(empty.curve_name));
+
+  char filepath[FILE_MAX];
+  BLI_path_join(filepath, sizeof(filepath), BKE_tempdir_session(), "paint_vector_cp_def.blend");
+  BlendFileWriteParams write_params{};
+  ASSERT_TRUE(BLO_write_file(bmain, filepath, 0, &write_params, nullptr));
+
+  BlendFileReadReport read_report{};
+  BlendFileData *bfd = BLO_read_from_file(filepath, BLO_READ_SKIP_NONE, &read_report);
+  ASSERT_NE(bfd, nullptr);
+
+  PaintVector *loaded = nullptr;
+  for (PaintVector &cur : bfd->main->paint_vectors) {
+    if (STREQ(cur.id.name + 2, "PVCurvePatchDefaults")) {
+      loaded = &cur;
+      break;
+    }
+  }
+  ASSERT_NE(loaded, nullptr);
+  ASSERT_EQ(loaded->items_num, 2);
+
+  const bke::CurvesGeometry &geom = loaded->items[0].curve_patch_geometry.wrap();
+  ASSERT_EQ(geom.points_num(), 3);
+  const bke::AttributeAccessor attrs = geom.attributes();
+  EXPECT_FALSE(attrs.contains(bke::CURVE_PATCH_ATTR_SURFACE_NORMAL));
+  EXPECT_FALSE(attrs.contains(bke::CURVE_PATCH_ATTR_STAMP_STRENGTH));
+  EXPECT_FALSE(attrs.contains(bke::CURVE_PATCH_ATTR_STAMP_ANGLE));
+  EXPECT_FALSE(attrs.contains(bke::CURVE_PATCH_ATTR_STAMP_TEXTURE));
+  EXPECT_FALSE(attrs.contains(bke::CURVE_PATCH_ATTR_STAMP_SEED));
+  /* Zeroed DNA params decode to the defaults a fresh build would use. */
+  const bke::CurvePatchParams decoded = BKE_paint_vector_curve_params_decode(
+      loaded->items[0].curve_patch_params);
+  EXPECT_FLOAT_EQ(decoded.radius, 0.0f);
+
+  /* The empty item stays empty and valid. */
+  const bke::CurvesGeometry &empty_geom = loaded->items[1].curve_patch_geometry.wrap();
+  EXPECT_EQ(empty_geom.curves_num(), 0);
+  EXPECT_TRUE(empty_geom.is_empty());
+
+  BLO_blendfiledata_free(bfd);
+  BLI_delete(filepath, false, false);
+}
+
+/** \} */
 
 }  // namespace
 

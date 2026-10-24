@@ -14,8 +14,10 @@
 #include <string>
 #include <unordered_set>
 
+#include "DNA_brush_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_paint_vector_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
@@ -662,6 +664,28 @@ static void rna_GpencilColorData_fill_image_set(PointerRNA *ptr,
 /** \name Paint Layer
  * \{ */
 
+/** The curve container of a Curve Patch row's payload, as an ID pointer. */
+static PointerRNA rna_MaterialPaintLayerCurvePatch_vectors_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerCurvePatch *payload = static_cast<const MaterialPaintLayerCurvePatch *>(
+      ptr->data);
+  if (payload == nullptr || payload->vectors == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_id_pointer_create(&payload->vectors->id);
+}
+
+/** The owned brush snapshot of a Curve Patch row, as an ID pointer (read-only in RNA). */
+static PointerRNA rna_MaterialPaintLayerCurvePatch_brush_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayerCurvePatch *payload = static_cast<const MaterialPaintLayerCurvePatch *>(
+      ptr->data);
+  if (payload == nullptr || payload->brush == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_id_pointer_create(&payload->brush->id);
+}
+
 static void rna_Material_paint_layers_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
 {
   Material *ma = static_cast<Material *>(ptr->data);
@@ -789,6 +813,10 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
       /* Each Material row reads a material of its own, so its settings are its own. */
       params.bmain = bmain;
       break;
+    case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
+      /* A Curve Patch is only ever an effect of a layer, never a layer of its own. */
+      BKE_report(reports, RPT_ERROR, "A Curve Patch can only be added as an effect of a layer");
+      return nullptr;
     default:
       params.kind = PaintLayerAddKind::Paint;
       break;
@@ -3660,6 +3688,11 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
      0,
      "Generator",
      "A procedural colour and coverage built from shading coordinates"},
+    {MA_PAINT_LAYER_SOURCE_CURVE_PATCH,
+     "CURVE_PATCH",
+     0,
+     "Curve Patch",
+     "Maps stamped from 3D control curves through a private brush snapshot"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -3966,6 +3999,40 @@ static const EnumPropertyItem rna_enum_material_paint_layer_bake_size_preset_ite
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static void rna_def_material_paint_layer_curve_patch(BlenderRNA *brna)
+{
+  StructRNA *srna;
+  PropertyRNA *prop;
+
+  srna = RNA_def_struct(brna, "MaterialPaintLayerCurvePatch", nullptr);
+  RNA_def_struct_sdna(srna, "MaterialPaintLayerCurvePatch");
+  RNA_def_struct_ui_text(srna,
+                         "Paint Layer Curve Patch",
+                         "The owned payload of a Curve Patch layer: its curve container and brush "
+                         "snapshot");
+
+  /* The container is a real ID (bpy.data.paint_vectors); the row owns it one to one. */
+  prop = RNA_def_property(srna, "vectors", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "PaintVector");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayerCurvePatch_vectors_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Vectors", "The curve container the Curve Patch layer paints from");
+
+  /* The snapshot is owned by the payload; assigning a brush goes through
+   * #PAINT_OT_curve_patch_layer_brush_assign, which duplicates it. */
+  prop = RNA_def_property(srna, "brush", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "Brush");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayerCurvePatch_brush_get", nullptr, nullptr, nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Brush",
+      "The private brush snapshot this Curve Patch layer paints with; use Assign Brush to replace it");
+}
+
 static void rna_def_material_paint_layer(BlenderRNA *brna)
 {
   StructRNA *srna;
@@ -3995,6 +4062,13 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
                                 nullptr);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(prop, "Marker", "Stable identity of the paint layer");
+
+  /* The payload of a Curve Patch row; null for every other kind. */
+  prop = RNA_def_property(srna, "curve_patch", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "MaterialPaintLayerCurvePatch");
+  RNA_def_property_pointer_sdna(prop, nullptr, "curve_patch");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Curve Patch", "The curve container and brush snapshot the row owns");
 
   /* The channel of its source a mask correction that reads a material takes its grey from. Only
    * the channels a grey can be taken from are offered. */
@@ -6204,6 +6278,7 @@ void RNA_def_material(BlenderRNA *brna)
   rna_def_material_paint_layer_issue(brna);
   rna_def_material_paint_layer_kind_param(brna);
   rna_def_material_paint_layer_id_color(brna);
+  rna_def_material_paint_layer_curve_patch(brna);
   rna_def_material_paint_layer(brna);
   rna_def_material_paint_layer_channel(brna);
   rna_def_material_paint_layer_channel_settings(brna);

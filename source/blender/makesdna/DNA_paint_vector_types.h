@@ -20,6 +20,7 @@
 #pragma once
 
 #include "DNA_ID.h"
+#include "DNA_curves_types.h"
 #include "DNA_scene_types.h"
 
 namespace blender {
@@ -131,6 +132,72 @@ struct PaintVectorSpace {
 };
 
 /**
+ * DNA mirror of `bke::CurvePatchParams` (`BKE_curve_patch.hh`), which cannot live in DNA itself.
+ * Field order and names match the source struct one to one, so the trivial converter in
+ * `BKE_paint_vector.hh` stays a field-by-field copy. Enums are widened to `int`; bools to `int`.
+ */
+struct PaintVectorCurveParams {
+  float radius = 0.0f;
+  float radius_per_size = 0.0f;
+  int swap_axis = 0;
+
+  int length_mode = 0;
+  int length_repeat = 1;
+
+  int end_falloff_mode = 0;
+  int end_falloff_percent = 0;
+  int start_point_shape = 0;
+  int end_point_shape = 0;
+
+  int stamp_mode = 0;
+  int stamp_layout = 0;
+  int stamp_projection = 0;
+  int stamp_use_random_angle = 0;
+  float stamp_size_random = 0.0f;
+  float stamp_strength_random = 0.0f;
+  int stamp_seed = 0;
+  float spacing_frac = 0.0f;
+  float jitter_amount = 0.0f;
+  float base_angle = 0.0f;
+  float random_angle = 0.0f;
+
+  float plane_normal[3] = {0.0f, 0.0f, 1.0f};
+
+  int final_quality = 0;
+  char _pad[4] = {};
+};
+
+/** #PaintVectorSurfaceBinding::state. */
+enum ePaintVectorBindState {
+  /** Control points are plain object-space positions; nothing is tracked. */
+  PAINT_VECTOR_BIND_NONE = 0,
+  /** Every control point is anchored to the surface (see #PaintVectorSurfaceBinding). */
+  PAINT_VECTOR_BIND_BOUND = 1,
+  /** The surface topology no longer matches: the points stay where they were stored and the user
+   * must accept or re-bind them explicitly. */
+  PAINT_VECTOR_BIND_BROKEN = 2,
+};
+
+/**
+ * Surface anchoring of a Curve Patch item, so the curve follows a deformed or animated mesh.
+ *
+ * The per-point anchors are attributes of #PaintVectorItem::curve_patch_geometry (serialized with
+ * it): `paintcurve_bind_tri` (int, corner-tri index of the bind mesh, -1 = unbound),
+ * `paintcurve_bind_bary` (float3 barycentric weights) and `paintcurve_bind_offset` (float, distance
+ * along the interpolated normal). This struct only holds what validates them: the topology
+ * signature of the mesh they were computed on. A mismatch means the indices are meaningless, so
+ * the curve is never re-evaluated through them (state #PAINT_VECTOR_BIND_BROKEN).
+ */
+struct PaintVectorSurfaceBinding {
+  /** Hash of the face/corner topology of the bind mesh (positions excluded). */
+  uint32_t topology_hash = 0;
+  int verts_num = 0;
+  int corner_tris_num = 0;
+  /** #ePaintVectorBindState. */
+  int state = PAINT_VECTOR_BIND_NONE;
+};
+
+/**
  * One element of a #PaintVector: the geometry, its space and the style snapshot.
  *
  * \note Ownership: the struct is shallow-copied *only* inside `paint_vector_copy_data` /
@@ -138,6 +205,11 @@ struct PaintVectorSpace {
  * `CurveMapping` / `ColorBand`) are duplicated explicitly. Everywhere else the pointers are
  * shared, never byte-copied without fixing the owned data. `DNA_DEFINE_CXX_METHODS` is
  * intentionally not used (the explicit copy paths rely on assignment).
+ *
+ * \note The embedded #PaintVectorItem::curve_patch_geometry is the one non-flat owned member: it
+ * is bitwise-copied like the rest (the DNA `CurvesGeometry` stays trivial), but the copy sites
+ * must re-establish it through a placement-new `bke::CurvesGeometry` whenever it holds curves,
+ * and the free path destroys it. Same contract as #PaintCurve::geometry.
  */
 struct PaintVectorItem {
   /* Owned flat arrays. Kept together so the struct has no implicit padding between the pointers
@@ -172,6 +244,20 @@ struct PaintVectorItem {
   int type = PAINT_VECTOR_ITEM_SHAPE;
   /** #ePaintShapeType of the geometry (Rect/Ellipse/Polygon/...), independent of #type above. */
   int shape_type = PAINT_SHAPE_RECT;
+
+  /** Curve Patch item payload; valid when #type == #PAINT_VECTOR_ITEM_CURVE_PATCH.
+   * Embedded like #PaintCurve::geometry; attribute contract: required position/handles+types/
+   * radius, optional per-point paintcurve_surface_normal/stamp_strength/stamp_angle/
+   * stamp_texture(-1=Auto)/stamp_seed (defaults applied on read). */
+  CurvesGeometry curve_patch_geometry;
+  /** Frozen per-curve parameters, a mirror of `bke::CurvePatchParams`. */
+  PaintVectorCurveParams curve_patch_params = {};
+  /** Name shown in the Active Tool curve list. */
+  char curve_name[64] = "";
+  /* Pads the struct to a multiple of the pointer size, as every DNA struct must. */
+  char _pad_curve_patch[4] = {};
+  /** Surface anchoring of the curve's control points. */
+  PaintVectorSurfaceBinding surface_binding = {};
 };
 
 /**

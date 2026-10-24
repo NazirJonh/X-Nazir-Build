@@ -17,12 +17,18 @@
 #include "DNA_paint_vector_types.h"
 
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_vector.h"
+#include "BLI_resource_scope.hh"
 #include "BLI_span.hh"
 #include "BLI_string.h"
 #include "BLI_string_ref.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BKE_colortools.hh"
+#include "BKE_curve_patch.hh"
+#include "BKE_curves.hh"
+#include "BKE_customdata.hh"
 #include "BKE_idprop.hh"
 #include "BKE_idtype.hh"
 #include "BKE_lib_id.hh"
@@ -36,6 +42,9 @@
 
 #include "BLT_translation.hh"
 
+#include <algorithm>
+#include <cstring>
+#include <memory>
 #include <type_traits>
 
 namespace blender {
@@ -46,9 +55,12 @@ namespace blender {
 
 /* Every shallow copy of a #PaintVectorItem or #PaintShapeSettings below relies on the whole
  * struct being bitwise copyable, and on the copy sites then re-duplicating every owned pointer
- * (points / splines, stroke_profile / fill_profile / stroke_ramp). Adding an
- * owned field to either DNA struct requires updating all of those sites; these asserts keep the
- * bitwise assumption explicit so a non-trivial member cannot sneak in silently. */
+ * (points / splines, stroke_profile / fill_profile / stroke_ramp). The one non-flat owned member
+ * is the embedded #PaintVectorItem::curve_patch_geometry: the DNA `CurvesGeometry` is bitwise
+ * copyable too, but whenever it holds curves the copy sites must re-establish it with a
+ * placement-new `bke::CurvesGeometry` (as #PaintCurve does), and the free path destroys it.
+ * Adding an owned field to either DNA struct requires updating all of those sites; these asserts
+ * keep the bitwise assumption explicit so a non-trivial member cannot sneak in silently. */
 static_assert(std::is_trivially_copyable_v<PaintVectorItem>,
               "PaintVectorItem is shallow-copied in this file; every owned pointer it gains must "
               "be re-duplicated by the copy sites below");
@@ -109,6 +121,26 @@ static void paint_vector_item_free(PaintVectorItem &item)
   paint_vector_item_points_free(item);
   paint_vector_item_splines_free(item);
   BKE_paint_vector_style_free(item.style);
+  /* The embedded geometry owns its attribute arrays; a Shape item's is an empty state, which the
+   * destructor accepts. Raw file-read bytes are valid to destroy too: #blend_read fixed their
+   * pointers, as for #PaintCurve::geometry. */
+  item.curve_patch_geometry.wrap().~CurvesGeometry();
+}
+
+/** A properly constructed, empty embedded geometry on \a item, replacing the bitwise state. */
+static void paint_vector_item_geometry_init(PaintVectorItem &item)
+{
+  new (&item.curve_patch_geometry) bke::CurvesGeometry();
+}
+
+bool BKE_paint_vector_item_curve_geometry_is_valid(const PaintVectorItem &item)
+{
+  /* Both runtimes decide readability: the geometry's own (offsets, vertex groups) and the
+   * attribute storage's, which its copy constructor dereferences unconditionally. A write-time
+   * view leaves them null, and every attribute read then crashes. */
+  return item.type == PAINT_VECTOR_ITEM_CURVE_PATCH &&
+         item.curve_patch_geometry.runtime != nullptr &&
+         item.curve_patch_geometry.attribute_storage.runtime != nullptr;
 }
 
 void BKE_paint_vector_items_clear(PaintVector &pv)
@@ -133,7 +165,42 @@ PaintVectorItem &BKE_paint_vector_item_add(PaintVector &pv)
   pv.items = items;
   pv.items_num++;
   pv.active_item = pv.items_num - 1;
+  /* The new item's embedded geometry starts properly constructed, not merely zeroed: it must be
+   * destructible through the free path and copyable through the placement-new copy sites. */
+  paint_vector_item_geometry_init(items[pv.items_num - 1]);
   return pv.items[pv.items_num - 1];
+}
+
+bool BKE_paint_vector_item_remove(PaintVector &pv, const int index)
+{
+  if (index < 0 || index >= pv.items_num) {
+    return false;
+  }
+  paint_vector_item_free(pv.items[index]);
+  const int new_num = pv.items_num - 1;
+  if (new_num == 0) {
+    MEM_delete(pv.items);
+    pv.items = nullptr;
+  }
+  else {
+    PaintVectorItem *items = MEM_new_array<PaintVectorItem>(new_num, __func__);
+    /* Shallow move of every surviving item: the owned arrays transfer, the old block is freed
+     * without walking them, exactly as #BKE_paint_vector_item_add does when it grows. */
+    for (int i = 0, j = 0; i < pv.items_num; i++) {
+      if (i != index) {
+        items[j++] = pv.items[i];
+      }
+    }
+    MEM_delete(pv.items);
+    pv.items = items;
+  }
+  pv.items_num = new_num;
+  /* Items after the removed one shifted down, so an active item past it follows its item. */
+  if (pv.active_item > index) {
+    pv.active_item--;
+  }
+  pv.active_item = std::min(pv.active_item, std::max(new_num - 1, 0));
+  return true;
 }
 
 MutableSpan<PaintVectorPoint> BKE_paint_vector_item_points_alloc(PaintVectorItem &item,
@@ -357,6 +424,17 @@ static void paint_vector_copy_data(Main * /*bmain*/,
       dst.splines_num = splines_num;
     }
     BKE_paint_vector_item_style_copy(dst, style);
+
+    if (BKE_paint_vector_item_curve_geometry_is_valid(src)) {
+      /* The shallow copy aliased the source's embedded geometry; replace it with a real deep copy.
+       * The params and name are plain data the block copy already carried. */
+      new (&dst.curve_patch_geometry) bke::CurvesGeometry(src.curve_patch_geometry.wrap());
+    }
+    else {
+      /* A Shape item owns no geometry, and a corrupt Curve Patch item must never be dereferenced:
+       * rebuild the empty state instead of keeping the shallow copy. */
+      paint_vector_item_geometry_init(dst);
+    }
   }
 }
 
@@ -384,18 +462,97 @@ static void paint_vector_foreach_id(ID *id, LibraryForeachIDData *data)
   }
 }
 
+/**
+ * One Curve Patch item's embedded geometry, prepared for the file and kept alive until both of its
+ * writes have run.
+ *
+ * `blend_write_prepare()` is a write-time view: it drops the attribute storage's runtime pointer and
+ * swaps the attribute and point-data state for the filtered DNA view. For #PaintCurve::geometry
+ * (and every other `CurvesGeometry` stored inside an ID struct) only the buffer copy made by
+ * `write_id_struct()` is touched, so leaving the live ID in that state is harmless. A
+ * #PaintVectorItem lives behind `PaintVector::items`, which is NOT part of the ID struct: the
+ * prepare would mutate the live item, and the next tool entry then dereferenced the nulled runtime
+ * (a crash inside #curve_patch_document_from_vector).
+ *
+ * The prepared state must also be written BEFORE the items array: that block carries the prepared
+ * `attribute_storage.dna_attributes` pointer, which the reader needs to rebuild the attributes. A
+ * deep copy per item provides both halves; it shares the attribute arrays through implicit
+ * sharing, so no pixel data is duplicated.
+ */
+struct CurvePatchGeometryWrite {
+  bke::CurvesGeometry geometry;
+  ResourceScope scope;
+  bke::CurvesGeometry::BlendWriteData write_data;
+  /** The copy's own runtime, nulled by the prepare and put back for the destructor to free. */
+  bke::AttributeStorageRuntime *storage_runtime = nullptr;
+  /** The point-data struct the prepare rewrote; restored for the destructor's free pass. */
+  CustomData point_data = {};
+
+  CurvePatchGeometryWrite(BlendWriter *writer, const bke::CurvesGeometry &source)
+      : geometry(source), write_data(writer, scope)
+  {
+  }
+
+  ~CurvePatchGeometryWrite()
+  {
+    geometry.attribute_storage.wrap().runtime = storage_runtime;
+    geometry.point_data = point_data;
+  }
+
+  CurvePatchGeometryWrite(const CurvePatchGeometryWrite &) = delete;
+  CurvePatchGeometryWrite &operator=(const CurvePatchGeometryWrite &) = delete;
+};
+
 static void paint_vector_blend_write(BlendWriter *writer, ID *id, const void *id_address)
 {
   PaintVector *pv = id_cast<PaintVector *>(id);
+
+  /* A geometry without a runtime cannot be read, copied or written. This only happens to data
+   * corrupted by an older build's live write-time view; repair it to an empty, constructed state
+   * before it reaches the file, so the saved item stays usable and keeps its counts in step with
+   * the (empty) geometry record written below. */
+  Vector<std::unique_ptr<CurvePatchGeometryWrite>> prepared(pv->items_num);
+  for (int i = 0; i < pv->items_num; i++) {
+    PaintVectorItem &item = pv->items[i];
+    if (item.type != PAINT_VECTOR_ITEM_CURVE_PATCH) {
+      continue;
+    }
+    if (!BKE_paint_vector_item_curve_geometry_is_valid(item)) {
+      paint_vector_item_geometry_init(item);
+    }
+    auto entry = std::make_unique<CurvePatchGeometryWrite>(writer, item.curve_patch_geometry.wrap());
+    entry->storage_runtime = entry->geometry.attribute_storage.wrap().runtime;
+    entry->point_data = entry->geometry.point_data;
+    entry->geometry.blend_write_prepare(entry->write_data, !BLO_write_is_undo(writer));
+    prepared[i] = std::move(entry);
+  }
 
   writer->write_id_struct(id_address, pv);
   BKE_id_blend_write(writer, &pv->id);
 
   /* The items themselves are one array block, matching the single
    * `BLO_read_array_and_validate_size` in the reader. Writing each item as its own block would
-   * make the reader see an array of count 1 and drop every item but a lone one. */
+   * make the reader see an array of count 1 and drop every item but a lone one. The Curve Patch
+   * slots are replaced by their prepared geometry: this block has to carry the attribute array
+   * pointer the geometry's own write below refers to. */
   if (pv->items_num > 0) {
-    writer->write_struct_array(pv->items_num, pv->items);
+    /* `MEM_new_array`, not the uninitialized variant: `PaintVectorItem` embeds a `CurvesGeometry`
+     * whose default member initializers make it non-trivially constructible. Every slot is then
+     * overwritten by the item it stands for. */
+    PaintVectorItem *items_write = MEM_new_array<PaintVectorItem>(pv->items_num, __func__);
+    for (int i = 0; i < pv->items_num; i++) {
+      items_write[i] = pv->items[i];
+      if (prepared[i]) {
+        memcpy(&items_write[i].curve_patch_geometry,
+               static_cast<const CurvesGeometry *>(&prepared[i]->geometry),
+               sizeof(CurvesGeometry));
+      }
+    }
+    /* Written under the live array's address: the reader resolves `PaintVector::items` (stored in
+     * the ID struct above) through the block's old address, which the temporary copy does not
+     * have. */
+    writer->write_struct_array_at_address(pv->items_num, pv->items, items_write);
+    MEM_delete(items_write);
   }
   for (int i = 0; i < pv->items_num; i++) {
     PaintVectorItem &item = pv->items[i];
@@ -404,6 +561,11 @@ static void paint_vector_blend_write(BlendWriter *writer, ID *id, const void *id
     }
     if (item.splines_num > 0) {
       writer->write_struct_array(item.splines_num, item.splines);
+    }
+    /* The reader consumes a Curve Patch item's embedded geometry BEFORE the style profiles
+     * (`paint_vector_blend_read_data`), so the writer has to follow that order. */
+    if (prepared[i]) {
+      prepared[i]->geometry.blend_write(*writer, pv->id, prepared[i]->write_data);
     }
     if (item.style.stroke_profile != nullptr) {
       BKE_curvemapping_blend_write(writer, item.style.stroke_profile);
@@ -427,6 +589,16 @@ static void paint_vector_blend_read_data(BlendDataReader *reader, ID *id)
 
     BLO_read_array_and_validate_size(reader, &item.points, &item.points_num);
     BLO_read_array_and_validate_size(reader, &item.splines, &item.splines_num);
+
+    if (item.type == PAINT_VECTOR_ITEM_CURVE_PATCH) {
+      item.curve_patch_geometry.wrap().blend_read(*reader);
+    }
+    else {
+      /* A Shape item owns no geometry: the raw block read above carries whatever live pointers the
+       * writer's snapshot held. Reset it to a properly constructed empty state instead of keeping
+       * (or destructing) the raw bytes. */
+      paint_vector_item_geometry_init(item);
+    }
 
     BLO_read_struct(reader, CurveMapping, &item.style.stroke_profile);
     if (item.style.stroke_profile != nullptr) {
@@ -506,5 +678,71 @@ bool BKE_paint_vector_needs_rebake(const PaintVector &pv)
 {
   return pv.bake_revision != pv.baked_revision;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Curve Patch params converter
+ *
+ * The field-by-field mirror between the DNA #PaintVectorCurveParams and `bke::CurvePatchParams`.
+ * Kept in BKE (not the editors) so the bake renderer can read the frozen parameters without
+ * dragging editor types in. The DNA mirror repeats the source struct's field order one to one.
+ * \{ */
+
+bke::CurvePatchParams BKE_paint_vector_curve_params_decode(const PaintVectorCurveParams &p)
+{
+  bke::CurvePatchParams out;
+  out.radius = p.radius;
+  out.radius_per_size = p.radius_per_size;
+  out.swap_axis = (p.swap_axis != 0);
+  out.length_mode = bke::CurvePatchLengthMode(p.length_mode);
+  out.length_repeat = p.length_repeat;
+  out.end_falloff_mode = bke::CurvePatchEndFalloff(p.end_falloff_mode);
+  out.end_falloff_percent = p.end_falloff_percent;
+  out.start_point_shape = bke::CurvePatchPointShape(p.start_point_shape);
+  out.end_point_shape = bke::CurvePatchPointShape(p.end_point_shape);
+  out.stamp_mode = bke::CurvePatchStampMode(p.stamp_mode);
+  out.stamp_layout = bke::CurvePatchStampLayout(p.stamp_layout);
+  out.stamp_projection = bke::CurvePatchStampProjection(p.stamp_projection);
+  out.stamp_use_random_angle = (p.stamp_use_random_angle != 0);
+  out.stamp_size_random = p.stamp_size_random;
+  out.stamp_strength_random = p.stamp_strength_random;
+  out.stamp_seed = uint32_t(p.stamp_seed);
+  out.spacing_frac = p.spacing_frac;
+  out.jitter_amount = p.jitter_amount;
+  out.base_angle = p.base_angle;
+  out.random_angle = p.random_angle;
+  copy_v3_v3(out.plane_normal, p.plane_normal);
+  out.final_quality = (p.final_quality != 0);
+  return out;
+}
+
+PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatchParams &p)
+{
+  PaintVectorCurveParams out;
+  out.radius = p.radius;
+  out.radius_per_size = p.radius_per_size;
+  out.swap_axis = p.swap_axis ? 1 : 0;
+  out.length_mode = int(p.length_mode);
+  out.length_repeat = p.length_repeat;
+  out.end_falloff_mode = int(p.end_falloff_mode);
+  out.end_falloff_percent = p.end_falloff_percent;
+  out.start_point_shape = int(p.start_point_shape);
+  out.end_point_shape = int(p.end_point_shape);
+  out.stamp_mode = int(p.stamp_mode);
+  out.stamp_layout = int(p.stamp_layout);
+  out.stamp_projection = int(p.stamp_projection);
+  out.stamp_use_random_angle = p.stamp_use_random_angle ? 1 : 0;
+  out.stamp_size_random = p.stamp_size_random;
+  out.stamp_strength_random = p.stamp_strength_random;
+  out.stamp_seed = int(p.stamp_seed);
+  out.spacing_frac = p.spacing_frac;
+  out.jitter_amount = p.jitter_amount;
+  out.base_angle = p.base_angle;
+  out.random_angle = p.random_angle;
+  copy_v3_v3(out.plane_normal, p.plane_normal);
+  out.final_quality = p.final_quality ? 1 : 0;
+  return out;
+}
+
+/** \} */
 
 }  // namespace blender

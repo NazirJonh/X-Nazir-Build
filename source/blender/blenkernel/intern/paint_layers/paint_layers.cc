@@ -16,12 +16,14 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
 
 #include "MEM_guardedalloc.h"
 
+#include "BKE_brush.hh"
 #include "BKE_global.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
@@ -30,6 +32,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_vector.hh"
 #include "BKE_report.hh"
 
 #include "IMB_colormanagement.hh"
@@ -52,6 +55,7 @@
 #include "DEG_depsgraph.hh"
 
 #include "DNA_ID.h"
+#include "DNA_brush_types.h"
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
@@ -697,6 +701,8 @@ static void paint_layer_material_duplicate(Main &bmain,
  * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
  * for the same reason as the channel maps.
  */
+static void paint_layer_curve_patch_duplicate(Main &bmain, MaterialPaintLayer &dst,
+                                              const MaterialPaintLayer &src);
 static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
                                                       Material &ma,
                                                       const MaterialPaintLayer &item,
@@ -719,6 +725,9 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
    * correction has to keep the offset, scale, rotation, lock and wrap the gizmo edits. */
   item_copy->mapping = dna::shallow_copy(item.mapping);
   paint_layer_material_duplicate(bmain, *item_copy, item);
+  /* A Curve Patch effect carries its payload (its own curve container and brush snapshot) like a
+   * Curve Patch row does: the copy owns duplicates of both, never shared. */
+  paint_layer_curve_patch_duplicate(bmain, *item_copy, item);
   paint_layer_channels_duplicate(bmain, *item_copy, item);
   paint_layer_id_colors_duplicate(*item_copy, item);
   paint_layer_properties_duplicate(*item_copy, item);
@@ -727,6 +736,29 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   }
   BKE_paint_layers_gradient_copy(*item_copy, item);
   return item_copy;
+}
+
+/**
+ * The copy of a Curve Patch row owns duplicates of the whole payload: the curve container and the
+ * brush snapshot are the row's private content and tool state, so a shared pointer would make two
+ * rows edit one effect. `BKE_id_copy` hands back one user each, which the copied row is.
+ */
+static void paint_layer_curve_patch_duplicate(Main &bmain,
+                                              MaterialPaintLayer &dst,
+                                              const MaterialPaintLayer &src)
+{
+  if (src.curve_patch == nullptr) {
+    return;
+  }
+  MaterialPaintLayerCurvePatch *payload = MEM_new<MaterialPaintLayerCurvePatch>(__func__);
+  dst.curve_patch = payload;
+  if (src.curve_patch->vectors != nullptr) {
+    payload->vectors = id_cast<PaintVector *>(
+        BKE_id_copy(&bmain, &src.curve_patch->vectors->id));
+  }
+  if (src.curve_patch->brush != nullptr) {
+    payload->brush = id_cast<Brush *>(BKE_id_copy(&bmain, &src.curve_patch->brush->id));
+  }
 }
 
 /**
@@ -760,6 +792,7 @@ static void paint_layer_branch_duplicate(Main &bmain,
   /* Keep the row's UV mapping (offset, scale, rotation, lock and wrap) with the copy. */
   dst.mapping = dna::shallow_copy(src.mapping);
   paint_layer_material_duplicate(bmain, dst, src);
+  paint_layer_curve_patch_duplicate(bmain, dst, src);
   paint_layer_channels_duplicate(bmain, dst, src);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
@@ -982,6 +1015,18 @@ static void paint_layer_release_users(MaterialPaintLayer &layer)
   if (layer.material != nullptr) {
     id_us_min(&layer.material->id);
   }
+  /* The Curve Patch payload loses the row's user too. Dropping the last one leaves the container
+   * and the brush snapshot as no-user data-blocks, which the save / purge pass drops like any
+   * other unused data: an unused ID is not written (a fake user keeps one alive, a linked one is
+   * never touched), so a removed row's private payload never reaches the file. */
+  if (layer.curve_patch != nullptr) {
+    if (layer.curve_patch->vectors != nullptr) {
+      id_us_min(&layer.curve_patch->vectors->id);
+    }
+    if (layer.curve_patch->brush != nullptr) {
+      id_us_min(&layer.curve_patch->brush->id);
+    }
+  }
   for (const int i : IndexRange(layer.channels_num)) {
     if (layer.channels[i].image != nullptr) {
       id_us_min(&layer.channels[i].image->id);
@@ -1105,6 +1150,137 @@ MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
   effect->material = source;
   id_us_plus(&source->id);
   BLI_addtail(&owner->effects, effect);
+  BKE_paint_layers_tag_edited(ma);
+  return effect;
+}
+
+/**
+ * A Curve Patch row's private brush snapshot: a full duplicate of \a source (or a fresh sculpt
+ * brush), named after the row and forced into the Curve Patch tool. The copy is local, so it can
+ * be edited during a session even when \a source came from a linked asset library. The material
+ * paint record is what the image effect reads its channel values from, so it is ensured here too.
+ */
+static Brush *paint_layer_curve_patch_brush_snapshot_create(Main &bmain,
+                                                            const char *row_name,
+                                                            const Brush *source)
+{
+  std::string brush_name = std::string(".CP Brush ") +
+                           ((row_name != nullptr && row_name[0] != '\0') ? row_name :
+                                                                          "Curve Patch");
+  Brush *snapshot = nullptr;
+  /* Only a brush whose type can actually stamp a patch is worth duplicating: an unsupported source
+   * (a Mask brush, a Voxel Remesh brush, ...) would produce a row whose tool refuses to start. */
+  if (source != nullptr && bke::brush::supports_curve_patch(*source)) {
+    snapshot = id_cast<Brush *>(BKE_id_copy_ex(&bmain,
+                                               &source->id,
+                                               nullptr,
+                                               LIB_ID_COPY_NO_ANIMDATA |
+                                                   LIB_ID_COPY_NO_PREVIEW));
+  }
+  if (snapshot == nullptr) {
+    snapshot = BKE_brush_add(&bmain, brush_name.c_str(), OB_MODE_SCULPT);
+  }
+  if (snapshot == nullptr) {
+    return nullptr;
+  }
+  /* The rename adjusts for uniqueness against the database, so two rows made from the same brush
+   * keep two distinct snapshots. */
+  BKE_libblock_rename(bmain, snapshot->id, brush_name.c_str());
+  /* The row's tool IS a Curve Patch brush. Without this the Stroke panel would hide the Curve
+   * Patch settings, the tool gates would not treat the brush as a patch, and the session would
+   * show the wrong cursor. */
+  snapshot->stroke_method = BRUSH_STROKE_CURVE_PATCH;
+  /* A copy of a brush from another paint mode would be refused by the Sculpt-mode brush set. */
+  snapshot->ob_mode |= OB_MODE_SCULPT;
+  BKE_brush_material_paint_ensure(snapshot);
+  return snapshot;
+}
+
+MaterialPaintLayerCurvePatch *BKE_paint_layers_curve_patch_payload_create(Main &bmain,
+                                                                          const char *row_name,
+                                                                          const Brush *source_brush)
+{
+  MaterialPaintLayerCurvePatch *payload = MEM_new<MaterialPaintLayerCurvePatch>(__func__);
+  payload->vectors = BKE_paint_vector_add(&bmain, "PV CurvePatch");
+  payload->brush = paint_layer_curve_patch_brush_snapshot_create(bmain, row_name, source_brush);
+  if (payload->vectors == nullptr || payload->brush == nullptr) {
+    if (payload->vectors != nullptr) {
+      BKE_id_free(&bmain, &payload->vectors->id);
+    }
+    if (payload->brush != nullptr) {
+      BKE_id_free(&bmain, &payload->brush->id);
+    }
+    MEM_delete(payload);
+    return nullptr;
+  }
+  return payload;
+}
+
+bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
+                                            Main &bmain,
+                                            MaterialPaintLayer &row,
+                                            const Brush &source)
+{
+  if (row.curve_patch == nullptr || row.source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
+      (BKE_paint_layers_owner_list(ma, row) == nullptr &&
+       BKE_paint_layers_correction_owner(ma, row) == nullptr))
+  {
+    return false;
+  }
+  Brush *snapshot = paint_layer_curve_patch_brush_snapshot_create(bmain, row.name, &source);
+  if (snapshot == nullptr) {
+    return false;
+  }
+  Brush *previous = row.curve_patch->brush;
+  row.curve_patch->brush = snapshot;
+  /* The payload owns its snapshot one to one: drop the old row user, and free the old brush when
+   * the row was its last user (a brush someone else kept stays). */
+  if (previous != nullptr) {
+    id_us_min(&previous->id);
+    if (previous->id.us == 0 && !ID_IS_LINKED(&previous->id) &&
+        ID_FAKE_USERS(&previous->id) == 0)
+    {
+      BKE_id_free(&bmain, &previous->id);
+    }
+  }
+  if (row.curve_patch->vectors != nullptr) {
+    BKE_paint_vector_tag_changed(*row.curve_patch->vectors);
+  }
+  BKE_paint_layers_bake_request(row);
+  BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
+                                                            MaterialPaintLayer *owner,
+                                                            const char *name,
+                                                            Main &bmain,
+                                                            const Brush *snapshot_source)
+{
+  /* A folder takes one too: like any correction, it corrects the isolated result of what the
+   * folder holds. The payload needs a database for its two IDs; without one the Add is refused
+   * before anything is linked, so a refusal leaves nothing behind. */
+  if (!paint_layer_in_stack(ma, owner)) {
+    return nullptr;
+  }
+  MaterialPaintLayer *effect = paint_layer_alloc(ma, name != nullptr ? name : "Curve Patch");
+  effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
+  effect->source = MA_PAINT_LAYER_SOURCE_CURVE_PATCH;
+  BLI_addtail(&owner->effects, effect);
+  /* Linked first: the channel records are added through the ownership check, and a fresh effect
+   * starts transparent, so it lays nothing until the curves are baked into its maps. */
+  BKE_paint_layers_default_channels_apply(ma, *effect);
+
+  MaterialPaintLayerCurvePatch *payload = BKE_paint_layers_curve_patch_payload_create(
+      bmain, effect->name, snapshot_source);
+  if (payload == nullptr) {
+    BLI_remlink(&owner->effects, effect);
+    BKE_material_paint_layer_free(effect);
+    BKE_paint_layers_tag_edited(ma);
+    return nullptr;
+  }
+  effect->curve_patch = payload;
+
   BKE_paint_layers_tag_edited(ma);
   return effect;
 }

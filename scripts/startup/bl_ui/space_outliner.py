@@ -135,6 +135,12 @@ def _draw_stack_layer_effect_entries(layout):
     layout.operator(
         "outliner.stack_layer_add", text="Add Gradient Correction", icon='COLOR',
     ).type = 'CORRECTION_GRADIENT'
+    # A Curve Patch hung on the layer as an effect: 3D control curves stamped through a brush
+    # snapshot of its own, laid over the layer's colour below the layer's own blend.
+    props = layout.operator("outliner.stack_layer_add", text="Add Curve Patch",
+                            icon='CURVE_BEZCURVE')
+    props.type = 'CURVE_PATCH_CORRECTION'
+    props.label = "Add Curve Patch"
     # Corrections laid over the layer's mask (made white first when there is none): a grey map
     # painted in Mask mode, or one flat grey.
     layout.separator()

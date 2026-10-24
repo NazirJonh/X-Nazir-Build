@@ -26,6 +26,8 @@
 
 namespace blender {
 
+struct Brush;
+
 /** What kind of row the Add creates. */
 enum class PaintLayerAddKind : int8_t {
   /** A painted layer. */
@@ -104,6 +106,15 @@ enum class PaintLayerAddKind : int8_t {
   GradientCorrection,
   /** A mask correction of the anchor row whose coverage is a procedural Gradient's grey. */
   MaskGradient,
+  /**
+   * A Curve Patch as a content effect of a row (or of the row an effect hangs on): its stamped
+   * maps are laid over the row's colour, below the row's own blend. The payload (a fresh curve
+   * container and a duplicate of the active brush) is created with the effect; the seeded control
+   * curve is the caller's business, through the editors wrapper. Refused without
+   * #PaintLayerAddParams::bmain: the payload IDs need a database. There is deliberately no
+   * standalone Curve Patch row.
+   */
+  CurvePatchEffect,
 };
 
 struct PaintLayerAddParams {
@@ -141,6 +152,11 @@ struct PaintLayerAddParams {
    * source becomes editable. Null makes the row share \a source.
    */
   Main *bmain = nullptr;
+  /**
+   * The brush a #PaintLayerAddKind::CurvePatch row snapshots (a full duplicate is made). Null
+   * falls back to a fresh default brush, so the row always carries a tool state of its own.
+   */
+  Brush *curve_patch_brush = nullptr;
   /**
    * Where an #PaintLayerAddKind::AnchorPoint marker lands: the anchor row's effects or its mask.
    * The three reader kinds take their list from the kind itself. \a insert_after names the item

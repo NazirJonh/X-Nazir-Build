@@ -76,6 +76,8 @@ struct VectorItem {
   /* CurvePatch item (ignored for Shape). */
   bke::CurvesGeometry control_curve;
   bke::CurvePatchParams params;
+  /** List name of a CurvePatch item, mirroring #PaintVectorItem::curve_name. */
+  char name[64] = "";
 
   /** The style this item is drawn and persisted with. It travels with the item through add /
    * delete / reorder and undo, so nothing is matched by index. */

@@ -128,7 +128,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 28u);
+  ASSERT_EQ(kinds.size(), 29u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -193,6 +193,9 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[26].is_effect);
   EXPECT_EQ(kinds[27].identifier, "MASK_CORRECTION_GRADIENT");
   EXPECT_TRUE(kinds[27].is_effect);
+  /* Then the Curve Patch, only ever an effect of a layer. */
+  EXPECT_EQ(kinds[28].identifier, "CURVE_PATCH_CORRECTION");
+  EXPECT_TRUE(kinds[28].is_effect);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, mask_corrections_are_rows_under_the_mask_section)
@@ -949,7 +952,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
 
   Vector<StackAddKindInfo> kinds;
   source().editor()->add_kinds(kinds);
-  ASSERT_EQ(kinds.size(), 28u);
+  ASSERT_EQ(kinds.size(), 29u);
   EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT_MASK_CORRECTION")
       << "row_add dispatches by index, last of the Anchor Point kinds";
   EXPECT_EQ(kinds[25].identifier, "GRADIENT")
@@ -969,7 +972,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_corr
   ASSERT_GE(ordinal, 0);
 
   /* The Add button's real path: the marker lands right after the active correction. */
-  const int created = row_add(21 /* ANCHOR_POINT */, ordinal);
+  const int created = row_add(22 /* ANCHOR_POINT */, ordinal);
   ASSERT_GE(created, 0);
   MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
   ASSERT_NE(point, nullptr);
@@ -990,7 +993,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_with_active_mask_
   const int ordinal = paint_layers_ordinal_of(*material, item);
   ASSERT_GE(ordinal, 0);
 
-  const int created = row_add(21 /* ANCHOR_POINT */, ordinal);
+  const int created = row_add(22 /* ANCHOR_POINT */, ordinal);
   ASSERT_GE(created, 0);
   MaterialPaintLayer *point = paint_description_row_for_ordinal(*material, created);
   ASSERT_NE(point, nullptr);

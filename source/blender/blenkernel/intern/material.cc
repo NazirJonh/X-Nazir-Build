@@ -20,6 +20,7 @@
 #define DNA_DEPRECATED_ALLOW
 
 #include "DNA_ID.h"
+#include "DNA_brush_types.h"
 #include "DNA_curve_types.h"
 #include "DNA_curves_types.h"
 #include "DNA_gpencil_legacy_types.h"
@@ -76,6 +77,7 @@
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_material_composite.hh"
+#include "BKE_paint_vector.hh"
 #include "BKE_pointcloud.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
@@ -137,6 +139,13 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
   layer->channels_num = 0;
   /* The maps of the bake cache are released like the channel maps, by the generic free pass. */
   MEM_SAFE_DELETE(layer->bake);
+  /* The payload IDs' users were released by the generic free pass through
+   * #paint_layer_dependencies (the pointers are already null by the time this runs); the payload
+   * block itself is owned sub-data like the records. */
+  if (layer->curve_patch != nullptr) {
+    MEM_delete(layer->curve_patch);
+    layer->curve_patch = nullptr;
+  }
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -155,7 +164,51 @@ static void material_paint_layers_free(Material &material)
   material.paint_layers = {nullptr, nullptr};
 }
 
-static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &src)
+/**
+ * The copy of a Curve Patch row owns duplicates of the payload IDs: the curve container and the
+ * brush snapshot are the row's private content and tool state, never shared between materials.
+ * The copies arrive with one user each; the generic copy pass adds the new row's own user on top,
+ * so the construction user is dropped first and the final count is exactly the row's reference.
+ */
+static void paint_layer_curve_patch_copy(Main *bmain,
+                                         const int flag,
+                                         MaterialPaintLayer &dst,
+                                         const MaterialPaintLayer &src)
+{
+  if (src.curve_patch == nullptr) {
+    return;
+  }
+  MaterialPaintLayerCurvePatch *payload = MEM_new<MaterialPaintLayerCurvePatch>(__func__);
+  dst.curve_patch = payload;
+  const bool count_users = (flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0 &&
+                           (flag & LIB_ID_CREATE_NO_MAIN) == 0;
+  if (!count_users || bmain == nullptr) {
+    /* An evaluated (or otherwise user-count-less) copy shares the pointers; the walk does not
+     * count users either. */
+    payload->vectors = src.curve_patch->vectors;
+    payload->brush = src.curve_patch->brush;
+    return;
+  }
+  const int copy_flag = LIB_ID_COPY_NO_ANIMDATA | LIB_ID_COPY_NO_PREVIEW;
+  if (src.curve_patch->vectors != nullptr) {
+    payload->vectors = id_cast<PaintVector *>(
+        BKE_id_copy_ex(bmain, &src.curve_patch->vectors->id, nullptr, copy_flag));
+    if (payload->vectors != nullptr) {
+      id_us_min(&payload->vectors->id);
+    }
+  }
+  if (src.curve_patch->brush != nullptr) {
+    payload->brush = id_cast<Brush *>(
+        BKE_id_copy_ex(bmain, &src.curve_patch->brush->id, nullptr, copy_flag));
+    if (payload->brush != nullptr) {
+      id_us_min(&payload->brush->id);
+    }
+  }
+}
+
+static MaterialPaintLayer *material_paint_layer_copy(Main *bmain,
+                                                     const int flag,
+                                                     const MaterialPaintLayer &src)
 {
   MaterialPaintLayer *dst = static_cast<MaterialPaintLayer *>(MEM_dupalloc(&src));
   dst->next = nullptr;
@@ -184,19 +237,21 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
                                            nullptr;
     }
   }
+  dst->curve_patch = nullptr;
+  paint_layer_curve_patch_copy(bmain, flag, *dst, src);
   /* The duplicate above copied the list heads: the items and children are owned sub-data, so each
    * gets its own. */
   dst->mask_stack = {nullptr, nullptr};
   for (const MaterialPaintLayer &item : src.mask_stack) {
-    BLI_addtail(&dst->mask_stack, material_paint_layer_copy(item));
+    BLI_addtail(&dst->mask_stack, material_paint_layer_copy(bmain, flag, item));
   }
   dst->effects = {nullptr, nullptr};
   for (const MaterialPaintLayer &effect : src.effects) {
-    BLI_addtail(&dst->effects, material_paint_layer_copy(effect));
+    BLI_addtail(&dst->effects, material_paint_layer_copy(bmain, flag, effect));
   }
   dst->children = {nullptr, nullptr};
   for (const MaterialPaintLayer &child : src.children) {
-    BLI_addtail(&dst->children, material_paint_layer_copy(child));
+    BLI_addtail(&dst->children, material_paint_layer_copy(bmain, flag, child));
   }
   /* The copied list head above points at the source's colours; they are owned sub-data like the
    * items, so each gets a copy of its own. */
@@ -256,6 +311,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   if (layer.gradient != nullptr) {
     writer->write_struct(layer.gradient);
   }
+  if (layer.curve_patch != nullptr) {
+    writer->write_struct(layer.curve_patch);
+  }
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -311,6 +369,7 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     layer.bake->hash[0] = 0;
     layer.bake->hash[1] = 0;
   }
+  BLO_read_struct(reader, MaterialPaintLayerCurvePatch, &layer.curve_patch);
   BLO_read_struct(reader, IDProperty, &layer.system_properties);
   IDP_BlendDataRead(reader, &layer.system_properties);
   BLO_read_struct_list(reader, MaterialPaintLayerIdColor, &layer.id_colors);
@@ -395,7 +454,7 @@ static void material_copy_data(Main *bmain,
   /* The description is owned sub-data: never share the source's list or its elements. */
   material_dst->paint_layers = {nullptr, nullptr};
   for (const MaterialPaintLayer &layer : material_src->paint_layers) {
-    BLI_addtail(&material_dst->paint_layers, material_paint_layer_copy(layer));
+    BLI_addtail(&material_dst->paint_layers, material_paint_layer_copy(bmain, flag, layer));
   }
   /* The generator owns the uid and the generated tree of a copy: a real copy gets its own, an
    * evaluated one shares the pointer under COW. */

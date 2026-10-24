@@ -9,6 +9,7 @@
 #include "BKE_paint_layers_edit.hh"
 
 #include <algorithm>
+#include <string>
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
@@ -218,6 +219,27 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
     const std::string name = (params.name != nullptr) ? std::string(params.name) :
                                                         std::string(params.source->id.name + 2);
     return BKE_paint_layers_correction_add_material(ma, owner, name.c_str(), params.source);
+  }
+  if (params.kind == PaintLayerAddKind::CurvePatchEffect) {
+    /* An Add aimed at an effect means another one on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+    }
+    if (owner == nullptr || params.bmain == nullptr) {
+      return nullptr;
+    }
+    /* Numbered among the effects of this one row only, like the corrections are. */
+    const std::string name = (params.name != nullptr) ?
+                                 std::string(params.name) :
+                                 std::string("Curve Patch") + " " +
+                                     std::to_string(
+                                         paint_layer_name_number_max(owner->effects, "Curve Patch") +
+                                         1);
+    return BKE_paint_layers_curve_patch_effect_add(
+        ma, owner, name.c_str(), *params.bmain, params.curve_patch_brush);
   }
   if (params.kind == PaintLayerAddKind::Filter) {
     /* Like a correction, an Add aimed at one means another on the row it hangs on. */

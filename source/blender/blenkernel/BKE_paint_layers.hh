@@ -36,8 +36,10 @@ struct Main;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
+struct MaterialPaintLayerCurvePatch;
 struct MaterialPaintLayerIdColor;
 struct MaterialSourceResolve;
+struct Brush;
 struct ReportList;
 enum eMaterialPaintChannel : int8_t;
 enum eMaterialPaintLayerBlend : int8_t;
@@ -561,6 +563,52 @@ MaterialPaintLayer *BKE_paint_layers_correction_add_material(Material &ma,
                                                              MaterialPaintLayer *owner,
                                                              const char *name,
                                                              Material *source);
+
+/**
+ * Create the owned payload of a Curve Patch row or effect: an empty PaintVector and a private
+ * brush snapshot. The snapshot is a full duplicate of \a source_brush when that brush's type can
+ * stamp a patch, and a fresh sculpt brush otherwise (null included), named
+ * `".CP Brush <row_name>"`, set to the Curve Patch stroke method and given the material-paint
+ * record the image effect reads its channel values from.
+ *
+ * \return the payload, or null when the database cannot create the brush (the container is freed
+ * again). The caller links it into its row and seeds the first curve.
+ */
+MaterialPaintLayerCurvePatch *BKE_paint_layers_curve_patch_payload_create(
+    Main &bmain, const char *row_name, const Brush *source_brush);
+
+/**
+ * Replace \a row's private brush snapshot with a fresh duplicate of \a source. The old snapshot
+ * loses the row's user and is freed when that was its last one; the row and its curves stay as
+ * they are (the frozen per-curve parameters belong to the curves, not to the brush). The bake is
+ * invalidated because the brush is part of its input.
+ *
+ * \return false when \a row is not a Curve Patch row or the duplicate could not be made.
+ */
+bool BKE_paint_layers_curve_patch_brush_set(Material &ma,
+                                            Main &bmain,
+                                            MaterialPaintLayer &row,
+                                            const Brush &source);
+
+/**
+ * Add a Curve Patch content effect to \a owner: its channels are laid by the 3D control curves of
+ * the effect's own PaintVector, stamped through a private brush snapshot (a full duplicate of \a
+ * snapshot_source when its type can stamp a patch, a fresh sculpt brush otherwise), over the row's
+ * colour, below the row's own blend. The payload is created with the effect; the seeded control
+ * curve is the caller's business, through the editors wrapper
+ * (#ED_paint_layers_curve_patch_row_seed_curve).
+ *
+ * \param bmain: the database the payload's two IDs are created in.
+ * \param snapshot_source: the brush duplicated as the effect's tool state, or null for a fresh
+ * default one.
+ * \return the new effect, or null when \a owner is not a row of \a ma's stack or \a bmain is
+ * null. A folder takes one, like any correction.
+ */
+MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
+                                                            MaterialPaintLayer *owner,
+                                                            const char *name,
+                                                            Main &bmain,
+                                                            const Brush *snapshot_source);
 
 /**
  * Remove the content correction \a effect from its owner, letting go of its maps. The active

@@ -615,6 +615,29 @@ enum eMaterialPaintLayerSource : int8_t {
    * map: a stroke never writes into it.
    */
   MA_PAINT_LAYER_SOURCE_GENERATOR = 7,
+  /**
+   * A Curve Patch effect: it paints its channels from the 3D control curves of its own PaintVector
+   * container, through a private snapshot of the brush it was created with. The payload is
+   * #MaterialPaintLayer::curve_patch. Only as an effect of another row.
+   */
+  MA_PAINT_LAYER_SOURCE_CURVE_PATCH = 9,
+};
+
+/**
+ * The owned payload of a #MA_PAINT_LAYER_SOURCE_CURVE_PATCH row: the curve container and the
+ * brush snapshot the row was created with. 1:1 ownership (see the ownership contract in
+ * `paint_layer_dependencies`): on row free the two IDs are released only while the row is their
+ * last user, otherwise they are left to whoever else uses them and the pointers are cleared.
+ */
+struct MaterialPaintLayerCurvePatch {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerCurvePatch)
+
+  /** The owned container of the effect's control curves (#PaintVector). */
+  struct PaintVector *vectors = nullptr;
+  /** The owned brush snapshot ("`.CP Brush <row>`" naming convention). */
+  struct Brush *brush = nullptr;
+  /* Pads the struct to a multiple of the pointer size, as every DNA struct must. */
+  char _pad[8] = {};
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_ANCHOR_POINT row. */
@@ -1072,6 +1095,12 @@ struct MaterialPaintLayer {
    * because the gradient's #ColorBand would otherwise bloat every row in the file.
    */
   struct MaterialPaintLayerGradient *gradient = nullptr;
+  /**
+   * The owned payload of a #MA_PAINT_LAYER_SOURCE_CURVE_PATCH row, or null for every other source.
+   * Owned by the row (freed, copied and written with it); the IDs it holds are registered in
+   * `paint_layer_dependencies` and the row's `foreach_id`.
+   */
+  MaterialPaintLayerCurvePatch *curve_patch = nullptr;
 };
 
 struct Material {

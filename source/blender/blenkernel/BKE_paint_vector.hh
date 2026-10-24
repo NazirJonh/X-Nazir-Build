@@ -25,6 +25,10 @@ struct PaintVectorItem;
 struct PaintVectorPoint;
 struct PaintVectorSpline;
 
+namespace bke {
+struct CurvePatchParams;
+}  // namespace bke
+
 /**
  * ID-property group on a Material that holds its PaintVector references. The link is
  * an ordinary `IDP_ID` custom property, so `foreach_id` counts the PaintVector as used by the
@@ -62,6 +66,12 @@ void BKE_paint_vector_items_clear(PaintVector &pv);
 PaintVectorItem &BKE_paint_vector_item_add(PaintVector &pv);
 
 /**
+ * Remove the \a index-th item, freeing its owned data. The items after it shift one slot down and
+ * #PaintVector::active_item is clamped. False when the index is out of range.
+ */
+bool BKE_paint_vector_item_remove(PaintVector &pv, int index);
+
+/**
  * Allocate (or reallocate) the item's flat point array and return it. Any previous array is freed
  * first, so calling this again on the same item does not leak.
  */
@@ -88,5 +98,22 @@ void BKE_paint_vector_item_style_copy(PaintVectorItem &item, const PaintShapeSet
 void BKE_paint_vector_style_free(PaintShapeSettings &style);
 /** Deep-copy a standalone style snapshot (the owned pointers are duplicated). */
 void BKE_paint_vector_style_copy(PaintShapeSettings &dst, const PaintShapeSettings &src);
+
+/**
+ * Whether \a item's embedded Curve Patch geometry is constructed and safe to read or copy. False
+ * for every other item type, and for a geometry whose runtime was never established (raw file
+ * bytes, or data left behind by an old write-time view).
+ */
+bool BKE_paint_vector_item_curve_geometry_is_valid(const PaintVectorItem &item);
+
+/**
+ * The field-by-field conversion between the DNA #PaintVectorCurveParams mirror and
+ * `bke::CurvePatchParams` (see `BKE_curve_patch.hh`). Pure POD, no editor types, so the bake
+ * renderer can decode the frozen per-curve parameters. Callers include `BKE_curve_patch.hh`
+ * themselves; the return type is only forward-declared here.
+ */
+bke::CurvePatchParams BKE_paint_vector_curve_params_decode(const PaintVectorCurveParams &params);
+/** The inverse of #BKE_paint_vector_curve_params_decode. */
+PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatchParams &params);
 
 }  // namespace blender

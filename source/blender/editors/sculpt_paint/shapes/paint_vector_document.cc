@@ -165,11 +165,21 @@ void paint_vector_from_document(PaintVector &r_pv, const VectorDocument &doc)
 
   for (const VectorItem &item : doc.items) {
     PaintVectorItem &pvi = BKE_paint_vector_item_add(r_pv);
-    const PaintShape &shape = item.shape;
 
     pvi.type = int(item.type);
-    pvi.shape_type = int(shape.type);
     space_to_dna(item.space, pvi.space);
+
+    if (item.type == VectorItemType::CurvePatch) {
+      /* The control curve and the frozen parameters are the whole persisted state of a CurvePatch
+       * item; the style stays null (a CurvePatch paints through the row's brush snapshot). */
+      pvi.curve_patch_geometry.wrap() = item.control_curve;
+      pvi.curve_patch_params = BKE_paint_vector_curve_params_encode(item.params);
+      BLI_strncpy(pvi.curve_name, item.name, sizeof(pvi.curve_name));
+      continue;
+    }
+
+    const PaintShape &shape = item.shape;
+    pvi.shape_type = int(shape.type);
 
     copy_v2_v2(pvi.origin, shape.origin);
     if (shape.origin_is_custom) {
@@ -247,6 +257,16 @@ void paint_vector_to_document(const PaintVector &pv, VectorDocument &r_doc)
     VectorItem item;
     item.type = VectorItemType(pvi.type);
     space_from_dna(pvi.space, item.space);
+
+    if (item.type == VectorItemType::CurvePatch) {
+      if (BKE_paint_vector_item_curve_geometry_is_valid(pvi)) {
+        item.control_curve = pvi.curve_patch_geometry.wrap();
+      }
+      item.params = BKE_paint_vector_curve_params_decode(pvi.curve_patch_params);
+      BLI_strncpy(item.name, pvi.curve_name, sizeof(item.name));
+      items.append(std::move(item));
+      continue;
+    }
 
     PaintShape &shape = item.shape;
     shape.type = ePaintShapeType(pvi.shape_type);

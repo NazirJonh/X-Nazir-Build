@@ -516,13 +516,24 @@ static void VIEW3D_GGT_paint_shape_transform(wmGizmoGroupType *gzgt)
   ED_view3d_shape_transform_gizmo_setup(gzgt);
 }
 
+static void VIEW3D_GGT_paint_layer_gradient(wmGizmoGroupType *gzgt)
+{
+  ED_view3d_paint_layer_gradient_gizmo_setup(gzgt);
+}
+
 static void view3d_widgets()
 {
   wmGizmoMapType_Params params{SPACE_VIEW3D, RGN_TYPE_WINDOW};
   wmGizmoMapType *gzmap_type = WM_gizmomaptype_ensure(&params);
 
+  /* The custom type both editors' Gradient Layer groups use. It is appended here rather than per
+   * editor so an Image Editor opened before any 3D View still finds it; every space type's gizmo
+   * callback runs at startup. */
+  ED_gizmotypes_paint_layer_gradient();
+
   WM_gizmogrouptype_append_and_link(gzmap_type, ed::transform::VIEW3D_GGT_xform_gizmo_context);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_paint_shape_transform);
+  WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_paint_layer_gradient);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_spot);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_point);
   WM_gizmogrouptype_append_and_link(gzmap_type, VIEW3D_GGT_light_area);

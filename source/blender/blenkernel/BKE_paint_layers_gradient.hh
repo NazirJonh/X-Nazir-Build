@@ -139,6 +139,14 @@ bool BKE_paint_layers_gradient_set_space(Material &ma,
                                          MaterialPaintLayer &layer,
                                          eMaterialPaintLayerGradientSpace space);
 
+/**
+ * Show or hide the row's line gizmo. A viewport aid only: the flag is not read by the generated
+ * graph or the CPU composite, so toggling it never rebuilds the tree.
+ */
+bool BKE_paint_layers_gradient_set_gizmo_shown(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               bool shown);
+
 /** Set the line's start; a value edit. False for a non-finite value. */
 bool BKE_paint_layers_gradient_set_start(Material &ma,
                                          MaterialPaintLayer &layer,

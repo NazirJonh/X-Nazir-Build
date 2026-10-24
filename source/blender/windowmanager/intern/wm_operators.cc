@@ -4457,6 +4457,7 @@ static void gesture_straightline_modal_keymap(wmKeyConfig *keyconf)
   WM_modalkeymap_assign(keymap, "SCULPT_OT_trim_line_gesture");
   WM_modalkeymap_assign(keymap, "SCULPT_OT_project_line_gesture");
   WM_modalkeymap_assign(keymap, "SCULPT_OT_color_gradient");
+  WM_modalkeymap_assign(keymap, "PAINT_OT_paint_layer_gradient");
   WM_modalkeymap_assign(keymap, "PAINT_OT_hide_show_line_gesture");
 }
 

@@ -2238,7 +2238,14 @@ struct PaintModeSettings {
    * new scene) means "synced".
    */
   char view_pass_sync_off = 0;
-  char _pad[6] = {};
+  /**
+   * Whether the Gradient Layer gizmo's dragged handles snap to the surface. Zero (also for files
+   * saved before the option existed) lets the handle follow the mouse in the view plane through
+   * its current position; UV rows are always surface-bound, since a UV coordinate has no
+   * off-surface meaning.
+   */
+  char gradient_snap = 0;
+  char _pad[5] = {};
 
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;

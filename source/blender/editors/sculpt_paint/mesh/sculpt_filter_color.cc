@@ -66,6 +66,8 @@
 
 #include "../paint_intern.hh"
 #include "../paint_gradient_curve.hh"
+#include "../paint_gradient_gizmo.hh"
+#include "../paint_layers_gradient.hh"
 
 #include "../selection/paint_image_select_gradient.hh"
 #include "../selection/paint_image_select_intern.hh"
@@ -3114,6 +3116,12 @@ enum GradientInteractiveHandle {
   GRADIENT_HANDLE_MID = 3,
 };
 
+/* The hit test is shared with the Gradient Layer gizmo; its parts have to keep these values. */
+static_assert(int(gradient_gizmo::NONE) == GRADIENT_HANDLE_NONE);
+static_assert(int(gradient_gizmo::START) == GRADIENT_HANDLE_START);
+static_assert(int(gradient_gizmo::END) == GRADIENT_HANDLE_END);
+static_assert(int(gradient_gizmo::MID) == GRADIENT_HANDLE_MID);
+
 /**
  * Sentinel whose address tags #ColorGradientInteractiveData inside #wmOperator::customdata: the
  * drag phase stores a #wmGesture there and the Curve phase a #ColorGradientCurveData, so the
@@ -3266,47 +3274,6 @@ static void interactive_handles_project(const ColorGradientInteractiveData &data
   r_end = data.fallback_end_px;
 }
 
-/** Screen position of the midpoint marker: along the handle line, at the halfway color point. */
-static float2 interactive_mid_point(const ColorGradientInteractiveData &data)
-{
-  return math::interpolate(data.start_px, data.end_px, data.midpoint);
-}
-
-/** Screen-space hit test radius of the handles. */
-static constexpr float GRADIENT_INTERACTIVE_HANDLE_RADIUS = 10.0f;
-
-static int interactive_hit_test(const ColorGradientInteractiveData &data, const float2 &mval)
-{
-  /* Nearest marker wins, with each marker's drawn size as its hit radius. Picking the midpoint
-   * first, as this used to, made the start handle unreachable on a short gradient: the midpoint
-   * marker sits on top of it and every press near the start moved the midpoint instead. */
-  struct Handle {
-    int id;
-    float2 point;
-    float radius;
-  };
-  const Handle handles[3] = {
-      {GRADIENT_HANDLE_START, data.start_px, GRADIENT_INTERACTIVE_HANDLE_RADIUS},
-      {GRADIENT_HANDLE_END, data.end_px, GRADIENT_INTERACTIVE_HANDLE_RADIUS},
-      {GRADIENT_HANDLE_MID,
-       interactive_mid_point(data),
-       GRADIENT_INTERACTIVE_HANDLE_RADIUS * 0.75f},
-  };
-  int best = GRADIENT_HANDLE_NONE;
-  float best_dist = GRADIENT_INTERACTIVE_HANDLE_RADIUS;
-  for (const Handle &handle : handles) {
-    const float dist = math::distance(handle.point, mval);
-    if (dist <= handle.radius && dist <= best_dist) {
-      best = handle.id;
-      best_dist = dist;
-    }
-  }
-  return best;
-}
-
-/** Segment count of the interactive gradient's handle discs. */
-static constexpr int GRADIENT_INTERACTIVE_HANDLE_SEGMENTS = 16;
-
 static void sculpt_color_gradient_interactive_draw(const bContext * /*C*/,
                                                    ARegion *region,
                                                    void *arg)
@@ -3314,58 +3281,12 @@ static void sculpt_color_gradient_interactive_draw(const bContext * /*C*/,
   const ColorGradientInteractiveData *data = static_cast<ColorGradientInteractiveData *>(arg);
   /* Project on every draw rather than reusing #ColorGradientInteractiveData::start_px: while the
    * camera navigates, the region redraws without the modal running, and the line has to follow
-   * the surface anchors instead of the viewport. */
+   * the surface anchors instead of the viewport. The line and handles are the shared gradient
+   * gizmo shapes, so the Gradient Layer's gizmo is drawn and picked exactly like this one. */
   float2 start_px;
   float2 end_px;
   interactive_handles_project(*data, region, start_px, end_px);
-
-  GPU_blend(GPU_BLEND_ALPHA);
-  GPU_line_smooth(true);
-  /* The handles float over the 3D scene; a depth test would be meaningless in POST_PIXEL. */
-  const GPUDepthTest depth_prev = GPU_depth_test_get();
-  GPU_depth_test(GPU_DEPTH_NONE);
-
-  GPUVertFormat *format = immVertexFormat();
-  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
-  /* This fork has no 2D uniform-color builtin; the 3D one with z = 0 in POST_PIXEL is the
-   * same pattern the curve gradient's overlay uses. */
-  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
-
-  /* Dark under-stroke then light core, matching the curve gradient's overlay. */
-  const float2 mid = math::interpolate(start_px, end_px, data->midpoint);
-  for (const int pass : IndexRange(2)) {
-    GPU_line_width((pass == 0) ? 3.0f : 1.5f);
-    immUniformColor4f(0.0f, 0.0f, 0.0f, 0.55f);
-    if (pass == 1) {
-      immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
-    }
-    immBegin(GPU_PRIM_LINE_STRIP, 3);
-    immVertex3f(pos, start_px.x, start_px.y, 0.0f);
-    immVertex3f(pos, mid.x, mid.y, 0.0f);
-    immVertex3f(pos, end_px.x, end_px.y, 0.0f);
-    immEnd();
-  }
-
-  /* Handles: filled discs with a contrasting outline. */
-  const float radius = GRADIENT_INTERACTIVE_HANDLE_RADIUS;
-  immUniformColor4f(0.9f, 0.9f, 0.9f, 0.9f);
-  imm_draw_circle_fill_3d(
-      pos, start_px.x, start_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
-  imm_draw_circle_fill_3d(
-      pos, end_px.x, end_px.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
-  imm_draw_circle_fill_3d(
-      pos, mid.x, mid.y, radius * 0.45f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.8f);
-  GPU_line_width(1.0f);
-  for (const float2 &center : {start_px, end_px, mid}) {
-    imm_draw_circle_wire_3d(
-        pos, center.x, center.y, radius * 0.6f, GRADIENT_INTERACTIVE_HANDLE_SEGMENTS);
-  }
-
-  immUnbindProgram();
-  GPU_depth_test(depth_prev);
-  GPU_blend(GPU_BLEND_NONE);
-  GPU_line_smooth(false);
+  gradient_gizmo::draw(start_px, end_px, data->midpoint);
 }
 
 /** Sync the draw overlay's mirrored state (world anchors + screen fallbacks) and tag the region. */
@@ -3557,7 +3478,8 @@ static wmOperatorStatus sculpt_color_gradient_interactive_modal(bContext *C,
       case GESTURE_MODAL_BEGIN: {
         /* LMB press: grab a handle; on the Radial type, clicking empty space re-centers the
          * gradient on the surface point under the cursor. */
-        data.dragging = interactive_hit_test(data, mval);
+        data.dragging = gradient_gizmo::hit_test(
+            data.start_px, data.end_px, data.midpoint, mval);
         if (data.dragging == GRADIENT_HANDLE_NONE &&
             eSculptGradientType(sd.gradient_type) == SCULPT_GRADIENT_RADIAL)
         {
@@ -3697,6 +3619,20 @@ static wmOperatorStatus sculpt_color_gradient_invoke(bContext *C,
                                                      wmOperator *op,
                                                      const wmEvent *event)
 {
+  /* A Gradient Layer is procedural: it has no map to paint into. The same Color Gradient tool
+   * edits the row's line instead, in the row's own space, the way the Mask brush reuses the brush
+   * tool for a mask target. Mask target mode keeps painting the row's mask; the layer tool's own
+   * poll decides whether the active row can be edited here. */
+  const Scene *scene = CTX_data_scene(C);
+  const bool mask_target = scene != nullptr && scene->toolsettings != nullptr &&
+                           scene->toolsettings->paint_mode.layer_target_mode ==
+                               PAINT_LAYER_TARGET_MASK;
+  if (!mask_target && paint_layer_gradient_active(C)) {
+    WM_operator_name_call(
+        C, "PAINT_OT_paint_layer_gradient", wm::OpCallContext::InvokeDefault, nullptr, event);
+    return OPERATOR_FINISHED;
+  }
+
   Object &ob = *CTX_data_active_object(C);
   View3D *v3d = CTX_wm_view3d(C);
   if (v3d && v3d->shading.type == OB_SOLID) {
@@ -3852,6 +3788,18 @@ void SCULPT_OT_color_gradient_colors_flip(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 }
 
+static bool sculpt_color_gradient_poll(bContext *C)
+{
+  if (sculpt_mode_poll(C)) {
+    return true;
+  }
+  /* Outside Sculpt Mode the tool has nothing to paint: it only edits a Gradient row's line, and
+   * only from a 3D View. #sculpt_color_gradient_invoke dispatches it there. */
+  Object *ob = CTX_data_active_object(C);
+  return ob != nullptr && (ob->mode & OB_MODE_TEXTURE_PAINT) != 0 &&
+         CTX_wm_view3d(C) != nullptr && paint_layer_gradient_active(C);
+}
+
 void SCULPT_OT_color_gradient(wmOperatorType *ot)
 {
   /* identifiers */
@@ -3864,7 +3812,7 @@ void SCULPT_OT_color_gradient(wmOperatorType *ot)
   ot->exec = sculpt_color_gradient_exec;
   ot->modal = sculpt_color_gradient_modal;
   ot->cancel = sculpt_color_gradient_cancel;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = sculpt_color_gradient_poll;
 
   /* The gesture owns its undo step (sculpt- or image-undo, see #sculpt_color_gradient_init), like
    * #SCULPT_OT_brush_stroke. A WM-level memfile push here would capture the maps created at

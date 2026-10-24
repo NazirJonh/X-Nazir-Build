@@ -584,11 +584,7 @@ void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
     runtime->gradient_preview_state = GradientPreviewState::Approximate;
     return;
   }
-  /* Match `Texture Coordinate.UV`: the render-active/default map, not the editable active map. */
-  StringRefNull uv_name = mesh->default_uv_map_name();
-  if (uv_name.is_empty()) {
-    uv_name = mesh->active_or_default_uv_map_name();
-  }
+  const StringRefNull uv_name = BKE_paint_layers_gradient_uv_map_name(*mesh);
   if (uv_name.is_empty()) {
     runtime->gradient_preview_state = GradientPreviewState::Approximate;
     return;

@@ -27,6 +27,9 @@
 #include <cstdint>
 #include <memory>
 
+#include "BLI_math_vector_types.hh"
+#include "BLI_string_ref.hh"
+
 #include "BKE_paint_material_composite_surface.hh"
 
 namespace blender {
@@ -52,6 +55,36 @@ BKE_paint_layers_gradient_surface_get(const Object &object,
                                       const Mesh &mesh,
                                       const char *uv_map_name,
                                       int size);
+
+/**
+ * The UV map the generated shader reads as `Texture Coordinate.UV`: the render-active/default map,
+ * not the editable active one. Empty when the mesh has no UV map.
+ */
+StringRefNull BKE_paint_layers_gradient_uv_map_name(const Mesh &mesh);
+
+/**
+ * The texture-space box the shader's `Generated` coordinate is normalized by: its center and half
+ * extent. A flat axis gets one unit of extent. Falls back to the bounds of \a object (nullable)
+ * when the mesh's texture space is empty.
+ *
+ * \return false when neither gives a usable box.
+ */
+bool BKE_paint_layers_gradient_generated_box_get(const Object *object,
+                                                 const Mesh &mesh,
+                                                 float3 &r_location,
+                                                 float3 &r_size);
+
+/** An object-space \a position as the shader's `Generated` coordinate (0..1 over the box). */
+bool BKE_paint_layers_gradient_generated_from_object(const Object *object,
+                                                     const Mesh &mesh,
+                                                     const float3 &position,
+                                                     float3 &r_generated);
+
+/** The inverse of #BKE_paint_layers_gradient_generated_from_object. */
+bool BKE_paint_layers_gradient_generated_to_object(const Object *object,
+                                                   const Mesh &mesh,
+                                                   const float3 &generated,
+                                                   float3 &r_position);
 
 /** Drop every cached surface. For teardown, file load and a wholesale geometry change. */
 void BKE_paint_layers_gradient_surface_cache_clear();

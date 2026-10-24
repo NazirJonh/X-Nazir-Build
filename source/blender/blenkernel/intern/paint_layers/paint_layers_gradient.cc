@@ -117,7 +117,9 @@ void BKE_paint_layers_gradient_init(MaterialPaintLayerGradient &gradient)
   gradient.space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
   gradient.type = MA_PAINT_LAYER_GRADIENT_LINEAR;
   gradient.repeat = MA_PAINT_LAYER_GRADIENT_REPEAT_NONE;
-  gradient.gizmo_shown = 0;
+  /* A new row opens with its handles shown: they are how the line is edited, and the panel's
+   * button hides them. */
+  gradient.gizmo_shown = 1;
 }
 
 MaterialPaintLayerGradient *BKE_paint_layers_gradient_ensure(MaterialPaintLayer &layer)
@@ -393,6 +395,24 @@ bool BKE_paint_layers_gradient_set_space(Material &ma,
    * graph structure, not a value. */
   gradient->space = space;
   BKE_paint_layers_tag_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_gradient_set_gizmo_shown(Material &ma,
+                                               MaterialPaintLayer &layer,
+                                               const bool shown)
+{
+  if (!gradient_owned(ma, layer)) {
+    return false;
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  /* A viewport aid, not a value the generated graph or the CPU composite reads: deliberately no
+   * #BKE_paint_layers_tag_value_edited, because rebuilding the tree for a UI toggle would also
+   * invalidate the maps of every row. The RNA update redraws the editors instead. */
+  gradient->gizmo_shown = shown ? 1 : 0;
   return true;
 }
 

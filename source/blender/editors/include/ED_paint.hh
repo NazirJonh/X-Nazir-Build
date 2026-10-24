@@ -525,6 +525,17 @@ void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 /** Register the gizmo group that edits the shown layer row's UV mapping (offset/scale/rotation). */
 void ED_image_paint_layer_mapping_gizmo_setup(wmGizmoGroupType *gzgt);
 
+/* `paint_layers_gradient_gizmo.cc` */
+
+/** Register the custom gizmo type the Gradient Layer handles use in both editors. */
+void ED_gizmotypes_paint_layer_gradient();
+
+/** Register the 3D View gizmo group that edits the active Gradient row's line. */
+void ED_view3d_paint_layer_gradient_gizmo_setup(wmGizmoGroupType *gzgt);
+
+/** Register the Image Editor gizmo group for the same row (UV space only). */
+void ED_image_paint_layer_gradient_gizmo_setup(wmGizmoGroupType *gzgt);
+
 /* `paint_image_shape_gizmo.cc` */
 
 /** Register the gizmo group that draws the live Vector shape session's transform cage. */

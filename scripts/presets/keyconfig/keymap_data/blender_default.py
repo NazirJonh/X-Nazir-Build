@@ -7955,6 +7955,18 @@ def km_image_editor_tool_paint_select_gradient(params, *, fallback):
     )
 
 
+def km_image_editor_tool_paint_layer_gradient(params, *, fallback):
+    return (
+        _fallback_id("Image Editor Tool: Paint, Layer Gradient", fallback),
+        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
+        {"items": [
+            *([] if (fallback and not params.use_fallback_tool) else [
+                ("paint.paint_layer_gradient", params.tool_maybe_tweak_event, None),
+            ]),
+        ]},
+    )
+
+
 def _template_items_image_paint_shape(params, shape_type):
     return [
         ("paint.image_shape_draw",
@@ -10102,6 +10114,7 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_gradient(params, fallback=fallback) for fallback in (False, True)),
+        *(km_image_editor_tool_paint_layer_gradient(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_line(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_polyline(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_rect(params, fallback=fallback) for fallback in (False, True)),

@@ -1702,6 +1702,53 @@ class _defs_particle:
         )
 
 
+def _active_gradient_layer(context):
+    """The active Gradient row of the layered material the paint tools write, or None.
+
+    The Color Gradient tool edits this row instead of painting while it is active, so its
+    settings show the row's own parameters instead of the Sculpt gradient colors.
+    """
+    if context is None:
+        # The tool registry flattens the active tool lists once with no context at startup.
+        return None
+    tool_settings = context.tool_settings
+    if tool_settings is None:
+        return None
+    if tool_settings.paint_mode.layer_target_mode == 'MASK':
+        # A Mask stroke paints the row's mask, which the gradient's own line does not reach.
+        return None
+    ob = context.active_object
+    mat = ob.active_material if ob is not None else None
+    if mat is None or not mat.is_layered:
+        return None
+    layer = mat.paint_layers.active
+    if layer is None or not layer.gradient_supported:
+        return None
+    return layer
+
+
+def _draw_layer_gradient_tool_settings(layout, context, layer, region_is_header):
+    row = layout.row(align=True)
+    row.label(text="Layer Gradient", icon='LAYER_ACTIVE')
+    row.prop(layer, "gradient_gizmo", text="", toggle=True, icon='GIZMO')
+    layout.prop(layer, "gradient_type", expand=True)
+    layout.prop(layer, "gradient_midpoint", slider=True)
+    layout.prop(layer, "gradient_repeat")
+
+    paint_mode = context.tool_settings.paint_mode
+    snap = layout.row(align=True)
+    snap.prop(paint_mode, "gradient_snap",
+              text="" if region_is_header else "Snap to Surface",
+              toggle=True,
+              icon='SNAP_ON' if paint_mode.gradient_snap else 'SNAP_OFF')
+    # A UV line lives on the surface by definition; only Object/Generated rows can be placed in
+    # space, so the toggle is meaningless there.
+    snap.enabled = layer.gradient_space != 'UV'
+
+    if not region_is_header:
+        layout.label(text="The line is also editable in the Gradient panel", icon='INFO')
+
+
 class _defs_sculpt:
     @ToolDef.from_fn
     def mask():
@@ -2239,6 +2286,11 @@ class _defs_sculpt:
             settings = context.tool_settings.sculpt
             region_is_header = context.region.type == 'TOOL_HEADER'
 
+            layer = _active_gradient_layer(context)
+            if layer is not None:
+                _draw_layer_gradient_tool_settings(layout, context, layer, region_is_header)
+                return
+
             layout.prop(settings, "gradient_type", text="" if region_is_header else "Type")
             if settings.gradient_type == 'CURVE':
                 if region_is_header:
@@ -2678,6 +2730,23 @@ class _defs_texture_paint:
             icon="ops.paint.weight_gradient",
             widget=None,
             keymap="Image Editor Tool: Paint, Gradient",
+            draw_settings=draw_settings,
+        )
+
+    @ToolDef.from_fn
+    def paint_layer_gradient():
+        def draw_settings(_context, layout, _tool):
+            layout.label(
+                text="Drag the active Gradient layer's UV line; 3D spaces are edited in the 3D View",
+                icon='INFO',
+            )
+
+        return dict(
+            idname="builtin.image_paint_layer_gradient",
+            label="Layer Gradient",
+            icon="ops.paint.weight_gradient",
+            widget=None,
+            keymap="Image Editor Tool: Paint, Layer Gradient",
             draw_settings=draw_settings,
         )
 
@@ -4861,6 +4930,7 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.texture_clone,
             _defs_texture_paint.fill,
             _defs_texture_paint.selection_gradient,
+            _defs_texture_paint.paint_layer_gradient,
             _defs_texture_paint.mask,
             None,
             (
@@ -5341,6 +5411,13 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_texture_paint.smear,
             _defs_texture_paint.clone,
             _defs_texture_paint.fill,
+            # In texture paint the tool only edits a Gradient row's line, so it is offered only
+            # while such a row is active.
+            lambda context: (
+                (_defs_sculpt.color_gradient,)
+                if _active_gradient_layer(context) is not None
+                else ()
+            ),
             _defs_texture_paint.mask,
             None,
             lambda context: (

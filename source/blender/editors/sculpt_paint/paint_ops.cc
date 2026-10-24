@@ -113,6 +113,7 @@
 #include "paint_clone_source.hh"
 #include "paint_image_curve_patch_edit.hh"
 #include "paint_intern.hh"
+#include "paint_layers_gradient.hh"
 #include "shapes/paint_shape_op_props.hh"
 
 #include "curves/sculpt_intern.hh"
@@ -3594,6 +3595,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_paint_channels_assign_images);
   WM_operatortype_append(PAINT_OT_material_canvas_cycle);
   WM_operatortype_append(PAINT_OT_material_view_pass_cycle);
+  WM_operatortype_append(PAINT_OT_paint_layer_gradient);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

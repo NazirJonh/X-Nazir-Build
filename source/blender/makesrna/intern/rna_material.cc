@@ -3380,6 +3380,21 @@ static void rna_MaterialPaintLayer_gradient_midpoint_set(PointerRNA *ptr, float 
   }
 }
 
+static bool rna_MaterialPaintLayer_gradient_gizmo_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && layer->gradient != nullptr && layer->gradient->gizmo_shown != 0;
+}
+
+static void rna_MaterialPaintLayer_gradient_gizmo_set(PointerRNA *ptr, bool value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_gradient_set_gizmo_shown(*ma, *layer, value);
+  }
+}
+
 static int rna_MaterialPaintLayer_gradient_space_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -3931,6 +3946,19 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(
       prop, "Gradient Supported", "Whether the row is a procedural Gradient generator");
+
+  /* The viewport gizmo: a UI flag on the payload, so the button can sit next to the line
+   * fields it edits. */
+  prop = RNA_def_property(srna, "gradient_gizmo", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop,
+                                 "rna_MaterialPaintLayer_gradient_gizmo_get",
+                                 "rna_MaterialPaintLayer_gradient_gizmo_set");
+  RNA_def_property_ui_text(
+      prop,
+      "Gradient Gizmo",
+      "Show the gradient's line as draggable handles in the 3D Viewport and the Image Editor");
+  /* A viewport-only flag: the material's shading is untouched, so only a redraw is needed. */
+  RNA_def_property_update_notifier(prop, NC_MATERIAL | ND_SHADING);
 
   prop = RNA_def_property(srna, "gradient_space", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_space_items);

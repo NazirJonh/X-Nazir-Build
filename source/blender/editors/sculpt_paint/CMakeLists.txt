@@ -60,6 +60,9 @@ set(SRC
   paint_curve_undo.cc
   paint_gradient_core.cc
   paint_gradient_curve.cc
+  paint_gradient_gizmo.cc
+  paint_layers_gradient.cc
+  paint_layers_gradient_gizmo.cc
   paint_ops.cc
   shapes/paint_bezier_input.cc
   shapes/paint_shape_blend.cc
@@ -255,6 +258,7 @@ set(SRC
   paint_intern.hh
   paint_gradient_core.hh
   paint_gradient_curve.hh
+  paint_gradient_gizmo.hh
   paint_image_curve_patch.hh
   paint_image_curve_patch_anchor.hh
   paint_image_stroke_hook.hh

@@ -21,6 +21,7 @@
 
 #include "BLI_hash.hh"
 #include "BLI_implicit_sharing.hh"
+#include "BLI_index_range.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
@@ -118,52 +119,7 @@ uint64_t surface_key(const Object &object,
   return key;
 }
 
-/**
- * The generated-coordinate bounding box, from the same texture space the shader's
- * `Texture Coordinate.Generated` uses when the mesh has no #CD_ORCO layer.
- *
- * A zero extent on an axis is widened to one unit around the center, matching Blender's rule where
- * a flat object still maps to the middle of the generated range instead of dividing by zero.
- *
- * \return false when neither the texture space nor the object bounds give a usable box.
- */
-bool generated_bbox_get(const Object &object,
-                        const Mesh &mesh,
-                        float3 &r_location,
-                        float3 &r_size)
-{
-  float texspace_location[3] = {0.0f, 0.0f, 0.0f};
-  float texspace_size[3] = {1.0f, 1.0f, 1.0f};
-  BKE_mesh_texspace_get(const_cast<Mesh *>(&mesh), texspace_location, texspace_size);
-  r_location = float3(texspace_location[0], texspace_location[1], texspace_location[2]);
-  r_size = float3(texspace_size[0], texspace_size[1], texspace_size[2]);
-
-  const bool texspace_usable = std::abs(r_size.x) > 1e-8f || std::abs(r_size.y) > 1e-8f ||
-                               std::abs(r_size.z) > 1e-8f;
-  if (!texspace_usable) {
-    const std::optional<Bounds<float3>> bounds = BKE_object_boundbox_get(&object);
-    if (!bounds) {
-      return false;
-    }
-    r_location = (bounds->min + bounds->max) * 0.5f;
-    r_size = (bounds->max - bounds->min) * 0.5f;
-    if (std::abs(r_size.x) <= 1e-8f && std::abs(r_size.y) <= 1e-8f &&
-        std::abs(r_size.z) <= 1e-8f)
-    {
-      return false;
-    }
-  }
-
-  /* A flat or degenerate axis gets a full unit of extent, so a generated coordinate exists. */
-  for (int axis = 0; axis < 3; axis++) {
-    if (std::abs(r_size[axis]) <= 1e-8f) {
-      r_size[axis] = 1.0f;
-    }
-  }
-  return true;
-}
-
-/** \a texspace_location / \a texspace_size and \a bbox_valid are the caller's #generated_bbox_get. */
+/**  texspace_location /  texspace_size and  bbox_valid come from the caller's box lookup. */
 std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Object &object,
                                                              const Mesh &mesh,
                                                              const char *uv_map_name,
@@ -332,7 +288,8 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
    * build cannot disagree about it. */
   float3 texspace_location(0.0f);
   float3 texspace_size(1.0f);
-  const bool bbox_valid = generated_bbox_get(object, mesh, texspace_location, texspace_size);
+  const bool bbox_valid = BKE_paint_layers_gradient_generated_box_get(
+      &object, mesh, texspace_location, texspace_size);
   const uint64_t key = surface_key(
       object, mesh, uv_map_name, clamped_size, texspace_location, texspace_size);
 
@@ -396,6 +353,79 @@ void BKE_paint_layers_gradient_surface_cache_clear_for_object(
   for (const uint64_t key : keys) {
     cache.entries.remove(key);
   }
+}
+
+StringRefNull BKE_paint_layers_gradient_uv_map_name(const Mesh &mesh)
+{
+  /* `Texture Coordinate.UV` reads the render-active/default map, not the editable active one. */
+  const StringRefNull name = mesh.default_uv_map_name();
+  return name.is_empty() ? mesh.active_or_default_uv_map_name() : name;
+}
+
+bool BKE_paint_layers_gradient_generated_box_get(const Object *object,
+                                                 const Mesh &mesh,
+                                                 float3 &r_location,
+                                                 float3 &r_size)
+{
+  float texspace_location[3] = {0.0f, 0.0f, 0.0f};
+  float texspace_size[3] = {1.0f, 1.0f, 1.0f};
+  BKE_mesh_texspace_get(const_cast<Mesh *>(&mesh), texspace_location, texspace_size);
+  r_location = float3(texspace_location);
+  r_size = float3(texspace_size);
+
+  const bool texspace_usable = std::abs(r_size.x) > 1e-8f || std::abs(r_size.y) > 1e-8f ||
+                               std::abs(r_size.z) > 1e-8f;
+  if (!texspace_usable) {
+    const std::optional<Bounds<float3>> bounds = object != nullptr ?
+                                                     BKE_object_boundbox_get(object) :
+                                                     std::nullopt;
+    if (!bounds) {
+      return false;
+    }
+    r_location = (bounds->min + bounds->max) * 0.5f;
+    r_size = (bounds->max - bounds->min) * 0.5f;
+    if (std::abs(r_size.x) <= 1e-8f && std::abs(r_size.y) <= 1e-8f &&
+        std::abs(r_size.z) <= 1e-8f)
+    {
+      return false;
+    }
+  }
+
+  /* A flat or degenerate axis gets a full unit of extent, so a generated coordinate exists. */
+  for (const int axis : IndexRange(3)) {
+    if (std::abs(r_size[axis]) <= 1e-8f) {
+      r_size[axis] = 1.0f;
+    }
+  }
+  return true;
+}
+
+bool BKE_paint_layers_gradient_generated_from_object(const Object *object,
+                                                     const Mesh &mesh,
+                                                     const float3 &position,
+                                                     float3 &r_generated)
+{
+  float3 location;
+  float3 size;
+  if (!BKE_paint_layers_gradient_generated_box_get(object, mesh, location, size)) {
+    return false;
+  }
+  r_generated = (position - location) / size * 0.5f + 0.5f;
+  return true;
+}
+
+bool BKE_paint_layers_gradient_generated_to_object(const Object *object,
+                                                   const Mesh &mesh,
+                                                   const float3 &generated,
+                                                   float3 &r_position)
+{
+  float3 location;
+  float3 size;
+  if (!BKE_paint_layers_gradient_generated_box_get(object, mesh, location, size)) {
+    return false;
+  }
+  r_position = location + (generated * 2.0f - 1.0f) * size;
+  return true;
 }
 
 }  // namespace blender

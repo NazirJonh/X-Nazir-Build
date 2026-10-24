@@ -771,10 +771,17 @@ static void IMAGE_GGT_paint_layer_mapping(wmGizmoGroupType *gzgt)
   ED_image_paint_layer_mapping_gizmo_setup(gzgt);
 }
 
+static void IMAGE_GGT_paint_layer_gradient(wmGizmoGroupType *gzgt)
+{
+  ED_image_paint_layer_gradient_gizmo_setup(gzgt);
+}
+
 static void image_widgets()
 {
   const wmGizmoMapType_Params params{SPACE_IMAGE, RGN_TYPE_WINDOW};
   wmGizmoMapType *gzmap_type = WM_gizmomaptype_ensure(&params);
+
+  ED_gizmotypes_paint_layer_gradient();
 
   WM_gizmogrouptype_append(IMAGE_GGT_gizmo2d);
   WM_gizmogrouptype_append(IMAGE_GGT_gizmo2d_translate);
@@ -793,6 +800,7 @@ static void image_widgets()
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_shape_transform);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_shape_transform_3d);
   WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_layer_mapping);
+  WM_gizmogrouptype_append_and_link(gzmap_type, IMAGE_GGT_paint_layer_gradient);
 }
 
 /************************** main region ***************************/

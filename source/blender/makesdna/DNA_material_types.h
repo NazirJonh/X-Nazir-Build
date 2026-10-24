@@ -689,9 +689,11 @@ struct MaterialPaintLayerGradient {
   int8_t type = MA_PAINT_LAYER_GRADIENT_LINEAR;
   /** #eMaterialPaintLayerGradientRepeat. */
   int8_t repeat = MA_PAINT_LAYER_GRADIENT_REPEAT_NONE;
-  /** Whether the gizmo of this gradient is shown; lives in what would be padding. */
+  /**
+   * Whether the viewports show the row's line as draggable handles (0 or 1). With the four 8-bit
+   * fields above this keeps the struct a multiple of 4 bytes, so no explicit padding is needed.
+   */
   int8_t gizmo_shown = 0;
-  char _pad[4] = {};
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_FILTER row. */

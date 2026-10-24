@@ -616,6 +616,8 @@ def draw_material_gradient_layer(layout, context, owner, layer):
     col.prop(layer, "gradient_type", expand=True)
     col.prop(layer, "gradient_repeat")
     col.prop(layer, "gradient_midpoint", slider=True)
+    row = layout.row(align=True)
+    row.prop(layer, "gradient_gizmo", text="Show Gizmo", toggle=True, icon='GIZMO')
     layout.separator()
     if layer.gradient_supported and layer.gradient_ramp is not None:
         layout.template_color_ramp(layer, "gradient_ramp", expand=True)

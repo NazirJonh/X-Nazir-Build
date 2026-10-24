@@ -836,8 +836,11 @@ static uint64_t bake_hash_layer(uint64_t h,
     h = bake_hash_mix(h, uint8_t(layer.blend));
   }
   /* The non-visibility flags of the row itself. Visibility is appended only for a child, so the
-   * row's own cache does not depend on its own on/off state. */
-  h = bake_hash_mix(h, uint16_t(layer.flag & ~MA_PAINT_LAYER_ENABLED));
+   * row's own cache does not depend on its own on/off state. The lock is left out with it: it
+   * changes no pixel, so putting it in would invalidate a bake for nothing. */
+  h = bake_hash_mix(h,
+                    uint16_t(layer.flag & ~(int(MA_PAINT_LAYER_ENABLED) |
+                                            int(MA_PAINT_LAYER_LOCKED))));
   h = bake_hash_mix(h, uint8_t(layer.role));
   h = bake_hash_float(h, layer.opacity);
   /* Only the fact that the mapping applies: such a row stays live and is never baked

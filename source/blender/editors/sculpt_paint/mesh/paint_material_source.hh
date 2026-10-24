@@ -26,7 +26,10 @@ namespace blender {
 struct ARegion;
 struct Image;
 struct Main;
+struct Material;
+struct MaterialPaintLayer;
 struct PaintLayersTarget;
+struct ReportList;
 struct Brush;
 struct BrushMaterialPaint;
 struct ImagePool;
@@ -246,6 +249,26 @@ Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings
  * \return true when a map was created.
  */
 bool mask_target_image_create_if_missing(Main *bmain, Object &ob, const PaintModeSettings &settings);
+
+/**
+ * Tell the user why a stroke into \a row writes nothing: the row itself, the row a mask item or
+ * correction hangs on, or one of its folders is locked. \a blocker is
+ * #BKE_paint_layers_lock_blocker's answer.
+ */
+void paint_layer_locked_report(const Material &ma,
+                               const MaterialPaintLayer &row,
+                               const MaterialPaintLayer *blocker,
+                               ReportList *reports);
+
+/**
+ * Report the active row of \a ob as locked when it is, for the canvas \a settings selects. The
+ * entry point every stroke start shares, so the message appears once per stroke and not per dab.
+ *
+ * \return true when a lock was reported and the caller should not start the stroke.
+ */
+bool paint_layers_lock_report(Object &ob,
+                              const PaintModeSettings &settings,
+                              ReportList *reports);
 
 /**
  * Map creation is deliberately not part of any stroke's undo step, so nothing else marks the file

@@ -1855,6 +1855,13 @@ bool ImageTilesBackend::begin(bContext &C, ReportList *reports)
     return false;
   }
   Object *ob = CTX_data_active_object(&C);
+  /* One gate per session: a locked row takes no targets, and must not have maps grown for it. */
+  if (ob != nullptr &&
+      ed::sculpt_paint::material::paint_layers_lock_report(
+          *ob, scene->toolsettings->paint_mode, reports))
+  {
+    return false;
+  }
   /* The one map-creation call of the session runs before the resolution, so a preview write
    * never allocates images (it would run outside any undo step that records the creation). */
   Paint &paint = scene->toolsettings->imapaint.paint;

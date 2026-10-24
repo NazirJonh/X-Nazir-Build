@@ -267,6 +267,24 @@ wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op)
              OPERATOR_CANCELLED;
 }
 
+wmOperatorStatus stack_row_lock_toggle_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  if (ID *owner = outliner_stack_owner_get(ctx, *space_outliner)) {
+    outliner_stack_rows_ensure(ctx, *space_outliner, *owner);
+  }
+  const StackRow *row = (ordinal < 0) ? nullptr :
+                                        outliner_stack_row_find(*space_outliner, ordinal);
+  if (row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  return outliner_stack_row_set_locked(C, *space_outliner, ordinal, !row->locked) ?
+             OPERATOR_FINISHED :
+             OPERATOR_CANCELLED;
+}
+
 wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
@@ -558,6 +576,26 @@ bool outliner_stack_row_set_enabled(bContext *C,
                           ID &owner,
                           int & /*r_select_ordinal*/) {
                         return editor.row_set_enabled(*C, focus, owner, ordinal, enable);
+                      });
+}
+
+bool outliner_stack_row_set_locked(bContext *C,
+                                   SpaceOutliner &space_outliner,
+                                   const int ordinal,
+                                   const bool locked)
+{
+  if (ordinal < 0) {
+    return false;
+  }
+  return stack_mutate(*C,
+                      space_outliner,
+                      false,
+                      [&](const StackSource & /*source*/,
+                          const StackEditor &editor,
+                          const StackFocus &focus,
+                          ID &owner,
+                          int & /*r_select_ordinal*/) {
+                        return editor.row_set_locked(*C, focus, owner, ordinal, locked);
                       });
 }
 

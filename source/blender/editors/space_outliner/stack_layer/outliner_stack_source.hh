@@ -219,6 +219,8 @@ struct StackRow {
    */
   bool is_bare_base = false;
   bool enabled = true;
+  /** The row is protected from painting; only drawn where the source supports a lock column. */
+  bool locked = false;
   /**
    * Whether the row's auxiliary content (a mask, for the sources that have one) is switched on.
    * Only meaningful when the row shows such content (its auxiliary slot or section): a
@@ -1113,6 +1115,16 @@ class StackEditor {
     return false;
   }
 
+  /** Protect the row at \a ordinal from painting, or lift that protection. */
+  virtual bool row_set_locked(bContext & /*C*/,
+                              const StackFocus & /*focus*/,
+                              ID & /*owner*/,
+                              int /*ordinal*/,
+                              bool /*locked*/) const
+  {
+    return false;
+  }
+
   /**
    * Copy the row at \a ordinal, putting the copy directly above it.
    *
@@ -1357,6 +1369,15 @@ class StackSource {
   virtual bool is_editable(const ID &owner) const = 0;
 
   virtual StackColumnLayout column_layout() const = 0;
+
+  /**
+   * Whether this source's rows carry a painting lock, which the Options popup can show as a column.
+   * A source without it reserves no room and draws no toggle, whatever the space's flag says.
+   */
+  virtual bool supports_row_lock() const
+  {
+    return false;
+  }
 
   /** Make the row the thing the rest of Blender acts on. */
   virtual bool row_activate(

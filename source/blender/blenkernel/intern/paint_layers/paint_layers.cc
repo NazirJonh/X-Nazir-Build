@@ -3116,8 +3116,10 @@ bool BKE_paint_layers_set_locked(Material &ma, MaterialPaintLayer *layer, const 
   }
   SET_FLAG_FROM_TEST(layer->flag, locked, MA_PAINT_LAYER_LOCKED);
   /* The lock changes no pixel and no topology, and the bake hash leaves it out: no rebuild, no
-   * re-bake and no value sync, only the answer the paint target gives on the next resolve. */
-  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
+   * re-bake and no value sync, only the answer the paint target gives on the next resolve. The
+   * target reads the original material, so the shading is not tagged either: that would make the
+   * viewport rebuild a shader that did not change. */
+  DEG_id_tag_update(&ma.id, ID_RECALC_PARAMETERS);
   return true;
 }
 

@@ -1336,6 +1336,30 @@ static void rna_MaterialPaintLayer_enabled_set(PointerRNA *ptr, bool value)
   }
 }
 
+static bool rna_MaterialPaintLayer_locked_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return BKE_paint_layers_is_locked(*layer);
+}
+
+static void rna_MaterialPaintLayer_locked_set(PointerRNA *ptr, bool value)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (Material *ma = rna_paint_layer_material(ptr, layer)) {
+    BKE_paint_layers_set_locked(*ma, layer, value);
+  }
+}
+
+static void rna_MaterialPaintLayer_locked_update(Main * /*bmain*/,
+                                                 Scene * /*scene*/,
+                                                 PointerRNA *ptr)
+{
+  /* Only the UI shows the lock: a redraw, unlike #rna_Material_update, which re-evaluates the
+   * shading. */
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
+}
+
 static int rna_MaterialPaintLayer_color_tag_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -3957,6 +3981,13 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayer_enabled_get", "rna_MaterialPaintLayer_enabled_set");
   RNA_def_property_ui_text(prop, "Enabled", "Whether the layer takes part in the stack");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "locked", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(
+      prop, "rna_MaterialPaintLayer_locked_get", "rna_MaterialPaintLayer_locked_set");
+  RNA_def_property_ui_text(
+      prop, "Locked", "Protect the layer from painting; its pixels and settings stay as they are");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING_DRAW, "rna_MaterialPaintLayer_locked_update");
 
   prop = RNA_def_property(srna, "color_tag", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_color_items);

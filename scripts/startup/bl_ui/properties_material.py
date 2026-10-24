@@ -659,6 +659,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         item = self._shown_mask_item(context, owner, layer)
         if item is not None:
             layout.label(text=item.name, icon='MOD_MASK')
+            layout.prop(item, "locked", text="Lock", icon='LOCKED' if item.locked else 'UNLOCKED')
             if item.source == 'FILTER':
                 # A filter in the mask changes its one coverage: opacity and the kind's parameters,
                 # and no channels to choose. A map-coverage operator draws its own mode, tolerance
@@ -685,6 +686,7 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             return
 
         layout.prop(layer, "opacity", text="Opacity")
+        layout.prop(layer, "locked", text="Lock", icon='LOCKED' if layer.locked else 'UNLOCKED')
         # The row's own blend is the base a channel inherits; a channel's override is edited in the
         # Outliner stack, beside its opacity.
         layout.prop(layer, "blend_type", text="Blend")

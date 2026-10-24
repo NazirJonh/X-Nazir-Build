@@ -117,6 +117,20 @@ TEST_F(PaintLayersBakeTest, the_hash_ignores_the_visibility_of_the_row_itself)
   EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
 }
 
+TEST_F(PaintLayersBakeTest, the_hash_ignores_the_lock_of_the_row_itself)
+{
+  MaterialPaintLayer *layer = add_paint_layer("Row", add_image("Row"));
+  BKE_paint_layers_bake_struct_ensure(*layer);
+  BKE_paint_layers_bake_finalize(*ma, *layer);
+  ASSERT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+
+  /* A lock changes no pixel, so it must neither invalidate nor schedule a re-bake. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, true));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, false));
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *layer));
+}
+
 TEST_F(PaintLayersBakeTest, the_planner_bakes_a_requested_row_and_it_stands_in)
 {
   MaterialPaintLayer *layer = add_baked_row("Row");

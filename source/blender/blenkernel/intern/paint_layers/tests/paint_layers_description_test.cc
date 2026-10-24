@@ -3077,6 +3077,23 @@ TEST_F(PaintLayersDescription, mapping_wrap_copies_with_the_row)
   EXPECT_EQ(BKE_paint_layers_mapping_wrap_get(*duplicate), MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y);
 }
 
+TEST_F(PaintLayersDescription, row_lock_is_a_flag_and_refuses_foreign_rows)
+{
+  Material *ma = BKE_material_add(bmain, "LockMat");
+  MaterialPaintLayer *layer = BKE_paint_layers_add(*ma, "L", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+
+  EXPECT_FALSE(BKE_paint_layers_is_locked(*layer));
+  EXPECT_TRUE(BKE_paint_layers_set_locked(*ma, layer, true));
+  EXPECT_TRUE(BKE_paint_layers_is_locked(*layer));
+  EXPECT_TRUE(BKE_paint_layers_set_locked(*ma, layer, false));
+  EXPECT_FALSE(BKE_paint_layers_is_locked(*layer));
+
+  Material *other = BKE_material_add(bmain, "LockOther");
+  EXPECT_FALSE(BKE_paint_layers_set_locked(*other, layer, true));
+  EXPECT_FALSE(BKE_paint_layers_is_locked(*layer));
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */

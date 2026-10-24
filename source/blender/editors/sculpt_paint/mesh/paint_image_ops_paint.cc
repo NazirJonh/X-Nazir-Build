@@ -627,7 +627,15 @@ static bool texture_fill_click(bContext *C, wmOperator *op, const float mouse[2]
   if (!texture_fill_context_get(C, true, &paint, &brush)) {
     return false;
   }
-  if (!texture_fill_canvas_has_texture(C, CTX_data_active_object(C))) {
+  Object *ob = CTX_data_active_object(C);
+  Scene *scene = CTX_data_scene(C);
+  if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
+      ed::sculpt_paint::material::paint_layers_lock_report(
+          *ob, scene->toolsettings->paint_mode, op->reports))
+  {
+    return false;
+  }
+  if (!texture_fill_canvas_has_texture(C, ob)) {
     BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
     return false;
   }
@@ -702,6 +710,13 @@ static bool texture_fill_line(bContext *C,
     return false;
   }
   Object *ob = CTX_data_active_object(C);
+  Scene *scene = CTX_data_scene(C);
+  if (ob != nullptr && scene != nullptr && scene->toolsettings != nullptr &&
+      ed::sculpt_paint::material::paint_layers_lock_report(
+          *ob, scene->toolsettings->paint_mode, op->reports))
+  {
+    return false;
+  }
   if (!texture_fill_canvas_has_texture(C, ob)) {
     BKE_report(op->reports, RPT_WARNING, "Texture Fill requires a PBR Paint texture to fill into");
     return false;
@@ -1543,6 +1558,15 @@ static void texture_paint_prepare_layered_maps(bContext *C,
   Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
   PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+
+  /* Projection paint writes every layered material of the object: a locked active row proves the
+   * stroke has nothing to write before any map is grown. The 2D path checks the same gate itself,
+   * so this one is limited to projection to report once per stroke. */
+  if (is_projection &&
+      ed::sculpt_paint::material::paint_layers_lock_report(*ob, paint_mode, CTX_wm_reports(C)))
+  {
+    return;
+  }
 
   int created = 0;
   if (is_projection) {

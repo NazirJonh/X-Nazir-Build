@@ -3488,11 +3488,12 @@ bool element_should_draw_faded(const TreeViewContext &tvc,
     case TSE_STACK_LAYER: {
       /* A layer switched off with its own visibility toggle should read the same way the rest of
        * the Outliner shows something hidden -- faded, not just an icon changed -- so its off state
-       * is obvious at a glance rather than only on hover. */
+       * is obvious at a glance rather than only on hover. A locked row fades the same way: it takes
+       * no strokes, so it reads as inactive at a glance. */
       const StackRow *row = (space_outliner != nullptr) ?
                                 outliner_stack_row_find(*space_outliner, tselem->nr) :
                                 nullptr;
-      if (row != nullptr && !row->enabled) {
+      if (row != nullptr && (!row->enabled || row->locked)) {
         return true;
       }
       /* A row's own toggle is not the whole story: switched off, a group takes everything it

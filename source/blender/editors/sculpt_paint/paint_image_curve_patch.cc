@@ -48,6 +48,7 @@
 
 #include "UI_view2d.hh"
 
+#include "mesh/paint_material_source.hh"
 #include "paint_curve_patch_edit_intern.hh"
 #include "paint_image_curve_patch.hh"
 #include "paint_image_curve_patch_raster.hh"
@@ -179,6 +180,18 @@ ImageCurvePatchSession *image_curve_patch_session_begin(bContext *C,
   if (!has_four_channels) {
     BKE_report(reports, RPT_WARNING, "Image requires 4 color channels to paint");
     return nullptr;
+  }
+
+  /* One gate per session: a locked row takes no target, and the user hears why before the patch
+   * starts rather than on every restamp. */
+  if (Scene *scene = CTX_data_scene(C)) {
+    Object *ob = CTX_data_active_object(C);
+    if (ob != nullptr && scene->toolsettings != nullptr &&
+        ed::sculpt_paint::material::paint_layers_lock_report(
+            *ob, scene->toolsettings->paint_mode, reports))
+    {
+      return nullptr;
+    }
   }
 
   /* MEM_new, NOT `std::make_unique`: every path that ends this session frees it with #MEM_delete

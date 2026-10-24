@@ -383,6 +383,7 @@ StackRow paint_correction_row_build(const Material &material,
   row.parent_section_id = "CHANNELS";
   row.stable_id = effect.marker;
   row.enabled = (effect.flag & MA_PAINT_LAYER_ENABLED) != 0;
+  row.locked = BKE_paint_layers_is_locked(effect);
   row.supported = true;
   const bool fill = effect.source == MA_PAINT_LAYER_SOURCE_CONSTANT;
   const bool from_material = effect.source == MA_PAINT_LAYER_SOURCE_MATERIAL;
@@ -495,6 +496,7 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.parent_section_id = "MASK";
   row.stable_id = item.marker;
   row.enabled = (item.flag & MA_PAINT_LAYER_ENABLED) != 0;
+  row.locked = BKE_paint_layers_is_locked(item);
   row.supported = true;
   row.name = item.name[0] != '\0' ?
                  item.name :
@@ -603,6 +605,7 @@ void paint_stack_rows_append(const Material &material,
     row.can_hold_children = folder;
     row.has_children = BKE_paint_layers_has_children(layer);
     row.enabled = (layer.flag & MA_PAINT_LAYER_ENABLED) != 0;
+    row.locked = BKE_paint_layers_is_locked(layer);
     row.supported = true;
     row.name = layer.name[0] != '\0' ? layer.name : (folder ? "Folder" : "Layer");
     row.name_buffer = const_cast<char *>(layer.name);
@@ -1087,6 +1090,11 @@ class PaintLayersStackSource final : public StackSource,
     layout.mode_width = 2.6f;
     layout.action_width = 1.0f;
     return layout;
+  }
+
+  bool supports_row_lock() const override
+  {
+    return true;
   }
 
   bool row_action(bContext &C,
@@ -2107,6 +2115,21 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);
+    return true;
+  }
+
+  bool row_set_locked(bContext &C,
+                      const StackFocus & /*focus*/,
+                      ID &owner,
+                      const int ordinal,
+                      const bool locked) const override
+  {
+    Material &material = layers_owner(owner);
+    MaterialPaintLayer *layer = paint_description_row_for_ordinal(material, ordinal);
+    if (layer == nullptr || !BKE_paint_layers_set_locked(material, layer, locked)) {
+      return false;
+    }
+    WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING_DRAW, &material.id);
     return true;
   }
 

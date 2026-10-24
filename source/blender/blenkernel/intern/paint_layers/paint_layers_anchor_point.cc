@@ -414,8 +414,12 @@ static uint64_t anchor_point_hash_row(uint64_t h,
 {
   h = anchor_point_hash_mix(h, get_default_hash(int(row.source), int(row.kind_subtype), int(row.role)));
   if (!top) {
-    h = anchor_point_hash_mix(
-        h, get_default_hash(int(row.blend), int(row.flag), row.opacity, int(row.object_mask_flag)));
+    /* The lock changes nothing a slice shows, so it must not invalidate a cached slice. */
+    h = anchor_point_hash_mix(h,
+                              get_default_hash(int(row.blend),
+                                               int(row.flag & ~MA_PAINT_LAYER_LOCKED),
+                                               row.opacity,
+                                               int(row.object_mask_flag)));
   }
   if (paint_layer_kind_reads_anchor_point(row)) {
     h = anchor_point_hash_uuid(h, row.anchor_point_source);

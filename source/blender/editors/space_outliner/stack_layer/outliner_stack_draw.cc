@@ -294,14 +294,20 @@ void outliner_draw_stack_row_icons(ui::Block *block,
   const StackSource &source = *stack_source_for_space(*space_outliner);
   const bool can_toggle = source.can_edit(*owner);
   const bool visibility_left = (space_outliner->stack_layers_flag & SO_SL_VISIBILITY_RIGHT) == 0;
+  const bool show_lock = (space_outliner->stack_layers_flag & SO_SL_SHOW_LOCK) != 0 &&
+                         source.supports_row_lock();
 
   /* The toggle sits in its own column at the right edge, after the value and mode ones --
    * unless it was moved to the dedicated left column instead, in which case this is only where
    * the "row not supported" badge sits. No margin towards the mode column:
    * #outliner_right_columns_width reserves the columns flush against each other, and an extra
-   * offset here would push the toggle into the mode button. */
+   * offset here would push the toggle into the mode button. The lock column, when shown, is the
+   * rightmost one, so the visibility toggle moves one unit left to make room for it. */
   const int icon_columns = visibility_left ? 0 : source.column_layout().icon_columns;
-  const int icons_x = int(region->v2d.cur.xmax) - icon_columns * UI_UNIT_X - V2D_SCROLL_WIDTH;
+  const int lock_columns = show_lock ? 1 : 0;
+  const int icons_x = int(region->v2d.cur.xmax) - (icon_columns + lock_columns) * UI_UNIT_X -
+                      V2D_SCROLL_WIDTH;
+  const int lock_x = int(region->v2d.cur.xmax) - UI_UNIT_X - V2D_SCROLL_WIDTH;
   /* The column immediately before the tree. With the left-side toggle enabled, the whole tree is
    * shifted right by one unit to reserve this column for its buttons. */
   const TreeElement *root = static_cast<const TreeElement *>(space_outliner->runtime->tree.first);
@@ -337,6 +343,32 @@ void outliner_draw_stack_row_icons(ui::Block *block,
                                                         TIP_(row->unsupported_reason));
       return;
     }
+    /* The lock is the rightmost column, after the visibility toggle. It is drawn for every row of
+     * a source that supports it, the bare base included: a lock protects painting, not a Mix node. */
+    if (show_lock && can_toggle) {
+      ui::Button *lock_but = uiDefIconButO(block,
+                                           ui::ButtonType::ButToggle,
+                                           "OUTLINER_OT_stack_layer_lock_toggle",
+                                           wm::OpCallContext::ExecDefault,
+                                           row->locked ? ICON_LOCKED : ICON_UNLOCKED,
+                                           lock_x,
+                                           content_y,
+                                           UI_UNIT_X,
+                                           UI_UNIT_Y,
+                                           row->locked ? TIP_("Unlock this layer") :
+                                                         TIP_("Lock this layer"));
+      RNA_int_set(ui::button_operator_ptr_ensure(lock_but), "ordinal", row->ordinal);
+      button_func_pushed_state_set(
+          lock_but, [locked = row->locked](const ui::Button & /*button*/) { return locked; });
+      /* Like the restriction columns of the other Outliner views, the lock reads lit only while it
+       * is on: an open lock is dimmed, whatever the row, so the two states differ in brightness
+       * and not just in the icon. A locked row is faded because of its lock, so the closed lock
+       * stays lit on it -- it is the one icon that says why. */
+      if (!row->locked) {
+        button_flag_enable(lock_but, ui::BUT_INACTIVE);
+      }
+    }
+
     /* A bare base has no Mix node to mute, so there is nothing to turn off. */
     if (!can_toggle || row->is_bare_base) {
       return;
@@ -860,7 +892,8 @@ float outliner_stack_columns_width(const SpaceOutliner &space_outliner)
    * want different room than a blend-mode menu. With Large rows on the two stack in one column
    * instead of sitting side by side, but only one of the two is ever visible at a time there, so
    * the column only has to be as wide as the wider of the two, not both together. */
-  const StackColumnLayout layout = stack_source_for_space(space_outliner)->column_layout();
+  const StackSource &source = *stack_source_for_space(space_outliner);
+  const StackColumnLayout layout = source.column_layout();
   const bool show_value = layout.value_width > 0 &&
                           (space_outliner.stack_layers_flag & SO_SL_HIDE_VALUE) == 0;
   const bool show_mode = layout.mode_width > 0 &&
@@ -888,6 +921,11 @@ float outliner_stack_columns_width(const SpaceOutliner &space_outliner)
    * tree's own first column, in which case nothing is left to reserve room for. */
   if ((space_outliner.stack_layers_flag & SO_SL_VISIBILITY_RIGHT) != 0) {
     num_columns += layout.icon_columns;
+  }
+  /* The lock column is drawn only by sources that have one, so a shape-key stack never reserves
+   * an empty unit for it. */
+  if ((space_outliner.stack_layers_flag & SO_SL_SHOW_LOCK) != 0 && source.supports_row_lock()) {
+    num_columns += 1.0f;
   }
   /* No half-unit of air here, unlike the restriction columns: the stack's value and mode buttons
    * go flush against the scrollbar strip, which is the only thing reserved past them. This width

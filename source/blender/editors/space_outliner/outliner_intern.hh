@@ -859,6 +859,7 @@ wmOperatorStatus stack_row_move_exec(bContext *C, wmOperator *op);
 bool stack_row_reorder_poll(bContext *C);
 wmOperatorStatus stack_row_visibility_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_visibility_toggle_poll(bContext *C);
+wmOperatorStatus stack_row_lock_toggle_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_mask_exec(bContext *C, wmOperator *op);
 wmOperatorStatus stack_row_mask_toggle_exec(bContext *C, wmOperator *op);
 bool stack_row_mask_poll(bContext *C);
@@ -967,6 +968,11 @@ bool outliner_stack_row_set_enabled(bContext *C,
                                     SpaceOutliner &space_outliner,
                                     int ordinal,
                                     bool enable);
+/** Set or clear a row's painting lock. See #StackEditor::row_set_locked. */
+bool outliner_stack_row_set_locked(bContext *C,
+                                   SpaceOutliner &space_outliner,
+                                   int ordinal,
+                                   bool locked);
 /** Set a row's display color tag; zero clears it. See #StackGroupingEditor::row_color_tag_set. */
 bool outliner_stack_row_color_tag_set(bContext *C,
                                       SpaceOutliner &space_outliner,
@@ -1011,6 +1017,7 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
 void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);
+void OUTLINER_OT_stack_layer_lock_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_mask_toggle(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_add(wmOperatorType *ot);

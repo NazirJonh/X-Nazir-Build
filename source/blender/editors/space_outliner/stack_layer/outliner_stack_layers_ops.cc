@@ -411,6 +411,27 @@ void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
+void OUTLINER_OT_stack_layer_lock_toggle(wmOperatorType *ot)
+{
+  ot->name = "Toggle Stack Layer Lock";
+  ot->idname = "OUTLINER_OT_stack_layer_lock_toggle";
+  ot->description = "Protect a layer of the stack from painting, or lift that protection";
+  ot->exec = stack_row_lock_toggle_exec;
+  ot->poll = stack_row_visibility_toggle_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_int(ot->srna,
+              "ordinal",
+              -1,
+              -1,
+              SHRT_MAX,
+              "Ordinal",
+              "Layer to toggle; -1 uses the active one",
+              -1,
+              SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
 /**
  * The name a button for one kind shows: the kinds are the source's own vocabulary, so the operator
  * cannot name them itself, and two icon buttons that both read "Add Stack Layer" cannot be told

@@ -4781,6 +4781,11 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
     }
     const BrushMaterialPaint &brush_paint = *brush->material_paint;
 
+    /* One gate per stroke: a locked row takes no target and must not create maps first. */
+    if (ed::sculpt_paint::material::paint_layers_lock_report(*ob, paint_mode, op->reports)) {
+      return nullptr;
+    }
+
     /* #Material.paint_channel_cache is only refreshed on writes made through this API (see its
      * doc comment); anything that changes the node tree from outside it (undo/redo swapping in a
      * different Main, manual node edits in the Shader Editor) leaves the cache pointing at a

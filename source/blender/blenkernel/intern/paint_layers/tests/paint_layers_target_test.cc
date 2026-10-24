@@ -976,6 +976,82 @@ TEST_F(PaintLayersTargetTest, active_slot_leaves_a_channel_outside_the_set)
   EXPECT_EQ(ma->paint_content_slot, 0);
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Painting lock
+ * \{ */
+
+TEST_F(PaintLayersTargetTest, lock_refuses_the_target_of_the_row)
+{
+  MaterialPaintLayer *layer = add_active_row("L");
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+
+  /* A locked row resolves no target, and unlocking gives it back. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, true));
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *layer), layer);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Content, target),
+            PaintLayersTargetStatus::Locked);
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, layer, false));
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *layer), nullptr);
+  EXPECT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+}
+
+TEST_F(PaintLayersTargetTest, lock_of_a_folder_or_a_mask_item_protects_what_it_holds)
+{
+  MaterialPaintLayer *folder = BKE_paint_layers_add(*ma, "F", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(folder, nullptr);
+  folder->source = MA_PAINT_LAYER_SOURCE_STACK;
+  MaterialPaintLayer *child = BKE_paint_layers_add(*ma, "C", folder, PaintLayerPlace::Into);
+  ASSERT_NE(child, nullptr);
+  BKE_paint_layers_active_set(*ma, child->marker);
+
+  PaintLayersTarget target;
+  ASSERT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+
+  /* A locked folder protects its whole subtree, and says so as the blocker. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, folder, true));
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *child), folder);
+  EXPECT_FALSE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, folder, false));
+  EXPECT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+
+  /* A locked mask correction keeps its pixels; the row's own content stays paint-able. */
+  MaterialPaintLayer *base = BKE_paint_layers_mask_add(*ma, child, 1.0f);
+  MaterialPaintLayer *paint = BKE_paint_layers_mask_item_add(
+      *ma, child, MA_PAINT_LAYER_SOURCE_IMAGE, "Corr");
+  ASSERT_NE(base, nullptr);
+  ASSERT_NE(paint, nullptr);
+  BKE_paint_layers_active_set(*ma, paint->marker);
+  ASSERT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  EXPECT_EQ(target.mask_item, paint);
+
+  /* The row a mask item hangs on locks its mask too. */
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, child, true));
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *paint), child);
+  EXPECT_FALSE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, child, false));
+
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, paint, true));
+  EXPECT_EQ(BKE_paint_layers_lock_blocker(*ma, *paint), paint);
+  EXPECT_EQ(BKE_paint_layers_target_resolve(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target),
+            PaintLayersTargetStatus::Locked);
+  EXPECT_FALSE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+  BKE_paint_layers_active_set(*ma, child->marker);
+  EXPECT_TRUE(BKE_paint_layers_target_get(*ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, target));
+
+  ASSERT_TRUE(BKE_paint_layers_set_locked(*ma, paint, false));
+  BKE_paint_layers_active_set(*ma, paint->marker);
+  EXPECT_TRUE(BKE_paint_layers_target_get(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayersTargetMode::Mask, target));
+}
+
 /** \} */
 
 }  // namespace blender::bke::tests

@@ -286,6 +286,12 @@ enum eSpaceOutliner_StackLayersFlag : short {
    * the user asks for them, unlike the Add and Remove verbs the header always carries.
    */
   SO_SL_SHOW_MOVE_BUTTONS = (1 << 7),
+  /**
+   * Show the painting-lock toggle in a column of its own, at the right edge after the visibility
+   * toggle. Off by default, which is what a zero-filled old file reads as. Bit 4 is left alone: it
+   * was the retired sort-by-name flag, and a file saved with it set would show the column.
+   */
+  SO_SL_SHOW_LOCK = (1 << 8),
 };
 ENUM_OPERATORS(eSpaceOutliner_StackLayersFlag)
 

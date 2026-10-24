@@ -9,12 +9,17 @@
 #include "BKE_brush.hh"
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_resolve.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_report.hh"
+
+#include "BLT_translation.hh"
 
 #include "DNA_brush_types.h"
 #include "DNA_image_types.h"
+#include "DNA_material_types.h"
 #include "DNA_texture_types.h"
 
 #include "IMB_colormanagement.hh"
@@ -290,6 +295,80 @@ Image *mask_target_image_get(Object &ob)
 {
   PaintLayersTarget target;
   return mask_target_get(ob, target) ? BKE_paint_layers_target_image(target) : nullptr;
+}
+
+void paint_layer_locked_report(const Material &ma,
+                               const MaterialPaintLayer &row,
+                               const MaterialPaintLayer *blocker,
+                               ReportList *reports)
+{
+  if (blocker == nullptr || reports == nullptr) {
+    return;
+  }
+  if (blocker == &row) {
+    BKE_reportf(reports, RPT_WARNING, TIP_("Layer \"%s\" is locked"), row.name);
+    return;
+  }
+  /* The owner and parent lookups only read the stack, but share its mutable iterator. */
+  Material &ma_mut = const_cast<Material &>(ma);
+  const MaterialPaintLayer *owner = nullptr;
+  if (row.role == MA_PAINT_LAYER_ROLE_EFFECT) {
+    owner = BKE_paint_layers_correction_owner(ma_mut, row);
+  }
+  else if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    owner = BKE_paint_layers_mask_item_owner(ma_mut, row);
+  }
+  if (owner != nullptr && blocker == owner) {
+    BKE_reportf(reports,
+                RPT_WARNING,
+                TIP_("Layer \"%s\" is locked because its layer \"%s\" is locked"),
+                row.name,
+                owner->name);
+    return;
+  }
+  BKE_reportf(reports,
+              RPT_WARNING,
+              TIP_("Layer \"%s\" is locked because its folder \"%s\" is locked"),
+              row.name,
+              blocker->name);
+}
+
+bool paint_layers_lock_report(Object &ob,
+                              const PaintModeSettings &settings,
+                              ReportList *reports)
+{
+  if (settings.canvas_source != PAINT_CANVAS_SOURCE_MATERIAL) {
+    return false;
+  }
+  Material *ma = BKE_paint_layers_active_material_get(&ob);
+  if (ma == nullptr) {
+    return false;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(*ma);
+  if (row == nullptr) {
+    return false;
+  }
+  const MaterialPaintLayer *blocker = BKE_paint_layers_lock_blocker(*ma, *row);
+  if (blocker == nullptr && BKE_paint_layers_target_mode(&settings) == PaintLayersTargetMode::Mask)
+  {
+    /* A mask item can be locked on its own while the row it hangs on is not. */
+    const MaterialPaintLayer *item = BKE_paint_layers_active_mask_item_get(*ma);
+    if (item == nullptr) {
+      item = BKE_paint_layers_mask_base(*row);
+    }
+    if (item != nullptr) {
+      const MaterialPaintLayer *item_blocker = BKE_paint_layers_lock_blocker(*ma, *item);
+      if (item_blocker != nullptr) {
+        row = item;
+        blocker = item_blocker;
+      }
+    }
+  }
+  if (blocker == nullptr) {
+    return false;
+  }
+  paint_layer_locked_report(*ma, *row, blocker, reports);
+  return true;
 }
 
 Image *mask_target_image_ensure(Main *bmain, Object &ob, const PaintModeSettings &settings)

@@ -22,6 +22,8 @@
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 
+#include "paint_material_source.hh"
+
 namespace blender::ed::sculpt_paint::shape {
 
 /** One image the bake writes: its pixels, plus the channel the target map holds (-1 for the
@@ -722,6 +724,11 @@ void SculptImageBackend::target_images(Vector<const Image *> &r_images) const
 
 bool SculptImageBackend::begin(bContext &C, ReportList *reports)
 {
+  if (ctx_.ob != nullptr && ctx_.toolsettings != nullptr &&
+      material::paint_layers_lock_report(*ctx_.ob, ctx_.toolsettings->paint_mode, reports))
+  {
+    return false;
+  }
   composite_targets_ensure_writable(&C, ctx_.ob, *ctx_.paint, *ctx_.settings);
   data_->targets = shape_image_targets_get(&C, *ctx_.ob, *ctx_.paint, *ctx_.settings);
   if (data_->targets.is_empty()) {

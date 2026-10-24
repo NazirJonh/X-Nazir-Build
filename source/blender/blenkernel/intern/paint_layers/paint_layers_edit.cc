@@ -183,6 +183,26 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
                                              PaintLayerPlace::Into :
                                              params.place);
   }
+  if (params.kind == PaintLayerAddKind::GradientCorrection) {
+    /* As any correction: aimed at one, it means another on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+    }
+    if (owner == nullptr) {
+      return nullptr;
+    }
+    const char *name_base = "Gradient Correction";
+    const std::string name =
+        (params.name != nullptr) ?
+            std::string(params.name) :
+            std::string(name_base) + " " +
+                std::to_string(paint_layer_name_number_max(owner->effects, name_base) + 1);
+    return BKE_paint_layers_correction_add(
+        ma, owner, name.c_str(), MA_PAINT_LAYER_SOURCE_GENERATOR);
+  }
   if (params.kind == PaintLayerAddKind::CorrectionMaterial) {
     /* An Add aimed at a correction means another one on the row it hangs on. */
     MaterialPaintLayer *owner = params.anchor;
@@ -368,6 +388,35 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
       BKE_paint_layers_set_fill_color(ma, item, params.fill_color);
     }
     return item;
+  }
+  if (params.kind == PaintLayerAddKind::MaskGradient) {
+    /* Aimed at a correction or a mask item, an Add means one more on the row it hangs on. */
+    MaterialPaintLayer *owner = params.anchor;
+    if (owner != nullptr) {
+      if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, *owner)) {
+        owner = parent;
+      }
+      else if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, *owner)) {
+        owner = item_parent;
+      }
+    }
+    if (owner == nullptr) {
+      return nullptr;
+    }
+    /* Like any mask correction, it lays over the base mask: made first, white. */
+    if (BKE_paint_layers_mask_base(*owner) == nullptr &&
+        BKE_paint_layers_mask_add(ma, owner, 1.0f) == nullptr)
+    {
+      return nullptr;
+    }
+    const char *name_base = "Mask Gradient";
+    const std::string name =
+        (params.name != nullptr) ?
+            std::string(params.name) :
+            std::string(name_base) + " " +
+                std::to_string(paint_layer_name_number_max(owner->mask_stack, name_base) + 1);
+    return BKE_paint_layers_mask_item_add(
+        ma, owner, MA_PAINT_LAYER_SOURCE_GENERATOR, name.c_str());
   }
   if (params.kind == PaintLayerAddKind::Material &&
       (params.source == nullptr ||

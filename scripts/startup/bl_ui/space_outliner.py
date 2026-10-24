@@ -130,6 +130,11 @@ def _draw_stack_layer_effect_entries(layout):
                             icon='GP_DRAW_FILL')
     props.type = 'CORRECTION_FILL'
     props.label = "Add Fill Correction"
+    # The same generator in its two correction roles: a procedural ramp over the layer's colour
+    # or its mask, edited through the gradient panel and the Color Gradient tool.
+    layout.operator(
+        "outliner.stack_layer_add", text="Add Gradient Correction", icon='COLOR',
+    ).type = 'CORRECTION_GRADIENT'
     # Corrections laid over the layer's mask (made white first when there is none): a grey map
     # painted in Mask mode, or one flat grey.
     layout.separator()
@@ -139,6 +144,9 @@ def _draw_stack_layer_effect_entries(layout):
     layout.operator(
         "outliner.stack_layer_add", text="Add Fill Mask Correction", icon='GP_DRAW_FILL',
     ).type = 'MASK_CORRECTION_FILL'
+    layout.operator(
+        "outliner.stack_layer_add", text="Add Mask Gradient Correction", icon='COLOR',
+    ).type = 'MASK_CORRECTION_GRADIENT'
 
 
 class OUTLINER_MT_stack_layer_advanced(Menu):

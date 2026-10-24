@@ -3439,6 +3439,29 @@ static void rna_def_paint_mode(BlenderRNA *brna)
                            "in the Image Editor");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
 
+  static const EnumPropertyItem gradient_tool_mode_items[] = {
+      {PAINT_GRADIENT_TOOL_MOVE,
+       "MOVE",
+       0,
+       "Move",
+       "Drag the Gradient Layer handles; a stroke anywhere else changes nothing"},
+      {PAINT_GRADIENT_TOOL_STROKE,
+       "STROKE",
+       0,
+       "Stroke",
+       "Draw a new line, so the gradient's direction follows the stroke"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "gradient_tool_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_tool_mode");
+  RNA_def_property_enum_items(prop, gradient_tool_mode_items);
+  RNA_def_property_enum_default(prop, PAINT_GRADIENT_TOOL_MOVE);
+  RNA_def_property_ui_text(
+      prop,
+      "Gradient Action",
+      "What a drag in the viewport does while the Color Gradient tool edits a Gradient row");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   /* The Gradient Layer gizmo's free placement: on, a dragged handle is raycast onto the surface;
    * off, it follows the mouse in the view plane through its current position. */
   prop = RNA_def_property(srna, "gradient_snap", PROP_BOOLEAN, PROP_NONE);

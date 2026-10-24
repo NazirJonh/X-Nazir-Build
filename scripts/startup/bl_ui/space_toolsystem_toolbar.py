@@ -1714,14 +1714,18 @@ def _active_gradient_layer(context):
     tool_settings = context.tool_settings
     if tool_settings is None:
         return None
-    if tool_settings.paint_mode.layer_target_mode == 'MASK':
-        # A Mask stroke paints the row's mask, which the gradient's own line does not reach.
-        return None
     ob = context.active_object
     mat = ob.active_material if ob is not None else None
     if mat is None or not mat.is_layered:
         return None
-    layer = mat.paint_layers.active
+    # A Gradient mask correction is the active item of its row's mask: the item holds the line, not
+    # the row. A plain mask item has no gradient, so the header stays out of the mask's way.
+    layer = mat.paint_layers.active_mask_item
+    if layer is None:
+        if tool_settings.paint_mode.layer_target_mode == 'MASK':
+            # A Mask stroke paints the row's mask, which the gradient's own line does not reach.
+            return None
+        layer = mat.paint_layers.active
     if layer is None or not layer.gradient_supported:
         return None
     return layer
@@ -1736,6 +1740,9 @@ def _draw_layer_gradient_tool_settings(layout, context, layer, region_is_header)
     layout.prop(layer, "gradient_repeat")
 
     paint_mode = context.tool_settings.paint_mode
+    action = layout.row(align=True)
+    action.prop(paint_mode, "gradient_tool_mode", expand=True)
+
     snap = layout.row(align=True)
     snap.prop(paint_mode, "gradient_snap",
               text="" if region_is_header else "Snap to Surface",
@@ -1746,6 +1753,7 @@ def _draw_layer_gradient_tool_settings(layout, context, layer, region_is_header)
     snap.enabled = layer.gradient_space != 'UV'
 
     if not region_is_header:
+        layout.label(text="Move: drag the handles. Stroke: drag to redraw the line.", icon='INFO')
         layout.label(text="The line is also editable in the Gradient panel", icon='INFO')
 
 

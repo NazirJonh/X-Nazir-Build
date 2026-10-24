@@ -363,11 +363,12 @@ bool BKE_paint_layers_mask_copy(Main &bmain,
  *
  * A Paint correction (the Image source) lays nothing until it has a map, which the first stroke in
  * Mask mode creates, transparent; a Fill correction (the Constant source) starts as the grey
- * \a value. Like a row's, its opacity, blend and visibility are its own settings.
+ * \a value; a Gradient correction (the Generator source) lays its ramp's grey, its alpha and its
+ * line. Like a row's, its opacity, blend and visibility are its own settings.
  *
- * \param name: the correction's name, or null for "Mask Paint" / "Mask Fill".
+ * \param name: the correction's name, or null for "Mask Paint" / "Mask Fill" / "Mask Gradient".
  * \return the new item, or null when \a layer is not a row of \a ma's stack, has no base mask, or
- * \a source is neither Image nor Constant.
+ * \a source is not Image, Constant or Generator.
  */
 MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
                                                    MaterialPaintLayer *layer,
@@ -524,10 +525,14 @@ MaterialPaintLayer *BKE_paint_layers_active_mask_item_get(Material &ma);
  * lays nothing in Normal while it has none, where a flat value is not a normal.
  *
  * \param name: the correction's name, or null for "Correction Paint" / "Correction Fill".
- * \param source: #MA_PAINT_LAYER_SOURCE_IMAGE or #MA_PAINT_LAYER_SOURCE_CONSTANT.
+ * A Gradient correction (the Generator source) has no map and one channel record: its ramp
+ * supplies the colour in a colour channel and its line the mix in a scalar one.
+ *
+ * \param source: #MA_PAINT_LAYER_SOURCE_IMAGE, #MA_PAINT_LAYER_SOURCE_CONSTANT or
+ *                #MA_PAINT_LAYER_SOURCE_GENERATOR.
  * \return the new correction, or null when \a owner is not a row of \a ma's stack or \a source is
- * neither. A folder takes one: it corrects the isolated result of what the folder holds, before the
- * folder's own blend, and a folder that has one is no longer a Pass Through folder.
+ * none of the three. A folder takes one: it corrects the isolated result of what the folder holds,
+ * before the folder's own blend, and a folder that has one is no longer a Pass Through folder.
  */
 MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
                                                     MaterialPaintLayer *owner,

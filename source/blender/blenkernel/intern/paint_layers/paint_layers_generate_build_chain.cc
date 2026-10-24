@@ -449,13 +449,16 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     }
     const bool from_source = paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE);
     const bool from_anchor = paint_layer_kind_reads_anchor_point(item);
+    const bool generates = paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_GENERATES);
     const MaterialPaintLayerChannel *item_record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     bNodeTreeInterfaceSocket **item_opacity_iface = mask_opacity_inputs_.lookup_ptr(&item);
     bNodeSocket *item_opacity = (item_opacity_iface != nullptr) ?
                                     this->group_input_socket(group, **item_opacity_iface) :
                                     nullptr;
-    if ((item_record == nullptr && !from_source && !from_anchor) || item_opacity == nullptr) {
+    if ((item_record == nullptr && !from_source && !from_anchor && !generates) ||
+        item_opacity == nullptr)
+    {
       continue;
     }
     NodeOutput item_grey;
@@ -467,6 +470,22 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
       if (item_grey.socket == nullptr) {
         continue;
       }
+    }
+    else if (generates) {
+      /* The ramp's colour as the grey, its alpha as the coverage: the same pair a painted item's
+       * map supplies, evaluated from the item's own line. */
+      const RowEmitContext emit_context{tree, group, item, PAINT_MATERIAL_CHANNEL_BASE_COLOR};
+      const KindEmitResult emitted = this->gradient_source_emit(emit_context);
+      if (emitted.color.socket == nullptr || emitted.content_alpha.socket == nullptr) {
+        discard();
+        return {};
+      }
+      item_grey = this->rgb_mean_nodes_add(tree, emitted.color, nodes);
+      if (item_grey.node == nullptr) {
+        discard();
+        return {};
+      }
+      item_alpha = emitted.content_alpha;
     }
     else if (from_source) {
       /* A mask correction that reads a material: the mean of the source's Base Color, read as a
@@ -1548,12 +1567,13 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   const bool from_anchor = paint_layer_kind_reads_anchor_point(effect);
   const bool from_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE) ||
                            from_anchor;
-  /* A Fill correction with no map in the channel is a flat colour, an input of the group; every
-   * other correction reads its map. */
-  const bool flat = !from_source && record != nullptr && record->image == nullptr &&
+  const bool generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
+  /* A Fill correction with no map in the channel is a flat colour, an input of the group; a
+   * Gradient correction produces its colour; every other correction reads its map. */
+  const bool flat = !from_source && !generates && record != nullptr && record->image == nullptr &&
                     paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_FLAT_VALUE);
   if (by_channel == nullptr || content.socket == nullptr ||
-      (!from_source && (record == nullptr || (!flat && record->image == nullptr))))
+      (!from_source && (record == nullptr || (!flat && !generates && record->image == nullptr))))
   {
     return false;
   }
@@ -1570,22 +1590,22 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
     if (opacity == nullptr) {
       return false;
     }
-    const RowEmitContext emit_context{tree,
-                                      group,
-                                      effect,
-                                      channel,
-                                      /*folder=*/false,
-                                      /*adjustment=*/false,
-                                      /*empty_base=*/false,
-                                      /*track_alpha=*/false,
-                                      /*record=*/nullptr,
-                                      /*below=*/nullptr,
-                                      /*below_alpha=*/nullptr,
-                                      /*folder_color=*/nullptr,
-                                      /*folder_alpha=*/nullptr,
-                                      /*baked_color=*/nullptr};
+    const RowEmitContext emit_context{tree, group, effect, channel};
     source_emitted = from_anchor ? this->anchor_point_source_emit(emit_context) :
                                     this->material_source_emit(emit_context);
+    if (source_emitted.color.socket == nullptr || source_emitted.content_alpha.socket == nullptr) {
+      return false;
+    }
+    map_color = source_emitted.color.socket;
+  }
+  else if (generates) {
+    /* The ramp's colour in a colour channel, its scalar mix in another, and the ramp's alpha as
+     * the coverage, exactly what a Gradient row emits. */
+    if (opacity == nullptr) {
+      return false;
+    }
+    const RowEmitContext emit_context{tree, group, effect, channel};
+    source_emitted = this->gradient_source_emit(emit_context);
     if (source_emitted.color.socket == nullptr || source_emitted.content_alpha.socket == nullptr) {
       return false;
     }
@@ -1630,13 +1650,15 @@ bool PaintLayersTreeBuilder::correction_lay(bNodeTree &tree,
   };
   /* The map is read as stored, like a row's own map: a colour map is un-premultiplied by the node,
    * and a data map follows the same rule a row's does, so the two cannot disagree. */
-  NodeOutput color = from_source ? source_emitted.color :
-                                   NodeOutput{flat ? group.group_input : map, map_color};
+  NodeOutput color = (from_source || generates) ?
+                         source_emitted.color :
+                         NodeOutput{flat ? group.group_input : map, map_color};
   if (mapped && channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     /* The Mapping moved only the read point; the tangent-space vectors follow it. */
     color = this->normal_remap_add(tree, effect, color, &nodes);
   }
-  NodeOutput alpha = from_source ? source_emitted.content_alpha : NodeOutput{map, map_alpha};
+  NodeOutput alpha = (from_source || generates) ? source_emitted.content_alpha :
+                                                  NodeOutput{map, map_alpha};
   if (mapped) {
     /* A clipping UV wrap takes the part outside the square out of the map's alpha. */
     alpha = this->mapping_clip_alpha(tree, effect, alpha, nodes);

@@ -101,13 +101,13 @@ static const PaintLayerKindInfo kinds[] = {
      0,
      PAINT_LAYER_KIND_READS_SOURCE},
     /* A procedural generator: its colour and coverage come from shader nodes reading the UV, not
-     * from a map. The first vertical slice is the Layer role; corrections and mask items follow
-     * once their graph and CPU paths are in place. */
+     * from a map. As a row it lays its colour; as a content correction it lays that colour over
+     * the row's; as a mask item its ramp's grey over the row's mask. */
     {MA_PAINT_LAYER_SOURCE_GENERATOR,
      MA_PAINT_LAYER_GENERATOR_GRADIENT,
      "Gradient",
      PaintLayerKindCategory::Source,
-     paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER),
+     all_roles,
      nullptr,
      0,
      PAINT_LAYER_KIND_GENERATES,

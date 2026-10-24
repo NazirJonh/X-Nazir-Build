@@ -2229,6 +2229,15 @@ enum ePaintLayerTargetMode : int8_t {
   PAINT_LAYER_TARGET_MASK = 1,
 };
 
+/** #PaintModeSettings::gradient_tool_mode: what a drag does while the Color Gradient tool edits a
+ * Gradient row. */
+enum ePaintGradientToolMode : int8_t {
+  /** Only the gizmo handles move; a drag anywhere else leaves the row untouched. */
+  PAINT_GRADIENT_TOOL_MOVE = 0,
+  /** A drag draws a new line, so the gradient's direction follows the stroke. */
+  PAINT_GRADIENT_TOOL_STROKE = 1,
+};
+
 struct PaintModeSettings {
   /** Source to select canvas from to paint on. */
   ePaintCanvasSource canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
@@ -2245,7 +2254,9 @@ struct PaintModeSettings {
    * off-surface meaning.
    */
   char gradient_snap = 0;
-  char _pad[5] = {};
+  /** #ePaintGradientToolMode: Move keeps an accidental stroke from rebuilding the line. */
+  int8_t gradient_tool_mode = PAINT_GRADIENT_TOOL_MOVE;
+  char _pad[4] = {};
 
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;

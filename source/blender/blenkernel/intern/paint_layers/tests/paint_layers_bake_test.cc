@@ -572,4 +572,87 @@ TEST_F(PaintLayersBakeTest, a_row_result_job_needs_both_rows_and_a_target_that_s
   BKE_paint_layers_row_result_job_free(*job);
 }
 
+TEST_F(PaintLayersBakeTest, a_gradient_effect_invalidates_the_parent_bake_and_settles)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_baked_row("Row");
+  clear_active();
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+
+  MaterialPaintLayer *effect = BKE_paint_layers_correction_add(
+      *ma, row, "Grad", MA_PAINT_LAYER_SOURCE_GENERATOR);
+  ASSERT_NE(effect, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "a gradient effect is part of the parent's pixels";
+
+  /* The re-bake settles: the following plans have nothing to do, so a value edit cannot loop. */
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 1.0f, 0.0f};
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *effect, start, end));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "moving the effect's line moves the parent's pixels";
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed) << "no infinite bake: the re-baked hash matches the description";
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* The midpoint is folded into the ramp position, so it moves the bake exactly once. */
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_midpoint(*ma, *effect, 0.75f));
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+}
+
+TEST_F(PaintLayersBakeTest, a_mask_gradient_item_invalidates_the_parent_bake_and_settles)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *row = add_baked_row("Row");
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, row, 1.0f), nullptr);
+  clear_active();
+  bool changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  ASSERT_NE(row->bake, nullptr);
+
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, row, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Grad", 1.0f);
+  ASSERT_NE(item, nullptr);
+  EXPECT_FALSE(BKE_paint_layers_bake_is_valid(*ma, *row))
+      << "a gradient mask item is part of the parent's pixels";
+
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_TRUE(changed);
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_TRUE(BKE_paint_layers_bake_is_valid(*ma, *row));
+
+  /* A 3D mask item has no shared pixels at all: the parent's bake is released, not re-made. */
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, item, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  changed = false;
+  EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_EQ(row->bake, nullptr) << "a 3D gradient item keeps the parent live";
+  changed = false;
+  EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
+  EXPECT_FALSE(changed);
+  EXPECT_EQ(row->bake, nullptr);
+}
+
 }  // namespace blender::bke::tests

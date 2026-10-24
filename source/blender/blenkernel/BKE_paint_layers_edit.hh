@@ -100,6 +100,10 @@ enum class PaintLayerAddKind : int8_t {
    * #PaintLayerAddParams::anchor_point_source.
    */
   AnchorPointMaskCorrection,
+  /** A content correction of the anchor row whose source is a procedural Gradient. */
+  GradientCorrection,
+  /** A mask correction of the anchor row whose coverage is a procedural Gradient's grey. */
+  MaskGradient,
 };
 
 struct PaintLayerAddParams {

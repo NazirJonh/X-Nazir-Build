@@ -128,7 +128,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   ASSERT_NE(editor, nullptr);
   editor->add_kinds(kinds);
   /* The order #StackEditor::row_add dispatches by index. */
-  ASSERT_EQ(kinds.size(), 26u);
+  ASSERT_EQ(kinds.size(), 28u);
   EXPECT_EQ(kinds[0].identifier, "PAINT");
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
@@ -184,10 +184,15 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[24].is_effect);
   EXPECT_FALSE(kinds[18].is_effect);
   EXPECT_FALSE(kinds[15].takes_color);
-  /* Last of all: a procedural Gradient layer, a row of the stack rather than a correction. */
+  /* Last of all: a procedural Gradient layer, a row of the stack rather than a correction, then
+   * the same generator in its two correction roles. */
   EXPECT_EQ(kinds[25].identifier, "GRADIENT");
   EXPECT_FALSE(kinds[25].is_effect);
   EXPECT_FALSE(kinds[25].takes_color);
+  EXPECT_EQ(kinds[26].identifier, "CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[26].is_effect);
+  EXPECT_EQ(kinds[27].identifier, "MASK_CORRECTION_GRADIENT");
+  EXPECT_TRUE(kinds[27].is_effect);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, mask_corrections_are_rows_under_the_mask_section)
@@ -944,11 +949,13 @@ TEST_F(OutlinerStackPaintLayersSourceTest,
 
   Vector<StackAddKindInfo> kinds;
   source().editor()->add_kinds(kinds);
-  ASSERT_EQ(kinds.size(), 26u);
+  ASSERT_EQ(kinds.size(), 28u);
   EXPECT_EQ(kinds[24].identifier, "ANCHOR_POINT_MASK_CORRECTION")
       << "row_add dispatches by index, last of the Anchor Point kinds";
   EXPECT_EQ(kinds[25].identifier, "GRADIENT")
       << "the Gradient kind is appended after every other kind";
+  EXPECT_EQ(kinds[26].identifier, "CORRECTION_GRADIENT");
+  EXPECT_EQ(kinds[27].identifier, "MASK_CORRECTION_GRADIENT");
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, anchor_point_marker_after_active_correction)

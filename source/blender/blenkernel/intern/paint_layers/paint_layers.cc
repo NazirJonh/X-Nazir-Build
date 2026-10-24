@@ -1014,12 +1014,21 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
   if (!paint_layer_in_stack(ma, owner)) {
     return nullptr;
   }
-  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+  if (!ELEM(source,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            MA_PAINT_LAYER_SOURCE_CONSTANT,
+            MA_PAINT_LAYER_SOURCE_GENERATOR))
+  {
     return nullptr;
   }
   const bool fill = source == MA_PAINT_LAYER_SOURCE_CONSTANT;
-  MaterialPaintLayer *effect = paint_layer_alloc(
-      ma, name != nullptr ? name : (fill ? "Correction Fill" : "Correction Paint"));
+  const bool generates = source == MA_PAINT_LAYER_SOURCE_GENERATOR;
+  MaterialPaintLayer *effect = paint_layer_alloc(ma,
+                                                 name != nullptr ?
+                                                     name :
+                                                     (fill      ? "Correction Fill" :
+                                                      generates ? "Gradient Correction" :
+                                                                  "Correction Paint"));
   effect->role = MA_PAINT_LAYER_ROLE_EFFECT;
   effect->source = source;
   BLI_addtail(&owner->effects, effect);
@@ -1033,6 +1042,28 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
     {
       const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
       copy_v4_v4(base->value, black);
+    }
+  }
+  else if (generates) {
+    /* The ramp supplies the colour; the record is the channel switch, as on a Gradient row. */
+    effect->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
+    BKE_paint_layers_gradient_ensure(*effect);
+    const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if (channel != PAINT_MATERIAL_CHANNEL_NORMAL && (set & (uint16_t(1) << channel)) != 0) {
+        MaterialPaintLayerChannel *record = BKE_paint_layers_channel_add(
+            ma, effect, eMaterialPaintChannel(channel));
+        const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+            eMaterialPaintChannel(channel));
+        if (record != nullptr && !info.is_color) {
+          /* A scalar channel ramps between its own two ends; a fresh record is all zero, which
+           * would make the correction a flat zero. The channel's own range bounds the ends, so a
+           * channel that does not span 0..1 still ramps across its whole span. */
+          record->value[0] = info.value_min;
+          record->value[1] = info.value_max;
+        }
+        break;
+      }
     }
   }
   else {
@@ -1268,12 +1299,20 @@ MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
   if (!paint_layer_in_stack(ma, layer) || BKE_paint_layers_mask_base(*layer) == nullptr) {
     return nullptr;
   }
-  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+  if (!ELEM(source,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            MA_PAINT_LAYER_SOURCE_CONSTANT,
+            MA_PAINT_LAYER_SOURCE_GENERATOR))
+  {
     return nullptr;
   }
   const bool fill = source == MA_PAINT_LAYER_SOURCE_CONSTANT;
-  MaterialPaintLayer *item = paint_layer_alloc(
-      ma, name != nullptr ? name : (fill ? "Mask Fill" : "Mask Paint"));
+  const bool generates = source == MA_PAINT_LAYER_SOURCE_GENERATOR;
+  MaterialPaintLayer *item = paint_layer_alloc(ma,
+                                               name != nullptr ? name :
+                                                                 (fill      ? "Mask Fill" :
+                                                                  generates ? "Mask Gradient" :
+                                                                              "Mask Paint"));
   item->role = MA_PAINT_LAYER_ROLE_MASK_ITEM;
   item->source = source;
   /* Mix: the correction says what the coverage is where it covers, rather than scaling it as the
@@ -1286,14 +1325,24 @@ MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
   record.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   record.image = nullptr;
+  record.flag = 0;
   if (fill) {
     const float gray = clamp_f(value, 0.0f, 1.0f);
     record.value[0] = record.value[1] = record.value[2] = gray;
     record.value[3] = 1.0f;
   }
+  else if (generates) {
+    /* The ramp supplies the grey; the record is only the structural Base Color switch, kept
+     * opaque white so an old reader sees an un-hidden item. */
+    record.value[0] = record.value[1] = record.value[2] = record.value[3] = 1.0f;
+    item->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
+  }
   /* A Paint item starts transparent: with no map it lays nothing, and its first map starts empty,
    * so a fresh item changes no pixel. */
   BLI_addtail(&layer->mask_stack, item);
+  if (generates) {
+    BKE_paint_layers_gradient_ensure(*item);
+  }
 
   BKE_paint_layers_tag_edited(ma);
   return item;

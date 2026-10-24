@@ -146,20 +146,21 @@ struct RowEmitContext {
   const MaterialPaintLayer &layer;
   int channel;
   /** The row is a folder, an adjustment, or a Paint row kept only for its corrections. */
-  bool folder;
-  bool adjustment;
-  bool empty_base;
+  bool folder = false;
+  bool adjustment = false;
+  bool empty_base = false;
   /** The channel tracks a content alpha, so the group has the sockets below. */
-  bool track_alpha;
+  bool track_alpha = false;
   /** The row's record in the channel; null for a folder and an adjustment. */
-  const MaterialPaintLayerChannel *record;
+  const MaterialPaintLayerChannel *record = nullptr;
   /** The group input sockets of what is below, and of a folder's contents. */
-  bNodeSocket *below;
-  bNodeSocket *below_alpha;
-  bNodeSocket *folder_color;
-  bNodeSocket *folder_alpha;
-  /** The row's bake in this channel when its bake stands in, else null: the source is then that map. */
-  Image *baked_color;
+  bNodeSocket *below = nullptr;
+  bNodeSocket *below_alpha = nullptr;
+  bNodeSocket *folder_color = nullptr;
+  bNodeSocket *folder_alpha = nullptr;
+  /** The row's bake in this channel when its bake stands in, else null: the source is then that
+   * map. */
+  Image *baked_color = nullptr;
 };
 
 /** The blend of one row over what is below: a Normal Combine instance or a Mix node. */
@@ -198,6 +199,24 @@ class PaintLayersTreeBuilder {
    * constant of every map-less channel; plus the base mask's opacity and, while the mask has no
    * map, its constant. Their values are written where they are created. */
   void create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer);
+
+  /**
+   * The line and shape inputs of \a row's gradient: start, end, midpoint, type and repeat. Shared
+   * by a Gradient row, a Gradient content correction and a Gradient mask item; the label prefixes
+   * the socket names so two of them in one group stay distinct.
+   */
+  void gradient_line_inputs_create(LayerGroup &group,
+                                   const MaterialPaintLayer &row,
+                                   const char *label);
+
+  /**
+   * The two ends a scalar \a channel of \a row's gradient ramps between, as inputs named after
+   * \a label. A colour channel reads the row's ColorRamp and takes none.
+   */
+  void gradient_scalar_inputs_create(LayerGroup &group,
+                                     const MaterialPaintLayer &row,
+                                     int channel,
+                                     const char *label);
 
   /**
    * The float input that picks the content alpha model of \a layer in \a channel: 1 for a Mix row,

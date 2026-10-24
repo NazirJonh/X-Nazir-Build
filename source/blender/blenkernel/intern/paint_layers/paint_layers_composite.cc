@@ -151,6 +151,64 @@ template<size_t N> static void composite_filter_params(const MaterialPaintLayer 
 }
 
 /**
+ * Describe \a row's Gradient payload in \a channel: the line, the ramp, the channel's scalar ends
+ * and, for an Object/Generated line, the surface that gives the texel its coordinate. The one
+ * place a Gradient row, a Gradient correction and a Gradient mask item are described, so the
+ * evaluator cannot read them differently.
+ */
+static bool composite_gradient_describe(
+    const Material &ma,
+    const MaterialPaintLayer &row,
+    const int channel,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
+    PaintMaterialCompositeGradient &out)
+{
+  if (row.gradient == nullptr) {
+    return false;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  out.enabled = true;
+  out.color_channel = info.is_color;
+  out.payload = dna::shallow_copy(*row.gradient);
+  const int size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) : 4096;
+  out.width = size;
+  out.height = size;
+  if (row.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
+    /* A UV line already reads the texel's own UV: no surface and no approximation. */
+    out.surface = nullptr;
+    out.surface_key = 0;
+    out.approximate = false;
+  }
+  else {
+    /* The 2D preview needs the texel's object-space position. Without one the evaluator falls
+     * back to `(u, v, 0)`, the approximate view. Whether to hand out a surface while the active
+     * row is being dragged is the caller's call (#ED_space_image_gradient_preview_sync): it passes
+     * none then, so this stays the single place that reads "no surface". The row holds a reference
+     * to the surface, so a cache replacement cannot pull it out from under the evaluation. A
+     * Generated row has a coordinate with stored CD_ORCO samples or a usable bbox; with neither it
+     * falls back to the approximate preview rather than an empty layer. */
+    const bool coordinate_usable = row.gradient->space !=
+                                       MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED ||
+                                   (context_surface &&
+                                    (context_surface->generated_bbox_valid ||
+                                     !context_surface->generated_positions.is_empty()));
+    out.surface = context_surface;
+    out.surface_key = context_surface ? context_surface->key : 0;
+    out.approximate = !context_surface || !coordinate_usable;
+  }
+  if (!info.is_color) {
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(row, channel);
+    if (record == nullptr) {
+      return false;
+    }
+    out.scalar_start = record->value[0];
+    out.scalar_end = record->value[1];
+  }
+  return true;
+}
+
+/**
  * Describe the source of the row \a layer (not a folder) in \a channel to the evaluator: the
  * counterpart of the generator's #PaintLayersTreeBuilder::row_source_emit, which builds the same
  * thing as nodes. False when the row takes no part, which the generator leaves out as well.
@@ -178,49 +236,7 @@ static bool composite_row_source_describe(const Material &ma,
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
     /* A Gradient: no map and no constant, only its line, ramp and the channel's scalar ends. */
-    if (layer.gradient == nullptr) {
-      return false;
-    }
-    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-        eMaterialPaintChannel(channel));
-    out.gradient.enabled = true;
-    out.gradient.color_channel = info.is_color;
-    out.gradient.payload = dna::shallow_copy(*layer.gradient);
-    const int size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) : 4096;
-    out.gradient.width = size;
-    out.gradient.height = size;
-    if (layer.gradient->space == MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
-      /* A UV line already reads the texel's own UV: no surface and no approximation. */
-      out.gradient.surface = nullptr;
-      out.gradient.surface_key = 0;
-      out.gradient.approximate = false;
-    }
-    else {
-      /* The 2D preview needs the texel's object-space position. Without one the evaluator falls
-       * back to `(u, v, 0)`, the approximate view. Whether to hand out a surface while the active
-       * row is being dragged is the caller's call (#ED_space_image_gradient_preview_sync): it
-       * passes none then, so this stays the single place that reads "no surface". */
-      /* The layer owns a reference to the surface: a cache replacement drops its own pointer but
-       * the described row still evaluates against the same pixels. A Generated row has a coordinate
-       * when it either stored CD_ORCO samples or has a usable bbox to normalize the position with;
-       * with neither it falls back to the approximate UV preview rather than an empty layer. */
-      const bool coordinate_usable =
-          layer.gradient->space != MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED ||
-          (context_surface && (context_surface->generated_bbox_valid ||
-                               !context_surface->generated_positions.is_empty()));
-      out.gradient.surface = context_surface;
-      out.gradient.surface_key = context_surface ? context_surface->key : 0;
-      out.gradient.approximate = !context_surface || !coordinate_usable;
-    }
-    if (!info.is_color) {
-      const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-      if (record == nullptr) {
-        return false;
-      }
-      out.gradient.scalar_start = record->value[0];
-      out.gradient.scalar_end = record->value[1];
-    }
-    return true;
+    return composite_gradient_describe(ma, layer, channel, context_surface, out.gradient);
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     /* The same decision the generator makes (#PaintLayersTreeBuilder::material_source_emit): the
@@ -305,13 +321,15 @@ static bool composite_row_source_describe(const Material &ma,
  * The one place the description is read for the mask, so the CPU composite and the strokes that
  * sample the mask themselves (#PaintLayersMaskSampler) cannot drift apart.
  */
-static void composite_mask_items_describe(const Material &ma,
-                                          const MaterialPaintLayer &layer,
-                                          Vector<PaintMaterialCompositeMaskItem> &r_items,
-                                          const bUUID *stop_before = nullptr,
-                                          const int *slice_rect = nullptr,
-                                          const bool dimensions_only = false,
-                                          const bool describe_only = false)
+static void composite_mask_items_describe(
+    const Material &ma,
+    const MaterialPaintLayer &layer,
+    Vector<PaintMaterialCompositeMaskItem> &r_items,
+    const bUUID *stop_before = nullptr,
+    const int *slice_rect = nullptr,
+    const bool dimensions_only = false,
+    const bool describe_only = false,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface = nullptr)
 {
   if (BKE_paint_layers_mask_base(layer) == nullptr) {
     return;
@@ -416,6 +434,22 @@ static void composite_mask_items_describe(const Material &ma,
       r_items.append(filter);
       continue;
     }
+    if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_GENERATES)) {
+      /* A Gradient mask item: the ramp's colour is the grey and its alpha the coverage, read from
+       * the item's own line rather than from a map. */
+      PaintMaterialCompositeMaskItem item;
+      item.opacity = BKE_paint_layers_effective_opacity(mask);
+      if (!composite_gradient_describe(
+              ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, context_surface, item.gradient))
+      {
+        continue;
+      }
+      item.blend = CompositeBlend(
+          BKE_paint_layers_blend_to_ramp(eMaterialPaintLayerBlend(mask.blend)));
+      item.invert = paint_layer_mask_item_inverted(mask);
+      r_items.append(item);
+      continue;
+    }
     if (paint_layer_kind_has_flag(mask, PAINT_LAYER_KIND_READS_SOURCE)) {
       /* The grey of a mask correction that reads a material is the mean of the source's Base
        * Color, read as a painted item's map is: a plain value, a plain texture or the map rendered
@@ -493,14 +527,16 @@ static void composite_image_layers_collect(const Material &ma,
  * or a map, flat colour, source or slice laid by the correction's own blend and opacity. Nothing is
  * appended for a correction that lays nothing here, as the generator builds nothing for it.
  */
-static void composite_effect_append(const Material &ma,
-                                    const MaterialPaintLayer &effect,
-                                    const int channel,
-                                    const float pass_through_scale,
-                                    const int *slice_rect,
-                                    const bool dimensions_only,
-                                    const bool describe_only,
-                                    PaintMaterialCompositeImageLayer &out)
+static void composite_effect_append(
+    const Material &ma,
+    const MaterialPaintLayer &effect,
+    const int channel,
+    const float pass_through_scale,
+    const int *slice_rect,
+    const bool dimensions_only,
+    const bool describe_only,
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface,
+    PaintMaterialCompositeImageLayer &out)
 {
   if (paint_layer_effect_filters(ma, effect, channel)) {
     PaintMaterialCompositeCorrection filter;
@@ -555,6 +591,12 @@ static void composite_effect_append(const Material &ma,
       }
       correction.anchor_point_hash = paint_layer_anchor_point_slice_hash(ma, effect, channel);
       BKE_paint_layers_anchor_point_slice_images(ma, effect, correction.anchor_point_images);
+    }
+  }
+  else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
+    /* A Gradient correction has no map: its ramp is laid by its own blend and opacity. */
+    if (!composite_gradient_describe(ma, effect, channel, context_surface, correction.gradient)) {
+      return;
     }
   }
   else if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
@@ -758,13 +800,26 @@ static bool composite_image_layer_build(const Material &ma,
     if (stop_before != nullptr && BLI_uuid_equal(effect.marker, *stop_before)) {
       break;
     }
-    composite_effect_append(
-        ma, effect, channel, pass_through_scale, slice_rect, dimensions_only, describe_only, out);
+    composite_effect_append(ma,
+                            effect,
+                            channel,
+                            pass_through_scale,
+                            slice_rect,
+                            dimensions_only,
+                            describe_only,
+                            context_surface,
+                            out);
   }
   /* The mask is one for all channels of the row, so the same item reaches every channel's stack,
    * exactly as the generator reads the one set of mask inputs in every channel chain. */
-  composite_mask_items_describe(
-      ma, layer, out.mask_items, stop_before, slice_rect, dimensions_only, describe_only);
+  composite_mask_items_describe(ma,
+                               layer,
+                               out.mask_items,
+                               stop_before,
+                               slice_rect,
+                               dimensions_only,
+                               describe_only,
+                               context_surface);
   /* Mark the positions the GPU has to capture: a marker is a producer only while at least one
    * reader lays its slice. A content marker sits in the effects, a mask marker in the mask stack. */
   for (const MaterialPaintLayer &effect : layer.effects) {
@@ -1033,6 +1088,16 @@ PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
     buffer.coverage_softness = item.coverage_softness;
     buffer.coverage_output = item.coverage_output;
     buffer.coverage_colors = item.coverage_colors;
+    buffer.gradient = item.gradient;
+    if (buffer.gradient.enabled && buffer.gradient.payload.space != MA_PAINT_LAYER_GRADIENT_SPACE_UV)
+    {
+      /* An Object/Generated line needs the object's surface to turn a texel into the coordinate
+       * the render reads, which a stroke has no way to get here. Reading the texel's UV instead
+       * would hide other texels than the render does, so the item takes no part in the stroke's
+       * mask: the render still applies it.
+       * TODO: hand the sampler the surface once the strokes can reach one. */
+      buffer.opacity = 0.0f;
+    }
   }
 }
 
@@ -1137,8 +1202,11 @@ float PaintLayersMaskSampler::sample(const int tile_number, const int x, const i
     return 1.0f;
   }
   const int64_t pixel_index = int64_t(y) * tile.width + x;
-  return BKE_paint_material_mask_factor_eval(
-      buffers_.as_span(), tile.item_samples, tile.coverage_samples, pixel_index);
+  return BKE_paint_material_mask_factor_eval(buffers_.as_span(),
+                                             tile.item_samples,
+                                             tile.coverage_samples,
+                                             pixel_index,
+                                             {x, y, tile.width, tile.height});
 }
 
 /**
@@ -2410,7 +2478,7 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
       eMaterialPaintChannel(channel));
   for (const MaterialPaintLayer *effect : corrections) {
     const int64_t before = r_row.content_corrections.size();
-    composite_effect_append(ma, *effect, channel, 1.0f, nullptr, false, false, r_row);
+    composite_effect_append(ma, *effect, channel, 1.0f, nullptr, false, false, nullptr, r_row);
     if (r_row.content_corrections.size() == before) {
       continue;
     }

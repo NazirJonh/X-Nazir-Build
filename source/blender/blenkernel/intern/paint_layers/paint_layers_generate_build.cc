@@ -589,7 +589,89 @@ NodeOutput PaintLayersTreeBuilder::normal_remap_add(bNodeTree &tree,
   return {encode_node, encoded};
 }
 
-void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const MaterialPaintLayer &layer)
+void PaintLayersTreeBuilder::gradient_line_inputs_create(LayerGroup &group,
+                                                         const MaterialPaintLayer &row,
+                                                         const char *label)
+{
+  if (row.gradient == nullptr) {
+    return;
+  }
+  char base[200];
+  SNPRINTF(base, "%s Gradient Start", label);
+  bNodeTreeInterfaceSocket *start = layer_group_value_input(
+      group, base, "NodeSocketVector", ROLE_GRADIENT_START, row.marker, -1);
+  if (start != nullptr) {
+    const float value[3] = {row.gradient->start[0],
+                            row.gradient->start[1],
+                            BKE_paint_layers_gradient_line_z(*row.gradient, row.gradient->start[2])};
+    group_input_vector_default_set(group, *start, value);
+    gradient_start_inputs_.add(&row, start);
+  }
+  SNPRINTF(base, "%s Gradient End", label);
+  bNodeTreeInterfaceSocket *end = layer_group_value_input(
+      group, base, "NodeSocketVector", ROLE_GRADIENT_END, row.marker, -1);
+  if (end != nullptr) {
+    const float value[3] = {row.gradient->end[0],
+                            row.gradient->end[1],
+                            BKE_paint_layers_gradient_line_z(*row.gradient, row.gradient->end[2])};
+    group_input_vector_default_set(group, *end, value);
+    gradient_end_inputs_.add(&row, end);
+  }
+  SNPRINTF(base, "%s Gradient Midpoint", label);
+  bNodeTreeInterfaceSocket *midpoint = layer_group_value_input(
+      group, base, "NodeSocketFloat", ROLE_GRADIENT_MIDPOINT, row.marker, -1);
+  if (midpoint != nullptr) {
+    group_input_default_set(group, *midpoint, row.gradient->midpoint);
+    gradient_midpoint_inputs_.add(&row, midpoint);
+  }
+  SNPRINTF(base, "%s Gradient Type", label);
+  bNodeTreeInterfaceSocket *type = layer_group_value_input(
+      group, base, "NodeSocketFloat", ROLE_GRADIENT_TYPE, row.marker, -1);
+  if (type != nullptr) {
+    group_input_default_set(group, *type, float(row.gradient->type));
+    gradient_type_inputs_.add(&row, type);
+  }
+  SNPRINTF(base, "%s Gradient Repeat", label);
+  bNodeTreeInterfaceSocket *repeat = layer_group_value_input(
+      group, base, "NodeSocketFloat", ROLE_GRADIENT_REPEAT, row.marker, -1);
+  if (repeat != nullptr) {
+    group_input_default_set(group, *repeat, float(row.gradient->repeat));
+    gradient_repeat_inputs_.add(&row, repeat);
+  }
+}
+
+void PaintLayersTreeBuilder::gradient_scalar_inputs_create(LayerGroup &group,
+                                                           const MaterialPaintLayer &row,
+                                                           const int channel,
+                                                           const char *label)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  /* A colour channel reads the row's ColorRamp, which needs no input beyond the factor; a scalar
+   * channel ramps between two inputs of its own. */
+  const MaterialPaintLayerChannel *record = paint_layer_channel_find(row, channel);
+  if (record == nullptr || info.is_color) {
+    return;
+  }
+  char base[200];
+  SNPRINTF(base, "%s %s Gradient Start", label, info.ui_name);
+  bNodeTreeInterfaceSocket *start = layer_group_value_input(
+      group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_START, row.marker, channel);
+  if (start != nullptr) {
+    group_input_default_set(group, *start, record->value[0]);
+    gradient_value_start_inputs_.lookup_or_add_default(&row).add(channel, start);
+  }
+  SNPRINTF(base, "%s %s Gradient End", label, info.ui_name);
+  bNodeTreeInterfaceSocket *end = layer_group_value_input(
+      group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_END, row.marker, channel);
+  if (end != nullptr) {
+    group_input_default_set(group, *end, record->value[1]);
+    gradient_value_end_inputs_.lookup_or_add_default(&row).add(channel, end);
+  }
+}
+
+void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
+                                                 const MaterialPaintLayer &layer)
 {
   const char *layer_name = layer.name[0] != '\0' ? layer.name : "Layer";
   if (paint_layer_row_substituted(ma_, layer)) {
@@ -627,52 +709,9 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
   }
   this->mapping_inputs_create(group, layer, layer_name);
   const bool generates = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
-  if (generates && layer.gradient != nullptr) {
+  if (generates) {
     /* The gradient's line and shape are values of the row, shared by all of its channels. */
-    char base[200];
-    SNPRINTF(base, "%s Gradient Start", layer_name);
-    bNodeTreeInterfaceSocket *start = layer_group_value_input(
-        group, base, "NodeSocketVector", ROLE_GRADIENT_START, layer.marker, -1);
-    if (start != nullptr) {
-      const float value[3] = {
-          layer.gradient->start[0],
-          layer.gradient->start[1],
-          BKE_paint_layers_gradient_line_z(*layer.gradient, layer.gradient->start[2])};
-      group_input_vector_default_set(group, *start, value);
-      gradient_start_inputs_.add(&layer, start);
-    }
-    SNPRINTF(base, "%s Gradient End", layer_name);
-    bNodeTreeInterfaceSocket *end = layer_group_value_input(
-        group, base, "NodeSocketVector", ROLE_GRADIENT_END, layer.marker, -1);
-    if (end != nullptr) {
-      const float value[3] = {
-          layer.gradient->end[0],
-          layer.gradient->end[1],
-          BKE_paint_layers_gradient_line_z(*layer.gradient, layer.gradient->end[2])};
-      group_input_vector_default_set(group, *end, value);
-      gradient_end_inputs_.add(&layer, end);
-    }
-    SNPRINTF(base, "%s Gradient Midpoint", layer_name);
-    bNodeTreeInterfaceSocket *midpoint = layer_group_value_input(
-        group, base, "NodeSocketFloat", ROLE_GRADIENT_MIDPOINT, layer.marker, -1);
-    if (midpoint != nullptr) {
-      group_input_default_set(group, *midpoint, layer.gradient->midpoint);
-      gradient_midpoint_inputs_.add(&layer, midpoint);
-    }
-    SNPRINTF(base, "%s Gradient Type", layer_name);
-    bNodeTreeInterfaceSocket *type = layer_group_value_input(
-        group, base, "NodeSocketFloat", ROLE_GRADIENT_TYPE, layer.marker, -1);
-    if (type != nullptr) {
-      group_input_default_set(group, *type, float(layer.gradient->type));
-      gradient_type_inputs_.add(&layer, type);
-    }
-    SNPRINTF(base, "%s Gradient Repeat", layer_name);
-    bNodeTreeInterfaceSocket *repeat = layer_group_value_input(
-        group, base, "NodeSocketFloat", ROLE_GRADIENT_REPEAT, layer.marker, -1);
-    if (repeat != nullptr) {
-      group_input_default_set(group, *repeat, float(layer.gradient->repeat));
-      gradient_repeat_inputs_.add(&layer, repeat);
-    }
+    this->gradient_line_inputs_create(group, layer, layer_name);
   }
   for (const int channel : wired_channels_) {
     if (!row_participates(ma_, layer, channel)) {
@@ -697,24 +736,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     if (generates) {
       /* A colour channel reads the row's ColorRamp, which needs no input beyond the factor; a
        * scalar channel ramps between two inputs of its own. */
-      const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
-      if (record == nullptr || info.is_color) {
-        continue;
-      }
-      SNPRINTF(base, "%s %s Gradient Start", layer_name, info.ui_name);
-      bNodeTreeInterfaceSocket *start = layer_group_value_input(
-          group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_START, layer.marker, channel);
-      if (start != nullptr) {
-        group_input_default_set(group, *start, record->value[0]);
-        gradient_value_start_inputs_.lookup_or_add_default(&layer).add(channel, start);
-      }
-      SNPRINTF(base, "%s %s Gradient End", layer_name, info.ui_name);
-      bNodeTreeInterfaceSocket *end = layer_group_value_input(
-          group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_END, layer.marker, channel);
-      if (end != nullptr) {
-        group_input_default_set(group, *end, record->value[1]);
-        gradient_value_end_inputs_.lookup_or_add_default(&layer).add(channel, end);
-      }
+      this->gradient_scalar_inputs_create(group, layer, channel, layer_name);
       continue;
     }
 
@@ -820,6 +842,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     char effect_label[224];
     SNPRINTF(effect_label, "%s %s", layer_name, paint_layer_effect_label(effect));
     this->mapping_inputs_create(group, effect, effect_label);
+    const bool effect_generates = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES);
+    if (effect_generates) {
+      this->gradient_line_inputs_create(group, effect, effect_label);
+    }
     for (const int channel : wired_channels_) {
       const bool filters = paint_layer_effect_filters(ma_, effect, channel);
       if (!filters && !paint_layer_effect_lays(ma_, effect, channel)) {
@@ -844,6 +870,12 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       }
       if (filters) {
         /* A filter has no colour of its own: its opacity is its only input. */
+        continue;
+      }
+      if (effect_generates) {
+        /* A colour channel reads the row's ColorRamp; a scalar one ramps between two inputs of its
+         * own, exactly as a Gradient row's does. */
+        this->gradient_scalar_inputs_create(group, effect, channel, effect_label);
         continue;
       }
       if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {
@@ -946,6 +978,10 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     filter_params_create(item, true);
     SNPRINTF(base, "%s %s", layer_name, item_name);
     this->mapping_inputs_create(group, item, base);
+    const bool item_generates = paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_GENERATES);
+    if (item_generates) {
+      this->gradient_line_inputs_create(group, item, item_name);
+    }
     if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {
       /* A mask correction that reads a material has no record: a plain value of its source's Base
        * Color is an input, and so is a plain transparency, as for a Material row. */
@@ -1045,7 +1081,7 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
       }
       continue;
     }
-    if (record != nullptr && record->image == nullptr) {
+    if (!item_generates && record != nullptr && record->image == nullptr) {
       SNPRINTF(base, "%s %s", layer_name, item_name);
       bNodeTreeInterfaceSocket *value = layer_group_value_input(
           group, base, "NodeSocketFloat", ROLE_MASK_VALUE, item.marker, -1);

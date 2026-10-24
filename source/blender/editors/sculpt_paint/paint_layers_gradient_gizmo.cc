@@ -49,6 +49,8 @@
 #include "ED_undo.hh"
 #include "ED_view3d.hh"
 
+#include "IMB_colormanagement.hh"
+
 #include "UI_view2d.hh"
 
 #include "WM_api.hh"
@@ -131,6 +133,9 @@ struct LayerGradientGizmoGroup {
    * handle's position when the drag started. */
   float3 drag_plane_point = float3(0.0f);
   bool has_drag_plane = false;
+
+  /** The shapes' colors and the direction arrow, refilled from the row's ramp on every update. */
+  gradient_gizmo::DrawOptions draw_options;
 
   /** The row the drag started on; a row or material switch cancels the drag. */
   Material *session_material = nullptr;
@@ -268,6 +273,23 @@ bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
     }
     ggd.end_px = float2(projected[0], projected[1]);
   }
+
+  /* The line and handles show the row's ramp: the start disc at ramp 0, the midpoint marker at
+   * the 50% color the midpoint bend defines, the end disc at ramp 1, and the arrow in the end
+   * color. */
+  /* The ramp is scene linear and the overlay is drawn in display space, so the colors are converted
+   * the way brush colors are before they are drawn. */
+  const auto overlay_color = [&](const float t) {
+    float linear[4];
+    BKE_paint_layers_gradient_color(gradient, t, linear);
+    float display[3];
+    IMB_colormanagement_scene_linear_to_srgb_v3(display, linear);
+    return float4(display[0], display[1], display[2], linear[3]);
+  };
+  ggd.draw_options.ramp_colors = true;
+  ggd.draw_options.color_start = overlay_color(0.0f);
+  ggd.draw_options.color_mid = overlay_color(0.5f);
+  ggd.draw_options.color_end = overlay_color(1.0f);
 
   ggd.midpoint = gradient.midpoint;
   return true;
@@ -455,7 +477,7 @@ void gizmo_draw(const bContext * /*C*/, wmGizmo *gz)
   if (!ggd.points_valid) {
     return;
   }
-  gradient_gizmo::draw(ggd.start_px, ggd.end_px, ggd.midpoint);
+  gradient_gizmo::draw(ggd.start_px, ggd.end_px, ggd.midpoint, ggd.draw_options);
 }
 
 int gizmo_test_select(bContext *C, wmGizmo *gz, const int mval[2])
@@ -570,6 +592,10 @@ void group_setup(const bContext *C, wmGizmoGroup *gzgroup, const bool image_edit
   UNUSED_VARS(C);
   LayerGradientGizmoGroup *ggd = MEM_new<LayerGradientGizmoGroup>(__func__);
   ggd->image_editor = image_editor;
+  /* The gradient's origin is the start disc: draw it larger than the end handle, and point an
+   * arrow along the line. */
+  ggd->draw_options.start_radius_scale = 0.9f;
+  ggd->draw_options.direction_arrow = true;
   gzgroup->customdata = ggd;
   gzgroup->customdata_free = [](void *customdata) {
     MEM_delete(static_cast<LayerGradientGizmoGroup *>(customdata));

@@ -918,11 +918,11 @@ static void composite_filter_color(const int16_t filter, const float *params, fl
   }
 }
 
-float BKE_paint_material_mask_factor_eval(
-    const Span<PaintMaterialCompositeMaskBuffer> items,
-    const Span<const float *> item_samples,
-    const Span<const float *> coverage_samples,
-    const int64_t pixel_index)
+float BKE_paint_material_mask_factor_eval(const Span<PaintMaterialCompositeMaskBuffer> items,
+                                          const Span<const float *> item_samples,
+                                          const Span<const float *> coverage_samples,
+                                          const int64_t pixel_index,
+                                          const PaintMaterialCompositeTexel &texel)
 {
   float mask_factor = 1.0f;
   for (const int item_i : items.index_range()) {
@@ -961,10 +961,25 @@ float BKE_paint_material_mask_factor_eval(
       continue;
     }
     const float *sample = item_samples[item_i];
+    /* A Gradient has no map: its ramp is computed at the texel, so no canvas-sized buffer of it
+     * exists. A texel outside the surface's islands samples as zero, which covers nothing. */
+    float gradient_rgba[4];
+    const float *c = nullptr;
+    if (item.gradient.enabled) {
+      BKE_paint_material_gradient_sample(item.gradient,
+                                         texel.x,
+                                         texel.y,
+                                         texel.width > 0 ? texel.width : item.gradient.width,
+                                         texel.height > 0 ? texel.height : item.gradient.height,
+                                         gradient_rgba);
+      c = gradient_rgba;
+    }
+    else if (sample != nullptr) {
+      c = sample + pixel_index * 4;
+    }
     float gray = clamp_f(item.constant_gray, 0.0f, 1.0f);
     float weight = opacity;
-    if (sample != nullptr) {
-      const float *c = sample + pixel_index * 4;
+    if (c != nullptr) {
       gray = clamp_f((c[0] + c[1] + c[2]) / 3.0f, 0.0f, 1.0f);
       weight = clamp_f(c[3], 0.0f, 1.0f) * opacity;
     }
@@ -979,6 +994,56 @@ float BKE_paint_material_mask_factor_eval(
     mask_factor = value[0];
   }
   return mask_factor;
+}
+
+bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
+                                        const int x,
+                                        const int y,
+                                        float r_rgba[4])
+{
+  return BKE_paint_material_gradient_sample(
+      gradient, x, y, gradient.width, gradient.height, r_rgba);
+}
+
+bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
+                                        const int x,
+                                        const int y,
+                                        const int grid_width,
+                                        const int grid_height,
+                                        float r_rgba[4])
+{
+  const int width = std::max(grid_width, 1);
+  const int height = std::max(grid_height, 1);
+  const float u = (float(x) + 0.5f) / float(width);
+  const float v = (float(y) + 0.5f) / float(height);
+  float3 coordinate;
+  if (gradient.approximate || gradient.surface == nullptr) {
+    /* No surface: the texel's own UV is the coordinate. A UV row always reads this way. */
+    coordinate = float3(u, v, 0.0f);
+  }
+  else if (gradient.payload.space == MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED) {
+    /* Generated reads the texel's orco, which is not the object-space position once a deformer
+     * moved it; #sample_generated prefers the stored CD_ORCO and only falls back to the bbox
+     * normalization. */
+    if (!gradient.surface->sample_generated(float2(u, v), coordinate)) {
+      zero_v4(r_rgba);
+      return false;
+    }
+  }
+  else if (!gradient.surface->sample(float2(u, v), coordinate)) {
+    zero_v4(r_rgba);
+    return false;
+  }
+  const float t = BKE_paint_layers_gradient_factor(gradient.payload, coordinate);
+  if (gradient.color_channel) {
+    BKE_paint_layers_gradient_color(gradient.payload, t, r_rgba);
+  }
+  else {
+    const float value = gradient.scalar_start + (gradient.scalar_end - gradient.scalar_start) * t;
+    r_rgba[0] = r_rgba[1] = r_rgba[2] = value;
+    r_rgba[3] = 1.0f;
+  }
+  return true;
 }
 
 static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
@@ -1000,45 +1065,10 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
   else if (layer.gradient.enabled) {
     /* A Gradient row has no map: each texel evaluates the same line and ramp the shader reads. The
      * fourth component carries the ramp's alpha for a colour channel and one for a scalar. */
-    const int width = std::max(layer.gradient.width, 1);
-    const int height = std::max(layer.gradient.height, 1);
     for (int ty = 0; ty < BLI_rcti_size_y(&tile); ty++) {
-      const float v = (float(tile.ymin + ty) + 0.5f) / float(height);
       for (int tx = 0; tx < BLI_rcti_size_x(&tile); tx++) {
-        const float u = (float(tile.xmin + tx) + 0.5f) / float(width);
         float *p = r_color + (int64_t(ty) * BLI_rcti_size_x(&tile) + tx) * 4;
-        float3 coordinate;
-        bool valid = true;
-        if (layer.gradient.approximate || layer.gradient.surface == nullptr) {
-          /* No surface: the texel's own UV is the coordinate. A UV row always reads this way. */
-          coordinate = float3(u, v, 0.0f);
-        }
-        else if (layer.gradient.payload.space == MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED) {
-          /* Generated reads the texel's orco, which is not the object-space position once a
-           * deformer moved it; #sample_generated prefers the stored CD_ORCO and only falls back
-           * to the bbox normalization. */
-          if (!layer.gradient.surface->sample_generated(float2(u, v), coordinate)) {
-            valid = false;
-          }
-        }
-        else if (!layer.gradient.surface->sample(float2(u, v), coordinate)) {
-          valid = false;
-        }
-        if (!valid) {
-          /* Outside the UV islands: transparent, so the row covers nothing there. */
-          p[0] = p[1] = p[2] = p[3] = 0.0f;
-          continue;
-        }
-        const float t = BKE_paint_layers_gradient_factor(layer.gradient.payload, coordinate);
-        if (layer.gradient.color_channel) {
-          BKE_paint_layers_gradient_color(layer.gradient.payload, t, p);
-        }
-        else {
-          const float value = layer.gradient.scalar_start +
-                              (layer.gradient.scalar_end - layer.gradient.scalar_start) * t;
-          p[0] = p[1] = p[2] = value;
-          p[3] = 1.0f;
-        }
+        BKE_paint_material_gradient_sample(layer.gradient, tile.xmin + tx, tile.ymin + ty, p);
       }
     }
   }
@@ -1128,7 +1158,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       continue;
     }
     if ((correction.ibuf == nullptr && !correction.has_constant_color &&
-         correction.anchor_point_slice == nullptr) ||
+         correction.anchor_point_slice == nullptr && !correction.gradient.enabled) ||
         correction.opacity <= 0.0f)
     {
       continue;
@@ -1162,12 +1192,31 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
       composite_decode_tile(
           correction.ibuf, correction.colorspace_name, tile, correction_storage.data());
     }
+    const int tile_width = BLI_rcti_size_x(&tile);
     for (int64_t i = 0; i < count; i++) {
       /* A flat colour covers by its opacity alone: its alpha is content alpha, which a Fill row's
-       * is too, and is no part of the factor. */
-      const float *c = (correction.ibuf != nullptr) ? correction_storage.data() + i * 4 :
-                      (anchor_slice != nullptr)   ? anchor_slice + i * 4 :
-                                                    correction.constant_color;
+       * is too, and is no part of the factor. A Gradient covers by its ramp's alpha, as a row's
+       * does. */
+      float gradient_color[4];
+      const float *c = nullptr;
+      if (correction.gradient.enabled) {
+        const int tx = int(i % tile_width);
+        const int ty = int(i / tile_width);
+        if (!BKE_paint_material_gradient_sample(
+                correction.gradient, tile.xmin + tx, tile.ymin + ty, gradient_color))
+        {
+          /* Outside the UV islands the correction, like a row, lays nothing. */
+          continue;
+        }
+        c = gradient_color;
+      }
+      else if (anchor_slice != nullptr) {
+        c = anchor_slice + i * 4;
+      }
+      else {
+        c = (correction.ibuf != nullptr) ? correction_storage.data() + i * 4 :
+                                           correction.constant_color;
+      }
       float *s = r_color + i * 4;
       float correction_factor = 1.0f;
       if (anchor_coverage != nullptr) {
@@ -1176,7 +1225,7 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         const float *cov = anchor_coverage + i * 4;
         correction_factor = (cov[0] + cov[1] + cov[2]) / 3.0f;
       }
-      else if (correction.ibuf != nullptr) {
+      else if (correction.ibuf != nullptr || correction.gradient.enabled) {
         correction_factor = c[3];
       }
       const float f = clamp_f(correction.opacity * correction_factor, 0.0f, 1.0f);
@@ -1248,9 +1297,12 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
         coverage_samples[item_i] = coverage_storage[item_i].data();
       }
     }
+    const int tile_width = BLI_rcti_size_x(&tile);
     for (int64_t i = 0; i < count; i++) {
+      const PaintMaterialCompositeTexel texel{
+          tile.xmin + int(i % tile_width), tile.ymin + int(i / tile_width)};
       r_factor[i] *= BKE_paint_material_mask_factor_eval(
-          layer.mask_items.as_span(), item_samples, coverage_samples, i);
+          layer.mask_items.as_span(), item_samples, coverage_samples, i, texel);
     }
   }
 }
@@ -1391,7 +1443,9 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
   {
     return false;
   }
-  if (layer.mask_ibuf != nullptr && !composite_mask_ibuf_is_valid(layer.mask_ibuf, width, height)) {
+  if (layer.mask_ibuf != nullptr &&
+      !composite_mask_ibuf_is_valid(layer.mask_ibuf, width, height))
+  {
     return false;
   }
   for (const PaintMaterialCompositeMaskBuffer &item : layer.mask_items) {
@@ -2198,11 +2252,17 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         /* A map that cannot be read is left as absent, so it samples as `match = 0` like a missing
          * one rather than failing the whole composite; the operator still takes part. */
       }
+      buffer.gradient = item.gradient;
+      if (buffer.gradient.enabled) {
+        /* The gradient has no map: its grid is the composite's, not the description's size. */
+        buffer.gradient.width = ref_width;
+        buffer.gradient.height = ref_height;
+      }
       layer.mask_items.append(buffer);
     }
     for (const PaintMaterialCompositeCorrection &correction : image_layer.content_corrections) {
       if (correction.image == nullptr && !correction.has_constant_color && correction.filter == 0 &&
-          correction.anchor_point_slice == nullptr)
+          correction.anchor_point_slice == nullptr && !correction.gradient.enabled)
       {
         continue;
       }
@@ -2237,10 +2297,17 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
               buffer.anchor_point_coverage_ibuf);
         }
       }
-      /* The flat colour belongs to the chain above: a slice or a map has none. */
-      if (correction.anchor_point_slice == nullptr && correction.image == nullptr) {
+      /* The flat colour belongs to the chain above: a slice, a map or a gradient has none. */
+      if (correction.anchor_point_slice == nullptr && correction.image == nullptr &&
+          !correction.gradient.enabled) {
         buffer.has_constant_color = true;
         copy_v4_v4(buffer.constant_color, correction.constant_color);
+      }
+      buffer.gradient = correction.gradient;
+      if (buffer.gradient.enabled) {
+        /* The gradient has no map: its grid is the composite's, not the description's size. */
+        buffer.gradient.width = ref_width;
+        buffer.gradient.height = ref_height;
       }
       layer.content_corrections.append(buffer);
     }
@@ -2447,6 +2514,18 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
         r_width = r_height = layer.empty_base_size;
         return true;
       }
+      /* A row kept for its corrections and carrying a Gradient has no map, but the gradient's grid
+       * still decides the stack's size, as a Gradient row's does. */
+      for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+        if (!correction.gradient.enabled) {
+          continue;
+        }
+        r_width = correction.gradient.width;
+        r_height = correction.gradient.height;
+        if (r_width > 0 && r_height > 0) {
+          return true;
+        }
+      }
       continue;
     }
     Vector<CompositeImageLock> locks;
@@ -2592,6 +2671,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
       hash = get_default_hash(hash, correction.anchor_point_hash);
       hash = composite_mapping_hash(get_default_hash(hash, correction.mapping.enabled),
                                     correction.mapping);
+      hash = composite_gradient_hash(hash, correction.gradient);
       /* A flat colour is not backed by an image, so its value is hashed like a row's. */
       hash = get_default_hash(hash,
                               correction.has_constant_color,
@@ -2620,6 +2700,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
         hash = get_default_hash(hash, param);
       }
       hash = composite_mapping_hash(get_default_hash(hash, item.mapping.enabled), item.mapping);
+      hash = composite_gradient_hash(hash, item.gradient);
       /* A map-coverage operator changes the factor from its own map and its colour list, none of
        * which is the laid item's map: all of it has to move the hash. */
       hash = get_default_hash(hash,

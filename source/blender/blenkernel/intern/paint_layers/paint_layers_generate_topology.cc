@@ -192,6 +192,22 @@ static void topology_hash_anchor_point_marker(uint64_t &hash,
   hash = topology_hash_mix(hash, paint_layer_anchor_point_is_read(ma, marker.marker) ? 1 : 0);
 }
 
+/**
+ * Mix what a Gradient payload decides the nodes: its ramp lives in a ColorRamp node's storage and
+ * its space picks the coordinate output, so both are topology. The values are inputs.
+ */
+static void gradient_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &row)
+{
+  if (!BKE_paint_layers_gradient_supported(row) || row.gradient == nullptr) {
+    return;
+  }
+  /* A ColorRamp node holds the ramp in its storage, not in a socket: a stop or an interpolation
+   * edit is a different node, so the group is rebuilt rather than synced in place. */
+  hash = topology_hash_mix(hash, 0x600);
+  hash = topology_hash_mix(hash, uint64_t(uint8_t(row.gradient->space)));
+  hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(row.gradient->ramp));
+}
+
 uint64_t paint_layers_layer_topology_hash(const Material &ma,
                                           const MaterialPaintLayer &layer,
                                           const Span<int> wired_channels,
@@ -205,14 +221,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
   hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.source)));
   /* Which filter an adjustment is decides its nodes; its parameters are inputs. */
   hash = topology_hash_mix(hash, uint64_t(uint16_t(layer.kind_subtype)));
-  if (BKE_paint_layers_gradient_supported(layer) && layer.gradient != nullptr) {
-    /* A ColorRamp node holds the ramp in its storage, not in a socket: a stop or an interpolation
-     * edit is a different node, so the group is rebuilt rather than synced in place. */
-    hash = topology_hash_mix(hash, 0x600);
-    /* The space decides which Texture Coordinate output the Gradient Factor reads: topology. */
-    hash = topology_hash_mix(hash, uint64_t(uint8_t(layer.gradient->space)));
-    hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(layer.gradient->ramp));
-  }
+  gradient_payload_hash_mix(hash, layer);
   hash = topology_hash_mix(hash, paint_layer_blend_shape(layer));
   /* The runtime tier changes which node a participating channel gets (the dynamic group against a
    * static Mix). Mixing its mask here keeps that transition out of #paint_layer_blend_shape, where
@@ -307,6 +316,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, uint64_t(uint16_t(effect.kind_subtype)));
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, effect) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, effect);
+    gradient_payload_hash_mix(hash, effect);
     const bool reads_source = paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE);
     if (reads_source) {
       /* A correction that reads a material has nodes that follow its source, as a Material row's
@@ -392,6 +402,7 @@ uint64_t paint_layers_layer_topology_hash(const Material &ma,
     hash = topology_hash_mix(hash, paint_layer_mask_item_inverted(item) ? 1 : 0);
     hash = topology_hash_mix(hash, BKE_paint_layers_mapping_applies(ma, item) ? 1 : 0);
     mapping_wrap_hash_mix(hash, ma, item);
+    gradient_payload_hash_mix(hash, item);
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_READS_SOURCE)) {

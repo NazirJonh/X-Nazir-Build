@@ -44,6 +44,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
 #include "DNA_material_types.h"
+#include "DNA_scene_types.h"
 
 namespace blender {
 
@@ -233,6 +234,37 @@ struct PaintMaterialCompositeGradient {
   }
 };
 
+/** A texel of an evaluation grid, for the items that are computed rather than read from a map. */
+struct PaintMaterialCompositeTexel {
+  int x = 0;
+  int y = 0;
+  /** The grid the texel is in; zero keeps the size the item was described with. */
+  int width = 0;
+  int height = 0;
+};
+
+/**
+ * Evaluate \a gradient at texel (\a x, \a y) into straight scene-linear RGBA. The line, ramp and
+ * scalar ends are the description's; the coordinate comes from the surface for Object/Generated
+ * rows and from the texel's UV otherwise. Returns false when the sample lies outside the surface's
+ * UV islands; \a r_rgba is then zeroed, so a row or correction lays nothing there.
+ */
+bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
+                                        int x,
+                                        int y,
+                                        float r_rgba[4]);
+
+/**
+ * As above on a grid of \a width x \a height texels instead of the gradient's own size: the grid of
+ * the tile a stroke or an evaluation runs on.
+ */
+bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gradient,
+                                        int x,
+                                        int y,
+                                        int width,
+                                        int height,
+                                        float r_rgba[4]);
+
 /**
  * What an image layer and its buffer twin share verbatim. The stack builders copy it as one value
  * (`static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer`), so a field added here
@@ -349,6 +381,8 @@ struct PaintMaterialCompositeCorrection : PaintMaterialCompositeConstant {
   uint64_t anchor_point_hash = 0;
   /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
   Vector<Image *> anchor_point_images;
+  /** A Gradient correction's payload; #enabled false for a map or a flat colour. */
+  PaintMaterialCompositeGradient gradient;
 };
 
 /** A correction as the evaluator reads it: a buffer, or a flat colour when #ibuf is null. */
@@ -367,6 +401,8 @@ struct PaintMaterialCompositeCorrectionBuffer : PaintMaterialCompositeConstant {
   /** See #PaintMaterialCompositeCorrection::anchor_point_coverage_image. */
   ImBuf *anchor_point_coverage_ibuf = nullptr;
   const char *anchor_point_coverage_colorspace_name = nullptr;
+  /** A Gradient correction's payload; #enabled false for a map or a constant. */
+  PaintMaterialCompositeGradient gradient;
 };
 
 /**
@@ -451,6 +487,8 @@ struct PaintMaterialCompositeMaskItem {
   int anchor_point_read_channel = 0;
   /** See #PaintMaterialCompositeImageLayer::anchor_point_images. */
   Vector<Image *> anchor_point_images;
+  /** A Gradient mask item's payload; #enabled false for a map or a constant. */
+  PaintMaterialCompositeGradient gradient;
 };
 
 /** One layer of a stack, as data-blocks. This is what a material resolves to. */
@@ -527,6 +565,8 @@ struct PaintMaterialCompositeMaskBuffer {
   Vector<PaintMaterialCompositeIdColor> coverage_colors;
   /** Borrowed from #PaintMaterialCompositeMaskItem::anchor_point_slice, which keeps it alive. */
   ImBuf *anchor_point_slice = nullptr;
+  /** A Gradient mask item's payload; #enabled false for a map or a constant. */
+  PaintMaterialCompositeGradient gradient;
 };
 
 /** One layer of a stack, as buffers. This is what the evaluator reads. */
@@ -598,12 +638,15 @@ float BKE_paint_material_coverage_match(int16_t map_coverage,
  * \param coverage_samples: item \a i's decoded coverage-map texel, or null (a map-driven operator
  *                          without a readable map samples as `match = 0`).
  * \param pixel_index: the texel index (row-major) to read both sample arrays at.
+ * \param texel: where a Gradient item is evaluated. A Gradient has no map to read a sample from, so
+ *               its ramp is computed here instead of being stored for the whole canvas. Unused by
+ *               every other item.
  */
-float BKE_paint_material_mask_factor_eval(
-    Span<PaintMaterialCompositeMaskBuffer> items,
-    Span<const float *> item_samples,
-    Span<const float *> coverage_samples,
-    int64_t pixel_index);
+float BKE_paint_material_mask_factor_eval(Span<PaintMaterialCompositeMaskBuffer> items,
+                                          Span<const float *> item_samples,
+                                          Span<const float *> coverage_samples,
+                                          int64_t pixel_index,
+                                          const PaintMaterialCompositeTexel &texel = {});
 
 /**
  * Acquire \a image's map for UDIM \a tile_number, decode it to straight scene-linear float RGBA,

@@ -1500,10 +1500,26 @@ class PaintLayersStackSource final : public StackSource,
     anchor_point_mask_correction.is_effect = true;
     r_kinds.append(anchor_point_mask_correction);
     /* Last of all, so no index above moves: a procedural ramp built from Shader Editor nodes. */
-    r_kinds.append({"GRADIENT",
-                    N_("Gradient Layer"),
-                    "A procedural colour and coverage ramp reading the UV, built from shader nodes",
-                    ICON_COLOR});
+    r_kinds.append(
+        {"GRADIENT",
+         N_("Gradient Layer"),
+         "A procedural colour and coverage ramp reading the UV, built from shader nodes",
+         ICON_COLOR});
+    /* The same generator in the two correction roles, appended after every kind above so the
+     * explicit indices in #row_add stay put. */
+    StackAddKindInfo gradient_correction{
+        "CORRECTION_GRADIENT",
+        N_("Gradient Correction"),
+        "A procedural ramp laid over the active layer's colour, below the layer's own blend",
+        ICON_COLOR};
+    gradient_correction.is_effect = true;
+    r_kinds.append(gradient_correction);
+    StackAddKindInfo mask_gradient{"MASK_CORRECTION_GRADIENT",
+                                   N_("Mask Gradient Correction"),
+                                   "A procedural ramp's grey laid over the active layer's mask",
+                                   ICON_MOD_MASK};
+    mask_gradient.is_effect = true;
+    r_kinds.append(mask_gradient);
   }
 
   int row_add(bContext &C,
@@ -1527,7 +1543,9 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int anchor_point_correction_kind = anchor_point_layer_kind + 1;
     constexpr int anchor_point_mask_correction_kind = anchor_point_correction_kind + 1;
     constexpr int gradient_kind = anchor_point_mask_correction_kind + 1;
-    if (kind < 0 || kind > gradient_kind || !this->is_editable(owner)) {
+    constexpr int gradient_correction_kind = gradient_kind + 1;
+    constexpr int mask_gradient_kind = gradient_correction_kind + 1;
+    if (kind < 0 || kind > mask_gradient_kind || !this->is_editable(owner)) {
       return -1;
     }
     const bool is_anchor_point = kind == anchor_point_kind;
@@ -1537,6 +1555,8 @@ class PaintLayersStackSource final : public StackSource,
     const bool is_anchor_point_reader = is_anchor_point_layer || is_anchor_point_correction ||
                                         is_anchor_point_mask_correction;
     const bool is_gradient = kind == gradient_kind;
+    const bool is_gradient_correction = kind == gradient_correction_kind;
+    const bool is_mask_gradient = kind == mask_gradient_kind;
     const bool is_material = kind == material_kind;
     const bool is_material_correction = kind == material_correction_kind;
     const bool is_mask_material = kind == mask_material_kind;
@@ -1583,13 +1603,15 @@ class PaintLayersStackSource final : public StackSource,
       /* Each Material row reads a material of its own, so its settings are its own. */
       params.bmain = CTX_data_main(&C);
     }
-    params.kind = is_anchor_point              ? PaintLayerAddKind::AnchorPoint :
-                  is_anchor_point_layer        ? PaintLayerAddKind::AnchorPointLayer :
-                  is_anchor_point_correction   ? PaintLayerAddKind::AnchorPointCorrection :
+    params.kind = is_anchor_point            ? PaintLayerAddKind::AnchorPoint :
+                  is_anchor_point_layer      ? PaintLayerAddKind::AnchorPointLayer :
+                  is_anchor_point_correction ? PaintLayerAddKind::AnchorPointCorrection :
                   is_anchor_point_mask_correction ?
-                                                 PaintLayerAddKind::AnchorPointMaskCorrection :
-                  is_gradient                 ? PaintLayerAddKind::Gradient :
-                  is_material                  ? PaintLayerAddKind::Material :
+                                               PaintLayerAddKind::AnchorPointMaskCorrection :
+                  is_gradient               ? PaintLayerAddKind::Gradient :
+                  is_gradient_correction    ? PaintLayerAddKind::GradientCorrection :
+                  is_mask_gradient          ? PaintLayerAddKind::MaskGradient :
+                  is_material                ? PaintLayerAddKind::Material :
                   is_material_correction ? PaintLayerAddKind::CorrectionMaterial :
                   is_mask_material       ? PaintLayerAddKind::MaskCorrectionMaterial :
                   is_mask_filter         ? PaintLayerAddKind::MaskFilter :
@@ -1690,13 +1712,15 @@ class PaintLayersStackSource final : public StackSource,
                                          PaintLayerAddKind::MaskCorrectionFill,
                                          PaintLayerAddKind::MaskCorrectionMaterial,
                                          PaintLayerAddKind::MaskFilter,
-                                         PaintLayerAddKind::AnchorPointMaskCorrection);
+                                         PaintLayerAddKind::AnchorPointMaskCorrection,
+                                         PaintLayerAddKind::MaskGradient);
     const bool is_correction = is_mask_correction || is_filter ||
                                ELEM(params.kind,
                                     PaintLayerAddKind::Correction,
                                     PaintLayerAddKind::CorrectionFill,
                                     PaintLayerAddKind::CorrectionMaterial,
-                                    PaintLayerAddKind::AnchorPointCorrection);
+                                    PaintLayerAddKind::AnchorPointCorrection,
+                                    PaintLayerAddKind::GradientCorrection);
     if (anchor != nullptr && !is_correction) {
       /* A correction is not a place a row can be added next to: the row it hangs on is. */
       if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(material, *anchor)) {

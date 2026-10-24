@@ -199,9 +199,14 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   if (BKE_paint_layers_lock_blocker(ma, *r_target.mask_item) != nullptr) {
     return PaintLayersTargetStatus::Locked;
   }
-  /* A map-coverage item whose kind is reference-only (Color ID: an external ID Map) is not a stroke
-   * target; editability is a trait of the kind, so the user cannot pick it by accident. A paintable
-   * one (UV Island) is written by its capture, not by a stroke, but is still a valid target image. */
+  /* A Gradient mask item produces its grey from nodes; a stroke has no map to write into it. */
+  if (paint_layer_kind_has_flag(*r_target.mask_item, PAINT_LAYER_KIND_GENERATES)) {
+    return PaintLayersTargetStatus::RowTakesNoStrokes;
+  }
+  /* A map-coverage item whose kind is reference-only (Color ID: an external ID Map) is not a
+   * stroke target; editability is a trait of the kind, so the user cannot pick it by accident. A
+   * paintable one (UV Island) is written by its capture, not by a stroke, but is still a valid
+   * target image. */
   if (paint_layer_kind_is_map_coverage(*r_target.mask_item) &&
       !paint_layer_kind_map_paintable(*r_target.mask_item))
   {

@@ -77,7 +77,12 @@ Material *paint_layer_gradient_target(const bContext *C, MaterialPaintLayer **r_
   if (ma == nullptr || !ID_IS_EDITABLE(&ma->id)) {
     return nullptr;
   }
-  MaterialPaintLayer *layer = BKE_paint_layers_active_layer_get(*ma);
+  /* A Gradient mask correction is the active item of its row's mask; the row itself may hold no
+   * gradient at all. */
+  MaterialPaintLayer *layer = BKE_paint_layers_active_mask_item_get(*ma);
+  if (layer == nullptr) {
+    layer = BKE_paint_layers_active_layer_get(*ma);
+  }
   if (layer == nullptr || !BKE_paint_layers_gradient_supported(*layer) ||
       layer->gradient == nullptr)
   {

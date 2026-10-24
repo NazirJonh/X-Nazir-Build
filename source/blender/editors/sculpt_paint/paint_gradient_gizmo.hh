@@ -42,10 +42,31 @@ int hit_test(const float2 &start_px,
              float hit_radius = HANDLE_RADIUS);
 
 /**
+ * Optional styling for #draw. The Color Gradient uses the neutral overlay colors; the Gradient
+ * Layer passes its row's ramp so the line, the handles and the direction arrow read as the
+ * gradient the row actually blends.
+ */
+struct DrawOptions {
+  /** Color the line and the handles from #color_start / #color_mid / #color_end. */
+  bool ramp_colors = false;
+  /** Samples of the row's ramp at 0, 0.5 and 1, in straight scene-linear RGBA. */
+  float4 color_start = float4(1.0f);
+  float4 color_mid = float4(1.0f);
+  float4 color_end = float4(1.0f);
+  /** Radius scale of the start disc; the end and midpoint markers keep their sizes. */
+  float start_radius_scale = 0.6f;
+  /** Draw a filled arrowhead on the line, pointing from the start towards the end. */
+  bool direction_arrow = false;
+};
+
+/**
  * Draw the line and its three handles, in region pixels. The caller sets a pixel-space projection
  * (a `REGION_DRAW_POST_PIXEL` callback or a 2D gizmo). Saves and restores the GPU state it
  * changes.
  */
-void draw(const float2 &start_px, const float2 &end_px, float midpoint);
+void draw(const float2 &start_px,
+          const float2 &end_px,
+          float midpoint,
+          const DrawOptions &options = {});
 
 }  // namespace blender::ed::sculpt_paint::gradient_gizmo

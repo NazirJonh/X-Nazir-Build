@@ -39,6 +39,8 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
+#include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
@@ -3624,10 +3626,27 @@ static wmOperatorStatus sculpt_color_gradient_invoke(bContext *C,
    * tool for a mask target. Mask target mode keeps painting the row's mask; the layer tool's own
    * poll decides whether the active row can be edited here. */
   const Scene *scene = CTX_data_scene(C);
-  const bool mask_target = scene != nullptr && scene->toolsettings != nullptr &&
-                           scene->toolsettings->paint_mode.layer_target_mode ==
-                               PAINT_LAYER_TARGET_MASK;
-  if (!mask_target && paint_layer_gradient_active(C)) {
+  const PaintModeSettings *paint_mode = (scene != nullptr && scene->toolsettings != nullptr) ?
+                                            &scene->toolsettings->paint_mode :
+                                            nullptr;
+  const bool mask_target = paint_mode != nullptr &&
+                           paint_mode->layer_target_mode == PAINT_LAYER_TARGET_MASK;
+  /* A Gradient mask item is a mask the gradient itself defines: the tool edits its line in Mask
+   * mode too. A base mask or a row's own gradient stays the Mask stroke's to paint. */
+  Object *active_ob = CTX_data_active_object(C);
+  Material *active_ma = (active_ob != nullptr) ? BKE_paint_layers_active_material_get(active_ob) :
+                                                 nullptr;
+  MaterialPaintLayer *active_mask_item = (active_ma != nullptr) ?
+                                             BKE_paint_layers_active_mask_item_get(*active_ma) :
+                                             nullptr;
+  const bool gradient_mask_item = active_mask_item != nullptr &&
+                                  BKE_paint_layers_gradient_supported(*active_mask_item);
+  if ((!mask_target || gradient_mask_item) && paint_layer_gradient_active(C)) {
+    /* Move keeps the row as it is: only the gizmo handles edit it, so an accidental stroke in the
+     * viewport cannot rebuild the line and lose the configured parameters. */
+    if (paint_mode == nullptr || paint_mode->gradient_tool_mode != PAINT_GRADIENT_TOOL_STROKE) {
+      return OPERATOR_CANCELLED;
+    }
     WM_operator_name_call(
         C, "PAINT_OT_paint_layer_gradient", wm::OpCallContext::InvokeDefault, nullptr, event);
     return OPERATOR_FINISHED;

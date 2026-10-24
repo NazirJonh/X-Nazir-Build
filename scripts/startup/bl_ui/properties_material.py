@@ -604,12 +604,13 @@ class LayerMaterialButtonsPanel:
         return mat is not None and not mat.grease_pencil
 
 
-def draw_material_gradient_layer(layout, context, owner, layer):
+def draw_material_gradient_layer(layout, context, owner, layer, draw_channels=True):
     """The Gradient panel: the ramp, its line and the channels that read them.
 
     The generated graph is built from these values: the ColorRamp becomes a node in the row's
     group, and the line and midpoint are inputs the Shader Editor shows as the group's sockets.
-    A scalar channel mixes its own two ends, drawn with the channel below.
+    A scalar channel mixes its own two ends, drawn with the channel below. A mask item has one
+    structural Base Color record and no channel widget, so its caller passes draw_channels=False.
     """
     col = layout.column(align=True)
     col.prop(layer, "gradient_space", expand=True)
@@ -634,7 +635,8 @@ def draw_material_gradient_layer(layout, context, owner, layer):
     elif space == 'GENERATED':
         line.label(text="0..1, object bounding box", icon='INFO')
     layout.separator()
-    draw_material_layer_channels(layout, context, owner, layer)
+    if draw_channels:
+        draw_material_layer_channels(layout, context, owner, layer)
 
 
 class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
@@ -676,6 +678,16 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
         if item is not None:
             layout.label(text=item.name, icon='MOD_MASK')
             layout.prop(item, "locked", text="Lock", icon='LOCKED' if item.locked else 'UNLOCKED')
+            if item.gradient_supported:
+                # A Gradient mask item has a line and a ramp instead of a map; its invert and blend
+                # are the mask item's own, as on any other correction.
+                layout.prop(item, "opacity", text="Opacity")
+                layout.prop(item, "blend_type", text="Blend")
+                if len(item.channels):
+                    layout.prop(item.channels[0], "invert", text="Invert", toggle=True)
+                layout.separator()
+                draw_material_gradient_layer(layout, context, owner, item, draw_channels=False)
+                return
             if item.source == 'FILTER':
                 # A filter in the mask changes its one coverage: opacity and the kind's parameters,
                 # and no channels to choose. A map-coverage operator draws its own mode, tolerance

@@ -902,6 +902,193 @@ bool paint_layers_edit_target_clear(Material &material)
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Add kinds
+ * \{ */
+
+/**
+ * One kind of the Add menu: what the user sees, and what #row_add asks the kernel for.
+ *
+ * The table is the only place that knows the kinds. A kind's index in it is the number scripts and
+ * the Add operator pass to #row_add, so a new kind is appended at the end and nothing above moves.
+ */
+struct PaintAddKindEntry {
+  StackAddKindInfo info;
+  PaintLayerAddKind kind = PaintLayerAddKind::Paint;
+  /** The #eMaterialPaintLayerFilter of a filter, adjustment or mask filter kind; else unused. */
+  int16_t filter = 0;
+};
+
+static Span<PaintAddKindEntry> paint_add_kind_entries()
+{
+  static const Vector<PaintAddKindEntry> entries = []() {
+    Vector<PaintAddKindEntry> table;
+    const auto add =
+        [&](StackAddKindInfo info, const PaintLayerAddKind kind, const int16_t filter = 0) {
+          table.append({std::move(info), kind, filter});
+        };
+    const auto effect = [](StackAddKindInfo info) {
+      info.is_effect = true;
+      return info;
+    };
+    const auto with_color = [](StackAddKindInfo info) {
+      info.takes_color = true;
+      return info;
+    };
+    /* A kind made from another material, picked from the ID Browser popover with the Material
+     * asset libraries. */
+    const auto from_material = [](StackAddKindInfo info, const char *browse_prop) {
+      info.source_id_type = ID_MA;
+      info.source_browse_prop = browse_prop;
+      return info;
+    };
+
+    add({"PAINT",
+         N_("Paint Layer"),
+         "A layer that shows nothing until it is painted on",
+         ICON_BRUSH_DATA},
+        PaintLayerAddKind::Paint);
+    add(with_color({"FILL", N_("Fill Layer"), "A layer of one flat colour", ICON_GP_DRAW_FILL}),
+        PaintLayerAddKind::Fill);
+    add({"FOLDER",
+         N_("Folder"),
+         "A group holding other layers, composited on its own",
+         ICON_FILE_FOLDER},
+        PaintLayerAddKind::Folder);
+    add(effect({"CORRECTION",
+                N_("Correction Paint"),
+                "A map painted over the active layer's colour, below the layer's own blend",
+                ICON_BRUSH_DATA}),
+        PaintLayerAddKind::Correction);
+    add(effect(with_color(
+            {"CORRECTION_FILL",
+             N_("Correction Fill"),
+             "A flat colour laid over the active layer's colour, below the layer's own blend",
+             ICON_GP_DRAW_FILL})),
+        PaintLayerAddKind::CorrectionFill);
+    add(effect({"MASK_CORRECTION",
+                N_("Mask Paint Correction"),
+                "A grey map painted over the active layer's mask, in Mask mode",
+                ICON_MOD_MASK}),
+        PaintLayerAddKind::MaskCorrection);
+    add(effect(with_color({"MASK_CORRECTION_FILL",
+                           N_("Mask Fill Correction"),
+                           "A flat grey laid over the active layer's mask",
+                           ICON_GP_DRAW_FILL})),
+        PaintLayerAddKind::MaskCorrectionFill);
+
+    /* Every filter as a correction of a layer's colour. */
+    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
+      add(effect({filter.identifier, filter.name, filter.description, filter.icon}),
+          PaintLayerAddKind::Filter,
+          filter.filter);
+    }
+    /* Then the same filters as rows of the stack: an adjustment changes the whole stack below it
+     * instead of one layer's colour. */
+    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
+      add({std::string("ADJUSTMENT") + (filter.identifier + std::strlen("FILTER")),
+           std::string(filter.name) + " Adjustment",
+           "Apply the filter to everything below this layer, with the layer's own opacity, blend "
+           "and mask",
+           filter.icon},
+          PaintLayerAddKind::Adjustment,
+          filter.filter);
+    }
+    /* And once more in the mask: the filter changes the mask's coverage, a single grey, so it has
+     * no channels to choose. They are corrections of the mask, listed with the other effects. */
+    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
+      add(effect({std::string("MASK_") + filter.identifier,
+                  std::string("Mask ") + filter.name,
+                  "Apply the filter to the active layer's mask coverage",
+                  ICON_MOD_MASK}),
+          PaintLayerAddKind::MaskFilter,
+          filter.filter);
+    }
+    /* The map-driven filters of the mask. */
+    for (const PaintFilterAddKind &filter : paint_coverage_add_kinds) {
+      add(effect({std::string("MASK_") + filter.identifier,
+                  std::string("Mask ") + filter.name,
+                  filter.description,
+                  filter.icon}),
+          PaintLayerAddKind::MaskFilter,
+          filter.filter);
+    }
+
+    /* A layer that shows what another material shows, and the two places a correction can lay it:
+     * the colour and the mask. */
+    add(from_material({"MATERIAL",
+                       N_("Material Layer"),
+                       "A layer that shows what another material shows",
+                       ICON_MATERIAL},
+                      "paint_layer_add_material"),
+        PaintLayerAddKind::Material);
+    add(effect(from_material(
+            {"CORRECTION_MATERIAL",
+             N_("Material Correction"),
+             "What another material shows, laid over the active layer's colour, below the layer's "
+             "own blend",
+             ICON_MATERIAL},
+            "paint_layer_add_material_correction")),
+        PaintLayerAddKind::CorrectionMaterial);
+    add(effect(from_material(
+            {"MASK_CORRECTION_MATERIAL",
+             N_("Mask Material Correction"),
+             "The grey of another material's Base Color, laid over the active layer's mask",
+             ICON_MATERIAL},
+            "paint_layer_add_material_mask_correction")),
+        PaintLayerAddKind::MaskCorrectionMaterial);
+
+    /* Anchor Points: the marker and the three places a reader can land. A marker picks its list
+     * from the active row; a reader's item decides the list, the way the three Material items do.
+     */
+    add(effect({"ANCHOR_POINT",
+                N_("Anchor Point"),
+                "Publish the active layer's content in its Effects up to this place; select a mask "
+                "item first to put the point in the mask instead",
+                ICON_EMPTY_AXIS}),
+        PaintLayerAddKind::AnchorPoint);
+    add({"ANCHOR_POINT_LAYER",
+         N_("Anchor Point Layer"),
+         "A layer that shows the slice an Anchor Point of this material publishes",
+         ICON_LINKED},
+        PaintLayerAddKind::AnchorPointLayer);
+    add(effect({"ANCHOR_POINT_CORRECTION",
+                N_("Anchor Point Correction"),
+                "The slice an Anchor Point publishes, laid over the active layer's colour, below "
+                "the layer's own blend",
+                ICON_LINKED}),
+        PaintLayerAddKind::AnchorPointCorrection);
+    add(effect({"ANCHOR_POINT_MASK_CORRECTION",
+                N_("Anchor Point Mask Correction"),
+                "The slice an Anchor Point publishes, laid over the active layer's mask",
+                ICON_LINKED}),
+        PaintLayerAddKind::AnchorPointMaskCorrection);
+
+    /* A procedural ramp built from Shader Editor nodes: as a layer, and in the two correction
+     * roles. */
+    add({"GRADIENT",
+         N_("Gradient Layer"),
+         "A procedural colour and coverage ramp reading the UV, built from shader nodes",
+         ICON_COLOR},
+        PaintLayerAddKind::Gradient);
+    add(effect({"CORRECTION_GRADIENT",
+                N_("Gradient Correction"),
+                "A procedural ramp laid over the active layer's colour, below the layer's own "
+                "blend",
+                ICON_COLOR}),
+        PaintLayerAddKind::GradientCorrection);
+    add(effect({"MASK_CORRECTION_GRADIENT",
+                N_("Mask Gradient Correction"),
+                "A procedural ramp's grey laid over the active layer's mask",
+                ICON_MOD_MASK}),
+        PaintLayerAddKind::MaskGradient);
+    return table;
+  }();
+  return entries.as_span();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name The source
  * \{ */
 
@@ -1354,172 +1541,10 @@ class PaintLayersStackSource final : public StackSource,
 
   void add_kinds(Vector<StackAddKindInfo> &r_kinds) const override
   {
-    /* The kinds whose features exist: Paint, Fill, Folder and the two corrections. The others are
-     * appended here as they land, in the order #row_add dispatches by index; the Material layer
-     * comes after the last filter. */
-    r_kinds.append({"PAINT",
-                    N_("Paint Layer"),
-                    "A layer that shows nothing until it is painted on",
-                    ICON_BRUSH_DATA});
-    StackAddKindInfo fill{"FILL",
-                          N_("Fill Layer"),
-                          "A layer of one flat colour",
-                          ICON_GP_DRAW_FILL};
-    fill.takes_color = true;
-    r_kinds.append(fill);
-    r_kinds.append({"FOLDER",
-                    N_("Folder"),
-                    "A group holding other layers, composited on its own",
-                    ICON_FILE_FOLDER});
-    StackAddKindInfo correction{
-        "CORRECTION",
-        N_("Correction Paint"),
-        "A map painted over the active layer's colour, below the layer's own blend",
-        ICON_BRUSH_DATA};
-    correction.is_effect = true;
-    r_kinds.append(correction);
-    StackAddKindInfo correction_fill{
-        "CORRECTION_FILL",
-        N_("Correction Fill"),
-        "A flat colour laid over the active layer's colour, below the layer's own blend",
-        ICON_GP_DRAW_FILL};
-    correction_fill.takes_color = true;
-    correction_fill.is_effect = true;
-    r_kinds.append(correction_fill);
-    StackAddKindInfo mask_correction{
-        "MASK_CORRECTION",
-        N_("Mask Paint Correction"),
-        "A grey map painted over the active layer's mask, in Mask mode",
-        ICON_MOD_MASK};
-    mask_correction.is_effect = true;
-    r_kinds.append(mask_correction);
-    StackAddKindInfo mask_correction_fill{"MASK_CORRECTION_FILL",
-                                          N_("Mask Fill Correction"),
-                                          "A flat grey laid over the active layer's mask",
-                                          ICON_GP_DRAW_FILL};
-    mask_correction_fill.takes_color = true;
-    mask_correction_fill.is_effect = true;
-    r_kinds.append(mask_correction_fill);
-    /* The filters follow, in the order of #paint_filter_add_kinds: #row_add reads the position back
-     * as an index into it. */
-    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
-      StackAddKindInfo info{filter.identifier, filter.name, filter.description, filter.icon};
-      info.is_effect = true;
-      r_kinds.append(info);
+    /* #row_add reads a kind back from the same table by its index. */
+    for (const PaintAddKindEntry &entry : paint_add_kind_entries()) {
+      r_kinds.append(entry.info);
     }
-    /* Then the same filters as rows of the stack, in the same order: an adjustment changes the whole
-     * stack below it instead of one layer's colour. */
-    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
-      r_kinds.append({std::string("ADJUSTMENT") + (filter.identifier + std::strlen("FILTER")),
-                      std::string(filter.name) + " Adjustment",
-                      "Apply the filter to everything below this layer, with the layer's own "
-                      "opacity, blend and mask",
-                      filter.icon});
-    }
-    /* And once more in the mask: the filter changes the mask's coverage, a single grey, so it has no
-     * channels to choose. They are corrections of the mask, listed with the other effects. */
-    for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
-      StackAddKindInfo info{std::string("MASK_") + filter.identifier,
-                            std::string("Mask ") + filter.name,
-                            "Apply the filter to the active layer's mask coverage",
-                            ICON_MOD_MASK};
-      info.is_effect = true;
-      r_kinds.append(info);
-    }
-    /* Last, the map-driven filters of the mask, in the order of #paint_coverage_add_kinds. */
-    for (const PaintFilterAddKind &filter : paint_coverage_add_kinds) {
-      StackAddKindInfo info{std::string("MASK_") + filter.identifier,
-                            std::string("Mask ") + filter.name,
-                            filter.description,
-                            filter.icon};
-      info.is_effect = true;
-      r_kinds.append(info);
-    }
-    /* Last of all, so no index above moves: a layer that shows what another material shows. */
-    StackAddKindInfo material{"MATERIAL",
-                              N_("Material Layer"),
-                              "A layer that shows what another material shows",
-                              ICON_MATERIAL};
-    material.source_id_type = ID_MA;
-    /* Picked from the ID Browser popover, with the Material asset libraries. */
-    material.source_browse_prop = "paint_layer_add_material";
-    r_kinds.append(material);
-    /* After it again, for the same reason: a correction that lays what another material shows. */
-    StackAddKindInfo material_correction{
-        "CORRECTION_MATERIAL",
-        N_("Material Correction"),
-        "What another material shows, laid over the active layer's colour, below the layer's own "
-        "blend",
-        ICON_MATERIAL};
-    material_correction.source_id_type = ID_MA;
-    /* Picked from the same ID Browser popover as a Material layer. */
-    material_correction.source_browse_prop = "paint_layer_add_material_correction";
-    material_correction.is_effect = true;
-    r_kinds.append(material_correction);
-    /* And once more for the mask: the grey of what another material shows as its Base Color. */
-    StackAddKindInfo mask_material{
-        "MASK_CORRECTION_MATERIAL",
-        N_("Mask Material Correction"),
-        "The grey of another material's Base Color, laid over the active layer's mask",
-        ICON_MATERIAL};
-    mask_material.source_id_type = ID_MA;
-    /* Picked from the same ID Browser popover as a Material layer. */
-    mask_material.source_browse_prop = "paint_layer_add_material_mask_correction";
-    mask_material.is_effect = true;
-    r_kinds.append(mask_material);
-    /* Anchor Points last of all, so no index above moves: the marker and the three places a
-     * reader can land. A marker picks its list from the active row; a reader's item decides the
-     * list, the way the three Material items do. */
-    StackAddKindInfo anchor_point{
-        "ANCHOR_POINT",
-        N_("Anchor Point"),
-        "Publish the active layer's content in its Effects up to this place; select a mask item "
-        "first to put the point in the mask instead",
-        ICON_EMPTY_AXIS};
-    anchor_point.is_effect = true;
-    r_kinds.append(anchor_point);
-    StackAddKindInfo anchor_point_layer{
-        "ANCHOR_POINT_LAYER",
-        N_("Anchor Point Layer"),
-        "A layer that shows the slice an Anchor Point of this material publishes",
-        ICON_LINKED};
-    r_kinds.append(anchor_point_layer);
-    StackAddKindInfo anchor_point_correction{
-        "ANCHOR_POINT_CORRECTION",
-        N_("Anchor Point Correction"),
-        "The slice an Anchor Point publishes, laid over the active layer's colour, below the "
-        "layer's own blend",
-        ICON_LINKED};
-    anchor_point_correction.is_effect = true;
-    r_kinds.append(anchor_point_correction);
-    StackAddKindInfo anchor_point_mask_correction{
-        "ANCHOR_POINT_MASK_CORRECTION",
-        N_("Anchor Point Mask Correction"),
-        "The slice an Anchor Point publishes, laid over the active layer's mask",
-        ICON_LINKED};
-    anchor_point_mask_correction.is_effect = true;
-    r_kinds.append(anchor_point_mask_correction);
-    /* Last of all, so no index above moves: a procedural ramp built from Shader Editor nodes. */
-    r_kinds.append(
-        {"GRADIENT",
-         N_("Gradient Layer"),
-         "A procedural colour and coverage ramp reading the UV, built from shader nodes",
-         ICON_COLOR});
-    /* The same generator in the two correction roles, appended after every kind above so the
-     * explicit indices in #row_add stay put. */
-    StackAddKindInfo gradient_correction{
-        "CORRECTION_GRADIENT",
-        N_("Gradient Correction"),
-        "A procedural ramp laid over the active layer's colour, below the layer's own blend",
-        ICON_COLOR};
-    gradient_correction.is_effect = true;
-    r_kinds.append(gradient_correction);
-    StackAddKindInfo mask_gradient{"MASK_CORRECTION_GRADIENT",
-                                   N_("Mask Gradient Correction"),
-                                   "A procedural ramp's grey laid over the active layer's mask",
-                                   ICON_MOD_MASK};
-    mask_gradient.is_effect = true;
-    r_kinds.append(mask_gradient);
   }
 
   int row_add(bContext &C,
@@ -1529,45 +1554,27 @@ class PaintLayersStackSource final : public StackSource,
               const int ordinal,
               const StackAddArgs &args = {}) const override
   {
-    constexpr int filter_first_kind = 7;
-    constexpr int filter_num = int(std::size(paint_filter_add_kinds));
-    constexpr int adjustment_first_kind = filter_first_kind + filter_num;
-    constexpr int mask_filter_first_kind = adjustment_first_kind + filter_num;
-    constexpr int coverage_first_kind = mask_filter_first_kind + filter_num;
-    constexpr int coverage_num = int(std::size(paint_coverage_add_kinds));
-    constexpr int material_kind = coverage_first_kind + coverage_num;
-    constexpr int material_correction_kind = material_kind + 1;
-    constexpr int mask_material_kind = material_correction_kind + 1;
-    constexpr int anchor_point_kind = mask_material_kind + 1;
-    constexpr int anchor_point_layer_kind = anchor_point_kind + 1;
-    constexpr int anchor_point_correction_kind = anchor_point_layer_kind + 1;
-    constexpr int anchor_point_mask_correction_kind = anchor_point_correction_kind + 1;
-    constexpr int gradient_kind = anchor_point_mask_correction_kind + 1;
-    constexpr int gradient_correction_kind = gradient_kind + 1;
-    constexpr int mask_gradient_kind = gradient_correction_kind + 1;
-    if (kind < 0 || kind > mask_gradient_kind || !this->is_editable(owner)) {
+    const Span<PaintAddKindEntry> entries = paint_add_kind_entries();
+    if (kind < 0 || kind >= entries.size() || !this->is_editable(owner)) {
       return -1;
     }
-    const bool is_anchor_point = kind == anchor_point_kind;
-    const bool is_anchor_point_layer = kind == anchor_point_layer_kind;
-    const bool is_anchor_point_correction = kind == anchor_point_correction_kind;
-    const bool is_anchor_point_mask_correction = kind == anchor_point_mask_correction_kind;
+    const PaintAddKindEntry &entry = entries[kind];
+    const PaintLayerAddKind add_kind = entry.kind;
+    const bool is_anchor_point = add_kind == PaintLayerAddKind::AnchorPoint;
+    const bool is_anchor_point_layer = add_kind == PaintLayerAddKind::AnchorPointLayer;
+    const bool is_anchor_point_correction = add_kind == PaintLayerAddKind::AnchorPointCorrection;
+    const bool is_anchor_point_mask_correction = add_kind ==
+                                                 PaintLayerAddKind::AnchorPointMaskCorrection;
     const bool is_anchor_point_reader = is_anchor_point_layer || is_anchor_point_correction ||
                                         is_anchor_point_mask_correction;
-    const bool is_gradient = kind == gradient_kind;
-    const bool is_gradient_correction = kind == gradient_correction_kind;
-    const bool is_mask_gradient = kind == mask_gradient_kind;
-    const bool is_material = kind == material_kind;
-    const bool is_material_correction = kind == material_correction_kind;
-    const bool is_mask_material = kind == mask_material_kind;
-    const bool reads_material = is_material || is_material_correction || is_mask_material;
-    /* The kind ranges are contiguous. Bounding each one is what keeps the Material, Anchor Point
-     * and Gradient kinds from falling into the last filter arrays, whose indices they are past. */
-    const bool is_coverage_filter = kind >= coverage_first_kind && kind < material_kind;
-    const bool is_mask_filter = kind >= mask_filter_first_kind && kind < material_kind;
-    const bool is_adjustment = kind >= adjustment_first_kind && kind < mask_filter_first_kind;
+    const bool is_material = add_kind == PaintLayerAddKind::Material;
+    const bool reads_material = ELEM(add_kind,
+                                     PaintLayerAddKind::Material,
+                                     PaintLayerAddKind::CorrectionMaterial,
+                                     PaintLayerAddKind::MaskCorrectionMaterial);
+    const bool is_adjustment = add_kind == PaintLayerAddKind::Adjustment;
     /* A filter correction hangs on a layer; an adjustment is a layer. */
-    const bool is_filter = kind >= filter_first_kind && kind < adjustment_first_kind;
+    const bool is_filter = add_kind == PaintLayerAddKind::Filter;
     Material &material = layers_owner(owner);
     MaterialPaintLayer *anchor = (ordinal < 0) ?
                                      nullptr :
@@ -1581,17 +1588,7 @@ class PaintLayersStackSource final : public StackSource,
       return -1;
     }
     PaintLayerAddParams params;
-    if (is_filter) {
-      params.filter = paint_filter_add_kinds[kind - filter_first_kind].filter;
-    }
-    if (is_adjustment) {
-      params.filter = paint_filter_add_kinds[kind - adjustment_first_kind].filter;
-    }
-    if (is_mask_filter) {
-      params.filter = is_coverage_filter ?
-                          paint_coverage_add_kinds[kind - coverage_first_kind].filter :
-                          paint_filter_add_kinds[kind - mask_filter_first_kind].filter;
-    }
+    params.filter = entry.filter;
     if (reads_material) {
       /* The Add resolved the data-block it names before the call; a kind that needs one is never
        * called without it, but the call is also open to scripts. */
@@ -1603,27 +1600,7 @@ class PaintLayersStackSource final : public StackSource,
       /* Each Material row reads a material of its own, so its settings are its own. */
       params.bmain = CTX_data_main(&C);
     }
-    params.kind = is_anchor_point            ? PaintLayerAddKind::AnchorPoint :
-                  is_anchor_point_layer      ? PaintLayerAddKind::AnchorPointLayer :
-                  is_anchor_point_correction ? PaintLayerAddKind::AnchorPointCorrection :
-                  is_anchor_point_mask_correction ?
-                                               PaintLayerAddKind::AnchorPointMaskCorrection :
-                  is_gradient               ? PaintLayerAddKind::Gradient :
-                  is_gradient_correction    ? PaintLayerAddKind::GradientCorrection :
-                  is_mask_gradient          ? PaintLayerAddKind::MaskGradient :
-                  is_material                ? PaintLayerAddKind::Material :
-                  is_material_correction ? PaintLayerAddKind::CorrectionMaterial :
-                  is_mask_material       ? PaintLayerAddKind::MaskCorrectionMaterial :
-                  is_mask_filter         ? PaintLayerAddKind::MaskFilter :
-                  is_adjustment          ? PaintLayerAddKind::Adjustment :
-                  is_filter              ? PaintLayerAddKind::Filter :
-                  (kind == 1)            ? PaintLayerAddKind::Fill :
-                  (kind == 2)            ? PaintLayerAddKind::Folder :
-                  (kind == 3)            ? PaintLayerAddKind::Correction :
-                  (kind == 4)            ? PaintLayerAddKind::CorrectionFill :
-                  (kind == 5)            ? PaintLayerAddKind::MaskCorrection :
-                  (kind == 6)            ? PaintLayerAddKind::MaskCorrectionFill :
-                                           PaintLayerAddKind::Paint;
+    params.kind = entry.kind;
     if (is_anchor_point || is_anchor_point_reader) {
       /* The active item decides where the point lands: a layer or a content correction publishes
        * content, a mask item publishes the mask. Canonicalize the effect/mask item to its owner

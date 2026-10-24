@@ -3462,8 +3462,8 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       "What a drag in the viewport does while the Color Gradient tool edits a Gradient row");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  /* The Gradient Layer gizmo's placement: on (the default), a dragged handle is raycast onto the
-   * surface; off, it moves freely so the direction can be aimed. Stored negated. */
+  /* The Gradient Layer gizmo's placement: off by default, a dragged handle moves freely so the
+   * direction can be aimed; on, it is raycast onto the surface. Stored negated. */
   prop = RNA_def_property(srna, "gradient_snap", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "gradient_free", 1);
   RNA_def_property_ui_text(

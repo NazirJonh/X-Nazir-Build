@@ -223,20 +223,6 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
-  if (STREQ(role, ROLE_GRADIENT_VALUE_START) || STREQ(role, ROLE_GRADIENT_VALUE_END)) {
-    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
-        *layer, eMaterialPaintChannel(channel));
-    if (record == nullptr || socket.default_value == nullptr) {
-      return false;
-    }
-    const float value = STREQ(role, ROLE_GRADIENT_VALUE_START) ? record->value[0] :
-                                                                 record->value[1];
-    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
-    if (iface.socket_data != nullptr) {
-      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
-    }
-    return true;
-  }
   if (STREQ(role, ROLE_LIVE_CONSTANT) || STREQ(role, ROLE_LIVE_COVERAGE)) {
     /* A plain value of the row's source. A source that stopped supplying one here is a different
      * shape of group, which only a rebuild can make right. */

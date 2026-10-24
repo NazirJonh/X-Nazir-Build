@@ -3263,9 +3263,16 @@ void template_preview(Layout *layout,
  * tools buttons below it, the active color stop index and position fields are hidden, and
  * clicking an empty area of the ramp inserts a new color stop there (see
  * #ButtonColorBand::insert_on_click).
+ * \param value: Edit the active stop as one grey value with the material-paint gradient value
+ * slider instead of a colour picker. Used by scalar channel value ramps, whose stops store a value
+ * in grey RGB.
  */
-void template_color_ramp(
-    Layout *layout, PointerRNA *ptr, StringRefNull propname, bool expand, bool compact = false);
+void template_color_ramp(Layout *layout,
+                         PointerRNA *ptr,
+                         StringRefNull propname,
+                         bool expand,
+                         bool compact = false,
+                         bool value = false);
 /**
  * One-handle gradient value slider for material-paint scalar channels.
  * Binds to float property \a propname at \a index on \a ptr (typically channel `value`).

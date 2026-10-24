@@ -2648,15 +2648,18 @@ static bool material_view_pass_cycle_poll(bContext *C)
   if (ma == nullptr || !BKE_paint_layers_is_layered(*ma) || !ID_IS_EDITABLE(&ma->id)) {
     return false;
   }
-  /* Only the Paint toolbar group owns the keys: a sculpt brush must keep C/Shift-C for Clay Strips
-   * and Crease Polish. The active brush is not enough to tell, as it stays the last one used while
-   * an operator tool (masks, transforms) is active, so the tool has to be a brush tool too.
-   * Mirrors the `is_paint_tool` test of the 3D Viewport header. */
+  /* A brush tool must keep C/Shift-C for its own brush shortcuts (Clay Strips, Crease Polish),
+   * except in the Paint group where the pass cycle owns them. An operator tool (the Gradient layer
+   * tool, masks, transforms) has no brush shortcut on C at all, so it always gets the pass cycle:
+   * otherwise pressing C while the Gradient tool is active would switch to a Clay brush. The active
+   * brush is not enough to tell the two apart, as it stays the last one used while an operator tool
+   * is active; the tool reference is. */
   const bToolRef *tref = WM_toolsystem_ref_from_context(C);
-  if (tref == nullptr || tref->runtime == nullptr ||
-      (tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES) == 0)
-  {
+  if (tref == nullptr || tref->runtime == nullptr) {
     return false;
+  }
+  if ((tref->runtime->flag & TOOLREF_FLAG_USE_BRUSHES) == 0) {
+    return true;
   }
   const Brush *brush = BKE_paint_brush_for_read(BKE_paint_get_active_from_context(C));
   return brush != nullptr && ELEM(brush->sculpt_brush_type,
@@ -3596,6 +3599,9 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_material_canvas_cycle);
   WM_operatortype_append(PAINT_OT_material_view_pass_cycle);
   WM_operatortype_append(PAINT_OT_paint_layer_gradient);
+  WM_operatortype_append(PAINT_OT_paint_layer_gradient_space_set);
+  WM_operatortype_append(PAINT_OT_paint_layer_gradient_sync_channel);
+  WM_operatortype_append(PAINT_OT_paint_layer_gradient_set_gizmo_channel);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

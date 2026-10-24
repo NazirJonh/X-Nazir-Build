@@ -138,4 +138,20 @@ bool paint_layer_gradient_world_point(const Object &ob,
 
 void PAINT_OT_paint_layer_gradient(wmOperatorType *ot);
 
+/**
+ * Switch the active Gradient row's space, converting the line through the active object's surface
+ * so the handles stay where they are. The panel uses this instead of the raw RNA setter; the raw
+ * setter still only reinterprets the numbers.
+ */
+void PAINT_OT_paint_layer_gradient_space_set(wmOperatorType *ot);
+
+/**
+ * Give one scalar channel's value ramp the stop count and positions of the row's Base Color ramp.
+ * The values the channel already has are sampled at the new positions.
+ */
+void PAINT_OT_paint_layer_gradient_sync_channel(wmOperatorType *ot);
+
+/** Choose the channel whose ramp the active Gradient row's gizmo shows. */
+void PAINT_OT_paint_layer_gradient_set_gizmo_channel(wmOperatorType *ot);
+
 }  // namespace blender

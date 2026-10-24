@@ -86,6 +86,24 @@ bool BKE_paint_layers_gradient_generated_to_object(const Object *object,
                                                    const float3 &generated,
                                                    float3 &r_position);
 
+/**
+ * The object-space point of \a uv on the render-active UV map. A point outside every island lands
+ * on the nearest island point, so a line the user authored on the border of the UV square stays
+ * reachable. \a mesh is the evaluated mesh the material is shaded on. Where islands overlap, the
+ * first triangle in mesh order that contains \a uv wins.
+ */
+bool BKE_paint_layers_gradient_uv_to_object(const Mesh &mesh,
+                                            const float2 &uv,
+                                            float3 &r_object);
+
+/**
+ * The UV coordinate of the closest surface point to \a object. A point off the surface loses its
+ * distance from the surface: the result is the UV of the nearest point that is on it.
+ */
+bool BKE_paint_layers_gradient_object_to_uv(const Mesh &mesh,
+                                           const float3 &object,
+                                           float2 &r_uv);
+
 /** Drop every cached surface. For teardown, file load and a wholesale geometry change. */
 void BKE_paint_layers_gradient_surface_cache_clear();
 

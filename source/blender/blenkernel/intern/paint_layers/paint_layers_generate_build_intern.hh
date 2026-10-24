@@ -210,15 +210,6 @@ class PaintLayersTreeBuilder {
                                    const char *label);
 
   /**
-   * The two ends a scalar \a channel of \a row's gradient ramps between, as inputs named after
-   * \a label. A colour channel reads the row's ColorRamp and takes none.
-   */
-  void gradient_scalar_inputs_create(LayerGroup &group,
-                                     const MaterialPaintLayer &row,
-                                     int channel,
-                                     const char *label);
-
-  /**
    * The float input that picks the content alpha model of \a layer in \a channel: 1 for a Mix row,
    * 0 otherwise. A value, so a blend edit never rewires the alpha chain.
    */
@@ -419,8 +410,8 @@ class PaintLayersTreeBuilder {
 
   /**
    * What a Gradient row lays in the channel of \a ctx: the ColorRamp's colour and alpha for a
-   * colour channel, a grey mix of the channel's two ends for a scalar one. The Factor group
-   * instance and the ColorRamp node are shared by every channel of the row.
+   * colour channel, the channel's own grey value ramp for a scalar one. The Factor group instance
+   * is shared by every channel of the row; the colour ramp is shared by the colour channels.
    */
   KindEmitResult gradient_source_emit(const RowEmitContext &ctx);
 
@@ -435,14 +426,13 @@ class PaintLayersTreeBuilder {
                                     const MaterialPaintLayer &layer);
 
   /**
-   * The row's ColorRamp node, keyed by the row's marker and built on first use. Its ColorBand is a
-   * copy of the description's ramp; a ramp edit regenerates the group, so this node is never
-   * updated in place (its storage change would need a node-property tag the value sync does not
-   * issue).
+   * The ColorRamp node \a channel of a Gradient \a layer reads, built on first use. A colour
+   * channel gets the row's ramp, shared by every colour channel; a scalar channel gets a node of
+   * its own holding the record's grey value ramp. Its ColorBand is a copy; a ramp edit regenerates
+   * the group, so this node is never updated in place (its storage change would need a
+   * node-property tag the value sync does not issue).
    */
-  bNode *gradient_ramp_ensure(bNodeTree &tree,
-                              LayerGroup &group,
-                              const MaterialPaintLayer &layer);
+  bNode *gradient_ramp_ensure(bNodeTree &tree, const MaterialPaintLayer &layer, int channel);
 
   /**
    * The output of the Material row's source group for \a channel, instancing the group in \a tree
@@ -637,15 +627,14 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, NodeOutput> gradient_factors_;
   /** A Gradient row's ColorRamp node, shared by every colour channel of the row. */
   Map<const MaterialPaintLayer *, bNode *> gradient_ramps_;
+  /** A Gradient row's scalar channel value ramps, keyed by the row and then the channel. */
+  Map<const MaterialPaintLayer *, Map<int, bNode *>> gradient_scalar_ramps_;
   /** A Gradient row's line, midpoint, type and repeat value inputs. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_start_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_end_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_midpoint_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_type_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_repeat_inputs_;
-  /** A scalar channel's two gradient ends, keyed by the row and the channel. */
-  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> gradient_value_start_inputs_;
-  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> gradient_value_end_inputs_;
   /** The clip factor of a row's UV wrap, built once and shared by every map of the row. */
   Map<const MaterialPaintLayer *, NodeOutput> mapping_clip_masks_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */

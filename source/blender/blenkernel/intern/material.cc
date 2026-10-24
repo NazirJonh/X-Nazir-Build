@@ -131,11 +131,12 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
   layer->children = {nullptr, nullptr};
   /* The Color ID colours are plain sub-data with no ID references, so they are freed outright. */
   layer->id_colors.free_no_destruct();
+  /* The gradient payload owns the channels' value ramps, so it goes before their array. */
+  BKE_paint_layers_gradient_free(*layer);
   MEM_SAFE_DELETE(layer->channels);
   layer->channels_num = 0;
   /* The maps of the bake cache are released like the channel maps, by the generic free pass. */
   MEM_SAFE_DELETE(layer->bake);
-  BKE_paint_layers_gradient_free(*layer);
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -175,6 +176,13 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
   if (src.channels != nullptr && src.channels_num > 0) {
     dst->channels = static_cast<MaterialPaintLayerChannel *>(MEM_dupalloc(src.channels));
     dst->channels_num = src.channels_num;
+    /* A gradient value ramp is owned sub-data, like a map. */
+    for (const int i : IndexRange(dst->channels_num)) {
+      dst->channels[i].gradient_ramp = (src.channels[i].gradient_ramp != nullptr) ?
+                                           static_cast<ColorBand *>(MEM_dupalloc(
+                                               src.channels[i].gradient_ramp)) :
+                                           nullptr;
+    }
   }
   /* The duplicate above copied the list heads: the items and children are owned sub-data, so each
    * gets its own. */
@@ -235,6 +243,12 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
 {
   if (layer.channels != nullptr && layer.channels_num > 0) {
     writer->write_struct_array(layer.channels_num, layer.channels);
+    /* A generator's scalar channels each own a value ramp; written in record order. */
+    for (const int i : IndexRange(layer.channels_num)) {
+      if (layer.channels[i].gradient_ramp != nullptr) {
+        writer->write_struct(layer.channels[i].gradient_ramp);
+      }
+    }
   }
   if (layer.bake != nullptr) {
     writer->write_struct(layer.bake);
@@ -272,6 +286,10 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
 {
   if (layer.channels != nullptr) {
     BLO_read_array_and_validate_size(reader, &layer.channels, &layer.channels_num);
+    /* Read in the order the writer wrote them; a record without a ramp has no struct in the file. */
+    for (const int i : IndexRange(layer.channels_num)) {
+      BLO_read_struct(reader, ColorBand, &layer.channels[i].gradient_ramp);
+    }
   }
   else {
     /* A corrupt file can carry a count without the matching array; a non-zero count with a null

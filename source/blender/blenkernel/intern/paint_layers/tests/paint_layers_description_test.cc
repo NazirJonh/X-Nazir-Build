@@ -88,6 +88,7 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
     layer.channels[0].channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
     layer.channels[0].state = MA_PAINT_LAYER_CHANNEL_ENABLED;
     layer.channels[0].image = &image;
+    layer.channels[0].gradient_ramp = nullptr;
     return layer.channels[0];
   }
 };
@@ -2043,6 +2044,7 @@ TEST_F(PaintLayersDescription, issues_report_a_folder_with_a_map_and_a_row_with_
   folder->channels_num = 1;
   folder->channels[0].channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   folder->channels[0].state = MA_PAINT_LAYER_CHANNEL_ENABLED;
+  folder->channels[0].gradient_ramp = nullptr;
   const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   folder->channels[0].image = BKE_image_add_generated(
       bmain, 4, 4, "FolderMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);

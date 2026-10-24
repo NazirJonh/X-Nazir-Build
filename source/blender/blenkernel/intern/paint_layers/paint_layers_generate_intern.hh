@@ -168,11 +168,6 @@ inline constexpr const char *ROLE_GRADIENT_MIDPOINT = "gradient_midpoint";
 inline constexpr const char *ROLE_GRADIENT_TYPE = "gradient_type";
 /** #INPUT_ROLE_PROP value of a Gradient row's repeat mode (a Float input). */
 inline constexpr const char *ROLE_GRADIENT_REPEAT = "gradient_repeat";
-/** #INPUT_ROLE_PROP value of a scalar channel's gradient start (a Float input; the channel tells
- * which record it belongs to). */
-inline constexpr const char *ROLE_GRADIENT_VALUE_START = "gradient_value_start";
-/** #INPUT_ROLE_PROP value of a scalar channel's gradient end. */
-inline constexpr const char *ROLE_GRADIENT_VALUE_END = "gradient_value_end";
 /**
  * On a source-group wrapper's interface input: the row mapping value relayed into the wrapper.
  * The same three roles travel from the row group into the wrapper instance and down every private

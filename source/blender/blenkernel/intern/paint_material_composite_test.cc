@@ -2699,7 +2699,8 @@ TEST_F(PaintLayersCompositeTest, a_uv_gradient_never_takes_a_surface)
   MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
       *ma, "Gradient", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(gradient, nullptr);
-  ASSERT_EQ(gradient->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_UV);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
 
   auto surface = gradient_test_surface(float3(0.75f), 0x7777);
   Vector<PaintMaterialCompositeImageLayer> layers;

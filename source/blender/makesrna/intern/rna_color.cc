@@ -422,6 +422,18 @@ static void rna_ColorRamp_eval(ColorBand *coba, float position, float color[4])
   BKE_colorband_evaluate(coba, position, color);
 }
 
+static float rna_ColorRampElement_value_get(PointerRNA *ptr)
+{
+  return static_cast<const CBData *>(ptr->data)->r;
+}
+
+static void rna_ColorRampElement_value_set(PointerRNA *ptr, float value)
+{
+  /* The property's range already clamps \a value. */
+  CBData *stop = static_cast<CBData *>(ptr->data);
+  stop->r = stop->g = stop->b = value;
+}
+
 static CBData *rna_ColorRampElement_new(ColorBand *coba, ReportList *reports, float position)
 {
   CBData *element = BKE_colorband_element_add(coba, position);
@@ -1138,6 +1150,19 @@ static void rna_def_color_ramp_element(BlenderRNA *brna)
   prop = RNA_def_property(srna, "alpha", PROP_FLOAT, PROP_COLOR);
   RNA_def_property_float_sdna(prop, nullptr, "a");
   RNA_def_property_ui_text(prop, "Alpha", "Set alpha of selected color stop");
+  RNA_def_property_update(prop, 0, "rna_ColorRamp_update");
+
+  /* The stop as one grey value, for a scalar channel's value ramp: the ColorRamp widget draws it
+   * with a gradient value slider instead of a colour picker. Stored in RGB so the ramp itself still
+   * reads as black to white through the stops. */
+  prop = RNA_def_property(srna, "value", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_ColorRampElement_value_get",
+                               "rna_ColorRampElement_value_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
+  RNA_def_property_ui_text(prop, "Value", "Grey value of the stop on a scalar channel's value ramp");
   RNA_def_property_update(prop, 0, "rna_ColorRamp_update");
 
   prop = RNA_def_property(srna, "position", PROP_FLOAT, PROP_NONE);

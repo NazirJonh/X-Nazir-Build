@@ -148,6 +148,42 @@ void draw_direction_arrow(const float2 &start_px, const float2 &end_px, const Dr
   immUnbindProgram();
 }
 
+/** One small disc per ramp stop, in the stop's color, drawn under the start/end handles. */
+void draw_stop_handles(const float2 &start_px,
+                       const float2 &end_px,
+                       const DrawOptions &options)
+{
+  if (!options.stop_handles || options.stop_count <= 0) {
+    return;
+  }
+  const float radius = HANDLE_RADIUS * 0.42f;
+
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  const int count = math::min(options.stop_count, MAX_STOP_HANDLES);
+  for (const int i : IndexRange(count)) {
+    const float4 color = options.stop_colors[i];
+    const float2 point = math::interpolate(
+        start_px, end_px, math::clamp(options.stop_positions[i], 0.0f, 1.0f));
+    immUniformColor4f(color.x, color.y, color.z, RAMP_OVERLAY_ALPHA);
+    imm_draw_circle_fill_3d(pos, point.x, point.y, radius, HANDLE_SEGMENTS);
+  }
+
+  GPU_line_width(1.0f);
+  for (const int i : IndexRange(count)) {
+    const float4 color = options.stop_colors[i];
+    const float2 point = math::interpolate(
+        start_px, end_px, math::clamp(options.stop_positions[i], 0.0f, 1.0f));
+    const float4 outline = outline_color_for(color);
+    immUniformColor4f(outline.x, outline.y, outline.z, outline.w);
+    imm_draw_circle_wire_3d(pos, point.x, point.y, radius, HANDLE_SEGMENTS);
+  }
+
+  immUnbindProgram();
+}
+
 /** The start, end and midpoint discs; the start is the gradient's origin and can be larger. */
 void draw_handles(const float2 &start_px,
                   const float2 &end_px,
@@ -209,7 +245,9 @@ int hit_test(const float2 &start_px,
              const float midpoint,
              const float2 &mval,
              const float hit_radius,
-             const bool midpoint_handle)
+             const bool midpoint_handle,
+             const float *stop_positions,
+             const int stop_count)
 {
   /* Nearest marker wins, with each marker's drawn size as its hit radius. Picking the midpoint
    * first, as this used to, made the start handle unreachable on a short gradient: the midpoint
@@ -236,6 +274,21 @@ int hit_test(const float2 &start_px,
       best_dist = dist;
     }
   }
+  /* Ramp stops: smaller than the handles, and a strict comparison so a stop sitting on a start or
+   * end handle never takes the press away from that handle. */
+  if (stop_positions != nullptr) {
+    const float stop_radius = hit_radius * 0.55f;
+    const int count = math::min(stop_count, MAX_STOP_HANDLES);
+    for (const int i : IndexRange(count)) {
+      const float2 point = math::interpolate(
+          start_px, end_px, math::clamp(stop_positions[i], 0.0f, 1.0f));
+      const float dist = math::distance(point, mval);
+      if (dist <= stop_radius && dist < best_dist) {
+        best = STOP_FIRST + i;
+        best_dist = dist;
+      }
+    }
+  }
   return best;
 }
 
@@ -255,6 +308,7 @@ void draw(const float2 &start_px,
   if (options.direction_arrow) {
     draw_direction_arrow(start_px, end_px, options);
   }
+  draw_stop_handles(start_px, end_px, options);
   draw_handles(start_px, end_px, mid_px, options);
 
   GPU_depth_test(depth_prev);

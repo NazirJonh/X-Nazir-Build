@@ -815,9 +815,9 @@ static uint64_t bake_hash_layer(uint64_t h,
   h = bake_hash_mix(h, uint16_t(layer.kind_subtype));
   if (BKE_paint_layers_gradient_supported(layer) && layer.gradient != nullptr) {
     /* A Gradient's pixels are its payload: the line, the shape and the ramp. The channel records'
-     * values below carry the scalar ends. The leading version invalidates the caches if the
-     * generated formula changes. */
-    h = bake_hash_mix(h, uint64_t(0x600));
+     * value ramps below carry the scalar channels. The leading version invalidates the caches if
+     * the generated formula changes. */
+    h = bake_hash_mix(h, BKE_PAINT_LAYERS_GRADIENT_HASH_VERSION);
     h = bake_hash_mix(h, uint8_t(layer.gradient->type));
     h = bake_hash_mix(h, uint8_t(layer.gradient->space));
     h = bake_hash_mix(h, uint8_t(layer.gradient->repeat));
@@ -864,6 +864,9 @@ static uint64_t bake_hash_layer(uint64_t h,
     h = bake_hash_mix(h, record.image != nullptr ? record.image->id.session_uid : 0);
     for (const float value : record.value) {
       h = bake_hash_float(h, value);
+    }
+    if (record.gradient_ramp != nullptr) {
+      h = bake_hash_mix(h, BKE_paint_layers_gradient_ramp_hash(*record.gradient_ramp));
     }
   }
   /* The per (row, channel) opacity overrides are baked into the row's result too, and exist whether

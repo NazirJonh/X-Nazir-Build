@@ -636,6 +636,11 @@ static void paint_layer_channels_duplicate(Main &bmain,
     if (dst.channels[i].image != nullptr) {
       dst.channels[i].image = paint_layer_image_duplicate(bmain, *dst.channels[i].image);
     }
+    /* A value ramp is owned sub-data like the map: the copy gets one of its own. */
+    dst.channels[i].gradient_ramp = (src.channels[i].gradient_ramp != nullptr) ?
+                                        static_cast<ColorBand *>(MEM_dupalloc(
+                                            src.channels[i].gradient_ramp)) :
+                                        nullptr;
   }
 }
 
@@ -1056,11 +1061,10 @@ MaterialPaintLayer *BKE_paint_layers_correction_add(Material &ma,
         const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
             eMaterialPaintChannel(channel));
         if (record != nullptr && !info.is_color) {
-          /* A scalar channel ramps between its own two ends; a fresh record is all zero, which
-           * would make the correction a flat zero. The channel's own range bounds the ends, so a
-           * channel that does not span 0..1 still ramps across its whole span. */
-          record->value[0] = info.value_min;
-          record->value[1] = info.value_max;
+          /* A scalar channel's value ramp spans the channel's whole range; a fresh record is all
+           * zero, which would make the correction a flat zero. */
+          BKE_paint_layers_gradient_set_channel_scalars(
+              ma, *effect, eMaterialPaintChannel(channel), info.value_min, info.value_max);
         }
         break;
       }
@@ -1263,6 +1267,7 @@ MaterialPaintLayer *BKE_paint_layers_mask_add(Material &ma,
   record.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   record.image = nullptr;
+  record.gradient_ramp = nullptr;
   const float gray = clamp_f(value, 0.0f, 1.0f);
   record.value[0] = record.value[1] = record.value[2] = gray;
   record.value[3] = 1.0f;
@@ -1325,6 +1330,7 @@ MaterialPaintLayer *BKE_paint_layers_mask_item_add(Material &ma,
   record.channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   record.image = nullptr;
+  record.gradient_ramp = nullptr;
   record.flag = 0;
   if (fill) {
     const float gray = clamp_f(value, 0.0f, 1.0f);
@@ -1972,6 +1978,12 @@ bool BKE_paint_layers_channel_set_value(Material &ma,
     return false;
   }
   copy_v4_v4(record->value, value);
+  /* A Gradient generator's scalar channel reads its value ramp, so an API write through the two
+   * ends has to move the ramp's outer stops as well. */
+  if (record->gradient_ramp != nullptr) {
+    BKE_paint_layers_gradient_channel_ramp_ends_set(
+        *record->gradient_ramp, channel, value[0], value[1]);
+  }
   /* A Fill row lays its Base-Color (and every other map-less channel's) constant through a group
    * input, so changing a value there is value-only. A Paint row's value alpha decides whether the
    * channel takes part at all, which is topology: it stays a regeneration. */
@@ -2040,6 +2052,7 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
   record.channel = channel;
   record.state = MA_PAINT_LAYER_CHANNEL_ENABLED;
   record.image = nullptr;
+  record.gradient_ramp = nullptr;
   zero_v4(record.value);
   if (channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
     /* Still transparent, but the colour is the flat tangent (#8080FF), the brush channel's default,
@@ -2055,6 +2068,8 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     if (!info.is_color) {
       record.value[0] = info.value_min;
       record.value[1] = info.value_max;
+      /* The scalar channel's own value ramp starts black to white, the range it spans. */
+      BKE_paint_layers_gradient_channel_ramp_ensure(record);
     }
   }
   /* A Fill correction's other channel starts at the colour it already lays, so switching one on
@@ -2092,6 +2107,7 @@ bool BKE_paint_layers_channel_remove(Material &ma,
   if (record->image != nullptr) {
     id_us_min(&record->image->id);
   }
+  MEM_SAFE_DELETE(record->gradient_ramp);
   const int index = int(record - layer->channels);
   if (layer->channels_num > 1) {
     memmove(layer->channels + index,

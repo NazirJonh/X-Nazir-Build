@@ -22,6 +22,7 @@
 #include "DNA_material_types.h"
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include "paint_layers_intern.hh"
 #include "paint_layers_kind.hh"
@@ -451,6 +452,9 @@ static uint64_t anchor_point_hash_row(uint64_t h,
                                                    0));
     h = anchor_point_hash_mix(
         h, get_default_hash(record.value[0], record.value[1], record.value[2], record.value[3]));
+    if (record.gradient_ramp != nullptr) {
+      h = anchor_point_hash_mix(h, BKE_paint_layers_gradient_ramp_hash(*record.gradient_ramp));
+    }
   }
   h = anchor_point_hash_mix(h,
                             get_default_hash(row.mapping.offset[0],

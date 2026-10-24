@@ -23,6 +23,14 @@ namespace blender {
 
 struct Material;
 struct MaterialPaintLayer;
+struct Mesh;
+struct Object;
+
+/**
+ * Mixed first into every hash of a Gradient payload (topology and bake). Bump it when the generated
+ * formula or the payload layout changes, so every cached graph and bake is rebuilt once.
+ */
+constexpr uint64_t BKE_PAINT_LAYERS_GRADIENT_HASH_VERSION = 0x700;
 
 /** Whether \a layer is a Gradient generator row, correction or mask item. */
 bool BKE_paint_layers_gradient_supported(const MaterialPaintLayer &layer);
@@ -46,7 +54,7 @@ void BKE_paint_layers_gradient_copy(MaterialPaintLayer &dst, const MaterialPaint
  * Add a Gradient generator row: a procedural ramp in UV space, built from Shader Editor nodes and
  * evaluated by the CPU with the same formula. The row gets its gradient payload, its default
  * Base Color channel and no map; another channel is switched on like a Fill's, and a scalar channel
- * starts spanning its whole range.
+ * starts with a black-to-white value ramp spanning its whole range.
  *
  * \param name: the row's name, or null for a unique "Gradient N".
  * \return the new row, or null when the stack refuses the Add.
@@ -58,6 +66,38 @@ MaterialPaintLayer *BKE_paint_layers_gradient_add(Material &ma,
 
 /** Set \a gradient to the defaults: a linear black-to-white ramp across the unit square. */
 void BKE_paint_layers_gradient_init(MaterialPaintLayerGradient &gradient);
+
+/**
+ * The ramp whose stops the row's gizmo shows for \a channel: the shared colour ramp for a colour
+ * channel, the scalar record's own value ramp for a value channel, or null when the row has no
+ * gradient or the channel has no ramp.
+ */
+const ColorBand *BKE_paint_layers_gradient_channel_ramp_get(const MaterialPaintLayer &layer,
+                                                           int channel);
+ColorBand *BKE_paint_layers_gradient_channel_ramp_get(MaterialPaintLayer &layer, int channel);
+
+/**
+ * Write the channel values \a start and \a end into the first and last stop of a scalar channel's
+ * value ramp, as grey in 0..1 over the channel's range. The inner stops are left alone. Not a
+ * rebuild: the caller tags the edit.
+ */
+void BKE_paint_layers_gradient_channel_ramp_ends_set(ColorBand &ramp,
+                                                     eMaterialPaintChannel channel,
+                                                     float start,
+                                                     float end);
+
+/** The channel value of the first (or, with \a end, the last) stop of a value ramp. */
+float BKE_paint_layers_gradient_channel_ramp_end_get(const ColorBand &ramp,
+                                                     eMaterialPaintChannel channel,
+                                                     bool end);
+
+/**
+ * Choose the channel whose ramp the gizmo shows. A viewport aid: it never rebuilds the graph.
+ * False for Normal, a row without a gradient, or a value channel with no ramp to show.
+ */
+bool BKE_paint_layers_gradient_set_gizmo_channel(Material &ma,
+                                                 MaterialPaintLayer &layer,
+                                                 eMaterialPaintChannel channel);
 
 /**
  * Fold a raw gradient parameter into the ramp position: repeat first, then the Hermite midpoint
@@ -155,6 +195,44 @@ bool BKE_paint_layers_gradient_set_space(Material &ma,
                                          eMaterialPaintLayerGradientSpace space);
 
 /**
+ * Switch the row's space while keeping the line where it is on the surface of \a object.
+ *
+ * \a mesh is the evaluated mesh of \a object, or null when there is none. Each end is converted
+ * through object space: UV is mapped on the render-active UV map (a point outside every island
+ * lands on the nearest one), and object/generated use the shader's box transform. A point off the
+ * surface loses its distance from it when converted to UV.
+ *
+ * When \a mesh is null, or an end cannot be placed, the numbers are left as they are and only the
+ * space changes; \a r_converted tells the caller. The space always ends up set.
+ */
+bool BKE_paint_layers_gradient_convert_space(Material &ma,
+                                             MaterialPaintLayer &layer,
+                                             const Object *object,
+                                             const Mesh *mesh,
+                                             eMaterialPaintLayerGradientSpace space,
+                                             bool &r_converted);
+
+/**
+ * Move one ramp stop along the ramp. The value is clamped to 0..1 and to the neighbouring stops,
+ * so the ramp's order never changes. A ramp edit rebuilds the generated ColorRamp node, as its
+ * storage is the node itself. False for an out-of-range index or a non-finite position.
+ */
+bool BKE_paint_layers_gradient_set_stop_position(Material &ma,
+                                                 MaterialPaintLayer &layer,
+                                                 int index,
+                                                 float position);
+
+/**
+ * Move one stop of the ramp the gizmo shows for \a channel. Same clamping and rebuild rules as
+ * #BKE_paint_layers_gradient_set_stop_position.
+ */
+bool BKE_paint_layers_gradient_set_channel_stop_position(Material &ma,
+                                                         MaterialPaintLayer &layer,
+                                                         eMaterialPaintChannel channel,
+                                                         int index,
+                                                         float position);
+
+/**
  * Show or hide the row's line gizmo. A viewport aid only: the flag is not read by the generated
  * graph or the CPU composite, so toggling it never rebuilds the tree.
  */
@@ -178,11 +256,29 @@ bool BKE_paint_layers_gradient_set_line(Material &ma,
                                         const float start[3],
                                         const float end[3]);
 
-/** Set a scalar channel's two ends; a value edit. Clamped to the channel's own range. */
+/** Set a scalar channel's two ends; a value edit. Clamped to the channel's own range. Also keeps
+ * the first and last stops of the channel's value ramp in step. */
 bool BKE_paint_layers_gradient_set_channel_scalars(Material &ma,
                                                    MaterialPaintLayer &layer,
                                                    eMaterialPaintChannel channel,
                                                    float start,
                                                    float end);
+
+/**
+ * The value ramp of the scalar channel \a record, allocated on first use as black at 0 and white at
+ * 1. The stops store the channel's normalized value in grey RGB (0..1). Null for a colour channel,
+ * a Normal, or a record that is not part of a Gradient generator.
+ */
+ColorBand *BKE_paint_layers_gradient_channel_ramp_ensure(MaterialPaintLayerChannel &record);
+
+/**
+ * Give the scalar channel \a channel the same stop count and positions as the row's Base Color
+ * ramp. The values of the existing stops are sampled at the new positions, so a user who first lays
+ * out colours and then tunes a channel keeps the tune. The interpolation modes follow Base Color.
+ * A topology edit. False for a colour channel, a missing record or a row without a gradient.
+ */
+bool BKE_paint_layers_gradient_sync_channel_ramp(Material &ma,
+                                                 MaterialPaintLayer &layer,
+                                                 eMaterialPaintChannel channel);
 
 }  // namespace blender

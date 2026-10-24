@@ -641,36 +641,6 @@ void PaintLayersTreeBuilder::gradient_line_inputs_create(LayerGroup &group,
   }
 }
 
-void PaintLayersTreeBuilder::gradient_scalar_inputs_create(LayerGroup &group,
-                                                           const MaterialPaintLayer &row,
-                                                           const int channel,
-                                                           const char *label)
-{
-  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
-      eMaterialPaintChannel(channel));
-  /* A colour channel reads the row's ColorRamp, which needs no input beyond the factor; a scalar
-   * channel ramps between two inputs of its own. */
-  const MaterialPaintLayerChannel *record = paint_layer_channel_find(row, channel);
-  if (record == nullptr || info.is_color) {
-    return;
-  }
-  char base[200];
-  SNPRINTF(base, "%s %s Gradient Start", label, info.ui_name);
-  bNodeTreeInterfaceSocket *start = layer_group_value_input(
-      group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_START, row.marker, channel);
-  if (start != nullptr) {
-    group_input_default_set(group, *start, record->value[0]);
-    gradient_value_start_inputs_.lookup_or_add_default(&row).add(channel, start);
-  }
-  SNPRINTF(base, "%s %s Gradient End", label, info.ui_name);
-  bNodeTreeInterfaceSocket *end = layer_group_value_input(
-      group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_END, row.marker, channel);
-  if (end != nullptr) {
-    group_input_default_set(group, *end, record->value[1]);
-    gradient_value_end_inputs_.lookup_or_add_default(&row).add(channel, end);
-  }
-}
-
 void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
                                                  const MaterialPaintLayer &layer)
 {
@@ -735,9 +705,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
     this->blend_mix_input_create(group, layer, channel, layer_name);
 
     if (generates) {
-      /* A colour channel reads the row's ColorRamp, which needs no input beyond the factor; a
-       * scalar channel ramps between two inputs of its own. */
-      this->gradient_scalar_inputs_create(group, layer, channel, layer_name);
+      /* Both a colour and a scalar channel read a ColorRamp built from the description; neither
+       * needs a value input beyond the shared factor. */
       continue;
     }
 
@@ -874,9 +843,8 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
         continue;
       }
       if (effect_generates) {
-        /* A colour channel reads the row's ColorRamp; a scalar one ramps between two inputs of its
-         * own, exactly as a Gradient row's does. */
-        this->gradient_scalar_inputs_create(group, effect, channel, effect_label);
+        /* Both a colour and a scalar channel read a ColorRamp built from the description, exactly
+         * as a Gradient row's do. */
         continue;
       }
       if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_READS_SOURCE)) {

@@ -204,6 +204,10 @@ static bool composite_gradient_describe(
     }
     out.scalar_start = record->value[0];
     out.scalar_end = record->value[1];
+    if (record->gradient_ramp != nullptr) {
+      out.scalar_ramp = *record->gradient_ramp;
+      out.scalar_ramp_valid = true;
+    }
   }
   return true;
 }
@@ -235,7 +239,8 @@ static bool composite_row_source_describe(const Material &ma,
     return false;
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
-    /* A Gradient: no map and no constant, only its line, ramp and the channel's scalar ends. */
+    /* A Gradient: no map and no constant, only its line, colour ramp and the channel's own value
+     * ramp. */
     return composite_gradient_describe(ma, layer, channel, context_surface, out.gradient);
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {

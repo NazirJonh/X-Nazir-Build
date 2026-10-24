@@ -8,6 +8,7 @@
 
 #include "BKE_paint_material_composite.hh"
 
+#include "BKE_colorband.hh"
 #include "BKE_idprop.hh"
 #include "BKE_image.hh"
 #include "BKE_main.hh"
@@ -1037,6 +1038,13 @@ bool BKE_paint_material_gradient_sample(const PaintMaterialCompositeGradient &gr
   const float t = BKE_paint_layers_gradient_factor(gradient.payload, coordinate);
   if (gradient.color_channel) {
     BKE_paint_layers_gradient_color(gradient.payload, t, r_rgba);
+  }
+  else if (gradient.scalar_ramp_valid) {
+    /* The channel's grey value ramp: red carries the value, the alpha stays one. */
+    float rgba[4];
+    BKE_colorband_evaluate(&gradient.scalar_ramp, t, rgba);
+    r_rgba[0] = r_rgba[1] = r_rgba[2] = rgba[0];
+    r_rgba[3] = 1.0f;
   }
   else {
     const float value = gradient.scalar_start + (gradient.scalar_end - gradient.scalar_start) * t;
@@ -2608,6 +2616,10 @@ static uint64_t composite_gradient_hash(uint64_t hash, const PaintMaterialCompos
                           gradient.scalar_end,
                           gradient.width,
                           gradient.height);
+  hash = get_default_hash(hash, gradient.scalar_ramp_valid);
+  if (gradient.scalar_ramp_valid) {
+    hash = get_default_hash(hash, BKE_paint_layers_gradient_ramp_hash(gradient.scalar_ramp));
+  }
   return get_default_hash(hash, BKE_paint_layers_gradient_ramp_hash(gradient.payload.ramp));
 }
 

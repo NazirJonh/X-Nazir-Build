@@ -20,6 +20,7 @@
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_index_range.hh"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
@@ -34,6 +35,7 @@
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
 
+#include "BKE_colorband.hh"
 #include "BKE_context.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
@@ -141,6 +143,11 @@ struct LayerGradientGizmoGroup {
   float3 start_before = float3(0.0f);
   float3 end_before = float3(0.0f);
   float midpoint_before = 0.5f;
+  /** The ramp stop a Ramp-marker drag moves, and the channel whose ramp it belongs to. */
+  int stop_index = -1;
+  int drag_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  int stop_count_before = 0;
+  float stop_positions_before[gradient_gizmo::MAX_STOP_HANDLES] = {};
   /** The surface point of the press, for a drag whose end misses the mesh. */
   PaintLayerGradientHit plane_hit;
   bool has_plane_hit = false;
@@ -182,6 +189,16 @@ bool target_is_session(const LayerGradientTarget &target, const LayerGradientGiz
 {
   return target.valid() && target.material == ggd.session_material &&
          BLI_uuid_equal(target.layer->marker, ggd.session_marker);
+}
+
+/** The channel whose ramp the gizmo shows, falling back to Base Color when its ramp is gone. */
+int gizmo_channel_resolve(const MaterialPaintLayer &layer,
+                          const MaterialPaintLayerGradient &gradient)
+{
+  if (BKE_paint_layers_gradient_channel_ramp_get(layer, gradient.gizmo_channel) != nullptr) {
+    return gradient.gizmo_channel;
+  }
+  return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
 }
 
 void notify_changed(bContext &C, Material &material)
@@ -292,17 +309,32 @@ bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
     }
   }
 
-  /* The line and handles show the row's ramp: the start disc at ramp 0, the midpoint marker at
-   * the 50% color the midpoint bend defines, the end disc at ramp 1, and the arrow in the end
-   * color. */
+  /* The line and handles show the selected channel's ramp: Base Color by default, or the value
+   * ramp of the channel whose eye is on in the Gradient panel. A value ramp reads as grey. */
+  const int channel = gizmo_channel_resolve(*target.layer, gradient);
+  const bool scalar_channel = channel != PAINT_MATERIAL_CHANNEL_BASE_COLOR &&
+                              channel != PAINT_MATERIAL_CHANNEL_EMISSION;
+  const ColorBand *ramp = BKE_paint_layers_gradient_channel_ramp_get(*target.layer, channel);
+  const bool use_grey = scalar_channel && ramp != nullptr;
+  if (ramp == nullptr) {
+    /* The selected channel lost its ramp (disabled or removed): the colour ramp is what is left. */
+    ramp = &gradient.ramp;
+  }
   /* The ramp is scene linear and the overlay is drawn in display space, so the colors are converted
    * the way brush colors are before they are drawn. */
   const auto overlay_color = [&](const float t) {
-    float linear[4];
-    BKE_paint_layers_gradient_color(gradient, t, linear);
+    float rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    if (ramp->tot > 0) {
+      BKE_colorband_evaluate(ramp, t, rgba);
+    }
+    float linear[3] = {rgba[0], rgba[1], rgba[2]};
+    if (use_grey) {
+      linear[0] = linear[1] = linear[2] = rgba[0];
+      rgba[3] = 1.0f;
+    }
     float display[3];
     IMB_colormanagement_scene_linear_to_srgb_v3(display, linear);
-    return float4(display[0], display[1], display[2], linear[3]);
+    return float4(display[0], display[1], display[2], rgba[3]);
   };
   ggd.draw_options.ramp_colors = true;
   ggd.draw_options.color_start = overlay_color(0.0f);
@@ -310,8 +342,29 @@ bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
   ggd.draw_options.color_end = overlay_color(1.0f);
 
   ggd.midpoint = gradient.midpoint;
-  ggd.draw_options.midpoint_handle = gradient.distribution ==
+  const bool midpoint_distribution = gradient.distribution ==
                                      MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT;
+  ggd.draw_options.midpoint_handle = midpoint_distribution;
+
+  /* In the Ramp distribution the ramp's own stops place the colours, so each stop is drawn on the
+   * line at the position the ramp gives it. The midpoint distribution has no stop markers. */
+  ggd.draw_options.stop_handles = !midpoint_distribution && ramp != nullptr;
+  ggd.draw_options.stop_count = 0;
+  if (ggd.draw_options.stop_handles) {
+    const int count = math::min(int(ramp->tot), gradient_gizmo::MAX_STOP_HANDLES);
+    for (const int i : IndexRange(count)) {
+      const CBData &stop = ramp->data[i];
+      float display[3];
+      float linear[3] = {stop.r, stop.g, stop.b};
+      if (use_grey) {
+        linear[0] = linear[1] = linear[2] = stop.r;
+      }
+      IMB_colormanagement_scene_linear_to_srgb_v3(display, linear);
+      ggd.draw_options.stop_positions[i] = stop.pos;
+      ggd.draw_options.stop_colors[i] = float4(display[0], display[1], display[2], stop.a);
+    }
+    ggd.draw_options.stop_count = count;
+  }
   return true;
 }
 
@@ -333,6 +386,16 @@ void drag_finish(bContext &C, wmGizmo *gz, const bool commit)
   if (material != nullptr && layer != nullptr && layer->gradient != nullptr &&
       material == ggd.session_material && BLI_uuid_equal(layer->marker, ggd.session_marker))
   {
+    const ColorBand *ramp = BKE_paint_layers_gradient_channel_ramp_get(*layer, ggd.drag_channel);
+    if (ramp == nullptr) {
+      ramp = &layer->gradient->ramp;
+    }
+    const int stop_count = math::min(ggd.stop_count_before, int(ramp->tot));
+    bool stop_changed = false;
+    for (const int i : IndexRange(stop_count)) {
+      stop_changed = stop_changed ||
+                     ramp->data[i].pos != ggd.stop_positions_before[i];
+    }
     if (commit) {
       /* Squared distances, so this is a few hundredths of a millimetre in object units. */
       constexpr float changed_epsilon = 1e-9f;
@@ -341,7 +404,8 @@ void drag_finish(bContext &C, wmGizmo *gz, const bool commit)
                            math::distance_squared(float3(layer->gradient->end), ggd.end_before) >
                                changed_epsilon ||
                            std::abs(layer->gradient->midpoint - ggd.midpoint_before) >
-                               changed_epsilon;
+                               changed_epsilon ||
+                           stop_changed;
       if (changed) {
         ED_undo_push(&C, "Move Gradient Layer Handle");
       }
@@ -351,11 +415,22 @@ void drag_finish(bContext &C, wmGizmo *gz, const bool commit)
       float end[3] = {ggd.end_before.x, ggd.end_before.y, ggd.end_before.z};
       BKE_paint_layers_gradient_set_line(*material, *layer, start, end);
       BKE_paint_layers_gradient_set_midpoint(*material, *layer, ggd.midpoint_before);
+      for (const int i : IndexRange(stop_count)) {
+        BKE_paint_layers_gradient_set_channel_stop_position(
+            *material,
+            *layer,
+            eMaterialPaintChannel(ggd.drag_channel),
+            i,
+            ggd.stop_positions_before[i]);
+      }
     }
     notify_changed(C, *material);
   }
 
   ggd.drag_handle = gradient_gizmo::NONE;
+  ggd.stop_index = -1;
+  ggd.drag_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  ggd.stop_count_before = 0;
   ggd.has_plane_hit = false;
   ggd.has_drag_plane = false;
   ggd.drag_tri = -1;
@@ -379,6 +454,26 @@ void drag_begin(bContext &C, wmGizmo *gz, const wmEvent &event)
   ggd.has_plane_hit = false;
   ggd.has_drag_plane = false;
   ggd.drag_tri = -1;
+
+  /* A Ramp stop drag only moves that stop along the line: remember the ramp so a cancel can put
+   * every stop back. */
+  ggd.stop_index = gradient_gizmo::is_stop_handle(ggd.drag_handle) ?
+                       ggd.drag_handle - gradient_gizmo::STOP_FIRST :
+                       -1;
+  ggd.drag_channel = gizmo_channel_resolve(*target.layer, gradient);
+  const ColorBand *drag_ramp = BKE_paint_layers_gradient_channel_ramp_get(*target.layer,
+                                                                         ggd.drag_channel);
+  if (drag_ramp == nullptr) {
+    drag_ramp = &gradient.ramp;
+  }
+  ggd.stop_count_before = math::min(int(drag_ramp->tot), gradient_gizmo::MAX_STOP_HANDLES);
+  for (const int i : IndexRange(ggd.stop_count_before)) {
+    ggd.stop_positions_before[i] = drag_ramp->data[i].pos;
+  }
+
+  if (ggd.stop_index >= 0) {
+    return;
+  }
 
   if (!ggd.image_editor && gradient.space == MA_PAINT_LAYER_GRADIENT_SPACE_UV && !snap_enabled(C) &&
       ggd.drag_handle != gradient_gizmo::MID)
@@ -422,6 +517,22 @@ void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
   }
   const MaterialPaintLayerGradient &gradient = *layer->gradient;
   const float2 mval(float(event.mval[0]), float(event.mval[1]));
+
+  if (ggd.stop_index >= 0) {
+    /* A stop marker only moves along the line. The setter clamps it to its neighbours, so the
+     * ramp order never changes. */
+    const float2 axis = ggd.end_px - ggd.start_px;
+    const float len_sq = math::length_squared(axis);
+    if (len_sq >= 1.0f) {
+      const float t = math::clamp(math::dot(mval - ggd.start_px, axis) / len_sq, 0.0f, 1.0f);
+      if (BKE_paint_layers_gradient_set_channel_stop_position(
+              *material, *layer, eMaterialPaintChannel(ggd.drag_channel), ggd.stop_index, t))
+      {
+        notify_changed(C, *material);
+      }
+    }
+    return;
+  }
 
   if (ggd.drag_handle == gradient_gizmo::MID) {
     /* The middle marker only moves along the line, exactly like the Color Gradient's. */
@@ -472,18 +583,12 @@ void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
       }
     }
     else if (!snap_enabled(C) && ggd.drag_tri >= 0) {
-      /* Over the mesh the UV under the cursor is exact; past it, the mapping of the last triangle
-       * under the cursor continues, so the line can leave the island and the mesh. */
-      PaintLayerGradientHit hit;
+      /* Free UV placement stays on the plane of the triangle the handle was grabbed on. Reading the
+       * surface under the cursor instead would snap the handle back onto the mesh; the plane is
+       * what lets the UV mapping continue past the island and the mesh. */
       float2 uv;
-      if (paint_layer_gradient_hit_at_mouse(C, gradient, mval, hit) && hit.valid && hit.has_uv) {
-        uv = hit.uv;
-        if (hit.tri >= 0) {
-          ggd.drag_tri = hit.tri;
-        }
-      }
-      else if (!paint_layer_gradient_uv_on_tri_plane(
-                   C, *target.object, *target.mesh, ggd.drag_tri, mval, uv))
+      if (!paint_layer_gradient_uv_on_tri_plane(
+              C, *target.object, *target.mesh, ggd.drag_tri, mval, uv))
       {
         return;
       }
@@ -543,7 +648,9 @@ int gizmo_test_select(bContext *C, wmGizmo *gz, const int mval[2])
       ggd.midpoint,
       float2(float(mval[0]), float(mval[1])),
       pick_radius,
-      ggd.draw_options.midpoint_handle);
+      ggd.draw_options.midpoint_handle,
+      ggd.draw_options.stop_handles ? ggd.draw_options.stop_positions : nullptr,
+      ggd.draw_options.stop_count);
   return (part == gradient_gizmo::NONE) ? -1 : part;
 }
 

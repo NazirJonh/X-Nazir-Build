@@ -25,6 +25,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
@@ -114,12 +115,35 @@ void BKE_paint_layers_gradient_init(MaterialPaintLayerGradient &gradient)
   copy_v3_fl3(gradient.start, 0.0f, 0.5f, 0.0f);
   copy_v3_fl3(gradient.end, 1.0f, 0.5f, 0.0f);
   gradient.midpoint = 0.5f;
-  gradient.space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+  /* A new Gradient works in object space: that is where a 3D line is aimed at the surface. UV and
+   * Generated remain one click away in the panel. */
+  gradient.space = MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT;
   gradient.type = MA_PAINT_LAYER_GRADIENT_LINEAR;
   gradient.repeat = MA_PAINT_LAYER_GRADIENT_REPEAT_NONE;
   /* A new row opens with its handles shown: they are how the line is edited, and the panel's
-   * button hides them. */
+   * button hides them. Base Color is the channel the handles read until the user opens another. */
   gradient.gizmo_shown = 1;
+  gradient.gizmo_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+ColorBand *BKE_paint_layers_gradient_channel_ramp_ensure(MaterialPaintLayerChannel &record)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(record.channel));
+  if (info.is_color || record.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return nullptr;
+  }
+  if (record.gradient_ramp == nullptr) {
+    record.gradient_ramp = MEM_new<ColorBand>(__func__);
+    BKE_colorband_init(record.gradient_ramp, true);
+    /* Existing files had two ends and no ramp: seed the ramp with them instead of resetting the
+     * channel to black-to-white. */
+    BKE_paint_layers_gradient_channel_ramp_ends_set(*record.gradient_ramp,
+                                                    eMaterialPaintChannel(record.channel),
+                                                    record.value[0],
+                                                    record.value[1]);
+  }
+  return record.gradient_ramp;
 }
 
 MaterialPaintLayerGradient *BKE_paint_layers_gradient_ensure(MaterialPaintLayer &layer)
@@ -136,11 +160,23 @@ MaterialPaintLayerGradient *BKE_paint_layers_gradient_ensure(MaterialPaintLayer 
      * their values, the missing ramp gets the default stops. */
     BKE_colorband_init(&layer.gradient->ramp, true);
   }
+  /* A scalar channel reads its own value ramp; one written before it existed gets it here, seeded
+   * from the two ends that record kept. */
+  if (layer.channels != nullptr) {
+    for (const int i : IndexRange(layer.channels_num)) {
+      BKE_paint_layers_gradient_channel_ramp_ensure(layer.channels[i]);
+    }
+  }
   return layer.gradient;
 }
 
 void BKE_paint_layers_gradient_free(MaterialPaintLayer &layer)
 {
+  if (layer.channels != nullptr) {
+    for (const int i : IndexRange(layer.channels_num)) {
+      MEM_SAFE_DELETE(layer.channels[i].gradient_ramp);
+    }
+  }
   MEM_SAFE_DELETE(layer.gradient);
 }
 
@@ -296,6 +332,20 @@ MaterialPaintLayer *BKE_paint_layers_gradient_ramp_row_from_data(Material &ma, c
           const uintptr_t end = uintptr_t(&ramp) + sizeof(ramp);
           if (address >= begin && address < end) {
             found = &row;
+            return;
+          }
+          /* A scalar channel's own value ramp: its stops are stops of the same row. */
+          for (const int i : IndexRange(row.channels != nullptr ? row.channels_num : 0)) {
+            const ColorBand *channel_ramp = row.channels[i].gradient_ramp;
+            if (channel_ramp == nullptr) {
+              continue;
+            }
+            const uintptr_t channel_begin = uintptr_t(channel_ramp);
+            const uintptr_t channel_end = channel_begin + sizeof(*channel_ramp);
+            if (address >= channel_begin && address < channel_end) {
+              found = &row;
+              return;
+            }
           }
         });
         return found == nullptr;
@@ -385,6 +435,85 @@ bool BKE_paint_layers_gradient_set_distribution(
   return true;
 }
 
+namespace {
+
+/** Shared by the const and mutable getters; \a Layer and \a Ramp carry the constness. */
+template<typename Layer, typename Ramp> Ramp *gradient_channel_ramp_find(Layer &layer, int channel)
+{
+  if (!BKE_paint_layers_gradient_supported(layer) || layer.gradient == nullptr ||
+      channel == PAINT_MATERIAL_CHANNEL_NORMAL)
+  {
+    return nullptr;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(channel));
+  if (info.is_color) {
+    return &layer.gradient->ramp;
+  }
+  auto *record = paint_layer_channel_find(layer, channel);
+  return (record != nullptr) ? record->gradient_ramp : nullptr;
+}
+
+}  // namespace
+
+const ColorBand *BKE_paint_layers_gradient_channel_ramp_get(const MaterialPaintLayer &layer,
+                                                           const int channel)
+{
+  return gradient_channel_ramp_find<const MaterialPaintLayer, const ColorBand>(layer, channel);
+}
+
+ColorBand *BKE_paint_layers_gradient_channel_ramp_get(MaterialPaintLayer &layer, const int channel)
+{
+  return gradient_channel_ramp_find<MaterialPaintLayer, ColorBand>(layer, channel);
+}
+
+void BKE_paint_layers_gradient_channel_ramp_ends_set(ColorBand &ramp,
+                                                     const eMaterialPaintChannel channel,
+                                                     const float start,
+                                                     const float end)
+{
+  if (ramp.tot <= 0) {
+    return;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  const float first = BKE_paint_material_t_from_value(info.value_min, info.value_max, start);
+  const float last = BKE_paint_material_t_from_value(info.value_min, info.value_max, end);
+  const auto set_grey = [](CBData &stop, const float value) {
+    stop.r = stop.g = stop.b = value;
+    stop.a = 1.0f;
+  };
+  set_grey(ramp.data[0], first);
+  set_grey(ramp.data[ramp.tot - 1], last);
+}
+
+float BKE_paint_layers_gradient_channel_ramp_end_get(const ColorBand &ramp,
+                                                     const eMaterialPaintChannel channel,
+                                                     const bool end)
+{
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  const CBData &stop = ramp.data[end ? std::max<int>(ramp.tot - 1, 0) : 0];
+  return BKE_paint_material_value_from_t(info.value_min, info.value_max, stop.r);
+}
+
+bool BKE_paint_layers_gradient_set_gizmo_channel(Material &ma,
+                                                 MaterialPaintLayer &layer,
+                                                 const eMaterialPaintChannel channel)
+{
+  if (!gradient_owned(ma, layer) || channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return false;
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  if (BKE_paint_layers_gradient_channel_ramp_get(layer, channel) == nullptr) {
+    return false;
+  }
+  /* A viewport aid like #BKE_paint_layers_gradient_set_gizmo_display: no graph rebuild. */
+  gradient->gizmo_channel = int8_t(channel);
+  return true;
+}
+
 bool BKE_paint_layers_gradient_set_gizmo_display(
     Material &ma,
     MaterialPaintLayer &layer,
@@ -448,6 +577,112 @@ bool BKE_paint_layers_gradient_set_space(Material &ma,
   return true;
 }
 
+namespace {
+
+/** A gradient-space point as an object-space one. */
+bool gradient_point_to_object(const MaterialPaintLayerGradient &gradient,
+                              const Object *object,
+                              const Mesh &mesh,
+                              const float3 &point,
+                              float3 &r_object)
+{
+  switch (eMaterialPaintLayerGradientSpace(gradient.space)) {
+    case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
+      r_object = point;
+      return true;
+    case MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED:
+      return BKE_paint_layers_gradient_generated_to_object(object, mesh, point, r_object);
+    case MA_PAINT_LAYER_GRADIENT_SPACE_UV:
+    default:
+      return BKE_paint_layers_gradient_uv_to_object(mesh, float2(point.x, point.y), r_object);
+  }
+}
+
+/** An object-space point as one in \a space. */
+bool gradient_point_from_object(const eMaterialPaintLayerGradientSpace space,
+                                const Object *object,
+                                const Mesh &mesh,
+                                const float3 &object_point,
+                                float3 &r_point)
+{
+  switch (space) {
+    case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
+      r_point = object_point;
+      return true;
+    case MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED:
+      return BKE_paint_layers_gradient_generated_from_object(object, mesh, object_point, r_point);
+    case MA_PAINT_LAYER_GRADIENT_SPACE_UV:
+    default: {
+      float2 uv;
+      if (!BKE_paint_layers_gradient_object_to_uv(mesh, object_point, uv)) {
+        return false;
+      }
+      r_point = float3(uv.x, uv.y, 0.0f);
+      return true;
+    }
+  }
+}
+
+}  // namespace
+
+bool BKE_paint_layers_gradient_convert_space(Material &ma,
+                                             MaterialPaintLayer &layer,
+                                             const Object *object,
+                                             const Mesh *mesh,
+                                             const eMaterialPaintLayerGradientSpace space,
+                                             bool &r_converted)
+{
+  r_converted = false;
+  if (!gradient_owned(ma, layer) ||
+      !ELEM(space,
+            MA_PAINT_LAYER_GRADIENT_SPACE_UV,
+            MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT,
+            MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED))
+  {
+    return false;
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  if (gradient->space == space) {
+    r_converted = true;
+    return true;
+  }
+  /* Without an evaluated mesh there is nothing to measure the line against: the numbers stay as
+   * they are and only the space changes, which the caller reports. */
+  if (object == nullptr || mesh == nullptr) {
+    return BKE_paint_layers_gradient_set_space(ma, layer, space);
+  }
+
+  float3 start_object;
+  float3 end_object;
+  if (!gradient_point_to_object(*gradient, object, *mesh, float3(gradient->start), start_object) ||
+      !gradient_point_to_object(*gradient, object, *mesh, float3(gradient->end), end_object))
+  {
+    return BKE_paint_layers_gradient_set_space(ma, layer, space);
+  }
+
+  float3 start;
+  float3 end;
+  if (!gradient_point_from_object(space, object, *mesh, start_object, start) ||
+      !gradient_point_from_object(space, object, *mesh, end_object, end))
+  {
+    return BKE_paint_layers_gradient_set_space(ma, layer, space);
+  }
+
+  const float start_array[3] = {start.x, start.y, start.z};
+  const float end_array[3] = {end.x, end.y, end.z};
+  if (!BKE_paint_layers_gradient_set_line(ma, layer, start_array, end_array)) {
+    return BKE_paint_layers_gradient_set_space(ma, layer, space);
+  }
+  if (!BKE_paint_layers_gradient_set_space(ma, layer, space)) {
+    return false;
+  }
+  r_converted = true;
+  return true;
+}
+
 bool BKE_paint_layers_gradient_set_gizmo_shown(Material &ma,
                                                MaterialPaintLayer &layer,
                                                const bool shown)
@@ -508,6 +743,65 @@ bool BKE_paint_layers_gradient_set_end(Material &ma,
   return true;
 }
 
+namespace {
+
+bool gradient_ramp_set_stop_position(Material &ma,
+                                     ColorBand &ramp,
+                                     const int index,
+                                     const float position)
+{
+  if (!std::isfinite(position) || index < 0 || index >= ramp.tot) {
+    return false;
+  }
+  /* The stops are kept sorted. Clamping to both neighbours keeps the order and still lets two
+   * stops share a position, as a ColorRamp allows. */
+  const float lower = (index > 0) ? ramp.data[index - 1].pos : 0.0f;
+  const float upper = (index + 1 < ramp.tot) ? ramp.data[index + 1].pos : 1.0f;
+  const float clamped = clamp_f(position, lower, upper);
+  if (ramp.data[index].pos == clamped) {
+    ramp.cur = index;
+    return false;
+  }
+  ramp.data[index].pos = clamped;
+  ramp.cur = index;
+  /* The ramp lives in the generated ColorRamp node's storage: this is a topology edit. */
+  BKE_paint_layers_gradient_ramp_edited(ma, &ramp);
+  return true;
+}
+
+}  // namespace
+
+bool BKE_paint_layers_gradient_set_stop_position(Material &ma,
+                                                 MaterialPaintLayer &layer,
+                                                 const int index,
+                                                 const float position)
+{
+  if (!gradient_owned(ma, layer)) {
+    return false;
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  return gradient_ramp_set_stop_position(ma, gradient->ramp, index, position);
+}
+
+bool BKE_paint_layers_gradient_set_channel_stop_position(Material &ma,
+                                                         MaterialPaintLayer &layer,
+                                                         const eMaterialPaintChannel channel,
+                                                         const int index,
+                                                         const float position)
+{
+  if (!gradient_owned(ma, layer)) {
+    return false;
+  }
+  ColorBand *ramp = BKE_paint_layers_gradient_channel_ramp_get(layer, channel);
+  if (ramp == nullptr) {
+    return false;
+  }
+  return gradient_ramp_set_stop_position(ma, *ramp, index, position);
+}
+
 bool BKE_paint_layers_gradient_set_line(Material &ma,
                                         MaterialPaintLayer &layer,
                                         const float start[3],
@@ -554,7 +848,58 @@ bool BKE_paint_layers_gradient_set_channel_scalars(Material &ma,
   }
   record->value[0] = clamp_f(start, info.value_min, info.value_max);
   record->value[1] = clamp_f(end, info.value_min, info.value_max);
+  /* Keep the ramp's outer stops equal to the two ends the RNA properties expose. Its inner stops
+   * stay as the user left them. */
+  if (ColorBand *ramp = BKE_paint_layers_gradient_channel_ramp_ensure(*record)) {
+    BKE_paint_layers_gradient_channel_ramp_ends_set(
+        *ramp, channel, record->value[0], record->value[1]);
+    BKE_paint_layers_gradient_ramp_edited(ma, ramp);
+  }
   BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+bool BKE_paint_layers_gradient_sync_channel_ramp(Material &ma,
+                                                 MaterialPaintLayer &layer,
+                                                 const eMaterialPaintChannel channel)
+{
+  if (!gradient_owned(ma, layer) || layer.gradient == nullptr) {
+    return false;
+  }
+  MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+  if (record == nullptr) {
+    return false;
+  }
+  ColorBand *ramp = BKE_paint_layers_gradient_channel_ramp_ensure(*record);
+  if (ramp == nullptr) {
+    return false;
+  }
+  const ColorBand &base = layer.gradient->ramp;
+  if (base.tot <= 0) {
+    return false;
+  }
+
+  /* Sample the channel's current values at the Base Color positions, so a re-sync keeps a tune the
+   * user already made. The old ramp is read before it is replaced. */
+  ColorBand synced;
+  BKE_colorband_init(&synced, true);
+  synced.color_mode = base.color_mode;
+  synced.ipotype = base.ipotype;
+  synced.ipotype_hue = base.ipotype_hue;
+  synced.cur = std::min<int>(ramp->cur, base.tot - 1);
+  for (const int i : IndexRange(base.tot)) {
+    const float position = base.data[i].pos;
+    float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    BKE_colorband_evaluate(ramp, position, rgba);
+    CBData &stop = synced.data[i];
+    stop.pos = position;
+    stop.r = stop.g = stop.b = rgba[0];
+    stop.a = 1.0f;
+  }
+  synced.tot = base.tot;
+  *ramp = synced;
+  BKE_paint_layers_gradient_ramp_edited(ma, ramp);
+  BKE_paint_layers_tag_edited(ma);
   return true;
 }
 

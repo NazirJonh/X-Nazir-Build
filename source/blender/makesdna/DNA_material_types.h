@@ -680,9 +680,9 @@ enum eMaterialPaintLayerGradientGizmoDisplay : int8_t {
  *
  * The row carries a pointer to this rather than the struct by value: #ColorBand is close to a
  * kilobyte, and every row, correction and mask item would otherwise pay for it. The ramp is the
- * colour source for colour channels; a scalar channel reads its two ends from its own
- * #MaterialPaintLayerChannel::value[0..1] instead (metallic and roughness want different ends, and
- * a colour ramp has no meaning there).
+ * colour source for colour channels. A scalar channel has its own value ramp, stored on its record
+ * as a pointer (#MaterialPaintLayerChannel::gradient_ramp): black at 0, white at 1, with as many
+ * grey stops as the user adds between them.
  *
  * The line is in #space: the active UV map (X/Y used, Z ignored), object space, or normalized
  * generated coordinates. `start` is the centre of a radial gradient and `|end - start|` its
@@ -703,7 +703,7 @@ struct MaterialPaintLayerGradient {
    */
   float midpoint = 0.5f;
   /** #eMaterialPaintLayerGradientSpace. */
-  int8_t space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+  int8_t space = MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT;
   /** #eMaterialPaintLayerGradientType. */
   int8_t type = MA_PAINT_LAYER_GRADIENT_LINEAR;
   /** #eMaterialPaintLayerGradientRepeat. */
@@ -714,7 +714,15 @@ struct MaterialPaintLayerGradient {
   int8_t distribution = MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT;
   /** #eMaterialPaintLayerGradientGizmoDisplay. */
   int8_t gizmo_display = MA_PAINT_LAYER_GRADIENT_GIZMO_PAINT_ONLY;
-  char _pad[2] = {};
+  /**
+   * #eMaterialPaintChannel whose ramp the handles show and move: a value channel reads its own
+   * value ramp, while Base Color, Emission and every colour channel share #ramp. Zero is
+   * PAINT_MATERIAL_CHANNEL_BASE_COLOR, which the padding older files carry, so they open on Base
+   * Color. Spelled as a number because the channel enum lives in DNA_scene_types.h, which this
+   * header cannot include.
+   */
+  int8_t gizmo_channel = 0;
+  char _pad[1] = {};
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_FILTER row. */
@@ -803,6 +811,13 @@ struct MaterialPaintLayerChannel {
   struct Image *image = nullptr;
   /** Constant value used while the channel carries no map. */
   float value[4] = {};
+  /**
+   * The value ramp of a scalar channel of a Gradient generator: one grey stop per value along the
+   * gradient, red/green/blue equal and in 0..1. Null for a colour channel, a Normal, and every row
+   * that is not a generator. Kept off the record itself because #ColorBand is close to a kilobyte
+   * and only a generator's scalar channels ever need one.
+   */
+  struct ColorBand *gradient_ramp = nullptr;
 };
 
 /**

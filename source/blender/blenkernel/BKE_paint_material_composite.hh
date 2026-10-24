@@ -145,15 +145,19 @@ struct PaintMaterialCompositeMapping {
  * A Gradient generator's payload, as the CPU evaluator reads it.
  *
  * The row has no map: its colour comes from #ramp at the factor of the row's UV-space line, and a
- * scalar channel mixes #scalar_start and #scalar_end instead. The generated shader tree builds the
- * same factor from the shared Gradient Factor group. #width and #height are the material's map size:
+ * scalar channel reads its own #scalar_ramp (grey stops) instead, falling back to
+ * #scalar_start/#scalar_end when the record has no ramp. The generated shader tree builds the same
+ * factor from the shared Gradient Factor group. #width and #height are the material's map size:
  * the evaluator needs them to turn a texel into the UV the shader would see.
  */
 struct PaintMaterialCompositeGradient {
   bool enabled = false;
-  /** The channel reads the ramp rather than the scalar ends. */
+  /** The channel reads the ramp rather than the scalar value ramp. */
   bool color_channel = false;
-  /** The channel's own ends, for a scalar channel. */
+  /** The channel's own value ramp, used for a scalar channel when #scalar_ramp_valid. */
+  bool scalar_ramp_valid = false;
+  ColorBand scalar_ramp = {};
+  /** The channel's own ends, the fallback for a scalar channel with no value ramp. */
   float scalar_start = 0.0f;
   float scalar_end = 1.0f;
   /** The material's map size, in pixels: the evaluator's UV grid for a row with no map. */
@@ -177,6 +181,8 @@ struct PaintMaterialCompositeGradient {
   PaintMaterialCompositeGradient(const PaintMaterialCompositeGradient &other)
       : enabled(other.enabled),
         color_channel(other.color_channel),
+        scalar_ramp_valid(other.scalar_ramp_valid),
+        scalar_ramp(other.scalar_ramp),
         scalar_start(other.scalar_start),
         scalar_end(other.scalar_end),
         width(other.width),
@@ -190,6 +196,8 @@ struct PaintMaterialCompositeGradient {
   PaintMaterialCompositeGradient(PaintMaterialCompositeGradient &&other) noexcept
       : enabled(other.enabled),
         color_channel(other.color_channel),
+        scalar_ramp_valid(other.scalar_ramp_valid),
+        scalar_ramp(other.scalar_ramp),
         scalar_start(other.scalar_start),
         scalar_end(other.scalar_end),
         width(other.width),
@@ -205,6 +213,8 @@ struct PaintMaterialCompositeGradient {
     if (this != &other) {
       enabled = other.enabled;
       color_channel = other.color_channel;
+      scalar_ramp_valid = other.scalar_ramp_valid;
+      scalar_ramp = other.scalar_ramp;
       scalar_start = other.scalar_start;
       scalar_end = other.scalar_end;
       width = other.width;
@@ -221,6 +231,8 @@ struct PaintMaterialCompositeGradient {
     if (this != &other) {
       enabled = other.enabled;
       color_channel = other.color_channel;
+      scalar_ramp_valid = other.scalar_ramp_valid;
+      scalar_ramp = other.scalar_ramp;
       scalar_start = other.scalar_start;
       scalar_end = other.scalar_end;
       width = other.width;

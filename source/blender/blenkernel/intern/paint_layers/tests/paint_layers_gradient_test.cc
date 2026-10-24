@@ -10,6 +10,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 
+#include "BKE_colorband.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_gradient.hh"
@@ -89,11 +90,11 @@ TEST_F(PaintLayersGradient, space_rejects_an_unknown_value_and_keeps_the_line)
 
   EXPECT_FALSE(BKE_paint_layers_gradient_set_space(
       *ma, *layer, eMaterialPaintLayerGradientSpace(42)));
-  EXPECT_EQ(layer->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_UV);
+  EXPECT_EQ(layer->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT);
 
   EXPECT_TRUE(BKE_paint_layers_gradient_set_space(
-      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
-  EXPECT_EQ(layer->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT);
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  EXPECT_EQ(layer->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_UV);
   /* Switching the space reinterprets the numbers, it never converts them. */
   for (const int i : IndexRange(3)) {
     EXPECT_FLOAT_EQ(layer->gradient->start[i], start[i]);
@@ -108,6 +109,139 @@ TEST_F(PaintLayersGradient, space_rejects_an_unknown_value_and_keeps_the_line)
     EXPECT_FLOAT_EQ(layer->gradient->start[i], end[i]);
     EXPECT_FLOAT_EQ(layer->gradient->end[i], start[i]);
   }
+}
+
+TEST_F(PaintLayersGradient, ramp_stop_position_is_clamped_to_its_neighbours)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  ASSERT_NE(layer->gradient, nullptr);
+  ColorBand &ramp = layer->gradient->ramp;
+  ASSERT_EQ(ramp.tot, 2);
+  ASSERT_TRUE(BKE_colorband_element_add(&ramp, 0.5f));
+  ASSERT_EQ(ramp.tot, 3);
+
+  /* The middle stop may move between its neighbours, never past them. */
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_stop_position(*ma, *layer, 1, 0.9f));
+  EXPECT_FLOAT_EQ(ramp.data[1].pos, 0.9f);
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_stop_position(*ma, *layer, 1, -2.0f));
+  EXPECT_FLOAT_EQ(ramp.data[1].pos, ramp.data[0].pos);
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_stop_position(*ma, *layer, 1, 2.0f));
+  EXPECT_FLOAT_EQ(ramp.data[1].pos, ramp.data[2].pos);
+
+  /* The ends stay inside 0..1. */
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_stop_position(*ma, *layer, 0, -1.0f));
+  EXPECT_FLOAT_EQ(ramp.data[0].pos, 0.0f);
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_stop_position(*ma, *layer, 2, 3.0f));
+  EXPECT_FLOAT_EQ(ramp.data[2].pos, 1.0f);
+
+  EXPECT_FALSE(BKE_paint_layers_gradient_set_stop_position(*ma, *layer, -1, 0.5f));
+  EXPECT_FALSE(BKE_paint_layers_gradient_set_stop_position(*ma, *layer, 3, 0.5f));
+  EXPECT_FALSE(BKE_paint_layers_gradient_set_stop_position(
+      *ma, *layer, 1, std::numeric_limits<float>::quiet_NaN()));
+  /* The order is still the ramp's. */
+  EXPECT_LE(ramp.data[0].pos, ramp.data[1].pos);
+  EXPECT_LE(ramp.data[1].pos, ramp.data[2].pos);
+}
+
+TEST_F(PaintLayersGradient, a_scalar_channel_gets_a_black_to_white_value_ramp)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayerChannel *base = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  ASSERT_NE(base, nullptr);
+  /* A colour channel reads the row's colour ramp, not a value ramp. */
+  EXPECT_EQ(base->gradient_ramp, nullptr);
+
+  MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  ASSERT_NE(rough->gradient_ramp, nullptr);
+  EXPECT_EQ(rough->gradient_ramp->tot, 2);
+  EXPECT_FLOAT_EQ(rough->gradient_ramp->data[0].r, 0.0f);
+  EXPECT_FLOAT_EQ(rough->gradient_ramp->data[1].r, 1.0f);
+  EXPECT_FLOAT_EQ(rough->gradient_ramp->data[0].a, 1.0f);
+  EXPECT_FLOAT_EQ(rough->gradient_ramp->data[1].a, 1.0f);
+}
+
+TEST_F(PaintLayersGradient, sync_copies_the_base_color_stop_layout)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  ASSERT_NE(layer->gradient, nullptr);
+
+  ColorBand &base = layer->gradient->ramp;
+  ASSERT_TRUE(BKE_colorband_element_add(&base, 0.4f));
+  ASSERT_EQ(base.tot, 3);
+  /* Give the middle colour stop a value the channel should keep at the new position. */
+  base.data[1].pos = 0.4f;
+
+  ASSERT_TRUE(BKE_paint_layers_gradient_sync_channel_ramp(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  ASSERT_NE(rough->gradient_ramp, nullptr);
+  ASSERT_EQ(rough->gradient_ramp->tot, base.tot);
+  for (const int i : IndexRange(base.tot)) {
+    EXPECT_FLOAT_EQ(rough->gradient_ramp->data[i].pos, base.data[i].pos);
+    /* Every stop is grey: the value ramp stores its value in all three components. */
+    EXPECT_FLOAT_EQ(rough->gradient_ramp->data[i].r, rough->gradient_ramp->data[i].g);
+    EXPECT_FLOAT_EQ(rough->gradient_ramp->data[i].g, rough->gradient_ramp->data[i].b);
+  }
+}
+
+TEST_F(PaintLayersGradient, the_gizmo_channel_selects_a_colour_or_value_ramp)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+
+  EXPECT_EQ(BKE_paint_layers_gradient_channel_ramp_get(
+                *layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR),
+            &layer->gradient->ramp);
+  EXPECT_EQ(BKE_paint_layers_gradient_channel_ramp_get(
+                *layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
+            rough->gradient_ramp);
+  EXPECT_EQ(BKE_paint_layers_gradient_channel_ramp_get(
+                *layer, PAINT_MATERIAL_CHANNEL_NORMAL),
+            nullptr);
+
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_gizmo_channel(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS));
+  EXPECT_EQ(layer->gradient->gizmo_channel, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  EXPECT_FALSE(BKE_paint_layers_gradient_set_gizmo_channel(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_NORMAL));
+  EXPECT_EQ(layer->gradient->gizmo_channel, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+}
+
+TEST_F(PaintLayersGradient, a_channel_stop_moves_on_its_own_value_ramp)
+{
+  MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
+      *ma, nullptr, nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(layer, nullptr);
+  MaterialPaintLayerChannel *rough = BKE_paint_layers_channel_add(
+      *ma, layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  ASSERT_NE(rough, nullptr);
+  ASSERT_NE(rough->gradient_ramp, nullptr);
+  ASSERT_TRUE(BKE_colorband_element_add(rough->gradient_ramp, 0.5f));
+
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_channel_stop_position(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 1, 0.75f));
+  EXPECT_FLOAT_EQ(rough->gradient_ramp->data[1].pos, 0.75f);
+  /* The colour ramp is untouched. */
+  EXPECT_FLOAT_EQ(layer->gradient->ramp.data[1].pos, 1.0f);
+
+  EXPECT_TRUE(BKE_paint_layers_gradient_set_channel_stop_position(
+      *ma, *layer, PAINT_MATERIAL_CHANNEL_ROUGHNESS, 1, -1.0f));
+  EXPECT_FLOAT_EQ(rough->gradient_ramp->data[1].pos, rough->gradient_ramp->data[0].pos);
 }
 
 TEST_F(PaintLayersGradient, setters_refuse_non_finite_values)
@@ -159,9 +293,10 @@ TEST_F(PaintLayersGradient, uv_factor_ignores_z_and_3d_spaces_do_not)
   BKE_paint_layers_gradient_init(zero_z);
   MaterialPaintLayerGradient with_z;
   BKE_paint_layers_gradient_init(with_z);
+  zero_z.space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+  with_z.space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
   with_z.start[2] = 9.0f;
   with_z.end[2] = -4.0f;
-  ASSERT_EQ(with_z.space, MA_PAINT_LAYER_GRADIENT_SPACE_UV);
 
   /* Linear UV: Z of both ends and of the coordinate is ignored. */
   EXPECT_NEAR(BKE_paint_layers_gradient_factor(with_z, float3(0.25f, 0.5f, 100.0f)),

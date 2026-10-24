@@ -202,10 +202,19 @@ static void gradient_payload_hash_mix(uint64_t &hash, const MaterialPaintLayer &
     return;
   }
   /* A ColorRamp node holds the ramp in its storage, not in a socket: a stop or an interpolation
-   * edit is a different node, so the group is rebuilt rather than synced in place. */
-  hash = topology_hash_mix(hash, 0x600);
+   * edit is a different node, so the group is rebuilt rather than synced in place. A scalar channel
+   * has its own value ramp node, so its ramp is topology too. */
+  hash = topology_hash_mix(hash, BKE_PAINT_LAYERS_GRADIENT_HASH_VERSION);
   hash = topology_hash_mix(hash, uint64_t(uint8_t(row.gradient->space)));
   hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(row.gradient->ramp));
+  for (const int i : IndexRange(row.channels_num)) {
+    const MaterialPaintLayerChannel &record = row.channels[i];
+    if (record.gradient_ramp == nullptr) {
+      continue;
+    }
+    hash = topology_hash_mix(hash, uint64_t(uint8_t(record.channel)));
+    hash = topology_hash_mix(hash, BKE_paint_layers_gradient_ramp_hash(*record.gradient_ramp));
+  }
 }
 
 uint64_t paint_layers_layer_topology_hash(const Material &ma,

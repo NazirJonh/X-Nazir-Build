@@ -2953,6 +2953,12 @@ void RNA_api_ui_layout(StructRNA *srna)
                   "Use a space saving layout: the ramp is drawn first with the add, remove and "
                   "tools buttons below it, the active color stop index and position fields are "
                   "hidden, and clicking an empty area of the ramp inserts a new color stop there");
+  RNA_def_boolean(func,
+                  "value",
+                  false,
+                  "",
+                  "Edit the active stop as one grey value with the material-paint gradient value "
+                  "slider instead of a colour picker (a scalar channel's value ramp)");
 
   func = RNA_def_function(
       srna, "template_material_paint_value_slider", "template_material_paint_value_slider");

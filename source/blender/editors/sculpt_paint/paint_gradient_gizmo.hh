@@ -22,7 +22,18 @@ enum Handle {
   START = 1,
   END = 2,
   MID = 3,
+  /** Ramp stop markers follow: `STOP_FIRST + i` for stop \a i. */
+  STOP_FIRST = 4,
 };
+
+/** Most stops a #DrawOptions can carry, matching #MAXCOLORBAND. */
+constexpr int MAX_STOP_HANDLES = 32;
+
+/** Whether \a handle is one of the ramp stop markers. */
+inline bool is_stop_handle(const int handle)
+{
+  return handle >= STOP_FIRST;
+}
 
 /** Radius of the drawn handle discs, in region pixels. */
 constexpr float HANDLE_RADIUS = 10.0f;
@@ -40,7 +51,9 @@ int hit_test(const float2 &start_px,
              float midpoint,
              const float2 &mval,
              float hit_radius = HANDLE_RADIUS,
-             bool midpoint_handle = true);
+             bool midpoint_handle = true,
+             const float *stop_positions = nullptr,
+             int stop_count = 0);
 
 /**
  * Optional styling for #draw. The Color Gradient uses the neutral overlay colors; the Gradient
@@ -60,12 +73,18 @@ struct DrawOptions {
   bool direction_arrow = false;
   /** Draw the midpoint marker: the Ramp distribution of a Gradient Layer has no midpoint to move. */
   bool midpoint_handle = true;
+  /** Draw one marker per ramp stop at `start + (end - start) * position`. */
+  bool stop_handles = false;
+  int stop_count = 0;
+  /** Ramp stop positions (0..1) and their display-space colors. */
+  float stop_positions[MAX_STOP_HANDLES] = {};
+  float4 stop_colors[MAX_STOP_HANDLES] = {};
 };
 
 /**
- * Draw the line and its three handles, in region pixels. The caller sets a pixel-space projection
- * (a `REGION_DRAW_POST_PIXEL` callback or a 2D gizmo). Saves and restores the GPU state it
- * changes.
+ * Draw the line, its handles and (when #DrawOptions::stop_handles is set) one marker per ramp
+ * stop, in region pixels. The caller sets a pixel-space projection (a `REGION_DRAW_POST_PIXEL`
+ * callback or a 2D gizmo). Saves and restores the GPU state it changes.
  */
 void draw(const float2 &start_px,
           const float2 &end_px,

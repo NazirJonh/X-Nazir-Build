@@ -138,7 +138,8 @@ TEST_F(PaintLayersBakeTest, a_uv_gradient_can_be_row_baked)
   MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
       *ma, "Gradient", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
-  ASSERT_EQ(layer->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_UV);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
   EXPECT_TRUE(BKE_paint_layers_gradient_is_shared_bakeable(*layer));
   EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
   clear_active();
@@ -157,6 +158,8 @@ TEST_F(PaintLayersBakeTest, switching_a_uv_gradient_to_object_releases_its_bake)
   MaterialPaintLayer *layer = BKE_paint_layers_gradient_add(
       *ma, "Gradient", nullptr, PaintLayerPlace::Above);
   ASSERT_NE(layer, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *layer, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
   ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
   clear_active();
   ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));

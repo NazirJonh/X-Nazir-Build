@@ -4,6 +4,8 @@
 
 #include "testing/testing.h"
 
+#include "BLI_index_range.hh"
+#include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 
 #include "BKE_attribute.hh"
@@ -367,6 +369,101 @@ TEST_F(PaintLayersGradientSurface, the_capacity_clears_the_cache)
   auto first_again = BKE_paint_layers_gradient_surface_get(*object, *mesh, "UVMap", 256);
   ASSERT_NE(first_again, nullptr);
   EXPECT_NE(first.get(), first_again.get());
+}
+
+TEST_F(PaintLayersGradientSurface, uv_and_object_points_round_trip_on_the_island)
+{
+  float3 object;
+  ASSERT_TRUE(BKE_paint_layers_gradient_uv_to_object(*mesh, float2(0.25f, 0.25f), object));
+  EXPECT_NEAR(object.x, 1.0f, 1e-5f);
+  EXPECT_NEAR(object.y, 1.0f, 1e-5f);
+  EXPECT_NEAR(object.z, 0.0f, 1e-5f);
+
+  float2 uv;
+  ASSERT_TRUE(BKE_paint_layers_gradient_object_to_uv(*mesh, object, uv));
+  EXPECT_NEAR(uv.x, 0.25f, 1e-5f);
+  EXPECT_NEAR(uv.y, 0.25f, 1e-5f);
+}
+
+TEST_F(PaintLayersGradientSurface, a_uv_point_outside_the_island_snaps_to_it)
+{
+  float3 object;
+  ASSERT_TRUE(BKE_paint_layers_gradient_uv_to_object(*mesh, float2(0.9f, 0.25f), object));
+  EXPECT_NEAR(object.x, 2.0f, 1e-5f);
+  EXPECT_NEAR(object.y, 1.0f, 1e-5f);
+
+  float2 uv;
+  ASSERT_TRUE(BKE_paint_layers_gradient_object_to_uv(*mesh, object, uv));
+  EXPECT_NEAR(uv.x, 0.5f, 1e-5f);
+  EXPECT_NEAR(uv.y, 0.25f, 1e-5f);
+}
+
+TEST_F(PaintLayersGradientSurface, an_object_point_off_the_surface_loses_its_distance)
+{
+  float2 uv;
+  ASSERT_TRUE(BKE_paint_layers_gradient_object_to_uv(*mesh, float3(1.0f, 1.0f, 5.0f), uv));
+  EXPECT_NEAR(uv.x, 0.25f, 1e-5f);
+  EXPECT_NEAR(uv.y, 0.25f, 1e-5f);
+}
+
+TEST_F(PaintLayersGradientSurface, switching_space_keeps_the_line_on_the_surface)
+{
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  const float start[3] = {0.0f, 0.25f, 0.0f};
+  const float end[3] = {0.5f, 0.25f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+
+  bool converted = false;
+  ASSERT_TRUE(BKE_paint_layers_gradient_convert_space(
+      *ma, *gradient, object, mesh, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT, converted));
+  ASSERT_TRUE(converted);
+  EXPECT_NEAR(gradient->gradient->start[0], 0.0f, 1e-5f);
+  EXPECT_NEAR(gradient->gradient->start[1], 1.0f, 1e-5f);
+  EXPECT_NEAR(gradient->gradient->end[0], 2.0f, 1e-5f);
+  EXPECT_NEAR(gradient->gradient->end[1], 1.0f, 1e-5f);
+
+  ASSERT_TRUE(BKE_paint_layers_gradient_convert_space(
+      *ma, *gradient, object, mesh, MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED, converted));
+  ASSERT_TRUE(converted);
+  EXPECT_NEAR(gradient->gradient->start[0], 0.0f, 1e-5f);
+  EXPECT_NEAR(gradient->gradient->start[1], 0.5f, 1e-5f);
+  EXPECT_NEAR(gradient->gradient->end[0], 1.0f, 1e-5f);
+  EXPECT_NEAR(gradient->gradient->end[1], 0.5f, 1e-5f);
+
+  ASSERT_TRUE(BKE_paint_layers_gradient_convert_space(
+      *ma, *gradient, object, mesh, MA_PAINT_LAYER_GRADIENT_SPACE_UV, converted));
+  ASSERT_TRUE(converted);
+  EXPECT_NEAR(gradient->gradient->start[0], start[0], 1e-5f);
+  EXPECT_NEAR(gradient->gradient->start[1], start[1], 1e-5f);
+  EXPECT_NEAR(gradient->gradient->end[0], end[0], 1e-5f);
+  EXPECT_NEAR(gradient->gradient->end[1], end[1], 1e-5f);
+}
+
+TEST_F(PaintLayersGradientSurface, switching_space_without_a_mesh_keeps_the_numbers)
+{
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  float start[3];
+  float end[3];
+  copy_v3_v3(start, gradient->gradient->start);
+  copy_v3_v3(end, gradient->gradient->end);
+
+  bool converted = false;
+  ASSERT_TRUE(BKE_paint_layers_gradient_convert_space(
+      *ma, *gradient, nullptr, nullptr, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT, converted));
+  EXPECT_FALSE(converted);
+  EXPECT_EQ(gradient->gradient->space, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT);
+  for (const int i : IndexRange(3)) {
+    EXPECT_FLOAT_EQ(gradient->gradient->start[i], start[i]);
+    EXPECT_FLOAT_EQ(gradient->gradient->end[i], end[i]);
+  }
 }
 
 TEST(PaintMaterialCompositeSurface, sample_generated_prefers_stored_orco)

@@ -383,12 +383,44 @@ def draw_material_layer_channels(layout, context, material, layer):
         record = records.get(channel_id)
         enabled = record is not None and record.use
         col = flow.column(align=False)
-        col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
-        op = col.operator(
-            "material.paint_layer_channel_toggle",
-            text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id],
-            depress=enabled,
-        )
+        if is_generator:
+            # An eye opens the channel's ramp on the gizmo; exactly one channel can be open. The
+            # eye sits right before its channel switch, so the row reads "what the gizmo shows" and
+            # "what the row paints" side by side.
+            color_channel = channel_id in {'BASE_COLOR', 'EMISSION'}
+            has_ramp = (layer.gradient_ramp is not None if color_channel else
+                        record is not None and record.gradient_ramp is not None)
+            col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X + 1.3
+            row = col.row(align=True)
+            if channel_id != 'NORMAL':
+                # The eye is always in the layout, even before a channel is activated: it is
+                # disabled while there is no ramp to show, and turns into a working eye as soon as
+                # the channel gets its value ramp.
+                gizmo_shown = has_ramp and layer.gradient_gizmo_channel == channel_id
+                eye_row = row.row(align=True)
+                eye_row.enabled = has_ramp
+                eye = eye_row.operator(
+                    "paint.paint_layer_gradient_set_gizmo_channel",
+                    text="",
+                    icon='HIDE_OFF' if gizmo_shown else 'HIDE_ON',
+                )
+                eye.marker = layer.marker
+                eye.channel = channel_id
+            else:
+                # Normal has no generator ramp at all; keep its switch in line with the rest.
+                row.label(text="", icon='BLANK1')
+            op = row.operator(
+                "material.paint_layer_channel_toggle",
+                text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id],
+                depress=enabled,
+            )
+        else:
+            col.ui_units_x = _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X
+            op = col.operator(
+                "material.paint_layer_channel_toggle",
+                text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id],
+                depress=enabled,
+            )
         op.marker = layer.marker
         op.channel = channel_id
         op.enable = not enabled
@@ -398,23 +430,49 @@ def draw_material_layer_channels(layout, context, material, layer):
         return
 
     if is_generator:
-        # A colour channel reads the row's ColorRamp; a scalar channel ramps between two values.
-        channel_col = layout.column(align=True)
+        # Every enabled channel gets its own subpanel, like a painted layer's channels. A colour
+        # channel shows the row's ColorRamp inside it; a scalar channel shows its own value ramp,
+        # whose grey stops are edited with the gradient value slider the Mask Base uses.
+        channel_col = layout.column(align=False)
         first = True
         for channel_id in channel_ids:
             record = records.get(channel_id)
-            if record is None or not record.use or channel_id in {'BASE_COLOR', 'EMISSION'}:
+            if record is None or not record.use:
                 continue
             if not first:
                 channel_col.separator()
             first = False
-            box = channel_col.box()
-            box.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
-            row = box.row(align=True)
-            row.prop(record, "gradient_value_start", text="Start")
-            row.prop(record, "gradient_value_end", text="End")
+            header, panel = channel_col.panel(
+                "material_paint_gradient_{:s}".format(channel_id.lower()),
+                default_closed=False,
+            )
+            header.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
+            if not panel:
+                continue
+            if channel_id in {'BASE_COLOR', 'EMISSION'}:
+                if layer.gradient_supported and layer.gradient_ramp is not None:
+                    panel.template_color_ramp(layer, "gradient_ramp", expand=True)
+            else:
+                # A scalar channel reads its own black-to-white value ramp: as many grey stops as
+                # the gradient needs, each edited with the gradient value slider rather than a
+                # colour picker. Sync Base Color copies the colour ramp's stop layout, so a user can
+                # lay out colours first and then tune each channel's values at the same positions.
+                if record.gradient_ramp is not None:
+                    # The full template keeps Interpolation and the tools menu (Flip, Distribute,
+                    # Eyedropper, Reset) available. Value mode only swaps the active stop's colour
+                    # picker for the gradient value slider and leaves Colour Mode out.
+                    panel.template_color_ramp(
+                        record, "gradient_ramp", expand=True, value=True)
+                row = panel.row(align=True)
+                op = row.operator(
+                    "paint.paint_layer_gradient_sync_channel",
+                    text="Sync Base Color",
+                    icon='FILE_REFRESH',
+                )
+                op.marker = layer.marker
+                op.channel = channel_id
         if first:
-            layout.label(text="Colour channels read the gradient ramp", icon='INFO')
+            layout.label(text="No enabled channels", icon='INFO')
         return
 
     if material_layer_weight_record_count(

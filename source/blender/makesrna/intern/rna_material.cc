@@ -3366,6 +3366,24 @@ static void rna_MaterialPaintLayer_gradient_distribution_set(PointerRNA *ptr, in
   }
 }
 
+static int rna_MaterialPaintLayer_gradient_gizmo_channel_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer != nullptr && layer->gradient != nullptr) ?
+             layer->gradient->gizmo_channel :
+             PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+}
+
+static void rna_MaterialPaintLayer_gradient_gizmo_channel_set(PointerRNA *ptr, int value)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_gradient_set_gizmo_channel(
+        *ma, *layer, eMaterialPaintChannel(value));
+  }
+}
+
 static int rna_MaterialPaintLayer_gradient_gizmo_display_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -3435,7 +3453,7 @@ static int rna_MaterialPaintLayer_gradient_space_get(PointerRNA *ptr)
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
   return (layer != nullptr && layer->gradient != nullptr) ?
              layer->gradient->space :
-             MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+             MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT;
 }
 
 static void rna_MaterialPaintLayer_gradient_space_set(PointerRNA *ptr, int value)
@@ -3492,6 +3510,43 @@ static void rna_MaterialPaintLayer_gradient_end_set(PointerRNA *ptr, const float
   }
 }
 
+/**
+ * The ramp is a node's storage in the generated graph, so a stop edit made through the template's
+ * shared update callback has to rebuild the material, not only redraw it. The ColorRamp's own stop
+ * callbacks do this too; the template replaces the button's callback with the ramp property's, so
+ * this is the one that runs for a click on the active stop.
+ */
+static void rna_MaterialPaintLayer_gradient_ramp_update(Main * /*bmain*/,
+                                                        Scene * /*scene*/,
+                                                        PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma == nullptr || layer == nullptr) {
+    return;
+  }
+  if (layer->gradient != nullptr) {
+    BKE_paint_layers_gradient_ramp_edited(*ma, &layer->gradient->ramp);
+  }
+  DEG_id_tag_update(&ma->id, 0);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
+}
+
+static void rna_MaterialPaintLayerChannel_gradient_ramp_update(Main * /*bmain*/,
+                                                               Scene * /*scene*/,
+                                                               PointerRNA *ptr)
+{
+  Material *ma = id_cast<Material *>(ptr->owner_id);
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  if (ma == nullptr || record == nullptr || record->gradient_ramp == nullptr) {
+    return;
+  }
+  BKE_paint_layers_gradient_ramp_edited(*ma, record->gradient_ramp);
+  DEG_id_tag_update(&ma->id, 0);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING_DRAW, ma);
+}
+
 static PointerRNA rna_MaterialPaintLayer_gradient_ramp_get(PointerRNA *ptr)
 {
   MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
@@ -3501,10 +3556,26 @@ static PointerRNA rna_MaterialPaintLayer_gradient_ramp_get(PointerRNA *ptr)
   return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, &layer->gradient->ramp);
 }
 
+static PointerRNA rna_MaterialPaintLayerChannel_gradient_ramp_get(PointerRNA *ptr)
+{
+  MaterialPaintLayerChannel *record = static_cast<MaterialPaintLayerChannel *>(ptr->data);
+  /* A getter only reads: a record written before value ramps got its ramp when the file was read,
+   * and a channel added later gets it on creation. */
+  if (record == nullptr || record->gradient_ramp == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, record->gradient_ramp);
+}
+
 static float rna_MaterialPaintLayerChannel_gradient_value_get(PointerRNA *ptr, const bool end)
 {
   const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
       ptr->data);
+  /* A value ramp is the channel's source now; the two ends are its outer stops. */
+  if (record->gradient_ramp != nullptr && record->gradient_ramp->tot > 0) {
+    return BKE_paint_layers_gradient_channel_ramp_end_get(
+        *record->gradient_ramp, eMaterialPaintChannel(record->channel), end);
+  }
   return record->value[end ? 1 : 0];
 }
 
@@ -3666,6 +3737,19 @@ static const EnumPropertyItem rna_enum_material_paint_layer_gradient_gizmo_displ
      0,
      "Always",
      "Show the handles whenever the layer is the active one"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintChannel: the channels whose ramp the gizmo can show. Normal has no
+ * generator channel node, so it is absent. */
+static const EnumPropertyItem rna_enum_material_paint_layer_gradient_gizmo_channel_items[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Show the colour ramp"},
+    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Show the value ramp"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emit", "Show the colour ramp"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Show the value ramp"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -4035,6 +4119,18 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "Gizmo Display", "When the handles of the gradient's line are shown");
   RNA_def_property_update_notifier(prop, NC_MATERIAL | ND_SHADING);
 
+  prop = RNA_def_property(srna, "gradient_gizmo_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_gizmo_channel_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_gradient_gizmo_channel_get",
+                              "rna_MaterialPaintLayer_gradient_gizmo_channel_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Gizmo Channel",
+      "Channel whose ramp the Gradient handles show and move");
+  RNA_def_property_update_notifier(prop, NC_MATERIAL | ND_SHADING);
+
   prop = RNA_def_property(srna, "gradient_distribution", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_distribution_items);
   RNA_def_property_enum_funcs(prop,
@@ -4115,7 +4211,8 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayer_gradient_ramp_get", nullptr, nullptr, nullptr);
   RNA_def_property_ui_text(
       prop, "Gradient Ramp", "Colours a Gradient's colour channels read along the line");
-  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
+  RNA_def_property_update(
+      prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayer_gradient_ramp_update");
 
   prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "material");
@@ -4864,15 +4961,30 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
   RNA_def_property_float_funcs(prop,
                                "rna_MaterialPaintLayerChannel_gradient_value_start_get",
                                "rna_MaterialPaintLayerChannel_gradient_value_start_set",
-                               nullptr);
+                               "rna_MaterialPaintLayerChannel_value_scalar_range");
   RNA_def_property_ui_text(prop, "Gradient Start", "The scalar channel's value at the line start");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* A scalar channel of a Gradient generator reads this value ramp (grey stops) instead of the
+   * two ends above. Colour channels read the row's own `gradient_ramp`. */
+  prop = RNA_def_property(srna, "gradient_ramp", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ColorRamp");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayerChannel_gradient_ramp_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Value Ramp",
+      "The scalar channel's value ramp: grey stops along the gradient, edited as values");
+  RNA_def_property_update(
+      prop,
+      NC_MATERIAL | ND_SHADING,
+      "rna_MaterialPaintLayerChannel_gradient_ramp_update");
 
   prop = RNA_def_property(srna, "gradient_value_end", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_funcs(prop,
                                "rna_MaterialPaintLayerChannel_gradient_value_end_get",
                                "rna_MaterialPaintLayerChannel_gradient_value_end_set",
-                               nullptr);
+                               "rna_MaterialPaintLayerChannel_value_scalar_range");
   RNA_def_property_ui_text(prop, "Gradient End", "The scalar channel's value at the line end");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 

@@ -26,6 +26,7 @@
 #include "BKE_context.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_library.hh"
+#include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_sample.hh"
 #include "BKE_object.hh"
@@ -44,6 +45,7 @@
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_uuid.h"
 #include "BLI_virtual_array.hh"
 
 #include "DEG_depsgraph_query.hh"
@@ -742,6 +744,278 @@ void PAINT_OT_paint_layer_gradient(wmOperatorType *ot)
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 
   WM_operator_properties_gesture_straightline(ot, WM_CURSOR_EDIT);
+}
+
+namespace {
+
+bool paint_layer_gradient_operator_poll(bContext *C)
+{
+  Object *ob = CTX_data_active_object(C);
+  Material *ma = (ob != nullptr) ? BKE_paint_layers_active_material_get(ob) : nullptr;
+  return ma != nullptr && ID_IS_EDITABLE(&ma->id);
+}
+
+/**
+ * The row or mask item an operator's buttons were drawn for. The panel can show an item that is
+ * not the active one (the base mask while Mask mode edits a layer), so the caller passes its
+ * stable marker; without one, the active item is used.
+ */
+bool paint_layer_gradient_operator_target(bContext *C,
+                                          wmOperator *op,
+                                          Material *&r_material,
+                                          MaterialPaintLayer *&r_layer)
+{
+  Object *active_object = CTX_data_active_object(C);
+  r_material = (active_object != nullptr) ?
+                   BKE_paint_layers_active_material_get(active_object) :
+                   nullptr;
+  if (r_material == nullptr || !ID_IS_EDITABLE(&r_material->id)) {
+    BKE_report(op->reports, RPT_WARNING, "Select a layered material first");
+    return false;
+  }
+
+  r_layer = nullptr;
+  char marker_buffer[64] = {};
+  RNA_string_get(op->ptr, "marker", marker_buffer);
+  bUUID marker;
+  if (marker_buffer[0] != '\0' && BLI_uuid_parse_string(&marker, marker_buffer)) {
+    r_layer = BKE_paint_layers_find(*r_material, marker);
+  }
+  if (r_layer == nullptr) {
+    r_layer = BKE_paint_layers_active_mask_item_get(*r_material);
+    if (r_layer == nullptr) {
+      r_layer = BKE_paint_layers_active_layer_get(*r_material);
+    }
+  }
+  if (r_layer == nullptr || !BKE_paint_layers_gradient_supported(*r_layer) ||
+      r_layer->gradient == nullptr)
+  {
+    BKE_report(op->reports, RPT_WARNING, "Select a Gradient layer first");
+    return false;
+  }
+  return true;
+}
+
+wmOperatorStatus paint_layer_gradient_space_set_exec(bContext *C, wmOperator *op)
+{
+  Object *active_object = CTX_data_active_object(C);
+  Material *ma = nullptr;
+  MaterialPaintLayer *layer = nullptr;
+  if (!paint_layer_gradient_operator_target(C, op, ma, layer)) {
+    return OPERATOR_CANCELLED;
+  }
+  const eMaterialPaintLayerGradientSpace space = eMaterialPaintLayerGradientSpace(
+      RNA_enum_get(op->ptr, "space"));
+  if (layer->gradient->space == space) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* The active object is the one the handles are shown on. A material may be used by several
+   * objects, and the active one may not use it at all: then there is no surface to measure the
+   * line against, and the numbers stay as they are. */
+  const bool uses_material = active_object != nullptr && active_object->type == OB_MESH &&
+                             BKE_object_material_slot_find_index(active_object, ma) >= 0;
+  const Mesh *mesh = uses_material ? paint_layer_gradient_mesh_eval(*C, *active_object) : nullptr;
+
+  bool converted = false;
+  if (!BKE_paint_layers_gradient_convert_space(
+          *ma, *layer, uses_material ? active_object : nullptr, mesh, space, converted))
+  {
+    BKE_report(op->reports, RPT_ERROR, "Could not change the gradient space");
+    return OPERATOR_CANCELLED;
+  }
+
+  if (!converted) {
+    if (!uses_material) {
+      BKE_report(op->reports,
+                 RPT_WARNING,
+                 "The active object does not use this material: the line numbers were not "
+                 "converted");
+    }
+    else {
+      BKE_report(op->reports,
+                 RPT_WARNING,
+                 "No surface point could be found: the line numbers were not converted");
+    }
+  }
+
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+  ED_undo_push(C, "Set Gradient Space");
+  return OPERATOR_FINISHED;
+}
+
+const EnumPropertyItem *paint_layer_gradient_space_items()
+{
+  static const EnumPropertyItem items[] = {
+      {MA_PAINT_LAYER_GRADIENT_SPACE_UV, "UV", 0, "UV", "The active UV map; Z is ignored"},
+      {MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT,
+       "OBJECT",
+       0,
+       "Object",
+       "Object-space coordinates, in object units"},
+      {MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED,
+       "GENERATED",
+       0,
+       "Generated",
+       "Generated coordinates, normalized to the object bounding box"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  return items;
+}
+
+const EnumPropertyItem *paint_layer_gradient_value_channel_items()
+{
+  static const EnumPropertyItem items[] = {
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Metallic value ramp"},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Roughness value ramp"},
+      {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", "Alpha value ramp"},
+      {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Ambient occlusion value ramp"},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Specular value ramp"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  return items;
+}
+
+const EnumPropertyItem *paint_layer_gradient_gizmo_channel_items()
+{
+  static const EnumPropertyItem items[] = {
+      {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Colour ramp"},
+      {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Value ramp"},
+      {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Value ramp"},
+      {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", "Value ramp"},
+      {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Value ramp"},
+      {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emit", "Colour ramp"},
+      {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Value ramp"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  return items;
+}
+
+wmOperatorStatus paint_layer_gradient_set_gizmo_channel_exec(bContext *C, wmOperator *op)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *layer = nullptr;
+  if (!paint_layer_gradient_operator_target(C, op, ma, layer)) {
+    return OPERATOR_CANCELLED;
+  }
+  const eMaterialPaintChannel channel = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  if (!BKE_paint_layers_gradient_set_gizmo_channel(*ma, *layer, channel)) {
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+  return OPERATOR_FINISHED;
+}
+
+wmOperatorStatus paint_layer_gradient_sync_channel_exec(bContext *C, wmOperator *op)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *layer = nullptr;
+  if (!paint_layer_gradient_operator_target(C, op, ma, layer)) {
+    return OPERATOR_CANCELLED;
+  }
+  const eMaterialPaintChannel channel = eMaterialPaintChannel(RNA_enum_get(op->ptr, "channel"));
+  if (!BKE_paint_layers_gradient_sync_channel_ramp(*ma, *layer, channel)) {
+    BKE_report(op->reports, RPT_WARNING, "This channel has no value ramp to sync");
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, &ma->id);
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+  ED_undo_push(C, "Sync Gradient Value Ramp");
+  return OPERATOR_FINISHED;
+}
+
+}  // namespace
+
+void PAINT_OT_paint_layer_gradient_space_set(wmOperatorType *ot)
+{
+  ot->name = "Set Gradient Space";
+  ot->idname = "PAINT_OT_paint_layer_gradient_space_set";
+  ot->description =
+      "Switch the Gradient's space, keeping its line on the same place of the active object's "
+      "surface";
+
+  ot->exec = paint_layer_gradient_space_set_exec;
+  ot->poll = paint_layer_gradient_operator_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_enum(ot->srna,
+               "space",
+               paint_layer_gradient_space_items(),
+               MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT,
+               "Space",
+               "Space the gradient's line is defined in");
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "marker",
+                                     nullptr,
+                                     64,
+                                     "Marker",
+                                     "Stable identity of the row or mask item the buttons edit");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+void PAINT_OT_paint_layer_gradient_set_gizmo_channel(wmOperatorType *ot)
+{
+  ot->name = "Set Gradient Gizmo Channel";
+  ot->idname = "PAINT_OT_paint_layer_gradient_set_gizmo_channel";
+  ot->description = "Show and move this channel's ramp on the Gradient handles";
+
+  ot->exec = paint_layer_gradient_set_gizmo_channel_exec;
+  ot->poll = paint_layer_gradient_operator_poll;
+
+  ot->flag = OPTYPE_REGISTER;
+
+  RNA_def_enum(ot->srna,
+               "channel",
+               paint_layer_gradient_gizmo_channel_items(),
+               PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+               "Channel",
+               "Channel whose ramp the handles show");
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "marker",
+                                     nullptr,
+                                     64,
+                                     "Marker",
+                                     "Stable identity of the row or mask item the buttons edit");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
+}
+
+void PAINT_OT_paint_layer_gradient_sync_channel(wmOperatorType *ot)
+{
+  ot->name = "Sync Gradient Value Ramp";
+  ot->idname = "PAINT_OT_paint_layer_gradient_sync_channel";
+  ot->description =
+      "Give the channel's value ramp the same stop count and positions as the Base Color ramp";
+
+  ot->exec = paint_layer_gradient_sync_channel_exec;
+  ot->poll = paint_layer_gradient_operator_poll;
+
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  RNA_def_enum(ot->srna,
+               "channel",
+               paint_layer_gradient_value_channel_items(),
+               PAINT_MATERIAL_CHANNEL_METALLIC,
+               "Channel",
+               "Scalar channel whose value ramp is synced");
+
+  PropertyRNA *prop = RNA_def_string(ot->srna,
+                                     "marker",
+                                     nullptr,
+                                     64,
+                                     "Marker",
+                                     "Stable identity of the row or mask item the buttons edit");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 }  // namespace blender

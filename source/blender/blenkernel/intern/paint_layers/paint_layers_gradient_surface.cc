@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -23,6 +24,7 @@
 #include "BLI_implicit_sharing.hh"
 #include "BLI_index_range.hh"
 #include "BLI_map.hh"
+#include "BLI_math_geom.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_string_ref.hh"
@@ -426,6 +428,166 @@ bool BKE_paint_layers_gradient_generated_to_object(const Object *object,
   }
   r_position = location + (generated * 2.0f - 1.0f) * size;
   return true;
+}
+
+namespace {
+
+/** Barycentric weights of \a point inside the UV triangle \a a, \a b, \a c. */
+bool uv_triangle_weights(const float2 &a,
+                         const float2 &b,
+                         const float2 &c,
+                         const float2 &point,
+                         float3 &r_weights)
+{
+  const float denominator = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+  if (std::abs(denominator) <= 1e-12f) {
+    return false;
+  }
+  r_weights.x = ((b.y - c.y) * (point.x - c.x) + (c.x - b.x) * (point.y - c.y)) / denominator;
+  r_weights.y = ((c.y - a.y) * (point.x - c.x) + (a.x - c.x) * (point.y - c.y)) / denominator;
+  r_weights.z = 1.0f - r_weights.x - r_weights.y;
+  return true;
+}
+
+/** The UV map and geometry the two conversions read, or an empty span when either is missing. */
+struct GradientMeshUv {
+  VArraySpan<float2> uv;
+  Span<float3> positions;
+  Span<int> corner_verts;
+  Span<int3> corner_tris;
+  bool valid = false;
+};
+
+GradientMeshUv gradient_mesh_uv(const Mesh &mesh)
+{
+  GradientMeshUv data;
+  const bke::AttributeReader<float2> uv_attribute = mesh.attributes().lookup<float2>(
+      BKE_paint_layers_gradient_uv_map_name(mesh), bke::AttrDomain::Corner);
+  if (!uv_attribute) {
+    return data;
+  }
+  data.uv = VArraySpan<float2>(*uv_attribute);
+  data.positions = mesh.vert_positions();
+  data.corner_verts = mesh.corner_verts();
+  data.corner_tris = mesh.corner_tris();
+  data.valid = !data.uv.is_empty() && !data.positions.is_empty() &&
+               !data.corner_verts.is_empty() && !data.corner_tris.is_empty();
+  return data;
+}
+
+}  // namespace
+
+bool BKE_paint_layers_gradient_uv_to_object(const Mesh &mesh,
+                                            const float2 &uv,
+                                            float3 &r_object)
+{
+  const GradientMeshUv data = gradient_mesh_uv(mesh);
+  if (!data.valid) {
+    return false;
+  }
+
+  const auto triangle_position = [&](const int index, const float3 &weights) {
+    const int3 tri = data.corner_tris[index];
+    return data.positions[data.corner_verts[tri.x]] * weights.x +
+           data.positions[data.corner_verts[tri.y]] * weights.y +
+           data.positions[data.corner_verts[tri.z]] * weights.z;
+  };
+
+  /* Inside an island the exact triangle wins. */
+  constexpr float inside_epsilon = -1e-5f;
+  for (const int index : IndexRange(data.corner_tris.size())) {
+    const int3 tri = data.corner_tris[index];
+    float3 weights;
+    if (!uv_triangle_weights(
+            data.uv[tri.x], data.uv[tri.y], data.uv[tri.z], uv, weights))
+    {
+      continue;
+    }
+    if (weights.x >= inside_epsilon && weights.y >= inside_epsilon &&
+        weights.z >= inside_epsilon)
+    {
+      r_object = triangle_position(index, weights);
+      return true;
+    }
+  }
+
+  /* Outside every island: the closest point of the closest triangle, measured in UV space. */
+  float best_distance = FLT_MAX;
+  int best_index = -1;
+  float3 best_weights(0.0f);
+  const float3 uv_point(uv.x, uv.y, 0.0f);
+  for (const int index : IndexRange(data.corner_tris.size())) {
+    const int3 tri = data.corner_tris[index];
+    float closest[3];
+    closest_on_tri_to_point_v3(closest,
+                               uv_point,
+                               float3(data.uv[tri.x].x, data.uv[tri.x].y, 0.0f),
+                               float3(data.uv[tri.y].x, data.uv[tri.y].y, 0.0f),
+                               float3(data.uv[tri.z].x, data.uv[tri.z].y, 0.0f));
+    const float distance = math::distance_squared(float3(closest), uv_point);
+    float3 weights;
+    if (distance >= best_distance ||
+        !uv_triangle_weights(data.uv[tri.x],
+                             data.uv[tri.y],
+                             data.uv[tri.z],
+                             float2(closest[0], closest[1]),
+                             weights))
+    {
+      continue;
+    }
+    best_distance = distance;
+    best_index = index;
+    best_weights = weights;
+  }
+  if (best_index < 0) {
+    return false;
+  }
+  r_object = triangle_position(best_index, best_weights);
+  return true;
+}
+
+bool BKE_paint_layers_gradient_object_to_uv(const Mesh &mesh,
+                                            const float3 &object,
+                                            float2 &r_uv)
+{
+  const GradientMeshUv data = gradient_mesh_uv(mesh);
+  if (!data.valid) {
+    return false;
+  }
+
+  float best_distance = FLT_MAX;
+  int best_index = -1;
+  float3 best_point(0.0f);
+  for (const int index : IndexRange(data.corner_tris.size())) {
+    const int3 tri = data.corner_tris[index];
+    const float3 &p0 = data.positions[data.corner_verts[tri.x]];
+    const float3 &p1 = data.positions[data.corner_verts[tri.y]];
+    const float3 &p2 = data.positions[data.corner_verts[tri.z]];
+    float closest[3];
+    closest_on_tri_to_point_v3(closest, object, p0, p1, p2);
+    const float distance = math::distance_squared(float3(closest), object);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_index = index;
+      best_point = float3(closest);
+    }
+  }
+  if (best_index < 0) {
+    return false;
+  }
+
+  const int3 tri = data.corner_tris[best_index];
+  const float3 &p0 = data.positions[data.corner_verts[tri.x]];
+  const float3 &p1 = data.positions[data.corner_verts[tri.y]];
+  const float3 &p2 = data.positions[data.corner_verts[tri.z]];
+  float normal[3];
+  if (normal_tri_v3(normal, p0, p1, p2) == 0.0f) {
+    return false;
+  }
+  float weights[3];
+  interp_weights_tri_v3(weights, p0, p1, p2, best_point);
+  r_uv = data.uv[tri.x] * weights[0] + data.uv[tri.y] * weights[1] + data.uv[tri.z] * weights[2];
+  return std::isfinite(r_uv.x) && std::isfinite(r_uv.y);
 }
 
 }  // namespace blender

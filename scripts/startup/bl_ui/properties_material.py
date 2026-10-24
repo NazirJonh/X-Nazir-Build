@@ -609,12 +609,27 @@ def draw_material_gradient_layer(layout, context, owner, layer, draw_channels=Tr
 
     The generated graph is built from these values: the ColorRamp becomes a node in the row's
     group, and the line and midpoint are inputs the Shader Editor shows as the group's sockets.
-    A scalar channel mixes its own two ends, drawn with the channel below. A mask item has one
-    structural Base Color record and no channel widget, so its caller passes draw_channels=False.
+    A Gradient row draws the ramp inside every colour channel's own subpanel, so the channel
+    buttons and what each channel reads sit together. A mask item has one structural Base Color
+    record and no channel widget, so its caller passes draw_channels=False and the ramp gets a
+    subpanel of its own.
     """
     col = layout.column(align=True)
-    col.prop(layer, "gradient_space", expand=True)
+    # Space is an operator, not the raw RNA setter: switching it converts the line through the
+    # active object's surface so the gizmo does not jump (see
+    # PAINT_OT_paint_layer_gradient_space_set).
+    space_row = col.row(align=True)
+    for space_id, space_label in (('UV', "UV"), ('OBJECT', "Object"), ('GENERATED', "Generated")):
+        op = space_row.operator(
+            "paint.paint_layer_gradient_space_set",
+            text=space_label,
+            depress=layer.gradient_space == space_id,
+        )
+        op.space = space_id
+        op.marker = layer.marker
+    col.separator()
     col.prop(layer, "gradient_type", expand=True)
+    col.separator()
     col.prop(layer, "gradient_repeat")
     # The ramp is always the source of the colors. Two colors are spread most easily with the
     # midpoint; with several, the stops of the ramp place them.
@@ -622,32 +637,46 @@ def draw_material_gradient_layer(layout, context, owner, layer, draw_channels=Tr
     col.prop(layer, "gradient_distribution", expand=True)
     if layer.gradient_distribution == 'MIDPOINT':
         col.prop(layer, "gradient_midpoint", slider=True)
-    layout.separator()
-    if layer.gradient_supported and layer.gradient_ramp is not None:
-        layout.template_color_ramp(layer, "gradient_ramp", expand=True)
-    layout.separator()
-    line = layout.column(align=True)
-    line.label(text="Line")
-    line.prop(layer, "gradient_start", text="Start")
-    line.prop(layer, "gradient_end", text="End")
-    space = layer.gradient_space
-    if space == 'UV':
-        line.label(text="Z is ignored in UV space", icon='INFO')
-    elif space == 'OBJECT':
-        line.label(text="Object units", icon='INFO')
-    elif space == 'GENERATED':
-        line.label(text="0..1, object bounding box", icon='INFO')
+
+    if not draw_channels:
+        layout.separator()
+        header, panel = layout.panel("material_gradient_ramp", default_closed=False)
+        header.label(text="Ramp")
+        if panel and layer.gradient_supported and layer.gradient_ramp is not None:
+            panel.template_color_ramp(layer, "gradient_ramp", expand=True)
+
+    if draw_channels:
+        layout.separator()
+        draw_material_layer_channels(layout, context, owner, layer)
+
+    # Display belongs after every channel panel and before Bake, which is a panel of its own. The
+    # gizmo switch lives in its header so it stays one click away while the body is folded.
     layout.separator()
     header, panel = layout.panel("material_gradient_display", default_closed=True)
-    header.label(text="Display")
+    header_row = header.row(align=True)
+    header_row.label(text="Display")
+    header_row.prop(layer, "gradient_gizmo", text="Show Gizmo", toggle=True, icon='GIZMO')
     if panel:
-        panel.prop(layer, "gradient_gizmo", text="Show Gizmo", toggle=True, icon='GIZMO')
+        # The line's numbers are gizmo parameters, not shading values: they only place the handles.
+        # They are the first thing to reach after turning the handles on, so the body opens by
+        # default rather than hiding them one more click deep.
+        param_header, param_panel = panel.panel("material_gradient_gizmo_parameter",
+                                                default_closed=False)
+        param_header.label(text="Gizmo Parameter")
+        if param_panel:
+            line = param_panel.column(align=True)
+            line.prop(layer, "gradient_start", text="Start")
+            line.prop(layer, "gradient_end", text="End")
+            space = layer.gradient_space
+            if space == 'UV':
+                line.label(text="Z is ignored in UV space", icon='INFO')
+            elif space == 'OBJECT':
+                line.label(text="Object units", icon='INFO')
+            elif space == 'GENERATED':
+                line.label(text="0..1, object bounding box", icon='INFO')
         sub = panel.row(align=True)
         sub.active = layer.gradient_gizmo
         sub.prop(layer, "gradient_gizmo_display", expand=True)
-    layout.separator()
-    if draw_channels:
-        draw_material_layer_channels(layout, context, owner, layer)
 
 
 class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):

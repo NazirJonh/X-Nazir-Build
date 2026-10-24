@@ -26,6 +26,7 @@
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
 
+#include "UI_interface_c.hh"
 #include "UI_interface_layout.hh"
 #include "interface_intern.hh"
 #include "interface_templates_intern.hh"
@@ -248,7 +249,8 @@ static void colorband_buttons_layout_compact(Layout &layout,
                                              const RNAUpdateCb &cb,
                                              const float unit,
                                              const float xs,
-                                             const float ys)
+                                             const float ys,
+                                             const bool value_mode)
 {
   Button *bt;
 
@@ -301,6 +303,8 @@ static void colorband_buttons_layout_compact(Layout &layout,
     button_func_tooltip_custom_set(bt, colorramp_disabled_tip_func, nullptr, nullptr);
   }
 
+  /* Flip, distribute, eyedropper and reset stay available for a value ramp too: they edit the same
+   * stop list, and the value is read from the stop's red channel. */
   RNAUpdateCb *tools_cb = MEM_new<RNAUpdateCb>(__func__, cb);
   bt = uiDefIconBlockBut(block,
                          colorband_tools_fn,
@@ -333,17 +337,24 @@ static void colorband_buttons_layout_compact(Layout &layout,
      * the block immediately (the same assumption as #colorband_buttons_layout below); if that ever
      * changes, or if the color property stops being drawn as a single button, the update callback
      * below is silently lost. */
-    const int64_t buttons_num_before = block->buttons_ptrs.size();
-    colrow->prop(&elem_ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
+    if (value_mode) {
+      /* A scalar channel's stop is one grey value: edit it with the gradient value slider, not a
+       * colour picker. The property's update callback already rebuilds the ramp's row. */
+      template_material_paint_value_slider(colrow, &elem_ptr, "value", 0);
+    }
+    else {
+      const int64_t buttons_num_before = block->buttons_ptrs.size();
+      colrow->prop(&elem_ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
 
-    /* Trigger the gradient update callback when the active stop color changes. */
-    for (Button &but : block->buttons() | std::views::drop(buttons_num_before)) {
-      if (but.rnapoin.data != elem_ptr.data || !but.rnaprop) {
-        continue;
-      }
-      if (STREQ(RNA_property_identifier(but.rnaprop), "color")) {
-        button_func_set(&but, [cb](bContext &C) { rna_update_cb(C, cb); });
-        break;
+      /* Trigger the gradient update callback when the active stop color changes. */
+      for (Button &but : block->buttons() | std::views::drop(buttons_num_before)) {
+        if (but.rnapoin.data != elem_ptr.data || !but.rnaprop) {
+          continue;
+        }
+        if (STREQ(RNA_property_identifier(but.rnaprop), "color")) {
+          button_func_set(&but, [cb](bContext &C) { rna_update_cb(C, cb); });
+          break;
+        }
       }
     }
   }
@@ -355,7 +366,8 @@ static void colorband_buttons_layout(Layout &layout,
                                      const rctf *butr,
                                      const RNAUpdateCb &cb,
                                      int expand,
-                                     bool compact)
+                                     bool compact,
+                                     bool value_mode)
 {
   Button *bt;
   const float unit = BLI_rctf_size_x(butr) / 14.0f;
@@ -363,7 +375,8 @@ static void colorband_buttons_layout(Layout &layout,
   const float ys = butr->ymin;
 
   if (compact) {
-    colorband_buttons_layout_compact(layout, block, coba, butr, cb, unit, xs, ys);
+    colorband_buttons_layout_compact(
+        layout, block, coba, butr, cb, unit, xs, ys, value_mode);
     return;
   }
 
@@ -433,12 +446,19 @@ static void colorband_buttons_layout(Layout &layout,
   row = &split->row(false);
 
   block_align_begin(block);
-  row->prop(&ptr, "color_mode", UI_ITEM_NONE, "", ICON_NONE);
-  if (ELEM(coba->color_mode, COLBAND_BLEND_HSV, COLBAND_BLEND_HSL)) {
-    row->prop(&ptr, "hue_interpolation", UI_ITEM_NONE, "", ICON_NONE);
-  }
-  else { /* COLBAND_BLEND_RGB */
+  if (value_mode) {
+    /* A value ramp has no colour space to blend through: only how the values interpolate is
+     * meaningful. */
     row->prop(&ptr, "interpolation", UI_ITEM_NONE, "", ICON_NONE);
+  }
+  else {
+    row->prop(&ptr, "color_mode", UI_ITEM_NONE, "", ICON_NONE);
+    if (ELEM(coba->color_mode, COLBAND_BLEND_HSV, COLBAND_BLEND_HSL)) {
+      row->prop(&ptr, "hue_interpolation", UI_ITEM_NONE, "", ICON_NONE);
+    }
+    else { /* COLBAND_BLEND_RGB */
+      row->prop(&ptr, "interpolation", UI_ITEM_NONE, "", ICON_NONE);
+    }
   }
   block_align_end(block);
 
@@ -478,7 +498,12 @@ static void colorband_buttons_layout(Layout &layout,
       row->prop(&ptr, "position", UI_ITEM_NONE, IFACE_("Pos"), ICON_NONE);
 
       row = &layout.row(false);
-      row->prop(&ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
+      if (value_mode) {
+        template_material_paint_value_slider(row, &ptr, "value", 0);
+      }
+      else {
+        row->prop(&ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
+      }
     }
     else {
       split = &layout.split(0.5f, false);
@@ -502,7 +527,12 @@ static void colorband_buttons_layout(Layout &layout,
       row->prop(&ptr, "position", ITEM_R_SLIDER, IFACE_("Pos"), ICON_NONE);
 
       row = &split->row(false);
-      row->prop(&ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
+      if (value_mode) {
+        template_material_paint_value_slider(row, &ptr, "value", 0);
+      }
+      else {
+        row->prop(&ptr, "color", UI_ITEM_NONE, "", ICON_NONE);
+      }
     }
 
     /* Some special (rather awkward) treatment to update UI state on certain property changes. */
@@ -520,14 +550,18 @@ static void colorband_buttons_layout(Layout &layout,
       }
 
       if (STREQ(prop_identifier, "color")) {
-        button_func_set(bt, [cb](bContext &C) { rna_update_cb(C, cb); });
+        button_func_set(&but, [cb](bContext &C) { rna_update_cb(C, cb); });
       }
     }
   }
 }
 
-void template_color_ramp(
-    Layout *layout, PointerRNA *ptr, const StringRefNull propname, bool expand, bool compact)
+void template_color_ramp(Layout *layout,
+                         PointerRNA *ptr,
+                         const StringRefNull propname,
+                         bool expand,
+                         bool compact,
+                         bool value)
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
 
@@ -557,7 +591,8 @@ void template_color_ramp(
                            &rect,
                            RNAUpdateCb{*ptr, prop},
                            expand,
-                           compact);
+                           compact,
+                           value);
 
   block_lock_clear(block);
 }

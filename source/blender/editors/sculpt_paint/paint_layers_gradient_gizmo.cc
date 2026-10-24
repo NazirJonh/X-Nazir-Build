@@ -36,11 +36,13 @@
 
 #include "BKE_context.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_library.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_gradient_surface.hh"
+#include "BKE_paint_layers_target.hh"
 
 #include "ED_gizmo_library.hh"
 #include "ED_image.hh"
@@ -110,6 +112,19 @@ LayerGradientTarget layer_gradient_target_resolve(const bContext &C, const bool 
   }
   return target;
 }
+/**
+ * One end of the line on the surface. The object-space point is looked up once per value of the row's
+ * point: a triangle scan on every redraw would be the gizmo's whole cost on a dense mesh.
+ */
+struct LineEndPlacement {
+  /** The triangle the point was last found in, to start the next search at. */
+  int tri = -1;
+  /** The row point #object belongs to; unset until the first lookup. */
+  float3 point = float3(FLT_MAX);
+  bool found = false;
+  /** Where #point sits on the mesh, in object space. */
+  float3 object = float3(0.0f);
+};
 
 struct LayerGradientGizmoGroup {
   wmGizmo *gizmo = nullptr;
@@ -133,6 +148,8 @@ struct LayerGradientGizmoGroup {
    * handle's position when the drag started. */
   float3 drag_plane_point = float3(0.0f);
   bool has_drag_plane = false;
+  /** The triangle a free-moving UV handle was grabbed on; its plane carries the drag. */
+  int drag_tri = -1;
 
   /** The shapes' colors and the direction arrow, refilled from the row's ramp on every update. */
   gradient_gizmo::DrawOptions draw_options;
@@ -147,15 +164,8 @@ struct LayerGradientGizmoGroup {
   int8_t cache_space = -1;
   Object *cache_object = nullptr;
   const Mesh *cache_mesh = nullptr;
-  int start_tri = -1;
-  int end_tri = -1;
-  /** The row points #start_tri / #end_tri belong to, and whether they were found. A point known
-   * to be outside the UV islands is not searched again until the line changes: a full triangle
-   * scan on every redraw would be the gizmo's whole cost on a dense mesh. */
-  float3 start_point_cache = float3(FLT_MAX);
-  bool start_found = false;
-  float3 end_point_cache = float3(FLT_MAX);
-  bool end_found = false;
+  LineEndPlacement start_place;
+  LineEndPlacement end_place;
 };
 
 LayerGradientGizmoGroup *group_data(wmGizmoGroup *gzgroup)
@@ -182,25 +192,67 @@ void notify_changed(bContext &C, Material &material)
   }
 }
 
+/**
+ * Whether the row's handles are shown in an object in  mode. By default only in the paint modes,
+ * so leaving them does not leave the handles behind; a row can ask for them whenever it is active.
+ */
+bool gizmo_display_allows(const MaterialPaintLayerGradient &gradient, const int mode)
+{
+  return gradient.gizmo_display == MA_PAINT_LAYER_GRADIENT_GIZMO_ALWAYS ||
+         (mode & (OB_MODE_SCULPT | OB_MODE_TEXTURE_PAINT)) != 0;
+}
+
 /** Whether a dragged handle is placed on the surface instead of moving freely in the view plane.
  */
 bool snap_enabled(const bContext &C)
 {
   const Scene *scene = CTX_data_scene(&C);
   return scene != nullptr && scene->toolsettings != nullptr &&
-         scene->toolsettings->paint_mode.gradient_snap != 0;
+         scene->toolsettings->paint_mode.gradient_free == 0;
 }
 
 /* -------------------------------------------------------------------- */
 /** \name Screen points
  * \{ */
 
+/**
+ * Place one end of the line on screen. False when it has no surface point (the placement says so
+ * through #LineEndPlacement::found) or does not project into the view.
+ */
+bool line_end_place(const LayerGradientTarget &target,
+                    const ARegion &region,
+                    const float3 &point,
+                    LineEndPlacement &place,
+                    float2 &r_px)
+{
+  if (math::distance_squared(point, place.point) != 0.0f) {
+    place.point = point;
+    place.found = paint_layer_gradient_object_point(
+        *target.object, *target.mesh, *target.gradient(), point, place.tri, place.object);
+  }
+  if (!place.found) {
+    return false;
+  }
+  const float3 world = math::transform_point(target.object->object_to_world(), place.object);
+  float projected[2];
+  if (ED_view3d_project_float_global(
+          &region, world, projected, V3D_PROJ_TEST_CLIP_DEFAULT) != V3D_PROJ_RET_OK)
+  {
+    return false;
+  }
+  r_px = float2(projected[0], projected[1]);
+  return true;
+}
+
 /** Fill the group's screen points from the row; false when the line cannot be placed. */
 bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
 {
   ARegion *region = CTX_wm_region(&C);
   LayerGradientTarget target = layer_gradient_target_resolve(C, !ggd.image_editor);
-  if (region == nullptr || !target.valid()) {
+  if (region == nullptr) {
+    return false;
+  }
+  if (!target.valid()) {
     return false;
   }
   const MaterialPaintLayerGradient &gradient = *target.gradient();
@@ -229,49 +281,15 @@ bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
       ggd.cache_space = gradient.space;
       ggd.cache_object = target.object;
       ggd.cache_mesh = target.mesh;
-      ggd.start_tri = -1;
-      ggd.end_tri = -1;
-      ggd.start_point_cache = float3(FLT_MAX);
-      ggd.end_point_cache = float3(FLT_MAX);
-      ggd.start_found = false;
-      ggd.end_found = false;
+      ggd.start_place = LineEndPlacement();
+      ggd.end_place = LineEndPlacement();
     }
-    float projected[2];
-    float3 point = float3(0.0f);
-
-    const float3 start_point = float3(gradient.start);
-    if (math::distance_squared(start_point, ggd.start_point_cache) == 0.0f && !ggd.start_found) {
+    if (!line_end_place(target, *region, float3(gradient.start), ggd.start_place, ggd.start_px)) {
       return false;
     }
-    ggd.start_point_cache = start_point;
-    ggd.start_found = paint_layer_gradient_world_point(
-        *target.object, *target.mesh, gradient, start_point, ggd.start_tri, point);
-    if (!ggd.start_found) {
+    if (!line_end_place(target, *region, float3(gradient.end), ggd.end_place, ggd.end_px)) {
       return false;
     }
-    if (ED_view3d_project_float_global(region, point, projected, V3D_PROJ_TEST_CLIP_DEFAULT) !=
-        V3D_PROJ_RET_OK)
-    {
-      return false;
-    }
-    ggd.start_px = float2(projected[0], projected[1]);
-
-    const float3 end_point = float3(gradient.end);
-    if (math::distance_squared(end_point, ggd.end_point_cache) == 0.0f && !ggd.end_found) {
-      return false;
-    }
-    ggd.end_point_cache = end_point;
-    ggd.end_found = paint_layer_gradient_world_point(
-        *target.object, *target.mesh, gradient, end_point, ggd.end_tri, point);
-    if (!ggd.end_found) {
-      return false;
-    }
-    if (ED_view3d_project_float_global(region, point, projected, V3D_PROJ_TEST_CLIP_DEFAULT) !=
-        V3D_PROJ_RET_OK)
-    {
-      return false;
-    }
-    ggd.end_px = float2(projected[0], projected[1]);
   }
 
   /* The line and handles show the row's ramp: the start disc at ramp 0, the midpoint marker at
@@ -292,6 +310,8 @@ bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
   ggd.draw_options.color_end = overlay_color(1.0f);
 
   ggd.midpoint = gradient.midpoint;
+  ggd.draw_options.midpoint_handle = gradient.distribution ==
+                                     MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT;
   return true;
 }
 
@@ -338,6 +358,7 @@ void drag_finish(bContext &C, wmGizmo *gz, const bool commit)
   ggd.drag_handle = gradient_gizmo::NONE;
   ggd.has_plane_hit = false;
   ggd.has_drag_plane = false;
+  ggd.drag_tri = -1;
 }
 
 void drag_begin(bContext &C, wmGizmo *gz, const wmEvent &event)
@@ -357,8 +378,17 @@ void drag_begin(bContext &C, wmGizmo *gz, const wmEvent &event)
   ggd.session_marker = target.layer->marker;
   ggd.has_plane_hit = false;
   ggd.has_drag_plane = false;
+  ggd.drag_tri = -1;
 
-  if (!ggd.image_editor && gradient.space != MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
+  if (!ggd.image_editor && gradient.space == MA_PAINT_LAYER_GRADIENT_SPACE_UV && !snap_enabled(C) &&
+      ggd.drag_handle != gradient_gizmo::MID)
+  {
+    /* Free placement of a UV handle: it moves on the plane of the triangle it sits on, so the UV
+     * continues past the island and the mesh. */
+    ggd.drag_tri = (ggd.drag_handle == gradient_gizmo::START) ? ggd.start_place.tri :
+                                                                ggd.end_place.tri;
+  }
+  else if (!ggd.image_editor && gradient.space != MA_PAINT_LAYER_GRADIENT_SPACE_UV) {
     if (snap_enabled(C)) {
       /* Snapping: remember the press's surface point, the fallback for a drag that leaves the
        * mesh. */
@@ -441,6 +471,24 @@ void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
         return;
       }
     }
+    else if (!snap_enabled(C) && ggd.drag_tri >= 0) {
+      /* Over the mesh the UV under the cursor is exact; past it, the mapping of the last triangle
+       * under the cursor continues, so the line can leave the island and the mesh. */
+      PaintLayerGradientHit hit;
+      float2 uv;
+      if (paint_layer_gradient_hit_at_mouse(C, gradient, mval, hit) && hit.valid && hit.has_uv) {
+        uv = hit.uv;
+        if (hit.tri >= 0) {
+          ggd.drag_tri = hit.tri;
+        }
+      }
+      else if (!paint_layer_gradient_uv_on_tri_plane(
+                   C, *target.object, *target.mesh, ggd.drag_tri, mval, uv))
+      {
+        return;
+      }
+      point = float3(uv.x, uv.y, 0.0f);
+    }
     else {
       /* Off the mesh, the press's tangent plane still gives a point in the row's space. */
       if (!paint_layer_gradient_point_at_mouse(C,
@@ -490,7 +538,12 @@ int gizmo_test_select(bContext *C, wmGizmo *gz, const int mval[2])
   /* The discs are small, so the pick area is wider than what is drawn; a miss drops the drag. */
   constexpr float pick_radius = gradient_gizmo::HANDLE_RADIUS * 1.8f;
   const int part = gradient_gizmo::hit_test(
-      ggd.start_px, ggd.end_px, ggd.midpoint, float2(float(mval[0]), float(mval[1])), pick_radius);
+      ggd.start_px,
+      ggd.end_px,
+      ggd.midpoint,
+      float2(float(mval[0]), float(mval[1])),
+      pick_radius,
+      ggd.draw_options.midpoint_handle);
   return (part == gradient_gizmo::NONE) ? -1 : part;
 }
 
@@ -562,8 +615,9 @@ bool group_poll_3d(const bContext *C, wmGizmoGroupType * /*gzgt*/)
   if ((U.gizmo_flag & USER_GIZMO_DRAW) == 0 || CTX_wm_view3d(C) == nullptr) {
     return false;
   }
-  LayerGradientTarget target = layer_gradient_target_resolve(*C, true);
-  return target.valid() && target.gradient()->gizmo_shown;
+  const LayerGradientTarget target = layer_gradient_target_resolve(*C, true);
+  return target.valid() && target.gradient()->gizmo_shown != 0 &&
+         gizmo_display_allows(*target.gradient(), target.object->mode);
 }
 
 bool group_poll_2d(const bContext *C, wmGizmoGroupType * /*gzgt*/)
@@ -572,11 +626,17 @@ bool group_poll_2d(const bContext *C, wmGizmoGroupType * /*gzgt*/)
     return false;
   }
   const SpaceImage *sima = CTX_wm_space_image(C);
-  if (sima == nullptr || sima->mode != SI_MODE_PAINT) {
+  if (sima == nullptr) {
     return false;
   }
   LayerGradientTarget target = layer_gradient_target_resolve(*C, false);
   if (!target.valid() || !target.gradient()->gizmo_shown) {
+    return false;
+  }
+  /* The Image Editor's Paint mode is its paint mode; the row can ask for the other modes too. */
+  if (sima->mode != SI_MODE_PAINT &&
+      target.gradient()->gizmo_display != MA_PAINT_LAYER_GRADIENT_GIZMO_ALWAYS)
+  {
     return false;
   }
   /* The handles may only edit the material the editor shows: a pinned image or another object's

@@ -175,6 +175,7 @@ static bool paint_layer_gradient_hit_on_mesh(const bContext &C,
   }
 
   r_hit.position = float3(hit.co);
+  r_hit.tri = hit.index;
   r_hit.valid = true;
 
   float normal[3];
@@ -332,7 +333,11 @@ bool paint_layer_gradient_active(const bContext *C)
   return paint_layer_gradient_target(C, &layer) != nullptr && layer != nullptr;
 }
 
-/** The object-space point of \a uv on the active UV map, or false outside its islands. */
+/**
+ * The object-space point of \a uv on the active UV map. A point outside every island, like the
+ * default line along the border of the UV square, is placed on the nearest island point instead, so
+ * the handle of a UV row stays reachable and dragging it onto the surface fixes the line.
+ */
 static bool paint_layer_gradient_uv_to_object(const Mesh &mesh,
                                               const float2 &uv,
                                               int &r_tri_cache,
@@ -354,7 +359,8 @@ static bool paint_layer_gradient_uv_to_object(const Mesh &mesh,
   const Span<int> corner_verts = mesh.corner_verts();
   const Span<float3> positions = mesh.vert_positions();
 
-  auto triangle_point = [&](const int index, float3 &r_point) -> bool {
+  /* Barycentric weights of \a point in triangle \a index; false for a degenerate one. */
+  const auto triangle_weights = [&](const int index, const float2 &point, float3 &r_weights) {
     const int3 tri = corner_tris[index];
     const float2 a = uv_map[tri.x];
     const float2 b = uv_map[tri.y];
@@ -363,15 +369,25 @@ static bool paint_layer_gradient_uv_to_object(const Mesh &mesh,
     if (std::abs(denominator) <= 1e-12f) {
       return false;
     }
-    const float w0 = ((b.y - c.y) * (uv.x - c.x) + (c.x - b.x) * (uv.y - c.y)) / denominator;
-    const float w1 = ((c.y - a.y) * (uv.x - c.x) + (a.x - c.x) * (uv.y - c.y)) / denominator;
-    const float w2 = 1.0f - w0 - w1;
+    r_weights.x = ((b.y - c.y) * (point.x - c.x) + (c.x - b.x) * (point.y - c.y)) / denominator;
+    r_weights.y = ((c.y - a.y) * (point.x - c.x) + (a.x - c.x) * (point.y - c.y)) / denominator;
+    r_weights.z = 1.0f - r_weights.x - r_weights.y;
+    return true;
+  };
+  const auto triangle_position = [&](const int index, const float3 &weights) {
+    const int3 tri = corner_tris[index];
+    return positions[corner_verts[tri.x]] * weights.x + positions[corner_verts[tri.y]] * weights.y +
+           positions[corner_verts[tri.z]] * weights.z;
+  };
+  const auto triangle_point = [&](const int index, float3 &r_point) {
+    float3 weights;
     constexpr float epsilon = -1e-5f;
-    if (w0 < epsilon || w1 < epsilon || w2 < epsilon) {
+    if (!triangle_weights(index, uv, weights) || weights.x < epsilon || weights.y < epsilon ||
+        weights.z < epsilon)
+    {
       return false;
     }
-    r_point = positions[corner_verts[tri.x]] * w0 + positions[corner_verts[tri.y]] * w1 +
-              positions[corner_verts[tri.z]] * w2;
+    r_point = triangle_position(index, weights);
     return true;
   };
 
@@ -391,8 +407,108 @@ static bool paint_layer_gradient_uv_to_object(const Mesh &mesh,
       return true;
     }
   }
-  r_tri_cache = -1;
-  return false;
+
+  /* Outside every island: the closest point of the closest triangle, measured in UV space. */
+  float best_distance = FLT_MAX;
+  int best_index = -1;
+  float3 best_closest(0.0f);
+  const float3 uv_point(uv.x, uv.y, 0.0f);
+  for (const int index : IndexRange(corner_tris.size())) {
+    const int3 tri = corner_tris[index];
+    float closest[3];
+    closest_on_tri_to_point_v3(closest,
+                               uv_point,
+                               float3(uv_map[tri.x].x, uv_map[tri.x].y, 0.0f),
+                               float3(uv_map[tri.y].x, uv_map[tri.y].y, 0.0f),
+                               float3(uv_map[tri.z].x, uv_map[tri.z].y, 0.0f));
+    const float distance = math::distance_squared(float3(closest), uv_point);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_index = index;
+      best_closest = float3(closest);
+    }
+  }
+  float3 weights;
+  if (best_index < 0 || !triangle_weights(best_index, float2(best_closest.x, best_closest.y), weights))
+  {
+    r_tri_cache = -1;
+    return false;
+  }
+  r_tri_cache = best_index;
+  r_object = triangle_position(best_index, weights);
+  return true;
+}
+
+bool paint_layer_gradient_uv_on_tri_plane(const bContext &C,
+                                          Object &ob,
+                                          const Mesh &mesh,
+                                          const int tri_index,
+                                          const float2 &mval,
+                                          float2 &r_uv)
+{
+  const Span<int3> corner_tris = mesh.corner_tris();
+  if (tri_index < 0 || tri_index >= corner_tris.size()) {
+    return false;
+  }
+  const bke::AttributeReader<float2> uv_attribute = mesh.attributes().lookup<float2>(
+      BKE_paint_layers_gradient_uv_map_name(mesh), bke::AttrDomain::Corner);
+  if (!uv_attribute) {
+    return false;
+  }
+  const VArraySpan<float2> uv_map(*uv_attribute);
+  if (uv_map.is_empty()) {
+    return false;
+  }
+  float ray_start[3];
+  float ray_direction[3];
+  if (!paint_layer_gradient_object_ray(C, ob, mval, ray_start, ray_direction)) {
+    return false;
+  }
+
+  const int3 tri = corner_tris[tri_index];
+  const Span<int> corner_verts = mesh.corner_verts();
+  const Span<float3> positions = mesh.vert_positions();
+  const float3 &p0 = positions[corner_verts[tri.x]];
+  const float3 &p1 = positions[corner_verts[tri.y]];
+  const float3 &p2 = positions[corner_verts[tri.z]];
+
+  float plane[4];
+  if (normal_tri_v3(plane, p0, p1, p2) == 0.0f) {
+    return false;
+  }
+  plane[3] = -math::dot(float3(plane), p0);
+  float lambda;
+  if (!isect_ray_plane_v3(ray_start, ray_direction, plane, &lambda, false)) {
+    return false;
+  }
+  const float3 hit = float3(ray_start) + float3(ray_direction) * lambda;
+
+  /* The weights are not clamped: past the triangle the UV continues along the same mapping, which
+   * is what lets the line leave the island and the mesh. */
+  float weights[3];
+  interp_weights_tri_v3(weights, p0, p1, p2, hit);
+  r_uv = uv_map[tri.x] * weights[0] + uv_map[tri.y] * weights[1] + uv_map[tri.z] * weights[2];
+  return std::isfinite(r_uv.x) && std::isfinite(r_uv.y);
+}
+
+bool paint_layer_gradient_object_point(const Object &ob,
+                                       const Mesh &mesh,
+                                       const MaterialPaintLayerGradient &gradient,
+                                       const float3 &point,
+                                       int &r_tri_cache,
+                                       float3 &r_object)
+{
+  switch (eMaterialPaintLayerGradientSpace(gradient.space)) {
+    case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
+      r_object = point;
+      return true;
+    case MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED:
+      return BKE_paint_layers_gradient_generated_to_object(&ob, mesh, point, r_object);
+    case MA_PAINT_LAYER_GRADIENT_SPACE_UV:
+    default:
+      return paint_layer_gradient_uv_to_object(
+          mesh, float2(point.x, point.y), r_tri_cache, r_object);
+  }
 }
 
 bool paint_layer_gradient_world_point(const Object &ob,
@@ -403,23 +519,8 @@ bool paint_layer_gradient_world_point(const Object &ob,
                                       float3 &r_world)
 {
   float3 object_point;
-  switch (eMaterialPaintLayerGradientSpace(gradient.space)) {
-    case MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT:
-      object_point = point;
-      break;
-    case MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED:
-      if (!BKE_paint_layers_gradient_generated_to_object(&ob, mesh, point, object_point)) {
-        return false;
-      }
-      break;
-    case MA_PAINT_LAYER_GRADIENT_SPACE_UV:
-    default:
-      if (!paint_layer_gradient_uv_to_object(
-              mesh, float2(point.x, point.y), r_tri_cache, object_point))
-      {
-        return false;
-      }
-      break;
+  if (!paint_layer_gradient_object_point(ob, mesh, gradient, point, r_tri_cache, object_point)) {
+    return false;
   }
   r_world = math::transform_point(ob.object_to_world(), object_point);
   return true;

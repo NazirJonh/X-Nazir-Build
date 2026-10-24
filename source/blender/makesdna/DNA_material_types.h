@@ -659,6 +659,22 @@ enum eMaterialPaintLayerGradientRepeat : int8_t {
   MA_PAINT_LAYER_GRADIENT_REPEAT_REFLECT = 2,
 };
 
+/** What decides how the colours of a gradient are spread along its line. */
+enum eMaterialPaintLayerGradientDistribution : int8_t {
+  /** The midpoint bends the ramp, which is the source of the colours: the easy control for two. */
+  MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT = 0,
+  /** The ramp's own stops place the colours; the midpoint is ignored: the control for several. */
+  MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_RAMP = 1,
+};
+
+/** When the viewports show the handles of a gradient row. */
+enum eMaterialPaintLayerGradientGizmoDisplay : int8_t {
+  /** Only in the paint modes (Sculpt and Texture Paint) and the Image Editor's Paint mode. */
+  MA_PAINT_LAYER_GRADIENT_GIZMO_PAINT_ONLY = 0,
+  /** Whenever the row is the active one. */
+  MA_PAINT_LAYER_GRADIENT_GIZMO_ALWAYS = 1,
+};
+
 /**
  * The payload of a #MA_PAINT_LAYER_SOURCE_GENERATOR / #MA_PAINT_LAYER_GENERATOR_GRADIENT row.
  *
@@ -681,7 +697,10 @@ struct MaterialPaintLayerGradient {
   float start[3] = {0.0f, 0.5f, 0.0f};
   /** End of the line / radius point of a radial gradient, in #space. */
   float end[3] = {1.0f, 0.5f, 0.0f};
-  /** Where the ramp's 0.5 lands (0..1); 0.5 is the unbent ramp. */
+  /**
+   * Where the ramp's 0.5 lands (0..1); 0.5 is the unbent ramp. Only read in the Midpoint
+   * distribution (see #BKE_paint_layers_gradient_midpoint_effective).
+   */
   float midpoint = 0.5f;
   /** #eMaterialPaintLayerGradientSpace. */
   int8_t space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
@@ -689,11 +708,13 @@ struct MaterialPaintLayerGradient {
   int8_t type = MA_PAINT_LAYER_GRADIENT_LINEAR;
   /** #eMaterialPaintLayerGradientRepeat. */
   int8_t repeat = MA_PAINT_LAYER_GRADIENT_REPEAT_NONE;
-  /**
-   * Whether the viewports show the row's line as draggable handles (0 or 1). With the four 8-bit
-   * fields above this keeps the struct a multiple of 4 bytes, so no explicit padding is needed.
-   */
+  /** Whether the viewports show the row's line as draggable handles (0 or 1). */
   int8_t gizmo_shown = 0;
+  /** #eMaterialPaintLayerGradientDistribution. */
+  int8_t distribution = MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT;
+  /** #eMaterialPaintLayerGradientGizmoDisplay. */
+  int8_t gizmo_display = MA_PAINT_LAYER_GRADIENT_GIZMO_PAINT_ONLY;
+  char _pad[2] = {};
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_FILTER row. */

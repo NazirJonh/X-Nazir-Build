@@ -191,7 +191,7 @@ float BKE_paint_layers_gradient_ramp_position(const MaterialPaintLayerGradient &
 {
   return math::gradient_remap_midpoint(
       gradient_repeat_apply(eMaterialPaintLayerGradientRepeat(gradient.repeat), t),
-      gradient.midpoint);
+      BKE_paint_layers_gradient_midpoint_effective(gradient));
 }
 
 float BKE_paint_layers_gradient_line_z(const MaterialPaintLayerGradient &gradient, const float z)
@@ -353,6 +353,56 @@ bool BKE_paint_layers_gradient_set_repeat(Material &ma,
   }
   gradient->repeat = repeat;
   BKE_paint_layers_tag_value_edited(ma);
+  return true;
+}
+
+float BKE_paint_layers_gradient_midpoint_effective(const MaterialPaintLayerGradient &gradient)
+{
+  return gradient.distribution == MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_RAMP ? 0.5f :
+                                                                               gradient.midpoint;
+}
+
+bool BKE_paint_layers_gradient_set_distribution(
+    Material &ma,
+    MaterialPaintLayer &layer,
+    const eMaterialPaintLayerGradientDistribution distribution)
+{
+  if (!gradient_owned(ma, layer) ||
+      !ELEM(distribution,
+            MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT,
+            MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_RAMP))
+  {
+    return false;
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  if (gradient->distribution != distribution) {
+    gradient->distribution = distribution;
+    BKE_paint_layers_tag_value_edited(ma);
+  }
+  return true;
+}
+
+bool BKE_paint_layers_gradient_set_gizmo_display(
+    Material &ma,
+    MaterialPaintLayer &layer,
+    const eMaterialPaintLayerGradientGizmoDisplay display)
+{
+  if (!gradient_owned(ma, layer) ||
+      !ELEM(display,
+            MA_PAINT_LAYER_GRADIENT_GIZMO_PAINT_ONLY,
+            MA_PAINT_LAYER_GRADIENT_GIZMO_ALWAYS))
+  {
+    return false;
+  }
+  MaterialPaintLayerGradient *gradient = BKE_paint_layers_gradient_ensure(layer);
+  if (gradient == nullptr) {
+    return false;
+  }
+  /* Like the visibility of the gizmo: a viewport aid the graph and the composite never read. */
+  gradient->gizmo_display = display;
   return true;
 }
 

@@ -36,6 +36,8 @@ struct PaintLayerGradientHit {
   float3 normal = float3(0.0f);
   /** Active UV map coordinate at the hit; only meaningful with #has_uv. */
   float2 uv = float2(0.0f);
+  /** The mesh triangle of a 3D View hit, or -1. */
+  int tri = -1;
   /** Whether #position is usable. */
   bool valid = false;
   /** Whether #normal is usable (3D View raycast hits only). */
@@ -99,9 +101,33 @@ bool paint_layer_gradient_plane_hit(const bContext &C,
                                     float3 &r_object_point);
 
 /**
+ * The UV the view ray under \a mval reaches on the plane of triangle \a tri_index of \a mesh,
+ * continued past the triangle: the free placement of a UV row, which may leave the island and the
+ * mesh. False for a degenerate triangle, a mesh without a UV map or a ray parallel to the plane.
+ */
+bool paint_layer_gradient_uv_on_tri_plane(const bContext &C,
+                                          Object &ob,
+                                          const Mesh &mesh,
+                                          int tri_index,
+                                          const float2 &mval,
+                                          float2 &r_uv);
+
+/**
+ * A row-space point in object space. A UV point outside every island lands on the nearest island
+ * point, so the overlay can always place it; see #paint_layer_gradient_world_point for
+ * \a r_tri_cache.
+ */
+bool paint_layer_gradient_object_point(const Object &ob,
+                                       const Mesh &mesh,
+                                       const MaterialPaintLayerGradient &gradient,
+                                       const float3 &point,
+                                       int &r_tri_cache,
+                                       float3 &r_object);
+
+/**
  * A row-space point in world space, for the overlay. \a r_tri_cache keeps the triangle a UV point
- * was last found in, so a repeated call is constant time; pass -1 to start a search. A UV point
- * outside the islands (or a mesh without a UV map) cannot be placed and returns false.
+ * was last found in, so a repeated call is constant time; pass -1 to start a search. Only a mesh
+ * without a UV map cannot place a UV point and returns false.
  */
 bool paint_layer_gradient_world_point(const Object &ob,
                                       const Mesh &mesh,

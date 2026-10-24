@@ -32,6 +32,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "DEG_depsgraph.hh"
@@ -209,7 +210,7 @@ bool values_sync_socket(Material &ma,
     if (layer->gradient == nullptr || socket.default_value == nullptr) {
       return false;
     }
-    float value = layer->gradient->midpoint;
+    float value = BKE_paint_layers_gradient_midpoint_effective(*layer->gradient);
     if (STREQ(role, ROLE_GRADIENT_TYPE)) {
       value = float(layer->gradient->type);
     }

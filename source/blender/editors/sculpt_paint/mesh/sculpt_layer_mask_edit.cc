@@ -50,6 +50,7 @@
 #include "BKE_sculpt_layers.hh"
 #include "BKE_subdiv_ccg.hh"
 
+#include "ED_paint.hh"
 #include "ED_sculpt.hh"
 
 #include "RNA_access.hh"
@@ -2611,3 +2612,12 @@ void SCULPT_OT_layer_mask_edit_cancel(wmOperatorType *ot)
 /** \} */
 
 }  // namespace blender::ed::sculpt_paint::layers
+
+namespace blender {
+
+void ED_paint_view3d_tool_id_set(bContext *C, const char *tool_id)
+{
+  ed::sculpt_paint::layers::view3d_tool_id_set(C, tool_id);
+}
+
+}  // namespace blender

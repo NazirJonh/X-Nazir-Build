@@ -129,6 +129,21 @@ bool BKE_paint_layers_gradient_set_repeat(Material &ma,
                                           MaterialPaintLayer &layer,
                                           eMaterialPaintLayerGradientRepeat repeat);
 
+/**
+ * The midpoint the ramp position is bent by: the stored one in the Midpoint distribution, and the
+ * unbent 0.5 in the Ramp distribution, where the ramp's stops alone place the colours. The one
+ * place the two are told apart, so the CPU, the generated graph and the hashes cannot disagree.
+ */
+float BKE_paint_layers_gradient_midpoint_effective(const MaterialPaintLayerGradient &gradient);
+
+/** Choose what spreads the colours along the line; a value edit. False for an unknown value. */
+bool BKE_paint_layers_gradient_set_distribution(
+    Material &ma, MaterialPaintLayer &layer, eMaterialPaintLayerGradientDistribution distribution);
+
+/** Choose when the handles are shown. A viewport aid: it never rebuilds the tree. */
+bool BKE_paint_layers_gradient_set_gizmo_display(
+    Material &ma, MaterialPaintLayer &layer, eMaterialPaintLayerGradientGizmoDisplay display);
+
 /** Set the ramp's midpoint (clamped to the usable range); a value edit. */
 bool BKE_paint_layers_gradient_set_midpoint(Material &ma,
                                             MaterialPaintLayer &layer,

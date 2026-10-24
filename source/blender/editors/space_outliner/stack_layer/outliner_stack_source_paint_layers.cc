@@ -44,6 +44,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_sync.hh"
@@ -66,6 +67,7 @@
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_import.hh"
 #include "ED_material_bake.hh"
+#include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
@@ -149,6 +151,23 @@ void layers_texpaint_slots_refresh(bContext &C)
       WM_event_add_notifier(&C, NC_BRUSH | NA_EDITED, BKE_paint_brush(paint));
     }
   }
+}
+
+/**
+ * A Gradient layer, correction or mask item is edited with the Color Gradient tool, so making one
+ * active switches to it. Only in Sculpt Mode, where that tool lives; anywhere else the tool is not
+ * on offer and the row is still edited through its panel and gizmo.
+ */
+void gradient_tool_activate(bContext &C, const MaterialPaintLayer *layer)
+{
+  if (layer == nullptr || !BKE_paint_layers_gradient_supported(*layer)) {
+    return;
+  }
+  const Object *object = CTX_data_active_object(&C);
+  if (object == nullptr || (object->mode & OB_MODE_SCULPT) == 0) {
+    return;
+  }
+  ED_paint_view3d_tool_id_set(&C, "builtin.color_gradient");
 }
 
 /** Set the target a layered material's stroke paints; true when it changed. */
@@ -1334,6 +1353,7 @@ class PaintLayersStackSource final : public StackSource,
       return false;
     }
     BKE_paint_layers_active_set(material, row.stable_id);
+    gradient_tool_activate(C, BKE_paint_layers_find(material, row.stable_id));
     /* Mask editing only makes sense on a Layer row; leaving it for a correction or mask item ends
      * it. */
     if (Scene *scene = CTX_data_scene(&C)) {
@@ -1774,6 +1794,7 @@ class PaintLayersStackSource final : public StackSource,
        * until the caller activates the new row, so the maps below would land on the wrong layer. */
       BKE_paint_layers_active_set(material, created->marker);
     }
+    gradient_tool_activate(C, created);
     /* A row with no map makes the first stroke create it and regenerate the graph before it can
      * write, which loses that stroke. The active slot's map is made together with the row, so the
      * first stroke already lands in it; the other channels still get theirs when they are used. */

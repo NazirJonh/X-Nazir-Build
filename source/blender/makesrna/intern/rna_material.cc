@@ -3349,6 +3349,41 @@ static void rna_MaterialPaintLayer_gradient_type_set(PointerRNA *ptr, int value)
   }
 }
 
+static int rna_MaterialPaintLayer_gradient_distribution_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer != nullptr && layer->gradient != nullptr) ? layer->gradient->distribution :
+                                                            MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT;
+}
+
+static void rna_MaterialPaintLayer_gradient_distribution_set(PointerRNA *ptr, int value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_gradient_set_distribution(
+        *ma, *layer, eMaterialPaintLayerGradientDistribution(value));
+  }
+}
+
+static int rna_MaterialPaintLayer_gradient_gizmo_display_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer != nullptr && layer->gradient != nullptr) ?
+             layer->gradient->gizmo_display :
+             MA_PAINT_LAYER_GRADIENT_GIZMO_PAINT_ONLY;
+}
+
+static void rna_MaterialPaintLayer_gradient_gizmo_display_set(PointerRNA *ptr, int value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_gradient_set_gizmo_display(
+        *ma, *layer, eMaterialPaintLayerGradientGizmoDisplay(value));
+  }
+}
+
 static int rna_MaterialPaintLayer_gradient_repeat_get(PointerRNA *ptr)
 {
   const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
@@ -3601,6 +3636,36 @@ static const EnumPropertyItem rna_enum_material_paint_layer_gradient_repeat_item
      0,
      "Reflect",
      "Mirror the ramp at every whole step"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintLayerGradientDistribution. */
+static const EnumPropertyItem rna_enum_material_paint_layer_gradient_distribution_items[] = {
+    {MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT,
+     "MIDPOINT",
+     0,
+     "Midpoint",
+     "Bend the ramp with the midpoint: the easy control for two colors"},
+    {MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_RAMP,
+     "RAMP",
+     0,
+     "Ramp",
+     "Place the colors with the stops of the ramp: the control for several colors"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintLayerGradientGizmoDisplay. */
+static const EnumPropertyItem rna_enum_material_paint_layer_gradient_gizmo_display_items[] = {
+    {MA_PAINT_LAYER_GRADIENT_GIZMO_PAINT_ONLY,
+     "PAINT_ONLY",
+     0,
+     "Paint Only",
+     "Show the handles only in the paint modes"},
+    {MA_PAINT_LAYER_GRADIENT_GIZMO_ALWAYS,
+     "ALWAYS",
+     0,
+     "Always",
+     "Show the handles whenever the layer is the active one"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -3959,6 +4024,28 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       "Show the gradient's line as draggable handles in the 3D Viewport and the Image Editor");
   /* A viewport-only flag: the material's shading is untouched, so only a redraw is needed. */
   RNA_def_property_update_notifier(prop, NC_MATERIAL | ND_SHADING);
+
+  prop = RNA_def_property(srna, "gradient_gizmo_display", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_gizmo_display_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_gradient_gizmo_display_get",
+                              "rna_MaterialPaintLayer_gradient_gizmo_display_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop, "Gizmo Display", "When the handles of the gradient's line are shown");
+  RNA_def_property_update_notifier(prop, NC_MATERIAL | ND_SHADING);
+
+  prop = RNA_def_property(srna, "gradient_distribution", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_distribution_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_gradient_distribution_get",
+                              "rna_MaterialPaintLayer_gradient_distribution_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Gradient Distribution",
+      "What spreads the colors along the line: the midpoint, or the stops of the ramp");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   prop = RNA_def_property(srna, "gradient_space", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_space_items);

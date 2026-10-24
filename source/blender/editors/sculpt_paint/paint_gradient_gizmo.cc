@@ -176,8 +176,10 @@ void draw_handles(const float2 &start_px,
   imm_draw_circle_fill_3d(pos, start_px.x, start_px.y, start_radius, HANDLE_SEGMENTS);
   immUniformColor4f(end_color.x, end_color.y, end_color.z, end_color.w);
   imm_draw_circle_fill_3d(pos, end_px.x, end_px.y, end_radius, HANDLE_SEGMENTS);
-  immUniformColor4f(mid_color.x, mid_color.y, mid_color.z, mid_color.w);
-  imm_draw_circle_fill_3d(pos, mid_px.x, mid_px.y, mid_radius, HANDLE_SEGMENTS);
+  if (options.midpoint_handle) {
+    immUniformColor4f(mid_color.x, mid_color.y, mid_color.z, mid_color.w);
+    imm_draw_circle_fill_3d(pos, mid_px.x, mid_px.y, mid_radius, HANDLE_SEGMENTS);
+  }
 
   GPU_line_width(1.0f);
   const float4 start_outline = outline_color_for(start_color);
@@ -186,9 +188,11 @@ void draw_handles(const float2 &start_px,
   const float4 end_outline = outline_color_for(end_color);
   immUniformColor4f(end_outline.x, end_outline.y, end_outline.z, end_outline.w);
   imm_draw_circle_wire_3d(pos, end_px.x, end_px.y, end_radius, HANDLE_SEGMENTS);
-  const float4 mid_outline = outline_color_for(mid_color);
-  immUniformColor4f(mid_outline.x, mid_outline.y, mid_outline.z, mid_outline.w);
-  imm_draw_circle_wire_3d(pos, mid_px.x, mid_px.y, mid_radius, HANDLE_SEGMENTS);
+  if (options.midpoint_handle) {
+    const float4 mid_outline = outline_color_for(mid_color);
+    immUniformColor4f(mid_outline.x, mid_outline.y, mid_outline.z, mid_outline.w);
+    imm_draw_circle_wire_3d(pos, mid_px.x, mid_px.y, mid_radius, HANDLE_SEGMENTS);
+  }
 
   immUnbindProgram();
 }
@@ -204,7 +208,8 @@ int hit_test(const float2 &start_px,
              const float2 &end_px,
              const float midpoint,
              const float2 &mval,
-             const float hit_radius)
+             const float hit_radius,
+             const bool midpoint_handle)
 {
   /* Nearest marker wins, with each marker's drawn size as its hit radius. Picking the midpoint
    * first, as this used to, made the start handle unreachable on a short gradient: the midpoint
@@ -222,6 +227,9 @@ int hit_test(const float2 &start_px,
   int best = NONE;
   float best_dist = hit_radius;
   for (const Handle &handle : handles) {
+    if (handle.id == MID && !midpoint_handle) {
+      continue;
+    }
     const float dist = math::distance(handle.point, mval);
     if (dist <= handle.radius && dist <= best_dist) {
       best = handle.id;

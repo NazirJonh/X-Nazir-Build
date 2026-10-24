@@ -39,7 +39,8 @@ int hit_test(const float2 &start_px,
              const float2 &end_px,
              float midpoint,
              const float2 &mval,
-             float hit_radius = HANDLE_RADIUS);
+             float hit_radius = HANDLE_RADIUS,
+             bool midpoint_handle = true);
 
 /**
  * Optional styling for #draw. The Color Gradient uses the neutral overlay colors; the Gradient
@@ -57,6 +58,8 @@ struct DrawOptions {
   float start_radius_scale = 0.6f;
   /** Draw a filled arrowhead on the line, pointing from the start towards the end. */
   bool direction_arrow = false;
+  /** Draw the midpoint marker: the Ramp distribution of a Gradient Layer has no midpoint to move. */
+  bool midpoint_handle = true;
 };
 
 /**

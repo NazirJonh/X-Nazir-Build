@@ -2248,12 +2248,13 @@ struct PaintModeSettings {
    */
   char view_pass_sync_off = 0;
   /**
-   * Whether the Gradient Layer gizmo's dragged handles snap to the surface. Zero (also for files
-   * saved before the option existed) lets the handle follow the mouse in the view plane through
-   * its current position; UV rows are always surface-bound, since a UV coordinate has no
-   * off-surface meaning.
+   * Whether the Gradient Layer gizmo's dragged handles move freely instead of snapping to the
+   * surface under the cursor, to aim the gradient's direction. Stored negated, so zero (a new scene,
+   * and files saved before the option existed) means "snap". Free handles of an Object or
+   * Generated row follow the mouse in the view plane through their current position; those of a UV
+   * row continue the UV mapping past the island and the mesh.
    */
-  char gradient_snap = 0;
+  char gradient_free = 0;
   /** #ePaintGradientToolMode: Move keeps an accidental stroke from rebuilding the line. */
   int8_t gradient_tool_mode = PAINT_GRADIENT_TOOL_MOVE;
   char _pad[4] = {};

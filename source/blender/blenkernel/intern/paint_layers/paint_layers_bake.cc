@@ -827,7 +827,7 @@ static uint64_t bake_hash_layer(uint64_t h,
     for (const float value : layer.gradient->end) {
       h = bake_hash_float(h, value);
     }
-    h = bake_hash_float(h, layer.gradient->midpoint);
+    h = bake_hash_float(h, BKE_paint_layers_gradient_midpoint_effective(*layer.gradient));
     h = bake_hash_mix(h, BKE_paint_layers_gradient_ramp_hash(layer.gradient->ramp));
   }
   /* A row's own blend is applied over its cache, so it moves no hash of that cache. A child's is

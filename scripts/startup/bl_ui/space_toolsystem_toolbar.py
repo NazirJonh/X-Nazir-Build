@@ -1736,7 +1736,9 @@ def _draw_layer_gradient_tool_settings(layout, context, layer, region_is_header)
     row.label(text="Layer Gradient", icon='LAYER_ACTIVE')
     row.prop(layer, "gradient_gizmo", text="", toggle=True, icon='GIZMO')
     layout.prop(layer, "gradient_type", expand=True)
-    layout.prop(layer, "gradient_midpoint", slider=True)
+    layout.prop(layer, "gradient_distribution", expand=True)
+    if layer.gradient_distribution == 'MIDPOINT':
+        layout.prop(layer, "gradient_midpoint", slider=True)
     layout.prop(layer, "gradient_repeat")
 
     paint_mode = context.tool_settings.paint_mode
@@ -1748,9 +1750,6 @@ def _draw_layer_gradient_tool_settings(layout, context, layer, region_is_header)
               text="" if region_is_header else "Snap to Surface",
               toggle=True,
               icon='SNAP_ON' if paint_mode.gradient_snap else 'SNAP_OFF')
-    # A UV line lives on the surface by definition; only Object/Generated rows can be placed in
-    # space, so the toggle is meaningless there.
-    snap.enabled = layer.gradient_space != 'UV'
 
     if not region_is_header:
         layout.label(text="Move: drag the handles. Stroke: drag to redraw the line.", icon='INFO')

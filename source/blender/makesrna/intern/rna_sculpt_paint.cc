@@ -3462,16 +3462,17 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       "What a drag in the viewport does while the Color Gradient tool edits a Gradient row");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
-  /* The Gradient Layer gizmo's free placement: on, a dragged handle is raycast onto the surface;
-   * off, it follows the mouse in the view plane through its current position. */
+  /* The Gradient Layer gizmo's placement: on (the default), a dragged handle is raycast onto the
+   * surface; off, it moves freely so the direction can be aimed. Stored negated. */
   prop = RNA_def_property(srna, "gradient_snap", PROP_BOOLEAN, PROP_NONE);
-  RNA_def_property_boolean_sdna(prop, nullptr, "gradient_snap", 1);
-  RNA_def_property_boolean_default(prop, false);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "gradient_free", 1);
   RNA_def_property_ui_text(
       prop,
       "Snap Gradient Handles",
-      "Place a dragged Gradient Layer handle on the surface; disabled, the handle follows the "
-      "mouse in the view plane through its current position (UV rows are always surface-bound)");
+      "Place a dragged Gradient Layer handle on the surface under the cursor; disabled, an "
+      "Object or Generated handle follows the mouse in the view plane through its current "
+      "position, and a UV handle moves on the plane of the triangle it sits on, so the line can "
+      "leave the island and the mesh");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
   prop = RNA_def_property(srna, "canvas_image", PROP_POINTER, PROP_NONE);

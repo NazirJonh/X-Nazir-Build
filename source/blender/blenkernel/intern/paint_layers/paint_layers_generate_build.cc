@@ -621,7 +621,8 @@ void PaintLayersTreeBuilder::gradient_line_inputs_create(LayerGroup &group,
   bNodeTreeInterfaceSocket *midpoint = layer_group_value_input(
       group, base, "NodeSocketFloat", ROLE_GRADIENT_MIDPOINT, row.marker, -1);
   if (midpoint != nullptr) {
-    group_input_default_set(group, *midpoint, row.gradient->midpoint);
+    group_input_default_set(
+        group, *midpoint, BKE_paint_layers_gradient_midpoint_effective(*row.gradient));
     gradient_midpoint_inputs_.add(&row, midpoint);
   }
   SNPRINTF(base, "%s Gradient Type", label);

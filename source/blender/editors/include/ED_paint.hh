@@ -525,6 +525,14 @@ void ED_image_paint_select_transform_gizmo_setup(wmGizmoGroupType *gzgt);
 /** Register the gizmo group that edits the shown layer row's UV mapping (offset/scale/rotation). */
 void ED_image_paint_layer_mapping_gizmo_setup(wmGizmoGroupType *gzgt);
 
+/* `sculpt_layer_mask_edit.cc` */
+
+/**
+ * Make \a tool_id the active tool of the 3D View, from any editor of the window. A failure to
+ * switch is ignored: every caller treats the tool as a convenience, never as a requirement.
+ */
+void ED_paint_view3d_tool_id_set(bContext *C, const char *tool_id);
+
 /* `paint_layers_gradient_gizmo.cc` */
 
 /** Register the custom gizmo type the Gradient Layer handles use in both editors. */

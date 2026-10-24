@@ -2596,7 +2596,7 @@ static uint64_t composite_gradient_hash(uint64_t hash, const PaintMaterialCompos
   hash = get_default_hash(hash,
                           gradient.payload.end[1],
                           gradient.payload.end[2],
-                          gradient.payload.midpoint);
+                          BKE_paint_layers_gradient_midpoint_effective(gradient.payload));
   /* The approximate and exact variants must not share a cache entry. The content revision, unlike
    * the identity key, changes when a notifier forces the same object/UV/size surface to rebuild. */
   hash = get_default_hash(hash,

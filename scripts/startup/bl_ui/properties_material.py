@@ -616,9 +616,12 @@ def draw_material_gradient_layer(layout, context, owner, layer, draw_channels=Tr
     col.prop(layer, "gradient_space", expand=True)
     col.prop(layer, "gradient_type", expand=True)
     col.prop(layer, "gradient_repeat")
-    col.prop(layer, "gradient_midpoint", slider=True)
-    row = layout.row(align=True)
-    row.prop(layer, "gradient_gizmo", text="Show Gizmo", toggle=True, icon='GIZMO')
+    # The ramp is always the source of the colors. Two colors are spread most easily with the
+    # midpoint; with several, the stops of the ramp place them.
+    col.separator()
+    col.prop(layer, "gradient_distribution", expand=True)
+    if layer.gradient_distribution == 'MIDPOINT':
+        col.prop(layer, "gradient_midpoint", slider=True)
     layout.separator()
     if layer.gradient_supported and layer.gradient_ramp is not None:
         layout.template_color_ramp(layer, "gradient_ramp", expand=True)
@@ -634,6 +637,14 @@ def draw_material_gradient_layer(layout, context, owner, layer, draw_channels=Tr
         line.label(text="Object units", icon='INFO')
     elif space == 'GENERATED':
         line.label(text="0..1, object bounding box", icon='INFO')
+    layout.separator()
+    header, panel = layout.panel("material_gradient_display", default_closed=True)
+    header.label(text="Display")
+    if panel:
+        panel.prop(layer, "gradient_gizmo", text="Show Gizmo", toggle=True, icon='GIZMO')
+        sub = panel.row(align=True)
+        sub.active = layer.gradient_gizmo
+        sub.prop(layer, "gradient_gizmo_display", expand=True)
     layout.separator()
     if draw_channels:
         draw_material_layer_channels(layout, context, owner, layer)

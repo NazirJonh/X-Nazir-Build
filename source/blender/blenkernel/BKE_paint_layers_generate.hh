@@ -46,6 +46,12 @@ struct PaintLayersBuildContext {
    */
   bNodeTree *blend_group = nullptr;
   /**
+   * Shared group that turns a UV coordinate and a Gradient's line into its ramp position, or null
+   * when the description has no gradient. The same group is instantiated in every Gradient row's
+   * group.
+   */
+  bNodeTree *gradient_group = nullptr;
+  /**
    * Hands out the empty node group that holds \a layer's own nodes, named and marked as that
    * layer's. Required: the build puts every layer in a group of its own, so a caller that cannot
    * create data-blocks cannot build.

@@ -365,6 +365,12 @@ inline bool paint_layer_channel_contributes(const Material &ma,
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
     return paint_layer_channel_live(record);
   }
+  /* A generator has no map or flat alpha: its live record is the whole condition. A tangent normal
+   * is not a colour a ramp can produce, so Normal takes no part in a generator whatever the record
+   * says. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
+    return paint_layer_channel_live(record) && record->channel != PAINT_MATERIAL_CHANNEL_NORMAL;
+  }
   return paint_layer_channel_contributes(record);
 }
 
@@ -397,6 +403,10 @@ inline bool paint_layer_effect_lays(const Material &ma,
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(effect, channel);
   if (!paint_layer_channel_live(record)) {
     return false;
+  }
+  if (paint_layer_kind_has_flag(effect, PAINT_LAYER_KIND_GENERATES)) {
+    /* A generator correction produces its colour and coverage itself; Normal is not a colour. */
+    return channel != PAINT_MATERIAL_CHANNEL_NORMAL;
   }
   if (record->image != nullptr) {
     return true;
@@ -533,7 +543,8 @@ inline bool paint_layer_mask_item_lays(const MaterialPaintLayer &item)
   const MaterialPaintLayerChannel *record = paint_layer_channel_find(
       item, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   return paint_layer_channel_live(record) &&
-         (record->image != nullptr || paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_FLAT_VALUE));
+         (record->image != nullptr || paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_FLAT_VALUE) ||
+          paint_layer_kind_has_flag(item, PAINT_LAYER_KIND_GENERATES));
 }
 
 /**

@@ -18,6 +18,7 @@
 #include "BKE_node_tree_update.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_perf_debug.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -63,6 +64,57 @@
 #include "paint_material_cache_common.hh"
 
 namespace blender {
+
+/* -------------------------------------------------------------------- */
+/** \name Node group markers
+ * \{ */
+
+/** The key shared by every group this module marks; only the value says which group it is. */
+static constexpr const char *NODE_GROUP_MARKER_PROP = "pbr_paint_node_group";
+
+/** The marker value on \a tree_id, or null when unmarked. */
+static const char *node_group_marker_get(const ID &tree_id)
+{
+  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(&tree_id));
+  if (properties == nullptr) {
+    return nullptr;
+  }
+  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
+      properties, NODE_GROUP_MARKER_PROP, IDP_STRING);
+  return (marker != nullptr) ? IDP_string_get(marker) : nullptr;
+}
+
+bool paint_material_group_has_marker(const bNode &node, const char *marker_value)
+{
+  if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
+    return false;
+  }
+  const char *marker = node_group_marker_get(*node.id);
+  return marker != nullptr && STREQ(marker, marker_value);
+}
+
+bNodeTree *paint_material_group_find(Main &bmain, const char *marker_value)
+{
+  for (bNodeTree &ntree : bmain.nodetrees) {
+    const char *marker = node_group_marker_get(ntree.id);
+    if (marker != nullptr && STREQ(marker, marker_value)) {
+      return &ntree;
+    }
+  }
+  return nullptr;
+}
+
+void paint_material_group_marker_set(bNodeTree &group, const char *marker_value)
+{
+  IDProperty *properties = IDP_EnsureProperties(&group.id);
+  IDPropertyTemplate value = {0};
+  value.string.str = const_cast<char *>(marker_value);
+  value.string.len = int(strlen(marker_value)) + 1;
+  value.string.subtype = IDP_STRING_SUB_UTF8;
+  IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, NODE_GROUP_MARKER_PROP));
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Stack Derivation
@@ -945,6 +997,29 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
   else if (layer.adjustment_filter != 0) {
     /* The colour is the filtered stack below, which only the caller holds: it filled r_color. */
   }
+  else if (layer.gradient.enabled) {
+    /* A Gradient row has no map: each texel evaluates the same line and ramp the shader reads. The
+     * fourth component carries the ramp's alpha for a colour channel and one for a scalar. */
+    const int width = std::max(layer.gradient.width, 1);
+    const int height = std::max(layer.gradient.height, 1);
+    for (int ty = 0; ty < BLI_rcti_size_y(&tile); ty++) {
+      const float v = (float(tile.ymin + ty) + 0.5f) / float(height);
+      for (int tx = 0; tx < BLI_rcti_size_x(&tile); tx++) {
+        const float u = (float(tile.xmin + tx) + 0.5f) / float(width);
+        const float t = BKE_paint_layers_gradient_factor(layer.gradient.payload, float3(u, v, 0.0f));
+        float *p = r_color + (int64_t(ty) * BLI_rcti_size_x(&tile) + tx) * 4;
+        if (layer.gradient.color_channel) {
+          BKE_paint_layers_gradient_color(layer.gradient.payload, t, p);
+        }
+        else {
+          const float value = layer.gradient.scalar_start +
+                              (layer.gradient.scalar_end - layer.gradient.scalar_start) * t;
+          p[0] = p[1] = p[2] = value;
+          p[3] = 1.0f;
+        }
+      }
+    }
+  }
   else if (layer.color_ibuf != nullptr) {
     composite_decode_tile(layer.color_ibuf, layer.color_colorspace_name, tile, r_color);
     if (layer.normal_directx) {
@@ -976,7 +1051,12 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
     const bool own_alpha = (layer.color_alpha_coverage && layer.color_ibuf != nullptr) ||
                            (mask == nullptr && layer.mask_from_alpha);
     float content = own_alpha ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
-    if (layer.is_folder) {
+    if (layer.gradient.enabled) {
+      /* A colour gradient covers by the ramp's alpha; a scalar gradient is opaque and blends by
+       * its opacity alone. */
+      content = layer.gradient.color_channel ? clamp_f(r_color[i * 4 + 3], 0.0f, 1.0f) : 1.0f;
+    }
+    else if (layer.is_folder) {
       /* A folder covers by what its contents covered, not by the alpha of the colour it reads. */
       content = clamp_f(folder_coverage[i], 0.0f, 1.0f);
     }
@@ -1161,7 +1241,8 @@ static void composite_layer_render(const PaintMaterialCompositeLayer &layer,
 template<typename LayerT>
 static bool composite_layer_has_content(const LayerT &layer, const bool has_map)
 {
-  return has_map || layer.has_constant_color || layer.adjustment_filter != 0;
+  return has_map || layer.has_constant_color || layer.adjustment_filter != 0 ||
+         layer.gradient.enabled;
 }
 
 static void composite_folder_accumulate(const PaintMaterialCompositeLayer &folder,
@@ -1269,6 +1350,11 @@ static bool composite_layer_validate_linear(const PaintMaterialCompositeLayer &l
         Span<PaintMaterialCompositeLayer>(layer.children.data(), int64_t(layer.children.size())),
         width,
         height);
+  }
+  if (layer.gradient.enabled && (layer.gradient.width <= 0 || layer.gradient.height <= 0)) {
+    /* Without a map the size has to come from the description; a zero would read every texel at
+     * the same UV. */
+    return false;
   }
   if (layer.color_ibuf != nullptr) {
     if (!composite_ibuf_is_rgba(layer.color_ibuf, width, height)) {
@@ -2137,6 +2223,14 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       layer.content_corrections.append(buffer);
     }
     static_cast<PaintMaterialCompositeRowParams &>(layer) = image_layer;
+    layer.gradient = image_layer.gradient;
+    if (layer.gradient.enabled) {
+      /* The gradient has no map of its own: its UV grid is the composite's, not the size the
+       * description was created at. A stack whose bottom map is smaller than the material would
+       * otherwise read only part of the ramp. */
+      layer.gradient.width = ref_width;
+      layer.gradient.height = ref_height;
+    }
     /* A clipping wrap of a Material row reaches its coverage as a 0/1 factor, since the row does
      * not cover through its map's alpha. Folded after the row's own coverage is acquired and
      * before the mask items are read, which still multiply on top in the evaluator. */
@@ -2305,6 +2399,15 @@ static bool composite_stack_bottom_layer_info(Span<PaintMaterialCompositeImageLa
       }
       continue;
     }
+    /* A Gradient has no map: the description carries the material's map size. */
+    if (layer.gradient.enabled) {
+      if (layer.gradient.width <= 0 || layer.gradient.height <= 0) {
+        continue;
+      }
+      r_width = layer.gradient.width;
+      r_height = layer.gradient.height;
+      return true;
+    }
     /* A row kept only for its corrections is as big as the first map it has. */
     Image *size_image = layer.color_image;
     const ImageUser *size_iuser = layer.color_iuser;
@@ -2369,6 +2472,30 @@ static uint64_t composite_mapping_hash(uint64_t hash, const PaintMaterialComposi
                           mapping.tangent_normal);
 }
 
+/** Fold a Gradient payload into \a hash: every parameter moves the composited pixels. */
+static uint64_t composite_gradient_hash(uint64_t hash, const PaintMaterialCompositeGradient &gradient)
+{
+  if (!gradient.enabled) {
+    return hash;
+  }
+  hash = get_default_hash(hash,
+                          gradient.color_channel,
+                          int(gradient.payload.type),
+                          int(gradient.payload.repeat));
+  hash = get_default_hash(hash,
+                          gradient.payload.start[0],
+                          gradient.payload.start[1],
+                          gradient.payload.end[0],
+                          gradient.payload.end[1],
+                          gradient.payload.midpoint);
+  hash = get_default_hash(hash,
+                          gradient.scalar_start,
+                          gradient.scalar_end,
+                          gradient.width,
+                          gradient.height);
+  return get_default_hash(hash, BKE_paint_layers_gradient_ramp_hash(gradient.payload.ramp));
+}
+
 uint64_t BKE_paint_material_composite_stack_hash(
     Span<PaintMaterialCompositeImageLayer> image_layers)
 {
@@ -2403,6 +2530,7 @@ uint64_t BKE_paint_material_composite_stack_hash(
     /* A slice has no Image to name its contents: the description hash keeps a stale composite from
      * surviving an edit above the marker. */
     hash = get_default_hash(hash, layer.anchor_point_hash);
+    hash = composite_gradient_hash(hash, layer.gradient);
     /* An adjustment is its filter and what it was told. */
     hash = get_default_hash(hash, int(layer.adjustment_filter));
     for (const float param : layer.adjustment_params) {
@@ -2660,6 +2788,13 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
   const char *byte_colorspace = nullptr;
   if (!composite_stack_bottom_layer_info(image_layers, width, height, &byte_colorspace)) {
     return nullptr;
+  }
+  if (byte_colorspace == nullptr) {
+    /* A Gradient-only stack has no image to take the encoding from: use the channel's role, the
+     * same one a composited map gets. */
+    const bool is_color = BKE_paint_material_channel_info(eMaterialPaintChannel(channel)).is_color;
+    byte_colorspace = IMB_colormanagement_role_colorspace_name_get(
+        is_color ? COLOR_ROLE_DEFAULT_BYTE : COLOR_ROLE_DATA);
   }
 
   CompositeCacheKey key;

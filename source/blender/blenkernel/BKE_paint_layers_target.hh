@@ -98,6 +98,8 @@ enum class PaintLayersTargetStatus : int8_t {
   ChannelNotInMode,
   /** Mask: the row has no mask, or its kind is not a stroke target. */
   NoMask,
+  /** The row, the stack row a mask item or correction hangs on, or one of its folders is locked. */
+  Locked,
 };
 
 /** The resolved description row and channel a stroke paints into. */

@@ -158,6 +158,21 @@ inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";
 inline constexpr const char *ROLE_MAPPING_SCALE = "mapping_scale";
 /** #INPUT_ROLE_PROP value of a row's UV mapping rotation (a Vector input holding 0, 0, angle). */
 inline constexpr const char *ROLE_MAPPING_ROTATION = "mapping_rotation";
+/** #INPUT_ROLE_PROP value of a Gradient row's UV-space line start (a Vector input, z unused). */
+inline constexpr const char *ROLE_GRADIENT_START = "gradient_start";
+/** #INPUT_ROLE_PROP value of a Gradient row's UV-space line end (a Vector input, z unused). */
+inline constexpr const char *ROLE_GRADIENT_END = "gradient_end";
+/** #INPUT_ROLE_PROP value of a Gradient row's midpoint (a Float input). */
+inline constexpr const char *ROLE_GRADIENT_MIDPOINT = "gradient_midpoint";
+/** #INPUT_ROLE_PROP value of a Gradient row's type (a Float input holding the enum value). */
+inline constexpr const char *ROLE_GRADIENT_TYPE = "gradient_type";
+/** #INPUT_ROLE_PROP value of a Gradient row's repeat mode (a Float input). */
+inline constexpr const char *ROLE_GRADIENT_REPEAT = "gradient_repeat";
+/** #INPUT_ROLE_PROP value of a scalar channel's gradient start (a Float input; the channel tells
+ * which record it belongs to). */
+inline constexpr const char *ROLE_GRADIENT_VALUE_START = "gradient_value_start";
+/** #INPUT_ROLE_PROP value of a scalar channel's gradient end. */
+inline constexpr const char *ROLE_GRADIENT_VALUE_END = "gradient_value_end";
 /**
  * On a source-group wrapper's interface input: the row mapping value relayed into the wrapper.
  * The same three roles travel from the row group into the wrapper instance and down every private

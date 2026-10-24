@@ -20,6 +20,7 @@
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_math_color.h"
 #include "BLI_math_geom.h"
+#include "BLI_math_gradient.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
@@ -101,68 +102,13 @@ static float image_paint_gradient_sample_t(const float t_raw,
 {
   switch (repeat) {
     case ImagePaintGradientRepeat::Repeat:
-      return t_raw - floorf(t_raw);
-    case ImagePaintGradientRepeat::Reflect: {
-      const float wrapped = fmodf(t_raw, 2.0f);
-      return (wrapped > 1.0f) ? (2.0f - wrapped) : wrapped;
-    }
+      return math::gradient_repeat(t_raw);
+    case ImagePaintGradientRepeat::Reflect:
+      return math::gradient_reflect(t_raw);
     case ImagePaintGradientRepeat::None:
     default:
       return clamp_f(t_raw, 0.0f, 1.0f);
   }
-}
-
-float image_paint_gradient_remap_midpoint(const float t, const float midpoint)
-{
-  if (t <= 0.0f) {
-    return 0.0f;
-  }
-  if (t >= 1.0f) {
-    return 1.0f;
-  }
-
-  const float mid = clamp_f(midpoint, 0.001f, 0.999f);
-
-  /* Linear pass-through when the handle is centered. */
-  if (fabsf(mid - 0.5f) < 1e-4f) {
-    return t;
-  }
-
-  /* Two cubic Hermite segments meeting at (mid, 0.5) with C1 continuity.
-   *
-   * Tangents are assigned by the Catmull-Rom rule over the three knots
-   * (0,0), (mid,0.5), (1,1):
-   *   - start  : one-sided slope of segment 1  -> m_start = 0.5 / mid
-   *   - junction: global slope (1-0)/(1-0)      -> m_mid   = 1.0
-   *   - end    : one-sided slope of segment 2  -> m_end   = 0.5 / (1-mid)
-   *
-   * Because all three tangents are strictly positive and the unique interior
-   * critical point of each Hermite segment lies outside [0,1] for every
-   * mid in (0,1), both segments are guaranteed monotone -- no flat zones,
-   * no overshoot, no derivative discontinuity at the junction.
-   *
-   * At mid=0.5 the scaled tangents of both segments equal 0.5, so the
-   * cubic Hermite degenerates to the identity, matching the linear pass-through.
-   *
-   * Scaled tangents (slope * interval width):
-   *   segment 1: m_start * mid = 0.5,  m_mid * mid = mid
-   *   segment 2: m_mid * (1-mid) = (1-mid),  m_end * (1-mid) = 0.5
-   */
-  if (t <= mid) {
-    const float u = t / mid;
-    const float u2 = u * u;
-    const float u3 = u2 * u;
-    /* h10 * 0.5 + h01 * 0.5 + h11 * mid */
-    return (u3 - 2.0f * u2 + u) * 0.5f + (-2.0f * u3 + 3.0f * u2) * 0.5f + (u3 - u2) * mid;
-  }
-
-  const float im = 1.0f - mid;
-  const float u = (t - mid) / im;
-  const float u2 = u * u;
-  const float u3 = u2 * u;
-  /* h00 * 0.5 + h10 * im + h01 * 1.0 + h11 * 0.5 */
-  return (2.0f * u3 - 3.0f * u2 + 1.0f) * 0.5f + (u3 - 2.0f * u2 + u) * im +
-         (-2.0f * u3 + 3.0f * u2) + (u3 - u2) * 0.5f;
 }
 
 /**
@@ -203,7 +149,7 @@ static float image_paint_gradient_finish_t(const float t_raw,
                                            const float midpoint)
 {
   const float t = image_paint_gradient_sample_t(t_raw, repeat);
-  return image_paint_gradient_remap_midpoint(t, midpoint);
+  return math::gradient_remap_midpoint(t, midpoint);
 }
 
 /**

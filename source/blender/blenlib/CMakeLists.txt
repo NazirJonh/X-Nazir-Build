@@ -305,6 +305,7 @@ set(SRC
   BLI_math_filter.hh
   BLI_math_geom.h
   BLI_math_geom.hh
+  BLI_math_gradient.hh
   BLI_math_half.hh
   BLI_math_inline.h
   BLI_math_interp.hh

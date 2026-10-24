@@ -398,6 +398,33 @@ class PaintLayersTreeBuilder {
                                 KindEmitResult *r_out);
 
   /**
+   * What a Gradient row lays in the channel of \a ctx: the ColorRamp's colour and alpha for a
+   * colour channel, a grey mix of the channel's two ends for a scalar one. The Factor group
+   * instance and the ColorRamp node are shared by every channel of the row.
+   */
+  KindEmitResult gradient_source_emit(const RowEmitContext &ctx);
+
+  /**
+   * The row's instance of the shared Gradient Factor group, built on first use and shared by every
+   * channel of the row. Its UV input reads the row group's Texture Coordinate; Start, End, Midpoint,
+   * Type and Repeat read the row group's value inputs. Null while the build context has no gradient
+   * group or a socket is missing.
+   */
+  NodeOutput gradient_factor_ensure(bNodeTree &tree,
+                                    LayerGroup &group,
+                                    const MaterialPaintLayer &layer);
+
+  /**
+   * The row's ColorRamp node, keyed by the row's marker and built on first use. Its ColorBand is a
+   * copy of the description's ramp; a ramp edit regenerates the group, so this node is never
+   * updated in place (its storage change would need a node-property tag the value sync does not
+   * issue).
+   */
+  bNode *gradient_ramp_ensure(bNodeTree &tree,
+                              LayerGroup &group,
+                              const MaterialPaintLayer &layer);
+
+  /**
    * The output of the Material row's source group for \a channel, instancing the group in \a tree
    * once for the row, outside the frames since every channel of the row shares it. Null when the
    * row has no source group or it has no output for the channel; the caller then reads the row's
@@ -579,6 +606,19 @@ class PaintLayersTreeBuilder {
   Map<const MaterialPaintLayer *, std::pair<bNode *, bNodeTree *>> source_group_instances_;
   /** The taps this build published, one per (point, channel) and one per point for the mask. */
   Vector<AnchorPointTap> anchor_point_taps_;
+  /** A Gradient row's Factor group instance, shared by every channel of the row. */
+  Map<const MaterialPaintLayer *, NodeOutput> gradient_factors_;
+  /** A Gradient row's ColorRamp node, shared by every colour channel of the row. */
+  Map<const MaterialPaintLayer *, bNode *> gradient_ramps_;
+  /** A Gradient row's line, midpoint, type and repeat value inputs. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_start_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_end_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_midpoint_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_type_inputs_;
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> gradient_repeat_inputs_;
+  /** A scalar channel's two gradient ends, keyed by the row and the channel. */
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> gradient_value_start_inputs_;
+  Map<const MaterialPaintLayer *, Map<int, bNodeTreeInterfaceSocket *>> gradient_value_end_inputs_;
   /** The clip factor of a row's UV wrap, built once and shared by every map of the row. */
   Map<const MaterialPaintLayer *, NodeOutput> mapping_clip_masks_;
   /** A row's built mask factor, so the second channel reads the nodes the first one made. */

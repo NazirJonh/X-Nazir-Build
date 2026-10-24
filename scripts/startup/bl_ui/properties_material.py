@@ -604,6 +604,29 @@ class LayerMaterialButtonsPanel:
         return mat is not None and not mat.grease_pencil
 
 
+def draw_material_gradient_layer(layout, context, owner, layer):
+    """The Gradient panel: the ramp, its line and the channels that read them.
+
+    The generated graph is built from these values: the ColorRamp becomes a node in the row's
+    group, and the line and midpoint are inputs the Shader Editor shows as the group's sockets.
+    A scalar channel mixes its own two ends, drawn with the channel below.
+    """
+    col = layout.column(align=True)
+    col.prop(layer, "gradient_type", expand=True)
+    col.prop(layer, "gradient_repeat")
+    col.prop(layer, "gradient_midpoint", slider=True)
+    layout.separator()
+    if layer.gradient_supported and layer.gradient_ramp is not None:
+        layout.template_color_ramp(layer, "gradient_ramp", expand=True)
+    layout.separator()
+    line = layout.column(align=True)
+    line.label(text="Line (Z is ignored in UV space)")
+    line.prop(layer, "gradient_start", text="Start")
+    line.prop(layer, "gradient_end", text="End")
+    layout.separator()
+    draw_material_layer_channels(layout, context, owner, layer)
+
+
 class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
     """The Layer Material tab for a layered material: the active layer read from the description,
     its opacity and its channels.
@@ -680,6 +703,11 @@ class LAYER_MATERIAL_PT_layers(LayerMaterialButtonsPanel, Panel):
             )
             if layer.material is None:
                 layout.label(text="No source material", icon='ERROR')
+            return
+        # A Gradient is procedural: its parameters and its ramp replace the map controls.
+        if layer.source == 'GENERATOR':
+            layout.separator()
+            draw_material_gradient_layer(layout, context, owner, layer)
             return
         # A filter has no map or channel records: what it is told is the parameters of its kind.
         if layer.source == 'FILTER':
@@ -959,8 +987,8 @@ class LAYER_MATERIAL_PT_row_result(LayerMaterialButtonsPanel, Panel):
         if not super().poll(context):
             return False
         owner, layer = cls._active_layer(context)
-        # A row that reads a material owns no maps to bake into.
-        if owner is None or layer is None or layer.source == 'MATERIAL':
+        # A row that reads a material owns no maps to bake into; a Gradient owns none either.
+        if owner is None or layer is None or layer.source in {'MATERIAL', 'GENERATOR'}:
             return False
         return cls._shown_mask_item(context, owner, layer) is None
 

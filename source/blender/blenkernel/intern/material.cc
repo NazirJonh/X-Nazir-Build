@@ -71,6 +71,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_layers_composite.hh"
@@ -134,6 +135,7 @@ void BKE_material_paint_layer_free(MaterialPaintLayer *layer)
   layer->channels_num = 0;
   /* The maps of the bake cache are released like the channel maps, by the generic free pass. */
   MEM_SAFE_DELETE(layer->bake);
+  BKE_paint_layers_gradient_free(*layer);
   /* The ID users of the parameters are released by the generic free pass through
    * #material_paint_layer_foreach_id, like the channel maps. */
   if (layer->system_properties != nullptr) {
@@ -161,6 +163,8 @@ static MaterialPaintLayer *material_paint_layer_copy(const MaterialPaintLayer &s
    * users; the generated-tree copy then gives it maps of its own (see maps_copy). */
   dst->bake = (src.bake != nullptr) ? static_cast<MaterialPaintLayerBake *>(MEM_dupalloc(src.bake)) :
                                       nullptr;
+  /* The generator payload is plain sub-data owned by the row, so the copy gets one of its own. */
+  BKE_paint_layers_gradient_copy(*dst, src);
   /* Like the channel maps, the users of ID parameters are added by the generic copy pass. */
   if (src.system_properties != nullptr) {
     dst->system_properties = IDP_CopyProperty_ex(src.system_properties,
@@ -235,6 +239,9 @@ static void material_paint_layer_blend_write(BlendWriter *writer, const Material
   if (layer.bake != nullptr) {
     writer->write_struct(layer.bake);
   }
+  if (layer.gradient != nullptr) {
+    writer->write_struct(layer.gradient);
+  }
   if (layer.system_properties != nullptr) {
     IDP_BlendWrite(writer, layer.system_properties);
   }
@@ -272,6 +279,12 @@ static void material_paint_layer_blend_read(BlendDataReader *reader, MaterialPai
     layer.channels_num = 0;
   }
   BLO_read_struct(reader, MaterialPaintLayerBake, &layer.bake);
+  BLO_read_struct(reader, MaterialPaintLayerGradient, &layer.gradient);
+  if (BKE_paint_layers_gradient_supported(layer)) {
+    /* A generator row written before the payload or its ramp existed (or by a failed allocation):
+     * give it the defaults so the generated graph and the CPU have something to read. */
+    BKE_paint_layers_gradient_ensure(layer);
+  }
   if (layer.bake != nullptr && !BLO_read_data_is_undo(reader)) {
     /* The bake maps are generated images whose pixels the file does not keep, and the pixel-edit
      * subscription that vouches for them is runtime only. A loaded bake therefore proves nothing:

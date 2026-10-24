@@ -24,6 +24,8 @@
 #include "DNA_node_tree_interface_types.h"
 #include "DNA_node_types.h"
 
+#include "paint_material_composite_internal.hh"
+
 #include <cstring>
 
 namespace blender {
@@ -36,56 +38,12 @@ namespace blender {
  * picker and #Node Groups list (see #interface_template_id). NOTE: do not translate. */
 static const char *NORMAL_COMBINE_TREE_NAME = ".PBR Normal Combine";
 
-/**
- * The IDProperty marking the trees this module recognizes as one of its own groups, told apart by
- * value. Kept local here: the Normal Combine group is the only group the new path marks.
- */
-static constexpr const char *NODE_GROUP_MARKER_PROP = "pbr_paint_node_group";
-/** #NODE_GROUP_MARKER_PROP value of the Normal Combine group. */
+/** Marker value of the Normal Combine group; see #paint_material_group_has_marker. */
 static constexpr const char *NORMAL_COMBINE_MARKER_VALUE = "NORMAL_COMBINE";
-
-/** The #NODE_GROUP_MARKER_PROP value on \a tree_id, or null when unmarked. */
-static const char *node_tree_group_marker_get(const ID &tree_id)
-{
-  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(&tree_id));
-  if (properties == nullptr) {
-    return nullptr;
-  }
-  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-      properties, NODE_GROUP_MARKER_PROP, IDP_STRING);
-  return (marker != nullptr) ? IDP_string_get(marker) : nullptr;
-}
-
-/** Stamp the shared Normal Combine group tree. */
-static void normal_combine_tree_marker_set(bNodeTree &group)
-{
-  IDProperty *properties = IDP_EnsureProperties(&group.id);
-  IDPropertyTemplate value = {0};
-  value.string.str = const_cast<char *>(NORMAL_COMBINE_MARKER_VALUE);
-  value.string.len = int(strlen(NORMAL_COMBINE_MARKER_VALUE)) + 1;
-  value.string.subtype = IDP_STRING_SUB_UTF8;
-  IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, NODE_GROUP_MARKER_PROP));
-}
 
 bool BKE_paint_material_is_normal_combine_group(const bNode &node)
 {
-  if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
-    return false;
-  }
-  const char *marker = node_tree_group_marker_get(*node.id);
-  return marker != nullptr && STREQ(marker, NORMAL_COMBINE_MARKER_VALUE);
-}
-
-/** The group already in \a bmain, or null. Found by its marker, so a rename does not lose it. */
-static bNodeTree *normal_combine_group_find(Main &bmain)
-{
-  for (bNodeTree &ntree : bmain.nodetrees) {
-    const char *marker = node_tree_group_marker_get(ntree.id);
-    if (marker != nullptr && STREQ(marker, NORMAL_COMBINE_MARKER_VALUE)) {
-      return &ntree;
-    }
-  }
-  return nullptr;
+  return paint_material_group_has_marker(node, NORMAL_COMBINE_MARKER_VALUE);
 }
 
 /** A Vector Math node set to \a operation. */
@@ -111,7 +69,7 @@ static void normal_combine_range_map_set(bNode &node, const float scale, const f
 
 bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
 {
-  if (bNodeTree *existing = normal_combine_group_find(bmain)) {
+  if (bNodeTree *existing = paint_material_group_find(bmain, NORMAL_COMBINE_MARKER_VALUE)) {
     /* A file saved before the dot scheme carries the bare name; rename it in place. Found by
      * marker, so the name never decides which tree this is. */
     if (!STREQ(existing->id.name + 2, NORMAL_COMBINE_TREE_NAME)) {
@@ -121,7 +79,7 @@ bNodeTree *BKE_paint_material_normal_combine_group_ensure(Main &bmain)
   }
 
   bNodeTree *group = bke::node_tree_add_tree(&bmain, NORMAL_COMBINE_TREE_NAME, "ShaderNodeTree");
-  normal_combine_tree_marker_set(*group);
+  paint_material_group_marker_set(*group, NORMAL_COMBINE_MARKER_VALUE);
 
   /* Interface identifiers are handed out in creation order: `Socket_0` .. `Socket_3`. */
   group->tree_interface.add_socket(

@@ -31,6 +31,7 @@
 #include "BKE_image.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_report.hh"
 
 #include "paint_layers_intern.hh"
@@ -172,6 +173,29 @@ static bool composite_row_source_describe(const Material &ma,
   }
   if (!paint_layer_row_participates(ma, layer, channel)) {
     return false;
+  }
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
+    /* A Gradient: no map and no constant, only its line, ramp and the channel's scalar ends. */
+    if (layer.gradient == nullptr) {
+      return false;
+    }
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+        eMaterialPaintChannel(channel));
+    out.gradient.enabled = true;
+    out.gradient.color_channel = info.is_color;
+    out.gradient.payload = dna::shallow_copy(*layer.gradient);
+    const int size = (ma.paint_layers_image_size > 0) ? int(ma.paint_layers_image_size) : 4096;
+    out.gradient.width = size;
+    out.gradient.height = size;
+    if (!info.is_color) {
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+      if (record == nullptr) {
+        return false;
+      }
+      out.gradient.scalar_start = record->value[0];
+      out.gradient.scalar_end = record->value[1];
+    }
+    return true;
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     /* The same decision the generator makes (#PaintLayersTreeBuilder::material_source_emit): the

@@ -29,6 +29,7 @@
 #include "BKE_node_tree_interface.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_material_composite.hh"
 
@@ -2484,6 +2485,216 @@ NodeOutput PaintLayersTreeBuilder::anchor_point_mask_item_emit(LayerGroup &group
   return linked.coverage;
 }
 
+NodeOutput PaintLayersTreeBuilder::gradient_factor_ensure(bNodeTree &tree,
+                                                          LayerGroup &group,
+                                                          const MaterialPaintLayer &layer)
+{
+  if (const NodeOutput *cached = gradient_factors_.lookup_ptr(&layer)) {
+    return *cached;
+  }
+  if (ctx_.gradient_group == nullptr || tree.typeinfo == nullptr ||
+      tree.typeinfo->group_idname == nullptr)
+  {
+    return {};
+  }
+  bNode *instance = bke::node_add_node(nullptr, tree, tree.typeinfo->group_idname);
+  if (instance == nullptr) {
+    return {};
+  }
+  instance->id = &ctx_.gradient_group->id;
+  id_us_plus(&ctx_.gradient_group->id);
+  STRNCPY_UTF8(instance->label, "Gradient Factor");
+  nodes::update_node_declaration_and_sockets(tree, *instance);
+  grid_.place(*instance, layout::Column::Source, 0);
+
+  const auto discard = [&]() -> NodeOutput {
+    bke::node_remove_node(nullptr, tree, *instance, true, false);
+    return {};
+  };
+
+  bNode *coord = this->uv_coordinate_ensure(tree);
+  bNodeSocket *uv = (coord != nullptr) ? socket_out(*coord, "UV") : nullptr;
+  bNodeSocket *uv_in = bke::node_find_socket(
+      *instance, SOCK_IN, UString::from_ptr_noinline(GRADIENT_GROUP_ID_UV));
+  if (uv == nullptr || uv_in == nullptr) {
+    return discard();
+  }
+  bke::node_add_link(tree, *coord, *uv, *instance, *uv_in);
+
+  struct GradientInput {
+    Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> *inputs;
+    const char *identifier;
+  };
+  const GradientInput inputs[5] = {
+      {&gradient_start_inputs_, GRADIENT_GROUP_ID_START},
+      {&gradient_end_inputs_, GRADIENT_GROUP_ID_END},
+      {&gradient_midpoint_inputs_, GRADIENT_GROUP_ID_MIDPOINT},
+      {&gradient_type_inputs_, GRADIENT_GROUP_ID_TYPE},
+      {&gradient_repeat_inputs_, GRADIENT_GROUP_ID_REPEAT},
+  };
+  for (const GradientInput &input : inputs) {
+    bNodeTreeInterfaceSocket *const *iface = input.inputs->lookup_ptr(&layer);
+    bNodeSocket *source = (iface != nullptr) ?
+                              this->group_input_socket(group, **iface) :
+                              nullptr;
+    bNodeSocket *target = bke::node_find_socket(
+        *instance, SOCK_IN, UString::from_ptr_noinline(input.identifier));
+    if (source == nullptr || target == nullptr) {
+      return discard();
+    }
+    bke::node_add_link(tree, *group.group_input, *source, *instance, *target);
+  }
+
+  bNodeSocket *factor = bke::node_find_socket(
+      *instance, SOCK_OUT, UString::from_ptr_noinline(GRADIENT_GROUP_ID_FACTOR));
+  if (factor == nullptr) {
+    return discard();
+  }
+  const NodeOutput out{instance, factor};
+  gradient_factors_.add(&layer, out);
+  return out;
+}
+
+bNode *PaintLayersTreeBuilder::gradient_ramp_ensure(bNodeTree &tree,
+                                                    LayerGroup & /*group*/,
+                                                    const MaterialPaintLayer &layer)
+{
+  if (bNode **cached = gradient_ramps_.lookup_ptr(&layer)) {
+    return *cached;
+  }
+  if (layer.gradient == nullptr) {
+    return nullptr;
+  }
+  bNode *ramp = bke::node_add_static_node(nullptr, tree, SH_NODE_VALTORGB);
+  if (ramp == nullptr || ramp->storage == nullptr) {
+    return nullptr;
+  }
+  *static_cast<ColorBand *>(ramp->storage) = layer.gradient->ramp;
+  grid_.place(*ramp, layout::Column::Source, 1);
+  gradient_ramps_.add(&layer, ramp);
+  return ramp;
+}
+
+KindEmitResult PaintLayersTreeBuilder::gradient_source_emit(const RowEmitContext &ctx)
+{
+  bNodeTree &tree = ctx.tree;
+  LayerGroup &group = ctx.group;
+  const MaterialPaintLayerGradient *gradient = ctx.layer.gradient;
+  if (gradient == nullptr) {
+    return {};
+  }
+  if (ctx.channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return {};
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+      eMaterialPaintChannel(ctx.channel));
+  const NodeOutput factor = this->gradient_factor_ensure(tree, group, ctx.layer);
+  if (factor.socket == nullptr) {
+    return {};
+  }
+
+  if (info.is_color) {
+    bNode *ramp = this->gradient_ramp_ensure(tree, group, ctx.layer);
+    if (ramp == nullptr) {
+      return {};
+    }
+    bNodeSocket *fac = socket_in(*ramp, "Fac");
+    bNodeSocket *color = socket_out(*ramp, "Color");
+    bNodeSocket *alpha = socket_out(*ramp, "Alpha");
+    if (fac == nullptr || color == nullptr || alpha == nullptr) {
+      return {};
+    }
+    /* The ramp node is shared by every colour channel of the row: the factor is linked once. */
+    if (fac->link == nullptr) {
+      bke::node_add_link(tree, *factor.node, *factor.socket, *ramp, *fac);
+    }
+    KindEmitResult out;
+    out.color = {ramp, color};
+    out.coverage = {ramp, alpha};
+    out.content_alpha = {ramp, alpha};
+    return out;
+  }
+
+  Map<int, bNodeTreeInterfaceSocket *> *starts = gradient_value_start_inputs_.lookup_ptr(
+      &ctx.layer);
+  Map<int, bNodeTreeInterfaceSocket *> *ends = gradient_value_end_inputs_.lookup_ptr(&ctx.layer);
+  bNodeTreeInterfaceSocket **start_iface = (starts != nullptr) ? starts->lookup_ptr(ctx.channel) :
+                                                                 nullptr;
+  bNodeTreeInterfaceSocket **end_iface = (ends != nullptr) ? ends->lookup_ptr(ctx.channel) :
+                                                              nullptr;
+  bNodeSocket *start_value = (start_iface != nullptr) ?
+                                 this->group_input_socket(group, **start_iface) :
+                                 nullptr;
+  bNodeSocket *end_value = (end_iface != nullptr) ?
+                               this->group_input_socket(group, **end_iface) :
+                               nullptr;
+  if (start_value == nullptr || end_value == nullptr) {
+    return {};
+  }
+
+  Vector<bNode *> nodes;
+  const auto discard = [&]() -> KindEmitResult {
+    this->nodes_discard(tree, nodes);
+    return {};
+  };
+  /* value = mix(start, end, factor): the same ramp the CPU lays for a scalar channel. */
+  bNode *mix = bke::node_add_static_node(nullptr, tree, SH_NODE_MIX);
+  if (mix == nullptr) {
+    return {};
+  }
+  nodes.append(mix);
+  NodeShaderMix *mix_storage = static_cast<NodeShaderMix *>(mix->storage);
+  mix_storage->data_type = SOCK_FLOAT;
+  mix_storage->factor_mode = NODE_MIX_MODE_UNIFORM;
+  mix_storage->clamp_factor = true;
+  mix_storage->clamp_result = false;
+  grid_.place_extra(*mix);
+  bNodeSocket *mix_factor = socket_in(*mix, "Factor_Float");
+  bNodeSocket *mix_a = socket_in(*mix, "A_Float");
+  bNodeSocket *mix_b = socket_in(*mix, "B_Float");
+  bNodeSocket *mix_out = socket_out(*mix, "Result_Float");
+  if (mix_factor == nullptr || mix_a == nullptr || mix_b == nullptr || mix_out == nullptr) {
+    return discard();
+  }
+  bke::node_add_link(tree, *factor.node, *factor.socket, *mix, *mix_factor);
+  bke::node_add_link(tree, *group.group_input, *start_value, *mix, *mix_a);
+  bke::node_add_link(tree, *group.group_input, *end_value, *mix, *mix_b);
+
+  bNode *combine = bke::node_add_node(nullptr, tree, "ShaderNodeCombineColor"_ustr);
+  if (combine == nullptr) {
+    return discard();
+  }
+  nodes.append(combine);
+  grid_.place_extra(*combine);
+  bNodeSocket *red = socket_in(*combine, "Red");
+  bNodeSocket *green = socket_in(*combine, "Green");
+  bNodeSocket *blue = socket_in(*combine, "Blue");
+  bNodeSocket *combined = socket_out(*combine, "Color");
+  if (red == nullptr || green == nullptr || blue == nullptr || combined == nullptr) {
+    return discard();
+  }
+  for (bNodeSocket *input : {red, green, blue}) {
+    bke::node_add_link(tree, *mix, *mix_out, *combine, *input);
+  }
+
+  bNode *one = bke::node_add_static_node(nullptr, tree, SH_NODE_VALUE);
+  if (one == nullptr) {
+    return discard();
+  }
+  nodes.append(one);
+  bNodeSocket *one_out = socket_out(*one, "Value");
+  if (one_out == nullptr || one_out->default_value == nullptr) {
+    return discard();
+  }
+  static_cast<bNodeSocketValueFloat *>(one_out->default_value)->value = 1.0f;
+
+  KindEmitResult out;
+  out.color = {combine, combined};
+  out.content_alpha = {one, one_out};
+  layout::frame_add(tree, "Gradient", nodes);
+  return out;
+}
+
 KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx)
 {
   bNodeTree &tree = ctx.tree;
@@ -2536,7 +2747,14 @@ KindEmitResult PaintLayersTreeBuilder::row_source_emit(const RowEmitContext &ctx
   else if (paint_layer_kind_reads_anchor_point(ctx.layer) && !ctx.folder) {
     out = this->anchor_point_source_emit(ctx);
   }
-  else if (paint_layer_kind_has_flag(ctx.layer, PAINT_LAYER_KIND_READS_SOURCE)) {
+  else if (ctx.baked_color == nullptr &&
+           paint_layer_kind_has_flag(ctx.layer, PAINT_LAYER_KIND_GENERATES))
+  {
+    out = this->gradient_source_emit(ctx);
+  }
+  else if (ctx.baked_color == nullptr &&
+           paint_layer_kind_has_flag(ctx.layer, PAINT_LAYER_KIND_READS_SOURCE))
+  {
     out = this->material_source_emit(ctx);
   }
   else if (ctx.baked_color != nullptr) {

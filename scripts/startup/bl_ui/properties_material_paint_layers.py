@@ -362,8 +362,12 @@ def draw_material_layer_channels(layout, context, material, layer):
     is_filter = layer.source == 'FILTER'
     # A filter and an Anchor Point Reader have no map or value per channel: the switches are all.
     switches_only = is_filter or layer.source == 'ANCHOR_POINT'
+    is_generator = layer.source == 'GENERATOR'
     if is_filter:
         # A tangent normal is not a colour a filter may change.
+        channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']
+    if is_generator:
+        # A tangent normal is not a ramp a generator can produce either.
         channel_ids = [channel_id for channel_id in channel_ids if channel_id != 'NORMAL']
     if not channel_ids:
         layout.label(text="No channels", icon='INFO')
@@ -391,6 +395,26 @@ def draw_material_layer_channels(layout, context, material, layer):
 
     if switches_only:
         # The switches are the whole choice: no map or value per channel.
+        return
+
+    if is_generator:
+        # A colour channel reads the row's ColorRamp; a scalar channel ramps between two values.
+        channel_col = layout.column(align=True)
+        first = True
+        for channel_id in channel_ids:
+            record = records.get(channel_id)
+            if record is None or not record.use or channel_id in {'BASE_COLOR', 'EMISSION'}:
+                continue
+            if not first:
+                channel_col.separator()
+            first = False
+            box = channel_col.box()
+            box.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
+            row = box.row(align=True)
+            row.prop(record, "gradient_value_start", text="Start")
+            row.prop(record, "gradient_value_end", text="End")
+        if first:
+            layout.label(text="Colour channels read the gradient ramp", icon='INFO')
         return
 
     if material_layer_weight_record_count(

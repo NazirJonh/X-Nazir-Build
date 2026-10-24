@@ -609,11 +609,12 @@ void paint_stack_rows_append(const Material &material,
     row.color_tag = layer.color_tag;
     /* An adjustment is a filter of the stack below it: no map, no channel slot, only its settings. */
     const bool adjustment = paint_layer_row_is_adjustment_view(layer);
-    row.icon = folder                                         ? ICON_FILE_FOLDER :
-               adjustment                                     ? ICON_ARROW_LEFTRIGHT :
-               (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) ? ICON_GP_DRAW_FILL :
-               (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) ? ICON_MATERIAL :
-                                                                  ICON_IMAGE_RGB;
+    row.icon = folder                                          ? ICON_FILE_FOLDER :
+               adjustment                                      ? ICON_ARROW_LEFTRIGHT :
+               (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT)  ? ICON_GP_DRAW_FILL :
+               (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL)  ? ICON_MATERIAL :
+               (layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR) ? ICON_COLOR :
+                                                                   ICON_IMAGE_RGB;
     /* Only layers and folders limit where they show; an adjustment acts on what is below it for
      * every object alike, and corrections and mask items are not rows of this list. */
     if (!adjustment && layer.role == MA_PAINT_LAYER_ROLE_LAYER) {
@@ -644,14 +645,17 @@ void paint_stack_rows_append(const Material &material,
       content.name = IFACE_("Content");
       row.content_sections.append(std::move(content));
     }
-    else if (adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    else if (adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
+             layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
+    {
       /* Nothing to show or switch to: the brush has no content to work on in this row. A Material
-       * row shows what its source shows and owns no map to paint. With a mask the row does have
-       * two targets, and the slot back to the content (made below) needs its section. A Material
-       * row takes corrections, which are listed under this section, so it has it with or without
-       * a mask. */
+       * row shows what its source shows and owns no map to paint; a Gradient row is procedural.
+       * With a mask the row does have two targets, and the slot back to the content (made below)
+       * needs its section. Both take corrections, which are listed under this section, so they
+       * have it with or without a mask. */
       if (BKE_paint_layers_mask_base(layer) != nullptr ||
-          layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL)
+          layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
+          layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
       {
         StackContentSection content;
         content.identifier = "CHANNELS";
@@ -692,7 +696,9 @@ void paint_stack_rows_append(const Material &material,
       row.preview_slots.append(std::move(channels_slot));
     }
 
-    if (!folder && !adjustment && layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL) {
+    if (!folder && !adjustment && layer.source != MA_PAINT_LAYER_SOURCE_MATERIAL &&
+        layer.source != MA_PAINT_LAYER_SOURCE_GENERATOR)
+    {
       /* The channel maps are the layer's internals rather than rows of their own; the section
        * stays so the brush can switch to the content and later rows can attach to it. */
       StackContentSection channels;
@@ -704,7 +710,9 @@ void paint_stack_rows_append(const Material &material,
     /* The mask: a slot of its own, whose click switches the brush to it, and the section that slot
      * reveals. Its switch rides on the row, so a switched-off mask is kept and listed. */
     if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
-      if (folder || adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL) {
+      if (folder || adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
+          layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
+      {
         /* The slot that switches back to the content, ahead of the mask's. The row icon stays in
          * front of it, as it does for a folder with no mask; these rows have no map of their own to
          * show in a slot, so without this one the brush could not leave the mask. */
@@ -1482,6 +1490,11 @@ class PaintLayersStackSource final : public StackSource,
         ICON_LINKED};
     anchor_point_mask_correction.is_effect = true;
     r_kinds.append(anchor_point_mask_correction);
+    /* Last of all, so no index above moves: a procedural ramp built from Shader Editor nodes. */
+    r_kinds.append({"GRADIENT",
+                    N_("Gradient Layer"),
+                    "A procedural colour and coverage ramp reading the UV, built from shader nodes",
+                    ICON_COLOR});
   }
 
   int row_add(bContext &C,
@@ -1504,7 +1517,8 @@ class PaintLayersStackSource final : public StackSource,
     constexpr int anchor_point_layer_kind = anchor_point_kind + 1;
     constexpr int anchor_point_correction_kind = anchor_point_layer_kind + 1;
     constexpr int anchor_point_mask_correction_kind = anchor_point_correction_kind + 1;
-    if (kind < 0 || kind > anchor_point_mask_correction_kind || !this->is_editable(owner)) {
+    constexpr int gradient_kind = anchor_point_mask_correction_kind + 1;
+    if (kind < 0 || kind > gradient_kind || !this->is_editable(owner)) {
       return -1;
     }
     const bool is_anchor_point = kind == anchor_point_kind;
@@ -1513,12 +1527,13 @@ class PaintLayersStackSource final : public StackSource,
     const bool is_anchor_point_mask_correction = kind == anchor_point_mask_correction_kind;
     const bool is_anchor_point_reader = is_anchor_point_layer || is_anchor_point_correction ||
                                         is_anchor_point_mask_correction;
+    const bool is_gradient = kind == gradient_kind;
     const bool is_material = kind == material_kind;
     const bool is_material_correction = kind == material_correction_kind;
     const bool is_mask_material = kind == mask_material_kind;
     const bool reads_material = is_material || is_material_correction || is_mask_material;
-    /* The kind ranges are contiguous. Bounding each one is what keeps the Material and Anchor
-     * Point kinds from falling into the last filter arrays, whose indices they are past. */
+    /* The kind ranges are contiguous. Bounding each one is what keeps the Material, Anchor Point
+     * and Gradient kinds from falling into the last filter arrays, whose indices they are past. */
     const bool is_coverage_filter = kind >= coverage_first_kind && kind < material_kind;
     const bool is_mask_filter = kind >= mask_filter_first_kind && kind < material_kind;
     const bool is_adjustment = kind >= adjustment_first_kind && kind < mask_filter_first_kind;
@@ -1564,6 +1579,7 @@ class PaintLayersStackSource final : public StackSource,
                   is_anchor_point_correction   ? PaintLayerAddKind::AnchorPointCorrection :
                   is_anchor_point_mask_correction ?
                                                  PaintLayerAddKind::AnchorPointMaskCorrection :
+                  is_gradient                 ? PaintLayerAddKind::Gradient :
                   is_material                  ? PaintLayerAddKind::Material :
                   is_material_correction ? PaintLayerAddKind::CorrectionMaterial :
                   is_mask_material       ? PaintLayerAddKind::MaskCorrectionMaterial :
@@ -1741,7 +1757,9 @@ class PaintLayersStackSource final : public StackSource,
       BKE_paint_layers_active_set(material, created->marker);
       layers_texpaint_slots_refresh(C);
     }
-    else if (params.kind == PaintLayerAddKind::Paint || is_adjustment || is_material) {
+    else if (params.kind == PaintLayerAddKind::Paint || params.kind == PaintLayerAddKind::Gradient ||
+             is_adjustment || is_material)
+    {
       /* The target resolves through the active row, and a plain Add leaves the previous one active
        * until the caller activates the new row, so the maps below would land on the wrong layer. */
       BKE_paint_layers_active_set(material, created->marker);

@@ -32,6 +32,11 @@ enum class PaintLayerAddKind : int8_t {
   Paint = 0,
   /** A flat-colour Fill layer. */
   Fill,
+  /**
+   * A procedural Gradient layer: a Shader Editor node chain reading the UV, with no maps. The
+   * payload defaults to a linear black-to-white ramp across the unit square.
+   */
+  Gradient,
   /** An empty folder, made to be filled. */
   Folder,
   /**

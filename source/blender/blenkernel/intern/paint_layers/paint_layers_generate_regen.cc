@@ -44,6 +44,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_composite.hh"
 #include "BKE_paint_material_resolve.hh"
 
@@ -1095,6 +1096,11 @@ bool BKE_paint_layers_regenerate(Main &bmain,
    * only created when at least one row or correction is being scrubbed. */
   if (paint_layers_blend_any_dynamic(ma)) {
     ctx.blend_group = BKE_paint_material_blend_group_ensure(bmain);
+  }
+  /* The Gradient rows share one factor group, so the Hermite midpoint and the repeat folding exist
+   * once in the Shader Editor rather than once per channel. */
+  if (BKE_paint_layers_gradient_any(ma)) {
+    ctx.gradient_group = BKE_paint_material_gradient_group_ensure(bmain);
   }
 
   /* A value edit changes no structure, so the root's stored hash still matches its description:

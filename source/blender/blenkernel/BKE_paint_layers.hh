@@ -1549,6 +1549,31 @@ bool BKE_paint_layers_set_fill_color(Material &ma, MaterialPaintLayer *layer, co
 /** \} */
 
 /* -------------------------------------------------------------------- */
+/** \name Painting lock
+ * \{ */
+
+/** Whether \a layer is protected from painting (#MA_PAINT_LAYER_LOCKED). */
+bool BKE_paint_layers_is_locked(const MaterialPaintLayer &layer);
+
+/**
+ * Set or clear the painting lock of \a layer.
+ *
+ * The lock changes no pixel, no value the stack is evaluated with and no topology, so it only tags
+ * the material for a redraw: the paint target answers it on the next resolve. A row of another
+ * material is refused.
+ */
+bool BKE_paint_layers_set_locked(Material &ma, MaterialPaintLayer *layer, bool locked);
+
+/**
+ * The row that keeps \a row from being painted because it is locked: \a row itself, the stack row a
+ * mask item or correction hangs on, or one of that row's parent folders. Null when nothing locks it.
+ */
+const MaterialPaintLayer *BKE_paint_layers_lock_blocker(const Material &ma,
+                                                        const MaterialPaintLayer &row);
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
 /** \name Values the stack is evaluated with
  * \{ */
 

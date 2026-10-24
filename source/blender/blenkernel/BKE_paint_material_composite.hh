@@ -36,6 +36,7 @@
 
 #include "DNA_scene_types.h"
 #include "DNA_uuid_types.h"
+#include "DNA_material_types.h"
 
 namespace blender {
 
@@ -130,6 +131,77 @@ struct PaintMaterialCompositeMapping {
    * flips the vectors, so the lighting follows the pattern.
    */
   bool tangent_normal = false;
+};
+
+/**
+ * A Gradient generator's payload, as the CPU evaluator reads it.
+ *
+ * The row has no map: its colour comes from #ramp at the factor of the row's UV-space line, and a
+ * scalar channel mixes #scalar_start and #scalar_end instead. The generated shader tree builds the
+ * same factor from the shared Gradient Factor group. #width and #height are the material's map size:
+ * the evaluator needs them to turn a texel into the UV the shader would see.
+ */
+struct PaintMaterialCompositeGradient {
+  bool enabled = false;
+  /** The channel reads the ramp rather than the scalar ends. */
+  bool color_channel = false;
+  /** The channel's own ends, for a scalar channel. */
+  float scalar_start = 0.0f;
+  float scalar_end = 1.0f;
+  /** The material's map size, in pixels: the evaluator's UV grid for a row with no map. */
+  int width = 0;
+  int height = 0;
+  /** The description's payload: line, midpoint, type, repeat and ramp. Its DNA type has deleted
+   * copy operations, so the two methods below copy it shallowly like every other DNA value. */
+  MaterialPaintLayerGradient payload;
+
+  PaintMaterialCompositeGradient() = default;
+  PaintMaterialCompositeGradient(const PaintMaterialCompositeGradient &other)
+      : enabled(other.enabled),
+        color_channel(other.color_channel),
+        scalar_start(other.scalar_start),
+        scalar_end(other.scalar_end),
+        width(other.width),
+        height(other.height),
+        payload(dna::shallow_copy(other.payload))
+  {
+  }
+  PaintMaterialCompositeGradient(PaintMaterialCompositeGradient &&other) noexcept
+      : enabled(other.enabled),
+        color_channel(other.color_channel),
+        scalar_start(other.scalar_start),
+        scalar_end(other.scalar_end),
+        width(other.width),
+        height(other.height),
+        payload(dna::shallow_copy(other.payload))
+  {
+  }
+  PaintMaterialCompositeGradient &operator=(const PaintMaterialCompositeGradient &other)
+  {
+    if (this != &other) {
+      enabled = other.enabled;
+      color_channel = other.color_channel;
+      scalar_start = other.scalar_start;
+      scalar_end = other.scalar_end;
+      width = other.width;
+      height = other.height;
+      payload = dna::shallow_copy(other.payload);
+    }
+    return *this;
+  }
+  PaintMaterialCompositeGradient &operator=(PaintMaterialCompositeGradient &&other) noexcept
+  {
+    if (this != &other) {
+      enabled = other.enabled;
+      color_channel = other.color_channel;
+      scalar_start = other.scalar_start;
+      scalar_end = other.scalar_end;
+      width = other.width;
+      height = other.height;
+      payload = dna::shallow_copy(other.payload);
+    }
+    return *this;
+  }
 };
 
 /**
@@ -387,6 +459,8 @@ struct PaintMaterialCompositeImageLayer : PaintMaterialCompositeRowParams {
   Vector<PaintMaterialCompositeMaskItem> mask_items;
   /** The corrections blended onto the row's colour, bottom to top. */
   Vector<PaintMaterialCompositeCorrection> content_corrections;
+  /** A Gradient generator's payload; #enabled false for every row with a map or constant. */
+  PaintMaterialCompositeGradient gradient;
   /**
    * A folder's own stack, bottom to top. A std::vector rather than a #Vector: the element type is
    * the one being defined here, and #Vector needs its size.
@@ -437,6 +511,8 @@ struct PaintMaterialCompositeLayer : PaintMaterialCompositeRowParams {
   Vector<PaintMaterialCompositeMaskBuffer> mask_items;
   /** The corrections blended onto the row's colour, bottom to top. */
   Vector<PaintMaterialCompositeCorrectionBuffer> content_corrections;
+  /** A Gradient generator's payload, copied from the image layer. */
+  PaintMaterialCompositeGradient gradient;
   /** A folder's own stack, bottom to top; see #PaintMaterialCompositeImageLayer::children. */
   std::vector<PaintMaterialCompositeLayer> children;
 };
@@ -738,6 +814,17 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain);
 
 /** Whether \a node is an instance of #BKE_paint_material_blend_group_ensure's group. */
 bool BKE_paint_material_is_blend_group(const bNode &node);
+
+/**
+ * The shared group that turns a UV coordinate and a gradient's line into its ramp position:
+ * `Factor(UV, Start, End, Midpoint, Type, Repeat)`. Built once per file and shared by every
+ * Gradient row, so the Hermite midpoint and the repeat folding exist in one place; the generated
+ * graph and the CPU composite use the same formula.
+ */
+bNodeTree *BKE_paint_material_gradient_group_ensure(Main &bmain);
+
+/** Whether \a node is an instance of #BKE_paint_material_gradient_group_ensure's group. */
+bool BKE_paint_material_is_gradient_group(const bNode &node);
 
 /**
  * The passes a layered material offers, in the order they are listed to the user.

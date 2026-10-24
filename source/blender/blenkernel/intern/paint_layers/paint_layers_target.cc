@@ -144,6 +144,11 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   r_target.layer = layer;
   r_target.channel = channel;
   r_target.mode = mode;
+  /* A locked row refuses the stroke before any mode-specific reason: painting it is what the user
+   * asked to prevent, whatever the channel or the kind of row would otherwise answer. */
+  if (BKE_paint_layers_lock_blocker(ma, *layer) != nullptr) {
+    return PaintLayersTargetStatus::Locked;
+  }
   if (mode == PaintLayersTargetMode::Content) {
     /* A filter's records only say which channels it works in: there is no map to write into, and
      * a stroke must not make one. The mask of its row is still paintable. */
@@ -154,6 +159,11 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
     if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_READS_SOURCE) ||
         paint_layer_kind_reads_anchor_point(*layer) || paint_layer_kind_is_anchor_point_marker(*layer))
     {
+      return PaintLayersTargetStatus::RowTakesNoStrokes;
+    }
+    /* A generator produces its colour from nodes; a stroke has no map to write into it either. Its
+     * mask is still paintable, as for a filter. */
+    if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES)) {
       return PaintLayersTargetStatus::RowTakesNoStrokes;
     }
     /* Cannot paint into a channel that is not in the material's channel set. */
@@ -175,6 +185,10 @@ PaintLayersTargetStatus BKE_paint_layers_target_resolve(Material &ma,
   r_target.mask_item = item_of_layer ? active_item : BKE_paint_layers_mask_base(*layer);
   if (r_target.mask_item == nullptr) {
     return PaintLayersTargetStatus::NoMask;
+  }
+  /* The mask item carries its own lock, and its row's lock was checked above. */
+  if (BKE_paint_layers_lock_blocker(ma, *r_target.mask_item) != nullptr) {
+    return PaintLayersTargetStatus::Locked;
   }
   /* A map-coverage item whose kind is reference-only (Color ID: an external ID Map) is not a stroke
    * target; editability is a trait of the kind, so the user cannot pick it by accident. A paintable

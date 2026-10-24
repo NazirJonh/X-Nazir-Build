@@ -12,6 +12,7 @@
 
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_generate.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include <cstdio>
 #include <cstring>
@@ -28,6 +29,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_paint.hh"
 #include "BKE_report.hh"
 
 #include "IMB_colormanagement.hh"
@@ -718,6 +720,7 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   if (r_map != nullptr) {
     r_map->append({item.marker, item_copy->marker});
   }
+  BKE_paint_layers_gradient_copy(*item_copy, item);
   return item_copy;
 }
 
@@ -755,6 +758,7 @@ static void paint_layer_branch_duplicate(Main &bmain,
   paint_layer_channels_duplicate(bmain, dst, src);
   paint_layer_id_colors_duplicate(dst, src);
   paint_layer_properties_duplicate(dst, src);
+  BKE_paint_layers_gradient_copy(dst, src);
 
   /* The mask and the corrections go with their row, with maps of their own for the same reason as
    * the channel maps. */
@@ -944,6 +948,21 @@ bool BKE_paint_layers_channel_set_mask_set(Material &ma, uint16_t mask)
   /* A material setting, not a row: the layers keep every record and map they had. */
   BKE_paint_layers_tag_edited(ma);
   return true;
+}
+
+/**
+ * Let go of the row's own channel maps, leaving the masks and corrections it holds untouched: they
+ * read maps of their own and stay painted when the row's source changes. The data-blocks stay in
+ * `Main` as orphans, like the maps #paint_layer_release_users lets go.
+ */
+static void paint_layer_channel_maps_release(MaterialPaintLayer &layer)
+{
+  for (const int i : IndexRange(layer.channels_num)) {
+    if (layer.channels[i].image != nullptr) {
+      id_us_min(&layer.channels[i].image->id);
+      layer.channels[i].image = nullptr;
+    }
+  }
 }
 
 /**
@@ -1952,6 +1971,13 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
   {
     return nullptr;
   }
+  /* A generator has no map and cannot produce a tangent normal; a Normal record would only be one
+   * the generator's predicates ignore. */
+  if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES) &&
+      channel == PAINT_MATERIAL_CHANNEL_NORMAL)
+  {
+    return nullptr;
+  }
   if (MaterialPaintLayerChannel *existing = paint_layer_channel_find(*layer, channel)) {
     return existing;
   }
@@ -1972,6 +1998,15 @@ MaterialPaintLayerChannel *BKE_paint_layers_channel_add(Material &ma,
     record.value[0] = 0.5f;
     record.value[1] = 0.5f;
     record.value[2] = 1.0f;
+  }
+  if (paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES)) {
+    /* A generator's scalar channel ramps between these two ends; a fresh one spans the channel's
+     * whole range. Base Color and the other colour channels read the gradient's ramp instead. */
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+    if (!info.is_color) {
+      record.value[0] = info.value_min;
+      record.value[1] = info.value_max;
+    }
   }
   /* A Fill correction's other channel starts at the colour it already lays, so switching one on
    * changes nothing until its own value is edited. Normal keeps the flat tangent above: a Fill lays
@@ -2268,6 +2303,10 @@ bool BKE_paint_layers_mapping_supported(const Material &ma, const MaterialPaintL
     return layer.material != nullptr && layer.material->nodetree != nullptr &&
            BKE_paint_layers_source_reads_uv(*layer.material);
   }
+  /* A generator's own UV line is its parameter, not a mapping of a map it owns. */
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
+    return false;
+  }
   /* Only a Fill's own map repeats under the remap: a painted map is written by strokes at the raw
    * UV, and a filter owns no map to move. */
   if (!paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_FLAT_VALUE)) {
@@ -2292,7 +2331,8 @@ bool BKE_paint_layers_row_is_paintable(const MaterialPaintLayer &row)
 {
   return !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_FLAT_VALUE) &&
          !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_READS_SOURCE) &&
-         !paint_layer_kind_reads_anchor_point(row) && !paint_layer_kind_is_anchor_point_marker(row);
+         !paint_layer_kind_reads_anchor_point(row) && !paint_layer_kind_is_anchor_point_marker(row) &&
+         !paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES);
 }
 
 bool BKE_paint_layers_mapping_enabled_get(const MaterialPaintLayer &layer)
@@ -2567,7 +2607,11 @@ bool BKE_paint_layers_set_source(Material &ma,
   if (!paint_layer_in_stack(ma, layer)) {
     return false;
   }
-  if (!ELEM(source, MA_PAINT_LAYER_SOURCE_IMAGE, MA_PAINT_LAYER_SOURCE_CONSTANT)) {
+  if (!ELEM(source,
+            MA_PAINT_LAYER_SOURCE_IMAGE,
+            MA_PAINT_LAYER_SOURCE_CONSTANT,
+            MA_PAINT_LAYER_SOURCE_GENERATOR))
+  {
     return false;
   }
   /* Turning a folder into a layer would orphan what it holds, and ungrouping is the one way out. A
@@ -2580,17 +2624,39 @@ bool BKE_paint_layers_set_source(Material &ma,
   if (layer->source == source) {
     return true;
   }
+  /* The cache describes the old source: a row switched to a generator (or away from one) must not
+   * keep showing it. */
+  if (layer->bake != nullptr) {
+    BKE_paint_layers_bake_clear(ma, *layer);
+  }
+  if (source == MA_PAINT_LAYER_SOURCE_GENERATOR) {
+    /* A generator owns no maps: let them go and keep the records, which decide the channels it
+     * takes part in. The payload is made once and kept if the row is switched back. Its masks and
+     * corrections keep their own maps. */
+    paint_layer_channel_maps_release(*layer);
+    layer->source = MA_PAINT_LAYER_SOURCE_GENERATOR;
+    layer->kind_subtype = MA_PAINT_LAYER_GENERATOR_GRADIENT;
+    BKE_paint_layers_gradient_ensure(*layer);
+    if (paint_layer_channel_find(*layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR) == nullptr) {
+      BKE_paint_layers_channel_add(ma, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+    }
+    BKE_paint_layers_tag_edited(ma);
+    return true;
+  }
+  /* Leaving the generator: the records stay, but the kind subtype is a generator's member and
+   * would name no kind under the new source. */
+  if (BKE_paint_layers_gradient_supported(*layer)) {
+    layer->kind_subtype = 0;
+  }
   MaterialPaintLayerChannel *base = paint_layer_channel_find(*layer,
                                                              PAINT_MATERIAL_CHANNEL_BASE_COLOR);
   if (source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
     /* A painted map is not a constant, so the maps go; the records stay, because a per-channel
      * setting is not a pixel. Base Color already lives in its record, so it survives the flip; a
      * transparent one becomes an opaque black Fill so the row lays a clean constant. The users are
-     * let go first, as a removed row does, so the orphaned maps are not saved as if still used. */
-    paint_layer_release_users(*layer);
-    for (const int i : IndexRange(layer->channels_num)) {
-      layer->channels[i].image = nullptr;
-    }
+     * let go first, as a removed row does, so the orphaned maps are not saved as if still used. The
+     * row's mask and corrections keep their own maps. */
+    paint_layer_channel_maps_release(*layer);
     if (base != nullptr && paint_layer_channel_live(base) && base->value[3] == 0.0f) {
       base->value[0] = base->value[1] = base->value[2] = 0.0f;
       base->value[3] = 1.0f;
@@ -3033,6 +3099,58 @@ float BKE_paint_layers_channel_opacity_effective(const MaterialPaintLayer &layer
     return row_opacity;
   }
   return row_opacity * layer.channel_settings[channel].opacity;
+}
+
+bool BKE_paint_layers_is_locked(const MaterialPaintLayer &layer)
+{
+  return (layer.flag & MA_PAINT_LAYER_LOCKED) != 0;
+}
+
+bool BKE_paint_layers_set_locked(Material &ma, MaterialPaintLayer *layer, const bool locked)
+{
+  if (!paint_layer_owned(ma, layer)) {
+    return false;
+  }
+  if (BKE_paint_layers_is_locked(*layer) == locked) {
+    return true;
+  }
+  SET_FLAG_FROM_TEST(layer->flag, locked, MA_PAINT_LAYER_LOCKED);
+  /* The lock changes no pixel and no topology, and the bake hash leaves it out: no rebuild, no
+   * re-bake and no value sync, only the answer the paint target gives on the next resolve. */
+  DEG_id_tag_update(&ma.id, ID_RECALC_SHADING);
+  return true;
+}
+
+const MaterialPaintLayer *BKE_paint_layers_lock_blocker(const Material &ma,
+                                                        const MaterialPaintLayer &row)
+{
+  if (BKE_paint_layers_is_locked(row)) {
+    return &row;
+  }
+  /* The owner and parent lookups take a mutable material although they only read it: the stack is
+   * a list, and every walk over it shares the one iterator. */
+  Material &ma_mut = const_cast<Material &>(ma);
+  const MaterialPaintLayer *owner = &row;
+  if (row.role == MA_PAINT_LAYER_ROLE_EFFECT) {
+    owner = BKE_paint_layers_correction_owner(ma_mut, row);
+  }
+  else if (row.role == MA_PAINT_LAYER_ROLE_MASK_ITEM) {
+    owner = BKE_paint_layers_mask_item_owner(ma_mut, row);
+  }
+  if (owner == nullptr) {
+    return nullptr;
+  }
+  if (owner != &row && BKE_paint_layers_is_locked(*owner)) {
+    return owner;
+  }
+  for (const MaterialPaintLayer *parent = BKE_paint_layers_parent(ma_mut, *owner); parent != nullptr;
+       parent = BKE_paint_layers_parent(ma_mut, *parent))
+  {
+    if (BKE_paint_layers_is_locked(*parent)) {
+      return parent;
+    }
+  }
+  return nullptr;
 }
 
 int BKE_paint_layers_channel_blend_effective(const MaterialPaintLayer &layer, const int channel)

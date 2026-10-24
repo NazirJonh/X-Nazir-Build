@@ -15,6 +15,7 @@
 #include "BLI_math_color.h"
 #include "BLI_math_color_blend.h"
 #include "BLI_math_geom.h"
+#include "BLI_math_gradient.hh"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
@@ -952,11 +953,9 @@ static float gradient_repeat_apply_raw(const eImagePaint_GradientRepeat repeat, 
 {
   switch (repeat) {
     case IMAGE_PAINT_GRADIENT_REPEAT_REPEAT:
-      return t - std::floor(t);
-    case IMAGE_PAINT_GRADIENT_REPEAT_REFLECT: {
-      const float m = std::fmod(std::abs(t), 2.0f);
-      return (m > 1.0f) ? 2.0f - m : m;
-    }
+      return math::gradient_repeat(t);
+    case IMAGE_PAINT_GRADIENT_REPEAT_REFLECT:
+      return math::gradient_reflect(t);
     case IMAGE_PAINT_GRADIENT_REPEAT_NONE:
       break;
   }
@@ -967,8 +966,8 @@ static float gradient_repeat_apply_raw(const eImagePaint_GradientRepeat repeat, 
  * order as the Image Editor gradient). */
 static float gradient_ramp_position(const GradientColoring &coloring, const float t)
 {
-  return image_paint_gradient_remap_midpoint(gradient_repeat_apply_raw(coloring.repeat, t),
-                                             coloring.midpoint);
+  return math::gradient_remap_midpoint(gradient_repeat_apply_raw(coloring.repeat, t),
+                                       coloring.midpoint);
 }
 
 /** Straight-alpha gradient color at parameter \a t, alpha already scaled by the opacity. */

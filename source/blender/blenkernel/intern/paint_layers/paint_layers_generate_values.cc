@@ -188,6 +188,52 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
+  if (STREQ(role, ROLE_GRADIENT_START) || STREQ(role, ROLE_GRADIENT_END)) {
+    if (layer->gradient == nullptr || socket.default_value == nullptr) {
+      return false;
+    }
+    const float *source = STREQ(role, ROLE_GRADIENT_START) ? layer->gradient->start :
+                                                             layer->gradient->end;
+    const float value[3] = {source[0], source[1], source[2]};
+    copy_v3_v3(static_cast<bNodeSocketValueVector *>(socket.default_value)->value, value);
+    if (iface.socket_data != nullptr) {
+      copy_v3_v3(static_cast<bNodeSocketValueVector *>(iface.socket_data)->value, value);
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_GRADIENT_MIDPOINT) || STREQ(role, ROLE_GRADIENT_TYPE) ||
+      STREQ(role, ROLE_GRADIENT_REPEAT))
+  {
+    if (layer->gradient == nullptr || socket.default_value == nullptr) {
+      return false;
+    }
+    float value = layer->gradient->midpoint;
+    if (STREQ(role, ROLE_GRADIENT_TYPE)) {
+      value = float(layer->gradient->type);
+    }
+    else if (STREQ(role, ROLE_GRADIENT_REPEAT)) {
+      value = float(layer->gradient->repeat);
+    }
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
+  if (STREQ(role, ROLE_GRADIENT_VALUE_START) || STREQ(role, ROLE_GRADIENT_VALUE_END)) {
+    const MaterialPaintLayerChannel *record = paint_layer_channel_find(
+        *layer, eMaterialPaintChannel(channel));
+    if (record == nullptr || socket.default_value == nullptr) {
+      return false;
+    }
+    const float value = STREQ(role, ROLE_GRADIENT_VALUE_START) ? record->value[0] :
+                                                                 record->value[1];
+    static_cast<bNodeSocketValueFloat *>(socket.default_value)->value = value;
+    if (iface.socket_data != nullptr) {
+      static_cast<bNodeSocketValueFloat *>(iface.socket_data)->value = value;
+    }
+    return true;
+  }
   if (STREQ(role, ROLE_LIVE_CONSTANT) || STREQ(role, ROLE_LIVE_COVERAGE)) {
     /* A plain value of the row's source. A source that stopped supplying one here is a different
      * shape of group, which only a rebuild can make right. */

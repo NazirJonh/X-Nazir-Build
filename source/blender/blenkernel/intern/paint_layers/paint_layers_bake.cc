@@ -18,6 +18,7 @@
  */
 
 #include "BKE_paint_layers.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -812,6 +813,23 @@ static uint64_t bake_hash_layer(uint64_t h,
   h = bake_hash_mix(h, uint64_t(0x9e3779b97f4a7c15ull));
   h = bake_hash_mix(h, uint8_t(layer.source));
   h = bake_hash_mix(h, uint16_t(layer.kind_subtype));
+  if (BKE_paint_layers_gradient_supported(layer) && layer.gradient != nullptr) {
+    /* A Gradient's pixels are its payload: the line, the shape and the ramp. The channel records'
+     * values below carry the scalar ends. The leading version invalidates the caches if the
+     * generated formula changes. */
+    h = bake_hash_mix(h, uint64_t(0x600));
+    h = bake_hash_mix(h, uint8_t(layer.gradient->type));
+    h = bake_hash_mix(h, uint8_t(layer.gradient->space));
+    h = bake_hash_mix(h, uint8_t(layer.gradient->repeat));
+    for (const float value : layer.gradient->start) {
+      h = bake_hash_float(h, value);
+    }
+    for (const float value : layer.gradient->end) {
+      h = bake_hash_float(h, value);
+    }
+    h = bake_hash_float(h, layer.gradient->midpoint);
+    h = bake_hash_mix(h, BKE_paint_layers_gradient_ramp_hash(layer.gradient->ramp));
+  }
   /* A row's own blend is applied over its cache, so it moves no hash of that cache. A child's is
    * inside the result its parent bakes, so it does. */
   if (is_child) {

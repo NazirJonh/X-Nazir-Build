@@ -37,56 +37,12 @@ namespace blender {
  * and #Node Groups list (see #interface_template_id). NOTE: do not translate. */
 static const char *BLEND_TREE_NAME = ".PBR Blend";
 
-/**
- * The IDProperty marking the trees this module recognizes as one of its own groups, told apart by
- * value. The key is shared with the Normal Combine group; only the value says which group this is.
- */
-static constexpr const char *BLEND_NODE_GROUP_MARKER_PROP = "pbr_paint_node_group";
-/** #BLEND_NODE_GROUP_MARKER_PROP value of the Blend group. */
+/** Marker value of the Blend group; see #paint_material_group_has_marker. */
 static constexpr const char *BLEND_MARKER_VALUE = "BLEND";
-
-/** The #BLEND_NODE_GROUP_MARKER_PROP value on \a tree_id, or null when unmarked. */
-static const char *blend_group_marker_get(const ID &tree_id)
-{
-  const IDProperty *properties = IDP_GetProperties(const_cast<ID *>(&tree_id));
-  if (properties == nullptr) {
-    return nullptr;
-  }
-  const IDProperty *marker = IDP_GetPropertyTypeFromGroup(
-      properties, BLEND_NODE_GROUP_MARKER_PROP, IDP_STRING);
-  return (marker != nullptr) ? IDP_string_get(marker) : nullptr;
-}
-
-/** Stamp the shared Blend group tree. */
-static void blend_group_marker_set(bNodeTree &group)
-{
-  IDProperty *properties = IDP_EnsureProperties(&group.id);
-  IDPropertyTemplate value = {0};
-  value.string.str = const_cast<char *>(BLEND_MARKER_VALUE);
-  value.string.len = int(strlen(BLEND_MARKER_VALUE)) + 1;
-  value.string.subtype = IDP_STRING_SUB_UTF8;
-  IDP_AddToGroup(properties, IDP_New(IDP_STRING, &value, BLEND_NODE_GROUP_MARKER_PROP));
-}
 
 bool BKE_paint_material_is_blend_group(const bNode &node)
 {
-  if (!node.is_group() || node.id == nullptr || GS(node.id->name) != ID_NT) {
-    return false;
-  }
-  const char *marker = blend_group_marker_get(*node.id);
-  return marker != nullptr && STREQ(marker, BLEND_MARKER_VALUE);
-}
-
-/** The group already in \a bmain, or null. Found by its marker, so a rename does not lose it. */
-static bNodeTree *blend_group_find(Main &bmain)
-{
-  for (bNodeTree &ntree : bmain.nodetrees) {
-    const char *marker = blend_group_marker_get(ntree.id);
-    if (marker != nullptr && STREQ(marker, BLEND_MARKER_VALUE)) {
-      return &ntree;
-    }
-  }
-  return nullptr;
+  return paint_material_group_has_marker(node, BLEND_MARKER_VALUE);
 }
 
 /**
@@ -118,7 +74,7 @@ static bNode *blend_branch_add(bNodeTree &group,
 
 bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
 {
-  if (bNodeTree *existing = blend_group_find(bmain)) {
+  if (bNodeTree *existing = paint_material_group_find(bmain, BLEND_MARKER_VALUE)) {
     /* A file saved before the dot scheme carries the bare name; rename it in place. Found by
      * marker, so the name never decides which tree this is. */
     if (!STREQ(existing->id.name + 2, BLEND_TREE_NAME)) {
@@ -131,7 +87,7 @@ bNodeTree *BKE_paint_material_blend_group_ensure(Main &bmain)
   if (group == nullptr) {
     return nullptr;
   }
-  blend_group_marker_set(*group);
+  paint_material_group_marker_set(*group, BLEND_MARKER_VALUE);
 
   /* Interface identifiers are handed out in creation order: `Socket_0` .. `Socket_4`, see the
    * `BLEND_GROUP_ID_*` constants in `paint_material_composite_internal.hh`. */

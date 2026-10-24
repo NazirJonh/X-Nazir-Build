@@ -129,6 +129,12 @@ enum PaintLayerKindFlag : uint8_t {
    * #MaterialPaintLayer::material).
    */
   PAINT_LAYER_KIND_READS_ANCHOR_POINT = 1 << 5,
+  /**
+   * The kind produces its colour and coverage procedurally (a Gradient): a live channel record
+   * makes it take part, even without a map or a flat value. It owns no map, so a stroke has nothing
+   * to write into; its values are its kind's payload and its channel records' endpoints.
+   */
+  PAINT_LAYER_KIND_GENERATES = 1 << 6,
 };
 
 struct PaintLayerKindInfo {

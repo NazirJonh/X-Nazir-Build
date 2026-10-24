@@ -67,6 +67,11 @@ class OUTLINER_HT_tool_header(Header):
             props = row.operator("outliner.stack_layer_add", text="", icon='MATERIAL')
             props.type = 'MATERIAL'
             props.label = "Add Material Layer"
+            # A procedural ramp built from shader nodes: a layer of its own, not an effect of the
+            # selected row, so it sits with the other layer kinds.
+            props = row.operator("outliner.stack_layer_add", text="", icon='COLOR')
+            props.type = 'GRADIENT'
+            props.label = "Add Gradient Layer"
             # Corrections hang on the selected layer or on its mask; one menu holds them all.
             row = layout.row(align=True)
             # An enum menu button: it opens a real menu of the correction kinds and shows the

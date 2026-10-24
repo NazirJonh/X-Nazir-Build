@@ -271,6 +271,7 @@ set(SRC
   intern/paint_layers/paint_layers_material_live.cc
   intern/paint_layers/paint_layers_composite.cc
   intern/paint_layers/paint_layers_edit.cc
+  intern/paint_layers/paint_layers_gradient.cc
   intern/paint_layers/paint_layers_generate_build.cc
   intern/paint_layers/paint_layers_generate_build_chain.cc
   intern/paint_layers/paint_layers_generate_build_intern.hh
@@ -290,6 +291,7 @@ set(SRC
   intern/paint_material_combined.cc
   intern/paint_material_blend_group.cc
   intern/paint_material_composite.cc
+  intern/paint_material_gradient_group.cc
   intern/paint_material_normal_combine.cc
   intern/paint_material_resolve.cc
   intern/paint_material_sync.cc
@@ -553,6 +555,7 @@ set(SRC
   BKE_paint_layers_composite.hh
   BKE_paint_layers_edit.hh
   BKE_paint_layers_generate.hh
+  BKE_paint_layers_gradient.hh
   BKE_paint_layers_object_mask.hh
   BKE_paint_layers_target.hh
   BKE_paint_types.hh
@@ -867,6 +870,7 @@ if(WITH_GTESTS)
     intern/paint_layers/tests/paint_layers_blend_tier_test.cc
     intern/paint_layers/tests/paint_layers_description_test.cc
     intern/paint_layers/tests/paint_layers_generate_test.cc
+    intern/paint_layers/tests/paint_layers_gradient_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_content_alpha_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_anchor_point_test.cc
     intern/paint_layers/tests/paint_layers_graph_eval_corrections_test.cc

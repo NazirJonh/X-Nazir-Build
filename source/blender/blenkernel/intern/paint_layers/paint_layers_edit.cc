@@ -18,6 +18,7 @@
 #include "DNA_scene_types.h"
 
 #include "BKE_lib_id.hh"
+#include "BKE_paint_layers_gradient.hh"
 
 #include "paint_layers_kind.hh"
 
@@ -171,6 +172,16 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
       BKE_paint_layers_set_fill_color(ma, effect, params.fill_color);
     }
     return effect;
+  }
+  if (params.kind == PaintLayerAddKind::Gradient) {
+    return BKE_paint_layers_gradient_add(ma,
+                                         params.name,
+                                         params.anchor,
+                                         params.fill_folder && params.anchor != nullptr &&
+                                                 BKE_paint_layers_is_folder(*params.anchor) &&
+                                                 params.place == PaintLayerPlace::Above ?
+                                             PaintLayerPlace::Into :
+                                             params.place);
   }
   if (params.kind == PaintLayerAddKind::CorrectionMaterial) {
     /* An Add aimed at a correction means another one on the row it hangs on. */
@@ -365,9 +376,10 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
   {
     return nullptr;
   }
-  const char *name_base = (params.kind == PaintLayerAddKind::Fill)   ? "Fill" :
-                          (params.kind == PaintLayerAddKind::Folder) ? "Folder" :
-                                                                       "Layer";
+  const char *name_base = (params.kind == PaintLayerAddKind::Fill)     ? "Fill" :
+                          (params.kind == PaintLayerAddKind::Gradient) ? "Gradient" :
+                          (params.kind == PaintLayerAddKind::Folder)   ? "Folder" :
+                                                                         "Layer";
   std::string name;
   if (params.name != nullptr) {
     name = params.name;

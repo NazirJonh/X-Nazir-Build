@@ -100,6 +100,19 @@ static const PaintLayerKindInfo kinds[] = {
      nullptr,
      0,
      PAINT_LAYER_KIND_READS_SOURCE},
+    /* A procedural generator: its colour and coverage come from shader nodes reading the UV, not
+     * from a map. The first vertical slice is the Layer role; corrections and mask items follow
+     * once their graph and CPU paths are in place. */
+    {MA_PAINT_LAYER_SOURCE_GENERATOR,
+     MA_PAINT_LAYER_GENERATOR_GRADIENT,
+     "Gradient",
+     PaintLayerKindCategory::Source,
+     paint_layer_role_bit(MA_PAINT_LAYER_ROLE_LAYER),
+     nullptr,
+     0,
+     PAINT_LAYER_KIND_GENERATES,
+     /* The kind owns no map, so a stroke cannot paint into it. */
+     false},
     /* A folder owns children, which corrections and mask items never have. */
     {MA_PAINT_LAYER_SOURCE_STACK,
      0,

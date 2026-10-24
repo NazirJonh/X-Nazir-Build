@@ -20,6 +20,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 
+#include "BLI_math_gradient.hh"
 #include "BLI_math_rotation.h"
 
 #include "BLT_translation.hh"
@@ -269,6 +270,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_
 #  include "BKE_node.hh"
 #  include "BKE_paint.hh"
 #  include "BKE_paint_layers.hh"
+#  include "BKE_paint_layers_gradient.hh"
 #  include "BKE_paint_layers_composite.hh"
 #  include "BKE_paint_layers_edit.hh"
 #  include "BKE_paint_layers_generate.hh"
@@ -770,6 +772,9 @@ static MaterialPaintLayer *rna_Material_paint_layers_new(Material *ma,
   switch (eMaterialPaintLayerSource(source)) {
     case MA_PAINT_LAYER_SOURCE_CONSTANT:
       params.kind = PaintLayerAddKind::Fill;
+      break;
+    case MA_PAINT_LAYER_SOURCE_GENERATOR:
+      params.kind = PaintLayerAddKind::Gradient;
       break;
     case MA_PAINT_LAYER_SOURCE_STACK:
       params.kind = PaintLayerAddKind::Folder;
@@ -3294,6 +3299,159 @@ static void rna_MaterialPaintLayerChannel_value_color_set(PointerRNA *ptr, const
   }
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Gradient generator
+ * \{ */
+
+static bool rna_MaterialPaintLayer_gradient_supported_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return layer != nullptr && BKE_paint_layers_gradient_supported(*layer);
+}
+
+static int rna_MaterialPaintLayer_gradient_type_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer != nullptr && layer->gradient != nullptr) ? layer->gradient->type : 0;
+}
+
+static void rna_MaterialPaintLayer_gradient_type_set(PointerRNA *ptr, int value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_gradient_set_type(
+        *ma, *layer, eMaterialPaintLayerGradientType(value));
+  }
+}
+
+static int rna_MaterialPaintLayer_gradient_repeat_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer != nullptr && layer->gradient != nullptr) ? layer->gradient->repeat : 0;
+}
+
+static void rna_MaterialPaintLayer_gradient_repeat_set(PointerRNA *ptr, int value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_gradient_set_repeat(
+        *ma, *layer, eMaterialPaintLayerGradientRepeat(value));
+  }
+}
+
+static float rna_MaterialPaintLayer_gradient_midpoint_get(PointerRNA *ptr)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  return (layer != nullptr && layer->gradient != nullptr) ? layer->gradient->midpoint : 0.5f;
+}
+
+static void rna_MaterialPaintLayer_gradient_midpoint_set(PointerRNA *ptr, float value)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr) {
+    BKE_paint_layers_gradient_set_midpoint(*ma, *layer, value);
+  }
+}
+
+static void rna_MaterialPaintLayer_gradient_start_get(PointerRNA *ptr, float *values)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (layer != nullptr && layer->gradient != nullptr) {
+    copy_v3_v3(values, layer->gradient->start);
+  }
+  else {
+    values[0] = 0.0f;
+    values[1] = 0.5f;
+    values[2] = 0.0f;
+  }
+}
+
+static void rna_MaterialPaintLayer_gradient_end_get(PointerRNA *ptr, float *values)
+{
+  const MaterialPaintLayer *layer = static_cast<const MaterialPaintLayer *>(ptr->data);
+  if (layer != nullptr && layer->gradient != nullptr) {
+    copy_v3_v3(values, layer->gradient->end);
+  }
+  else {
+    values[0] = 1.0f;
+    values[1] = 0.5f;
+    values[2] = 0.0f;
+  }
+}
+
+static void rna_MaterialPaintLayer_gradient_start_set(PointerRNA *ptr, const float *values)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr && layer->gradient != nullptr) {
+    BKE_paint_layers_gradient_set_line(*ma, *layer, values, layer->gradient->end);
+  }
+}
+
+static void rna_MaterialPaintLayer_gradient_end_set(PointerRNA *ptr, const float *values)
+{
+  Material *ma = reinterpret_cast<Material *>(ptr->owner_id);
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (ma != nullptr && layer != nullptr && layer->gradient != nullptr) {
+    BKE_paint_layers_gradient_set_line(*ma, *layer, layer->gradient->start, values);
+  }
+}
+
+static PointerRNA rna_MaterialPaintLayer_gradient_ramp_get(PointerRNA *ptr)
+{
+  MaterialPaintLayer *layer = static_cast<MaterialPaintLayer *>(ptr->data);
+  if (layer == nullptr || layer->gradient == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, &layer->gradient->ramp);
+}
+
+static float rna_MaterialPaintLayerChannel_gradient_value_get(PointerRNA *ptr, const bool end)
+{
+  const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+      ptr->data);
+  return record->value[end ? 1 : 0];
+}
+
+static void rna_MaterialPaintLayerChannel_gradient_value_set(PointerRNA *ptr,
+                                                            const bool end,
+                                                            const float value)
+{
+  MaterialPaintLayer *layer = nullptr;
+  if (Material *ma = rna_paint_layer_sub_owner(ptr, &layer)) {
+    const MaterialPaintLayerChannel *record = static_cast<const MaterialPaintLayerChannel *>(
+        ptr->data);
+    const eMaterialPaintChannel channel = eMaterialPaintChannel(record->channel);
+    BKE_paint_layers_gradient_set_channel_scalars(
+        *ma, *layer, channel, end ? record->value[0] : value, end ? value : record->value[1]);
+  }
+}
+
+static float rna_MaterialPaintLayerChannel_gradient_value_start_get(PointerRNA *ptr)
+{
+  return rna_MaterialPaintLayerChannel_gradient_value_get(ptr, false);
+}
+
+static void rna_MaterialPaintLayerChannel_gradient_value_start_set(PointerRNA *ptr, float value)
+{
+  rna_MaterialPaintLayerChannel_gradient_value_set(ptr, false, value);
+}
+
+static float rna_MaterialPaintLayerChannel_gradient_value_end_get(PointerRNA *ptr)
+{
+  return rna_MaterialPaintLayerChannel_gradient_value_get(ptr, true);
+}
+
+static void rna_MaterialPaintLayerChannel_gradient_value_end_set(PointerRNA *ptr, float value)
+{
+  rna_MaterialPaintLayerChannel_gradient_value_set(ptr, true, value);
+}
+
+/** \} */
+
 /** \} */
 
 }  // namespace blender
@@ -3334,6 +3492,38 @@ static const EnumPropertyItem rna_enum_material_paint_layer_source_items[] = {
      0,
      "Anchor Point",
      "A slice published by an Anchor Point of the same material"},
+    {MA_PAINT_LAYER_SOURCE_GENERATOR,
+     "GENERATOR",
+     0,
+     "Generator",
+     "A procedural colour and coverage built from shading coordinates"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintLayerGradientType. */
+static const EnumPropertyItem rna_enum_material_paint_layer_gradient_type_items[] = {
+    {MA_PAINT_LAYER_GRADIENT_LINEAR, "LINEAR", 0, "Linear", "A ramp along the space's line"},
+    {MA_PAINT_LAYER_GRADIENT_RADIAL,
+     "RADIAL",
+     0,
+     "Radial",
+     "A ramp around the start point, reaching the end point"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/* Values match #eMaterialPaintLayerGradientRepeat. */
+static const EnumPropertyItem rna_enum_material_paint_layer_gradient_repeat_items[] = {
+    {MA_PAINT_LAYER_GRADIENT_REPEAT_NONE,
+     "NONE",
+     0,
+     "None",
+     "Clamp outside the line: the nearest end fills the surface"},
+    {MA_PAINT_LAYER_GRADIENT_REPEAT_REPEAT, "REPEAT", 0, "Repeat", "Repeat the ramp"},
+    {MA_PAINT_LAYER_GRADIENT_REPEAT_REFLECT,
+     "REFLECT",
+     0,
+     "Reflect",
+     "Mirror the ramp at every whole step"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -3672,6 +3862,73 @@ static void rna_def_material_paint_layer(BlenderRNA *brna)
       prop, "rna_MaterialPaintLayer_source_get", "rna_MaterialPaintLayer_source_set", nullptr);
   RNA_def_property_ui_text(prop, "Source", "What the layer reads its values from");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* Read-only: the row is a Gradient generator, so the Gradient panel below applies. */
+  prop = RNA_def_property(srna, "gradient_supported", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_funcs(prop, "rna_MaterialPaintLayer_gradient_supported_get", nullptr);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop, "Gradient Supported", "Whether the row is a procedural Gradient generator");
+
+  prop = RNA_def_property(srna, "gradient_type", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_type_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_gradient_type_get",
+                              "rna_MaterialPaintLayer_gradient_type_set",
+                              nullptr);
+  RNA_def_property_ui_text(prop, "Gradient Type", "Shape of the gradient's iso-lines");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "gradient_repeat", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_material_paint_layer_gradient_repeat_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MaterialPaintLayer_gradient_repeat_get",
+                              "rna_MaterialPaintLayer_gradient_repeat_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop, "Gradient Repeat", "How the UV parameter outside 0..1 is folded into the ramp");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "gradient_midpoint", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_gradient_midpoint_get",
+                               "rna_MaterialPaintLayer_gradient_midpoint_set",
+                               nullptr);
+  RNA_def_property_range(prop, math::gradient_midpoint_min, math::gradient_midpoint_max);
+  RNA_def_property_ui_text(prop, "Gradient Midpoint", "Where the ramp's middle lands along the line");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "gradient_start", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_gradient_start_get",
+                               "rna_MaterialPaintLayer_gradient_start_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Gradient Start",
+                           "Start of the line, or centre of a radial gradient (Z is ignored in UV "
+                           "space)");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "gradient_end", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayer_gradient_end_get",
+                               "rna_MaterialPaintLayer_gradient_end_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop,
+                           "Gradient End",
+                           "End of the line, or radius point of a radial gradient (Z is ignored in "
+                           "UV space)");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "gradient_ramp", PROP_POINTER, PROP_NONE);
+  RNA_def_property_struct_type(prop, "ColorRamp");
+  RNA_def_property_pointer_funcs(
+      prop, "rna_MaterialPaintLayer_gradient_ramp_get", nullptr, nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop, "Gradient Ramp", "Colours a Gradient's colour channels read along the line");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, nullptr);
 
   prop = RNA_def_property(srna, "material", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "material");
@@ -4406,6 +4663,23 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
                                "rna_MaterialPaintLayerChannel_value_scalar_range");
   RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01, 3);
   RNA_def_property_ui_text(prop, "Value", "The scalar channel's constant value");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  /* A scalar channel of a Gradient generator ramps between these two values. */
+  prop = RNA_def_property(srna, "gradient_value_start", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannel_gradient_value_start_get",
+                               "rna_MaterialPaintLayerChannel_gradient_value_start_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Gradient Start", "The scalar channel's value at the line start");
+  RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
+
+  prop = RNA_def_property(srna, "gradient_value_end", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_MaterialPaintLayerChannel_gradient_value_end_get",
+                               "rna_MaterialPaintLayerChannel_gradient_value_end_set",
+                               nullptr);
+  RNA_def_property_ui_text(prop, "Gradient End", "The scalar channel's value at the line end");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_Material_update");
 
   /* The scalar channels' grayscale swatch, matching the brush channel's value_color. */

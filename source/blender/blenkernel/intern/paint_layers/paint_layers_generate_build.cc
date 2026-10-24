@@ -610,6 +610,48 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     return;
   }
   this->mapping_inputs_create(group, layer, layer_name);
+  const bool generates = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
+  if (generates && layer.gradient != nullptr) {
+    /* The gradient's line and shape are values of the row, shared by all of its channels. */
+    char base[200];
+    SNPRINTF(base, "%s Gradient Start", layer_name);
+    bNodeTreeInterfaceSocket *start = layer_group_value_input(
+        group, base, "NodeSocketVector", ROLE_GRADIENT_START, layer.marker, -1);
+    if (start != nullptr) {
+      const float value[3] = {layer.gradient->start[0], layer.gradient->start[1], layer.gradient->start[2]};
+      group_input_vector_default_set(group, *start, value);
+      gradient_start_inputs_.add(&layer, start);
+    }
+    SNPRINTF(base, "%s Gradient End", layer_name);
+    bNodeTreeInterfaceSocket *end = layer_group_value_input(
+        group, base, "NodeSocketVector", ROLE_GRADIENT_END, layer.marker, -1);
+    if (end != nullptr) {
+      const float value[3] = {layer.gradient->end[0], layer.gradient->end[1], 0.0f};
+      group_input_vector_default_set(group, *end, value);
+      gradient_end_inputs_.add(&layer, end);
+    }
+    SNPRINTF(base, "%s Gradient Midpoint", layer_name);
+    bNodeTreeInterfaceSocket *midpoint = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_GRADIENT_MIDPOINT, layer.marker, -1);
+    if (midpoint != nullptr) {
+      group_input_default_set(group, *midpoint, layer.gradient->midpoint);
+      gradient_midpoint_inputs_.add(&layer, midpoint);
+    }
+    SNPRINTF(base, "%s Gradient Type", layer_name);
+    bNodeTreeInterfaceSocket *type = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_GRADIENT_TYPE, layer.marker, -1);
+    if (type != nullptr) {
+      group_input_default_set(group, *type, float(layer.gradient->type));
+      gradient_type_inputs_.add(&layer, type);
+    }
+    SNPRINTF(base, "%s Gradient Repeat", layer_name);
+    bNodeTreeInterfaceSocket *repeat = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_GRADIENT_REPEAT, layer.marker, -1);
+    if (repeat != nullptr) {
+      group_input_default_set(group, *repeat, float(layer.gradient->repeat));
+      gradient_repeat_inputs_.add(&layer, repeat);
+    }
+  }
   for (const int channel : wired_channels_) {
     if (!row_participates(ma_, layer, channel)) {
       continue;
@@ -629,6 +671,30 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group, const Materi
     }
     /* The alpha model of the channel: a value, so a blend edit never rewires the alpha chain. */
     this->blend_mix_input_create(group, layer, channel, layer_name);
+
+    if (generates) {
+      /* A colour channel reads the row's ColorRamp, which needs no input beyond the factor; a
+       * scalar channel ramps between two inputs of its own. */
+      const MaterialPaintLayerChannel *record = paint_layer_channel_find(layer, channel);
+      if (record == nullptr || info.is_color) {
+        continue;
+      }
+      SNPRINTF(base, "%s %s Gradient Start", layer_name, info.ui_name);
+      bNodeTreeInterfaceSocket *start = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_START, layer.marker, channel);
+      if (start != nullptr) {
+        group_input_default_set(group, *start, record->value[0]);
+        gradient_value_start_inputs_.lookup_or_add_default(&layer).add(channel, start);
+      }
+      SNPRINTF(base, "%s %s Gradient End", layer_name, info.ui_name);
+      bNodeTreeInterfaceSocket *end = layer_group_value_input(
+          group, base, "NodeSocketFloat", ROLE_GRADIENT_VALUE_END, layer.marker, channel);
+      if (end != nullptr) {
+        group_input_default_set(group, *end, record->value[1]);
+        gradient_value_end_inputs_.lookup_or_add_default(&layer).add(channel, end);
+      }
+      continue;
+    }
 
     if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
       /* A Material row has no record: a plain value of its source is an input, filled from the

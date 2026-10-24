@@ -9,6 +9,7 @@
 #pragma once
 
 #include "DNA_ID.h"
+#include "DNA_colorband_types.h"
 #include "DNA_defs.h"
 #include "DNA_listBase.h"
 #include "DNA_uuid_types.h"
@@ -24,6 +25,7 @@ namespace blender {
 struct AnimData;
 struct Image;
 struct Material;
+struct Object;
 struct bNodeTree;
 
 /* MaterialGPencilStyle->flag */
@@ -482,6 +484,11 @@ enum eMaterialPaintLayerFlag : int16_t {
    * than as a filled grey. Stored for consumers that export or reuse the mask as an image.
    */
   MA_PAINT_LAYER_MASK_ITEM_ALPHA_BACKGROUND = 1 << 4,
+  /**
+   * The row is protected from painting. It changes no pixel, no topology and no value the stack is
+   * evaluated with, so it only answers the paint target and the UI.
+   */
+  MA_PAINT_LAYER_LOCKED = 1 << 5,
 };
 ENUM_OPERATORS(eMaterialPaintLayerFlag)
 
@@ -591,15 +598,23 @@ enum eMaterialPaintLayerSource : int8_t {
   /**
    * A filter: no colour of its own, it changes the colour it reads. The member is
    * #MaterialPaintLayer::kind_subtype (#eMaterialPaintLayerFilter). Only as a correction for now.
-   * 5 is reserved for the Mesh Map source, 7 for the generators.
+   * 5 is reserved for the Mesh Map source.
    */
   MA_PAINT_LAYER_SOURCE_FILTER = 6,
   /**
    * An Anchor Point or an Anchor Point Reader: the marker publishes a slice of its row, the reader
    * lays that slice. The member is #MaterialPaintLayer::kind_subtype
-   * (#eMaterialPaintLayerAnchorPoint). 3, 5 and 7 stay reserved for the source families named above.
+   * (#eMaterialPaintLayerAnchorPoint). 3 and 5 stay reserved for the source families named above.
    */
   MA_PAINT_LAYER_SOURCE_ANCHOR_POINT = 8,
+  /**
+   * A procedural generator: it produces its colour and coverage from the shading coordinates
+   * instead of a map. The member is #MaterialPaintLayer::kind_subtype
+   * (#eMaterialPaintLayerGenerator) and the parameters live in
+   * #MaterialPaintLayer::gradient. It owns channel records for the channels it takes part in, but no
+   * map: a stroke never writes into it.
+   */
+  MA_PAINT_LAYER_SOURCE_GENERATOR = 7,
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_ANCHOR_POINT row. */
@@ -608,6 +623,74 @@ enum eMaterialPaintLayerAnchorPoint : int16_t {
   MA_PAINT_LAYER_ANCHOR_POINT_MARKER = 0,
   /** The reader: it lays a slice published by a marker. */
   MA_PAINT_LAYER_ANCHOR_POINT_READER = 1,
+};
+
+/** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_GENERATOR row. */
+enum eMaterialPaintLayerGenerator : int16_t {
+  /** A ramp along a line (`linear`) or around a point (`radial`). */
+  MA_PAINT_LAYER_GENERATOR_GRADIENT = 1,
+};
+
+/** #MaterialPaintLayerGradient::space: which coordinates the line is defined in. */
+enum eMaterialPaintLayerGradientSpace : int8_t {
+  /** The stack's render-active UV map; Z of the line points is ignored. */
+  MA_PAINT_LAYER_GRADIENT_SPACE_UV = 0,
+  MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT = 1,
+  MA_PAINT_LAYER_GRADIENT_SPACE_GENERATED = 2,
+};
+
+/** #MaterialPaintLayerGradient::type: the shape of the gradient's iso-lines. */
+enum eMaterialPaintLayerGradientType : int8_t {
+  /** `t` grows along the start-to-end line. */
+  MA_PAINT_LAYER_GRADIENT_LINEAR = 0,
+  /** The start is the centre, `|end - start|` the radius. */
+  MA_PAINT_LAYER_GRADIENT_RADIAL = 1,
+};
+
+/** How a gradient parameter outside 0..1 is folded back into the ramp. */
+enum eMaterialPaintLayerGradientRepeat : int8_t {
+  /** Clamp to the nearest end: the gradient fills the whole surface. */
+  MA_PAINT_LAYER_GRADIENT_REPEAT_NONE = 0,
+  /** `t - floor(t)`: the ramp repeats. */
+  MA_PAINT_LAYER_GRADIENT_REPEAT_REPEAT = 1,
+  /** Mirror at every whole number: the ramp runs forwards, backwards, forwards... */
+  MA_PAINT_LAYER_GRADIENT_REPEAT_REFLECT = 2,
+};
+
+/**
+ * The payload of a #MA_PAINT_LAYER_SOURCE_GENERATOR / #MA_PAINT_LAYER_GENERATOR_GRADIENT row.
+ *
+ * The row carries a pointer to this rather than the struct by value: #ColorBand is close to a
+ * kilobyte, and every row, correction and mask item would otherwise pay for it. The ramp is the
+ * colour source for colour channels; a scalar channel reads its two ends from its own
+ * #MaterialPaintLayerChannel::value[0..1] instead (metallic and roughness want different ends, and
+ * a colour ramp has no meaning there).
+ *
+ * The line is in the space selected by #MaterialPaintLayerGradient::space: the stack's
+ * render-active UV map (Z ignored), object space, or the 0..1 generated bounding box.
+ * `start` is the centre of a radial gradient and `|end - start|` its radius. The two points are
+ * what the gradient tool writes; no map resolution is involved.
+ */
+struct MaterialPaintLayerGradient {
+  DNA_DEFINE_CXX_METHODS(MaterialPaintLayerGradient)
+
+  /** The colours a colour channel reads, evaluated at the folded ramp position. */
+  struct ColorBand ramp;
+  /** Start of the line (or centre of a radial gradient) in the gradient's space. */
+  float start[3] = {0.0f, 0.5f, 0.0f};
+  /** End of the line (or the radius point of a radial gradient) in the gradient's space. */
+  float end[3] = {1.0f, 0.5f, 0.0f};
+  /** Where the ramp's 0.5 lands (0..1); 0.5 is the unbent ramp. */
+  float midpoint = 0.5f;
+  /** #eMaterialPaintLayerGradientSpace. */
+  int8_t space = MA_PAINT_LAYER_GRADIENT_SPACE_UV;
+  /** #eMaterialPaintLayerGradientType. */
+  int8_t type = MA_PAINT_LAYER_GRADIENT_LINEAR;
+  /** #eMaterialPaintLayerGradientRepeat. */
+  int8_t repeat = MA_PAINT_LAYER_GRADIENT_REPEAT_NONE;
+  /** Whether the gizmo of this gradient is shown; lives in what would be padding. */
+  int8_t gizmo_shown = 0;
+  char _pad[4] = {};
 };
 
 /** #MaterialPaintLayer::kind_subtype of a #MA_PAINT_LAYER_SOURCE_FILTER row. */
@@ -944,6 +1027,12 @@ struct MaterialPaintLayer {
    * #MaterialPaintLayer::mask_stack for the mask).
    */
   bUUID anchor_point_source = {};
+  /**
+   * The payload of a generator row (#MA_PAINT_LAYER_SOURCE_GENERATOR), or null for every other
+   * source. Owned by the row (freed, copied and written with it); a pointer rather than a value
+   * because the gradient's #ColorBand would otherwise bloat every row in the file.
+   */
+  struct MaterialPaintLayerGradient *gradient = nullptr;
 };
 
 struct Material {

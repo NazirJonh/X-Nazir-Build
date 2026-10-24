@@ -812,6 +812,16 @@ void stack_preview_empty_draw(const rctf &preview_rect, int icon, const float al
 void stack_preview_color_draw(const rctf &preview_rect,
                               const float color[4],
                               const float alpha_fac);
+/**
+ * Draw the rendered preview that the slot names (see #StackRowPreview::render_kind), with its tooltip,
+ * through #rendered_preview_draw. Always at full alpha: the picture shows the material the row lays
+ * down, and the row's dimming would change its colours. Returns false when the slot names none or
+ * there is nothing to preview, leaving its other looks to answer.
+ */
+bool stack_preview_slot_rendered_draw(const bContext *C,
+                                      ui::Block *block,
+                                      const rctf &preview_rect,
+                                      const StackRowPreview &slot);
 
 /** Whether a Stack Layers row should read as selected (its own row or one of its sub-rows). */
 bool stack_layer_row_selected(const TreeElement &te);

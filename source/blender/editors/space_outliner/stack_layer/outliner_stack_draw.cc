@@ -6,20 +6,25 @@
  * \ingroup spoutliner
  */
 
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
 
+#include "DNA_ID.h"
 #include "DNA_armature_types.h"
 #include "DNA_collection_types.h"
 #include "DNA_constraint_types.h"
 #include "DNA_gpencil_legacy_types.h"
+#include "DNA_image_types.h"
 #include "DNA_key_types.h"
 #include "DNA_layer_types.h"
 #include "DNA_light_types.h"
 #include "DNA_lightprobe_types.h"
+#include "DNA_material_types.h"
+#include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_sequence_types.h"
@@ -27,6 +32,7 @@
 
 #include "BLI_fileops.h"
 #include "BLI_listbase.h"
+#include "BLI_map.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
@@ -35,6 +41,7 @@
 #include "BLI_string_utf8.h"
 #include "BLI_string_utils.hh"
 #include "BLI_utildefines.h"
+#include "BLI_vector.hh"
 
 #include "BLF_api.hh"
 #include "BLT_translation.hh"
@@ -47,6 +54,7 @@
 #include "BKE_global.hh"
 #include "BKE_gpencil_legacy.h"
 #include "BKE_grease_pencil.hh"
+#include "BKE_icons.hh"
 #include "BKE_idtype.hh"
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
@@ -55,7 +63,12 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_main_namemap.hh"
+#include "BKE_material.hh"
 #include "BKE_modifier.hh"
+#include "BKE_node.hh"
+#include "BKE_node_legacy_types.hh"
+#include "BKE_node_runtime.hh"
+#include "BKE_node_tree_update.hh"
 #include "BKE_object.hh"
 #include "BKE_particle.h"
 #include "BKE_preview_image.hh"
@@ -73,6 +86,7 @@
 #include "ED_fileselect.hh"
 #include "ED_id_management.hh"
 #include "ED_outliner.hh"
+#include "ED_render.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
 
@@ -104,6 +118,7 @@
 #include "../tree/tree_element_rna.hh"
 #include "../tree/tree_element_seq.hh"
 #include "../tree/tree_iterator.hh"
+#include "outliner_rendered_preview.hh"
 #include "outliner_stack_source.hh"
 
 namespace blender {
@@ -174,6 +189,37 @@ void stack_preview_color_draw(const rctf &preview_rect,
   draw_roundbox_corner_set(ui::CNR_ALL);
   ui::draw_roundbox_aa(&frame, false, UI_UNIT_Y / 5.0f, swatch_border);
   GPU_blend(GPU_BLEND_ALPHA); /* Round-box disables. */
+}
+
+bool stack_preview_slot_rendered_draw(const bContext *C,
+                                      ui::Block *block,
+                                      const rctf &preview_rect,
+                                      const StackRowPreview &slot)
+{
+  RenderedPreview preview;
+  switch (slot.render_kind) {
+    case StackRowPreviewRender::None:
+      return false;
+    case StackRowPreviewRender::IdPreview:
+      preview.kind = RenderedPreviewKind::Id;
+      break;
+    case StackRowPreviewRender::Sphere:
+      preview.kind = RenderedPreviewKind::Sphere;
+      break;
+    case StackRowPreviewRender::SourceRender:
+      preview.kind = RenderedPreviewKind::Material;
+      break;
+  }
+  preview.hash = slot.render_hash;
+  preview.id_uid = slot.id_uid;
+  preview.id_type = slot.id_type;
+  copy_v4_v4(preview.color, slot.color);
+  preview.metallic = slot.sphere_metallic;
+  preview.roughness = slot.sphere_roughness;
+  std::copy(std::begin(slot.sphere_map_uid), std::end(slot.sphere_map_uid), preview.map_uid);
+  preview.label = slot.label;
+  rendered_preview_tooltip_add(block, preview_rect, preview);
+  return rendered_preview_draw(C, preview_rect, preview, 1.0f);
 }
 
 /**

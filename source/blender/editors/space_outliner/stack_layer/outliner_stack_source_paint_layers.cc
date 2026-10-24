@@ -14,6 +14,7 @@
  */
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <optional>
 #include <string>
@@ -47,6 +48,7 @@
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
+#include "BKE_paint_material_resolve.hh"
 #include "BKE_paint_material_sync.hh"
 #include "BKE_report.hh"
 
@@ -55,6 +57,7 @@
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_listbase_iterator.hh"
+#include "BLI_math_color.h"
 #include "BLI_path_utils.hh"
 #include "BLI_string.h"
 #include "BLI_utildefines.h"
@@ -593,6 +596,115 @@ StackRow paint_mask_item_row_build(const Material &material,
 }
 
 /**
+ * The constants a Fill's sphere preview shades with: the flat colour the swatch already shows,
+ * plus the metallic and roughness a flat colour cannot. A channel that carries a map hands the
+ * map's session UID instead, so the sphere shades with the texture the layer lays down rather than
+ * with the constant the record keeps beside it.
+ */
+static void paint_fill_sphere_read(const MaterialPaintLayer &layer,
+                                   float &r_metallic,
+                                   float &r_roughness,
+                                   uint32_t r_map_uid[3])
+{
+  r_metallic = 0.0f;
+  r_roughness = 0.5f;
+  r_map_uid[0] = r_map_uid[1] = r_map_uid[2] = 0;
+  for (int c = 0; c < layer.channels_num; c++) {
+    const MaterialPaintLayerChannel &record = layer.channels[c];
+    switch (record.channel) {
+      case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+        r_map_uid[0] = record.image != nullptr ? record.image->id.session_uid : 0;
+        break;
+      case PAINT_MATERIAL_CHANNEL_METALLIC:
+        r_metallic = record.value[0];
+        r_map_uid[1] = record.image != nullptr ? record.image->id.session_uid : 0;
+        break;
+      case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+        r_roughness = record.value[0];
+        r_map_uid[2] = record.image != nullptr ? record.image->id.session_uid : 0;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+/**
+ * Everything the Fill's sphere preview shows, folded into the one value its slot carries: an edit
+ * anywhere in it -- a dragged colour, a retuned roughness -- re-renders the sphere. The blend and
+ * the opacity are left out on purpose: they compose the row over the stack and do not change the
+ * fill itself, and folding them in would re-render the sphere for every slider drag that leaves
+ * it looking the same. The exact float bits are folded rather than their decimal values, so two
+ * constants cannot fold alike by rounding.
+ */
+static uint64_t paint_fill_sphere_hash(const MaterialPaintLayer &layer)
+{
+  uint64_t hash = 0;
+  const auto mix = [&hash](const uint64_t value) {
+    hash = (hash << 27) + (hash >> 5) + value + 0x9e3779b97f4a7c15ull;
+  };
+  const auto mix_float = [&mix](const float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    mix(bits);
+  };
+  for (int c = 0; c < layer.channels_num; c++) {
+    const MaterialPaintLayerChannel &record = layer.channels[c];
+    mix((uint64_t(uint8_t(record.channel)) << 8) | uint8_t(record.state));
+    mix_float(record.value[0]);
+    mix_float(record.value[1]);
+    mix_float(record.value[2]);
+    mix_float(record.value[3]);
+    mix(record.image != nullptr ? record.image->id.session_uid : 0);
+  }
+  return hash;
+}
+
+/**
+ * Everything a Material row's sphere preview shows, folded into the one value its slot carries:
+ * the source's identity and the hash of its whole graph, so an edit of it re-renders; each
+ * channel's resolution with the map or the constant it resolved to; and -- where a channel's
+ * answer is the bake's, the only case that is -- the bake's stamps, so a re-bake landing new maps
+ * re-renders the sphere off them.
+ */
+static uint64_t paint_material_sphere_hash(const Material &source,
+                                           const MaterialSourceResolve &resolve,
+                                           const MaterialPaintLayer &layer)
+{
+  uint64_t hash = 0;
+  const auto mix = [&hash](const uint64_t value) {
+    hash = (hash << 27) + (hash >> 5) + value + 0x9e3779b97f4a7c15ull;
+  };
+  mix(source.id.session_uid);
+  mix(BKE_paint_layers_source_material_tree_hash_cached(source));
+  for (const int channel :
+       {PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_METALLIC,
+        PAINT_MATERIAL_CHANNEL_ROUGHNESS})
+  {
+    const ChannelResolution resolution = resolve.channels[channel];
+    mix(uint8_t(resolution));
+    if (resolution == ChannelResolution::Constant) {
+      uint64_t constant_bits[2];
+      memcpy(constant_bits, &resolve.constants[channel], sizeof(constant_bits));
+      mix(constant_bits[0]);
+      mix(constant_bits[1]);
+    }
+    else if (resolution == ChannelResolution::Image) {
+      const Image *map = resolve.images[channel].image;
+      mix(map != nullptr ? map->id.session_uid : 0);
+    }
+    else if (resolution == ChannelResolution::Baked && layer.bake != nullptr) {
+      mix(layer.bake->hash[0] | (uint64_t(layer.bake->hash[1]) << 32));
+      mix(layer.bake->source_hash[0] | (uint64_t(layer.bake->source_hash[1]) << 32));
+      mix(uint32_t(layer.bake->size));
+      const Image *map = layer.bake->images[channel];
+      mix(map != nullptr ? map->id.session_uid : 0);
+    }
+  }
+  return hash;
+}
+
+/**
  * Append the rows of \a list, and recursively of every folder in it, depth first. A folder's row
  * is appended after what it holds: the tree is built walking the rows from the last one down, and a
  * child is only hung off a folder already made. The ordinals keep the walk order -- rows are looked
@@ -671,11 +783,89 @@ void paint_stack_rows_append(const Material &material,
     else if (adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
              layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
     {
-      /* Nothing to show or switch to: the brush has no content to work on in this row. A Material
-       * row shows what its source shows and owns no map to paint; a Gradient row is procedural.
-       * With a mask the row does have two targets, and the slot back to the content (made below)
-       * needs its section. Both take corrections, which are listed under this section, so they
-       * have it with or without a mask. */
+      /* A Gradient row is procedural and an adjustment has no content, so neither has a slot. Both
+       * take corrections, which are listed under the content section, so they have it with or
+       * without a mask. A Material row's preview is what the row paints, resolved the same way the
+       * paint system itself reads the source: a plain constant or a plain texture of the source's
+       * own shades a sphere, and so does the bake where the source is a graph. A graph whose bake
+       * is missing or no longer describes the source -- Auto leaves it to the live shader -- has no
+       * map to shade with, and the colour fields would show what the graph no longer is, so the
+       * source's own preview answers instead; its change flag follows the graph's edits. The flat
+       * colour answers wherever neither can; without a source, the placeholder below. */
+      if (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material != nullptr) {
+        StackRowPreview material_slot;
+        material_slot.section_id = "CHANNELS";
+        material_slot.label = layer.material->id.name + 2;
+        material_slot.is_color_swatch = true;
+        /* The remembered answer: the rows are rebuilt on every stack redraw. */
+        const std::shared_ptr<const MaterialSourceResolve> resolve_shared =
+            BKE_paint_layers_source_resolve(*layer.material);
+        const MaterialSourceResolve resolve = resolve_shared ?
+                                                  *resolve_shared :
+                                                  BKE_paint_material_source_resolve(layer.material);
+        if (resolve.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR] == ChannelResolution::Constant) {
+          const float4 &base = resolve.constants[PAINT_MATERIAL_CHANNEL_BASE_COLOR];
+          material_slot.color[0] = base[0];
+          material_slot.color[1] = base[1];
+          material_slot.color[2] = base[2];
+          material_slot.color[3] = base[3];
+        }
+        else {
+          /* The source's own RGB fields are display-referred; the slot's colour is scene linear
+           * like every slot colour. */
+          const float source_color[4] = {
+              layer.material->r, layer.material->g, layer.material->b, layer.material->a};
+          srgb_to_linearrgb_v4(material_slot.color, source_color);
+        }
+        material_slot.sphere_metallic =
+            (resolve.channels[PAINT_MATERIAL_CHANNEL_METALLIC] == ChannelResolution::Constant) ?
+                resolve.constants[PAINT_MATERIAL_CHANNEL_METALLIC][0] :
+                0.0f;
+        material_slot.sphere_roughness =
+            (resolve.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS] == ChannelResolution::Constant) ?
+                resolve.constants[PAINT_MATERIAL_CHANNEL_ROUGHNESS][0] :
+                0.5f;
+        /* The maps the sphere shades with: the source's own texture where the source is one -- the
+         * system reads it directly and never bakes it -- and the bake's map where the source is a
+         * graph, the one case the row is baked for. */
+        bool graph_without_map = false;
+        for (const int channel :
+             {PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_METALLIC,
+              PAINT_MATERIAL_CHANNEL_ROUGHNESS})
+        {
+          const Image *map = nullptr;
+          if (resolve.channels[channel] == ChannelResolution::Image) {
+            map = resolve.images[channel].image;
+          }
+          else if (resolve.channels[channel] == ChannelResolution::Baked) {
+            map = layer.bake != nullptr ? layer.bake->images[channel] : nullptr;
+            graph_without_map |= (map == nullptr);
+          }
+          material_slot.sphere_map_uid[channel] = map != nullptr ? map->id.session_uid : 0;
+        }
+        const bool graph_channel = ELEM(ChannelResolution::Baked,
+                                        resolve.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR],
+                                        resolve.channels[PAINT_MATERIAL_CHANNEL_METALLIC],
+                                        resolve.channels[PAINT_MATERIAL_CHANNEL_ROUGHNESS]);
+        if (graph_channel &&
+            (graph_without_map || BKE_paint_layers_material_row_stale(material, layer)))
+        {
+          material_slot.render_kind = StackRowPreviewRender::SourceRender;
+          material_slot.id_uid = layer.material->id.session_uid;
+          material_slot.id_type = ID_MA;
+          /* The source alone is what is rendered, so only its graph decides a new render. */
+          material_slot.render_hash = (uint64_t(layer.material->id.session_uid) << 1) ^
+                                      BKE_paint_layers_source_material_tree_hash_cached(
+                                          *layer.material);
+        }
+        else if (material_slot.sphere_map_uid[PAINT_MATERIAL_CHANNEL_BASE_COLOR] != 0 ||
+                 resolve.channels[PAINT_MATERIAL_CHANNEL_BASE_COLOR] == ChannelResolution::Constant)
+        {
+          material_slot.render_kind = StackRowPreviewRender::Sphere;
+          material_slot.render_hash = paint_material_sphere_hash(*layer.material, resolve, layer);
+        }
+        row.preview_slots.append(std::move(material_slot));
+      }
       if (BKE_paint_layers_mask_base(layer) != nullptr ||
           layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
           layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
@@ -699,6 +889,15 @@ void paint_stack_rows_append(const Material &material,
         fill_swatch.section_id = "CHANNELS";
         BKE_paint_layers_base_color_get(layer, fill_swatch.color);
         fill_swatch.label = IFACE_("Fill Color");
+        /* The swatch is the fill's own flat colour, arriving with the row itself. The sphere over
+         * it is the same constants shaded -- metallic and roughness read too -- arriving from the
+         * preview render and keeping the swatch underneath as its instant answer. */
+        paint_fill_sphere_read(layer,
+                               fill_swatch.sphere_metallic,
+                               fill_swatch.sphere_roughness,
+                               fill_swatch.sphere_map_uid);
+        fill_swatch.render_kind = StackRowPreviewRender::Sphere;
+        fill_swatch.render_hash = paint_fill_sphere_hash(layer);
         row.preview_slots.append(std::move(fill_swatch));
       }
     }
@@ -733,12 +932,13 @@ void paint_stack_rows_append(const Material &material,
     /* The mask: a slot of its own, whose click switches the brush to it, and the section that slot
      * reveals. Its switch rides on the row, so a switched-off mask is kept and listed. */
     if (const MaterialPaintLayer *mask = BKE_paint_layers_mask_base(layer)) {
-      if (folder || adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
-          layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
+      if (folder || adjustment || layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR ||
+          (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL && layer.material == nullptr))
       {
         /* The slot that switches back to the content, ahead of the mask's. The row icon stays in
          * front of it, as it does for a folder with no mask; these rows have no map of their own to
-         * show in a slot, so without this one the brush could not leave the mask. */
+         * show in a slot, so without this one the brush could not leave the mask. A Material row
+         * with a source switches with its own preview slot, which opens the same section. */
         StackRowPreview content_slot;
         content_slot.section_id = "CHANNELS";
         content_slot.icon = ICON_BRUSHES_ALL;

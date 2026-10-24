@@ -86,6 +86,30 @@ struct StackSubRow {
 };
 
 /**
+ * A rendered preview a slot can ask the draw for, beyond the plain icon, the flat colour and the
+ * placeholder.
+ *
+ * Rendering is the draw's business, the way fetching #id_uid's data-block already is: a visible
+ * slot asks for the pixels, the draw keeps them, and nothing renders again until what the slot
+ * shows (#render_hash) changes. The render itself rides the stock ID preview machinery, so it
+ * happens in its own debounced job and never on the draw's thread.
+ */
+enum class StackRowPreviewRender : int8_t {
+  /** No rendered preview: the icon, the swatch or the placeholder answers for the slot. */
+  None = 0,
+  /** The preview image of the data-block #StackRowPreview::id_uid names, drawn like an ID
+   * picker's thumbnail (a Material layer's source). */
+  IdPreview,
+  /** A lit sphere shaded with the slot's own constants -- #StackRowPreview::color, metallic and
+   * roughness -- so a flat Fill reads as the material it lays down. */
+  Sphere,
+  /** The data-block #StackRowPreview::id_uid names (a material) rendered afresh into a preview the
+   * draw owns, re-rendered when #StackRowPreview::render_hash changes. Unlike #IdPreview it never
+   * shows the pixels the data-block carries, which for an asset are the ones stored with it. */
+  SourceRender,
+};
+
+/**
  * One clickable preview slot of a row.
  *
  * A row may show multiple previews -- the paint source shows a layer's channel map and its mask
@@ -147,6 +171,29 @@ struct StackRowPreview {
   bool is_color_swatch = false;
   /** The scene linear colour #is_color_swatch draws; meaningless otherwise. */
   float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+  /** Which rendered preview the slot asks the draw for, if any. */
+  StackRowPreviewRender render_kind = StackRowPreviewRender::None;
+  /**
+   * Everything the rendered preview shows, folded into one value. The draw holds the pixels it
+   * last rendered beside this value and re-renders only when the two disagree, so the source must
+   * mix in every input the render reads. Meaningless for #StackRowPreviewRender::None, where the
+   * preview's own data-block carries its change flag instead.
+   */
+  uint64_t render_hash = 0;
+  /** Metallic and roughness the #StackRowPreviewRender::Sphere shading reads; meaningless
+   * otherwise. The base colour it shades with is #color. */
+  float sphere_metallic = 0.0f;
+  float sphere_roughness = 0.5f;
+  /**
+   * Maps the #StackRowPreviewRender::Sphere shades with, by session UID -- Base Color, Metallic,
+   * Roughness -- or zero for the matching constant (#color, #sphere_metallic, #sphere_roughness).
+   *
+   * A map is not the row's own fact the way the constants are: it is baked elsewhere (a Material
+   * row's channel maps) and only its stable name survives a rebuild, for the draw to resolve. The
+   * bake's own hashes ride along in #render_hash, so the sphere re-renders when the bake does.
+   */
+  uint32_t sphere_map_uid[3] = {0, 0, 0};
 };
 
 /**

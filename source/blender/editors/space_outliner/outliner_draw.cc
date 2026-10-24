@@ -3518,6 +3518,7 @@ bool element_should_draw_faded(const TreeViewContext &tvc,
 }
 
 static void outliner_draw_tree_element(ui::Block *block,
+                                       const bContext *C,
                                        const uiFontStyle *fstyle,
                                        const TreeViewContext &tvc,
                                        ARegion *region,
@@ -3736,8 +3737,17 @@ static void outliner_draw_tree_element(ui::Block *block,
           const StackRowPreview &slot = row->preview_slots[slot_index];
           const rctf preview_rect = outliner_stack_row_preview_rect(
               *row, float(startx), float(*starty), slot_index);
-          const float alpha = (tselem->flag & TSE_HIGHLIGHTED_ICON) ? alpha_fac + 0.5f : alpha_fac;
-          if (slot.is_color_swatch) {
+          /* A slot that names a rendered preview always draws at full alpha: it is a picture of
+           * the material the row lays down, and the row's dimming would change its colours. */
+          const float alpha = (slot.render_kind != StackRowPreviewRender::None) ? 1.0f :
+                              (tselem->flag & TSE_HIGHLIGHTED_ICON) ? alpha_fac + 0.5f :
+                                                                      alpha_fac;
+          /* A slot that names a rendered preview draws its pixels; while they are on their way it
+           * draws its own stand-in, and when there is nothing to render at all it falls through
+           * to its other looks below. */
+          const bool slot_rendered = stack_preview_slot_rendered_draw(
+              C, block, preview_rect, slot);
+          if (!slot_rendered && slot.is_color_swatch) {
             /* A row that is a colour shows the colour: no thumbnail to fetch, no icon that says
              * more than the swatch does. Drawn opaque whatever the row state or hover, so the
              * swatch reports the fill's actual colour rather than the row's shading. */
@@ -3762,12 +3772,12 @@ static void outliner_draw_tree_element(ui::Block *block,
                                OUTLINER_STACK_PREVIEW_SCALE);
             }
           }
-          else if (slot.is_blank) {
+          else if (!slot_rendered && slot.is_blank) {
             /* The data-block exists, but its thumbnail has nothing to show yet: the source says
              * so, and the empty-texture placeholder answers for the slot. */
             stack_preview_empty_draw(preview_rect, stack_empty_icon, alpha);
           }
-          else {
+          else if (!slot_rendered) {
             const int icon_id = slot.icon;
             ui::icon_draw_ex(preview_rect.xmin,
                              preview_rect.ymin,
@@ -3979,6 +3989,7 @@ static void outliner_draw_tree_element(ui::Block *block,
        * children of a grayed out parent (pass on draw_grayed_out to children). */
       bool draw_children_grayed_out = draw_grayed_out || (ten.flag & TE_DRAGGING);
       outliner_draw_tree_element(block,
+                                 C,
                                  fstyle,
                                  tvc,
                                  region,
@@ -4336,6 +4347,7 @@ static void outliner_draw_highlights(ARegion *region,
 }
 
 static void outliner_draw_tree(ui::Block *block,
+                               const bContext *C,
                                const TreeViewContext &tvc,
                                ARegion *region,
                                SpaceOutliner *space_outliner,
@@ -4418,6 +4430,7 @@ static void outliner_draw_tree(ui::Block *block,
     int startx = columns_offset;
     for (TreeElement &te : space_outliner->runtime->tree) {
       outliner_draw_tree_element(block,
+                                 C,
                                  fstyle,
                                  tvc,
                                  region,
@@ -4593,6 +4606,7 @@ void draw_outliner(const bContext *C, bool do_rebuild)
   outliner_back(*space_outliner, region);
   block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
   outliner_draw_tree(block,
+                     C,
                      tvc,
                      region,
                      space_outliner,

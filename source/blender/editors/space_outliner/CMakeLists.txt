@@ -29,6 +29,7 @@ set(SRC
   outliner_tree.cc
   outliner_utils.cc
   space_outliner.cc
+  stack_layer/outliner_rendered_preview.cc
   stack_layer/outliner_stack_draw.cc
   stack_layer/outliner_stack_add.cc
   stack_layer/outliner_stack_clipboard.cc
@@ -98,6 +99,7 @@ set(SRC
   tree/tree_iterator.cc
 
   outliner_intern.hh
+  stack_layer/outliner_rendered_preview.hh
   stack_layer/outliner_stack_drag.hh
   stack_layer/outliner_stack_layers_intern.hh
   tree/common.hh
@@ -160,6 +162,7 @@ set(LIB
   PRIVATE bf::depsgraph
   PRIVATE bf::dna
   bf_editor_id_management
+  bf_editor_render
   bf_editor_undo
   PRIVATE bf::gpu
   PRIVATE bf::imbuf

@@ -22,6 +22,12 @@ struct PointerRNA;
 bool ED_outliner_collections_editor_poll(bContext *C);
 
 /**
+ * Free the pixels of the Stack Layers' rendered previews. They belong to no Main, so the exit path
+ * has to drop them before the leak check.
+ */
+void ED_outliner_rendered_previews_free();
+
+/**
  * Populates the `objects` #ListBaseT with all the outliner selected objects
  * We store it as `(Object *)LinkData->data`.
  *

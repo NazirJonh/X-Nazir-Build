@@ -257,6 +257,7 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_
 
 #  include "BKE_attribute.h"
 #  include "BKE_attribute.hh"
+#  include "BKE_brush.hh"
 #  include "BKE_colorband.hh"
 #  include "BKE_context.hh"
 #  include "BKE_editmesh.hh"
@@ -282,6 +283,8 @@ static const EnumPropertyItem rna_enum_material_paint_layer_anchor_point_target_
 #  include "BKE_scene.hh"
 #  include "BKE_texture.h"
 #  include "BKE_workspace.hh"
+
+#  include "BLI_string.h"
 
 #  include "DEG_depsgraph.hh"
 #  include "DEG_depsgraph_build.hh"
@@ -684,6 +687,64 @@ static PointerRNA rna_MaterialPaintLayerCurvePatch_brush_get(PointerRNA *ptr)
     return PointerRNA_NULL;
   }
   return RNA_id_pointer_create(&payload->brush->id);
+}
+
+/** Only a brush a Curve Patch can stamp with is offered (and accepted from a drop); the effects'
+ * own private snapshots are not sources, so one effect cannot adopt another's state by accident. */
+static bool rna_MaterialPaintLayerCurvePatch_brush_poll(PointerRNA * /*ptr*/, const PointerRNA value)
+{
+  const Brush *brush = static_cast<const Brush *>(value.data);
+  return brush != nullptr && bke::brush::supports_curve_patch(*brush) &&
+         !STRPREFIX(brush->id.name + 2, ".CP Brush ");
+}
+
+/** Assigning a brush gives the effect a fresh private duplicate of it (the effect never shares a
+ * brush with the user's library), so a drop of a brush asset onto the field is the whole gesture. */
+static void rna_MaterialPaintLayerCurvePatch_brush_set(PointerRNA *ptr,
+                                                       PointerRNA value,
+                                                       ReportList *reports)
+{
+  MaterialPaintLayerCurvePatch *payload = static_cast<MaterialPaintLayerCurvePatch *>(ptr->data);
+  Material *ma = (ptr->owner_id != nullptr && GS(ptr->owner_id->name) == ID_MA) ?
+                     id_cast<Material *>(ptr->owner_id) :
+                     nullptr;
+  const Brush *source = static_cast<const Brush *>(value.data);
+  Main *bmain = G_MAIN;
+  if (payload == nullptr || ma == nullptr || source == nullptr || bmain == nullptr ||
+      source == payload->brush)
+  {
+    return;
+  }
+  if (!rna_MaterialPaintLayerCurvePatch_brush_poll(ptr, value)) {
+    BKE_report(reports, RPT_WARNING, "That brush cannot stamp a Curve Patch");
+    return;
+  }
+  /* The previous snapshot is freed by the replacement: refuse while a session holds it as the
+   * active brush, which would leave the modal editing through a freed brush. */
+  for (const Scene &scene : bmain->scenes) {
+    if (scene.toolsettings != nullptr && scene.toolsettings->sculpt != nullptr &&
+        scene.toolsettings->sculpt->paint.brush == payload->brush)
+    {
+      BKE_report(reports, RPT_WARNING, "Finish the Curve Patch session before changing its brush");
+      return;
+    }
+  }
+  MaterialPaintLayer *owner = nullptr;
+  BKE_paint_layers_foreach(*ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) {
+    for (MaterialPaintLayer &effect : layer.effects) {
+      if (effect.curve_patch == payload) {
+        owner = &effect;
+        return false;
+      }
+    }
+    return true;
+  });
+  if (owner == nullptr || !BKE_paint_layers_curve_patch_brush_set(*ma, *bmain, *owner, *source)) {
+    BKE_report(reports, RPT_ERROR, "Could not assign that brush to the Curve Patch");
+    return;
+  }
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+  WM_main_add_notifier(NC_MATERIAL | ND_SHADING, &ma->id);
 }
 
 static void rna_Material_paint_layers_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
@@ -4024,13 +4085,16 @@ static void rna_def_material_paint_layer_curve_patch(BlenderRNA *brna)
    * #PAINT_OT_curve_patch_layer_brush_assign, which duplicates it. */
   prop = RNA_def_property(srna, "brush", PROP_POINTER, PROP_NONE);
   RNA_def_property_struct_type(prop, "Brush");
-  RNA_def_property_pointer_funcs(
-      prop, "rna_MaterialPaintLayerCurvePatch_brush_get", nullptr, nullptr, nullptr);
-  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
-  RNA_def_property_ui_text(
-      prop,
-      "Brush",
-      "The private brush snapshot this Curve Patch layer paints with; use Assign Brush to replace it");
+  RNA_def_property_pointer_funcs(prop,
+                                 "rna_MaterialPaintLayerCurvePatch_brush_get",
+                                 "rna_MaterialPaintLayerCurvePatch_brush_set",
+                                 nullptr,
+                                 "rna_MaterialPaintLayerCurvePatch_brush_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_NEVER_UNLINK | PROP_NEVER_NULL);
+  RNA_def_property_ui_text(prop,
+                           "Brush",
+                           "The private brush snapshot this Curve Patch paints with; drop or pick "
+                           "a brush to replace it with a duplicate of that brush");
 }
 
 static void rna_def_material_paint_layer(BlenderRNA *brna)

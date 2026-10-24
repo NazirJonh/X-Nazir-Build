@@ -698,11 +698,32 @@ static void paint_layer_material_duplicate(Main &bmain,
 }
 
 /**
+ * The copy of a Curve Patch effect owns duplicates of the whole payload: the curve container and the
+ * brush snapshot are the effect's private content and tool state, so a shared pointer would make two
+ * effects edit one set of curves. `BKE_id_copy` hands back one user each, which the copy is.
+ */
+static void paint_layer_curve_patch_duplicate(Main &bmain,
+                                              MaterialPaintLayer &dst,
+                                              const MaterialPaintLayer &src)
+{
+  if (src.curve_patch == nullptr) {
+    return;
+  }
+  MaterialPaintLayerCurvePatch *payload = MEM_new<MaterialPaintLayerCurvePatch>(__func__);
+  dst.curve_patch = payload;
+  if (src.curve_patch->vectors != nullptr) {
+    payload->vectors = id_cast<PaintVector *>(
+        BKE_id_copy(&bmain, &src.curve_patch->vectors->id));
+  }
+  if (src.curve_patch->brush != nullptr) {
+    payload->brush = id_cast<Brush *>(BKE_id_copy(&bmain, &src.curve_patch->brush->id));
+  }
+}
+
+/**
  * An unlinked copy of the mask item or correction \a item: a marker of its own and maps of its own,
  * for the same reason as the channel maps.
  */
-static void paint_layer_curve_patch_duplicate(Main &bmain, MaterialPaintLayer &dst,
-                                              const MaterialPaintLayer &src);
 static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
                                                       Material &ma,
                                                       const MaterialPaintLayer &item,
@@ -736,29 +757,6 @@ static MaterialPaintLayer *paint_layer_item_duplicate(Main &bmain,
   }
   BKE_paint_layers_gradient_copy(*item_copy, item);
   return item_copy;
-}
-
-/**
- * The copy of a Curve Patch row owns duplicates of the whole payload: the curve container and the
- * brush snapshot are the row's private content and tool state, so a shared pointer would make two
- * rows edit one effect. `BKE_id_copy` hands back one user each, which the copied row is.
- */
-static void paint_layer_curve_patch_duplicate(Main &bmain,
-                                              MaterialPaintLayer &dst,
-                                              const MaterialPaintLayer &src)
-{
-  if (src.curve_patch == nullptr) {
-    return;
-  }
-  MaterialPaintLayerCurvePatch *payload = MEM_new<MaterialPaintLayerCurvePatch>(__func__);
-  dst.curve_patch = payload;
-  if (src.curve_patch->vectors != nullptr) {
-    payload->vectors = id_cast<PaintVector *>(
-        BKE_id_copy(&bmain, &src.curve_patch->vectors->id));
-  }
-  if (src.curve_patch->brush != nullptr) {
-    payload->brush = id_cast<Brush *>(BKE_id_copy(&bmain, &src.curve_patch->brush->id));
-  }
 }
 
 /**

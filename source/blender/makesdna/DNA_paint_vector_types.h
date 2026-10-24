@@ -42,6 +42,10 @@ enum PaintVectorSpaceType {
 enum PaintVectorItemFlag {
   /** #PaintVectorItem::origin is user-set and must survive point edits. */
   PAINT_VECTOR_ITEM_ORIGIN_CUSTOM = 1 << 0,
+  /** A Curve Patch item still at its Add-time default position (a segment on the object origin,
+   * usually inside the mesh); the tool entry lays it on the surface under the view and clears the
+   * flag. */
+  PAINT_VECTOR_ITEM_CURVE_SEED = 1 << 1,
 };
 
 /** #PaintVectorPoint::flag. */

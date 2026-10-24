@@ -1032,6 +1032,8 @@ void OUTLINER_OT_stack_layer_clear_target(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_color_tag_set(wmOperatorType *ot);
 void OUTLINER_OT_stack_layers_back(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot);
+/** Double-click on a Curve Patch effect row: enter the row's curve-patch tool. */
+void OUTLINER_OT_stack_layer_curve_patch_edit(wmOperatorType *ot);
 void OUTLINER_OT_stack_column_popup(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_move(wmOperatorType *ot);
 void OUTLINER_OT_stack_layer_visibility_toggle(wmOperatorType *ot);

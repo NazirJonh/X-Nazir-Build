@@ -108,6 +108,7 @@
 
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_edit_intern.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_clone.hh"
 #include "paint_clone_mesh_source.hh"
 #include "paint_clone_source.hh"
@@ -3706,6 +3707,12 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_image_shape_point_delete);
   WM_operatortype_append(PAINT_OT_vector_save);
   WM_operatortype_append(PAINT_OT_vector_edit);
+  /* The active Curve Patch layer row's curve list and tool. */
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_add);
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_remove);
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_rename);
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_edit);
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_brush_assign);
   WM_operatortype_append(PAINT_OT_image_select_invert);
   /* Canvas-space symmetry line widget for the Image Editor. */
   WM_operatortype_append(PAINT_OT_image_symmetry_edit);

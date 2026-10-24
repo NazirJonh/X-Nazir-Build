@@ -8,6 +8,7 @@
 
 #include "ED_curve_patch.hh"
 
+#include "paint_curve_patch_layer.hh"
 #include "paint_curve_patch_session.hh"
 
 namespace blender::ed::sculpt_paint::tests {

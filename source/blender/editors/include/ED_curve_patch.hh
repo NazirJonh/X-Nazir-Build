@@ -78,6 +78,18 @@ void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *
 /** #ED_curve_patch_session_get then #ED_curve_patch_overlay_data_get. Null `ob` is empty. */
 void ED_curve_patch_overlay_data_get(const Object *ob, CurvePatchOverlayData &r_data);
 
+/**
+ * Fill \a r_data from the ACTIVE stack row of \a ob's active material (passive preview, no
+ * session): the control curves of every Curve Patch item in the row's PaintVector, `active_index`
+ * the row's stored active item. Empty when there is no object, its active row is not a Curve Patch
+ * row, or the container holds no curve items -- the overlay then draws nothing, the same way a
+ * null session reads.
+ *
+ * A live session has priority: the overlay caller resolves the session first and only falls back
+ * to this when none runs, so the interactive curves are never drawn twice.
+ */
+void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayData &r_data);
+
 /* Mutable point access for the Transform system (`transform_convert_curve_patch.cc`). Every
  * function tolerates "no session"/"no valid active point" by returning false or doing nothing. */
 

@@ -8,6 +8,10 @@
 
 #include "paint_curve_patch_document.hh"
 
+#include <algorithm>
+
+#include "BLI_index_range.hh"
+
 namespace blender::ed::sculpt_paint {
 
 int curve_patch_index_for_source_curve(const CurvePatchDocument &document,
@@ -19,6 +23,19 @@ int curve_patch_index_for_source_curve(const CurvePatchDocument &document,
     }
   }
   return -1;
+}
+
+void curve_patch_document_active_patch_set(CurvePatchDocument &document, const int index)
+{
+  if (document.patches.is_empty()) {
+    document.active_patch = 0;
+    document.active_point = -1;
+    return;
+  }
+  document.active_patch = std::clamp(index, 0, int(document.patches.size()) - 1);
+  /* The point belonged to the patch that was active until now. */
+  document.active_point = -1;
+  document.texture_pick_point = -1;
 }
 
 }  // namespace blender::ed::sculpt_paint

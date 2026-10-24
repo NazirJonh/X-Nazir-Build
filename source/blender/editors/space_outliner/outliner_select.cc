@@ -11,6 +11,7 @@
 #include "DNA_armature_types.h"
 #include "DNA_gpencil_legacy_types.h"
 #include "DNA_gpencil_modifier_types.h"
+#include "DNA_material_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -32,6 +33,7 @@
 #include "BKE_main.hh"
 #include "BKE_modifier.hh"
 #include "BKE_object.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_particle.h"
 #include "BKE_report.hh"
 #include "BKE_shader_fx.hh"
@@ -1881,6 +1883,30 @@ static bool outliner_is_co_within_active_mode_column(bContext *C,
 }
 
 /**
+ * Whether the stack row \a ordinal belongs to a Curve Patch effect of the Outliner's material.
+ * The double-click needs this before it calls the edit operator: that operator's poll reads the
+ * ACTIVE row, so the click has to activate the row first.
+ */
+static bool outliner_stack_row_is_curve_patch(const bContext &C,
+                                              SpaceOutliner &space_outliner,
+                                              const int ordinal)
+{
+  const StackRow *row = outliner_stack_row_find(space_outliner, ordinal);
+  if (row == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(C);
+  ID *owner = outliner_stack_owner_get(ctx, space_outliner);
+  if (owner == nullptr || GS(owner->name) != ID_MA) {
+    return false;
+  }
+  const MaterialPaintLayer *layer = BKE_paint_layers_find(id_cast<Material &>(*owner),
+                                                          row->stable_id);
+  return layer != nullptr && layer->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
+         layer->curve_patch != nullptr;
+}
+
+/**
  * Action to run when clicking in the outliner,
  *
  * May expend/collapse branches or activate items.
@@ -1940,6 +1966,29 @@ static wmOperatorStatus outliner_item_do_activate_from_cursor(bContext *C,
         return outliner_stack_focus_set(C, *space_outliner, *object, -1, true) ?
                    OPERATOR_FINISHED :
                    OPERATOR_CANCELLED;
+      }
+      if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
+          activate_tselem->type == TSE_STACK_LAYER && activate_tselem->id != nullptr && recurse &&
+          outliner_stack_row_is_curve_patch(*C, *space_outliner, activate_tselem->nr))
+      {
+        /* Double-click on a Curve Patch effect row is the explicit entrance into its curve tool. The
+         * operator's poll reads the active row, so activate the clicked row first; the live-session
+         * guard of `outliner_stack_row_activate` then decides whether the switch may happen. */
+        if (outliner_stack_row_activate(C, *space_outliner, activate_tselem->nr)) {
+          PointerRNA props = WM_operator_properties_create(
+              "OUTLINER_OT_stack_layer_curve_patch_edit");
+          RNA_int_set(&props, "ordinal", activate_tselem->nr);
+          const wmOperatorStatus status = WM_operator_name_call(
+              C,
+              "OUTLINER_OT_stack_layer_curve_patch_edit",
+              wm::OpCallContext::InvokeDefault,
+              &props,
+              nullptr);
+          WM_operator_properties_free(&props);
+          if ((status & OPERATOR_FINISHED) != 0) {
+            return OPERATOR_FINISHED;
+          }
+        }
       }
       if (space_outliner->stack_layers_view == SO_SL_VIEW_STACK &&
           activate_tselem->type == TSE_STACK_LAYER && !recurse)

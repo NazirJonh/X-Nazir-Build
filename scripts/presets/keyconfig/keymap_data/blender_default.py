@@ -7156,6 +7156,7 @@ def km_curve_patch_edit_modal_map(_params):
         ("SCALE", {"type": 'S', "value": 'PRESS'}, None),
         ("RADIUS", {"type": 'S', "value": 'PRESS', "alt": True}, None),
         ("DELETE", {"type": 'DEL', "value": 'PRESS'}, None),
+        ("NEXT_CURVE", {"type": 'TAB', "value": 'PRESS'}, None),
     ])
     return keymap
 

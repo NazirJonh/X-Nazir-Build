@@ -5,6 +5,7 @@
 import bpy
 from bpy.types import (
     Menu,
+    Panel,
     UIGrid,
     UIList,
 )
@@ -241,6 +242,11 @@ class BrushAssetShelf:
         if display_name and brush.has_unsaved_changes:
             # Show "*" to the left for consistency with unsaved files in the title bar.
             display_name = "* " + display_name
+
+        # A Curve Patch layer's brush snapshot ("`.CP Brush <row>`") is not a user brush: mark the
+        # button so the popover does not look like the place to switch brushes mid-session.
+        if display_name and display_name.startswith(".CP Brush "):
+            layout.label(text="", icon='CURVE_BEZCURVE')
 
         layout.template_asset_shelf_popover(
             shelf_name,
@@ -4588,6 +4594,127 @@ class PAINT_PT_shape_texture_preview(bpy.types.Panel):
         sub.prop(shape, "texture_preview_opacity", text="Opacity", slider=True)
 
 
+class PAINTVECTOR_UL_curve_patches(bpy.types.UIList):
+    """The items of the active effect's container.
+
+    Shape items live in the same PaintVector and are shown as plain placeholders: they are not
+    curves of this layer and are never edited by the Curve Patch tool.
+    """
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if item.type == 'CURVE_PATCH':
+            layout.prop(item, "curve_name", text="", emboss=False, icon='CURVE_BEZCURVE')
+        else:
+            layout.label(text="Shape", icon='MESH_PLANE')
+
+
+def curve_patch_layer_active_row(context):
+    """The active material's active row, when it is a Curve Patch row (or effect)."""
+    ob = context.active_object
+    ma = ob.active_material if ob is not None else None
+    if ma is None or not hasattr(ma, "paint_layers"):
+        return None
+    row = ma.paint_layers.active
+    if row is None or row.curve_patch is None:
+        return None
+    return row
+
+
+def curve_patch_layer_active_vector(context):
+    """The PaintVector of the active material's Curve Patch row, or None."""
+    row = curve_patch_layer_active_row(context)
+    return row.curve_patch.vectors if row is not None else None
+
+
+# The brush types bke::brush::supports_curve_patch() accepts (plus Mask Draw). Kept as data
+# rather than a call so the menu can filter without entering Sculpt Mode.
+_CURVE_PATCH_BRUSH_TYPES = {
+    'DRAW', 'DRAW_SHARP', 'CLAY', 'CLAY_STRIPS', 'CLAY_THUMB', 'INFLATE', 'BLOB',
+    'CREASE', 'FLATTEN', 'FILL', 'SCRAPE', 'MULTIPLANE_SCRAPE', 'PLANE', 'PAINT',
+}
+
+
+def curve_patch_brush_supported(brush):
+    if brush.sculpt_brush_type in _CURVE_PATCH_BRUSH_TYPES:
+        return True
+    return brush.sculpt_brush_type == 'MASK' and brush.mask_tool == 'DRAW'
+
+
+class PAINT_MT_curve_patch_layer_brush(Menu):
+    """Pick the private brush a Curve Patch effect stamps with."""
+
+    bl_label = "Curve Patch Layer Brush"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator(
+            "paint.curve_patch_layer_brush_assign",
+            text="Use Active Brush",
+            icon='BRUSH_DATA',
+        )
+        layout.separator()
+        shown = False
+        for brush in bpy.data.brushes:
+            # A layer's own snapshot is not a source: listing `.CP Brush <row>` here would let
+            # one layer adopt another's private state by accident.
+            if (not brush.use_paint_sculpt or brush.name.startswith(".CP Brush ") or
+                    not curve_patch_brush_supported(brush)):
+                continue
+            props = layout.operator(
+                "paint.curve_patch_layer_brush_assign",
+                text=brush.name,
+                icon_value=layout.icon(brush),
+            )
+            props.brush_name = brush.name
+            shown = True
+        if not shown:
+            layout.label(text="No supported brushes", icon='INFO')
+
+
+class CURVE_PATCH_LAYER_PT_curves(Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Tool"
+    bl_label = "Curve Patch Curves"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        if ob is None or ob.type != 'MESH':
+            return False
+        # Deliberately not gated on Sculpt Mode: the brush of the row and the entry into its
+        # tool are what this panel is for, and both are settable before the session starts.
+        return curve_patch_layer_active_row(context) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        row_data = curve_patch_layer_active_row(context)
+        pv = row_data.curve_patch.vectors if row_data is not None else None
+        if pv is None:
+            layout.label(text="No Curve Patch effect active", icon='INFO')
+            return
+
+        # The effect's tool state: a private snapshot, replaced (never shared) by assignment. The
+        # field takes a brush dropped from the Asset Shelf or the Asset Browser, or picked from its
+        # dropdown; either way the effect gets a duplicate of that brush.
+        brush_row = layout.row(align=True)
+        brush_row.prop(row_data.curve_patch, "brush", text="Brush")
+        brush_row.menu("PAINT_MT_curve_patch_layer_brush", text="", icon='DOWNARROW_HLT')
+
+        layout.separator()
+        row = layout.row()
+        row.template_list("PAINTVECTOR_UL_curve_patches", "", pv, "elements", pv, "active_item")
+        col = row.column(align=True)
+        col.operator("paint.curve_patch_layer_curve_add", text="", icon='ADD')
+        col.operator("paint.curve_patch_layer_curve_remove", text="", icon='REMOVE')
+        if pv.elements and 0 <= pv.active_item < len(pv.elements):
+            rename = col.operator("paint.curve_patch_layer_curve_rename", text="", icon='FONT_DATA')
+            rename.name = pv.elements[pv.active_item].curve_name
+
+        col = layout.column(align=True)
+        col.operator("paint.curve_patch_layer_edit", text="Edit Curves", icon='CURVE_BEZCURVE')
+
+
 classes = (
     PAINT_GT_mp_source,
     PAINT_PT_material_mask_value_primary,
@@ -4598,6 +4725,9 @@ classes = (
     PAINT_MT_material_layer_channel_socket,
     PAINT_MT_material_paint_brush_sync,
     PAINT_PT_material_paint_channel_visibility,
+    PAINTVECTOR_UL_curve_patches,
+    PAINT_MT_curve_patch_layer_brush,
+    CURVE_PATCH_LAYER_PT_curves,
     SCULPT_UL_curve_patch_textures,
     VIEW3D_MT_tools_projectpaint_clone,
 )

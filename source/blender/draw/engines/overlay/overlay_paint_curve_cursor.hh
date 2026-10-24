@@ -259,6 +259,11 @@ class PaintCurveCursor : Overlay {
     }
 
     ED_curve_patch_overlay_data_get(vc.obact, patch_overlay_);
+    if (patch_overlay_.splines.is_empty()) {
+      /* No live session on the object: the passive preview of the active Curve Patch stack row
+       * (if the object's active material has one) is what the overlay shows. */
+      ED_curve_patch_overlay_data_get_stack(vc.obact, patch_overlay_);
+    }
     /* Non-empty overlay, not "session has an active item". A half-built session
      * (`active_patch` out of range with patches still present) still draws every spline;
      * hover and insert preview stay off because `active_index` is -1. The previous gate

@@ -112,6 +112,7 @@
 #include "paint_curve_patch_host.hh"
 #include "paint_curve_patch_live.hh"
 #include "paint_curve_patch_session.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_session_confirm.hh"
 #include "paint_image_curve_patch.hh"
 
@@ -1344,6 +1345,20 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
         break;
       }
+      case CURVE_PATCH_MODAL_NEXT_CURVE: {
+        if (patch.doc.patches.size() < 2) {
+          break;
+        }
+        const int next = (patch.doc.active_patch + 1) % int(patch.doc.patches.size());
+        curve_patch_document_active_patch_set(patch.doc, next);
+        /* A Stack Layers row keeps its container's active item in step, so the passive overlay and
+         * the Active Tool list follow the Tab presses. */
+        curve_patch_layer_active_item_sync(patch);
+        curve_patch_edit_status_set(C, patch);
+        curve_patch_restore_and_restamp(*C, ob, patch);
+        curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+        break;
+      }
       /* Handled by the shared editing core rather than by `transform.translate` and friends. Those
        * carry `OPTYPE_UNDO` and finish on a later event, so every G/R/S press used to add a global
        * undo step and the finished patch could no longer be undone in one go -- see
@@ -1596,6 +1611,9 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
         /* Builds and closes the patch's single position undo step, then optionally writes the face
          * set as a second one -- see `curve_patch_finish_commit()`. */
         curve_patch_finish_commit(*C, ob, *patch);
+        /* A session entered from a Stack Layers row writes its document back into the row's
+         * PaintVector and invalidates the row bake, in one memfile step of its own. */
+        curve_patch_layer_commit_document(*C, *patch);
 
         /* The re-stamp ends in `flush_update_step()`, which only arms the fast paint-redraw path;
          * that is torn down the instant this operator finishes. Issue the full finished-stroke

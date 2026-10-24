@@ -30,6 +30,8 @@
 
 #include "DNA_material_types.h"
 
+#include "ED_curve_patch.hh"
+
 #include "BLI_string.h"
 #include "BLI_uuid.h"
 
@@ -44,7 +46,10 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
+#include "../../sculpt_paint/paint_curve_patch_layer.hh"
+
 #include "../outliner_intern.hh"
+#include "outliner_stack_layers_intern.hh"
 #include "outliner_stack_source.hh"
 
 namespace blender::ed::outliner {
@@ -139,6 +144,80 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot)
               "Position of the layer in the stack",
               0,
               SHRT_MAX);
+  rna_def_stack_row_marker(ot);
+}
+
+/** The active row must be a Curve Patch effect with a payload, for the tool to enter. The caller
+ * activates the row first when the click aimed at another one (see the double-click handler). */
+static bool stack_layer_curve_patch_edit_poll(bContext *C)
+{
+  if (!stack_mode_poll(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr || GS(owner->name) != ID_MA) {
+    return false;
+  }
+  Material &material = id_cast<Material &>(*owner);
+  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(material);
+  return row != nullptr && row->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
+         row->curve_patch != nullptr;
+}
+
+static wmOperatorStatus stack_layer_curve_patch_edit_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  const StackRow *row = (owner != nullptr) ? outliner_stack_row_find(*space_outliner, ordinal) :
+                                             nullptr;
+  if (owner == nullptr || row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  Material &material = id_cast<Material &>(*owner);
+  MaterialPaintLayer *layer = BKE_paint_layers_find(material, row->stable_id);
+  if (layer == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
+      layer->curve_patch == nullptr)
+  {
+    BKE_report(op->reports, RPT_WARNING, "The selected row is not a Curve Patch effect");
+    return OPERATOR_CANCELLED;
+  }
+  /* The tool runs on the active row: activate it when the edit was aimed elsewhere. A refused
+   * switch (the live-session confirm) must not start a second session on top. */
+  if (!BLI_uuid_equal(material.active_layer_marker, row->stable_id)) {
+    if (!outliner_stack_row_activate(C, *space_outliner, ordinal)) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+  if (!blender::ed::sculpt_paint::curve_patch_layer_activate(*C, material, *layer)) {
+    return OPERATOR_CANCELLED;
+  }
+  ED_region_tag_redraw(CTX_wm_region(C));
+  return OPERATOR_FINISHED;
+}
+
+/** Double-click on a Curve Patch effect row: the explicit entrance into the row's curve tool. */
+void OUTLINER_OT_stack_layer_curve_patch_edit(wmOperatorType *ot)
+{
+  ot->name = "Edit Curve Patch Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_curve_patch_edit";
+  ot->description =
+      "Enter the Curve Patch tool of the layer: its brush snapshot becomes the active brush and "
+      "its curves open in the modal editor";
+  ot->exec = stack_layer_curve_patch_edit_exec;
+  ot->poll = stack_layer_curve_patch_edit_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  rna_def_stack_row_ordinal(ot, "Curve Patch effect to edit; -1 uses the active one");
   rna_def_stack_row_marker(ot);
 }
 

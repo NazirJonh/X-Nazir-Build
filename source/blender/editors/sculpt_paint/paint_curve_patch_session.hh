@@ -43,8 +43,12 @@
 namespace blender {
 struct Brush;
 struct Depsgraph;
+struct Main;
+struct Material;
+struct MaterialPaintLayer;
 struct Object;
 struct PaintModeSettings;
+struct PaintVector;
 struct ReportList;
 struct Scene;
 struct Sculpt;
@@ -154,6 +158,22 @@ struct CurvePatchSession {
    * suppressed for the whole anchor phase, so the commit is its only chance. Without the fallback
    * a brush switch mid-edit or a null `StrokeCache::paint` would silently drop the Face Set. */
   bool use_face_set_on_commit = false;
+
+  /** The stack row this session was entered from, when it edits a
+   * #MA_PAINT_LAYER_SOURCE_CURVE_PATCH row (see #curve_patch_start_from_layer and
+   * `paint_curve_patch_layer.hh`). Null for an anchor-stroke or headless session. The row is
+   * addressed by its marker, never by a raw pointer: the Outliner can delete it while the session
+   * runs, and a dangling pointer on the commit path would crash. */
+  Material *layer_material = nullptr;
+  bUUID layer_row_marker = {};
+
+  /**
+   * The previous-brush restore of a layer session: the single path that puts the user's own brush
+   * back on every exit (commit, cancel, refused invoke, object death). Owned here rather than by
+   * the modal's operator data, so it survives the confirm dialog's teardown / relaunch round-trip.
+   * Null for a session that did not switch the brush.
+   */
+  std::unique_ptr<class PrevBrushRestore> layer_brush_restore;
 
   /** Forwards to #CurvePatchDocument::has_active_item. */
   bool has_active_item() const
@@ -422,6 +442,29 @@ float3 curve_patch_plane_normal_from_curve(const bke::CurvesGeometry &curve,
  */
 bool curve_patch_start_from_anchor(
     const Depsgraph &depsgraph, Object &ob, Sculpt &sd, const Brush &brush, const ViewContext &vc);
+
+/**
+ * Publish a Curve Patch session from a persisted Stack Layers row: adopt the curve items of the
+ * row's #PaintVector as the patches (no `Brush::paint_curve` adoption, no anchor stroke), freeze
+ * each patch's parameters as they are stored in DNA, and stamp the initial state the way the
+ * headless apply path does (a stand-in `StrokeCache` built with #curve_patch_apply_cache_init).
+ *
+ * The effect is always #CurvePatchEffectType::Image: a Stack Layers row's content is its material
+ * channel maps, whatever canvas the scene happens to show. The caller must create the row's channel
+ * map and set the Material canvas before this (see `curve_patch_layer_activate`).
+ *
+ * Unlike the anchor entry this does not take over a stroke's undo transaction or cache: there is
+ * no stroke. The caller activates the row's brush snapshot BEFORE calling this (so the effect
+ * resolution and the live inputs read the snapshot), passes a ViewContext on a 3D Viewport (the
+ * Outliner/panel entry has none of its own), and launches `SCULPT_OT_curve_patch_edit` after it,
+ * as with #curve_patch_start_from_anchor. Returns the published session, or null when the object
+ * or the container cannot carry one (the same refusals the anchor entry reports).
+ */
+CurvePatchSession *curve_patch_start_from_layer(bContext &C,
+                                                Object &ob,
+                                                Sculpt &sd,
+                                                PaintVector &vectors,
+                                                const ViewContext &vc);
 
 /**
  * Publish a Curve Patch session from a finished #BRUSH_STROKE_ROLL stroke. Builds the control

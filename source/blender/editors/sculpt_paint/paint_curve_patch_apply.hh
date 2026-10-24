@@ -26,6 +26,7 @@ struct Brush;
 struct Paint;
 struct ReportList;
 struct Sculpt;
+struct StrokeCache;
 struct wmOperatorType;
 }  // namespace blender
 
@@ -70,6 +71,22 @@ struct CurvePatchApplyInput {
   /** No tablet in a script: the strength multiplier a stroke would have read from pressure. */
   float pressure = 1.0f;
 };
+
+/**
+ * Stand in for the `StrokeCache` an interactive patch inherits from its anchor stroke. Only the
+ * fields the Curve Patch re-stamp and the symmetry machinery actually read are set; everything
+ * else keeps the defaults `StrokeCache`'s own member initializers give it. Shared by the headless
+ * apply path and the Stack Layers session entry (`curve_patch_start_from_layer`), which both start
+ * a patch outside a stroke.
+ */
+void curve_patch_apply_cache_init(StrokeCache &cache,
+                                  Object &ob,
+                                  Sculpt &sd,
+                                  Brush &brush,
+                                  PaintModeSettings &paint_mode_settings,
+                                  const bke::CurvePatchParams &params,
+                                  CurvePatchEffectType effect_type,
+                                  const CurvePatchApplyInput &input);
 
 /**
  * Apply a Curve Patch to an object, without a modal editor and without a stroke.

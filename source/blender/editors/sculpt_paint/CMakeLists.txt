@@ -49,6 +49,7 @@ set(SRC
   paint_curve_patch_effect_image.cc
   paint_curve_patch_effect_mask.cc
   paint_curve_patch_effect_relief.cc
+  paint_curve_patch_layer.cc
   paint_curve_patch_live.cc
   paint_curve_patch_params.cc
   paint_curve_patch_sampler.cc
@@ -421,6 +422,7 @@ if(WITH_GTESTS)
     tests/paint_shape_texture_test.cc
     tests/paint_shape_uv_trace_test.cc
     tests/paint_vector_editor_test.cc
+    tests/paint_curve_patch_layer_convert_test.cc
     tests/paint_vector_serialize_test.cc
     tests/roll_spline_test.cc
   )

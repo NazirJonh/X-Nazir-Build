@@ -43,6 +43,11 @@ wmKeyMap *curve_patch_edit_modal_keymap(wmKeyConfig *keyconf)
       {CURVE_PATCH_MODAL_SCALE, "SCALE", 0, "Scale", "Scale the active point"},
       {CURVE_PATCH_MODAL_RADIUS, "RADIUS", 0, "Radius", "Drag the active point's radius"},
       {CURVE_PATCH_MODAL_DELETE, "DELETE", 0, "Delete Point", "Delete the active point"},
+      {CURVE_PATCH_MODAL_NEXT_CURVE,
+       "NEXT_CURVE",
+       0,
+       "Next Curve",
+       "Make the next curve of the document the active one"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

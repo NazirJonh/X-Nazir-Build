@@ -51,6 +51,7 @@ void outliner_operatortypes()
   WM_operatortype_append(OUTLINER_OT_stack_layer_color_tag_set);
   WM_operatortype_append(OUTLINER_OT_stack_layers_back);
   WM_operatortype_append(OUTLINER_OT_stack_layer_activate);
+  WM_operatortype_append(OUTLINER_OT_stack_layer_curve_patch_edit);
   WM_operatortype_append(OUTLINER_OT_stack_row_action);
   WM_operatortype_append(OUTLINER_OT_stack_column_popup);
   WM_operatortype_append(OUTLINER_OT_stack_layer_visibility_toggle);

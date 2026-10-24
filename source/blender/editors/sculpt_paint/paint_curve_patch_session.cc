@@ -23,12 +23,15 @@
 #include "BKE_brush.hh"
 #include "BKE_context.hh"
 #include "BKE_main.hh"
+#include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_types.hh"
+#include "BKE_paint_vector.hh"
 #include "BKE_report.hh"
 #include "BKE_subdiv_ccg.hh"
 
@@ -57,7 +60,9 @@
 #include "WM_types.hh"
 
 #include "paint_curve_intern.hh"
+#include "paint_curve_patch_apply.hh"
 #include "paint_curve_patch_edit_intern.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_curve_patch_sampler.hh"
 #include "paint_image_curve_patch.hh"
 #include "paint_intern.hh"
@@ -584,6 +589,9 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
   }
   else {
     curve_patch_finish_commit(C, ob, *session);
+    /* A session entered from a Stack Layers row writes its document back into the row's
+     * PaintVector before the session is freed, so leaving Sculpt Mode loses no curve edit. */
+    curve_patch_layer_commit_document(C, *session);
     flush_update_done(&C, ob, UpdateType::Position);
     committed = true;
   }
@@ -1001,6 +1009,125 @@ bool curve_patch_start_from_anchor(
       ob, brush, vc, session, plane_normal, cache.initial_radius, tool_settings->paint_mode);
 }
 
+CurvePatchSession *curve_patch_start_from_layer(bContext &C,
+                                                Object &ob,
+                                                Sculpt &sd,
+                                                PaintVector &vectors,
+                                                const ViewContext &vc)
+{
+  if (ob.runtime->sculpt_session == nullptr) {
+    BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch: the object has no Sculpt session");
+    return nullptr;
+  }
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  if (ss.curve_patch_session != nullptr) {
+    return nullptr;
+  }
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (pbvh == nullptr) {
+    BKE_report(CTX_wm_reports(&C),
+               RPT_WARNING,
+               "Curve Patch: the sculpt data is not ready yet; try again");
+    return nullptr;
+  }
+  if (pbvh->type() == bke::pbvh::Type::BMesh) {
+    BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch does not support Dynamic Topology");
+    return nullptr;
+  }
+  Brush *brush = BKE_paint_brush(&sd.paint);
+  if (brush == nullptr) {
+    BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Curve Patch: no active brush");
+    return nullptr;
+  }
+  /* No stroke took the measurements `brush_strength()` multiplies by: `overlap_factor` stays 0 and
+   * every texel of the patch gets a strength of zero -- "painted" with no coverage and no
+   * diagnostic. The headless apply makes the same call before its own re-stamp. Also builds the
+   * brush's lazy pressure curves. */
+  curve_patch_prepare_brush_for_headless(sd.paint, *brush);
+
+  CurvePatchSession *session = MEM_new<CurvePatchSession>(__func__);
+  /* The document is the persisted one: the frozen parameters come from the DNA, not from the
+   * brush. Curves too short to build are dropped the same way the anchor adoption skips them. */
+  curve_patch_document_from_vector(vectors, session->doc);
+  session->doc.patches.remove_if(
+      [](const CurvePatchItem &item) { return item.control_curve.points_num() < 2; });
+  if (session->doc.patches.is_empty()) {
+    BKE_report(
+        CTX_wm_reports(&C), RPT_WARNING, "Curve Patch layer has no usable control curve yet");
+    MEM_delete(session);
+    return nullptr;
+  }
+  session->doc.active_patch = std::clamp(session->doc.active_patch,
+                                         0,
+                                         std::max<int>(session->doc.patches.size() - 1, 0));
+
+  ToolSettings *tool_settings = CTX_data_tool_settings(&C);
+  PaintModeSettings &paint_mode_settings = tool_settings->paint_mode;
+
+  /* A Stack Layers Curve Patch always writes the row's material channel maps; it must not fall
+   * through to a vertex-color or relief target because of the brush type or the current canvas.
+   * The caller creates the row's channel map before this (so the image targets exist) and sets the
+   * Material canvas. */
+  if (!bke::brush::supports_curve_patch(*brush)) {
+    BKE_report(CTX_wm_reports(&C),
+               RPT_WARNING,
+               curve_patch_refusal_message(CurvePatchRefusal::BrushType));
+    MEM_delete(session);
+    return nullptr;
+  }
+  if (brush->material_paint == nullptr ||
+      BKE_paint_material_image_targets_get(ob,
+                                           paint_mode_settings,
+                                           brush->material_paint,
+                                           sd.paint.visible_material_channels)
+          .is_empty())
+  {
+    BKE_report(CTX_wm_reports(&C),
+               RPT_WARNING,
+               curve_patch_refusal_message(CurvePatchRefusal::NoImageCanvas));
+    MEM_delete(session);
+    return nullptr;
+  }
+  const CurvePatchEffectType effect_type = CurvePatchEffectType::Image;
+
+  /* The stand-in cache of a session that started outside a stroke, seeded from the active patch's
+   * frozen parameters exactly as the headless apply does. The re-stamp below overwrites location
+   * and radius with the curve's own encompassing sphere. */
+  ss.cache = MEM_new<StrokeCache>(__func__);
+  const CurvePatchApplyInput input;
+  curve_patch_apply_cache_init(*ss.cache,
+                               ob,
+                               sd,
+                               *brush,
+                               paint_mode_settings,
+                               session->doc.patches[session->doc.active_patch].params,
+                               effect_type,
+                               input);
+  session->view_context = vc;
+  ss.cache->vc = &session->view_context;
+
+  if (!curve_patch_session_publish(ob, *session, effect_type, paint_mode_settings)) {
+    BKE_report(
+        CTX_wm_reports(&C), RPT_WARNING, "Curve Patch: this object cannot carry the effect");
+    MEM_delete(session);
+    MEM_delete(ss.cache);
+    ss.cache = nullptr;
+    return nullptr;
+  }
+
+  /* Nothing opened a stroke transaction, so the effect's undo hook runs before the only re-stamp
+   * -- the same order the headless apply uses. */
+  session->effect->session_undo_begin();
+  curve_patch_restore_and_restamp(C, ob, *session);
+  if (session->apply.invalidated) {
+    /* The target check failed (a stale mesh); publishing would leave a session that cannot
+     * restore. Tear down the same way a refused publish does. */
+    curve_patch_session_free(ob);
+    return nullptr;
+  }
+  return session;
+}
+
 bool roll_start_curve_patch_from_stroke(const Depsgraph &depsgraph,
                                         Object &ob,
                                         Sculpt & /*sd*/,
@@ -1173,6 +1300,46 @@ void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *
 void ED_curve_patch_overlay_data_get(const Object *ob, CurvePatchOverlayData &r_data)
 {
   ED_curve_patch_overlay_data_get(ob ? ED_curve_patch_session_get(*ob) : nullptr, r_data);
+}
+
+void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayData &r_data)
+{
+  r_data.splines.clear();
+  r_data.active_index = -1;
+  if (ob == nullptr) {
+    return;
+  }
+  /* The material the sculpt paint session works on: the object's active slot, the same resolution
+   * a stroke's material-paint target takes. */
+  const Material *ma = BKE_object_material_get(const_cast<Object *>(ob), ob->actcol);
+  if (ma == nullptr) {
+    return;
+  }
+  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(
+      const_cast<Material &>(*ma));
+  if (row == nullptr || row->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
+      row->curve_patch == nullptr || row->curve_patch->vectors == nullptr)
+  {
+    return;
+  }
+  const PaintVector &pv = *row->curve_patch->vectors;
+  r_data.splines.reserve(pv.items_num);
+  int curve_index = 0;
+  int active_curve = 0;
+  for (const int i : IndexRange(pv.items_num)) {
+    const PaintVectorItem &item = pv.items[i];
+    if (item.type != PAINT_VECTOR_ITEM_CURVE_PATCH) {
+      continue;
+    }
+    r_data.splines.append(&item.curve_patch_geometry.wrap());
+    if (i == pv.active_item) {
+      active_curve = curve_index;
+    }
+    curve_index++;
+  }
+  if (!r_data.splines.is_empty()) {
+    r_data.active_index = active_curve;
+  }
 }
 
 /** \} */

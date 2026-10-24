@@ -69,6 +69,7 @@
 
 #include "ED_asset_image_utils.hh"
 #include "ED_asset_import.hh"
+#include "ED_curve_patch.hh"
 #include "ED_material_bake.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
@@ -86,6 +87,8 @@
 #include "WM_api.hh"
 #include "WM_toolsystem.hh"
 #include "WM_types.hh"
+
+#include "../../sculpt_paint/paint_curve_patch_layer.hh"
 
 #include "../outliner_intern.hh"
 #include "outliner_stack_layers_intern.hh"
@@ -423,6 +426,11 @@ StackRow paint_correction_row_build(const Material &material,
              curve_patch   ? ICON_CURVE_BEZCURVE :
              fill          ? ICON_GP_DRAW_FILL :
                              ICON_BRUSH_DATA;
+  if (curve_patch) {
+    /* The effect's action is its tool entrance, the same one the row's own action icon is. */
+    row.action_icon = ICON_CURVE_BEZCURVE;
+    row.action_tooltip = TIP_("Edit Curves: enter the Curve Patch tool of this effect");
+  }
   if (BKE_paint_layers_is_anchor_point(effect)) {
     /* A marker is a place, not a correction: it publishes a slice and has no opacity, blend or map
      * of its own, so it is a bare compact row with the icon of its Add entry. */
@@ -1526,6 +1534,21 @@ class PaintLayersStackSource final : public StackSource,
     if (scene == nullptr || scene->toolsettings == nullptr || space_outliner == nullptr) {
       return false;
     }
+    /* The action button of a Curve Patch effect enters its tool: activate the effect, then open
+     * the session (which switches to the effect's brush snapshot and blocks the other tools). */
+    {
+      Material &material = layers_owner(owner);
+      if (MaterialPaintLayer *effect = BKE_paint_layers_find(material, row.stable_id);
+          effect != nullptr && effect->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH)
+      {
+        /* The activation also raises the live-session confirm; do not start a second session over
+         * it when the switch was refused. */
+        if (!outliner_stack_row_activate(&C, *space_outliner, ordinal)) {
+          return false;
+        }
+        return blender::ed::sculpt_paint::curve_patch_layer_activate(C, material, *effect);
+      }
+    }
     PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
     if (row.action_active) {
       paint_mode.layer_object_mask_edit = 0;
@@ -1564,8 +1587,37 @@ class PaintLayersStackSource final : public StackSource,
       BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Unsupported layer cannot be activated");
       return false;
     }
+    /* A live Curve Patch session owns the tool while it runs: switching the active row away from
+     * its effect would silently leave its curves half-edited. The same confirm dialog a workspace
+     * change opens decides the session's fate; the switch is retried by the user afterwards. */
+    if (const Object *ob = CTX_data_active_object(&C)) {
+      const MaterialPaintLayer *target = BKE_paint_layers_find(material, row.stable_id);
+      if (target != nullptr &&
+          blender::ed::sculpt_paint::curve_patch_layer_session_blocks_row(*ob, *target))
+      {
+        PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
+        WM_operator_name_call(&C,
+                              "SCULPT_OT_curve_patch_edit_confirm",
+                              wm::OpCallContext::InvokeDefault,
+                              &props,
+                              nullptr);
+        WM_operator_properties_free(&props);
+        BKE_report(CTX_wm_reports(&C),
+                   RPT_WARNING,
+                   "Finish the Curve Patch session first (Return to apply, Esc to cancel)");
+        return false;
+      }
+    }
     BKE_paint_layers_active_set(material, row.stable_id);
     gradient_tool_activate(C, BKE_paint_layers_find(material, row.stable_id));
+    if (MaterialPaintLayer *active = BKE_paint_layers_find(material, row.stable_id);
+        active != nullptr && active->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH)
+    {
+      /* Selecting a Curve Patch effect in Sculpt Mode puts its brush snapshot in the user's hand
+       * and opens its curves, like the Gradient tool follows its rows. A refusal is reported by
+       * the entry itself and leaves the effect merely selected. */
+      blender::ed::sculpt_paint::curve_patch_layer_enter_if_sculpting(C, material, *active);
+    }
     /* Mask editing only makes sense on a Layer row; leaving it for a correction or mask item ends
      * it. */
     if (Scene *scene = CTX_data_scene(&C)) {
@@ -2017,6 +2069,14 @@ class PaintLayersStackSource final : public StackSource,
       /* The target resolves through the active row, and a plain Add leaves the previous one active
        * until the caller activates the new row, so the maps below would land on the wrong layer. */
       BKE_paint_layers_active_set(material, created->marker);
+    }
+    if (params.kind == PaintLayerAddKind::CurvePatchEffect && created->curve_patch != nullptr) {
+      /* The effect starts with one seeded control curve laid out from its snapshot brush, so the
+       * passive overlay and the tool entry have something to show and edit. The channel maps are
+       * made when the tool is entered. */
+      blender::ed::sculpt_paint::ED_paint_layers_curve_patch_row_seed_curve(*created->curve_patch);
+      /* A fresh effect is the one being worked on: in Sculpt Mode its tool opens right away. */
+      blender::ed::sculpt_paint::curve_patch_layer_enter_if_sculpting(C, material, *created);
     }
     gradient_tool_activate(C, created);
     /* A row with no map makes the first stroke create it and regenerate the graph before it can

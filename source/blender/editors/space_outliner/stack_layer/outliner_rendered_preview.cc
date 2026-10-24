@@ -761,4 +761,17 @@ void rendered_preview_tooltip_add(ui::Block *block,
 /** \} */
 
 }  // namespace ed::outliner
+
+void ED_outliner_rendered_previews_free()
+{
+  /* The previews are created with #BKE_previewimg_create, which no Main owns, so nothing else
+   * frees them: without this they are the "not freed memory blocks" of the leak check at exit. */
+  for (ed::outliner::RenderedPreviewEntry &entry : ed::outliner::g_rendered_previews.values()) {
+    if (entry.prv != nullptr) {
+      BKE_previewimg_free(&entry.prv);
+    }
+  }
+  ed::outliner::g_rendered_previews.clear();
+}
+
 }  // namespace blender

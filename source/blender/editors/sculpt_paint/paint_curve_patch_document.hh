@@ -268,6 +268,13 @@ struct CurvePatchDocument {
 int curve_patch_index_for_source_curve(const CurvePatchDocument &document, int source_curve_index);
 
 /**
+ * Make \a index the active patch (clamped to the patches that exist) and reset the point of the
+ * patch the user last interacted with. The host decides what follows the switch -- a re-stamp, an
+ * undo step, syncing `PaintVector::active_item` -- the document only carries it.
+ */
+void curve_patch_document_active_patch_set(CurvePatchDocument &document, int index);
+
+/**
  * Set the build-quality switch on every patch.
  *
  * `final_quality` describes the BUILD, not one curve -- every patch of a document is always

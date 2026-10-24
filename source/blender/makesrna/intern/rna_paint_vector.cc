@@ -73,6 +73,11 @@ static void rna_def_paint_vector_item(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "origin");
   RNA_def_property_array(prop, 2);
   RNA_def_property_ui_text(prop, "Origin", "Pivot of the item, in its shape space");
+
+  prop = RNA_def_property(srna, "curve_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "curve_name");
+  RNA_def_property_ui_text(
+      prop, "Curve Name", "List name of a Curve Patch curve, shown in the Active Tool panel");
 }
 
 static void rna_def_paint_vector(BlenderRNA *brna)

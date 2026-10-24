@@ -52,6 +52,7 @@
 
 #include "paint_curve_intern.hh"
 #include "paint_curve_patch_session.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_intern.hh"
 
 #include "mesh/sculpt_face_set.hh"
@@ -88,7 +89,7 @@ static void curve_patch_apply_release(SculptSession &ss)
 /* Stand in for the `StrokeCache` an interactive patch inherits from its anchor stroke. Only the
  * fields the Curve Patch re-stamp and the symmetry machinery actually read are set; everything
  * else keeps the defaults `StrokeCache`'s own member initializers give it. */
-static void curve_patch_apply_cache_init(StrokeCache &cache,
+void curve_patch_apply_cache_init(StrokeCache &cache,
                                          Object &ob,
                                          Sculpt &sd,
                                          Brush &brush,

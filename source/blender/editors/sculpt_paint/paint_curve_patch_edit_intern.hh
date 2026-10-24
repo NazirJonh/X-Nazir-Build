@@ -40,6 +40,8 @@ enum {
   CURVE_PATCH_MODAL_SCALE = 8,
   CURVE_PATCH_MODAL_RADIUS = 9,
   CURVE_PATCH_MODAL_DELETE = 10,
+  /** Make the next (wrapping) patch of the document the active one. */
+  CURVE_PATCH_MODAL_NEXT_CURVE = 11,
 };
 
 /** Modal keymap for #SCULPT_OT_curve_patch_edit. Keyboard actions only; mouse stays in the

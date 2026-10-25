@@ -213,6 +213,16 @@ void paintcurve_geom_stamp_angle_set(bke::CurvesGeometry &geom, int point_index,
 /** Per-point texture slot index into the brush's Curve Patch texture list; -1 = Auto. */
 int paintcurve_geom_stamp_texture_get(const bke::CurvesGeometry &geom, int point_index);
 void paintcurve_geom_stamp_texture_set(bke::CurvesGeometry &geom, int point_index, int slot_index);
+/** Per-point opacity multiplier in [0, 1]; 1.0 when the attribute is absent. Interpolated along
+ * the curve and applied on top of the curve-wide opacity in both Ribbon and Stamps modes. */
+float paintcurve_geom_opacity_get(const bke::CurvesGeometry &geom, int point_index);
+void paintcurve_geom_opacity_set(bke::CurvesGeometry &geom, int point_index, float opacity);
+/** Per-point opacity falloff, as a multiple of the curve's width; 1.0 when absent. This is the
+ * arc-length reach of THIS control point's opacity influence. */
+float paintcurve_geom_opacity_falloff_get(const bke::CurvesGeometry &geom, int point_index);
+void paintcurve_geom_opacity_falloff_set(bke::CurvesGeometry &geom,
+                                         int point_index,
+                                         float falloff);
 
 /**
  * Materialize the stable per-point stamp seed (`bke::CURVE_PATCH_ATTR_STAMP_SEED`) if it is absent,

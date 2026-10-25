@@ -310,6 +310,18 @@ static bke::CurvesGeometry make_curve_patch_curve(const bool with_optional)
     seed.span[1] = 22;
     seed.span[2] = 33;
     seed.finish();
+    bke::SpanAttributeWriter<float> opacity = attrs.lookup_or_add_for_write_span<float>(
+        bke::CURVE_PATCH_ATTR_OPACITY, bke::AttrDomain::Point);
+    opacity.span[0] = 1.0f;
+    opacity.span[1] = 0.35f;
+    opacity.span[2] = 0.0f;
+    opacity.finish();
+    bke::SpanAttributeWriter<float> falloff = attrs.lookup_or_add_for_write_span<float>(
+        bke::CURVE_PATCH_ATTR_OPACITY_FALLOFF, bke::AttrDomain::Point);
+    falloff.span[0] = 0.5f;
+    falloff.span[1] = 2.5f;
+    falloff.span[2] = 1.0f;
+    falloff.finish();
   }
 
   geom.tag_topology_changed();
@@ -486,6 +498,16 @@ TEST_F(PaintVectorTest, SaveReloadKeepsCurvePatchItems)
   const bke::AttributeReader<int> seed = attrs.lookup_or_default<int>(
       bke::CURVE_PATCH_ATTR_STAMP_SEED, bke::AttrDomain::Point, 0);
   EXPECT_EQ(seed.varray[2], 33);
+  /* Per-point opacity is a regular point attribute on the embedded geometry, so the same blend
+   * write/read that carries the stamp attributes has to carry it too. */
+  const bke::AttributeReader<float> opacity = attrs.lookup_or_default<float>(
+      bke::CURVE_PATCH_ATTR_OPACITY, bke::AttrDomain::Point, 1.0f);
+  EXPECT_FLOAT_EQ(opacity.varray[1], 0.35f);
+  EXPECT_FLOAT_EQ(opacity.varray[2], 0.0f);
+  /* Per-point opacity falloff lives on the point domain and must survive the same round trip. */
+  const bke::AttributeReader<float> falloff = attrs.lookup_or_default<float>(
+      bke::CURVE_PATCH_ATTR_OPACITY_FALLOFF, bke::AttrDomain::Point, 1.0f);
+  EXPECT_FLOAT_EQ(falloff.varray[1], 2.5f);
 
   BLO_blendfiledata_free(bfd);
   BLI_delete(filepath, false, false);

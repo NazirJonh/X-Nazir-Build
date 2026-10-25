@@ -767,17 +767,25 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
       }
     }
 
+    /* Per-point opacity is a look property of the curve, like the per-curve one: it scales how much
+     * the patch paints here, not what it samples. Multiplying the final height makes it apply
+     * uniformly to Ribbon and Stamps and to every effect that consumes the sample. */
+    const float point_opacity = item.geometry.spline.opacity_at(s);
     const float height = tex_value * stamp_strength * lateral_falloff * end_falloff * mask_factor *
-                         ctx.bstrength;
+                         point_opacity * ctx.bstrength;
     /* `end_falloff` scales the claim WEIGHT as well as the height. Not for the branch merge just
      * above -- `relief_at()` picks the branch with the largest `|height|` and never reads the
      * weight -- but for the cross-pass blend in PHASE 2 (`pass_weight_accum`), which averages
      * every symmetry pass claiming this vertex as `sum(weight * height) / sum(weight)`. A faded
      * end that kept its full weight would enter that average with the same authority as a
-     * mirrored pass at full amplitude and dent the relief along the symmetry plane. */
+     * mirrored pass at full amplitude and dent the relief along the symmetry plane.
+     *
+     * The point opacity scales the weight for the same reason, and for one more: the weight is
+     * also the coverage a patch stamped over another composites with, so a transparent stretch
+     * must claim nothing there or it would hide the curve below instead of showing it. */
     return CurvePatchSample{orig,
                             height,
-                            lateral_falloff * end_falloff,
+                            lateral_falloff * end_falloff * point_opacity,
                             float4(tex_rgba[0], tex_rgba[1], tex_rgba[2], tex_rgba[3]),
                             tex_valid,
                             patch_uv,

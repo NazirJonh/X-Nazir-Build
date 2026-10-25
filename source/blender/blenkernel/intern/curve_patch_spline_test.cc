@@ -160,6 +160,98 @@ TEST_F(paint_curve_patch_spline, radius_at_clamps_out_of_range_s)
   EXPECT_NEAR(spline.radius_at(100.0f), 3.0f, 1e-5f);
 }
 
+TEST_F(paint_curve_patch_spline, opacity_at_defaults_to_one_without_attribute)
+{
+  CurvePatchSpline spline;
+  const float3 points[2] = {float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 2));
+
+  /* Curves authored before the per-point attribute existed must stay fully opaque. */
+  EXPECT_NEAR(spline.opacity_at(0.0f), 1.0f, 1e-6f);
+  EXPECT_NEAR(spline.opacity_at(0.5f), 1.0f, 1e-6f);
+  EXPECT_NEAR(spline.opacity_at(100.0f), 1.0f, 1e-6f);
+}
+
+TEST_F(paint_curve_patch_spline, opacity_field_stays_inactive_for_opaque_points)
+{
+  CurvePatchSpline spline;
+  const float3 points[3] = {
+      float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 3));
+  spline.control_point_lengths = Vector<float>{0.0f, 1.0f, 2.0f};
+  const float opacities[3] = {1.0f, 1.0f, 1.0f};
+  const float falloffs[3] = {1.0f, 1.0f, 1.0f};
+  spline.opacity_field_build(Span(opacities, 3), Span(falloffs, 3), /*curve_width=*/1.0f);
+
+  /* Nothing lowers the opacity, so the field must not be built at all -- every relief sample would
+   * otherwise pay for a loop whose result is known to be 1. */
+  EXPECT_FALSE(spline.opacity_field_active());
+  EXPECT_NEAR(spline.opacity_at(1.0f), 1.0f, 1e-6f);
+}
+
+TEST_F(paint_curve_patch_spline, opacity_field_is_exact_at_the_point_and_has_finite_reach)
+{
+  CurvePatchSpline spline;
+  const float3 points[3] = {
+      float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 3));
+  spline.control_point_lengths = Vector<float>{0.0f, 1.0f, 2.0f};
+  const float opacities[3] = {1.0f, 0.0f, 1.0f};
+  const float falloffs[3] = {1.0f, 1.0f, 1.0f};
+  spline.opacity_field_build(Span(opacities, 3), Span(falloffs, 3), /*curve_width=*/0.5f);
+
+  /* The point itself is exactly transparent -- no neighbour dilutes it. The Gaussian reach is half
+   * a unit in each direction, independent of the one-unit distance to the neighbours. */
+  EXPECT_NEAR(spline.opacity_at(0.0f), 1.0f, 1e-3f);
+  EXPECT_NEAR(spline.opacity_at(1.0f), 0.0f, 1e-5f);
+  EXPECT_NEAR(spline.opacity_at(2.0f), 1.0f, 1e-3f);
+  /* Halfway through the falloff: exp(-2 * 0.5^2) = 0.6065, so opacity = 0.3935. */
+  EXPECT_NEAR(spline.opacity_at(0.75f), 0.39347f, 1e-5f);
+  EXPECT_NEAR(spline.opacity_at(1.25f), 0.39347f, 1e-5f);
+  /* At the nominal reach exp(-2) = 0.1353 of the point's influence remains: the tail eases out
+   * instead of snapping to full opacity at a hard edge. */
+  EXPECT_NEAR(spline.opacity_at(0.5f), 0.864665f, 1e-5f);
+  EXPECT_NEAR(spline.opacity_at(1.5f), 0.864665f, 1e-5f);
+}
+
+TEST_F(paint_curve_patch_spline, opacity_field_overlapping_points_accumulate)
+{
+  CurvePatchSpline spline;
+  const float3 points[3] = {
+      float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 3));
+  spline.control_point_lengths = Vector<float>{0.0f, 1.0f, 2.0f};
+  const float opacities[3] = {0.0f, 0.0f, 1.0f};
+  const float falloffs[3] = {1.0f, 1.0f, 1.0f};
+  spline.opacity_field_build(Span(opacities, 3), Span(falloffs, 3), /*curve_width=*/1.0f);
+
+  /* Both low points reach the sample between them, so the transparency accumulates and clamps. */
+  EXPECT_NEAR(spline.opacity_at(0.0f), 0.0f, 1e-5f);
+  EXPECT_NEAR(spline.opacity_at(0.5f), 0.0f, 1e-5f);
+  EXPECT_NEAR(spline.opacity_at(1.0f), 0.0f, 1e-5f);
+  /* The third point is opaque; the first two only leave their (small) Gaussian tails here. */
+  EXPECT_NEAR(spline.opacity_at(2.0f), 0.86433f, 1e-5f);
+}
+
+TEST_F(paint_curve_patch_spline, opacity_field_uses_per_point_falloff)
+{
+  CurvePatchSpline spline;
+  const float3 points[3] = {
+      float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 3));
+  spline.control_point_lengths = Vector<float>{0.0f, 1.0f, 2.0f};
+  const float opacities[3] = {1.0f, 0.0f, 1.0f};
+  /* Only the middle point's reach is shortened: one half-width instead of a full width. */
+  const float falloffs[3] = {1.0f, 0.5f, 1.0f};
+  spline.opacity_field_build(Span(opacities, 3), Span(falloffs, 3), /*curve_width=*/1.0f);
+
+  EXPECT_NEAR(spline.opacity_at(1.0f), 0.0f, 1e-5f);
+  EXPECT_NEAR(spline.opacity_at(0.75f), 0.39347f, 1e-5f);
+  /* This sample is outside the shortened point's nominal reach; only its Gaussian tail remains. */
+  EXPECT_NEAR(spline.opacity_at(0.4f), 0.94387f, 1e-4f);
+  EXPECT_NEAR(spline.opacity_at(1.6f), 0.94387f, 1e-4f);
+}
+
 TEST_F(paint_curve_patch_spline, tile_span_default_is_hybrid_min)
 {
   /* Short curve (shorter than one diameter): span == total_length. */

@@ -441,6 +441,54 @@ static float rna_CurvePatchSession_radius_get(PointerRNA *ptr)
   return ED_curve_patch_session_radius(rna_curve_patch_session_from_ptr(ptr));
 }
 
+/** `ptr->data` is the session, but the mutation API is keyed by the owning object. */
+static Object *rna_curve_patch_session_object(PointerRNA *ptr)
+{
+  ID *id = ptr->owner_id;
+  if (id == nullptr || GS(id->name) != ID_OB) {
+    return nullptr;
+  }
+  return reinterpret_cast<Object *>(id);
+}
+
+static float rna_CurvePatchSession_active_point_opacity_get(PointerRNA *ptr)
+{
+  return ED_curve_patch_session_active_point_opacity(rna_curve_patch_session_from_ptr(ptr));
+}
+
+static void rna_CurvePatchSession_active_point_opacity_set(PointerRNA *ptr, float value)
+{
+  Object *ob = rna_curve_patch_session_object(ptr);
+  if (ob != nullptr) {
+    ED_curve_patch_session_active_point_opacity_set(*ob, value);
+  }
+}
+
+static float rna_CurvePatchSession_active_point_opacity_falloff_get(PointerRNA *ptr)
+{
+  return ED_curve_patch_session_active_point_opacity_falloff(
+      rna_curve_patch_session_from_ptr(ptr));
+}
+
+static void rna_CurvePatchSession_active_point_opacity_falloff_set(PointerRNA *ptr, float value)
+{
+  Object *ob = rna_curve_patch_session_object(ptr);
+  if (ob != nullptr) {
+    ED_curve_patch_session_active_point_opacity_falloff_set(*ob, value);
+  }
+}
+
+static void rna_CurvePatchSession_look_update(bContext *C, PointerRNA *ptr)
+{
+  Object *ob = rna_curve_patch_session_object(ptr);
+  if (ob == nullptr) {
+    return;
+  }
+  /* The panel is not the viewport: the modal does not see this edit and would not re-stamp it. */
+  ED_curve_patch_session_restamp(*C, *ob);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+}
+
 static int rna_CurvePatchSession_stamp_count_get(PointerRNA *ptr)
 {
   return ED_curve_patch_session_stamp_num(rna_curve_patch_session_from_ptr(ptr));
@@ -4295,6 +4343,39 @@ static void rna_def_curve_patch_session(BlenderRNA *brna)
   RNA_def_property_float_funcs(prop, "rna_CurvePatchSession_radius_get", nullptr, nullptr);
   RNA_def_property_ui_text(
       prop, "Radius", "World-space brush radius frozen when the patch started");
+
+  prop = RNA_def_property(srna, "active_point_opacity", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchSession_active_point_opacity_get",
+                               "rna_CurvePatchSession_active_point_opacity_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 3);
+  RNA_def_property_ui_text(
+      prop,
+      "Active Point Opacity",
+      "Opacity multiplier of the active control point, applied on top of the curve's own Opacity. "
+      "The value is smoothed along the curve, so one low point blends with its neighbors instead "
+      "of creating a hard transparent trough");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchSession_look_update");
+
+  prop = RNA_def_property(srna, "active_point_opacity_falloff", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_funcs(prop,
+                               "rna_CurvePatchSession_active_point_opacity_falloff_get",
+                               "rna_CurvePatchSession_active_point_opacity_falloff_set",
+                               nullptr);
+  RNA_def_property_range(prop, 0.0f, 100.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 10.0f, 0.01f, 2);
+  RNA_def_property_ui_text(
+      prop,
+      "Opacity Falloff",
+      "Distance along the curve over which THIS control point's opacity influence fades, as a "
+      "multiple of the curve's width (1.0 = one full ribbon width)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, "rna_CurvePatchSession_look_update");
 
   prop = RNA_def_property(srna, "stamp_count", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);

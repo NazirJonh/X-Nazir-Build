@@ -94,51 +94,71 @@ inline IndexMask curve_patch_effect_node_mask(const Depsgraph &depsgraph,
 }
 
 /**
- * Fold one pass's contribution into the cross-pass accumulator and report the running weighted
- * average.
+ * Fold one pass's contribution into the cross-pass accumulator and return the running composite.
  *
- * A patch straddling a mirror or radial symmetry plane can have both the direct and the mirrored
- * pass claim the same element. Without this the pass whose write ran last would simply overwrite
- * the earlier one, leaving a hard seam where only one side "won". Weighting by each pass's own
- * falloff (rather than a plain average) makes the blend fall off to whichever pass dominates away
- * from the overlap, converging to that pass's own value alone.
+ * Two different overlaps meet at one element, and they are not the same operation:
+ * - The passes of ONE patch (mirror / radial symmetry) can each claim it. Their contributions
+ *   average, weighted by each pass's own falloff, so the pass whose write ran last does not leave a
+ *   hard seam where only one side "won".
+ * - A patch stamped AFTER another (the session stamps from the bottom of the curve list up) lies
+ *   over it. It is composited with the "over" operator, so it hides what is below it exactly as far
+ *   as its own coverage says and lets the rest show through. This is what makes a point's opacity
+ *   behave as opacity: a transparent stretch of the upper curve contributes nothing and the lower
+ *   curve stays visible, instead of being averaged down.
  *
- * `key` is whatever index the effect's snapshot is keyed by -- a mesh vertex, a color-domain
- * element, or the image effect's packed tile-and-offset id.
+ * `premultiplied` is the pass's payload in `xyz` (a height, a color already multiplied by its
+ * coverage, ...) and its coverage in `w`, in [0, 1]. `weight` weights the pass within its own
+ * patch. The patch is identified by #CurvePatchApplyState::patch_rank, so the passes of one patch
+ * must run back to back.
  *
- * TODO(I10): overlap policy for TWO PATCHES vs symmetry of ONE patch. The session feeds every
- * `CurvePatchItem` through this same accumulator (`curve_patch_apply_effect_action`), so
- * multi-patch overlap inherits the symmetry rule. Decide before interactive multi-curve edit;
- * do not change the mix until then. Self-overlap of one curve (sampler `relief_at` keeps max
- * |height|) and symmetry averaging (this function, one patch, two passes) stay as they are.
- *
- * What is true today:
- * - Relief: `value` is height; the returned average IS the written displacement. Two patches
- *   on one vertex average, they do not stack and the last does not win.
- * - Color and Image: `value` is only the mix factor. RGB is `lerp(orig, current_brush_color,
- *   factor)` against the pre-patch original, so the last item's color identity wins while
- *   the opacities average. (Color does call this function; it does not skip it.)
- *
- * Policy options when returning to this:
- * 1. Keep as-is. Document it. Cheap. Two reliefs blend; two colors: last RGB, blended factor.
- * 2. Align Color/Image to average: accumulate RGB (or the finished lerp) so a red+blue overlap
- *    mixes like two heights mix. More consistent accumulator; less like a paint stroke.
- * 3. Align Relief to last-wins: the later patch owns the overlap (with its own falloff). Closer
- *    to "upper ribbon on top". MUST keep averaging for symmetry or the mirror seam returns --
- *    that means splitting this accumulator into per-patch symmetry blend vs cross-patch rule.
- *
- * Additive stacking (h1+h2) is not one of the three: this function also serves symmetry, and
- * adding two mirrored claims would double the seam.
+ * `key` is whatever index the effect's snapshot is keyed by -- a mesh vertex or a color-domain
+ * element. A sole patch gets back exactly its own weighted average, which is what the accumulator
+ * returned before patches could overlap.
+ */
+inline float4 curve_patch_blend_over(CurvePatchOverAccum &accum,
+                                     const int patch_rank,
+                                     const float weight,
+                                     const float4 &premultiplied)
+{
+  if (accum.patch_rank != patch_rank) {
+    if (accum.patch_rank >= 0 && accum.current_weight > 0.0f) {
+      const float4 previous = accum.current / accum.current_weight;
+      accum.below = previous + accum.below * (1.0f - previous.w);
+    }
+    accum.current = float4(0.0f);
+    accum.current_weight = 0.0f;
+    accum.patch_rank = patch_rank;
+  }
+  accum.current += premultiplied * weight;
+  accum.current_weight += weight;
+  /* A pass with no weight (a fully transparent stretch) claims nothing: what is below stays. */
+  const float4 current = accum.current_weight > 0.0f ? accum.current / accum.current_weight :
+                                                       float4(0.0f);
+  return current + accum.below * (1.0f - current.w);
+}
+
+/** The same for an element kept in the restamp's shared `Map`, keyed like the effect's snapshot. */
+inline float4 curve_patch_blend_over(CurvePatchApplyState &apply,
+                                     const int key,
+                                     const float weight,
+                                     const float4 &premultiplied)
+{
+  return curve_patch_blend_over(
+      apply.pass_weight_accum.lookup_or_add_default(key), apply.patch_rank, weight, premultiplied);
+}
+
+/**
+ * #curve_patch_blend_over for a single scalar (a relief height, a mask value), whose coverage is
+ * the pass weight itself. Returns the composited scalar.
  */
 inline float curve_patch_blend_across_passes(CurvePatchApplyState &apply,
                                              const int key,
                                              const float weight,
                                              const float value)
 {
-  float2 &accum = apply.pass_weight_accum.lookup_or_add(key, float2(0.0f, 0.0f));
-  accum.x += weight;
-  accum.y += weight * value;
-  return accum.y / accum.x;
+  return curve_patch_blend_over(
+             apply, key, weight, float4(value, 0.0f, 0.0f, std::clamp(weight, 0.0f, 1.0f)))
+      .x;
 }
 
 /**

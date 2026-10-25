@@ -158,9 +158,8 @@ struct TileSnapshot {
    * (`BLI_bit_span_ops.hh:100-110`) and test the same `tile_size` bits the loop already tests. */
   BitVector<> captured_rows;
 
-  /** Cross-pass blend accumulator for this tile's slots: `x` the running sum of each claiming
-   * pass's falloff weight, `y` the running sum of `weight * value` -- the same pair, with the same
-   * meaning, that #curve_patch_blend_across_passes keeps in `CurvePatchApplyState`.
+  /** Cross-pass blend accumulator for this tile's slots -- the same #CurvePatchOverAccum, with
+   * the same meaning, that #curve_patch_blend_over keeps in `CurvePatchApplyState`.
    *
    * Held here instead of in that shared `Map` because the image effect's key is one per PIXEL, so
    * the map grew to one entry per painted texel (millions) and cost a hash lookup each, in a
@@ -169,7 +168,7 @@ struct TileSnapshot {
    * A slot holds live data only where #accum_claimed is set, which in turn is only meaningful once
    * #accum_gen matches the effect's current restamp generation; see those fields.
    * Sized with #pixels, so a slot's accumulator is always addressable once the tile exists. */
-  Array<float2> accum;
+  Array<CurvePatchOverAccum> accum;
   /**
    * Which restamp this tile's #accum_claimed was last reset for.
    *
@@ -1935,8 +1934,8 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
             new_snapshot.pixels.reinitialize(tile_size * tile_size);
             new_snapshot.captured.resize(tile_size * tile_size, false);
             new_snapshot.captured_rows.resize(tile_size, false);
-            /* `accum` is left uninitialized on purpose: a slot is only ever read once its
-             * `accum_claimed` bit is set, and that bit is only set together with a zero write. */
+            /* A slot is only ever read once its `accum_claimed` bit is set, and that bit is only
+             * set together with a reset of the slot. */
             new_snapshot.accum.reinitialize(tile_size * tile_size);
             new_snapshot.accum_claimed.resize(tile_size * tile_size, false);
             return new_snapshot;
@@ -1977,25 +1976,49 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
          * per-pixel hash lookup disappears. A clear `accum_claimed` bit means no pass of THIS
          * restamp has claimed the slot yet, which is exactly the state a cleared map represented.
          *
-         * TODO(I10): same Color/Image last-RGB + averaged-factor split as ColorEffect. Image is
-         * not grouped with Relief for this policy; see #curve_patch_blend_across_passes. */
-        float2 &accum = snapshot.accum[in_tile_offset];
+         * The accumulator composites patches (see #curve_patch_blend_over), so what it needs per
+         * pass is the color the pass paints and the coverage it paints it with. */
+        CurvePatchOverAccum &accum = snapshot.accum[in_tile_offset];
         if (!snapshot.accum_claimed[in_tile_offset]) {
           snapshot.accum_claimed[in_tile_offset].set();
-          accum = float2(0.0f, 0.0f);
+          accum = CurvePatchOverAccum();
           /* One per texel this restamp writes -- the count the shared map reported by its size. */
           painted_slots_++;
         }
-        accum.x += pixel.weight;
-        accum.y += pixel.weight * pixel.value;
-        const float blended = accum.y / accum.x;
+        const float pass_factor = curve_patch_color_mix_factor(
+            pixel.value, pixel.tex_color, pixel.tex_valid, strength);
+        /* Precedence, matching the stroke engine: the CHANNEL's own source wins (that is the
+         * image assigned to Base Color in the channel panel); failing that the ribbon's own
+         * texture supplies the color; failing that the flat channel/brush color. A ribbon
+         * texture still contributes its intensity and alpha through `factor` either way.
+         * Randomize Color applies once to whichever color won, so a source- or texture-driven
+         * patch randomizes exactly like a value-driven one; PHASE 1 decoded the sampled texels
+         * to scene-linear, the same space the channel-value path jitters in. */
+        const float3 pass_rgb_raw = target_has_source ?
+                                        pixel.source_color :
+                                        (target_paints_color ?
+                                             curve_patch_paint_color(
+                                                 brush_color, pixel.tex_color, pixel.tex_valid) :
+                                             brush_color);
+        const float3 pass_rgb =
+            (target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR || !target.is_material_channel) ?
+                BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, pass_rgb_raw) :
+                pass_rgb_raw;
+        const float4 over = curve_patch_blend_over(
+            accum,
+            patch.apply.patch_rank,
+            pixel.weight,
+            float4(pass_rgb * pass_factor, pass_factor));
+        /* The color the patches stamped so far leave here, and their coverage of the texel. */
+        const float over_alpha = over.w;
+        const float3 paint_rgb = over_alpha > 0.0f ?
+                                     float3(over.x, over.y, over.z) / over_alpha :
+                                     float3(0.0f);
         /* The selection mask scales the resulting COVERAGE the same way the stroke engine folds its
          * weight into the brush factor: zero outside the selection, partial on a feathered edge.
          * Applying it here rather than to `pixel.weight` is what keeps a selected-out pixel blank
-         * -- a uniform factor on the accumulated weights would cancel in `blended`. */
-        const float factor = curve_patch_color_mix_factor(
-            blended, pixel.tex_color, pixel.tex_valid, strength);
-        const float coverage = std::clamp(factor * pixel.selection, 0.0f, 1.0f);
+         * -- a uniform factor on the accumulated weights would cancel in the average. */
+        const float coverage = std::clamp(over_alpha * pixel.selection, 0.0f, 1.0f);
         /* The color a patch paints is a `float3` (`BKE_brush_color_get()`, or a channel color), so
          * the only alpha it contributes is its own coverage. That coverage accumulates onto the
          * destination alpha with the straight-alpha "over", in every branch below. On an opaque map
@@ -2004,23 +2027,6 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
          * destination alpha through would leave the painted color invisible to the layer composite.
          * Normal was the only channel that did this before. */
         const float alpha_out = orig.w + coverage * (1.0f - orig.w);
-        /* Precedence, matching the stroke engine: the CHANNEL's own source wins (that is the
-         * image assigned to Base Color in the channel panel); failing that the ribbon's own
-         * texture supplies the color; failing that the flat channel/brush color. A ribbon
-         * texture still contributes its intensity and alpha through `factor` either way.
-         * Randomize Color applies once to whichever color won, so a source- or texture-driven
-         * patch randomizes exactly like a value-driven one; PHASE 1 decoded the sampled texels
-         * to scene-linear, the same space the channel-value path jitters in. */
-        const float3 paint_rgb_raw = target_has_source ?
-                                         pixel.source_color :
-                                         (target_paints_color ?
-                                              curve_patch_paint_color(
-                                                  brush_color, pixel.tex_color, pixel.tex_valid) :
-                                          brush_color);
-        const float3 paint_rgb =
-            (target.channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR || !target.is_material_channel) ?
-                BKE_paint_stroke_color_jitter_apply_color(dab_color_jitter, paint_rgb_raw) :
-                paint_rgb_raw;
         if (blend_mode == IMB_BLEND_NORMAL_MIX) {
           /* A packed tangent normal is an ENCODED direction, not a linear color, so it must NOT
            * be pre-multiplied by coverage the way every other mode's source is: scaling it toward

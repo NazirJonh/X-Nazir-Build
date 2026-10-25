@@ -72,6 +72,13 @@ PaintVectorItem &BKE_paint_vector_item_add(PaintVector &pv);
 bool BKE_paint_vector_item_remove(PaintVector &pv, int index);
 
 /**
+ * Exchange the \a a-th and \a b-th items in place, keeping every owned array with its item.
+ * #PaintVector::active_item follows the item it pointed at. Used by the Curve Patch curve list's
+ * up/down controls. False when either index is out of range.
+ */
+bool BKE_paint_vector_item_swap(PaintVector &pv, int a, int b);
+
+/**
  * Allocate (or reallocate) the item's flat point array and return it. Any previous array is freed
  * first, so calling this again on the same item does not leak.
  */

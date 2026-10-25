@@ -789,12 +789,33 @@ static void curve_patch_edit_context_menu_open(bContext *C)
   layout.op_menu_enum(
       C, "SCULPT_OT_curve_patch_handle_type_set", "type", IFACE_("Handle Type"), ICON_NONE);
 
-  const CurvePatchSession &patch = patch_cache_of(C);
+  CurvePatchSession &patch = patch_cache_of(C);
   const bool is_cyclic = curve_patch_is_cyclic(patch);
   const ToolSettings *tool_settings = CTX_data_tool_settings(C);
   Brush *brush = (tool_settings && tool_settings->sculpt) ?
                      BKE_paint_brush(&tool_settings->sculpt->paint) :
                      nullptr;
+
+  /* The active point is set by the right-click hit test just before the menu opens. Both look
+   * values are edited through the session RNA: a popup can only invoke operators or edit plain
+   * properties, and the custom setters/update callbacks do the restamp. */
+  if (curve_patch_active_point_is_valid(patch)) {
+    Object &ob = *CTX_data_active_object(C);
+    PointerRNA session_ptr = RNA_pointer_create_discrete(
+        &ob.id, RNA_CurvePatchSession, static_cast<void *>(&patch));
+    layout.separator();
+    layout.prop(&session_ptr,
+                "active_point_opacity",
+                UI_ITEM_NONE,
+                IFACE_("Point Opacity"),
+                ICON_NONE);
+    layout.prop(&session_ptr,
+                "active_point_opacity_falloff",
+                UI_ITEM_NONE,
+                IFACE_("Opacity Falloff"),
+                ICON_NONE);
+  }
+
   layout.separator();
   layout.op("SCULPT_OT_curve_patch_toggle_cyclic",
             is_cyclic ? IFACE_("Open Curve") : IFACE_("Close Curve"),
@@ -1183,8 +1204,13 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
     curve_patch_restore_and_restamp(*C, ob, patch);
     curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
   }
+  /* A per-point opacity or opacity-falloff edit restamps from its own RNA update callback (the
+   * panel is not the viewport), so all the modal has to do is fold it into the same
+   * gesture-deferred undo step. */
+  const bool rna_look_changed = patch.rna_look_changed;
+  patch.rna_look_changed = false;
   /* One undo step per gesture on a slider: it is recorded once the values stop moving. */
-  if (look_changed) {
+  if (look_changed || rna_look_changed) {
     data.look_undo_pending = true;
   }
   else if (data.look_undo_pending) {

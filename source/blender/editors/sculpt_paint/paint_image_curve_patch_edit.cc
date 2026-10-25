@@ -25,7 +25,7 @@
  *
  * Feature parity with the 3D Sculpt Mode Curve Patch editor (`paint_curve_patch_edit.cc`) covers
  * everything that has a meaning on a flat canvas: point, handle, segment and radius drags,
- * Ctrl+RMB insert-or-append, X / Del delete, C cyclic toggle, Y direction switch, V handle-type
+ * Ctrl+RMB insert-or-append, X / Del delete, J cyclic toggle, Y direction switch, V handle-type
  * cycle, the RMB context menu, Enter commit, Esc cancel. Surface snapping, per-point surface
  * normals and scene-curve silhouettes are 3D-only and deliberately absent.
  */

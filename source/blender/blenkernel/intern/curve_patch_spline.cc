@@ -28,6 +28,8 @@ void CurvePatchSpline::clear()
   tangents_3d.clear();
   control_point_lengths.clear();
   radii.clear();
+  control_point_opacities.clear();
+  control_point_falloffs.clear();
   normals_3d.clear();
   normals_smooth_3d.clear();
   cyclic = false;
@@ -181,6 +183,78 @@ float CurvePatchSpline::radius_at(const float s) const
   float t;
   find_segment(lengths_3d, s, i, t);
   return math::interpolate(radii[i], radii[i + 1], t);
+}
+
+void CurvePatchSpline::opacity_field_build(const Span<float> values,
+                                           const Span<float> falloff_multipliers,
+                                           const float curve_width)
+{
+  control_point_opacities.clear();
+  control_point_falloffs.clear();
+  const int n = int(values.size());
+  if (n == 0 || is_empty() || control_point_lengths.size() != n ||
+      falloff_multipliers.size() != n)
+  {
+    return;
+  }
+  /* A curve whose points are all opaque is the overwhelmingly common case and must cost nothing: an
+   * active field adds a per-sample loop over the control points to every relief sample. */
+  const bool any_translucent = std::any_of(
+      values.begin(), values.end(), [](const float value) { return value < 0.999f; });
+  if (!any_translucent) {
+    return;
+  }
+  control_point_opacities.extend(values);
+  control_point_falloffs.reinitialize(n);
+  const float width = std::max(curve_width, 0.0f);
+  for (const int i : IndexRange(n)) {
+    control_point_falloffs[i] = std::max(falloff_multipliers[i], 0.0f) * width;
+  }
+}
+
+bool CurvePatchSpline::opacity_field_active() const
+{
+  return !control_point_opacities.is_empty();
+}
+
+float CurvePatchSpline::opacity_at(const float s) const
+{
+  if (is_empty() || !this->opacity_field_active()) {
+    return 1.0f;
+  }
+
+  const int point_num = int(control_point_opacities.size());
+  /* Local opacity brushes: every control point reduces the curve's opacity toward its own value
+   * with a Gaussian falloff scaled by that point's reach. The reach is a physical length, not a
+   * fraction of the distance to the neighbors, so the capture range is independent of how far
+   * apart the points happen to be. A point at 1 contributes nothing; several low points
+   * accumulate until the result clamps at fully transparent. */
+  const float total = total_length();
+  const float ss = math::clamp(s, 0.0f, total);
+  float transparency = 0.0f;
+  for (const int i : IndexRange(point_num)) {
+    const float falloff = control_point_falloffs[i];
+    if (falloff <= 1e-6f) {
+      continue;
+    }
+    float dist = std::abs(ss - control_point_lengths[i]);
+    if (cyclic) {
+      dist = std::min(dist, total - dist);
+    }
+    /* The Gaussian tail is negligible after three sigma; cutting there keeps the per-sample loop
+     * bounded without reintroducing a visible support edge. */
+    if (dist >= 3.0f * falloff) {
+      continue;
+    }
+    const float t = dist / falloff;
+    /* Gaussian rather than a compact smoothstep. A compact kernel is back at full opacity
+     * exactly at the slider's end, which reads as a hard shoulder; the tail keeps a little
+     * influence past the nominal falloff, so the fade eases out instead of stepping back to
+     * full intensity. The center is still exactly the point's own opacity. */
+    const float weight = std::exp(-2.0f * t * t);
+    transparency += (1.0f - control_point_opacities[i]) * weight;
+  }
+  return math::clamp(1.0f - transparency, 0.0f, 1.0f);
 }
 
 float CurvePatchSpline::distance_sq_to(const float3 &query) const

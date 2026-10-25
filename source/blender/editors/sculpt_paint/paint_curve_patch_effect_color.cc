@@ -562,27 +562,28 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
       BLI_assert(has_color_target_);
       orig_colors_.lookup_or_add(write.idx, write.orig);
 
-      /* TODO(I10): `blended` averages every claiming pass/patch's mix factor; `brush_color` is
-       * this call's brush, so a later overlapping patch replaces the RGB. Options on
-       * #curve_patch_blend_across_passes. */
-      const float blended = curve_patch_blend_across_passes(
-          patch.apply, write.idx, write.weight, write.value);
-      const float factor = curve_patch_color_mix_factor(
-          blended, write.tex_color, write.tex_valid, strength);
-
-      /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
-       * returns a `float3`, so writing an alpha would invent data the brush never specified (the
-       * Stage 3 invariant). Mix is from the pre-patch original, not from a previous patch's write.
-       */
+      const float pass_factor = curve_patch_color_mix_factor(
+          write.value, write.tex_color, write.tex_valid, strength);
       /* Base Color and the plain color attribute both write a color, so both take the ribbon
        * texture's RGB when one is assigned. Randomize Color applies once to whichever color won,
        * so the texture's RGB randomizes the same way the flat color does. */
       const float3 paint_rgb = BKE_paint_stroke_color_jitter_apply_color(
           dab_color_jitter,
           curve_patch_paint_color(brush_color, write.tex_color, write.tex_valid));
+      /* The patches stamped so far, composited with this one: `over.xyz` is the pre-multiplied
+       * color they leave and `over.w` their coverage of the element. A curve stamped over another
+       * keeps the lower curve's color wherever its own coverage is partial. */
+      const float4 over = curve_patch_blend_over(
+          patch.apply, write.idx, write.weight, float4(paint_rgb * pass_factor, pass_factor));
+      const float factor = over.w;
+
+      /* The original alpha is carried through untouched, textured or not: `BKE_brush_color_get()`
+       * returns a `float3`, so writing an alpha would invent data the brush never specified (the
+       * Stage 3 invariant). Mix is from the pre-patch original, not from a previous patch's write.
+       */
       float4 mixed;
       if (blend_mode == IMB_BLEND_MIX) {
-        mixed = float4(math::interpolate(float3(write.orig), paint_rgb, factor),
+        mixed = float4(float3(write.orig) * (1.0f - factor) + float3(over.x, over.y, over.z),
                        write.orig.w);
       }
       else {
@@ -591,8 +592,7 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
          * #composite_coverage expects. The patch snapshot plays the role
          * #StrokeCache::material_mix_base_color plays for a stroke. Pre-multiplied, as that
          * contract requires. */
-        mixed = material::composite_coverage(
-            write.orig, float4(paint_rgb * factor, factor), blend_mode);
+        mixed = material::composite_coverage(write.orig, over, blend_mode);
         mixed.w = write.orig.w;
       }
       /* Restore from the frozen pre-patch color rather than from the live element: a patch is
@@ -662,14 +662,17 @@ void ColorEffect::apply_pass(const Depsgraph &depsgraph,
             continue;
           }
           const float orig = target.orig_values.lookup_or_add(write.vert, values[write.vert]);
-          const float blended = curve_patch_blend_across_passes(
-              patch.apply, -(write.vert + 1), write.weight, write.value);
-          const float factor = curve_patch_color_mix_factor(
-              blended, write.tex_color, write.tex_valid, strength);
+          const float pass_factor = curve_patch_color_mix_factor(
+              write.value, write.tex_color, write.tex_valid, strength);
+          const float4 over = curve_patch_blend_over(
+              patch.apply,
+              -(write.vert + 1),
+              write.weight,
+              float4(target_value * pass_factor, 0.0f, 0.0f, pass_factor));
           /* Pre-multiplied coverage, exactly what `accumulate_scalar_coverage()` builds up over
-           * a stroke's dabs -- here the patch snapshot plus `factor` already are that pair. */
+           * a stroke's dabs -- here the patch snapshot plus the composite already are that pair. */
           const float blended_value = material::apply_scalar_blend(
-              orig, float2(target_value * factor, factor), channel_blend);
+              orig, float2(over.x, over.w), channel_blend);
           values[write.vert] = math::clamp(blended_value, range.x, range.y);
         }
       }

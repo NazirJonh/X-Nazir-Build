@@ -3711,6 +3711,7 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_add);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_remove);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_duplicate);
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_move);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_resume);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_edit);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_brush_assign);

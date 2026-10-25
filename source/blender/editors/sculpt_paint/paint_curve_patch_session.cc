@@ -203,25 +203,23 @@ static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
                                             PaintModeSettings & /*paint_mode_settings*/)
 {
   CurvePatchSession &session = *ob.runtime->sculpt_session->curve_patch_session;
-  /* One pass per patch, inside this symmetry pass. Overlapping patches meet in
-   * `CurvePatchApplyState::pass_weight_accum` exactly as two symmetry passes do -- which is why
-   * this is a plain loop and not a restore between patches: restoring would erase the previous
-   * patch's contribution.
-   *
-   * TODO(I10): this is the call site that makes two patches share the symmetry accumulator.
-   * Policy options (keep / Color-to-average / Relief-to-last-wins) are listed on
-   * #curve_patch_blend_across_passes. Do not change the mix here until that is decided. */
-  for (const CurvePatchItem &item : session.doc.patches) {
-    if (item.params.hidden) {
-      continue;
-    }
-    if (!session_item_is_buildable(item)) {
-      /* Skipped rather than refused: asking for every spline of a curve must not fail because one
-       * of them is a stray single point. */
-      continue;
-    }
-    session.effect->apply_pass(depsgraph, ob, brush, session, item);
+  /* The one patch `session_apply()` is stamping: it runs this symmetry pass patch by patch, so the
+   * passes of a patch reach the accumulator back to back (see #curve_patch_blend_over). The list
+   * shows the topmost curve first, so the stamping order is the reverse of the document's. */
+  const int patch_i = int(session.doc.patches.size()) - 1 - session.apply.patch_rank;
+  if (patch_i < 0 || patch_i >= int(session.doc.patches.size())) {
+    return;
   }
+  const CurvePatchItem &item = session.doc.patches[patch_i];
+  if (item.params.hidden) {
+    return;
+  }
+  if (!session_item_is_buildable(item)) {
+    /* Skipped rather than refused: asking for every spline of a curve must not fail because one
+     * of them is a stray single point. */
+    return;
+  }
+  session.effect->apply_pass(depsgraph, ob, brush, session, item);
 }
 
 /* Tessellate every patch's control curve, project it onto the shared surface snapshot, and rebuild
@@ -332,13 +330,23 @@ static void session_apply(const Scene &scene,
    * (`paint_curve_patch_edit.cc`) watches the slider and triggers a re-stamp when it changes, so
    * this tracks the slider in real time. Radius/axis stay frozen (see
    * `CurvePatchSession::params`). */
-  do_symmetrical_brush_actions(depsgraph,
-                               scene,
-                               sd,
-                               ob,
-                               curve_patch_apply_effect_action,
-                               paint_mode_settings,
-                               std::nullopt);
+  /* One symmetry run per patch, bottom of the list first: a patch overlapping another is
+   * composited over it, which needs the earlier patch's result on the accumulator before the later
+   * one is folded in. Not a restore between patches -- that would erase the earlier contribution. */
+  for (const int rank : session.doc.patches.index_range()) {
+    const CurvePatchItem &item = session.doc.patches[session.doc.patches.size() - 1 - rank];
+    if (item.params.hidden || !session_item_is_buildable(item)) {
+      continue;
+    }
+    session.apply.patch_rank = rank;
+    do_symmetrical_brush_actions(depsgraph,
+                                 scene,
+                                 sd,
+                                 ob,
+                                 curve_patch_apply_effect_action,
+                                 paint_mode_settings,
+                                 std::nullopt);
+  }
 
   /* Final-quality smoothing (commit only) and whatever else this target has to close off. */
   session.effect->end_restamp(ob, session);
@@ -1322,6 +1330,34 @@ float ED_curve_patch_session_radius(const ed::sculpt_paint::CurvePatchSession *s
   return item != nullptr ? item->params.radius : 0.0f;
 }
 
+float ED_curve_patch_session_active_point_opacity(
+    const ed::sculpt_paint::CurvePatchSession *session)
+{
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
+  if (item == nullptr) {
+    return 1.0f;
+  }
+  const int point = ED_curve_patch_session_active_point(session);
+  if (point < 0) {
+    return 1.0f;
+  }
+  return paintcurve_geom_opacity_get(item->control_curve, point);
+}
+
+float ED_curve_patch_session_active_point_opacity_falloff(
+    const ed::sculpt_paint::CurvePatchSession *session)
+{
+  const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
+  if (item == nullptr) {
+    return 1.0f;
+  }
+  const int point = ED_curve_patch_session_active_point(session);
+  if (point < 0) {
+    return 1.0f;
+  }
+  return paintcurve_geom_opacity_falloff_get(item->control_curve, point);
+}
+
 int ED_curve_patch_session_stamp_num(const ed::sculpt_paint::CurvePatchSession *session)
 {
   const ed::sculpt_paint::CurvePatchItem *item = active_item_from_session(session);
@@ -1434,6 +1470,30 @@ static ed::sculpt_paint::CurvePatchItem *active_item_with_valid_point(Object &ob
     return nullptr;
   }
   return &item;
+}
+
+bool ED_curve_patch_session_active_point_opacity_set(Object &ob, const float opacity)
+{
+  ed::sculpt_paint::CurvePatchItem *item = active_item_with_valid_point(ob);
+  ed::sculpt_paint::CurvePatchSession *patch = mutable_session_from_object(ob);
+  if (item == nullptr || patch == nullptr) {
+    return false;
+  }
+  paintcurve_geom_opacity_set(item->control_curve, patch->doc.active_point, opacity);
+  patch->rna_look_changed = true;
+  return true;
+}
+
+bool ED_curve_patch_session_active_point_opacity_falloff_set(Object &ob, const float falloff)
+{
+  ed::sculpt_paint::CurvePatchItem *item = active_item_with_valid_point(ob);
+  ed::sculpt_paint::CurvePatchSession *patch = mutable_session_from_object(ob);
+  if (item == nullptr || patch == nullptr) {
+    return false;
+  }
+  paintcurve_geom_opacity_falloff_set(item->control_curve, patch->doc.active_point, falloff);
+  patch->rna_look_changed = true;
+  return true;
 }
 
 bool ED_curve_patch_session_active_point_handle_get(Object &ob,

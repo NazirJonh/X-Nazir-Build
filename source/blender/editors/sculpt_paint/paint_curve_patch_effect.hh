@@ -125,14 +125,11 @@ class CurvePatchEffect {
    * `CurvePatchApplyState::pass_weight_accum` and of the target data.
    *
    * `patch` carries what is shared with the whole session (texture binding, apply state); `item`
-   * is the one patch this call writes. Two overlapping items reach the same vertex through
-   * `pass_weight_accum`, exactly as two symmetry passes do.
-   *
-   * Current mix (not a bug -- a policy, see TODO I10 on #curve_patch_blend_across_passes):
-   * Relief writes the accumulated scalar as height. Color and Image accumulate only the mix
-   * *factor* and lerp from the pre-patch original toward the current brush RGB, so the last
-   * item's color identity wins. Interactive edit currently publishes one patch with one live
-   * brush color, so the split is almost invisible until multi-curve edit.
+   * is the one patch this call writes. The passes of one patch run back to back and average
+   * (symmetry); a patch stamped later, `CurvePatchApplyState::patch_rank` higher, is composited
+   * over the earlier ones -- see #curve_patch_blend_over. Relief and Mask composite a scalar,
+   * Color and Image composite the pre-multiplied color and its coverage, so a lower curve shows
+   * through wherever an upper one is partially transparent.
    */
   virtual void apply_pass(const Depsgraph &depsgraph,
                           Object &ob,

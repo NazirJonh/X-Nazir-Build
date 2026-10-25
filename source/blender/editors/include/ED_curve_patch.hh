@@ -48,6 +48,19 @@ int ED_curve_patch_session_active_point(const ed::sculpt_paint::CurvePatchSessio
 bool ED_curve_patch_session_is_cyclic(const ed::sculpt_paint::CurvePatchSession *session);
 /** World-space brush radius frozen when the patch started. */
 float ED_curve_patch_session_radius(const ed::sculpt_paint::CurvePatchSession *session);
+/** Per-point opacity of the active control point, in [0, 1]. Returns 1.0 when no point is active. */
+float ED_curve_patch_session_active_point_opacity(
+    const ed::sculpt_paint::CurvePatchSession *session);
+/** Write the active control point's opacity. Returns false when no point is active. Does not
+ * itself re-stamp: the RNA update callback does, because it is the caller with a context. */
+bool ED_curve_patch_session_active_point_opacity_set(Object &ob, float opacity);
+/** Opacity falloff of the ACTIVE control point, as a multiple of the curve's width. Returns 1.0
+ * when no point is active. */
+float ED_curve_patch_session_active_point_opacity_falloff(
+    const ed::sculpt_paint::CurvePatchSession *session);
+/** Write the active control point's opacity falloff. Does not itself re-stamp: the RNA update
+ * callback does, because it is the caller with a context. */
+bool ED_curve_patch_session_active_point_opacity_falloff_set(Object &ob, float falloff);
 /** Stamp count of the last build; zero in Ribbon mode, which lays out none. */
 int ED_curve_patch_session_stamp_num(const ed::sculpt_paint::CurvePatchSession *session);
 

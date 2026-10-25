@@ -208,6 +208,7 @@ bool ED_paint_layers_curve_patch_row_maps_ensure(bContext &C,
 void PAINT_OT_curve_patch_layer_curve_add(wmOperatorType *ot);
 void PAINT_OT_curve_patch_layer_curve_remove(wmOperatorType *ot);
 void PAINT_OT_curve_patch_layer_curve_duplicate(wmOperatorType *ot);
+void PAINT_OT_curve_patch_layer_curve_move(wmOperatorType *ot);
 /** Internal: enters the active effect's tool one event-loop tick after a mode change. */
 void PAINT_OT_curve_patch_layer_resume(wmOperatorType *ot);
 

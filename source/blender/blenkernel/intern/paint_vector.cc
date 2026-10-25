@@ -203,6 +203,31 @@ bool BKE_paint_vector_item_remove(PaintVector &pv, const int index)
   return true;
 }
 
+bool BKE_paint_vector_item_swap(PaintVector &pv, const int a, const int b)
+{
+  if (a < 0 || a >= pv.items_num || b < 0 || b >= pv.items_num) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  PaintVectorItem *items = MEM_new_array<PaintVectorItem>(pv.items_num, __func__);
+  /* Shallow moves, exactly like #BKE_paint_vector_item_add / _remove: each owned array has one
+   * destination, and the old block is freed without walking the items. */
+  for (int i = 0; i < pv.items_num; i++) {
+    items[i] = (i == a) ? pv.items[b] : (i == b) ? pv.items[a] : pv.items[i];
+  }
+  MEM_delete(pv.items);
+  pv.items = items;
+  if (pv.active_item == a) {
+    pv.active_item = b;
+  }
+  else if (pv.active_item == b) {
+    pv.active_item = a;
+  }
+  return true;
+}
+
 MutableSpan<PaintVectorPoint> BKE_paint_vector_item_points_alloc(PaintVectorItem &item,
                                                                 const int num)
 {

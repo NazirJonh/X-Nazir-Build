@@ -10,6 +10,7 @@
  * needs them.
  */
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "DNA_paint_vector_types.h"
@@ -54,6 +55,49 @@ static void rna_PaintVectorItem_curve_look_update(Main * /*bmain*/,
   if (PaintVector *pv = id_cast<PaintVector *>(ptr->owner_id)) {
     BKE_paint_vector_tag_changed(*pv);
   }
+}
+
+/* The Width slider is a friendly scale over the stored world-space `radius`: one unit is 5 px of
+ * the brush size the curve was made with, so 100 is a 500 px brush and a value above 100 can still
+ * be typed. `radius_per_size` is the curve's own world-units-per-pixel ratio, set when the curve is
+ * created and kept fixed by the layer sync -- that is what keeps the mapping stable while the
+ * radius is edited. */
+static constexpr float CURVE_PATCH_WIDTH_PX_PER_UNIT = 5.0f;
+static constexpr float CURVE_PATCH_WIDTH_FALLBACK_BRUSH_PX = 500.0f;
+
+static float rna_PaintVectorItem_width_ratio_get(const PaintVectorCurveParams &params)
+{
+  if (params.radius_per_size > 0.0f) {
+    return params.radius_per_size;
+  }
+  /* Data written before the ratio existed, or a curve whose brush had a zero Size: treat its
+   * current radius as the 500 px reference, so the slider still opens on a usable value. */
+  if (params.radius > 0.0f) {
+    return params.radius / CURVE_PATCH_WIDTH_FALLBACK_BRUSH_PX;
+  }
+  return 0.0f;
+}
+
+static float rna_PaintVectorItem_width_get(PointerRNA *ptr)
+{
+  const PaintVectorItem *item = static_cast<const PaintVectorItem *>(ptr->data);
+  const PaintVectorCurveParams &params = item->curve_patch_params;
+  const float ratio = rna_PaintVectorItem_width_ratio_get(params);
+  if (ratio <= 0.0f) {
+    return 0.0f;
+  }
+  return params.radius / (ratio * CURVE_PATCH_WIDTH_PX_PER_UNIT);
+}
+
+static void rna_PaintVectorItem_width_set(PointerRNA *ptr, float value)
+{
+  PaintVectorItem *item = static_cast<PaintVectorItem *>(ptr->data);
+  PaintVectorCurveParams &params = item->curve_patch_params;
+  const float ratio = rna_PaintVectorItem_width_ratio_get(params);
+  if (ratio <= 0.0f) {
+    return;
+  }
+  params.radius = std::max(value, 0.0f) * ratio * CURVE_PATCH_WIDTH_PX_PER_UNIT;
 }
 
 }  // namespace blender
@@ -109,16 +153,19 @@ static void rna_def_paint_vector_item(BlenderRNA *brna)
   RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
 
-  /* No unit: the radius is in object space, and a distance unit would scale it with the object. */
   prop = RNA_def_property(srna, "width", PROP_FLOAT, PROP_NONE);
-  RNA_def_property_float_sdna(prop, nullptr, "curve_patch_params.radius");
-  RNA_def_property_range(prop, 0.0001f, 1000.0f);
-  RNA_def_property_ui_range(prop, 0.001f, 10.0f, 0.01f, 3);
+  RNA_def_property_float_funcs(prop,
+                               "rna_PaintVectorItem_width_get",
+                               "rna_PaintVectorItem_width_set",
+                               nullptr);
+  /* The slider's soft range stops at 100, but the hard range lets the user type a bigger value. */
+  RNA_def_property_range(prop, 0.0f, 100000.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 1.0f, 1);
   RNA_def_property_ui_text(
       prop,
       "Width",
-      "Radius of the curve's ribbon, in object space. Taken from the brush Size when the curve is "
-      "made, then its own");
+      "Width of the curve's ribbon: 1 unit is 5 px of brush size, so 100 is a 500 px brush. "
+      "Values above 100 can be typed");
   RNA_def_property_editable_func(prop, "rna_PaintVectorItem_curve_look_editable");
   RNA_def_property_update(prop, NC_SPACE | ND_SPACE_VIEW3D, "rna_PaintVectorItem_curve_look_update");
 }

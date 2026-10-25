@@ -44,6 +44,15 @@ namespace blender::bke {
  * without depending on the editor module -- see #curve_patch_build_from_control_curve. */
 constexpr const char *CURVE_PATCH_ATTR_SURFACE_NORMAL = "paintcurve_surface_normal";
 
+/** Per-point opacity multiplier, in [0, 1]; default 1.0. Interpolated along the curve and applied to
+ * both Ribbon and Stamps modes, on top of the curve's own `CurvePatchParams::opacity`. */
+constexpr const char *CURVE_PATCH_ATTR_OPACITY = "paintcurve_opacity";
+
+/** Per-point float: how far along the curve THIS point's opacity influence reaches, as a multiple
+ * of the curve's WIDTH. Default 1.0 = one full ribbon width. Kept as a point attribute so every
+ * point can have its own capture range and it survives save/load without a DNA struct change. */
+constexpr const char *CURVE_PATCH_ATTR_OPACITY_FALLOFF = "paintcurve_point_opacity_falloff";
+
 /** Per-point stamp overrides for the POINTS stamp layout, stored as point attributes on the
  * control curve. A missing attribute reads as its default, so curves authored before these
  * existed need no migration; each is created lazily on first write.
@@ -240,6 +249,13 @@ struct CurvePatchSpline {
    * `bke::CurvesGeometry::interpolate_to_evaluated()`). Empty unless `build_from_positions()` was
    * called with a non-empty `radii` -- `radius_at()` requires this to be populated. */
   Vector<float> radii;
+  /** Per-control-point opacity values, aligned with `control_point_lengths`. Filled by
+   * #opacity_field_build only when at least one point is not fully opaque, so an empty array means
+   * "uniformly opaque" and keeps curves authored before the attribute existed unchanged. */
+  Vector<float> control_point_opacities;
+  /** World-space reach of each #control_point_opacities entry along the curve, aligned with it.
+   * A zero entry makes that point contribute nothing. */
+  Vector<float> control_point_falloffs;
   /** Surface normal under each `poly_3d` sample, as returned by the shrinkwrap. An empty vector
    * means "no normals" -- consumers then fall back to `plane_normal`. Sharp: it changes abruptly
    * across an edge, which is exactly what selecting a window's projection plane needs. */
@@ -304,6 +320,36 @@ struct CurvePatchSpline {
    * `radii` entries), clamped to `[0, total_length()]`. Requires `build_from_positions()` to have
    * been called with a non-empty `radii` matching `poly_3d` in size. */
   float radius_at(float s) const;
+
+  /**
+   * Build the local opacity field from per-point \a values and \a falloff_multipliers. Both spans
+   * must match #control_point_lengths in size; call after the spline is built (and after
+   * #control_point_lengths is filled).
+   *
+   * Each control point reduces the curve's opacity toward its own value with a Gaussian falloff
+   * whose scale is `falloff_multipliers[i] * curve_width` world units along the curve. The
+   * contributions are additive and clamped: a point at 0 in a neighborhood of 1s is exactly
+   * transparent at the point and eases back to 1 with a soft tail, instead of snapping to full
+   * opacity at a hard falloff edge. Unlike an interpolating spline, the transition scale is the
+   * point's falloff, NOT the distance to the neighboring control points. Setting several
+   * neighboring points low widens the transparent region; overlapping falloffs accumulate.
+   *
+   * The field stays empty (see #opacity_field_active) when every point is fully opaque, so a plain
+   * curve pays nothing for it.
+   */
+  void opacity_field_build(Span<float> values,
+                           Span<float> falloff_multipliers,
+                           float curve_width);
+
+  /** Whether any control point lowers the opacity, i.e. #opacity_at() can return less than 1. */
+  bool opacity_field_active() const;
+
+  /** Per-point opacity at arc-length `s`, clamped to `[0, total_length()]`.
+   *
+   * Each control point's value reaches its own falloff distance along the curve (see
+   * #opacity_field_build), so the capture range is independent of the spacing between points and
+   * can differ per point. Returns 1.0 when the field is not active. */
+  float opacity_at(float s) const;
 
   /** Minimum SQUARED Euclidean distance from `query` to the polyline (nearest point on any
    * segment). Returns 0 when `is_empty()`. Cheaper than #closest_point (no tangent/lateral/normal

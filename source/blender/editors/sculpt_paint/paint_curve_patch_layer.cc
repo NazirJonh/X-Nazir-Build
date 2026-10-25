@@ -988,11 +988,10 @@ bool curve_patch_layer_active_item_follow(CurvePatchSession &session, bool *r_lo
     if (patch.params.opacity != stored.opacity || patch.params.radius != stored.radius ||
         patch.params.hidden != stored.hidden)
     {
-      /* The size-relative values follow the edited radius, or a later conversion of absolute
-       * jitter would use the old one. */
-      if (patch.params.radius > 0.0f) {
-        patch.params.radius_per_size *= stored.radius / patch.params.radius;
-      }
+      /* `radius_per_size` is deliberately left alone. It is the curve's world-units-per-pixel
+       * ratio -- the basis the Width slider's 0-100 scale and the absolute-jitter conversion are
+       * both expressed in -- so scaling it with the radius would make Width snap back to its old
+       * value on every edit. */
       patch.params.opacity = stored.opacity;
       patch.params.radius = stored.radius;
       patch.params.hidden = stored.hidden;
@@ -1071,6 +1070,32 @@ void curve_patch_layer_mirror_vector(CurvePatchSession &session)
     pvi.curve_patch_params = BKE_paint_vector_curve_params_encode(patch.params);
     BLI_strncpy(pvi.curve_name, patch.name.c_str(), sizeof(pvi.curve_name));
     patch.source_curve_index = item_of_patch[patch_i];
+  }
+  /* The list shows the container's order while the effect stamps in the document's, so the
+   * container's curve items are put in the document's order: the curve items keep their slots
+   * (a Shape item between them stays where it is) and trade places until each patch has the slot
+   * its position asks for. */
+  Vector<int> curve_slots;
+  for (const int i : IndexRange(pv.items_num)) {
+    if (pv.items[i].type == PAINT_VECTOR_ITEM_CURVE_PATCH) {
+      curve_slots.append(i);
+    }
+  }
+  if (curve_slots.size() == session.doc.patches.size()) {
+    for (const int patch_i : session.doc.patches.index_range()) {
+      const int wanted = session.doc.patches[patch_i].source_curve_index;
+      const int slot = curve_slots[patch_i];
+      if (wanted == slot || !BKE_paint_vector_item_swap(pv, wanted, slot)) {
+        continue;
+      }
+      /* The item that sat in `slot` now sits where the wanted one was. */
+      for (CurvePatchItem &other : session.doc.patches) {
+        if (other.source_curve_index == slot) {
+          other.source_curve_index = wanted;
+        }
+      }
+      session.doc.patches[patch_i].source_curve_index = slot;
+    }
   }
   /* `BKE_paint_vector_item_add` moves the active item to the new one; the document decides. */
   if (session.doc.has_active_item()) {
@@ -1167,12 +1192,14 @@ static bool curve_patch_layer_session_curve_add(bContext &C,
 
   /* The temporary item is dropped by the mirror: the patch gets an id of its own there. */
   const PaintVectorItem &item = pv.items[item_i];
-  session.doc.patches.append_as();
-  CurvePatchItem &patch = session.doc.patches.last();
+  /* At the top of the list, which is also the top of the stack: the newest curve lies over the
+   * others. */
+  CurvePatchItem patch;
   patch.control_curve = item.curve_patch_geometry.wrap();
   patch.params = BKE_paint_vector_curve_params_decode(item.curve_patch_params);
   patch.name = item.curve_name;
-  curve_patch_document_active_patch_set(session.doc, int(session.doc.patches.size()) - 1);
+  session.doc.patches.insert(0, std::move(patch));
+  curve_patch_document_active_patch_set(session.doc, 0);
   session.doc.active_point = -1;
   curve_patch_layer_mirror_vector(session);
   curve_patch_layer_session_changed(C, session);
@@ -1212,8 +1239,9 @@ static bool curve_patch_layer_session_curve_duplicate(bContext &C, CurvePatchSes
     copy.params = source.params;
     copy.name = source.name + " Copy";
   }
-  session.doc.patches.append(std::move(copy));
-  curve_patch_document_active_patch_set(session.doc, int(session.doc.patches.size()) - 1);
+  /* A copy lies over the curve it was made from, so it goes to the top of the stack. */
+  session.doc.patches.insert(0, std::move(copy));
+  curve_patch_document_active_patch_set(session.doc, 0);
   session.doc.active_point = -1;
   curve_patch_layer_mirror_vector(session);
   curve_patch_layer_session_changed(C, session);
@@ -1254,6 +1282,26 @@ static PaintVectorItem *curve_patch_layer_active_item(MaterialPaintLayerCurvePat
   return item.type == PAINT_VECTOR_ITEM_CURVE_PATCH ? &item : nullptr;
 }
 
+/** Bring the curve item at \a item_i to the top of the curve list (the first curve item), the
+ * others keeping their relative order, and return its new index. The list's top is the top of the
+ * stack, which is where a new curve belongs. */
+static int curve_patch_layer_item_move_to_top(PaintVector &pv, int item_i)
+{
+  while (true) {
+    int previous = -1;
+    for (int i = item_i - 1; i >= 0; i--) {
+      if (pv.items[i].type == PAINT_VECTOR_ITEM_CURVE_PATCH) {
+        previous = i;
+        break;
+      }
+    }
+    if (previous < 0 || !BKE_paint_vector_item_swap(pv, item_i, previous)) {
+      return item_i;
+    }
+    item_i = previous;
+  }
+}
+
 static wmOperatorStatus paint_curve_patch_layer_curve_add_exec(bContext *C, wmOperator *op)
 {
   MaterialPaintLayer *row = nullptr;
@@ -1270,7 +1318,8 @@ static wmOperatorStatus paint_curve_patch_layer_curve_add_exec(bContext *C, wmOp
                                                                          OPERATOR_CANCELLED;
   }
   curve_patch_layer_curve_item_default(*payload->vectors, payload->brush);
-  payload->vectors->active_item = payload->vectors->items_num - 1;
+  payload->vectors->active_item = curve_patch_layer_item_move_to_top(
+      *payload->vectors, payload->vectors->items_num - 1);
   BKE_paint_vector_tag_changed(*payload->vectors);
   BKE_paint_layers_bake_request(*row);
   ED_undo_memfile_push(C, "Curve Patch Layer Curve Add");
@@ -1352,7 +1401,7 @@ static wmOperatorStatus paint_curve_patch_layer_curve_duplicate_exec(bContext *C
   copy.curve_patch_geometry.wrap() = geometry;
   copy.curve_patch_params = params;
   BLI_strncpy(copy.curve_name, name, sizeof(copy.curve_name));
-  pv.active_item = pv.items_num - 1;
+  pv.active_item = curve_patch_layer_item_move_to_top(pv, pv.items_num - 1);
   BKE_paint_vector_tag_changed(pv);
   BKE_paint_layers_bake_request(*row);
   ED_undo_memfile_push(C, "Curve Patch Layer Curve Duplicate");
@@ -1368,6 +1417,93 @@ void PAINT_OT_curve_patch_layer_curve_duplicate(wmOperatorType *ot)
   ot->exec = paint_curve_patch_layer_curve_duplicate_exec;
   ot->poll = ED_operator_object_active_editable_mesh;
   ot->flag = OPTYPE_REGISTER;
+}
+
+static const EnumPropertyItem curve_move_direction_items[] = {
+    {0, "UP", 0, "Up", "Move the active curve up the list"},
+    {1, "DOWN", 0, "Down", "Move the active curve down the list"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/** Move the active curve of the live document one place up or down the list. The document's order
+ * is the stacking order; the mirror puts the container, which the list shows, in the same order. */
+static bool curve_patch_layer_session_curve_move(bContext &C,
+                                                 CurvePatchSession &session,
+                                                 const bool move_down)
+{
+  curve_patch_layer_active_item_follow(session);
+  if (!session.doc.has_active_item()) {
+    return false;
+  }
+  const int patch_a = session.doc.active_patch;
+  const int patch_b = patch_a + (move_down ? 1 : -1);
+  if (patch_b < 0 || patch_b >= int(session.doc.patches.size())) {
+    return false;
+  }
+  std::swap(session.doc.patches[patch_a], session.doc.patches[patch_b]);
+  curve_patch_document_active_patch_set(session.doc, patch_b);
+  session.doc.active_point = -1;
+  curve_patch_layer_mirror_vector(session);
+  curve_patch_layer_session_changed(C, session);
+  return true;
+}
+
+static wmOperatorStatus paint_curve_patch_layer_curve_move_exec(bContext *C, wmOperator *op)
+{
+  MaterialPaintLayer *row = nullptr;
+  MaterialPaintLayerCurvePatch *payload = curve_patch_layer_active_payload(C, &row);
+  PaintVectorItem *active = (payload != nullptr) ? curve_patch_layer_active_item(*payload) : nullptr;
+  if (active == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  PaintVector &pv = *payload->vectors;
+  const bool move_down = RNA_enum_get(op->ptr, "direction") == 1;
+  if (CurvePatchSession *session = curve_patch_layer_live_session(C)) {
+    if (curve_patch_layer_session_row(*session) != row) {
+      curve_patch_layer_report_other_effect(op);
+      return OPERATOR_CANCELLED;
+    }
+    return curve_patch_layer_session_curve_move(*C, *session, move_down) ? OPERATOR_FINISHED :
+                                                                           OPERATOR_CANCELLED;
+  }
+  int target = -1;
+  if (move_down) {
+    for (int i = pv.active_item + 1; i < pv.items_num; i++) {
+      if (pv.items[i].type == PAINT_VECTOR_ITEM_CURVE_PATCH) {
+        target = i;
+        break;
+      }
+    }
+  }
+  else {
+    for (int i = pv.active_item - 1; i >= 0; i--) {
+      if (pv.items[i].type == PAINT_VECTOR_ITEM_CURVE_PATCH) {
+        target = i;
+        break;
+      }
+    }
+  }
+  if (target < 0 || !BKE_paint_vector_item_swap(pv, pv.active_item, target)) {
+    return OPERATOR_CANCELLED;
+  }
+  BKE_paint_vector_tag_changed(pv);
+  BKE_paint_layers_bake_request(*row);
+  ED_undo_memfile_push(C, "Curve Patch Layer Curve Move");
+  WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, nullptr);
+  return OPERATOR_FINISHED;
+}
+
+void PAINT_OT_curve_patch_layer_curve_move(wmOperatorType *ot)
+{
+  ot->name = "Move Curve";
+  ot->idname = "PAINT_OT_curve_patch_layer_curve_move";
+  ot->description = "Move the active curve up or down in the active Curve Patch effect";
+  ot->exec = paint_curve_patch_layer_curve_move_exec;
+  ot->poll = ED_operator_object_active_editable_mesh;
+  ot->flag = OPTYPE_REGISTER;
+
+  ot->prop = RNA_def_enum(
+      ot->srna, "direction", curve_move_direction_items, 0, "Direction", "Where to move the curve");
 }
 
 /** \} */

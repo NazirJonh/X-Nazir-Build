@@ -7149,7 +7149,7 @@ def km_curve_patch_edit_modal_map(_params):
         ("UNDO", {"type": 'Z', "value": 'PRESS', "oskey": True}, None),
         ("REDO", {"type": 'Z', "value": 'PRESS', "ctrl": True, "shift": True}, None),
         ("REDO", {"type": 'Z', "value": 'PRESS', "oskey": True, "shift": True}, None),
-        ("TOGGLE_CYCLIC", {"type": 'C', "value": 'PRESS'}, None),
+        ("TOGGLE_CYCLIC", {"type": 'J', "value": 'PRESS'}, None),
         ("SWAP_AXIS", {"type": 'Y', "value": 'PRESS'}, None),
         ("TRANSLATE", {"type": 'G', "value": 'PRESS'}, None),
         ("ROTATE", {"type": 'R', "value": 'PRESS'}, None),

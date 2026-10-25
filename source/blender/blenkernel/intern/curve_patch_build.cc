@@ -185,6 +185,12 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
   Array<float> evaluated_radii(control_curve.evaluated_points_num());
   control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()),
                                          evaluated_radii.as_mutable_span());
+  /* Opacity is not tessellated: the local field is built from the control points after the spline
+   * exists (see the `opacity_field_build` call at the end of this function). */
+  const VArray<float> control_opacities = *control_curve.attributes().lookup_or_default<float>(
+      CURVE_PATCH_ATTR_OPACITY, AttrDomain::Point, 1.0f);
+  const VArray<float> control_falloffs = *control_curve.attributes().lookup_or_default<float>(
+      CURVE_PATCH_ATTR_OPACITY_FALLOFF, AttrDomain::Point, 1.0f);
   /* A control curve is always a single spline, so curve 0 carries the whole patch's cyclic state.
    */
   const bool cyclic = control_curve.curves_num() > 0 && control_curve.cyclic()[0];
@@ -342,6 +348,17 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
                                          control_point_eval_offsets.as_span(),
                                          point_overrides,
                                          r_geometry);
+
+  /* Opacity is evaluated as local, width-relative brushes around the control points, not as an
+   * interpolation over the distance to their neighbors. The user-facing falloff multiplier is a
+   * POINT attribute (default 1.0 = one full ribbon width); multiplying it by the ribbon's width
+   * gives the physical arc-length reach of each point's own opacity. */
+  if (control_point_num >= 1 && !control_point_eval_offsets.is_empty() &&
+      r_geometry.spline.control_point_lengths.size() == control_point_num)
+  {
+    r_geometry.spline.opacity_field_build(
+        VArraySpan(control_opacities), VArraySpan(control_falloffs), params.radius * 2.0f);
+  }
 }
 
 /* Anchors each control point's arc length onto the built polyline: control point `i` sits at the

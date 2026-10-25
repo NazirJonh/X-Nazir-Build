@@ -61,6 +61,21 @@ namespace blender::ed::sculpt_paint {
 /** The next value of #CurvePatchSession::serial. Main thread only, like the sessions themselves. */
 uint64_t curve_patch_session_serial_next();
 
+/**
+ * What every patch stamped so far has left on one element (a vertex, a color-domain element), kept
+ * premultiplied so a later patch can be composited over it. See #curve_patch_blend_over.
+ */
+struct CurvePatchOverAccum {
+  /** Composite of the patches stamped BEFORE the current one: payload in `xyz`, coverage in `w`. */
+  float4 below = float4(0.0f);
+  /** `weight * (payload, coverage)` summed over the passes of the current patch, and the weights'
+   * sum, so the passes of one patch (symmetry) still average. */
+  float4 current = float4(0.0f);
+  float current_weight = 0.0f;
+  /** #CurvePatchApplyState::patch_rank of the patch `current` belongs to; -1 = none yet. */
+  int patch_rank = -1;
+};
+
 /** Per-application bookkeeping against the live mesh. */
 struct CurvePatchApplyState {
   /** Number of elements the keys of the effect's snapshot index into, sampled once when the patch
@@ -96,9 +111,15 @@ struct CurvePatchApplyState {
    * start of every `curve_patch_restore_and_restamp()`, since blending is only meaningful between
    * passes of the SAME restamp.
    *
-   * Also shared across every `CurvePatchItem` of this restamp. TODO(I10): that reuse is the
-   * Color-vs-Relief overlap policy; options on #curve_patch_blend_across_passes. */
-  Map<int, float2> pass_weight_accum;
+   * Shared across every `CurvePatchItem` of this restamp: the passes of ONE patch average, while
+   * a patch stamped later composites over the result of the earlier ones (see
+   * #curve_patch_blend_over). */
+  Map<int, CurvePatchOverAccum> pass_weight_accum;
+
+  /** Position of the patch being stamped in the stamping order (0 = bottom of the stack, stamped
+   * first). Set by the session before every patch's symmetry passes; those passes must run
+   * back to back, because the accumulator above detects a new patch by this value changing. */
+  int patch_rank = 0;
 
   /** PBVH node indices displaced by the PREVIOUS restamp (one bit per `bke::pbvh::Tree` node).
    * `curve_patch_restore_only()` tags exactly these nodes so `bke::pbvh::update_normals()` reverts
@@ -154,6 +175,12 @@ struct CurvePatchSession {
   /** Suppresses repeating the window-cap warning: `curve_patch_restore_and_restamp()` runs on
    * EVERY mouse event, so an unguarded message would flood the info line. */
   bool reported_frame_cap = false;
+
+  /** Set when a curve look value (per-point opacity or opacity falloff) was edited through RNA
+   * (the Active Tool panel). The modal consumes it on its next event to defer its undo step to the
+   * end of the slider gesture, the same way `curve_patch_layer_active_item_follow()` reports a
+   * per-curve look change. */
+  bool rna_look_changed = false;
 
   /** Frozen `brush.curve_patch.face_set` from the anchor stroke (see #curve_patch_begin_editing).
    * `ReliefEffect::face_set_masks()` reads the LIVE brush so the toggle can be flipped mid-edit,

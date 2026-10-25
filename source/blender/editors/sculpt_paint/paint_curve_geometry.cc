@@ -798,6 +798,57 @@ void paintcurve_geom_stamp_texture_set(bke::CurvesGeometry &geom,
       geom, bke::CURVE_PATCH_ATTR_STAMP_TEXTURE, point_index, slot_index, -1);
 }
 
+float paintcurve_geom_opacity_get(const bke::CurvesGeometry &geom, const int point_index)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return 1.0f;
+  }
+  return paintcurve_stamp_attr_get<float>(
+      geom, bke::CURVE_PATCH_ATTR_OPACITY, point_index, 1.0f);
+}
+
+void paintcurve_geom_opacity_set(bke::CurvesGeometry &geom,
+                                 const int point_index,
+                                 const float opacity)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return;
+  }
+  paintcurve_stamp_attr_set<float>(
+      geom, bke::CURVE_PATCH_ATTR_OPACITY, point_index, math::clamp(opacity, 0.0f, 1.0f), 1.0f);
+}
+
+float paintcurve_geom_opacity_falloff_get(const bke::CurvesGeometry &geom, const int point_index)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return 1.0f;
+  }
+  return paintcurve_stamp_attr_get<float>(
+      geom, bke::CURVE_PATCH_ATTR_OPACITY_FALLOFF, point_index, 1.0f);
+}
+
+void paintcurve_geom_opacity_falloff_set(bke::CurvesGeometry &geom,
+                                         const int point_index,
+                                         const float falloff)
+{
+  if (!paintcurve_geometry_is_valid(geom) || point_index < 0 ||
+      point_index >= geom.points_num())
+  {
+    return;
+  }
+  paintcurve_stamp_attr_set<float>(geom,
+                                   bke::CURVE_PATCH_ATTR_OPACITY_FALLOFF,
+                                   point_index,
+                                   math::clamp(falloff, 0.0f, 100.0f),
+                                   1.0f);
+}
+
 /* How a per-point stamp value is derived for a newly inserted point. `Linear` interpolates between
  * the bracketing points (an append with no next neighbor copies the previous); `ShortArc` does the
  * same for an angle and walks the SHORT arc, so a sweep through +/-PI does not spin the new point
@@ -809,7 +860,7 @@ enum class StampAttrInterp {
   Reset,
 };
 
-/** One per-point stamp attribute, so adding another is one entry here rather than a fourth
+/** One per-point look attribute, so adding another is one entry here rather than a fourth
  * hand-written copy of the shift-and-interpolate block. `type` selects the value branch in
  * #paintcurve_geom_stamp_attrs_insert; `default_*` is what an absent attribute reads as. */
 struct StampAttrDesc {
@@ -836,6 +887,20 @@ static const StampAttrDesc paintcurve_stamp_attr_descs[] = {
      StampAttrInterp::Reset,
      0.0f,
      -1},
+    /* Opacity is not a stamp override, but it is a per-point look attribute and must survive an
+     * insert/reverse the same way: a point added between two faded points fades with them. */
+    {bke::CURVE_PATCH_ATTR_OPACITY,
+     CD_PROP_FLOAT,
+     StampAttrInterp::Linear,
+     1.0f,
+     0},
+    /* Without its own entry the falloff array would not be shifted by an insert, leaving every
+     * later point with its predecessor's reach. */
+    {bke::CURVE_PATCH_ATTR_OPACITY_FALLOFF,
+     CD_PROP_FLOAT,
+     StampAttrInterp::Linear,
+     1.0f,
+     0},
 };
 
 void paintcurve_geom_stamp_seed_ensure(bke::CurvesGeometry &geom)

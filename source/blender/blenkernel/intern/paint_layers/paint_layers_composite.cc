@@ -325,6 +325,12 @@ static bool composite_row_source_describe(const Material &ma,
  *
  * The one place the description is read for the mask, so the CPU composite and the strokes that
  * sample the mask themselves (#PaintLayersMaskSampler) cannot drift apart.
+ *
+ * \param hidden_with_base: the base's switch carries the whole stack -- with it off, no item of the
+ * stack lays and the mask reads as one, the same mix-out the graph's gate applies over the chain
+ * (see #PaintLayersTreeBuilder::mask_factor_ensure). The items themselves are left untouched, so
+ * switching the base back restores every correction at once. A straight slice read passes false: a
+ * tap publishes the stack as it stands, independent of the row's visibility.
  */
 static void composite_mask_items_describe(
     const Material &ma,
@@ -334,9 +340,14 @@ static void composite_mask_items_describe(
     const int *slice_rect = nullptr,
     const bool dimensions_only = false,
     const bool describe_only = false,
-    const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface = nullptr)
+    const std::shared_ptr<const PaintMaterialCompositeSurface> &context_surface = nullptr,
+    const bool hidden_with_base = true)
 {
-  if (BKE_paint_layers_mask_base(layer) == nullptr) {
+  const MaterialPaintLayer *base = BKE_paint_layers_mask_base(layer);
+  if (base == nullptr) {
+    return;
+  }
+  if (hidden_with_base && (base->flag & MA_PAINT_LAYER_ENABLED) == 0) {
     return;
   }
   for (const MaterialPaintLayer &mask : layer.mask_stack) {
@@ -1071,9 +1082,11 @@ bool BKE_paint_layers_mask_items(const Material &ma,
 
 PaintLayersMaskSampler::PaintLayersMaskSampler(const Material &ma,
                                                const MaterialPaintLayer &layer,
-                                               const bUUID *stop_before)
+                                               const bUUID *stop_before,
+                                               const bool hidden_with_base)
 {
-  composite_mask_items_describe(ma, layer, items_, stop_before);
+  composite_mask_items_describe(ma, layer, items_, stop_before, nullptr, false, false, nullptr,
+                                hidden_with_base);
   /* The evaluator's own form of the description, so #BKE_paint_material_mask_factor_eval reads the
    * same opacity/blend/invert/filter/coverage fields the composite reads. */
   buffers_.resize(items_.size());
@@ -1476,13 +1489,17 @@ bool BKE_paint_layers_slice_describe(const Material &ma,
   r_entry = PaintMaterialCompositeImageLayer{};
   if (ref.target == PaintLayerAnchorPointTarget::Mask) {
     /* A mask slice is the source row's mask stack up to the point, the base mask included as its
-     * first item. It has no opacity, blend or mask of its own. */
+     * first item. It has no opacity, blend or mask of its own, and reads the stack straight: the
+     * base's switch hides the mask from the row, not from a reader of the slice. */
     composite_mask_items_describe(ma,
                                   *ref.source_row,
                                   r_entry.mask_items,
                                   &ref.point->marker,
                                   slice_rect,
-                                  dimensions_only);
+                                  dimensions_only,
+                                  /*describe_only=*/false,
+                                  /*context_surface=*/nullptr,
+                                  /*hidden_with_base=*/false);
     if (r_entry.mask_items.is_empty() && !allow_empty_mask) {
       return false;
     }
@@ -1561,7 +1578,9 @@ static bool anchor_slice_fill(const Material &ma,
   float *coverage_pixels = coverage.float_data_for_write();
 
   if (ref.target == PaintLayerAnchorPointTarget::Mask) {
-    PaintLayersMaskSampler sampler(ma, *ref.source_row, &ref.point->marker);
+    /* The slice reads the stack straight, the base's switch included (see
+     * #BKE_paint_layers_slice_describe). */
+    PaintLayersMaskSampler sampler(ma, *ref.source_row, &ref.point->marker, false);
     sampler.tile_acquire(0, width, height);
     for (int y = ry0; y < ry1; y++) {
       for (int x = rx0; x < rx1; x++) {

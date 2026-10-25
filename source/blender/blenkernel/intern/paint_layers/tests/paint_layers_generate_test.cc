@@ -250,10 +250,10 @@ TEST_F(PaintLayersGenerateTest, mask_constant_and_opacity_are_inputs_of_the_row_
                                                                        "Paint Mask Opacity");
   ASSERT_NE(value_iface, nullptr);
   ASSERT_NE(opacity_iface, nullptr);
-  /* The map of the row, the Mix of its blend and its two alpha-model Mix nodes, plus one Mix
-   * for the mask and no second map. */
+  /* The map of the row, the Mix of its blend and its two alpha-model Mix nodes, plus the Mix of
+   * the mask and the one gating it by the base's switch, and no second map. */
   EXPECT_EQ(count_type(*group, SH_NODE_TEX_IMAGE), 1);
-  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 4);
+  EXPECT_EQ(count_type(*group, SH_NODE_MIX), 5);
 
   bNode *instance = group_instance_find(*ma->paint_layers_tree, *group);
   ASSERT_NE(instance, nullptr);

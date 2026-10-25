@@ -1269,6 +1269,23 @@ Image *BKE_image_load_exists_in_lib(Main *bmain,
   return BKE_image_load_in_lib(bmain, owner_library, filepath);
 }
 
+Image *BKE_image_load_exists_unedited(Main *bmain, const char *filepath, bool *r_exists)
+{
+  bool exists = false;
+  Image *ima = BKE_image_load_exists(bmain, filepath, &exists);
+  if (ima != nullptr && exists && BKE_image_is_dirty(ima)) {
+    /* Edited in Blender: the file on disk is no longer what the image holds, and sharing it would
+     * let a stroke on one user change the other. A fresh image keeps the original apart. */
+    id_us_min(&ima->id);
+    ima = BKE_image_load(bmain, filepath);
+    exists = false;
+  }
+  if (r_exists) {
+    *r_exists = exists;
+  }
+  return ima;
+}
+
 struct ImageFillData {
   short gen_type;
   uint width;

@@ -983,6 +983,24 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     return found;
   }
 
+  /**
+   * Whether a multi-file drop belongs to the channel-assign dialog: the target is a brush channel,
+   * or a record of a stack row the dialog can name. A record of one of the row's mask items or
+   * corrections is not -- the mask reads one grey and a correction owns no channel set of its own
+   * -- so a multi-file drop there takes the direct single-image path below instead. Handing such a
+   * record to the operator would name no layer for it and silently reroute the images to the
+   * active brush, which reads as the drop being ignored.
+   */
+  bool multi_file_dialog_applies() const
+  {
+    if (!target_ptr_.type || !RNA_struct_is_a(target_ptr_.type, RNA_MaterialPaintLayerChannel)) {
+      /* A brush channel (or no paint channel at all): the dialog's own path. */
+      return true;
+    }
+    std::string material_name, layer_marker;
+    return layer_target_get(material_name, layer_marker);
+  }
+
   /** All image file paths carried by a path drag, absolute and normalized. */
   static Vector<std::string> drag_image_paths(const wmDrag &drag)
   {
@@ -1198,7 +1216,7 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
   std::string drop_tooltip(const ui::DragInfo &drag_info) const override
   {
     const wmDrag &drag = drag_info.drag_data;
-    if (targets_paint_channel()) {
+    if (targets_paint_channel() && multi_file_dialog_applies()) {
       const int image_count = paint_channel_drag_image_count(drag);
       if (image_count > 1) {
         return fmt::format(
@@ -1251,7 +1269,7 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     const wmDrag &drag = drag_info.drag_data;
 
     if (targets_paint_channel()) {
-      if (paint_channel_drag_image_count(drag) > 1) {
+      if (paint_channel_drag_image_count(drag) > 1 && multi_file_dialog_applies()) {
         return drop_to_channel_assign_operator(C, drag_info);
       }
     }
@@ -1292,12 +1310,12 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
          * Single-image drops keep using #WM_drag_get_single_path below. */
         const Vector<std::string> image_paths = drag_image_paths(drag);
         if (!image_paths.is_empty()) {
-          image = BKE_image_load_exists(bmain, image_paths[0].c_str(), nullptr);
+          image = BKE_image_load_exists_unedited(bmain, image_paths[0].c_str(), nullptr);
           image_has_extra_user = image != nullptr;
         }
       }
       else if (const char *path = WM_drag_get_single_path(&drag)) {
-        image = BKE_image_load_exists(bmain, path, nullptr);
+        image = BKE_image_load_exists_unedited(bmain, path, nullptr);
         image_has_extra_user = image != nullptr;
       }
     }
@@ -1320,6 +1338,14 @@ class ImageIDBrowserDropTarget : public ui::DropTargetInterface {
     PointerRNA target_ptr = target_ptr_;
     RNA_property_pointer_set(
         &target_ptr, target_prop_, RNA_id_pointer_create(&image->id), nullptr);
+    if (RNA_property_pointer_get(&target_ptr, target_prop_).data != &image->id) {
+      /* The owner refused the value (a record outside its material, say): the assignment is not
+       * silently swallowed as success, and the load loan was not consumed. */
+      if (image_has_extra_user) {
+        id_us_min(&image->id);
+      }
+      return false;
+    }
     if (image_has_extra_user && (RNA_property_flag(target_prop_) & PROP_ID_REFCOUNT)) {
       /* The property setter now owns the real image reference. */
       id_us_min(&image->id);

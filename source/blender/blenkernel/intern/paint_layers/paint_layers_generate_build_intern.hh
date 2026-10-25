@@ -613,6 +613,8 @@ class PaintLayersTreeBuilder {
   /** A row's base mask opacity and constant inputs, keyed by the row. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_opacity_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_value_inputs_;
+  /** Per row, the base mask's switch input that gates the whole mask stack. */
+  Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mask_enabled_inputs_;
   /** A row's UV mapping value inputs, keyed by the row that owns the Mapping. */
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_offset_inputs_;
   Map<const MaterialPaintLayer *, bNodeTreeInterfaceSocket *> mapping_scale_inputs_;

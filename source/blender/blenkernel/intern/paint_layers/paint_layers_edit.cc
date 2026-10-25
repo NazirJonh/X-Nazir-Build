@@ -13,6 +13,7 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
+#include "BLI_utildefines.h"
 #include "BLI_vector.hh"
 
 #include "DNA_material_types.h"
@@ -509,10 +510,43 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
   return created;
 }
 
+/** Whether \a kind adds a row of the stack, as opposed to an item hanging on a row. */
+static bool paint_layer_add_kind_is_row(const PaintLayerAddKind kind)
+{
+  return ELEM(kind,
+              PaintLayerAddKind::Paint,
+              PaintLayerAddKind::Fill,
+              PaintLayerAddKind::Gradient,
+              PaintLayerAddKind::Folder,
+              PaintLayerAddKind::Adjustment,
+              PaintLayerAddKind::Material);
+}
+
+/**
+ * The row an Add aimed at \a anchor means: a correction or a mask item stands for the row that
+ * holds it, since only a row of the stack can be a neighbor of a new row.
+ */
+static MaterialPaintLayer *paint_layer_add_row_anchor(Material &ma, MaterialPaintLayer &anchor)
+{
+  if (MaterialPaintLayer *parent = BKE_paint_layers_correction_owner(ma, anchor)) {
+    return parent;
+  }
+  if (MaterialPaintLayer *item_parent = BKE_paint_layers_mask_item_owner(ma, anchor)) {
+    return item_parent;
+  }
+  return &anchor;
+}
+
 MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
                                                      const PaintLayerAddParams &params)
 {
-  MaterialPaintLayer *created = paint_layers_add_with_policy_impl(ma, params);
+  PaintLayerAddParams row_params = params;
+  if (params.anchor != nullptr && paint_layer_add_kind_is_row(params.kind)) {
+    /* The anchor itself is not in the stack, so passing it on would refuse the Add with nothing to
+     * tell the user why. */
+    row_params.anchor = paint_layer_add_row_anchor(ma, *params.anchor);
+  }
+  MaterialPaintLayer *created = paint_layers_add_with_policy_impl(ma, row_params);
   if (created == nullptr || params.anchor == nullptr ||
       !paint_layer_kind_is_anchor_point_marker(*params.anchor) ||
       paint_layer_kind_is_anchor_point_marker(*created) || created->role == MA_PAINT_LAYER_ROLE_LAYER)

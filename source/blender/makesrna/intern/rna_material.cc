@@ -5027,7 +5027,11 @@ static void rna_def_material_paint_layer_channel(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "Image");
   RNA_def_property_pointer_funcs(
       prop, nullptr, "rna_MaterialPaintLayerChannel_image_set", nullptr, nullptr);
-  RNA_def_property_flag(prop, PROP_EDITABLE);
+  /* The setter does its own id_us_plus()/id_us_min() (see #BKE_paint_layers_channel_set_image), so
+   * the flag has to name that explicitly or #RNA_property_pointer_set's user-count consistency
+   * check misreads it -- and a caller balancing a #BKE_image_load_exists loan on the flag (the
+   * drop target) leaks a user per assignment without it. */
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
   RNA_def_property_ui_text(prop, "Image", "The channel's map, or none for a constant");
   RNA_def_property_update(prop, NC_MATERIAL | ND_SHADING, "rna_MaterialPaintLayerChannel_image_update");
 

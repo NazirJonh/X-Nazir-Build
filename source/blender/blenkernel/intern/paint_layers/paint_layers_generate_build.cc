@@ -913,6 +913,14 @@ void PaintLayersTreeBuilder::create_value_inputs(LayerGroup &group,
       group_input_default_set(group, *opacity, BKE_paint_layers_effective_opacity(*mask));
       mask_opacity_inputs_.add(&layer, opacity);
     }
+    SNPRINTF(base, "%s Mask Enabled", layer_name);
+    bNodeTreeInterfaceSocket *enabled = layer_group_value_input(
+        group, base, "NodeSocketFloat", ROLE_MASK_ENABLED, layer.marker, -1);
+    if (enabled != nullptr) {
+      group_input_default_set(
+          group, *enabled, (mask->flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f);
+      mask_enabled_inputs_.add(&layer, enabled);
+    }
     const MaterialPaintLayerChannel *record = paint_layer_channel_find(
         *mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
     if (record != nullptr && record->image == nullptr) {

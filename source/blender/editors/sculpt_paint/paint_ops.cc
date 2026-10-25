@@ -1863,13 +1863,15 @@ static MaterialPaintLayer *material_paint_channels_assign_images_layer_get(bCont
   RNA_string_get(op->ptr, "layer_marker", layer_marker);
   bUUID target_uuid;
   BLI_uuid_parse_string(&target_uuid, layer_marker);
-  for (MaterialPaintLayer &layer : material->paint_layers) {
-    if (BLI_uuid_equal(layer.marker, target_uuid)) {
-      r_material = material;
-      return &layer;
-    }
+  /* The marker names a row at any depth: the drop resolves the record through the walk the stack
+   * numbering uses, so a layer inside a folder is found the same way a top-level one is (the
+   * top-level list alone would report a folder's layers as gone). */
+  MaterialPaintLayer *layer = BKE_paint_layers_find(*material, target_uuid);
+  if (layer == nullptr) {
+    return nullptr;
   }
-  return nullptr;
+  r_material = material;
+  return layer;
 }
 
 static std::optional<eMaterialPaintChannel> material_paint_channels_assign_images_entry_channel(
@@ -1934,14 +1936,17 @@ static Image *material_paint_channels_assign_images_entry_image(bContext *C,
   if (filepath[0] == '\0') {
     return nullptr;
   }
-  Image *image = BKE_image_load_exists(bmain, filepath, nullptr);
+  bool exists = false;
+  Image *image = BKE_image_load_exists_unedited(bmain, filepath, &exists);
   if (image == nullptr) {
     BKE_reportf(op->reports, RPT_WARNING, "Could not load image \"%s\"", filepath);
     return nullptr;
   }
   /* #BKE_image_load_exists hands out a temporary user; the channel setter adds its own. */
   id_us_min(&image->id);
-  r_is_new_import = true;
+  /* An image the file already holds is not an import: marking it as one would silently re-catalog
+   * an image the user may have organized themselves. */
+  r_is_new_import = !exists;
   return image;
 }
 

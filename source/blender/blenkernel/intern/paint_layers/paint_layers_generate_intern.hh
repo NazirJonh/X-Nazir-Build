@@ -151,6 +151,9 @@ inline constexpr const char *INPUT_PARAM_PROP = "pbr_paint_layers_param";
 inline constexpr const char *ROLE_MASK_VALUE = "mask_value";
 /** #INPUT_ROLE_PROP value of a row's base mask opacity (enabled already folded in). */
 inline constexpr const char *ROLE_MASK_OPACITY = "mask_opacity";
+/** #INPUT_ROLE_PROP value of a row's base mask switch: 1 enabled, 0 off, which hides the whole
+ * mask stack (the owner row's marker). Apart from the opacity, which only weighs the base. */
+inline constexpr const char *ROLE_MASK_ENABLED = "mask_enabled";
 /** #INPUT_ROLE_PROP value of a row's UV mapping offset (a Vector input holding offset, 0). The
  * marker is the row's own, whether a layer, a correction or a mask item. */
 inline constexpr const char *ROLE_MAPPING_OFFSET = "mapping_offset";

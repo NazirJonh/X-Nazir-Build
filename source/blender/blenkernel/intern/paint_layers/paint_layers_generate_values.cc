@@ -131,7 +131,9 @@ bool values_sync_socket(Material &ma,
     }
     return true;
   }
-  if (STREQ(role, ROLE_MASK_OPACITY) || STREQ(role, ROLE_MASK_VALUE)) {
+  if (STREQ(role, ROLE_MASK_OPACITY) || STREQ(role, ROLE_MASK_VALUE) ||
+      STREQ(role, ROLE_MASK_ENABLED))
+  {
     /* The marker names the owner row, and the item is whatever base mask it carries now; a mask
      * correction's inputs name the correction itself. */
     const MaterialPaintLayer *mask = (layer->role == MA_PAINT_LAYER_ROLE_MASK_ITEM) ?
@@ -143,6 +145,9 @@ bool values_sync_socket(Material &ma,
     float value = 0.0f;
     if (STREQ(role, ROLE_MASK_OPACITY)) {
       value = BKE_paint_layers_effective_opacity(*mask);
+    }
+    else if (STREQ(role, ROLE_MASK_ENABLED)) {
+      value = (mask->flag & MA_PAINT_LAYER_ENABLED) != 0 ? 1.0f : 0.0f;
     }
     else if (paint_layer_kind_is_map_coverage(*mask)) {
       /* Gradient carries the item's standard value; White/Black read one. */

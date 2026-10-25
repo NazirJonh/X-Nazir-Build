@@ -126,6 +126,11 @@ bool BKE_paint_layers_composite_image(const Material &ma,
  * #BKE_paint_layers_composite_image_layers carries per layer, exposed for a caller that samples the
  * mask itself (the strokes, see #PaintLayersMaskSampler).
  *
+ * A switched-off base hides the whole stack, corrections included: nothing is described and the
+ * mask reads as one, exactly as the row displays. The items stay in the row's data, so switching
+ * the base back restores them; a slice reads the stack straight instead (see
+ * #BKE_paint_layers_slice_describe).
+ *
  * \return false when the row has no mask.
  */
 bool BKE_paint_layers_mask_items(const Material &ma,
@@ -352,12 +357,17 @@ class PaintLayersGpuSlotGuard {
  * A row with no mask items is empty and samples as one. A map that cannot be read is treated as an
  * absent one, as in the composite: a laid item falls back to its constant, a map-driven operator to
  * `match = 0`.
+ *
+ * \param hidden_with_base: false reads the stack straight for a slice (see
+ *        #BKE_paint_layers_slice_describe); the default hides the whole stack together with a
+ *        switched-off base, the way the row's own mask displays.
  */
 class PaintLayersMaskSampler {
  public:
   PaintLayersMaskSampler(const Material &ma,
                          const MaterialPaintLayer &layer,
-                         const bUUID *stop_before = nullptr);
+                         const bUUID *stop_before = nullptr,
+                         const bool hidden_with_base = true);
   ~PaintLayersMaskSampler();
 
   PaintLayersMaskSampler(const PaintLayersMaskSampler &) = delete;

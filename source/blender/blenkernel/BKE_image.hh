@@ -491,6 +491,12 @@ Image *BKE_image_load_exists_in_lib(Main *bmain,
                                     std::optional<Library *> owner_library,
                                     const char *filepath,
                                     bool *r_exists = nullptr);
+/**
+ * Like #BKE_image_load_exists, but an existing image that was edited in Blender (see
+ * #BKE_image_is_dirty) is not reused: the file is loaded as a new image beside it, and
+ * \a r_exists reports false. Either way the caller gets one extra user, as with the original.
+ */
+Image *BKE_image_load_exists_unedited(Main *bmain, const char *filepath, bool *r_exists = nullptr);
 
 /**
  * Adds new image block, creates ImBuf and initializes color.

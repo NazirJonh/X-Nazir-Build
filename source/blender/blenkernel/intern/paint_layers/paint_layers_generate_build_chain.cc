@@ -601,6 +601,41 @@ NodeOutput PaintLayersTreeBuilder::mask_factor_ensure(bNodeTree &tree,
     bke::node_add_link(tree, *item_weight.node, *item_weight.socket, *blend, *blend_factor);
     current = {blend, blend_result};
   }
+
+  /* The base's switch carries the whole stack, the corrections included: its own 0/1 input folds
+   * the chain's result over a factor of one, so a switched-off mask hides nothing anywhere. It is
+   * not the opacity input: that one only weighs the base, and the CPU gates on the switch alone.
+   * The shape stays the same whatever the value, which is what lets the switch be a value edit and
+   * come back at once; the corrections keep their own switches and nodes, only the result is
+   * gated. A tap stays live through it: the taps above read the chain mid-way, before this node. */
+  bNodeTreeInterfaceSocket **enabled_iface = mask_enabled_inputs_.lookup_ptr(&layer);
+  bNodeSocket *enabled = (enabled_iface != nullptr) ?
+                             this->group_input_socket(group, **enabled_iface) :
+                             nullptr;
+  bNode *gate = (enabled != nullptr) ? mix_float_node_add(tree) : nullptr;
+  if (gate == nullptr) {
+    discard();
+    return {};
+  }
+  nodes.append(gate);
+  grid_.place(*gate, layout::Column::Mask, row);
+  bNodeSocket *gate_a = socket_in(*gate, "A_Float");
+  bNodeSocket *gate_b = socket_in(*gate, "B_Float");
+  bNodeSocket *gate_factor = socket_in(*gate, "Factor_Float");
+  bNodeSocket *gate_result = socket_out(*gate, "Result_Float");
+  if (gate_a == nullptr || gate_b == nullptr || gate_factor == nullptr || gate_result == nullptr ||
+      current.socket == nullptr)
+  {
+    discard();
+    return {};
+  }
+  if (gate_a->default_value != nullptr) {
+    static_cast<bNodeSocketValueFloat *>(gate_a->default_value)->value = 1.0f;
+  }
+  bke::node_add_link(tree, *group.group_input, *enabled, *gate, *gate_factor);
+  bke::node_add_link(tree, *current.node, *current.socket, *gate, *gate_b);
+  current = {gate, gate_result};
+
   layout::frame_add(tree, "Mask", nodes);
 
   mask_factors_.add(&layer, current);

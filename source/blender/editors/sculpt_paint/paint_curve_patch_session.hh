@@ -25,6 +25,7 @@
 #include "BLI_array.hh"
 #include "BLI_assert.h"
 #include "BLI_bit_vector.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_map.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
@@ -56,6 +57,9 @@ struct bContext;
 }  // namespace blender
 
 namespace blender::ed::sculpt_paint {
+
+/** The next value of #CurvePatchSession::serial. Main thread only, like the sessions themselves. */
+uint64_t curve_patch_session_serial_next();
 
 /** Per-application bookkeeping against the live mesh. */
 struct CurvePatchApplyState {
@@ -175,6 +179,11 @@ struct CurvePatchSession {
    */
   std::unique_ptr<class PrevBrushRestore> layer_brush_restore;
 
+  /** Identity of this session, unique for the run. A modal editor compares it to tell its own
+   * session from a later one the same object published after it ended (a pointer would not do:
+   * the allocator hands the freed address to the next session). */
+  uint64_t serial = curve_patch_session_serial_next();
+
   /** Forwards to #CurvePatchDocument::has_active_item. */
   bool has_active_item() const
   {
@@ -249,7 +258,8 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
 bke::CurvePatchParams curve_patch_params_live_overlay(const Brush &brush,
                                                       const bke::CurvePatchParams &frozen,
                                                       int brush_size,
-                                                      bool apply_brush_swap_axis);
+                                                      bool apply_brush_swap_axis,
+                                                      bool radius_is_per_curve = false);
 
 /**
  * The half of starting a session that owes nothing to a stroke: reset the per-session bookkeeping,
@@ -376,6 +386,12 @@ void curve_patch_discard_on_session_end(Object &ob);
 void curve_patch_session_free(Object &ob);
 
 /**
+ * Keep the curves of a live effect session before the mode exit discards its pixels. Needs the
+ * material alive, so it is called from the mode exit and not from the discard.
+ */
+void curve_patch_store_on_mode_exit(Object &ob);
+
+/**
  * Finish a committed Curve Patch edit: close the patch's position undo step, and -- if the brush's
  * `curve_patch.face_set` flag is set and the relief actually raised anything -- assign a fresh
  * face set to the raised faces in an undo step of its own.
@@ -459,12 +475,17 @@ bool curve_patch_start_from_anchor(
  * Outliner/panel entry has none of its own), and launches `SCULPT_OT_curve_patch_edit` after it,
  * as with #curve_patch_start_from_anchor. Returns the published session, or null when the object
  * or the container cannot carry one (the same refusals the anchor entry reports).
+ *
+ * \a prepare_canvas runs once the session is published and before the effect snapshots the canvas,
+ * with the material channels this session is going to write, so a caller can reset exactly the
+ * maps the patches are about to re-render. A session that refuses to start never reaches it.
  */
 CurvePatchSession *curve_patch_start_from_layer(bContext &C,
                                                 Object &ob,
                                                 Sculpt &sd,
                                                 PaintVector &vectors,
-                                                const ViewContext &vc);
+                                                const ViewContext &vc,
+                                                FunctionRef<void(Span<int>)> prepare_canvas);
 
 /**
  * Publish a Curve Patch session from a finished #BRUSH_STROKE_ROLL stroke. Builds the control

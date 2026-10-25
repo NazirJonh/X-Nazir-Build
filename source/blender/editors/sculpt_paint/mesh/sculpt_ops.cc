@@ -630,6 +630,7 @@ void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Ob
    * BEFORE the flushes below, while the session it restores through is still intact.
    * Object deletion never reaches this function; #BKE_sculptsession_free invokes the same discard
    * via `SculptSession::free_curve_patch_session`. */
+  curve_patch_store_on_mode_exit(ob);
   curve_patch_discard_on_session_end(ob);
 
   /* Same last-resort for a live Vector shape session: `SCULPT_OT_paint_shape_draw` owns it but is
@@ -767,10 +768,16 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
      * sculpt-mode exit through this operator (`object_mode_op_string()`,
      * `object_modes.cc`). */
     for (Base &base : view_layer.object_bases) {
-      const Object *ob = base.object;
+      Object *ob = base.object;
       if ((ob->mode & mode_flag) == 0 || !ob->runtime->sculpt_session ||
           !ob->runtime->sculpt_session->curve_patch_session)
       {
+        continue;
+      }
+      if (ob->runtime->sculpt_session->curve_patch_session->layer_material != nullptr) {
+        /* An effect of the Stack Layers keeps its curves in its container: leaving the mode just
+         * commits them there, and the next entry resumes the edit, so there is nothing to ask. */
+        curve_patch_commit_on_session_end(*C, *ob);
         continue;
       }
       PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
@@ -861,6 +868,10 @@ static wmOperatorStatus sculpt_mode_toggle_exec(bContext *C, wmOperator *op)
       return OPERATOR_CANCELLED;
     }
     object_sculpt_mode_enter(bmain, *depsgraph, scene, *active_ob, false, op->reports);
+    /* The active Curve Patch effect resumes its edit, the counterpart of the silent commit on
+     * exit. */
+    WM_operator_name_call(
+        C, "PAINT_OT_curve_patch_layer_resume", wm::OpCallContext::InvokeDefault, nullptr, nullptr);
 
     {
       Vector<PointerRNA> selected_objects;

@@ -181,6 +181,10 @@ struct CurvePatchEditOpData {
    * #SCULPT_OT_curve_patch_edit_confirm, whose poll / commit would otherwise look at the new
    * active object. Zero only if invoke somehow ran with no active object. */
   int object_session_uid_at_invoke = 0;
+  /* #CurvePatchSession::serial of the session this modal was started for. */
+  uint64_t session_serial_at_invoke = 0;
+  /* A per-curve look edit in the list waits to be recorded as an undo step. */
+  bool look_undo_pending = false;
   /* Snap context reused for the duration of a point drag, mirroring `PointSlideData::snap_ctx`
    * (paint_curve.cc). Only the scene-snap-element level of #paintcurve_surface_place needs it, so
    * it is created lazily on the first MOUSEMOVE that reaches that level and freed when the drag
@@ -350,6 +354,12 @@ class SculptCurvePatchHost : public CurvePatchEditorHost {
   void pickable_curves(Vector<bke::CurvesGeometry *> &r_curves) override
   {
     r_curves.clear();
+    if (curve_patch_layer_solo(patch_)) {
+      /* Solo: only the active curve can be picked, so a click never lands on a hidden one. The
+       * Tab key and the curve list are what switch curves. */
+      r_curves.append(&patch_.active_item().control_curve);
+      return;
+    }
     r_curves.reserve(patch_.doc.patches.size());
     for (CurvePatchItem &item : patch_.doc.patches) {
       r_curves.append(&item.control_curve);
@@ -358,7 +368,11 @@ class SculptCurvePatchHost : public CurvePatchEditorHost {
 
   void pickable_curve_activate(const int index) override
   {
-    patch_.doc.active_patch = index;
+    /* An index into #pickable_curves: in Solo that list holds the active curve alone. */
+    if (!curve_patch_layer_solo(patch_)) {
+      patch_.doc.active_patch = index;
+      curve_patch_layer_active_item_sync(patch_);
+    }
   }
 
   /**
@@ -930,6 +944,9 @@ static wmOperatorStatus curve_patch_edit_invoke(bContext *C,
   }
   if (const Object *ob = CTX_data_active_object(C)) {
     data->object_session_uid_at_invoke = int(ob->id.session_uid);
+    if (ob->runtime->sculpt_session && ob->runtime->sculpt_session->curve_patch_session) {
+      data->session_serial_at_invoke = ob->runtime->sculpt_session->curve_patch_session->serial;
+    }
   }
   WM_event_add_modal_handler_all_windows(C, op, SPACE_VIEW3D, RGN_TYPE_WINDOW);
   /* Drive the live-sync poll at a steady cadence (see `CurvePatchEditOpData::sync_timer`). 20 Hz:
@@ -1078,8 +1095,12 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
    * dereferencing a dangling `SculptSession`/`curve_patch_session` in #patch_cache_of.
    * `curve_patch_edit_poll()` only guards the initial invoke. */
   const Object *ob_check = CTX_data_active_object(C);
+  /* A session of the same object that replaced this modal's own (an effect switch commits the old
+   * one and starts the next) is not the one this modal was started for. */
   if (!ob_check || !ob_check->runtime->sculpt_session ||
-      !ob_check->runtime->sculpt_session->curve_patch_session)
+      !ob_check->runtime->sculpt_session->curve_patch_session ||
+      ob_check->runtime->sculpt_session->curve_patch_session->serial !=
+          data.session_serial_at_invoke)
   {
     /* The active object has no live patch. If the *invoke-time owner* still does, the user
      * switched the active object away from a live edit -- hand that patch to the Apply/Cancel
@@ -1092,12 +1113,19 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
                 CTX_data_main(C), ID_OB, uint32_t(data.object_session_uid_at_invoke))) :
             nullptr;
     if (owner && owner->runtime->sculpt_session &&
-        owner->runtime->sculpt_session->curve_patch_session)
+        owner->runtime->sculpt_session->curve_patch_session &&
+        owner->runtime->sculpt_session->curve_patch_session->serial ==
+            data.session_serial_at_invoke)
     {
       return curve_patch_edit_hand_to_confirm(C, op, data);
     }
 
-    ED_workspace_status_text(C, nullptr);
+    /* A successor session of the same object has its own status text; leave it alone. */
+    if (!(ob_check && ob_check->runtime->sculpt_session &&
+          ob_check->runtime->sculpt_session->curve_patch_session))
+    {
+      ED_workspace_status_text(C, nullptr);
+    }
     if (data.sync_timer) {
       WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), data.sync_timer);
     }
@@ -1147,6 +1175,23 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
   CurvePatchSession &patch = patch_cache_of(C);
   Object &ob = *CTX_data_active_object(C);
 
+  /* A pick in the Active Tool curve list only writes `PaintVector::active_item`; the session
+   * follows it here, like a Tab press, so the switch needs no exit from the session. */
+  bool look_changed = false;
+  if (curve_patch_layer_active_item_follow(patch, &look_changed)) {
+    curve_patch_edit_status_set(C, patch);
+    curve_patch_restore_and_restamp(*C, ob, patch);
+    curve_patch_tag_viewports_redraw_after_edit(*C, ob, patch);
+  }
+  /* One undo step per gesture on a slider: it is recorded once the values stop moving. */
+  if (look_changed) {
+    data.look_undo_pending = true;
+  }
+  else if (data.look_undo_pending) {
+    data.look_undo_pending = false;
+    curve_patch_undo_push(patch);
+  }
+
   /* Live brush sync. Frozen per-patch fields stay on `item.params`; everything else is overlaid
    * from the live brush by #curve_patch_params_live_overlay, plus #CurvePatchLiveInputs for
    * strength/color/textures/falloff/symmetry which are not in params. Only re-stamp on an actual
@@ -1169,8 +1214,9 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
 
       const int brush_size = BKE_brush_size_get(&sd.paint, brush);
       CurvePatchItem &active_item = patch.active_item();
+      const bool radius_is_per_curve = patch.layer_material != nullptr;
       const bke::CurvePatchParams live = curve_patch_params_live_overlay(
-          *brush, active_item.params, brush_size, brush_swap_axis_changed);
+          *brush, active_item.params, brush_size, brush_swap_axis_changed, radius_is_per_curve);
 
       /* The per-point texture browse writes its attribute from an RNA setter with no context (see
        * #CurvePatchDocument::pending_point_texture_restamp): that write is invisible to the
@@ -1183,7 +1229,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         /* Brush-driven fields onto every patch; frozen fields stay per-item. */
         for (CurvePatchItem &item : patch.doc.patches) {
           item.params = curve_patch_params_live_overlay(
-              *brush, item.params, brush_size, brush_swap_axis_changed);
+              *brush, item.params, brush_size, brush_swap_axis_changed, radius_is_per_curve);
         }
         const bool rebuild_tex_pool = live_inputs.needs_texture_pool_rebuild(
             patch.doc.last_synced);
@@ -1474,7 +1520,11 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
          * matters in practice for a delete action. */
         int best_patch = -1;
         int hit_point = -1;
+        const bool solo = curve_patch_layer_solo(patch);
         for (const int i : patch.doc.patches.index_range()) {
+          if (solo && i != patch.doc.active_patch) {
+            continue;
+          }
           bke::CurvesGeometry &geom = patch.doc.patches[i].control_curve;
           hit_point = patch_find_point_index_at_pos_for_delete(geom, &vc, loc_fl);
           if (hit_point >= 0) {
@@ -1491,6 +1541,7 @@ static wmOperatorStatus curve_patch_edit_modal(bContext *C, wmOperator *op, cons
         }
 
         patch.doc.active_patch = best_patch;
+        curve_patch_layer_active_item_sync(patch);
         patch.doc.active_point = hit_point;
         if (curve_patch_delete_active_point(*C, ob, patch, op->reports)) {
           /* The removed point may have been the one under an in-flight drag; drop the drag state
@@ -1574,7 +1625,11 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
 
   bool committed = false;
   if (patch) {
-    if (is_cancel) {
+    /* An effect of the Stack Layers has no Cancel: its curves are chosen and edited in place, and
+     * the container already holds the structural changes (Add, Delete, Duplicate), so discarding
+     * only the maps would leave the two disagreeing. Esc therefore applies. */
+    const bool cancel_patch = is_cancel && patch->layer_material == nullptr;
+    if (cancel_patch) {
       /* No undo bookkeeping HERE: the modal never opened a transaction (the one the anchor stroke
        * opened is discarded the moment the editor starts, see `SculptPaintStroke::done()` in
        * `mesh/sculpt.cc`) and never pushed a node. The restore is what puts the mesh back.
@@ -1622,6 +1677,10 @@ static bool curve_patch_edit_session_finish(bContext *C, const bool is_cancel, O
          * effect-specific flush for non-position targets. */
         flush_update_done(C, ob, UpdateType::Position);
         committed = true;
+      }
+      else {
+        /* The curves do not depend on the mesh, so an effect of the Stack Layers keeps them. */
+        curve_patch_layer_commit_document(*C, *patch);
       }
     }
     curve_patch_session_free(ob);

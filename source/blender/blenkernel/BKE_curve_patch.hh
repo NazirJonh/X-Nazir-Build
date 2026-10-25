@@ -181,6 +181,11 @@ struct CurvePatchParams {
   /** Projection plane, frozen at patch start from the anchor dab's sculpt normal. */
   float3 plane_normal = float3(0.0f, 0.0f, 1.0f);
 
+  /** Per-curve look, frozen with the curve (the brush never overwrites it): a multiplier on the
+   * stamp strength, and whether the curve is skipped when stamping. */
+  float opacity = 1.0f;
+  bool hidden = false;
+
   /** Commit-time build: supersampled texture reads and a higher-resolution ribbon. An input to
    * the build, not session state -- which is why it lives here and not on the session. */
   bool final_quality = false;

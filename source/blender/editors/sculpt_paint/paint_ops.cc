@@ -3710,7 +3710,8 @@ void ED_operatortypes_paint()
   /* The active Curve Patch layer row's curve list and tool. */
   WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_add);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_remove);
-  WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_rename);
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_curve_duplicate);
+  WM_operatortype_append(PAINT_OT_curve_patch_layer_resume);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_edit);
   WM_operatortype_append(PAINT_OT_curve_patch_layer_brush_assign);
   WM_operatortype_append(PAINT_OT_image_select_invert);

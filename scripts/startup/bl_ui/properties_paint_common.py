@@ -4603,7 +4603,12 @@ class PAINTVECTOR_UL_curve_patches(bpy.types.UIList):
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if item.type == 'CURVE_PATCH':
-            layout.prop(item, "curve_name", text="", emboss=False, icon='CURVE_BEZCURVE')
+            row = layout.row(align=True)
+            row.prop(item, "curve_name", text="", emboss=False, icon='CURVE_BEZCURVE')
+            # The look of a curve is edited with its session: outside it nothing would be redrawn.
+            if context.object is not None and context.object.curve_patch_session is not None:
+                row.prop(item, "hide", text="", emboss=False,
+                         icon='HIDE_ON' if item.hide else 'HIDE_OFF')
         else:
             layout.label(text="Shape", icon='MESH_PLANE')
 
@@ -4707,12 +4712,20 @@ class CURVE_PATCH_LAYER_PT_curves(Panel):
         col = row.column(align=True)
         col.operator("paint.curve_patch_layer_curve_add", text="", icon='ADD')
         col.operator("paint.curve_patch_layer_curve_remove", text="", icon='REMOVE')
-        if pv.elements and 0 <= pv.active_item < len(pv.elements):
-            rename = col.operator("paint.curve_patch_layer_curve_rename", text="", icon='FONT_DATA')
-            rename.name = pv.elements[pv.active_item].curve_name
+        col.operator("paint.curve_patch_layer_curve_duplicate", text="", icon='DUPLICATE')
+        col.separator()
+        # The icon names the mode the click switches to: Solo shows only the selected curve.
+        col.prop(pv, "show_all_curves", text="",
+                 icon='ONIONSKIN_OFF' if pv.show_all_curves else 'ONIONSKIN_ON')
 
-        col = layout.column(align=True)
-        col.operator("paint.curve_patch_layer_edit", text="Edit Curves", icon='CURVE_BEZCURVE')
+        if pv.elements and 0 <= pv.active_item < len(pv.elements):
+            active = pv.elements[pv.active_item]
+            # Opacity and width are applied by the session, so they are offered only while it runs.
+            if (active.type == 'CURVE_PATCH' and context.object is not None and
+                    context.object.curve_patch_session is not None):
+                col = layout.column(align=True)
+                col.prop(active, "opacity", slider=True)
+                col.prop(active, "width", slider=True)
 
 
 classes = (

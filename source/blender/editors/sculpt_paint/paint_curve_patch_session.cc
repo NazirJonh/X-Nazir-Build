@@ -212,6 +212,9 @@ static void curve_patch_apply_effect_action(const Depsgraph &depsgraph,
    * Policy options (keep / Color-to-average / Relief-to-last-wins) are listed on
    * #curve_patch_blend_across_passes. Do not change the mix here until that is decided. */
   for (const CurvePatchItem &item : session.doc.patches) {
+    if (item.params.hidden) {
+      continue;
+    }
     if (!session_item_is_buildable(item)) {
       /* Skipped rather than refused: asking for every spline of a curve must not fail because one
        * of them is a stray single point. */
@@ -426,6 +429,22 @@ static void session_report_diagnostics(const CurvePatchSession &session,
 }
 #endif
 
+/** A patch added after the session started (Add, Duplicate, an undo that brings one back) has no
+ * surface snapshot yet; without it its stamps ignore the surface normals the others use. */
+static void session_surface_ensure(Object &ob, CurvePatchSession &session)
+{
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (pbvh == nullptr || pbvh->type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
+  const Mesh &mesh = *BKE_object_get_original_mesh(&ob);
+  for (CurvePatchItem &item : session.doc.patches) {
+    if (!item.geometry.surface.ready) {
+      bke::curve_patch_surface_snapshot_build(mesh, item.geometry.surface);
+    }
+  }
+}
+
 void curve_patch_restore_and_restamp(const Scene &scene,
                                      const Depsgraph &depsgraph,
                                      Sculpt &sd,
@@ -476,6 +495,7 @@ void curve_patch_restore_and_restamp(const Scene &scene,
     curve_patch_texture_binding_clear(session.doc.texture);
   }
 
+  session_surface_ensure(ob, session);
   session_rebuild_geometry(session);
   session_report_frame_cap(reports, session);
 #if CURVE_PATCH_PROFILING
@@ -551,6 +571,12 @@ static void curve_patch_session_tag_layer_ui(Object &ob)
   WM_main_add_notifier(NC_GEOM | ND_DATA, ob.data);
 }
 
+uint64_t curve_patch_session_serial_next()
+{
+  static uint64_t serial = 0;
+  return ++serial;
+}
+
 void curve_patch_session_free(Object &ob)
 {
   /* The per-point texture browse target cannot outlive its session; drop the pick with it. */
@@ -586,6 +612,8 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
      * `curve_patch_restore_only()` is a no-op in this state, leaving the mesh as that operator
      * left it. Same outcome the modal reports as canceled. */
     curve_patch_restore_only(ob, *session);
+    /* The curves do not depend on the mesh, so an effect of the Stack Layers keeps them. */
+    curve_patch_layer_commit_document(C, *session);
   }
   else {
     curve_patch_finish_commit(C, ob, *session);
@@ -628,12 +656,24 @@ bool curve_patch_commit_on_session_end(bContext &C, Object &ob)
   return committed;
 }
 
+void curve_patch_store_on_mode_exit(Object &ob)
+{
+  SculptSession *ss = ob.runtime->sculpt_session;
+  if (ss && ss->curve_patch_session) {
+    /* The pixels of a session that ends without a commit are put back, but the curves of an effect
+     * of the Stack Layers are not a preview: they are kept, and the bake is stale. Not part of the
+     * discard itself, which also runs while the object is freed, when the material may be gone. */
+    curve_patch_layer_store_document(*ss->curve_patch_session);
+  }
+}
+
 void curve_patch_discard_on_session_end(Object &ob)
 {
   SculptSession *ss = ob.runtime->sculpt_session;
   if (!ss || !ss->curve_patch_session) {
     return;
   }
+
   /* Same order as the cancel branch of `curve_patch_edit_finish()`: put the surface back before
    * anything the restore reads is torn down. Safe even for an invalidated patch -- the
    * element-count guard at the top of `curve_patch_restore_only()` turns it into a no-op. */
@@ -1013,7 +1053,8 @@ CurvePatchSession *curve_patch_start_from_layer(bContext &C,
                                                 Object &ob,
                                                 Sculpt &sd,
                                                 PaintVector &vectors,
-                                                const ViewContext &vc)
+                                                const ViewContext &vc,
+                                                const FunctionRef<void(Span<int>)> prepare_canvas)
 {
   if (ob.runtime->sculpt_session == nullptr) {
     BKE_report(CTX_wm_reports(&C), RPT_WARNING, "Curve Patch: the object has no Sculpt session");
@@ -1113,6 +1154,19 @@ CurvePatchSession *curve_patch_start_from_layer(bContext &C,
     MEM_delete(ss.cache);
     ss.cache = nullptr;
     return nullptr;
+  }
+
+  /* Published, so a refusal can no longer happen before the first stamp; the effect snapshots the
+   * canvas lazily on its first write, which is after this. Only the maps the session writes are
+   * reset. */
+  {
+    Vector<int> channels;
+    for (const paint::image::ImagePaintTarget &target : ss.cache->image_paint_targets) {
+      if (target.is_material_channel) {
+        channels.append(int(target.channel));
+      }
+    }
+    prepare_canvas(channels);
   }
 
   /* Nothing opened a stroke transaction, so the effect's undo hook runs before the only re-stamp
@@ -1288,6 +1342,12 @@ void ED_curve_patch_overlay_data_get(const ed::sculpt_paint::CurvePatchSession *
   if (session == nullptr) {
     return;
   }
+  if (session->has_active_item() && ed::sculpt_paint::curve_patch_layer_solo(*session)) {
+    /* Solo: the curves that are not selected are neither drawn nor pickable. */
+    r_data.splines.append(&session->doc.active_item().control_curve);
+    r_data.active_index = 0;
+    return;
+  }
   r_data.splines.reserve(session->doc.patches.size());
   for (const ed::sculpt_paint::CurvePatchItem &item : session->doc.patches) {
     r_data.splines.append(&item.control_curve);
@@ -1306,7 +1366,8 @@ void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayDa
 {
   r_data.splines.clear();
   r_data.active_index = -1;
-  if (ob == nullptr) {
+  /* The curves are a tool of Sculpt Mode; the overlay has no business drawing them elsewhere. */
+  if (ob == nullptr || (ob->mode & OB_MODE_SCULPT) == 0) {
     return;
   }
   /* The material the sculpt paint session works on: the object's active slot, the same resolution
@@ -1323,12 +1384,13 @@ void ED_curve_patch_overlay_data_get_stack(const Object *ob, CurvePatchOverlayDa
     return;
   }
   const PaintVector &pv = *row->curve_patch->vectors;
+  const bool solo = (pv.flag & PAINT_VECTOR_SHOW_ALL_CURVES) == 0;
   r_data.splines.reserve(pv.items_num);
   int curve_index = 0;
   int active_curve = 0;
   for (const int i : IndexRange(pv.items_num)) {
     const PaintVectorItem &item = pv.items[i];
-    if (item.type != PAINT_VECTOR_ITEM_CURVE_PATCH) {
+    if (item.type != PAINT_VECTOR_ITEM_CURVE_PATCH || (solo && i != pv.active_item)) {
       continue;
     }
     r_data.splines.append(&item.curve_patch_geometry.wrap());

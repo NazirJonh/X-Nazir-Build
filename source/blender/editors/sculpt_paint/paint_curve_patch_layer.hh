@@ -88,6 +88,13 @@ class PrevBrushRestore {
 bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &row);
 
 /**
+ * Enter the tool for the active Curve Patch effect of \a C's active object, if there is one and the
+ * object is in Sculpt Mode: the automatic entry when Sculpt Mode is (re)entered, so a stroke of
+ * work left by a mode exit resumes without a dialog. Returns false when nothing was entered.
+ */
+bool curve_patch_layer_enter_active_row(bContext &C);
+
+/**
  * The automatic entry: selecting (or adding) a Curve Patch effect while the object is in Sculpt Mode
  * swaps the user's brush for the effect's snapshot and opens its session, so the next stroke
  * edits the effect's curves instead of painting with the previous brush. Outside Sculpt Mode this
@@ -104,11 +111,43 @@ bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPai
 void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session);
 
 /**
+ * Write the live document into the row's container and mark the row's bake stale, with no undo step
+ * and no notifier: for the teardown paths that have no context to commit through (the pixels of
+ * such a session are put back, the curves must not be lost). No-op for a session that was not
+ * entered from a row.
+ */
+void curve_patch_layer_store_document(CurvePatchSession &session);
+
+/**
  * Sync the row's `PaintVector::active_item` with the session's active patch (through each patch's
  * remembered item index), so the passive overlay and the Active Tool list follow the Tab presses
  * of a live session. No-op for a session that was not entered from a row.
  */
 void curve_patch_layer_active_item_sync(const CurvePatchSession &session);
+
+/**
+ * The opposite direction: make the session's active patch follow the row's
+ * `PaintVector::active_item`, which the Active Tool list writes. Returns true when the active patch
+ * changed, or when the per-curve look (opacity, width, hide) was edited in the list: the caller
+ * re-stamps and redraws. No-op for a session that was not entered from a row.
+ */
+bool curve_patch_layer_active_item_follow(CurvePatchSession &session,
+                                          bool *r_look_changed = nullptr);
+
+/**
+ * Rebuild the row's container curve items from the live document: the document is the truth while
+ * a session runs (it is what undo restores), so an item whose patch is gone is dropped and a patch
+ * without an item gets one. Shape items are left alone. No-op for a session that was not entered
+ * from a row.
+ */
+void curve_patch_layer_mirror_vector(CurvePatchSession &session);
+
+/**
+ * Whether the overlay and the pointer picking are limited to the active curve of \a session (Solo,
+ * the default), as opposed to showing every curve of the effect. False for a session that was not
+ * entered from a row.
+ */
+bool curve_patch_layer_solo(const CurvePatchSession &session);
 
 /**
  * Whether a live session edits a row OTHER than \a row: switching the stack's active row away
@@ -120,6 +159,12 @@ bool curve_patch_layer_session_blocks_row(const CurvePatchSession &session,
 /** The same question asked of \a ob's live session: false when it has none, or when the session was
  * not entered from a Stack Layers effect (an anchor session never blocks a row switch). */
 bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintLayer &row);
+
+/**
+ * Commit the live session of \a ob, if any, into its effect and end it: the silent counterpart of
+ * the confirm dialog, for a switch the user can undo (another row of the stack becoming active).
+ */
+void curve_patch_layer_commit_live_session(bContext &C, Object &ob);
 
 /** The dedicated `PaintVector <-> CurvePatchDocument` converter (the shapes converter produces a
  * `VectorDocument`, not this document). Only `PAINT_VECTOR_ITEM_CURVE_PATCH` items are read;
@@ -162,7 +207,9 @@ bool ED_paint_layers_curve_patch_row_maps_ensure(bContext &C,
 
 void PAINT_OT_curve_patch_layer_curve_add(wmOperatorType *ot);
 void PAINT_OT_curve_patch_layer_curve_remove(wmOperatorType *ot);
-void PAINT_OT_curve_patch_layer_curve_rename(wmOperatorType *ot);
+void PAINT_OT_curve_patch_layer_curve_duplicate(wmOperatorType *ot);
+/** Internal: enters the active effect's tool one event-loop tick after a mode change. */
+void PAINT_OT_curve_patch_layer_resume(wmOperatorType *ot);
 
 /** \} */
 

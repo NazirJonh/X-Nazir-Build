@@ -1737,7 +1737,10 @@ void ImageColorEffect::apply_pass(const Depsgraph &depsgraph,
               accepted.append({li,
                                sample->tex_color,
                                sample->tex_valid,
-                               sample->value,
+                               /* The curve's opacity scales the magnitude that the cross-pass
+                                * average mixes, so two overlapping curves meet at the weighted
+                                * mean of their opacities whatever order they are stamped in. */
+                               sample->value * item.params.opacity,
                                sample->weight,
                                source_color,
                                selection_weight});

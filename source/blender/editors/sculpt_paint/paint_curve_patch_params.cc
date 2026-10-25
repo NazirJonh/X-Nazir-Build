@@ -199,17 +199,25 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
 bke::CurvePatchParams curve_patch_params_live_overlay(const Brush &brush,
                                                       const bke::CurvePatchParams &frozen,
                                                       const int brush_size,
-                                                      const bool apply_brush_swap_axis)
+                                                      const bool apply_brush_swap_axis,
+                                                      const bool radius_is_per_curve)
 {
   /* A zero `radius_per_size` means the patch started with a zero brush size, which cannot happen
-   * through the UI; keep the captured world radius rather than collapse the patch to nothing. */
-  const float radius = frozen.radius_per_size > 0.0f ? frozen.radius_per_size * float(brush_size) :
-                                                       frozen.radius;
+   * through the UI; keep the captured world radius rather than collapse the patch to nothing.
+   * Per-curve radii (a Stack Layers effect) are the curve's own: taken from the brush Size when
+   * the curve was made, then edited per curve, so a later change of the Size slider does not
+   * resize curves that exist. */
+  const float radius = (radius_is_per_curve || frozen.radius_per_size <= 0.0f) ?
+                           frozen.radius :
+                           frozen.radius_per_size * float(brush_size);
   const bool swap_axis = apply_brush_swap_axis ? (brush.curve_patch.swap_axis != 0) :
                                                  frozen.swap_axis;
   bke::CurvePatchParams live = curve_patch_params_from_brush(
       brush, radius, frozen.radius_per_size, frozen.plane_normal, frozen.stamp_seed, swap_axis);
   live.final_quality = frozen.final_quality;
+  /* The per-curve look is the curve's own, never the brush's. */
+  live.opacity = frozen.opacity;
+  live.hidden = frozen.hidden;
   return live;
 }
 

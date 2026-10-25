@@ -72,6 +72,9 @@ enum PaintVectorFlag {
    * (deliberately not derived from the revision counters).
    */
   PAINT_VECTOR_BAKED = 1 << 0,
+  /** Curve Patch overlay and picking cover every curve; unset (the default) is Solo: only the
+   * active curve is shown and editable. */
+  PAINT_VECTOR_SHOW_ALL_CURVES = 1 << 1,
 };
 
 /** One control point of a #PaintVectorSpline. */
@@ -168,7 +171,13 @@ struct PaintVectorCurveParams {
   float plane_normal[3] = {0.0f, 0.0f, 1.0f};
 
   int final_quality = 0;
-  char _pad[4] = {};
+
+  /** Multiplier on the stamp strength of this curve, in [0, 1]. Meaningful from #version 1 on. */
+  float opacity = 1.0f;
+  /** The curve is skipped when stamping; it stays in the list and keeps its overlay. */
+  int hidden = 0;
+  /** 0 for data written before opacity existed: its zero-filled members mean "unset". */
+  int version = 1;
 };
 
 /** #PaintVectorSurfaceBinding::state. */
@@ -258,8 +267,10 @@ struct PaintVectorItem {
   PaintVectorCurveParams curve_patch_params = {};
   /** Name shown in the Active Tool curve list. */
   char curve_name[64] = "";
-  /* Pads the struct to a multiple of the pointer size, as every DNA struct must. */
-  char _pad_curve_patch[4] = {};
+  /** Stable identity of a Curve Patch item inside its container (0 = not assigned yet, files from
+   * before the id existed). Unlike the array index it survives deleting and re-adding the other
+   * curves, which is what lets a live session keep the item's other fields. */
+  int curve_id = 0;
   /** Surface anchoring of the curve's control points. */
   PaintVectorSurfaceBinding surface_binding = {};
 };

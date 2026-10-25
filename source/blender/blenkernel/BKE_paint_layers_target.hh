@@ -257,6 +257,15 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
                                                const float *new_channel_fill_linear = nullptr);
 
 /**
+ * Put the map of \a target's channel back to the state a fresh map starts from: the record's flat
+ * value, with the flat tangent in a Normal map's empty texels. For content that is rendered from
+ * its own source (the Curve Patch effect), so a re-render does not land on its previous result.
+ *
+ * \return false when the target is not a Content target, or its record has no live map.
+ */
+bool BKE_paint_layers_target_content_reset(PaintLayersTarget &target);
+
+/**
  * Give the active row a map for every channel of the material's global set that the row takes part
  * in and has no map for yet, so a fresh layer is paintable in all of them at once instead of
  * growing one stroke at a time (and the UI never offers to create missing maps for it).

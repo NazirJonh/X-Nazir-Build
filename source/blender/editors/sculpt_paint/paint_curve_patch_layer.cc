@@ -78,6 +78,7 @@
 #include "mesh/sculpt_intern.hh"
 #include "paint_curve_geometry.hh"
 #include "paint_curve_patch_document.hh"
+#include "paint_curve_patch_edit_intern.hh"
 #include "paint_curve_screen.hh"
 #include "paint_curve_patch_effect.hh"
 #include "paint_curve_patch_session.hh"
@@ -157,6 +158,8 @@ void curve_patch_document_from_vector(const PaintVector &pv, CurvePatchDocument 
     /* The item index is what keeps the patch and its persisted row in step for the active-curve
      * sync and for the write-back below. */
     item.source_curve_index = item_i;
+    item.name = pvi.curve_name;
+    item.curve_id = pvi.curve_id;
     item.control_curve = pvi.curve_patch_geometry.wrap();
     item.params = BKE_paint_vector_curve_params_decode(pvi.curve_patch_params);
     if (item_i == pv.active_item) {
@@ -187,6 +190,9 @@ void curve_patch_document_to_vector(const CurvePatchDocument &doc, PaintVector &
     PaintVectorItem &pvi = r_pv.items[item_i];
     pvi.curve_patch_geometry.wrap() = item.control_curve;
     pvi.curve_patch_params = BKE_paint_vector_curve_params_encode(item.params);
+    if (!item.name.empty()) {
+      BLI_strncpy(pvi.curve_name, item.name.c_str(), sizeof(pvi.curve_name));
+    }
     written[patch_i] = item_i;
   }
 
@@ -201,7 +207,12 @@ void curve_patch_document_to_vector(const CurvePatchDocument &doc, PaintVector &
     pvi.type = PAINT_VECTOR_ITEM_CURVE_PATCH;
     pvi.curve_patch_geometry.wrap() = item.control_curve;
     pvi.curve_patch_params = BKE_paint_vector_curve_params_encode(item.params);
-    SNPRINTF(pvi.curve_name, "Curve %d", r_pv.items_num);
+    if (item.name.empty()) {
+      SNPRINTF(pvi.curve_name, "Curve %d", r_pv.items_num);
+    }
+    else {
+      BLI_strncpy(pvi.curve_name, item.name.c_str(), sizeof(pvi.curve_name));
+    }
     written[patch_i] = r_pv.items_num - 1;
   }
 
@@ -249,6 +260,26 @@ static void curve_patch_layer_radius_attribute_ensure(bke::CurvesGeometry &geom)
   }
 }
 
+/** The id the next curve item of \a pv gets: one above the largest in use. */
+static int curve_patch_layer_next_curve_id(const PaintVector &pv)
+{
+  int next = 1;
+  for (const int i : IndexRange(pv.items_num)) {
+    next = std::max(next, pv.items[i].curve_id + 1);
+  }
+  return next;
+}
+
+/** Give every curve item that has no id yet (a file from before the id existed) one. */
+static void curve_patch_layer_curve_ids_ensure(PaintVector &pv)
+{
+  for (const int i : IndexRange(pv.items_num)) {
+    if (pv.items[i].type == PAINT_VECTOR_ITEM_CURVE_PATCH && pv.items[i].curve_id <= 0) {
+      pv.items[i].curve_id = curve_patch_layer_next_curve_id(pv);
+    }
+  }
+}
+
 /** Append one default curve item to \a pv: a two-point segment sized from \a brush, with the
  * frozen parameters the brush would stamp with. Used by the row seed and the curve-add operator. */
 static PaintVectorItem &curve_patch_layer_curve_item_default(PaintVector &pv, const Brush *brush)
@@ -262,8 +293,10 @@ static PaintVectorItem &curve_patch_layer_curve_item_default(PaintVector &pv, co
   const int brush_size = (brush != nullptr && brush->size > 0) ? brush->size : 1;
   const float radius_per_size = radius / float(brush_size);
 
+  const int curve_id = curve_patch_layer_next_curve_id(pv);
   PaintVectorItem &item = BKE_paint_vector_item_add(pv);
   item.type = PAINT_VECTOR_ITEM_CURVE_PATCH;
+  item.curve_id = curve_id;
   item.flag |= PAINT_VECTOR_ITEM_CURVE_SEED;
   SNPRINTF(item.curve_name, "Curve %d", pv.items_num);
 
@@ -716,6 +749,7 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
     ED_paint_layers_curve_patch_row_seed_curve(*row.curve_patch);
     BKE_paint_layers_bake_request(row);
   }
+  curve_patch_layer_curve_ids_ensure(pv);
   curve_patch_layer_seeds_place(C, *ob, *view_context, sd->paint, *brush, pv);
   /* The interactive Image effect resolves its targets from the row's channel maps and refuses a
    * canvas without one; the same maps are what the bake renders into. Create them all before the
@@ -744,9 +778,28 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
     return false;
   }
 
-  CurvePatchSession *session = curve_patch_start_from_layer(C, *ob, *sd, pv, *view_context);
+  /* The maps hold the previous render of these very curves: stamping over it would leave the old
+   * result under a moved or deleted curve, so the maps the session writes start empty and it
+   * renders all curves. */
+  bool maps_reset = false;
+  const auto reset_maps = [&](const Span<int> channels) {
+    for (const int channel : channels) {
+      PaintLayersTarget target;
+      target.material = &ma;
+      target.layer = &row;
+      target.channel = channel;
+      target.mode = PaintLayersTargetMode::Content;
+      maps_reset |= BKE_paint_layers_target_content_reset(target);
+    }
+  };
+  CurvePatchSession *session = curve_patch_start_from_layer(
+      C, *ob, *sd, pv, *view_context, reset_maps);
   if (session == nullptr) {
-    /* Nothing was published; the destructor restores the previous brush. */
+    /* Nothing was published; the destructor restores the previous brush. A session that failed
+     * after the maps were reset leaves them empty, so the row must not look up to date. */
+    if (maps_reset) {
+      BKE_paint_layers_bake_request(row);
+    }
     return false;
   }
   session->layer_brush_restore = std::move(restore);
@@ -780,6 +833,88 @@ bool curve_patch_layer_activate(bContext &C, Material &ma, MaterialPaintLayer &r
   return true;
 }
 
+/** The active Curve Patch effect of the active object's active material, or false. */
+static bool curve_patch_layer_active_effect_get(bContext &C,
+                                                Material *&r_ma,
+                                                MaterialPaintLayer *&r_row)
+{
+  Object *ob = CTX_data_active_object(&C);
+  if (ob == nullptr || ob->type != OB_MESH) {
+    return false;
+  }
+  r_ma = BKE_object_material_get(ob, ob->actcol);
+  if (r_ma == nullptr) {
+    return false;
+  }
+  r_row = BKE_paint_layers_active_layer_get(*r_ma);
+  return r_row != nullptr && r_row->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
+         r_row->curve_patch != nullptr;
+}
+
+bool curve_patch_layer_enter_active_row(bContext &C)
+{
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = nullptr;
+  if (!curve_patch_layer_active_effect_get(C, ma, row)) {
+    return false;
+  }
+  return curve_patch_layer_enter_if_sculpting(C, *ma, *row);
+}
+
+/* The mode switch that resumes an edit runs before the tool system has synced the area's tool to
+ * the new mode, and entering the tool right there trips its consistency check. The entry therefore
+ * waits for the first timer tick of this modal, which is a later pass of the event loop. */
+static wmOperatorStatus curve_patch_layer_resume_invoke(bContext *C,
+                                                        wmOperator *op,
+                                                        const wmEvent * /*event*/)
+{
+  /* Background runs have no window to host a timer, and most mode entries have no effect to
+   * resume at all. */
+  Material *ma = nullptr;
+  MaterialPaintLayer *row = nullptr;
+  if (CTX_wm_window(C) == nullptr || !curve_patch_layer_active_effect_get(*C, ma, row)) {
+    return OPERATOR_CANCELLED;
+  }
+  op->customdata = WM_event_timer_add(CTX_wm_manager(C), CTX_wm_window(C), TIMER, 0.05);
+  WM_event_add_modal_handler(C, op);
+  return OPERATOR_RUNNING_MODAL;
+}
+
+static wmOperatorStatus curve_patch_layer_resume_modal(bContext *C,
+                                                       wmOperator *op,
+                                                       const wmEvent *event)
+{
+  wmTimer *timer = static_cast<wmTimer *>(op->customdata);
+  if (event->type != TIMER || event->customdata != timer) {
+    return OPERATOR_RUNNING_MODAL | OPERATOR_PASS_THROUGH;
+  }
+  WM_event_timer_remove(CTX_wm_manager(C), CTX_wm_window(C), timer);
+  op->customdata = nullptr;
+  curve_patch_layer_enter_active_row(*C);
+  return OPERATOR_FINISHED;
+}
+
+static void curve_patch_layer_resume_cancel(bContext *C, wmOperator *op)
+{
+  if (op->customdata != nullptr) {
+    WM_event_timer_remove(
+        CTX_wm_manager(C), CTX_wm_window(C), static_cast<wmTimer *>(op->customdata));
+    op->customdata = nullptr;
+  }
+}
+
+void PAINT_OT_curve_patch_layer_resume(wmOperatorType *ot)
+{
+  ot->name = "Resume Curve Patch Edit";
+  ot->idname = "PAINT_OT_curve_patch_layer_resume";
+  ot->description = "Enter the active Curve Patch effect's tool once the mode change has settled";
+  ot->invoke = curve_patch_layer_resume_invoke;
+  ot->modal = curve_patch_layer_resume_modal;
+  ot->cancel = curve_patch_layer_resume_cancel;
+  ot->poll = ED_operator_object_active_editable_mesh;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
 bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPaintLayer &row)
 {
   const Object *ob = CTX_data_active_object(&C);
@@ -791,18 +926,28 @@ bool curve_patch_layer_enter_if_sculpting(bContext &C, Material &ma, MaterialPai
   return curve_patch_layer_activate(C, ma, row);
 }
 
-void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session)
+void curve_patch_layer_store_document(CurvePatchSession &session)
 {
   MaterialPaintLayer *row = curve_patch_layer_session_row(session);
   if (row == nullptr || row->curve_patch->vectors == nullptr) {
     return;
   }
+  /* A look edit in the list is only picked up by the modal's poll; the last one may not have been. */
+  curve_patch_layer_active_item_follow(session);
   PaintVector &pv = *row->curve_patch->vectors;
   curve_patch_document_to_vector(session.doc, pv);
   BKE_paint_vector_tag_changed(pv);
   /* The row's content is its own channel maps: the changed document invalidates the bake, which
    * re-renders the maps in the background the next time the plan runs. */
   BKE_paint_layers_bake_request(*row);
+}
+
+void curve_patch_layer_commit_document(bContext &C, CurvePatchSession &session)
+{
+  if (curve_patch_layer_session_row(session) == nullptr) {
+    return;
+  }
+  curve_patch_layer_store_document(session);
   ED_undo_memfile_push(&C, "Curve Patch Layer Edit");
   WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, session.layer_material);
 }
@@ -820,10 +965,138 @@ void curve_patch_layer_active_item_sync(const CurvePatchSession &session)
   }
 }
 
+bool curve_patch_layer_active_item_follow(CurvePatchSession &session, bool *r_look_changed)
+{
+  MaterialPaintLayer *row = curve_patch_layer_session_row(session);
+  if (row == nullptr || row->curve_patch->vectors == nullptr) {
+    return false;
+  }
+  const PaintVector &pv = *row->curve_patch->vectors;
+  /* A rename or a per-curve look edit in the list writes the container item only; the document is
+   * what undo and the mirror work from. */
+  bool look_changed = false;
+  for (CurvePatchItem &patch : session.doc.patches) {
+    if (patch.source_curve_index < 0 || patch.source_curve_index >= pv.items_num) {
+      continue;
+    }
+    const PaintVectorItem &pvi = pv.items[patch.source_curve_index];
+    if (patch.name != pvi.curve_name) {
+      patch.name = pvi.curve_name;
+    }
+    const bke::CurvePatchParams stored = BKE_paint_vector_curve_params_decode(
+        pvi.curve_patch_params);
+    if (patch.params.opacity != stored.opacity || patch.params.radius != stored.radius ||
+        patch.params.hidden != stored.hidden)
+    {
+      /* The size-relative values follow the edited radius, or a later conversion of absolute
+       * jitter would use the old one. */
+      if (patch.params.radius > 0.0f) {
+        patch.params.radius_per_size *= stored.radius / patch.params.radius;
+      }
+      patch.params.opacity = stored.opacity;
+      patch.params.radius = stored.radius;
+      patch.params.hidden = stored.hidden;
+      look_changed = true;
+    }
+  }
+  if (r_look_changed != nullptr) {
+    *r_look_changed = look_changed;
+  }
+  const int item_i = pv.active_item;
+  for (const int patch_i : session.doc.patches.index_range()) {
+    if (session.doc.patches[patch_i].source_curve_index != item_i) {
+      continue;
+    }
+    if (patch_i == session.doc.active_patch) {
+      return look_changed;
+    }
+    curve_patch_document_active_patch_set(session.doc, patch_i);
+    return true;
+  }
+  return look_changed;
+}
+
+void curve_patch_layer_mirror_vector(CurvePatchSession &session)
+{
+  MaterialPaintLayer *row = curve_patch_layer_session_row(session);
+  if (row == nullptr || row->curve_patch->vectors == nullptr) {
+    return;
+  }
+  PaintVector &pv = *row->curve_patch->vectors;
+
+  /* Items are matched by id, not by position: an item whose patch is still there is updated in
+   * place, which keeps the fields the document does not carry (flag, surface binding). */
+  Vector<int> item_of_patch(session.doc.patches.size(), -1);
+  Vector<bool> claimed(pv.items_num, false);
+  for (const int patch_i : session.doc.patches.index_range()) {
+    const int curve_id = session.doc.patches[patch_i].curve_id;
+    if (curve_id <= 0) {
+      continue;
+    }
+    for (const int i : IndexRange(pv.items_num)) {
+      if (!claimed[i] && pv.items[i].type == PAINT_VECTOR_ITEM_CURVE_PATCH &&
+          pv.items[i].curve_id == curve_id)
+      {
+        item_of_patch[patch_i] = i;
+        claimed[i] = true;
+        break;
+      }
+    }
+  }
+  /* Curve items nobody claims belong to a patch that was deleted (or never confirmed). */
+  for (int i = pv.items_num - 1; i >= 0; i--) {
+    if (pv.items[i].type != PAINT_VECTOR_ITEM_CURVE_PATCH || claimed[i]) {
+      continue;
+    }
+    BKE_paint_vector_item_remove(pv, i);
+    for (int &item_i : item_of_patch) {
+      if (item_i > i) {
+        item_i--;
+      }
+    }
+  }
+  for (const int patch_i : session.doc.patches.index_range()) {
+    CurvePatchItem &patch = session.doc.patches[patch_i];
+    if (item_of_patch[patch_i] < 0) {
+      if (patch.curve_id <= 0) {
+        patch.curve_id = curve_patch_layer_next_curve_id(pv);
+      }
+      BKE_paint_vector_item_add(pv);
+      item_of_patch[patch_i] = pv.items_num - 1;
+      pv.items[item_of_patch[patch_i]].type = PAINT_VECTOR_ITEM_CURVE_PATCH;
+    }
+    PaintVectorItem &pvi = pv.items[item_of_patch[patch_i]];
+    pvi.curve_id = patch.curve_id;
+    pvi.curve_patch_geometry.wrap() = patch.control_curve;
+    pvi.curve_patch_params = BKE_paint_vector_curve_params_encode(patch.params);
+    BLI_strncpy(pvi.curve_name, patch.name.c_str(), sizeof(pvi.curve_name));
+    patch.source_curve_index = item_of_patch[patch_i];
+  }
+  /* `BKE_paint_vector_item_add` moves the active item to the new one; the document decides. */
+  if (session.doc.has_active_item()) {
+    pv.active_item = session.doc.active_item().source_curve_index;
+  }
+  else {
+    pv.active_item = std::clamp(pv.active_item, 0, std::max(pv.items_num - 1, 0));
+  }
+}
+
+bool curve_patch_layer_solo(const CurvePatchSession &session)
+{
+  const MaterialPaintLayer *row = curve_patch_layer_session_row(session);
+  return row != nullptr && row->curve_patch->vectors != nullptr &&
+         (row->curve_patch->vectors->flag & PAINT_VECTOR_SHOW_ALL_CURVES) == 0;
+}
+
 bool curve_patch_layer_session_blocks_row(const CurvePatchSession &session,
                                           const MaterialPaintLayer &row)
 {
   return !BLI_uuid_equal(session.layer_row_marker, row.marker);
+}
+
+void curve_patch_layer_commit_live_session(bContext &C, Object &ob)
+{
+  curve_patch_commit_on_session_end(C, ob);
 }
 
 bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintLayer &row)
@@ -838,16 +1111,113 @@ bool curve_patch_layer_session_blocks_row(const Object &ob, const MaterialPaintL
 /* -------------------------------------------------------------------- */
 /** \name Curve list operators (Active Tool panel)
  *
- * The small Add / Delete / Rename operators the curve list panel puts beside the template list.
+ * The small Add / Delete / Duplicate operators the curve list panel puts beside the template list.
  * The persisted container is a DNA array, so these are C operators, not property edits.
  * \{ */
 
-/** The object currently owns a live Curve Patch session (its modal owns the tool). */
-static bool curve_patch_layer_session_is_live(bContext *C)
+/** The live Curve Patch session of the active object (its modal owns the tool), or null. */
+static CurvePatchSession *curve_patch_layer_live_session(bContext *C)
 {
   const Object *ob = CTX_data_active_object(C);
-  return ob != nullptr && ob->runtime != nullptr && ob->runtime->sculpt_session != nullptr &&
-         ob->runtime->sculpt_session->curve_patch_session != nullptr;
+  if (ob == nullptr || ob->runtime == nullptr || ob->runtime->sculpt_session == nullptr) {
+    return nullptr;
+  }
+  return ob->runtime->sculpt_session->curve_patch_session;
+}
+
+static void curve_patch_layer_report_other_effect(wmOperator *op)
+{
+  BKE_report(op->reports, RPT_WARNING, "Finish the live Curve Patch of the other effect first");
+}
+
+/** Re-stamp and redraw after the live document changed, with the step on the session's own undo
+ * stack (the modal's Tab / swap-axis path does the same). */
+static void curve_patch_layer_session_changed(bContext &C, CurvePatchSession &session)
+{
+  Object &ob = *CTX_data_active_object(&C);
+  curve_patch_layer_active_item_sync(session);
+  curve_patch_undo_push(session);
+  curve_patch_edit_status_set(&C, session);
+  curve_patch_restore_and_restamp(C, ob, session);
+  curve_patch_tag_viewports_redraw_after_edit(C, ob, session);
+}
+
+/** Add a curve to the live document, placed under the view like the first one, without leaving the
+ * session. The default item is made in the container only to get its geometry placed on the
+ * surface; the mirror then rebuilds the container from the document. */
+static bool curve_patch_layer_session_curve_add(bContext &C,
+                                                CurvePatchSession &session,
+                                                MaterialPaintLayerCurvePatch &payload)
+{
+  const ToolSettings *tool_settings = CTX_data_tool_settings(&C);
+  Object &ob = *CTX_data_active_object(&C);
+  if (tool_settings == nullptr || tool_settings->sculpt == nullptr) {
+    return false;
+  }
+  Sculpt &sd = *tool_settings->sculpt;
+  const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
+  if (brush == nullptr) {
+    return false;
+  }
+  curve_patch_layer_active_item_follow(session);
+  PaintVector &pv = *payload.vectors;
+  const int item_i = pv.items_num;
+  curve_patch_layer_curve_item_default(pv, payload.brush);
+  curve_patch_layer_seeds_place(C, ob, session.view_context, sd.paint, *brush, pv);
+
+  /* The temporary item is dropped by the mirror: the patch gets an id of its own there. */
+  const PaintVectorItem &item = pv.items[item_i];
+  session.doc.patches.append_as();
+  CurvePatchItem &patch = session.doc.patches.last();
+  patch.control_curve = item.curve_patch_geometry.wrap();
+  patch.params = BKE_paint_vector_curve_params_decode(item.curve_patch_params);
+  patch.name = item.curve_name;
+  curve_patch_document_active_patch_set(session.doc, int(session.doc.patches.size()) - 1);
+  session.doc.active_point = -1;
+  curve_patch_layer_mirror_vector(session);
+  curve_patch_layer_session_changed(C, session);
+  return true;
+}
+
+/** Delete the active curve of the live document; the mirror drops its container item with it. */
+static bool curve_patch_layer_session_curve_remove(bContext &C, CurvePatchSession &session)
+{
+  if (session.doc.patches.size() < 2) {
+    BKE_report(CTX_wm_reports(&C), RPT_WARNING, "A Curve Patch needs at least one curve");
+    return false;
+  }
+  curve_patch_layer_active_item_follow(session);
+  const int patch_i = session.doc.active_patch;
+  session.doc.patches.remove(patch_i);
+  curve_patch_document_active_patch_set(
+      session.doc, std::min(patch_i, int(session.doc.patches.size()) - 1));
+  session.doc.active_point = -1;
+  curve_patch_layer_mirror_vector(session);
+  curve_patch_layer_session_changed(C, session);
+  return true;
+}
+
+/** Copy the active curve of the live document, in place: it becomes the active one, ready to be
+ * moved with the usual handle gestures. */
+static bool curve_patch_layer_session_curve_duplicate(bContext &C, CurvePatchSession &session)
+{
+  curve_patch_layer_active_item_follow(session);
+  if (!session.doc.has_active_item()) {
+    return false;
+  }
+  CurvePatchItem copy;
+  {
+    const CurvePatchItem &source = session.doc.active_item();
+    copy.control_curve = source.control_curve;
+    copy.params = source.params;
+    copy.name = source.name + " Copy";
+  }
+  session.doc.patches.append(std::move(copy));
+  curve_patch_document_active_patch_set(session.doc, int(session.doc.patches.size()) - 1);
+  session.doc.active_point = -1;
+  curve_patch_layer_mirror_vector(session);
+  curve_patch_layer_session_changed(C, session);
+  return true;
 }
 
 /** The active row's payload when the active row of the context material is a Curve Patch row. */
@@ -886,14 +1256,18 @@ static PaintVectorItem *curve_patch_layer_active_item(MaterialPaintLayerCurvePat
 
 static wmOperatorStatus paint_curve_patch_layer_curve_add_exec(bContext *C, wmOperator *op)
 {
-  if (curve_patch_layer_session_is_live(C)) {
-    BKE_report(op->reports, RPT_WARNING, "Finish the live Curve Patch first");
-    return OPERATOR_CANCELLED;
-  }
   MaterialPaintLayer *row = nullptr;
   MaterialPaintLayerCurvePatch *payload = curve_patch_layer_active_payload(C, &row);
   if (payload == nullptr || payload->brush == nullptr) {
     return OPERATOR_CANCELLED;
+  }
+  if (CurvePatchSession *session = curve_patch_layer_live_session(C)) {
+    if (curve_patch_layer_session_row(*session) != row) {
+      curve_patch_layer_report_other_effect(op);
+      return OPERATOR_CANCELLED;
+    }
+    return curve_patch_layer_session_curve_add(*C, *session, *payload) ? OPERATOR_FINISHED :
+                                                                         OPERATOR_CANCELLED;
   }
   curve_patch_layer_curve_item_default(*payload->vectors, payload->brush);
   payload->vectors->active_item = payload->vectors->items_num - 1;
@@ -911,19 +1285,23 @@ void PAINT_OT_curve_patch_layer_curve_add(wmOperatorType *ot)
   ot->description = "Add a control curve to the active Curve Patch effect";
   ot->exec = paint_curve_patch_layer_curve_add_exec;
   ot->poll = ED_operator_object_active_editable_mesh;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus paint_curve_patch_layer_curve_remove_exec(bContext *C, wmOperator *op)
 {
-  if (curve_patch_layer_session_is_live(C)) {
-    BKE_report(op->reports, RPT_WARNING, "Finish the live Curve Patch first");
-    return OPERATOR_CANCELLED;
-  }
   MaterialPaintLayer *row = nullptr;
   MaterialPaintLayerCurvePatch *payload = curve_patch_layer_active_payload(C, &row);
   if (payload == nullptr || curve_patch_layer_active_item(*payload) == nullptr) {
     return OPERATOR_CANCELLED;
+  }
+  if (CurvePatchSession *session = curve_patch_layer_live_session(C)) {
+    if (curve_patch_layer_session_row(*session) != row) {
+      curve_patch_layer_report_other_effect(op);
+      return OPERATOR_CANCELLED;
+    }
+    return curve_patch_layer_session_curve_remove(*C, *session) ? OPERATOR_FINISHED :
+                                                                  OPERATOR_CANCELLED;
   }
   PaintVector &pv = *payload->vectors;
   BKE_paint_vector_item_remove(pv, pv.active_item);
@@ -941,44 +1319,55 @@ void PAINT_OT_curve_patch_layer_curve_remove(wmOperatorType *ot)
   ot->description = "Delete the active curve of the active Curve Patch effect";
   ot->exec = paint_curve_patch_layer_curve_remove_exec;
   ot->poll = ED_operator_object_active_editable_mesh;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  ot->flag = OPTYPE_REGISTER;
 }
 
-static wmOperatorStatus paint_curve_patch_layer_curve_rename_exec(bContext *C, wmOperator *op)
+static wmOperatorStatus paint_curve_patch_layer_curve_duplicate_exec(bContext *C, wmOperator *op)
 {
-  if (curve_patch_layer_session_is_live(C)) {
-    BKE_report(op->reports, RPT_WARNING, "Finish the live Curve Patch first");
-    return OPERATOR_CANCELLED;
-  }
   MaterialPaintLayer *row = nullptr;
   MaterialPaintLayerCurvePatch *payload = curve_patch_layer_active_payload(C, &row);
-  PaintVectorItem *item = (payload != nullptr) ? curve_patch_layer_active_item(*payload) : nullptr;
-  if (item == nullptr) {
+  PaintVectorItem *source = (payload != nullptr) ? curve_patch_layer_active_item(*payload) :
+                                                   nullptr;
+  if (source == nullptr || !BKE_paint_vector_item_curve_geometry_is_valid(*source)) {
     return OPERATOR_CANCELLED;
   }
+  if (CurvePatchSession *session = curve_patch_layer_live_session(C)) {
+    if (curve_patch_layer_session_row(*session) != row) {
+      curve_patch_layer_report_other_effect(op);
+      return OPERATOR_CANCELLED;
+    }
+    return curve_patch_layer_session_curve_duplicate(*C, *session) ? OPERATOR_FINISHED :
+                                                                     OPERATOR_CANCELLED;
+  }
+  PaintVector &pv = *payload->vectors;
+  /* Copied before the add: the item array may be reallocated by it. */
+  const bke::CurvesGeometry geometry = source->curve_patch_geometry.wrap();
+  const PaintVectorCurveParams params = source->curve_patch_params;
   char name[64];
-  RNA_string_get(op->ptr, "name", name);
-  if (name[0] == '\0') {
-    return OPERATOR_CANCELLED;
-  }
-  BLI_strncpy(item->curve_name, name, sizeof(item->curve_name));
-  BKE_paint_vector_tag_changed(*payload->vectors);
+  SNPRINTF(name, "%s Copy", source->curve_name);
+  const int curve_id = curve_patch_layer_next_curve_id(pv);
+  PaintVectorItem &copy = BKE_paint_vector_item_add(pv);
+  copy.type = PAINT_VECTOR_ITEM_CURVE_PATCH;
+  copy.curve_id = curve_id;
+  copy.curve_patch_geometry.wrap() = geometry;
+  copy.curve_patch_params = params;
+  BLI_strncpy(copy.curve_name, name, sizeof(copy.curve_name));
+  pv.active_item = pv.items_num - 1;
+  BKE_paint_vector_tag_changed(pv);
   BKE_paint_layers_bake_request(*row);
-  ED_undo_memfile_push(C, "Curve Patch Layer Curve Rename");
+  ED_undo_memfile_push(C, "Curve Patch Layer Curve Duplicate");
   WM_event_add_notifier(C, NC_MATERIAL | ND_SHADING, nullptr);
   return OPERATOR_FINISHED;
 }
 
-void PAINT_OT_curve_patch_layer_curve_rename(wmOperatorType *ot)
+void PAINT_OT_curve_patch_layer_curve_duplicate(wmOperatorType *ot)
 {
-  ot->name = "Rename Curve";
-  ot->idname = "PAINT_OT_curve_patch_layer_curve_rename";
-  ot->description = "Rename the active curve of the active Curve Patch effect";
-  ot->exec = paint_curve_patch_layer_curve_rename_exec;
+  ot->name = "Duplicate Curve";
+  ot->idname = "PAINT_OT_curve_patch_layer_curve_duplicate";
+  ot->description = "Duplicate the active curve of the active Curve Patch effect";
+  ot->exec = paint_curve_patch_layer_curve_duplicate_exec;
   ot->poll = ED_operator_object_active_editable_mesh;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  RNA_def_string(ot->srna, "name", nullptr, 64, "Name", "The new name of the curve");
+  ot->flag = OPTYPE_REGISTER;
 }
 
 /** \} */
@@ -1061,7 +1450,7 @@ static bool curve_patch_layer_brush_assign_poll(bContext *C)
 static wmOperatorStatus curve_patch_layer_brush_assign_exec(bContext *C, wmOperator *op)
 {
   /* Replacing the snapshot would free the brush the live modal is editing through. */
-  if (curve_patch_layer_session_is_live(C)) {
+  if (curve_patch_layer_live_session(C) != nullptr) {
     BKE_report(op->reports, RPT_WARNING, "Finish the live Curve Patch first");
     return OPERATOR_CANCELLED;
   }

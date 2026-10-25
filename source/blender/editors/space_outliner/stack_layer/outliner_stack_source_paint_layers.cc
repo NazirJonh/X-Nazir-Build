@@ -1587,25 +1587,15 @@ class PaintLayersStackSource final : public StackSource,
       BKE_report(CTX_wm_reports(&C), RPT_ERROR, "Unsupported layer cannot be activated");
       return false;
     }
-    /* A live Curve Patch session owns the tool while it runs: switching the active row away from
-     * its effect would silently leave its curves half-edited. The same confirm dialog a workspace
-     * change opens decides the session's fate; the switch is retried by the user afterwards. */
-    if (const Object *ob = CTX_data_active_object(&C)) {
+    /* A live Curve Patch session owns the tool while it runs. Switching the active row away from
+     * its effect is a deliberate step the user can undo, so the session just commits its curves
+     * into the effect and the switch goes on, with no question and no warning. */
+    if (Object *ob = CTX_data_active_object(&C)) {
       const MaterialPaintLayer *target = BKE_paint_layers_find(material, row.stable_id);
       if (target != nullptr &&
           blender::ed::sculpt_paint::curve_patch_layer_session_blocks_row(*ob, *target))
       {
-        PointerRNA props = WM_operator_properties_create("SCULPT_OT_curve_patch_edit_confirm");
-        WM_operator_name_call(&C,
-                              "SCULPT_OT_curve_patch_edit_confirm",
-                              wm::OpCallContext::InvokeDefault,
-                              &props,
-                              nullptr);
-        WM_operator_properties_free(&props);
-        BKE_report(CTX_wm_reports(&C),
-                   RPT_WARNING,
-                   "Finish the Curve Patch session first (Return to apply, Esc to cancel)");
-        return false;
+        blender::ed::sculpt_paint::curve_patch_layer_commit_live_session(C, *ob);
       }
     }
     BKE_paint_layers_active_set(material, row.stable_id);

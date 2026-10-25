@@ -587,6 +587,53 @@ Image *BKE_paint_layers_target_ensure_writable(Main &bmain,
   return record->image;
 }
 
+bool BKE_paint_layers_target_content_reset(PaintLayersTarget &target)
+{
+  if (target.material == nullptr || target.layer == nullptr ||
+      target.mode != PaintLayersTargetMode::Content)
+  {
+    return false;
+  }
+  const eMaterialPaintChannel channel = eMaterialPaintChannel(target.channel);
+  MaterialPaintLayerChannel *record = paint_layer_channel_find(*target.layer, target.channel);
+  if (record == nullptr || record->image == nullptr || !paint_layer_channel_live(record)) {
+    return false;
+  }
+  Image &image = *record->image;
+  /* A linked map cannot be rewritten, and only the byte buffer of a paint-layer map is filled. */
+  if (ID_IS_LINKED(&image.id)) {
+    return false;
+  }
+  void *lock = nullptr;
+  ImBuf *ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  if (ibuf == nullptr || ibuf->byte_data() == nullptr) {
+    BKE_image_release_ibuf(&image, ibuf, lock);
+    return false;
+  }
+  /* The record's flat value, like a map the row already had a record for is created with (see
+   * #BKE_paint_layers_target_ensure_writable), with the flat tangent in a Normal map's empty
+   * texels. */
+  float fill[4];
+  copy_v4_v4(fill, record->value);
+  if (channel == PAINT_MATERIAL_CHANNEL_NORMAL && fill[3] <= 0.0f) {
+    fill[0] = 0.5f;
+    fill[1] = 0.5f;
+    fill[2] = 1.0f;
+  }
+  BKE_image_release_ibuf(&image, ibuf, lock);
+  paint_layers_image_fill(image, BKE_paint_material_channel_info(channel).is_color, fill);
+
+  ibuf = BKE_image_acquire_ibuf(&image, nullptr, &lock);
+  if (ibuf != nullptr) {
+    BKE_image_mark_dirty(&image, ibuf);
+  }
+  BKE_image_release_ibuf(&image, ibuf, lock);
+  BKE_image_partial_update_mark_full_update(&image);
+  BKE_image_free_gputextures(&image);
+  target.channel_record = record;
+  return true;
+}
+
 int BKE_paint_layers_active_maps_ensure(Main &bmain, Material &ma, const int image_size)
 {
   const uint16_t channel_set = BKE_paint_layers_channel_set_mask_get(ma);

@@ -21,6 +21,7 @@
  */
 
 #include <array>
+#include <string>
 
 #include "BLI_array.hh"
 #include "BLI_assert.h"
@@ -70,6 +71,10 @@ struct CurvePatchEditStepItem {
    * next poll's #curve_patch_params_live_overlay regardless, so storing the whole struct costs
    * nothing on the common path. */
   bke::CurvePatchParams params;
+  /** The curve's name in the Active Tool list: a patch brought back by undo keeps it. */
+  std::string name;
+  /** #PaintVectorItem::curve_id of the patch, so undo hands a restored patch its identity back. */
+  int curve_id = 0;
 };
 
 /** One snapshot of the session-local undo stack: everything the user edits inside a live Curve
@@ -139,8 +144,15 @@ struct CurvePatchTextureBinding {
  * effect, the texture binding and `CurvePatchApplyState` all describe the mesh, which is shared.
  */
 struct CurvePatchItem {
-  /** Index of the source PaintCurve spline. -1 for procedurally-created curves. */
+  /** Index of this patch's item in #PaintVector::items; -1 for a patch with no item yet. Rewritten
+   * by #curve_patch_layer_mirror_vector, so it is only valid between two mirrors. */
   int source_curve_index = -1;
+
+  /** #PaintVectorItem::curve_id: the identity the mirror matches the item by. 0 until assigned. */
+  int curve_id = 0;
+
+  /** Name shown in the Active Tool curve list; the container item carries it on commit. */
+  std::string name;
 
   /** The user-editable control curve. Not attached to any `Brush`/datablock -- a standalone
    * runtime `CurvesGeometry`, built fresh via `paintcurve_geometry_init_bezier()` (see

@@ -592,6 +592,10 @@ static void paint_vector_blend_read_data(BlendDataReader *reader, ID *id)
 
     if (item.type == PAINT_VECTOR_ITEM_CURVE_PATCH) {
       item.curve_patch_geometry.wrap().blend_read(*reader);
+      if (item.curve_patch_params.version < 1) {
+        item.curve_patch_params.opacity = 1.0f;
+        item.curve_patch_params.version = 1;
+      }
     }
     else {
       /* A Shape item owns no geometry: the raw block read above carries whatever live pointers the
@@ -712,6 +716,9 @@ bke::CurvePatchParams BKE_paint_vector_curve_params_decode(const PaintVectorCurv
   out.random_angle = p.random_angle;
   copy_v3_v3(out.plane_normal, p.plane_normal);
   out.final_quality = (p.final_quality != 0);
+  /* Zero-filled data from before the field existed reads as fully opaque. */
+  out.opacity = p.version >= 1 ? std::clamp(p.opacity, 0.0f, 1.0f) : 1.0f;
+  out.hidden = (p.hidden != 0);
   return out;
 }
 
@@ -740,6 +747,9 @@ PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatc
   out.random_angle = p.random_angle;
   copy_v3_v3(out.plane_normal, p.plane_normal);
   out.final_quality = p.final_quality ? 1 : 0;
+  out.opacity = p.opacity;
+  out.hidden = p.hidden ? 1 : 0;
+  out.version = 1;
   return out;
 }
 

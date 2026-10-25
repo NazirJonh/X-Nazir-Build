@@ -16,6 +16,7 @@
 #include "BKE_context.hh"
 
 #include "paint_curve_patch_edit_intern.hh"
+#include "paint_curve_patch_layer.hh"
 #include "paint_curve_patch_session.hh"
 
 namespace blender::ed::sculpt_paint {
@@ -37,7 +38,7 @@ void curve_patch_undo_push(CurvePatchSession &patch)
   CurvePatchEditStep step;
   step.items.reserve(patch.doc.patches.size());
   for (const CurvePatchItem &item : patch.doc.patches) {
-    step.items.append({item.control_curve, item.params});
+    step.items.append({item.control_curve, item.params, item.name, item.curve_id});
   }
   step.active_patch = patch.doc.active_patch;
   patch.doc.undo_steps.append(std::move(step));
@@ -63,10 +64,14 @@ static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession 
   for (const int i : step.items.index_range()) {
     patch.doc.patches[i].control_curve = step.items[i].curve;
     patch.doc.patches[i].params = step.items[i].params;
+    patch.doc.patches[i].name = step.items[i].name;
+    patch.doc.patches[i].curve_id = step.items[i].curve_id;
   }
   patch.doc.active_patch = std::min(step.active_patch, int(patch.doc.patches.size()) - 1);
   /* The restored curve may hold fewer points than the one just replaced. */
   patch.doc.active_point = -1;
+  /* The patch count may have changed: the container's curve items follow the document. */
+  curve_patch_layer_mirror_vector(patch);
 
   curve_patch_edit_status_set(&C, patch);
   curve_patch_restore_and_restamp(C, ob, patch);
@@ -83,7 +88,8 @@ static void curve_patch_undo_restore(bContext &C, Object &ob, CurvePatchSession 
 bool curve_patch_undo_step_back(bContext &C, Object &ob, CurvePatchSession &patch)
 {
   if (patch.doc.undo_step_current <= 0) {
-    return patch.doc.undo_anchor_trimmed;
+    /* An effect of the Stack Layers has no patch to cancel: running out of history just stops. */
+    return patch.doc.undo_anchor_trimmed || patch.layer_material != nullptr;
   }
   patch.doc.undo_step_current--;
   curve_patch_undo_restore(C, ob, patch);

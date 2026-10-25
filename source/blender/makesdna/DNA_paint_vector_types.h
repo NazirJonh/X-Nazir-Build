@@ -150,6 +150,9 @@ struct PaintVectorCurveParams {
 
   int length_mode = 0;
   int length_repeat = 1;
+  /** #bke::CurvePatchRadiusInterp. 0 (Linear) for data written before the mode existed, which is
+   * the profile those curves were built with. */
+  int radius_interp = 0;
 
   int end_falloff_mode = 0;
   int end_falloff_percent = 0;
@@ -271,6 +274,9 @@ struct PaintVectorItem {
    * before the id existed). Unlike the array index it survives deleting and re-adding the other
    * curves, which is what lets a live session keep the item's other fields. */
   int curve_id = 0;
+  /* Explicit padding: #PaintVectorCurveParams::radius_interp made the preceding block 4 bytes
+   * longer, and the 8-byte aligned binding below must still start on a multiple of 8. */
+  int _pad1 = 0;
   /** Surface anchoring of the curve's control points. */
   PaintVectorSurfaceBinding surface_binding = {};
 };

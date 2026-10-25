@@ -257,6 +257,48 @@ float CurvePatchSpline::opacity_at(const float s) const
   return math::clamp(1.0f - transparency, 0.0f, 1.0f);
 }
 
+float CurvePatchSpline::closest_s_near(const float3 &query,
+                                       const float s_hint,
+                                       const float window) const
+{
+  const float total = total_length();
+  const float s_min = s_hint - window;
+  const float s_max = s_hint + window;
+  if (is_empty() || window <= 0.0f) {
+    return s_hint;
+  }
+  if (cyclic && (s_min < 0.0f || s_max > total)) {
+    /* The window wraps past the seam; the refinement is only a quantization fix, so skipping the
+     * few samples there is cheaper than a second search range. */
+    return s_hint;
+  }
+
+  int first;
+  int last;
+  float t_unused;
+  find_segment(lengths_3d, std::max(s_min, 0.0f), first, t_unused);
+  find_segment(lengths_3d, std::min(s_max, total), last, t_unused);
+
+  float best_dist_sq = FLT_MAX;
+  float best_s = s_hint;
+  for (const int i : IndexRange(first, last - first + 1)) {
+    const float3 &a = poly_3d[i];
+    const float3 ab = poly_3d[i + 1] - a;
+    const float len_sq = math::length_squared(ab);
+    const float t = len_sq > 1e-12f ? math::clamp(math::dot(query - a, ab) / len_sq, 0.0f, 1.0f) :
+                                      0.0f;
+    const float dist_sq = math::length_squared(query - (a + ab * t));
+    if (dist_sq < best_dist_sq) {
+      best_dist_sq = dist_sq;
+      best_s = math::interpolate(lengths_3d[i], lengths_3d[i + 1], t);
+    }
+  }
+  /* A vertex of a convex bend attracts every sample on its outer side, so the raw projection is
+   * constant over a fan there -- exactly the artifact the ribbon LUT exists to avoid. Staying
+   * within the window keeps the LUT's single-valued mapping in charge of those samples. */
+  return math::clamp(best_s, s_min, s_max);
+}
+
 float CurvePatchSpline::distance_sq_to(const float3 &query) const
 {
   if (is_empty()) {

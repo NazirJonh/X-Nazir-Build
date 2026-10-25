@@ -130,6 +130,30 @@ static const EnumPropertyItem rna_enum_brush_curve_patch_end_falloff_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+static const EnumPropertyItem rna_enum_brush_curve_patch_radius_interp_items[] = {
+    {BRUSH_CURVE_PATCH_RADIUS_INTERP_LINEAR,
+     "LINEAR",
+     0,
+     "Linear",
+     "Blend the width straight between control points (the historical behavior)"},
+    {BRUSH_CURVE_PATCH_RADIUS_INTERP_SMOOTH,
+     "SMOOTH",
+     0,
+     "Smooth",
+     "Ease the width in and out of each control point (smoothstep)"},
+    {BRUSH_CURVE_PATCH_RADIUS_INTERP_SPLINE,
+     "SPLINE",
+     0,
+     "Spline",
+     "Run a smooth monotone cubic through the control point radii"},
+    {BRUSH_CURVE_PATCH_RADIUS_INTERP_EASE,
+     "EASE",
+     0,
+     "Ease",
+     "Blend the width with a gentle sinusoidal ease"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem rna_enum_brush_curve_patch_point_shape_items[] = {
     {BRUSH_CURVE_PATCH_POINT_SQUARE,
      "SQUARE",
@@ -2961,6 +2985,14 @@ static void rna_def_brush_curve_patch_settings(BlenderRNA *brna)
   RNA_def_property_ui_range(prop, 1, 64, 1, -1);
   RNA_def_property_ui_text(
       prop, "Repeats", "Number of times the texture repeats along the curve length");
+  RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
+
+  prop = RNA_def_property(srna, "radius_interp", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "radius_interp");
+  RNA_def_property_enum_items(prop, rna_enum_brush_curve_patch_radius_interp_items);
+  RNA_def_property_ui_text(prop,
+                           "Radius Interpolation",
+                           "How the per-point radius transitions between control points");
   RNA_def_property_update(prop, 0, "rna_BrushCurvePatchSettings_update");
 
   prop = RNA_def_property(srna, "end_falloff", PROP_ENUM, PROP_NONE);

@@ -15,9 +15,11 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 
 #include "BLI_math_base.h"
 #include "BLI_math_vector.hh"
+#include "BLI_utildefines.h"
 /* `BKE_curves.hh` only forward-declares the virtual array types, and the tessellation below reads
  * the `radius` and `paintcurve_surface_normal` attributes through a #VArraySpan. */
 #include "BLI_virtual_array.hh"
@@ -175,6 +177,181 @@ static void curve_patch_build_stamps(const CurvePatchParams &params,
   r_geometry.ribbon_end_margin = curve_patch_stamp_reach(max_r) + params.jitter_amount;
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Per-Point Radius Interpolation Profiles
+ * \{ */
+
+/**
+ * Tangents of the monotone cubic through the control radii, in per-segment parameter space
+ * (every Bezier segment runs `t` from 0 to 1, so a segment's secant is simply `r1 - r0`).
+ *
+ * Fritsch-Carlson: start from the Catmull-Rom average of the incoming and outgoing secants,
+ * zero it where they disagree in sign (a local extremum must not be overshot), then limit each
+ * segment's pair so the cubic cannot leave the range spanned by that segment's two endpoint
+ * radii. That limiter is what makes SPLINE safe for the ribbon: an overshooting width would
+ * widen the strip past both of its anchor points and disturb the self-intersection validation
+ * radius, which is sized from the control radii.
+ */
+static void curve_patch_radius_cubic_tangents(const Span<float> radii,
+                                              const bool cyclic,
+                                              MutableSpan<float> r_tangents)
+{
+  const int n = int(radii.size());
+  BLI_assert(r_tangents.size() == n);
+  const int seg_num = cyclic ? n : n - 1;
+  if (n < 2 || seg_num < 1) {
+    r_tangents.fill(0.0f);
+    return;
+  }
+  /* Secant of every segment, including the wrap segment of a cyclic curve. */
+  Array<float> deltas(seg_num);
+  for (const int s : IndexRange(seg_num)) {
+    deltas[s] = radii[(s + 1) % n] - radii[s];
+  }
+  const auto delta_in = [&](const int i) { return deltas[(i - 1 + seg_num) % seg_num]; };
+  const auto delta_out = [&](const int i) { return deltas[i % seg_num]; };
+  for (const int i : IndexRange(n)) {
+    const bool has_in = cyclic || i > 0;
+    const bool has_out = cyclic || i < n - 1;
+    if (has_in && has_out) {
+      const float d_in = delta_in(i);
+      const float d_out = delta_out(i);
+      r_tangents[i] = (d_in * d_out <= 0.0f) ? 0.0f : 0.5f * (d_in + d_out);
+    }
+    else {
+      /* An open curve's two ends keep the one secant they have. */
+      r_tangents[i] = has_out ? delta_out(i) : delta_in(i);
+    }
+  }
+  /* The limiter, one pass over the segments. A shared control point can be limited by both of its
+   * segments; each limit only ever shrinks the tangent, so visiting the segments in order cannot
+   * un-monotonize anything the earlier pass fixed. */
+  for (const int s : IndexRange(seg_num)) {
+    const float d = deltas[s];
+    const int i0 = s;
+    const int i1 = (s + 1) % n;
+    if (d == 0.0f) {
+      r_tangents[i0] = 0.0f;
+      r_tangents[i1] = 0.0f;
+      continue;
+    }
+    const float alpha = r_tangents[i0] / d;
+    const float beta = r_tangents[i1] / d;
+    const float sq = alpha * alpha + beta * beta;
+    if (sq > 9.0f) {
+      const float tau = 3.0f / std::sqrt(sq);
+      r_tangents[i0] = tau * alpha * d;
+      r_tangents[i1] = tau * beta * d;
+    }
+  }
+}
+
+/** One profile evaluation at segment parameter `t` (0 at the segment's first control point, 1
+ * past its last sample -- the endpoint itself belongs to the next segment's first sample, so `t`
+ * never quite reaches 1 here). `m0`/`m1` are #curve_patch_radius_cubic_tangents' tangents and are
+ * read only by SPLINE. */
+static float curve_patch_radius_profile_value(const CurvePatchRadiusInterp mode,
+                                              const float r0,
+                                              const float m0,
+                                              const float r1,
+                                              const float m1,
+                                              const float t)
+{
+  switch (mode) {
+    case CurvePatchRadiusInterp::Linear:
+      return math::interpolate(r0, r1, t);
+    case CurvePatchRadiusInterp::Smooth:
+      return math::interpolate(r0, r1, t * t * (3.0f - 2.0f * t));
+    case CurvePatchRadiusInterp::Ease:
+      return math::interpolate(r0, r1, 0.5f - 0.5f * std::cos(float(M_PI) * t));
+    case CurvePatchRadiusInterp::Spline: {
+      /* Cubic Hermite basis over the (already limited) tangents. */
+      const float t2 = t * t;
+      const float t3 = t2 * t;
+      return (2.0f * t3 - 3.0f * t2 + 1.0f) * r0 + (t3 - 2.0f * t2 + t) * m0 +
+             (-2.0f * t3 + 3.0f * t2) * r1 + (t3 - t2) * m1;
+    }
+  }
+  BLI_assert_unreachable();
+  return math::interpolate(r0, r1, t);
+}
+
+void curve_patch_radii_interpolate_to_evaluated(const CurvesGeometry &control_curve,
+                                                const CurvePatchRadiusInterp mode,
+                                                MutableSpan<float> r_evaluated_radii)
+{
+  BLI_assert(r_evaluated_radii.size() == control_curve.evaluated_points_num());
+  /* The non-linear path below writes curve 0's samples only; a multi-spline curve would leave the
+   * rest of the output untouched. An empty curve is handled by the generic fallback below, so the
+   * contract is "at most one spline", which every current caller satisfies. */
+  BLI_assert(control_curve.curves_num() <= 1);
+
+  const auto interpolate_generic = [&]() {
+    control_curve.ensure_can_interpolate_to_evaluated();
+    control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()), r_evaluated_radii);
+  };
+  if (mode == CurvePatchRadiusInterp::Linear || control_curve.curves_num() == 0 ||
+      control_curve.points_num() < 2 || control_curve.curve_types()[0] != CURVE_TYPE_BEZIER)
+  {
+    /* LINEAR keeps the generic path bit-for-bit; the other curve types (a Python-authored
+     * poly/catmull-rom/nurbs control curve) have either nothing between control points to shape
+     * (poly: evaluated == control) or a basis of their own, and keep their current behavior. */
+    interpolate_generic();
+    return;
+  }
+
+  /* The paint-curve multiplier convention (1.0 = full brush size), the same default the per-point
+   * stamp overrides read further down. The generic reader keeps its own 0.01 default for a missing
+   * attribute, so the Linear path stays bit-for-bit what it was. */
+  const VArray<float> radii = *control_curve.attributes().lookup_or_default<float>(
+      "radius", AttrDomain::Point, 1.0f);
+  const int point_num = control_curve.points_num();
+  Array<float> values(point_num);
+  radii.materialize(values.as_mutable_span());
+  const bool cyclic = control_curve.cyclic()[0];
+
+  /* Populates the evaluated-offsets cache `bezier_evaluated_offsets_for_curve` reads. */
+  control_curve.evaluated_points_by_curve();
+  const Span<int> offsets = control_curve.bezier_evaluated_offsets_for_curve(0);
+  if (offsets.size() != point_num + 1) {
+    /* Unexpected layout (a future evaluator change): the generic path is always correct, just
+     * unshaped. */
+    interpolate_generic();
+    return;
+  }
+
+  const bool use_cubic = mode == CurvePatchRadiusInterp::Spline;
+  Array<float> tangents;
+  if (use_cubic) {
+    tangents.reinitialize(point_num);
+    curve_patch_radius_cubic_tangents(values.as_span(), cyclic, tangents.as_mutable_span());
+  }
+
+  /* Every segment owns `offsets[s + 1] - offsets[s]` evaluated samples at uniform parameter steps
+   * `t = j / n` -- the same parameterization `curves::bezier::calculate_evaluated_positions`
+   * evaluates the POSITIONS at, so the attribute and position transitions stay in step. A "vector"
+   * segment carries a single sample (its `t` is 0) and the non-cyclic curve's final single sample
+   * IS the last control point. On a cyclic curve the last segment wraps around to point 0. */
+  const int seg_num = cyclic ? point_num : point_num - 1;
+  for (const int s : IndexRange(seg_num)) {
+    const IndexRange dst_range(offsets[s], offsets[s + 1] - offsets[s]);
+    const float v0 = values[s];
+    const float v1 = values[(s + 1) % point_num];
+    const float m0 = use_cubic ? tangents[s] : 0.0f;
+    const float m1 = use_cubic ? tangents[(s + 1) % point_num] : 0.0f;
+    const int n = int(dst_range.size());
+    for (const int j : IndexRange(n)) {
+      const float t = n > 1 ? float(j) / float(n) : 0.0f;
+      r_evaluated_radii[dst_range[j]] = curve_patch_radius_profile_value(mode, v0, m0, v1, m1, t);
+    }
+  }
+  if (!cyclic) {
+    r_evaluated_radii[offsets[point_num - 1]] = values[point_num - 1];
+  }
+}
+
+/** \} */
+
 void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
                                           const CurvePatchParams &params,
                                           const Span<float> stamp_texture_weights_cdf,
@@ -183,8 +360,12 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
 {
   control_curve.ensure_can_interpolate_to_evaluated();
   Array<float> evaluated_radii(control_curve.evaluated_points_num());
-  control_curve.interpolate_to_evaluated(VArraySpan(control_curve.radius()),
-                                         evaluated_radii.as_mutable_span());
+  /* The generic Bezier attribute interpolation is linear; the selected profile replaces it for the
+   * radius attribute. Everything downstream (the spline's radii, the ribbon's half-widths,
+   * `radius_at()`, the falloff) reads the result, so no other stage needs to know the profile
+   * exists. */
+  curve_patch_radii_interpolate_to_evaluated(
+      control_curve, params.radius_interp, evaluated_radii.as_mutable_span());
   /* Opacity is not tessellated: the local field is built from the control points after the spline
    * exists (see the `opacity_field_build` call at the end of this function). */
   const VArray<float> control_opacities = *control_curve.attributes().lookup_or_default<float>(
@@ -339,6 +520,17 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
     point_overrides.seed = point_seeds.as_span();
   }
 
+  /* A translucent point makes the narrow opacity gradient the dominant visual, and the ordinary
+   * coarse interactive table shows its texels. Boost only that case; every other patch keeps the
+   * cheaper table. */
+  bool opacity_boost = false;
+  for (const int i : IndexRange(control_point_num)) {
+    if (control_opacities[i] < 0.999f) {
+      opacity_boost = true;
+      break;
+    }
+  }
+
   curve_patch_geometry_build_with_points(evaluated_positions.as_span(),
                                          evaluated_radii.as_span(),
                                          evaluated_normals.as_span(),
@@ -347,6 +539,7 @@ void curve_patch_build_from_control_curve(const CurvesGeometry &control_curve,
                                          stamp_texture_weights_cdf,
                                          control_point_eval_offsets.as_span(),
                                          point_overrides,
+                                         opacity_boost,
                                          r_geometry);
 
   /* Opacity is evaluated as local, width-relative brushes around the control points, not as an
@@ -398,6 +591,7 @@ void curve_patch_geometry_build(const Span<float3> evaluated_positions,
                                          stamp_texture_weights_cdf,
                                          {},
                                          CurvePatchStampPointOverrides(),
+                                         false,
                                          r_geometry);
 }
 
@@ -409,6 +603,7 @@ void curve_patch_geometry_build_with_points(const Span<float3> evaluated_positio
                                             const Span<float> stamp_texture_weights_cdf,
                                             const Span<int> control_point_eval_offsets,
                                             const CurvePatchStampPointOverrides &point_overrides,
+                                            const bool opacity_boost,
                                             CurvePatchGeometry &r_geometry)
 {
   r_geometry.spline.plane_normal = params.plane_normal;
@@ -482,6 +677,7 @@ void curve_patch_geometry_build_with_points(const Span<float3> evaluated_positio
      * short enough that a window crossing a break does not rasterize a long stretch of the other
      * face nearly edge-on. */
     frame_params.overlap_length = 0.5f * params.radius;
+    frame_params.opacity_boost = opacity_boost;
 #if CURVE_PATCH_FORCE_SINGLE_FRAME
     /* FORCE_SINGLE_FRAME: see the note at the top of this file. */
     frame_params.max_frames = 1;
@@ -501,7 +697,9 @@ void curve_patch_geometry_build_with_points(const Span<float3> evaluated_positio
                              r_geometry.ribbon,
                              params.final_quality,
                              r_geometry.ribbon_end_margin,
-                             r_geometry.ribbon_end_margin);
+                             r_geometry.ribbon_end_margin,
+                             {},
+                             opacity_boost);
   }
 }
 

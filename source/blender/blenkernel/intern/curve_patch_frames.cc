@@ -208,7 +208,8 @@ void curve_patch_frames_build(const CurvePatchSpline &spline,
                              high_quality,
                              margin_start,
                              margin_end,
-                             sub_binormals.as_span());
+                             sub_binormals.as_span(),
+                             params.opacity_boost);
 
     frame.bb_min = float3(FLT_MAX);
     frame.bb_max = float3(-FLT_MAX);

@@ -102,6 +102,33 @@ enum class CurvePatchLengthMode : int8_t {
   Stretch = 2,
 };
 
+/**
+ * How the control curve's per-point `radius` attribute is interpolated onto the evaluated samples
+ * between two neighboring control points. The generic Bezier attribute interpolation
+ * (`curves::bezier::interpolate_to_evaluated`) is linear, so every consumer downstream of the
+ * tessellated radii -- the ribbon's half-width, `radius_at()`, the lateral falloff and the
+ * across-strip texture coordinate -- sees a piecewise-linear width whose slope breaks exactly at
+ * each control point. The non-linear profiles replace that per-segment lerp:
+ * - Linear: the historical behavior, bit-for-bit (the generic path runs unchanged).
+ * - Smooth: cubic smoothstep `t^2 * (3 - 2t)` per segment; C1 at the control points (the slope
+ *   reaches zero at each point, so the width settles briefly instead of kinking).
+ * - Spline: monotone cubic Hermite (Fritsch-Carlson-limited Catmull-Rom) through the control
+ *   radii; C1 at the control points without the smoothstep's zero-slope plateaus, and the
+ *   limiter guarantees the result never overshoots past the two endpoint radii.
+ * - Ease: sinusoidal ease `0.5 - 0.5 * cos(pi * t)`; C1 with zero end slopes like Smooth, but
+ *   with a gentler, sinusoidal middle.
+ *
+ * Only the BETWEEN-points transition changes: the value AT each control point is always the
+ * point's own radius, and every profile stays within the range spanned by the two neighboring
+ * radii (Spline's limiter exists precisely to enforce that).
+ */
+enum class CurvePatchRadiusInterp : int8_t {
+  Linear = 0,
+  Smooth = 1,
+  Spline = 2,
+  Ease = 3,
+};
+
 enum class CurvePatchEndFalloff : int8_t {
   None = 0,
   Smooth = 1,
@@ -139,8 +166,8 @@ enum class CurvePatchStampProjection : int8_t {
  * live brush except `swap_axis` when the BRUSH itself changed):
  *   `radius`, `radius_per_size`, `plane_normal`, `stamp_seed`, `swap_axis`, `final_quality`.
  * Live from the brush on every modal poll (`operator==` triggers a re-stamp):
- *   length, endpoint falloff/shapes, stamps mode/projection/random, spacing, jitter, texture
- *   angles.
+ *   length, radius interpolation, endpoint falloff/shapes, stamps mode/projection/random, spacing,
+ *   jitter, texture angles.
  * Live but not in this struct (editor watchdogs on the modal): strength, Add/Subtract, mirror
  * symmetry, textures/`MTex`, color, falloff curve.
  */
@@ -154,6 +181,11 @@ struct CurvePatchParams {
 
   CurvePatchLengthMode length_mode = CurvePatchLengthMode::Default;
   int length_repeat = 1;
+  /** Profile of the radius transition between control points; see #CurvePatchRadiusInterp. An
+   * input to the tessellation in #curve_patch_build_from_control_curve, so changing it changes
+   * the built spline's `radii` and thereby invalidates the ribbon LUT cache (which hashes them).
+   */
+  CurvePatchRadiusInterp radius_interp = CurvePatchRadiusInterp::Linear;
 
   CurvePatchEndFalloff end_falloff_mode = CurvePatchEndFalloff::None;
   /** Fade length at each end, as a percentage of the curve's total arc length. */
@@ -343,6 +375,17 @@ struct CurvePatchSpline {
 
   /** Whether any control point lowers the opacity, i.e. #opacity_at() can return less than 1. */
   bool opacity_field_active() const;
+
+  /**
+   * Arc length of the point on the polyline closest to \a query, searched only within \a window
+   * of \a s_hint and never further from it than that. Meant for refining the ribbon LUT's `uv.y`,
+   * which selects the right stretch of a self-overlapping curve but is quantized to the LUT's
+   * texel grid: re-projecting onto the polyline removes that quantization from `s`-dependent
+   * values (a narrow opacity falloff shows it as stair-steps) without letting the result leave the
+   * stretch the LUT chose. Returns \a s_hint unchanged when the window crosses the seam of a
+   * cyclic curve.
+   */
+  float closest_s_near(const float3 &query, float s_hint, float window) const;
 
   /** Per-point opacity at arc-length `s`, clamped to `[0, total_length()]`.
    *
@@ -818,6 +861,10 @@ struct CurvePatchRibbonLut {
  * non-empty span must match `spline.poly_3d` in size; it is what allows building the strip over a
  * CONTINUOUS binormal field, whereas deriving from a single `plane_normal` breaks `u` wherever the
  * curve crosses an edge at an angle.
+ *
+ * \param opacity_boost: builds the interactive table at a higher density for a patch whose points
+ * carry a per-point opacity. A narrow opacity gradient is the dominant visual there, and the
+ * ordinary coarse table shows its texels in it. Every other patch keeps the cheaper table.
  */
 void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               float brush_radius,
@@ -825,7 +872,8 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               bool high_quality = false,
                               float end_margin_start = 0.0f,
                               float end_margin_end = 0.0f,
-                              Span<float3> binormals = {});
+                              Span<float3> binormals = {},
+                              bool opacity_boost = false);
 
 /**
  * The polygonal strip #curve_patch_ribbon_build rasterizes its LUT from: a `rows * cols` grid of
@@ -926,6 +974,8 @@ struct CurvePatchFramesParams {
    * cut. */
   float overlap_length = 0.0f;
   int max_frames = CURVE_PATCH_MAX_FRAMES;
+  /** Same meaning as the flag on #curve_patch_ribbon_build, applied to every window's table. */
+  bool opacity_boost = false;
 };
 
 /**
@@ -1162,6 +1212,24 @@ enum class CurvePatchBuildMode : int8_t {
 };
 
 /**
+ * Interpolate the control curve's per-point `radius` attribute onto its evaluated samples with
+ * the selected profile (see #CurvePatchRadiusInterp), replacing the generic -- strictly linear --
+ * Bezier attribute interpolation for this one attribute.
+ *
+ * Bezier is the only type with samples BETWEEN control points to interpolate, and the only one
+ * handled here; any other curve type (a Python-authored poly/catmull-rom/nurbs control curve)
+ * falls back to the generic `CurvesGeometry::interpolate_to_evaluated`, which is a no-op copy for
+ * poly and unchanged for the rest. `Linear` likewise takes the generic path, so the historical
+ * behavior stays bit-for-bit.
+ *
+ * `control_curve` must hold a single spline (same contract as #curve_patch_build_from_control_curve).
+ * `r_evaluated_radii` must hold `control_curve.evaluated_points_num()` entries.
+ */
+void curve_patch_radii_interpolate_to_evaluated(const CurvesGeometry &control_curve,
+                                                CurvePatchRadiusInterp mode,
+                                                MutableSpan<float> r_evaluated_radii);
+
+/**
  * Tessellate a single-spline control curve and build every derived structure from it.
  *
  * Wraps #curve_patch_geometry_build with the tessellation that every caller performed identically:
@@ -1199,6 +1267,8 @@ void curve_patch_geometry_build(Span<float3> evaluated_positions,
  * (bezier tessellation offsets, or identity for a poly curve). Empty disables POINTS anchoring:
  * `CurvePatchSpline::control_point_lengths` stays empty and the layout places no stamps.
  * `point_overrides` carries the per-point radius / strength / angle / texture / seed attributes.
+ * `opacity_boost` requests the denser interactive ribbon table used while a point carries a
+ * per-point opacity; without it the cheaper default table is kept.
  */
 void curve_patch_geometry_build_with_points(Span<float3> evaluated_positions,
                                             Span<float> evaluated_radii,
@@ -1208,6 +1278,7 @@ void curve_patch_geometry_build_with_points(Span<float3> evaluated_positions,
                                             Span<float> stamp_texture_weights_cdf,
                                             Span<int> control_point_eval_offsets,
                                             const CurvePatchStampPointOverrides &point_overrides,
+                                            bool opacity_boost,
                                             CurvePatchGeometry &r_geometry);
 
 /** \} */

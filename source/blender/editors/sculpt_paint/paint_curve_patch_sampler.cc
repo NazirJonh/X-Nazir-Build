@@ -178,7 +178,19 @@ std::optional<CurvePatchSample> CurvePatchSampler::sample(const int idx, const i
 #if CURVE_PATCH_PROFILING
     dbg_branch_funnel_.branch_calls++;
 #endif
-    const float s = ribbon_uv.y;
+    /* The LUT's `uv.y` selects the branch but is quantized to its texel grid, which shows up as
+     * stair-steps in every `s`-dependent value -- most visibly in a narrow opacity falloff. While
+     * the opacity field is active, re-project the sample onto the polyline around that hint and use
+     * the refined arc length for the WHOLE sample (radius, end falloff, texture v, opacity). The
+     * window is a fraction of the strip width, comfortably above a texel, so the LUT keeps choosing
+     * the stretch and self-overlap stays single-valued. Past the curve's ends there is no polyline
+     * to project onto: the extended arc length the Round and Triangle caps measure from is kept. */
+    const float ribbon_s = ribbon_uv.y;
+    const bool refine_s = item.geometry.spline.opacity_field_active() && ribbon_s >= 0.0f &&
+                          ribbon_s <= total_length;
+    const float s = refine_s ? item.geometry.spline.closest_s_near(
+                                   sample_co, ribbon_s, 0.25f * item.params.radius) :
+                               ribbon_s;
     /* Signed offset from the surface, measured against the curve point the ribbon mapped this
      * sample to (NOT the globally-closest point -- consistent with the ribbon's own branch
      * choice).

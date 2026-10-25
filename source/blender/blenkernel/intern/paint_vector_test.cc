@@ -338,6 +338,7 @@ static bke::CurvePatchParams make_curve_patch_params()
   params.swap_axis = true;
   params.length_mode = bke::CurvePatchLengthMode::Repeat;
   params.length_repeat = 3;
+  params.radius_interp = bke::CurvePatchRadiusInterp::Spline;
   params.end_falloff_mode = bke::CurvePatchEndFalloff::Smooth;
   params.end_falloff_percent = 15;
   params.start_point_shape = bke::CurvePatchPointShape::Round;
@@ -364,6 +365,7 @@ TEST_F(PaintVectorTest, CurvePatchParamsConvertRoundTrip)
 
   const bke::CurvePatchParams decoded = BKE_paint_vector_curve_params_decode(dna);
   EXPECT_TRUE(decoded == make_curve_patch_params());
+  EXPECT_EQ(decoded.radius_interp, bke::CurvePatchRadiusInterp::Spline);
 
   const PaintVectorCurveParams reencoded = BKE_paint_vector_curve_params_encode(decoded);
   EXPECT_EQ(std::memcmp(&dna, &reencoded, sizeof(PaintVectorCurveParams)), 0);
@@ -377,6 +379,7 @@ TEST_F(PaintVectorTest, CurvePatchParamsDecodeDefaults)
    * stamping, no falloff). */
   EXPECT_FLOAT_EQ(decoded.radius, 0.0f);
   EXPECT_FALSE(decoded.swap_axis);
+  EXPECT_EQ(decoded.radius_interp, bke::CurvePatchRadiusInterp::Linear);
   EXPECT_EQ(decoded.length_mode, bke::CurvePatchLengthMode::Default);
   EXPECT_EQ(decoded.length_repeat, 0);
   EXPECT_EQ(decoded.end_falloff_mode, bke::CurvePatchEndFalloff::None);

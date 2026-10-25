@@ -252,6 +252,20 @@ TEST_F(paint_curve_patch_spline, opacity_field_uses_per_point_falloff)
   EXPECT_NEAR(spline.opacity_at(1.6f), 0.94387f, 1e-4f);
 }
 
+TEST_F(paint_curve_patch_spline, closest_s_near_refines_a_quantized_hint)
+{
+  CurvePatchSpline spline;
+  const float3 points[3] = {
+      float3(0.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), float3(2.0f, 0.0f, 0.0f)};
+  spline.build_from_positions(Span(points, 3));
+
+  /* A hint off by a texel is pulled onto the true projection, whatever the lateral offset. */
+  EXPECT_NEAR(spline.closest_s_near(float3(0.73f, 0.4f, 0.0f), 0.7f, 0.2f), 0.73f, 1e-5f);
+  EXPECT_NEAR(spline.closest_s_near(float3(1.26f, -0.4f, 0.0f), 1.3f, 0.2f), 1.26f, 1e-5f);
+  /* The result never leaves the window: the true projection (1.5) is further than allowed. */
+  EXPECT_NEAR(spline.closest_s_near(float3(1.5f, 0.0f, 0.0f), 1.0f, 0.2f), 1.2f, 1e-5f);
+}
+
 TEST_F(paint_curve_patch_spline, tile_span_default_is_hybrid_min)
 {
   /* Short curve (shorter than one diameter): span == total_length. */

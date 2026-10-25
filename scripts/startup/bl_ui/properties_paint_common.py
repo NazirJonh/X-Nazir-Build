@@ -922,6 +922,11 @@ class StrokePanel(BrushPanel):
                 col.row().prop(cp, "length_mode", text="Curve Patch Length", expand=True)
                 if cp.length_mode == 'REPEAT':
                     col.prop(cp, "length_repeat", text="Repeats")
+                # Ribbon-only: the strip's width follows the per-point radii, so the width
+                # transition between control points is shaped here. Stamps mode sizes each
+                # stamp from its own point and keeps the strip uniform, so there is nothing
+                # to shape there. Opacity is shaped separately, by each point's falloff.
+                col.prop(cp, "radius_interp", text="Radius Interpolation")
             falloff_header, falloff_panel = col.panel("curve_patch_falloff_panel", default_closed=True)
             falloff_header.label(text="Falloff")
             if falloff_panel:

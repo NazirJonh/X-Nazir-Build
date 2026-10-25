@@ -451,4 +451,160 @@ TEST_F(paint_curve_patch_build, build_mode_selects_normals_and_strip_path)
   EXPECT_TRUE(planar.frames.frames.is_empty());
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Per-Point Radius Interpolation Profiles
+ * \{ */
+
+/* A bezier control curve (the type a paint curve always is) with `radii.size()` points spaced one
+ * unit apart along +X, AUTO handles and a small resolution so profile values are easy to check:
+ * every segment holds `res` samples at t = j / res, the anchor of control point i sits at
+ * evaluated index i * res, and a non-cyclic curve adds one final sample for the last point. */
+static CurvesGeometry make_bezier_control_curve(const Span<float> radii,
+                                                const bool cyclic = false,
+                                                const int res = 4)
+{
+  const int count = int(radii.size());
+  CurvesGeometry curves(count, 1);
+  curves.offsets_for_write().copy_from({0, count});
+  curves.fill_curve_types(CURVE_TYPE_BEZIER);
+  curves.resolution_for_write().fill(res);
+
+  MutableSpan<float3> positions = curves.positions_for_write();
+  for (const int i : positions.index_range()) {
+    positions[i] = float3(float(i), 0.0f, 0.0f);
+  }
+  curves.handle_types_left_for_write().fill(BEZIER_HANDLE_AUTO);
+  curves.handle_types_right_for_write().fill(BEZIER_HANDLE_AUTO);
+  /* `calculate_bezier_auto_handles()` silently does nothing when the handle POSITION attributes
+   * are absent, which would leave every evaluated position at the origin (zero-length curve). */
+  curves.handle_positions_left_for_write();
+  curves.handle_positions_right_for_write();
+  curves.calculate_bezier_auto_handles();
+  curves.radius_for_write().copy_from(radii);
+  curves.cyclic_for_write().fill(cyclic);
+
+  curves.tag_topology_changed();
+  curves.tag_positions_changed();
+  return curves;
+}
+
+TEST_F(paint_curve_patch_build, radius_interp_anchors_and_midpoints_follow_the_profile)
+{
+  const float radii[2] = {1.0f, 0.2f};
+  const CurvesGeometry curve = make_bezier_control_curve(Span(radii, 2));
+  Array<float> evaluated(curve.evaluated_points_num());
+  ASSERT_EQ(evaluated.size(), 5); /* 4 samples for the segment + the final point. */
+
+  curve_patch_radii_interpolate_to_evaluated(
+      curve, CurvePatchRadiusInterp::Linear, evaluated.as_mutable_span());
+  EXPECT_NEAR(evaluated[0], 1.0f, 1e-6f);
+  EXPECT_NEAR(evaluated[1], 0.8f, 1e-6f); /* t = 0.25 lerp. */
+  EXPECT_NEAR(evaluated[4], 0.2f, 1e-6f);
+
+  curve_patch_radii_interpolate_to_evaluated(
+      curve, CurvePatchRadiusInterp::Smooth, evaluated.as_mutable_span());
+  /* smoothstep(0.25) = 0.15625, smoothstep(0.75) = 0.84375. */
+  EXPECT_NEAR(evaluated[1], math::interpolate(1.0f, 0.2f, 0.15625f), 1e-6f);
+  EXPECT_NEAR(evaluated[3], math::interpolate(1.0f, 0.2f, 0.84375f), 1e-6f);
+  EXPECT_NEAR(evaluated[4], 0.2f, 1e-6f);
+
+  curve_patch_radii_interpolate_to_evaluated(
+      curve, CurvePatchRadiusInterp::Ease, evaluated.as_mutable_span());
+  const float ease_quarter = 0.5f - 0.5f * std::cos(float(M_PI) * 0.25f);
+  EXPECT_NEAR(evaluated[1], math::interpolate(1.0f, 0.2f, ease_quarter), 1e-6f);
+
+  /* With only two points SPLINE's tangents equal the one secant, so it degenerates to the lerp
+   * -- pinned so the degenerate case is a documented equivalence, not an accident. */
+  curve_patch_radii_interpolate_to_evaluated(
+      curve, CurvePatchRadiusInterp::Spline, evaluated.as_mutable_span());
+  EXPECT_NEAR(evaluated[1], 0.8f, 1e-6f);
+}
+
+TEST_F(paint_curve_patch_build, radius_interp_spline_rounds_local_extrema)
+{
+  const float radii[3] = {1.0f, 0.2f, 1.0f};
+  const CurvesGeometry curve = make_bezier_control_curve(Span(radii, 3));
+  Array<float> evaluated(curve.evaluated_points_num());
+  ASSERT_EQ(evaluated.size(), 9); /* 2 segments x 4 samples + the final point. */
+
+  curve_patch_radii_interpolate_to_evaluated(
+      curve, CurvePatchRadiusInterp::Spline, evaluated.as_mutable_span());
+
+  /* The middle point is a local minimum, so Fritsch-Carlson zeroes its tangent and the profile
+   * dips BELOW the lerp on the way in instead of kinking at the anchor. */
+  EXPECT_NEAR(evaluated[4], 0.2f, 1e-6f);
+  EXPECT_NEAR(evaluated[2], 0.5f, 1e-5f);
+  EXPECT_LT(evaluated[2], 0.6f);
+  EXPECT_NEAR(evaluated[6], 0.5f, 1e-5f);
+}
+
+TEST_F(paint_curve_patch_build, radius_interp_spline_limiter_prevents_overshoot)
+{
+  /* The neighbors pull the middle segment's tangents far past its own shallow secant; without
+   * the Fritsch-Carlson limiter the cubic would bulge outside [0.5, 0.55]. */
+  const float radii[4] = {0.0f, 0.5f, 0.55f, 1.0f};
+  const CurvesGeometry curve = make_bezier_control_curve(Span(radii, 4));
+  Array<float> evaluated(curve.evaluated_points_num());
+
+  curve_patch_radii_interpolate_to_evaluated(
+      curve, CurvePatchRadiusInterp::Spline, evaluated.as_mutable_span());
+
+  /* Segment 1's samples (evaluated indices 4..7) stay within its endpoint radii. */
+  for (const int i : IndexRange(4, 4)) {
+    EXPECT_GE(evaluated[i], 0.5f - 1e-5f);
+    EXPECT_LE(evaluated[i], 0.55f + 1e-5f);
+  }
+}
+
+TEST_F(paint_curve_patch_build, radius_interp_cyclic_wraps_the_join)
+{
+  const float radii[3] = {1.0f, 0.4f, 0.7f};
+  const CurvesGeometry curve = make_bezier_control_curve(Span(radii, 3), /*cyclic*/ true);
+  Array<float> evaluated(curve.evaluated_points_num());
+  /* 3 segments x 4 samples; a cyclic evaluation does not duplicate the join point. */
+  ASSERT_EQ(evaluated.size(), 12);
+
+  curve_patch_radii_interpolate_to_evaluated(
+      curve, CurvePatchRadiusInterp::Smooth, evaluated.as_mutable_span());
+
+  EXPECT_NEAR(evaluated[0], 1.0f, 1e-6f);
+  EXPECT_NEAR(evaluated[4], 0.4f, 1e-6f);
+  EXPECT_NEAR(evaluated[8], 0.7f, 1e-6f);
+  /* The wrap segment interpolates back to radii[0]: its last sample sits at t = 0.75. */
+  const float wrap_t = 0.75f * 0.75f * (3.0f - 2.0f * 0.75f);
+  EXPECT_NEAR(evaluated[11], math::interpolate(0.7f, 1.0f, wrap_t), 1e-6f);
+}
+
+TEST_F(paint_curve_patch_build, radius_interp_flows_into_the_built_spline)
+{
+  const float radii[3] = {1.0f, 0.2f, 1.0f};
+  const CurvesGeometry curve = make_bezier_control_curve(Span(radii, 3));
+
+  CurvePatchGeometry linear_geometry;
+  curve_patch_build_from_control_curve(
+      curve, make_params(), {}, CurvePatchBuildMode::PlanarSingleWindow, linear_geometry);
+
+  CurvePatchParams smooth_params = make_params();
+  smooth_params.radius_interp = CurvePatchRadiusInterp::Smooth;
+  CurvePatchGeometry smooth_geometry;
+  curve_patch_build_from_control_curve(
+      curve, smooth_params, {}, CurvePatchBuildMode::PlanarSingleWindow, smooth_geometry);
+
+  ASSERT_FALSE(linear_geometry.spline.radii.is_empty());
+  /* A curve collapsed to the origin by missing handle positions would still satisfy the radii
+   * comparison; the built ribbon has to have real length for this test to exercise a build. */
+  EXPECT_GT(linear_geometry.spline.total_length(), 0.0f);
+  /* The profile changes the tessellated radii the whole ribbon is built from; only the anchors
+   * coincide, so the two builds must disagree somewhere between them. */
+  bool any_different = false;
+  for (const int i : linear_geometry.spline.radii.index_range()) {
+    if (std::abs(linear_geometry.spline.radii[i] - smooth_geometry.spline.radii[i]) > 1e-6f) {
+      any_different = true;
+    }
+  }
+  EXPECT_TRUE(any_different);
+}
+
+/** \} */
+
 }  // namespace blender::bke::tests

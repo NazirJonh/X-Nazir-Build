@@ -62,6 +62,22 @@ static bke::CurvePatchEndFalloff end_falloff_from_dna(const int dna_value)
   return bke::CurvePatchEndFalloff::None;
 }
 
+static bke::CurvePatchRadiusInterp radius_interp_from_dna(const int dna_value)
+{
+  switch (eBrushCurvePatchRadiusInterp(dna_value)) {
+    case BRUSH_CURVE_PATCH_RADIUS_INTERP_LINEAR:
+      return bke::CurvePatchRadiusInterp::Linear;
+    case BRUSH_CURVE_PATCH_RADIUS_INTERP_SMOOTH:
+      return bke::CurvePatchRadiusInterp::Smooth;
+    case BRUSH_CURVE_PATCH_RADIUS_INTERP_SPLINE:
+      return bke::CurvePatchRadiusInterp::Spline;
+    case BRUSH_CURVE_PATCH_RADIUS_INTERP_EASE:
+      return bke::CurvePatchRadiusInterp::Ease;
+  }
+  BLI_assert_unreachable();
+  return bke::CurvePatchRadiusInterp::Linear;
+}
+
 static bke::CurvePatchPointShape point_shape_from_dna(const int dna_value)
 {
   switch (eBrushCurvePatchPointShape(dna_value)) {
@@ -157,6 +173,7 @@ bke::CurvePatchParams curve_patch_params_from_brush(const Brush &brush,
 
   params.length_mode = length_mode_from_dna(settings.length_mode);
   params.length_repeat = settings.length_repeat;
+  params.radius_interp = radius_interp_from_dna(settings.radius_interp);
   params.end_falloff_mode = end_falloff_from_dna(settings.end_falloff);
   params.end_falloff_percent = settings.end_falloff_percent;
   params.start_point_shape = point_shape_from_dna(settings.start_point_shape);

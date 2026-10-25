@@ -715,6 +715,25 @@ enum eBrushCurvePatchEndFalloff : char {
   BRUSH_CURVE_PATCH_END_SMOOTH = 1,
 };
 
+/** #BrushCurvePatchSettings::radius_interp — how the per-point `radius` attribute transitions
+ * between neighboring control points of the control curve.
+ *
+ * The core Bezier attribute interpolation is linear, so a point whose radius differs strongly
+ * from its neighbors' kinks the ribbon's width exactly at the control point. The non-linear
+ * profiles below replace that per-segment lerp when the ribbon is built (see
+ * #CurvePatchRadiusInterp in `BKE_curve_patch.hh` for the math). Opacity is interpolated
+ * separately, in arc-length space.
+ *
+ * Spline is the default for new brushes. A file written before this field existed reads back as
+ * LINEAR (the zero value), which `versioning_520.cc` upgrades to SPLINE; LINEAR stays available as
+ * an explicit choice afterwards. */
+enum eBrushCurvePatchRadiusInterp : char {
+  BRUSH_CURVE_PATCH_RADIUS_INTERP_LINEAR = 0,
+  BRUSH_CURVE_PATCH_RADIUS_INTERP_SMOOTH = 1,
+  BRUSH_CURVE_PATCH_RADIUS_INTERP_SPLINE = 2,
+  BRUSH_CURVE_PATCH_RADIUS_INTERP_EASE = 3,
+};
+
 /** #BrushCurvePatchSettings::{start,end}_point_shape — profile of each open curve endpoint. */
 enum eBrushCurvePatchPointShape : char {
   BRUSH_CURVE_PATCH_POINT_SQUARE = 0,

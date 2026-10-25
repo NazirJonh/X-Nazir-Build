@@ -476,7 +476,11 @@ struct BrushCurvePatchSettings {
   /** POINTS layout: show handles to edit each point's own stamp strength (the
    * `paintcurve_stamp_strength` attribute) in the curve editor. */
   char show_point_strength_handles = false;
-  char _pad1[5] = {};
+  /** How the per-point `radius` attribute transitions between neighboring control points when
+   * the ribbon's width is tessellated. See #eBrushCurvePatchRadiusInterp. Mostly meaningful in
+   * RIBBON mode, where the width follows the interpolated radii. */
+  char radius_interp = BRUSH_CURVE_PATCH_RADIUS_INTERP_SPLINE;
+  char _pad1[4] = {};
   /** Whether the whole ribbon carries the brush's own texture or splits into the Start / Middle /
    * End textures below. See #eBrushCurvePatchTexSource. */
   char ribbon_texture_source = BRUSH_CURVE_PATCH_TEX_SINGLE;

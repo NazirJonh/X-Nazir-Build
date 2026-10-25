@@ -527,6 +527,7 @@ static void ribbon_laplacian_smooth(Vector<float3> &grid_pos,
 static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
                                    const float brush_radius,
                                    const bool high_quality,
+                                   const bool opacity_boost,
                                    const float end_margin_start,
                                    const float end_margin_end,
                                    const Span<float3> binormals)
@@ -556,6 +557,8 @@ static uint64_t ribbon_source_hash(const CurvePatchSpline &spline,
   /* Without this the commit-time high-quality rebuild would be skipped as a cache hit against the
    * interactive table, which is exactly the table it needs to replace. */
   hash = (hash ^ uint64_t(high_quality ? 1 : 0)) * 1099511628211ull;
+  /* The boosted interactive table is a different resolution than the ordinary one. */
+  hash = (hash ^ uint64_t(opacity_boost ? 1 : 0)) * 1099511628211ull;
   /* The end extension changes the strip's geometry without touching any of the spline data hashed
    * above, so a margin change would otherwise be served from the stale table -- switching between
    * Ribbon and Stamps mode, or moving the Jitter slider, would leave the ends unextended. */
@@ -810,13 +813,20 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
                               const bool high_quality,
                               const float end_margin_start,
                               const float end_margin_end,
-                              const Span<float3> binormals)
+                              const Span<float3> binormals,
+                              const bool opacity_boost)
 {
   /* Nothing the ribbon depends on has changed, so the existing LUT is still exact. The modal
    * editor re-stamps on events that never touch the curve (strength slider, Length mode, Repeats
    * count), and those otherwise paid for a full rebuild each time. */
   const uint64_t source_hash = ribbon_source_hash(
-      spline, brush_radius, high_quality, end_margin_start, end_margin_end, binormals);
+      spline,
+      brush_radius,
+      high_quality,
+      opacity_boost,
+      end_margin_start,
+      end_margin_end,
+      binormals);
   if (r_lut.ready && r_lut.source_hash == source_hash) {
     return;
   }
@@ -867,17 +877,23 @@ void curve_patch_ribbon_build(const CurvePatchSpline &spline,
    * than a fraction of the largest half-width so the across-strip coordinate keeps sub-strip
    * precision on long thin curves, clamped to keep the per-restamp fill cost bounded.
    *
-   * The high-quality pass roughly doubles the density: its supersampled relief places samples a
-   * few percent of a strip-width apart, and the interactive table's pixels are coarser than that.
-   */
-  const float pixel_fraction = high_quality ? 0.075f : 0.15f;
-  const int res_cap = high_quality ? 1024 : 512;
+   * The high-quality pass is the densest: its supersampled relief places samples a few percent of
+   * a strip-width apart, and the interactive table's pixels are coarser than that. The default
+   * interactive table is deliberately coarse, since most patches never carry a per-point opacity;
+   * a narrow opacity falloff exposes the texel grid as stair-steps, so those patches (see
+   * `opacity_boost`) get a denser live table instead. */
+  const bool dense = high_quality || opacity_boost;
+  const float pixel_fraction = high_quality ? 0.06f : (opacity_boost ? 0.1f : 0.15f);
+  const int res_min = dense ? 512 : 128;
+  const int res_cap = high_quality ? 1536 : (opacity_boost ? 1024 : 512);
   const float max_extent = std::max(ext.x, ext.y);
   /* Quantized to 64-pixel steps: dragging a control point changes the curve's extent slightly on
    * every event, and an exact resolution would therefore drift by a pixel or two each time and
-   * force the arrays below to be reallocated for no benefit. */
+   * force the arrays below to be reallocated for no benefit. The floor matters for a wide ribbon:
+   * `max_extent / R_max` is small there, so a low floor would leave the LUT visibly coarser than
+   * the painted strip; the cap still bounds the live rebuild cost. */
   const int res_target = int(max_extent / (pixel_fraction * R_max)) + 1;
-  const int res = std::clamp((res_target + 63) / 64 * 64, 128, res_cap);
+  const int res = std::clamp((res_target + 63) / 64 * 64, res_min, res_cap);
   const float2 inv_ext(float(res) / ext.x, float(res) / ext.y);
 
   const int lut_total = res * res;

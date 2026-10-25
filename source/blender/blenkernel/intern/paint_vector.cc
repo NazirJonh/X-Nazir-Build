@@ -724,6 +724,7 @@ bke::CurvePatchParams BKE_paint_vector_curve_params_decode(const PaintVectorCurv
   out.swap_axis = (p.swap_axis != 0);
   out.length_mode = bke::CurvePatchLengthMode(p.length_mode);
   out.length_repeat = p.length_repeat;
+  out.radius_interp = bke::CurvePatchRadiusInterp(p.radius_interp);
   out.end_falloff_mode = bke::CurvePatchEndFalloff(p.end_falloff_mode);
   out.end_falloff_percent = p.end_falloff_percent;
   out.start_point_shape = bke::CurvePatchPointShape(p.start_point_shape);
@@ -755,6 +756,7 @@ PaintVectorCurveParams BKE_paint_vector_curve_params_encode(const bke::CurvePatc
   out.swap_axis = p.swap_axis ? 1 : 0;
   out.length_mode = int(p.length_mode);
   out.length_repeat = p.length_repeat;
+  out.radius_interp = int(p.radius_interp);
   out.end_falloff_mode = int(p.end_falloff_mode);
   out.end_falloff_percent = p.end_falloff_percent;
   out.start_point_shape = int(p.start_point_shape);

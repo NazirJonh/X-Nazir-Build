@@ -2076,6 +2076,19 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 84)) {
+    /* `BrushCurvePatchSettings::radius_interp` was introduced with Linear as a temporary default;
+     * the intended default is now Spline. Files written before the field existed read it back as
+     * zero (Linear), and files written between the field's introduction and this subversion still
+     * carry that placeholder unless the user changed it, so both are upgraded here. Linear remains
+     * selectable afterwards. */
+    for (Brush &brush : bmain->brushes) {
+      if (brush.curve_patch.radius_interp == BRUSH_CURVE_PATCH_RADIUS_INTERP_LINEAR) {
+        brush.curve_patch.radius_interp = BRUSH_CURVE_PATCH_RADIUS_INTERP_SPLINE;
+      }
+    }
+  }
+
   /* The Sculpt Color Gradient tool settings are new. A file written before them zero-fills the
    * opacity (fully transparent) and leaves the embedded #ColorBand without stops.
    *

@@ -3863,7 +3863,7 @@ int BKE_paint_face_set_find_by_custom_color(const Mesh *mesh, const float color[
  * presence of these attributes.
  */
 /* Fields in order: channel, ui_name, attribute_name, socket_name, value_min, value_max, is_color,
- * supports_vertex_paint, supports_image_paint, slot_type. */
+ * supports_vertex_paint, supports_image_paint, slot_type, bake_float. */
 static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
     {PAINT_MATERIAL_CHANNEL_BASE_COLOR,
      "Base Color",
@@ -3874,7 +3874,9 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      true,
      true,
      true,
-     NODE_TEX_IMAGE_SLOT_BASE_COLOR},
+     NODE_TEX_IMAGE_SLOT_BASE_COLOR,
+     /* A colour: sRGB-coded bytes hold it as well as every other material map does. */
+     false},
     {PAINT_MATERIAL_CHANNEL_METALLIC,
      "Metallic",
      "material_metallic",
@@ -3884,7 +3886,9 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      true,
-     NODE_TEX_IMAGE_SLOT_METALLIC},
+     NODE_TEX_IMAGE_SLOT_METALLIC,
+     /* A smooth metallic ramp in bytes reads as bands on a reflective surface. */
+     true},
     {PAINT_MATERIAL_CHANNEL_ROUGHNESS,
      "Roughness",
      "material_roughness",
@@ -3894,7 +3898,9 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      true,
-     NODE_TEX_IMAGE_SLOT_ROUGHNESS},
+     NODE_TEX_IMAGE_SLOT_ROUGHNESS,
+     /* The same as Metallic: the highlight follows every step of the value. */
+     true},
     {PAINT_MATERIAL_CHANNEL_SPECULAR,
      "Specular",
      "material_specular",
@@ -3904,7 +3910,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      true,
-     NODE_TEX_IMAGE_SLOT_SPECULAR},
+     NODE_TEX_IMAGE_SLOT_SPECULAR,
+     true},
     /* Normal is authored as a tangent-space map (Image Texture -> Normal Map); a per-vertex float
      * cannot represent it, so the vertex canvas skips it. */
     {PAINT_MATERIAL_CHANNEL_NORMAL,
@@ -3916,7 +3923,10 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      false,
      true,
-     NODE_TEX_IMAGE_SLOT_NORMAL},
+     NODE_TEX_IMAGE_SLOT_NORMAL,
+     /* A direction: one byte step is a visible step in the shading. No generator lays this
+      * channel today, so the flag costs nothing until one does. */
+     true},
     /* Custom targets a user-named attribute. Image paint has no way to resolve a map for it yet -
      * it would need a user-assigned image rather than a Principled input. */
     {PAINT_MATERIAL_CHANNEL_CUSTOM,
@@ -3928,7 +3938,9 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      false,
-     NODE_TEX_IMAGE_SLOT_NONE},
+     NODE_TEX_IMAGE_SLOT_NONE,
+     /* An arbitrary float attribute, whose range the user decides. */
+     true},
     /* Height has no per-vertex display and no Principled input to resolve a map through; it needs
      * a displacement/bump target before either canvas can take it. */
     {PAINT_MATERIAL_CHANNEL_HEIGHT,
@@ -3940,7 +3952,9 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      false,
      false,
-     NODE_TEX_IMAGE_SLOT_NONE},
+     NODE_TEX_IMAGE_SLOT_NONE,
+     /* A height field: 256 levels of it are the terraces displacement is known for. */
+     true},
     {PAINT_MATERIAL_CHANNEL_ALPHA,
      "Alpha",
      "material_alpha",
@@ -3950,7 +3964,10 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      true,
-     NODE_TEX_IMAGE_SLOT_NONE},
+     NODE_TEX_IMAGE_SLOT_NONE,
+     /* A factor that multiplies a colour, not a colour: 8 bits of alpha is the convention of every
+      * other map in the material. */
+     false},
     /* AO has no Principled BSDF socket to resolve an image through (same as Custom). */
     {PAINT_MATERIAL_CHANNEL_AO,
      "AO",
@@ -3961,7 +3978,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      false,
      true,
      false,
-     NODE_TEX_IMAGE_SLOT_NONE},
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
     /* Emission is a color channel; is_color routes it through the generic color-attribute path. */
     {PAINT_MATERIAL_CHANNEL_EMISSION,
      "Emission",
@@ -3972,7 +3990,8 @@ static constexpr MaterialPaintChannelInfo material_paint_channels[] = {
      true,
      false,
      true,
-     NODE_TEX_IMAGE_SLOT_NONE},
+     NODE_TEX_IMAGE_SLOT_NONE,
+     false},
 };
 
 static_assert(ARRAY_SIZE(material_paint_channels) == PAINT_MATERIAL_CHANNEL_NUM,

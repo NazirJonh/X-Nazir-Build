@@ -44,6 +44,7 @@
 #include "BLI_math_base.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
+#include "BLI_time.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -889,7 +890,14 @@ static uint64_t bake_hash_layer(uint64_t h,
   /* A child's own bake size is not part of its parent's pixels, and allocating or releasing the
    * child's cache would otherwise invalidate the parent for no visible change. */
   if (!is_child) {
-    h = bake_hash_mix(h, layer.bake != nullptr ? uint32_t(layer.bake->size) : 0);
+    /* A generated row has no size of its own: its pixels are laid on the material's canvas (see
+     * #bake_size_for), so that canvas is what the cache was rendered at. Hashing the stored size
+     * instead would keep a bake made before a resize, and the preview would resample it. */
+    const uint32_t bake_size =
+        paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES) ?
+            uint32_t(std::max(int(ma.paint_layers_image_size), 0)) :
+            uint32_t(layer.bake != nullptr ? layer.bake->size : 0);
+    h = bake_hash_mix(h, bake_size);
   }
   if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_READS_SOURCE)) {
     /* Inside a baked folder a Material row is read through the maps it shows, so which source and
@@ -1166,23 +1174,53 @@ static Image **bake_service_slot(MaterialPaintLayer &layer, const int channel)
   return (channel >= 0) ? &layer.bake->images[channel] : &layer.bake->coverage;
 }
 
+/** Whether \a image's generated tile holds a float buffer rather than a byte one. */
+static bool bake_image_is_float(Image &image)
+{
+  const ImageTile *tile = BKE_image_get_tile(&image, 0);
+  return tile != nullptr && (tile->gen_flag & IMA_GEN_FLOAT) != 0;
+}
+
+/**
+ * Whether a bake map of \a layer in \a info's channel is kept as float.
+ *
+ * Only a generated row qualifies: its pixels are a formula the shader evaluates in float, so a
+ * scalar channel stored as bytes reads back as terraces. Every other row bakes a map it already
+ * holds (or a flat value), which is a byte texture like the maps around it.
+ */
+static bool bake_channel_needs_float(const MaterialPaintLayer &layer,
+                                     const MaterialPaintChannelInfo &info)
+{
+  return info.bake_float && paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
+}
+
+/**
+ * The map of \a layer in \a channel at \a size, made when it is missing or of another size or
+ * format.
+ *
+ * \param floatbuf: keep the values as float. A map of the wrong format cannot be reused: the pixel
+ *                  writers index one buffer or the other, and a byte map read as float (or back)
+ *                  would be a different picture.
+ */
 static Image *bake_service_image(Main &bmain,
                                  MaterialPaintLayer &layer,
                                  const int channel,
                                  const int size,
-                                 const bool is_color)
+                                 const bool is_color,
+                                 const bool floatbuf)
 {
   Image **slot = bake_service_slot(layer, channel);
   if (*slot != nullptr) {
     int width = 0;
     int height = 0;
     BKE_image_get_size(*slot, nullptr, &width, &height);
-    if (width == size && height == size) {
+    if (width == size && height == size && bake_image_is_float(**slot) == floatbuf) {
       return *slot;
     }
-    /* The map was created at another size (the row's `bake_size` changed): the pixel writers index
-     * the render buffer by the image's own width, so a map of a different size cannot be reused. The
-     * creation reference is the bake's alone, so the old map goes with it. */
+    /* The map was created at another size (the row's `bake_size` changed) or in another format (a
+     * generated row's channel moved to float): the pixel writers index the render buffer by the
+     * image's own width, so neither can be reused. The creation reference is the bake's alone, so
+     * the old map goes with it. */
     Image *stale = *slot;
     *slot = nullptr;
     if (stale->id.us > 0) {
@@ -1205,7 +1243,7 @@ static Image *bake_service_image(Main &bmain,
   /* The creation reference is the one the row holds: unlike #BKE_paint_layers_bake_set_map this
    * takes no user of its own. */
   Image *image = BKE_image_add_generated(
-      &bmain, size, size, name, 32, false, IMA_GENTYPE_BLANK, black, false, !is_color, false);
+      &bmain, size, size, name, 32, floatbuf, IMA_GENTYPE_BLANK, black, false, !is_color, false);
   if (image != nullptr) {
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
   }
@@ -1226,7 +1264,12 @@ static void bake_image_pixels_changed(Image &image, ImBuf &ibuf)
   BKE_image_free_gputextures(&image);
 }
 
-/** Write \a values into \a image, or only into \a rect (x0, y0, x1, y1 in image pixels) when given. */
+/**
+ * Write \a values into \a image, or only into \a rect (x0, y0, x1, y1 in image pixels) when given.
+ *
+ * The map's own buffer decides the format: a byte map stores the value encoded into its colorspace,
+ * a float map stores it as it came, which is what a precise channel of a generated row is for.
+ */
 static void bake_write_image(Image &image, const float *values, const bool is_color, const int *rect)
 {
   void *lock = nullptr;
@@ -1234,14 +1277,33 @@ static void bake_write_image(Image &image, const float *values, const bool is_co
   if (ibuf == nullptr) {
     return;
   }
-  uchar *pixels = ibuf->byte_data_for_write();
-  const auto *colorspace = ibuf->byte_buffer.colorspace;
   const int width = ibuf->x;
   const int x0 = rect != nullptr ? clamp_i(rect[0], 0, width) : 0;
   const int x1 = rect != nullptr ? clamp_i(rect[2], 0, width) : width;
   const int y0 = rect != nullptr ? clamp_i(rect[1], 0, ibuf->y) : 0;
   const int y1 = rect != nullptr ? clamp_i(rect[3], 0, ibuf->y) : ibuf->y;
-  if (pixels != nullptr) {
+  /* The buffer that exists decides, which is the rule `composite_decode_tile` reads a map by: a
+   * byte buffer wins over a float one there, so writing the other here would leave the map showing
+   * one picture to the renderer and another to the composite. */
+  float *floats = (ibuf->byte_buffer.data == nullptr && ibuf->float_buffer.data != nullptr) ?
+                      ibuf->float_data_for_write() :
+                      nullptr;
+  if (floats != nullptr) {
+    /* A float buffer is premultiplied -- the composite and the renderer both read it that way -- so
+     * the straight colour it is given is stored multiplied by the alpha that travels with it. */
+    for (int y = y0; y < y1; y++) {
+      for (int x = x0; x < x1; x++) {
+        const int64_t i = int64_t(y) * width + x;
+        const float alpha = clamp_f(values[i * 4 + 3], 0.0f, 1.0f);
+        floats[i * 4 + 0] = values[i * 4 + 0] * alpha;
+        floats[i * 4 + 1] = values[i * 4 + 1] * alpha;
+        floats[i * 4 + 2] = values[i * 4 + 2] * alpha;
+        floats[i * 4 + 3] = alpha;
+      }
+    }
+  }
+  else if (uchar *pixels = ibuf->byte_data_for_write()) {
+    const auto *colorspace = ibuf->byte_buffer.colorspace;
     for (int y = y0; y < y1; y++) {
       for (int x = x0; x < x1; x++) {
         const int64_t i = int64_t(y) * width + x;
@@ -1367,6 +1429,13 @@ bool BKE_paint_layers_bake_is_heavy(const Material &ma, const MaterialPaintLayer
 {
   if (bake_subtree_weight(ma, layer) > PAINT_LAYERS_AUTO_BAKE_NODES) {
     return true;
+  }
+  if (paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES)) {
+    /* A Gradient row is cheap by node count and expensive by texels: its cost is the canvas it is
+     * laid on, and the first bake has no stored size to weigh yet. Left on the main thread it would
+     * hitch the moment the user leaves the row. */
+    const int canvas = int(ma.paint_layers_image_size);
+    return canvas <= 0 || canvas >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
   }
   return layer.bake != nullptr && layer.bake->size >= PAINT_LAYERS_HEAVY_BAKE_SIZE;
 }
@@ -1501,6 +1570,15 @@ static int bake_size_from_content(const Material &ma, const MaterialPaintLayer &
 /** The side \a row is baked at: its stored size, the one an AUTO release kept, then its content's. */
 static int bake_size_for(const Material &ma, const MaterialPaintLayer &row)
 {
+  if (paint_layer_kind_has_flag(row, PAINT_LAYER_KIND_GENERATES)) {
+    /* A Gradient has no map of its own to keep a size for: its pixels are laid on the material's
+     * canvas, so the cache follows that canvas rather than the size it happened to be baked at
+     * first. */
+    if (ma.paint_layers_image_size > 0) {
+      return int(ma.paint_layers_image_size);
+    }
+    return bake_size_from_content(ma, row);
+  }
   int size = (row.bake != nullptr) ? row.bake->size : 0;
   if (size <= 0) {
     size = bake_dropped_size(ma, row);
@@ -1568,14 +1646,18 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
   }
   const bool folder = BKE_paint_layers_is_folder(layer);
   const int mode = BKE_paint_layers_bake_mode_get(layer);
+  /* A Gradient row is cached for the same reason a reader is: it has no map of its own, so its
+   * cache does not double anything, and it is laid per texel -- the cost a cache exists to avoid.
+   * The AUTO exemptions below name it beside the reader for that reason. */
+  const bool cheap_live = paint_layer_kind_reads_anchor_point(layer) ||
+                          paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
   if (mode == MA_PAINT_LAYER_BAKE_NEVER) {
     return false;
   }
   if (folder && BKE_paint_layers_folder_is_pass_through(layer)) {
     return false;
   }
-  if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO &&
-      !paint_layer_kind_reads_anchor_point(layer))
+  if (!folder && mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live)
   {
     /* AUTO caches subgraphs: a folder is the heavy thing, a single row is already one map per
      * channel and a cache of it would only double its memory. Always is the way to ask for a row
@@ -1598,17 +1680,55 @@ static bool bake_row_is_due(const Material &ma, const MaterialPaintLayer &layer,
   if (BKE_paint_layers_bake_row_is_deferred(ma, layer) || bake_row_is_hidden(ma, layer)) {
     return false;
   }
-  if (mode == MA_PAINT_LAYER_BAKE_AUTO &&
-      !paint_layer_kind_reads_anchor_point(layer) &&
+  if (mode == MA_PAINT_LAYER_BAKE_AUTO && !cheap_live &&
       bake_subtree_weight(ma, layer) <= PAINT_LAYERS_AUTO_BAKE_NODES)
   {
     /* A light subtree is cheaper live; a bake carried over from when it was heavy is released. A
      * reader is exempt: its bake is the slice cache the depth rules asked for, not a cache of a
-     * subtree, so a light row deep in a chain still gets one. */
+     * subtree, so a light row deep in a chain still gets one. Neither has a map the live path could
+     * read instead, which is the whole reason the exemption is safe. */
     r_release = layer.bake != nullptr;
     return false;
   }
   return true;
+}
+
+/**
+ * Report one bake of a generated row: the time it took, the maps it left and what they cost.
+ *
+ * The cost is what the formats decide: at 4K a float RGBA map is 256 MiB against a byte one's 64,
+ * so a row that lays in several precise channels is a large allocation and the line says so before
+ * the user has to wonder where the memory went.
+ */
+static void bake_gradient_row_report(const MaterialPaintLayer &layer,
+                                     const int size,
+                                     const bool sync,
+                                     const double seconds,
+                                     const Span<int> channels)
+{
+  char formats[256] = "";
+  double mib = 0.0;
+  for (const int channel : channels) {
+    const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+        eMaterialPaintChannel(channel));
+    const bool floatbuf = bake_channel_needs_float(layer, info);
+    mib += double(size) * double(size) * (floatbuf ? 16.0 : 4.0) / (1024.0 * 1024.0);
+    char entry[64];
+    SNPRINTF(entry, "%s:%s ", info.ui_name, floatbuf ? "float" : "byte");
+    BLI_strncat(formats, entry, sizeof(formats));
+  }
+  /* The coverage map is one byte RGBA plane whatever the channels are. */
+  mib += double(size) * double(size) * 4.0 / (1024.0 * 1024.0);
+  BLI_strncat(formats, "coverage:byte", sizeof(formats));
+  printf("[paint-layers gradient row bake] row \"%s\" size=%d sync=%d time=%.1f ms maps=%.1fMiB "
+         "[%s]\n",
+         layer.name,
+         size,
+         int(sync),
+         seconds * 1000.0,
+         mib,
+         formats);
+  fflush(stdout);
 }
 
 bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
@@ -1704,11 +1824,17 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
 
       Vector<float> color(int64_t(size) * size * 4);
       Vector<float> coverage(int64_t(size) * size);
+      /* A Gradient row's bake is the whole point of its cache being worth anything, and it is the
+       * one kind whose cost is pure evaluation: report what it cost and at what size. */
+      const bool gradient_row = paint_layer_kind_has_flag(layer, PAINT_LAYER_KIND_GENERATES);
+      const double gradient_start = gradient_row ? BLI_time_now_seconds() : 0.0;
       /* The channel-independent row factor `common = mask x opacity`, the max of
        * `coverage / content` over channels, written once below so channel order cannot matter. A
        * partial re-bake folds only its rectangle; untouched texels keep the stored common. */
       Vector<float> common(int64_t(size) * size, 0.0f);
       bool any_channel = false;
+      /* The channels this bake wrote a map for, for the report of what it allocated. */
+      Vector<int> written_channels;
       for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
         const int channel = int(info.channel);
         /* A partial re-bake needs the maps to already exist: an image created just now cannot take a
@@ -1721,11 +1847,15 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
         {
           continue;
         }
-        Image *color_image = bake_service_image(bmain, layer, channel, size, info.is_color);
+        Image *color_image = bake_service_image(
+            bmain, layer, channel, size, info.is_color, bake_channel_needs_float(layer, info));
         if (color_image == nullptr) {
           continue;
         }
         bake_write_image(*color_image, color.data(), info.is_color, channel_rect);
+        if (gradient_row) {
+          written_channels.append(channel);
+        }
         const int ax0 = (channel_rect != nullptr) ? channel_rect[0] : 0;
         const int ay0 = (channel_rect != nullptr) ? channel_rect[1] : 0;
         const int ax1 = (channel_rect != nullptr) ? channel_rect[2] : size;
@@ -1746,12 +1876,19 @@ bool BKE_paint_layers_bake_plan_run(Main &bmain, Material &ma, bool *r_changed)
       }
       /* One shared coverage write for all channels; a partial re-bake touches only its rectangle,
        * so the stored common outside it survives. */
-      if (Image *coverage_image = bake_service_image(bmain, layer, -1, size, false)) {
+      if (Image *coverage_image = bake_service_image(bmain, layer, -1, size, false, false)) {
         bake_write_coverage_image(*coverage_image,
                                   common.data(),
                                   (rect_ptr != nullptr && reuse_cache) ? rect_ptr : nullptr);
       }
       BKE_paint_layers_bake_finalize(ma, layer);
+      if (gradient_row) {
+        bake_gradient_row_report(layer,
+                                 size,
+                                 true,
+                                 BLI_time_now_seconds() - gradient_start,
+                                 written_channels);
+      }
       changed = true;
     }
   }
@@ -2602,6 +2739,8 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
       report();
       continue;
     }
+    const bool gradient_row = paint_layer_kind_has_flag(*layer, PAINT_LAYER_KIND_GENERATES);
+    const double gradient_start = gradient_row ? BLI_time_now_seconds() : 0.0;
     for (const MaterialPaintChannelInfo &info : BKE_paint_material_channels()) {
       /* The render of one channel is not interruptible; checking between channels keeps the cancel
        * button responsive to within one channel's render. */
@@ -2625,6 +2764,14 @@ void BKE_paint_layers_bake_job_compute(PaintLayersBakeJob &job,
       result.color = std::move(color);
       result.coverage = std::move(coverage);
       row.channels.append(std::move(result));
+    }
+    if (gradient_row) {
+      Vector<int> channels;
+      for (const PaintLayersBakeJob::ChannelResult &result : row.channels) {
+        channels.append(result.channel);
+      }
+      bake_gradient_row_report(
+          *layer, row.size, false, BLI_time_now_seconds() - gradient_start, channels);
     }
   }
 }
@@ -2662,8 +2809,14 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
     }
     bool row_written = false;
     for (PaintLayersBakeJob::ChannelResult &channel : row.channels) {
-      Image *color_image = bake_service_image(
-          bmain, *layer, channel.channel, row.size, channel.is_color);
+      const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(
+          eMaterialPaintChannel(channel.channel));
+      Image *color_image = bake_service_image(bmain,
+                                             *layer,
+                                             channel.channel,
+                                             row.size,
+                                             channel.is_color,
+                                             bake_channel_needs_float(*layer, info));
       if (color_image == nullptr) {
         continue;
       }
@@ -2677,7 +2830,7 @@ bool BKE_paint_layers_bake_job_commit(PaintLayersBakeJob &job)
       const int64_t pixel_num = int64_t(row.size) * row.size;
       Vector<float> common(pixel_num);
       bake_common_from_job_channels(row.channels, pixel_num, common.data());
-      if (Image *coverage_image = bake_service_image(bmain, *layer, -1, row.size, false)) {
+      if (Image *coverage_image = bake_service_image(bmain, *layer, -1, row.size, false, false)) {
         bake_write_coverage_image(*coverage_image, common.data(), nullptr);
       }
     }

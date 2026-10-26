@@ -29,8 +29,12 @@ struct Object;
 /**
  * Mixed first into every hash of a Gradient payload (topology and bake). Bump it when the generated
  * formula or the payload layout changes, so every cached graph and bake is rebuilt once.
+ *
+ * 0x701: the row bake of a generated row stores its precise channels as float maps instead of byte
+ * ones. A stored hash cannot see a map's format, so the bump is what makes a file saved before it
+ * rebuild its byte bake instead of reading it as the new one.
  */
-constexpr uint64_t BKE_PAINT_LAYERS_GRADIENT_HASH_VERSION = 0x700;
+constexpr uint64_t BKE_PAINT_LAYERS_GRADIENT_HASH_VERSION = 0x701;
 
 /** Whether \a layer is a Gradient generator row, correction or mask item. */
 bool BKE_paint_layers_gradient_supported(const MaterialPaintLayer &layer);

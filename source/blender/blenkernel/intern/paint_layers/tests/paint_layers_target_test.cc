@@ -1274,4 +1274,66 @@ TEST_F(PaintLayersTargetTest, merge_lets_go_of_the_old_maps)
 
 /** \} */
 
+TEST_F(PaintLayersTargetTest, composite_display_image_ignores_the_active_row)
+{
+  Image *map = add_solid_image("CompositeMap");
+  MaterialPaintLayer *paint = add_paint_layer("Paint", map);
+  ASSERT_NE(paint, nullptr);
+
+  /* A row that owns no map: the active row is what the old, row-dependent lookup followed. */
+  MaterialPaintLayer *bare = add_active_row("Bare");
+  ASSERT_NE(bare, nullptr);
+  EXPECT_EQ(BKE_paint_layers_active_layer_get(*ma), bare);
+
+  EXPECT_EQ(BKE_paint_material_composite_display_image(*ma), map);
+  /* The row-dependent preferred image still reports nothing, which is why the composite needs the
+   * stack-wide lookup. */
+  BKE_paint_layers_active_set(*ma, paint->marker);
+  EXPECT_EQ(BKE_paint_material_composite_display_image(*ma), map);
+  /* A material that holds a map never needs the stand-in. */
+  EXPECT_EQ(BKE_paint_material_composite_canvas_image_ensure(*bmain, *ma), map);
+  EXPECT_EQ(ma->paint_layers_canvas_image, nullptr);
+}
+
+TEST_F(PaintLayersTargetTest, composite_canvas_image_is_created_once_for_a_stack_without_maps)
+{
+  MaterialPaintLayer *bare = add_active_row("Bare");
+  ASSERT_NE(bare, nullptr);
+  EXPECT_EQ(BKE_paint_material_composite_display_image(*ma), nullptr);
+
+  Image *canvas = BKE_paint_material_composite_canvas_image_ensure(*bmain, *ma);
+  ASSERT_NE(canvas, nullptr);
+  EXPECT_EQ(ma->paint_layers_canvas_image, canvas);
+  EXPECT_EQ(canvas->id.us, 1);
+  EXPECT_TRUE(BKE_paint_material_composite_canvas_image_is(*bmain, *canvas));
+  EXPECT_FALSE(canvas->id.flag & LIB_FAKEUSER);
+
+  /* The lookup key is reused: a second click must not mint another data-block. */
+  EXPECT_EQ(BKE_paint_material_composite_canvas_image_ensure(*bmain, *ma), canvas);
+  EXPECT_EQ(canvas->id.us, 1);
+}
+
+TEST_F(PaintLayersTargetTest, composite_canvas_image_is_recreated_for_a_material_copy)
+{
+  MaterialPaintLayer *bare = add_active_row("Bare");
+  ASSERT_NE(bare, nullptr);
+  Image *canvas = BKE_paint_material_composite_canvas_image_ensure(*bmain, *ma);
+  ASSERT_NE(canvas, nullptr);
+  ASSERT_EQ(canvas->id.us, 1);
+
+  /* The stand-in is a lookup key: a copy must not share it, or both materials would answer to the
+   * same image and the editor would show whichever one it found first. */
+  Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(copy->paint_layers_canvas_image, nullptr);
+  EXPECT_EQ(canvas->id.us, 1);
+
+  Image *copy_canvas = BKE_paint_material_composite_canvas_image_ensure(*bmain, *copy);
+  ASSERT_NE(copy_canvas, nullptr);
+  EXPECT_NE(copy_canvas, canvas);
+  EXPECT_EQ(copy_canvas->id.us, 1);
+  BKE_id_free(bmain, copy);
+  EXPECT_EQ(canvas->id.us, 1);
+}
+
 }  // namespace blender::bke::tests

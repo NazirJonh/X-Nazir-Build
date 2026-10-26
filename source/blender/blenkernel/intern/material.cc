@@ -460,6 +460,13 @@ static void material_copy_data(Main *bmain,
    * evaluated one shares the pointer under COW. */
   BKE_paint_layers_generate_copy_data(bmain, *material_dst, *material_src, flag);
 
+  /* The composite's stand-in image is a lookup key, not content: a real copy must not keep the
+   * source's key, or the same image would resolve to whichever material the Image Editor happens
+   * to scan first. It is recreated on demand; an evaluated copy shares it under COW like the tree. */
+  if ((flag & LIB_ID_CREATE_NO_USER_REFCOUNT) == 0 && (flag & LIB_ID_CREATE_NO_MAIN) == 0) {
+    material_dst->paint_layers_canvas_image = nullptr;
+  }
+
   material_dst->gpumaterial.clear_no_delete();
   BKE_paint_material_channel_cache_invalidate(material_dst);
 
@@ -534,6 +541,11 @@ static void material_foreach_id(ID *id, LibraryForeachIDData *data)
   /* The generated stack tree is owned by the material (one user) and shared by the instance node
    * in #nodetree; walking it keeps it alive across purge and remaps it on file read. */
   BKE_LIB_FOREACHID_PROCESS_IDSUPER(data, material->paint_layers_tree, IDWALK_CB_USER);
+
+  /* The composite's stand-in image is the material's own: one user, remapped on file read and kept
+   * across purge exactly like the generated tree above. */
+  BKE_LIB_FOREACHID_PROCESS_IDSUPER(
+      data, material->paint_layers_canvas_image, IDWALK_CB_USER);
 
   for (MaterialPaintLayer &layer : material->paint_layers) {
     BKE_LIB_FOREACHID_PROCESS_FUNCTION_CALL(data, material_paint_layer_foreach_id(&layer, data));

@@ -56,6 +56,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_mask.hh"
+#include "BKE_material.hh"
 #include "BKE_packedFile.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
@@ -1025,10 +1026,17 @@ void IMAGE_OT_combined_light_rotate(wmOperatorType *ot)
 /** \name Activate Composite Canvas Operator
  * \{ */
 
+/** The active material slot of \a ob, the material the Image Editor header shows. */
+static Material *activate_composite_canvas_material(Object &ob)
+{
+  return BKE_object_material_get(&ob, ob.actcol);
+}
+
 /**
  * Poll for #IMAGE_OT_activate_composite_canvas.
- * Available in Paint mode when the active object has a layered material with a preferred
- * display image (i.e. a PBR paint layer stack).
+ * Available in Paint mode when the active object has a material the Image Editor can show a
+ * composite of. A layered material always qualifies: a stand-in image is created on demand when the
+ * stack holds no map, so a Gradient, Fill, Material or folder row never hides the way back.
  */
 static bool activate_composite_canvas_poll(bContext *C)
 {
@@ -1036,11 +1044,16 @@ static bool activate_composite_canvas_poll(bContext *C)
   if (sima == nullptr || sima->mode != SI_MODE_PAINT) {
     return false;
   }
-  const Object *ob = CTX_data_active_object(C);
+  Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) {
     return false;
   }
-  return BKE_paint_material_preferred_display_image(const_cast<Object &>(*ob)) != nullptr;
+  Material *ma = activate_composite_canvas_material(*ob);
+  if (ma != nullptr && BKE_paint_layers_is_layered(*ma)) {
+    return true;
+  }
+  /* A plain material composites through its Principled maps, which are resolved by object. */
+  return BKE_paint_material_preferred_display_image(*ob) != nullptr;
 }
 
 static wmOperatorStatus activate_composite_canvas_exec(bContext *C, wmOperator * /*op*/)
@@ -1049,7 +1062,13 @@ static wmOperatorStatus activate_composite_canvas_exec(bContext *C, wmOperator *
   Object *ob = CTX_data_active_object(C);
   Main *bmain = CTX_data_main(C);
 
-  Image *image = BKE_paint_material_preferred_display_image(*ob);
+  Image *image = nullptr;
+  if (ob != nullptr) {
+    Material *ma = activate_composite_canvas_material(*ob);
+    image = (ma != nullptr && BKE_paint_layers_is_layered(*ma)) ?
+                BKE_paint_material_composite_canvas_image_ensure(*bmain, *ma) :
+                BKE_paint_material_preferred_display_image(*ob);
+  }
   if (image == nullptr) {
     return OPERATOR_CANCELLED;
   }

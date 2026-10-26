@@ -1255,6 +1255,13 @@ struct Material {
    */
   int16_t paint_layers_view_pass = 0;
   char _pad_paint_layers[4] = {};
+  /**
+   * Stand-in image for the Image Editor's composite when the stack holds no map at all: the
+   * composite is found through an #Image, so a material made of Gradient/Fill/Material rows alone
+   * needs one to be reachable. Only the size the editor starts from and the material lookup use it;
+   * the composite itself is shaded from the stack. Owned by the material (one user).
+   */
+  struct Image *paint_layers_canvas_image = nullptr;
 };
 
 }  // namespace blender

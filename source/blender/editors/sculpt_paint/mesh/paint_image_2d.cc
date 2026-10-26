@@ -5046,6 +5046,13 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   if (paint_mode.canvas_source == PAINT_CANVAS_SOURCE_IMAGE && paint_mode.canvas_image != nullptr) {
     image = paint_mode.canvas_image;
   }
+  /* The composite stand-in is a lookup key, not a paint target: a stack with no map has nothing to
+   * write, exactly as when its active row is a Gradient. */
+  if (image != nullptr &&
+      BKE_paint_material_composite_canvas_image_is(*CTX_data_main(C), *image))
+  {
+    return nullptr;
+  }
   ImagePaintState *state = paint_2d_new_stroke_for_image(
       C, op, mode, image, nullptr, -1.0f, nullptr, -1, false, true, clone_context.active);
   if (state != nullptr) {
@@ -6607,6 +6614,12 @@ static bool paint_image_2d_geometry_fill_rect_impl(const bContext *C,
   if (target_image == nullptr) {
     return false;
   }
+  if (!mask_mode &&
+      BKE_paint_material_composite_canvas_image_is(*CTX_data_main(C), *target_image))
+  {
+    /* A material with no map has no target for this fill; the displayed stand-in is not one. */
+    return false;
+  }
 
   rctf uv_rect;
   const float region_points[2][2] = {{float(rect.xmin), float(rect.ymin)},
@@ -6735,6 +6748,12 @@ bool paint_image_2d_geometry_fill_faces_exact(const bContext *C,
   const bool mask_mode = paint_image_fill_mask_mode_get(C);
   Image *target_image = mask_mode ? paint_image_fill_mask_image_get(C) : sima->image;
   if (target_image == nullptr) {
+    return false;
+  }
+  if (!mask_mode &&
+      BKE_paint_material_composite_canvas_image_is(*CTX_data_main(C), *target_image))
+  {
+    /* A material with no map has no target for this fill; the displayed stand-in is not one. */
     return false;
   }
 
@@ -7870,6 +7889,10 @@ void paint_2d_bucket_fill(const bContext *C,
   if (!ima) {
     return;
   }
+  /* A material with no map has no target for this fill; the displayed stand-in is not one. */
+  if (!mask_mode && BKE_paint_material_composite_canvas_image_is(*CTX_data_main(C), *ima)) {
+    return;
+  }
   /* The legacy whole-image bucket operator passes no brush; a Mask fill still needs the active
    * one to resolve its Mask value. */
   Brush *mask_brush = br;
@@ -8282,6 +8305,10 @@ void paint_2d_gradient_fill(
   Scene *scene = CTX_data_scene(C);
 
   if (ima == nullptr || s == nullptr) {
+    return;
+  }
+  if (BKE_paint_material_composite_canvas_image_is(*CTX_data_main(C), *ima)) {
+    /* A material with no map has no target for this fill; the displayed stand-in is not one. */
     return;
   }
 

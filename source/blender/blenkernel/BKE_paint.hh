@@ -1810,6 +1810,39 @@ bool BKE_paint_material_mask_brush_set(Scene &scene,
 Image *BKE_paint_material_preferred_display_image(Object &ob);
 
 /**
+ * An image of \a ma that the Image Editor can show its composite on, whichever row is active.
+ *
+ * A layered material's preferred display image is resolved through the active row, so it is null
+ * while a Gradient, Fill, Material or folder row is active even though the material holds maps
+ * elsewhere. The composite is built from the stack rather than from one row, so any map of the
+ * material can stand for the canvas: the active row's is preferred when it has one, then the
+ * first map found in the stack (corrections and mask items included).
+ *
+ * Returns null for a material that holds no map at all, and for a material that is not layered.
+ */
+Image *BKE_paint_material_composite_display_image(Material &ma);
+
+/**
+ * The image the Image Editor should show to open \a ma's composite.
+ *
+ * A map from the stack when the material holds one, otherwise the material's own stand-in image
+ * (#Material::paint_layers_canvas_image), created on first use. The stand-in is a tiny generated
+ * image that serves only as the key the composite is found through: the pixels come from the stack.
+ *
+ * Returns null for a material that is not layered.
+ */
+Image *BKE_paint_material_composite_canvas_image_ensure(Main &bmain, Material &ma);
+
+/**
+ * Whether \a image is the composite stand-in of a layered material in \a bmain.
+ *
+ * The stand-in is not a paint target and not a layer map: callers that would write the image the
+ * Image Editor displays -- the legacy 2D fill paths -- must leave it alone. A material with maps
+ * never has one.
+ */
+bool BKE_paint_material_composite_canvas_image_is(Main &bmain, const Image &image);
+
+/**
  * Same as #BKE_paint_principled_channel_image_get, but when \a channel's Principled
  * socket exists and has no incoming link, creates a generated blank Image with the color space
  * required by the channel, adds an Image Texture node for it, and links it to the socket, then

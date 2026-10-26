@@ -335,8 +335,12 @@ static bool space_image_composite_material_contains(
     Vector<PaintMaterialCompositeImageLayer> &layers)
 {
   /* A layered material answers from its description alone: a map belongs to the row whose channels
-   * hold it, so there is no graph to walk and no stored back-pointer to trust. */
+   * hold it, so there is no graph to walk and no stored back-pointer to trust. The composite's
+   * stand-in image belongs to the material itself and is not a map of any row. */
   if (BKE_paint_layers_is_layered(ma)) {
+    if (ma.paint_layers_canvas_image == &image) {
+      return true;
+    }
     PaintLayersImageUse use;
     return BKE_paint_layers_find_image_use(ma, image, use);
   }
@@ -997,6 +1001,15 @@ void ED_space_image_get_size(SpaceImage *sima, int *r_width, int *r_height)
   {
     /* A channel pass the GPU draws has no buffer to measure: shading one to read two integers is the
      * cost this exists to avoid, and the canvas is the size of the layer's own map. */
+    if (Material *ma = ED_space_image_composite_material_get(G_MAIN, sima->image);
+        ma != nullptr && ma->paint_layers_canvas_image == sima->image)
+    {
+      /* The stand-in image is a key, not a canvas. */
+      const int side = (ma->paint_layers_image_size > 0) ? ma->paint_layers_image_size : 4096;
+      *r_width = side;
+      *r_height = side;
+      return;
+    }
     BKE_image_get_size(sima->image, &sima->iuser, r_width, r_height);
     return;
   }
@@ -1019,6 +1032,14 @@ void ED_space_image_get_size(SpaceImage *sima, int *r_width, int *r_height)
      * the cache directly, which still beats producing the preview to measure it. */
     if (Material *ma = ED_space_image_composite_material_get(G_MAIN, sima->image)) {
       if (BKE_paint_material_combined_cache_size_get(*ma, *r_width, *r_height)) {
+        return;
+      }
+      /* Before the first evaluation a stand-in canvas image is 64x64 by design: it is a lookup key,
+       * not the canvas. The stack's own size is what the first preview will be built at. */
+      if (ma->paint_layers_canvas_image == sima->image) {
+        const int side = (ma->paint_layers_image_size > 0) ? ma->paint_layers_image_size : 4096;
+        *r_width = side;
+        *r_height = side;
         return;
       }
     }

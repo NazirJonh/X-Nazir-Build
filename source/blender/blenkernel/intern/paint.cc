@@ -4812,6 +4812,126 @@ bool BKE_paint_principled_channel_image_get(Object &ob,
   return true;
 }
 
+/** The map of \a layer itself that best stands for its look, or null when it has none. */
+static Image *paint_material_layer_display_image(const MaterialPaintLayer &layer)
+{
+  /* The same order as #BKE_paint_material_preferred_display_image: a colour map before a scalar,
+   * and the tangent-space Normal and Alpha maps last. */
+  static const eMaterialPaintChannel priority[] = {
+      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+      PAINT_MATERIAL_CHANNEL_METALLIC,
+      PAINT_MATERIAL_CHANNEL_ROUGHNESS,
+      PAINT_MATERIAL_CHANNEL_SPECULAR,
+      PAINT_MATERIAL_CHANNEL_EMISSION,
+      PAINT_MATERIAL_CHANNEL_NORMAL,
+      PAINT_MATERIAL_CHANNEL_ALPHA,
+  };
+  for (const eMaterialPaintChannel channel : priority) {
+    for (const int i : IndexRange(layer.channels_num)) {
+      if (layer.channels[i].channel == channel && layer.channels[i].image != nullptr) {
+        return layer.channels[i].image;
+      }
+    }
+  }
+  /* Any map, so a channel this list does not name -- AO or a channel the material added later --
+   * still makes the composite reachable. */
+  for (const int i : IndexRange(layer.channels_num)) {
+    if (layer.channels[i].image != nullptr) {
+      return layer.channels[i].image;
+    }
+  }
+  return nullptr;
+}
+
+/** The first map in \a layer, its corrections or its mask items. */
+static Image *paint_material_row_display_image(const MaterialPaintLayer &layer)
+{
+  if (Image *image = paint_material_layer_display_image(layer)) {
+    return image;
+  }
+  for (const MaterialPaintLayer &effect : layer.effects) {
+    if (Image *image = paint_material_layer_display_image(effect)) {
+      return image;
+    }
+  }
+  for (const MaterialPaintLayer &item : layer.mask_stack) {
+    if (Image *image = paint_material_layer_display_image(item)) {
+      return image;
+    }
+  }
+  return nullptr;
+}
+
+Image *BKE_paint_material_composite_display_image(Material &ma)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return nullptr;
+  }
+  /* The active row's map is what the editor would have shown before this was row-independent, and
+   * is the one the user is most likely working on now. */
+  if (const MaterialPaintLayer *active = BKE_paint_layers_active_layer_get(ma)) {
+    if (Image *image = paint_material_row_display_image(*active)) {
+      return image;
+    }
+  }
+  Image *found = nullptr;
+  BKE_paint_layers_foreach(
+      ma, [&](const MaterialPaintLayer &layer, const MaterialPaintLayer * /*parent*/) -> bool {
+        found = paint_material_row_display_image(layer);
+        return found == nullptr;
+      });
+  return found;
+}
+
+Image *BKE_paint_material_composite_canvas_image_ensure(Main &bmain, Material &ma)
+{
+  if (!BKE_paint_layers_is_layered(ma)) {
+    return nullptr;
+  }
+  /* A map is the real canvas when the material has one: a stand-in would only make the editor point
+   * at a blank image instead of the layer the user paints. */
+  if (Image *image = BKE_paint_material_composite_display_image(ma)) {
+    return image;
+  }
+  if (ma.paint_layers_canvas_image != nullptr) {
+    return ma.paint_layers_canvas_image;
+  }
+
+  /* The composite is found through an image, and a stack of Gradient/Fill/Material rows may hold
+   * none. A tiny generated image stands for the canvas: only the lookup and the size the editor
+   * starts from use it, the pixels are shaded from the stack. No fake user: a material that goes
+   * away takes the last user with it and the image is purged like any other orphan. */
+  char name[192];
+  BLI_snprintf(name, sizeof(name), "%s Composite Canvas", ma.id.name + 2);
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(&bmain,
+                                        64,
+                                        64,
+                                        name,
+                                        32,
+                                        false,
+                                        IMA_GENTYPE_BLANK,
+                                        black,
+                                        false,
+                                        false,
+                                        false);
+  if (image == nullptr) {
+    return nullptr;
+  }
+  ma.paint_layers_canvas_image = image;
+  return image;
+}
+
+bool BKE_paint_material_composite_canvas_image_is(Main &bmain, const Image &image)
+{
+  for (const Material &ma : bmain.materials) {
+    if (ma.paint_layers_canvas_image == &image) {
+      return true;
+    }
+  }
+  return false;
+}
+
 Image *BKE_paint_material_preferred_display_image(Object &ob)
 {
   /* Base Color first, then the other created maps, Normal and Alpha last so a missing color map

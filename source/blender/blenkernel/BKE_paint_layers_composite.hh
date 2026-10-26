@@ -153,6 +153,10 @@ bool BKE_paint_layers_correction_blend_is_normal(const MaterialPaintLayer &effec
  * \param size: the side of the square canvas, for a set that owns no map to say it.
  * \param iuser: the ImageUser naming \a tile_number, given to every map; it must outlive the row. A
  * correction whose map has no such tile lays nothing on it and is left out.
+ * \param context_surface: the surface an Object or a Generated Gradient correction reads the texel's
+ * coordinate through, the way the 2D preview does (#ED_space_image_gradient_preview_sync). A UV
+ * Gradient needs none; a 3D one without a surface falls back to the approximate view, so a bake
+ * passes what #BKE_paint_layers_corrections_bake was handed.
  * \return false when no correction lays anything in \a channel on that tile.
  */
 bool BKE_paint_layers_corrections_row_describe(const Material &ma,
@@ -161,7 +165,9 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
                                                int size,
                                                const ImageUser *iuser,
                                                int tile_number,
-                                               PaintMaterialCompositeImageLayer &r_row);
+                                               PaintMaterialCompositeImageLayer &r_row,
+                                               const std::shared_ptr<const PaintMaterialCompositeSurface>
+                                                   &context_surface = nullptr);
 
 /**
  * Describe the slice \a reader lays in \a channel, without rendering it: the same entry

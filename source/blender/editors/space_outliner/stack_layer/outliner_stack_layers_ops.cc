@@ -842,8 +842,8 @@ void OUTLINER_OT_stack_layer_correction_to_texture(wmOperatorType *ot)
   ot->name = "Convert to Texture";
   ot->idname = "OUTLINER_OT_stack_layer_correction_to_texture";
   ot->description =
-      "Bake a Fill or Material correction into a Paint correction texture. Irreversible: the "
-      "undo history is cleared";
+      "Bake a Fill, Material or Gradient correction into a Paint correction texture. Irreversible: "
+      "the undo history is cleared";
   ot->invoke = stack_correction_texture_invoke;
   ot->exec = stack_corrections_bake_exec;
   ot->poll = stack_correction_texture_poll;

@@ -217,6 +217,11 @@ bool material_bake_source_is_baking(const Image &image);
  * One channel to bake into its own #Image. v1 carries only the channel; an object, a UV map or a
  * socket override are the documented seam for mesh-space and arbitrary-socket bakes and go here
  * without touching #material_bake_to_images's signature.
+ *
+ * NOTE: a merge with an Object or a Generated Gradient runs on the CPU surface
+ * #BKE_paint_layers_gradient_surface_build. Its tolerances are the 0..1 UV square (no UDIM beyond
+ * 1001), the nearest texel, the last triangle winning an overlap, islands padded to hide their
+ * seam and a surface clamped to 4096 on a larger canvas.
  */
 struct BakeTargetSpec {
   eMaterialPaintChannel channel;

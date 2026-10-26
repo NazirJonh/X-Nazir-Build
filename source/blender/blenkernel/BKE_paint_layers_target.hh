@@ -35,6 +35,7 @@ struct Main;
 struct Material;
 struct MaterialPaintLayer;
 struct MaterialPaintLayerChannel;
+struct Mesh;
 struct Object;
 struct PaintModeSettings;
 struct ReportList;
@@ -332,30 +333,66 @@ Image *BKE_paint_layers_mask_stack_merge(Main &bmain,
 /**
  * What baking \a selected asks of the user: 0 when it cannot be baked as selected (not corrections
  * of one row, not next to each other, a kind with no colour of its own, or a Paint correction on its
- * own, which is a texture already), 1 for a single Fill or Material correction (a conversion to a
- * texture), 2 for two or more (a merge). A shape test for menus: locks and blends are left to
- * #BKE_paint_layers_corrections_bake, which reports them.
+ * own, which is a texture already), 1 for a single Fill, Material or Gradient correction (a
+ * conversion to a texture), 2 for two or more (a merge). A shape test for menus: locks, blends and
+ * the object a 3D Gradient needs are left to #BKE_paint_layers_corrections_bake, which reports
+ * them.
  */
 int BKE_paint_layers_corrections_bake_kind(Material &ma, Span<MaterialPaintLayer *> selected);
 
 /**
+ * Whether baking \a selected reads an Object or a Generated Gradient line: such a line lays through
+ * the surface of a concrete object, so the caller has to hand the bake one (the evaluated object and
+ * its evaluated mesh, see #BKE_paint_layers_corrections_bake). A disabled correction, or one whose
+ * channels the set lays nothing in, asks for nothing.
+ */
+bool BKE_paint_layers_corrections_surface_needed(Material &ma,
+                                                 Span<MaterialPaintLayer *> selected);
+
+/**
+ * The evaluated object a 3D Gradient correction reads its surface through.
+ *
+ * An Object or a Generated Gradient lays through the geometry of one concrete object, so the bake
+ * has to be handed the object the line was drawn in: the caller resolves both pointers from the
+ * evaluated depsgraph, never from the original data, and passes them together. Null when the
+ * selection needs no surface at all (see #BKE_paint_layers_corrections_surface_needed).
+ */
+struct CorrectionsBakeSurface {
+  /** The evaluated object; its object-space and generated coordinates match the shader's. */
+  const Object *object = nullptr;
+  /** The evaluated mesh of #object. */
+  const Mesh *mesh = nullptr;
+};
+
+/**
  * The refusals of #BKE_paint_layers_corrections_bake that need no render, answered up front: shape,
- * locks, a Paint correction on its own, the blend of the lowest correction of a channel. A caller
- * that renders Material corrections first asks this before paying for the render. A refusal is
- * reported to \a reports. A Material correction that is not rendered yet is not a refusal here.
+ * locks, a Paint correction on its own, the blend of the lowest correction of a channel, and the
+ * surface an Object or a Generated Gradient lays through. A caller that renders Material corrections
+ * first asks this before paying for the render. A refusal is reported to \a reports. A Material
+ * correction that is not rendered yet is not a refusal here.
+ *
+ * \a surface is the evaluated object a 3D Gradient line reads (see
+ * #BKE_paint_layers_corrections_surface_needed); both of its pointers are null when the selection
+ * needs no surface. A selection that needs one and got none is a refusal here: the bake cannot
+ * invent the object the line was drawn in.
  */
 bool BKE_paint_layers_corrections_bake_precheck(Material &ma,
                                                 Span<MaterialPaintLayer *> selected,
-                                                ReportList *reports);
+                                                ReportList *reports,
+                                                const CorrectionsBakeSurface &surface = {});
 /**
  * Bake the content corrections \a selected (one row's, next to each other) into a single Paint
  * correction: a map per channel they lay in, holding what they lay together over nothing, stacked so
- * that the upper covers the lower as the render shows it. Fill and Material corrections become
- * textures this way, and so does one of them on its own.
+ * that the upper covers the lower as the render shows it. Fill, Material and Gradient corrections
+ * become textures this way, and so does one of them on its own. A Gradient bakes in every space: a
+ * UV line through the texel's own UV, and an Object or a Generated one through the surface in
+ * \a surface (both pointers null when the selection needs no surface, refused when it needs one
+ * and got none).
  *
  * The new correction takes the place of the topmost of \a selected, blends with Normal at full
  * opacity, and becomes the active row; the corrections it replaces are removed and their maps become
- * orphans. UDIM maps are baked tile by tile.
+ * orphans. UDIM maps are baked tile by tile; a 3D Gradient is refused on tiles beyond 1001, the UV
+ * square its surface covers.
  *
  * Refused, with the reason reported to \a reports, when the shape is wrong (see
  * #BKE_paint_layers_corrections_bake_kind), a lock blocks one of them (the same lock a stroke
@@ -369,7 +406,8 @@ bool BKE_paint_layers_corrections_bake_precheck(Material &ma,
 MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
                                                       Material &ma,
                                                       Span<MaterialPaintLayer *> selected,
-                                                      ReportList *reports);
+                                                      ReportList *reports,
+                                                      const CorrectionsBakeSurface &surface = {});
 
 /**
  * Free the maps a one-way bake or merge left without a user once the shader tree that still held

@@ -2489,7 +2489,9 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
                                                const int size,
                                                const ImageUser *iuser,
                                                const int tile_number,
-                                               PaintMaterialCompositeImageLayer &r_row)
+                                               PaintMaterialCompositeImageLayer &r_row,
+                                               const std::shared_ptr<const PaintMaterialCompositeSurface>
+                                                   &context_surface)
 {
   r_row = PaintMaterialCompositeImageLayer();
   /* The same shape a Paint row kept only for its corrections takes (#composite_row_source_describe):
@@ -2502,7 +2504,8 @@ bool BKE_paint_layers_corrections_row_describe(const Material &ma,
       eMaterialPaintChannel(channel));
   for (const MaterialPaintLayer *effect : corrections) {
     const int64_t before = r_row.content_corrections.size();
-    composite_effect_append(ma, *effect, channel, 1.0f, nullptr, false, false, nullptr, r_row);
+    composite_effect_append(
+        ma, *effect, channel, 1.0f, nullptr, false, false, context_surface, r_row);
     if (r_row.content_corrections.size() == before) {
       continue;
     }

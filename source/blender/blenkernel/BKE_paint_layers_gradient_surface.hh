@@ -17,11 +17,16 @@
  *
  * The builder is deliberately separate from #BKE_paint_layers_composite_image_layers: the latter
  * only samples the #PaintMaterialCompositeSurface, so a caller that already has one (a test, a
- * future asynchronous builder) needs no object at all.
+ * future asynchronous builder) needs no object at all. The 2D preview reads the cached
+ * #BKE_paint_layers_gradient_surface_get; a corrections bake reads the one-shot
+ * #BKE_paint_layers_gradient_surface_build.
  *
  * Known limitations: only the 0..1 UV square is rasterized (no UDIM tiles), and overlapping UV
- * islands are resolved deterministically by the last triangle that covers a texel. The surface is
- * a preview aid, not a bake.
+ * islands are resolved deterministically by the last triangle that covers a texel. For the preview
+ * that is an aid; for a bake it is the tolerance the merged map carries. A bake also grows the
+ * islands outward (#BKE_paint_layers_gradient_surface_build's `padding_texels`), so bilinear
+ * filtering and mipmaps do not blend the empty side of a UV border into the island (see the NOTE
+ * on #BakeTargetSpec).
  */
 
 #include <cstdint>
@@ -55,6 +60,32 @@ BKE_paint_layers_gradient_surface_get(const Object &object,
                                       const Mesh &mesh,
                                       const char *uv_map_name,
                                       int size);
+
+/**
+ * The one-shot UV-space surface of a corrections bake (#BKE_paint_layers_corrections_bake): the
+ * same rasterization as #BKE_paint_layers_gradient_surface_get, but built for the caller alone and
+ * never cached -- the bake follows the canvas it writes, which a preview-size cache entry must not
+ * pin in memory.
+ *
+ * \param size: requested square resolution, clamped to 256..4096. The surface carries the position
+ *              grid and the valid mask (13 bytes a texel), plus the orco grid unless
+ *              \a need_generated is false (25 bytes a texel): about 400 MiB at 4096, held only
+ *              for as long as the bake runs.
+ * \param padding_texels: how far the islands are grown outward by copying their nearest valid
+ *                        texel, one ring a pass. A written map is read with bilinear filtering and
+ *                        mipmaps, which would otherwise blend the empty side of every UV border
+ *                        into the island as a seam; the preview samples nearest and passes 0.
+ * \param need_generated: store the #CD_ORCO sample per texel. Only a Generated Gradient reads it,
+ *                        and it is a third of the surface's memory, so a bake without one passes
+ *                        false; the texture-space box alone still answers an undeformed surface.
+ */
+std::shared_ptr<const PaintMaterialCompositeSurface>
+BKE_paint_layers_gradient_surface_build(const Object &object,
+                                        const Mesh &mesh,
+                                        const char *uv_map_name,
+                                        int size,
+                                        int padding_texels = 0,
+                                        bool need_generated = true);
 
 /**
  * The UV map the generated shader reads as `Texture Coordinate.UV`: the render-active/default map,

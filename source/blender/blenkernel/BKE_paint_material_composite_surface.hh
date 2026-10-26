@@ -27,8 +27,9 @@ namespace blender {
  * Used only by the 2D Image Editor preview of Object/Generated gradients.
  *
  * The rasterizer is the caller's (the Image Editor builds and caches one per object); the
- * evaluator only samples it. Sampling is nearest-texel, so a texel outside the UV islands never
- * borrows a position from a valid neighbour.
+ * evaluator only samples it. Sampling is nearest-texel; a texel outside the UV islands borrows a
+ * position only when the rasterizer padded them for a bake
+ * (#BKE_paint_layers_gradient_surface_build).
  *
  * Known limitations: only UVs in the 0..1 square are represented (no UDIM tiles), and overlapping
  * UV islands are resolved by the rasterizer's last-triangle-wins rule, which is deterministic but

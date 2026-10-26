@@ -29,6 +29,7 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
@@ -42,10 +43,12 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
+#include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_layers_gradient_surface.hh"
 #include "BKE_paint_layers_object_mask.hh"
 #include "BKE_paint_layers_target.hh"
 #include "BKE_paint_material_resolve.hh"
@@ -64,6 +67,8 @@
 #include "BLI_uuid.h"
 
 #include "BLT_translation.hh"
+
+#include "DEG_depsgraph_query.hh"
 
 #include "IMB_imbuf_types.hh"
 
@@ -2290,6 +2295,146 @@ class PaintLayersStackSource final : public StackSource,
     return rows;
   }
 
+  /** Whether \a object has \a ma in one of its material slots, object overrides included. */
+  static bool object_uses_material(const Object &object, const Material &ma)
+  {
+    Object *object_mut = const_cast<Object *>(&object);
+    for (int slot = 0; slot < object.totcol; slot++) {
+      if (BKE_object_material_get(object_mut, short(slot + 1)) == &ma) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether \a a and \a b shade the same surface: same mesh data and the same modifier stack, so a
+   * linked duplicate does not warn about a Gradient line it shares.
+   */
+  static bool object_same_bake_geometry(const Object &a, const Object &b)
+  {
+    if (a.data == nullptr || a.data != b.data) {
+      return false;
+    }
+    const ModifierData *md_a = static_cast<const ModifierData *>(a.modifiers.first);
+    const ModifierData *md_b = static_cast<const ModifierData *>(b.modifiers.first);
+    while (md_a != nullptr && md_b != nullptr) {
+      if (md_a->type != md_b->type) {
+        return false;
+      }
+      md_a = md_a->next;
+      md_b = md_b->next;
+    }
+    return md_a == nullptr && md_b == nullptr;
+  }
+
+  /**
+   * Resolve the evaluated object a 3D Gradient correction lays through, the way the Image Editor's
+   * 2D preview resolves it (#ED_space_image_gradient_preview_sync): the active mesh that uses
+   * \a material, its evaluated object and evaluated mesh. False, with the reason reported, when
+   * the selection needs one and the context cannot name it; \a r_surface stays null when the
+   * selection needs none.
+   */
+  static bool corrections_bake_surface_resolve(bContext &C,
+                                               Material &material,
+                                               const Span<MaterialPaintLayer *> rows,
+                                               CorrectionsBakeSurface &r_surface,
+                                               Object *&r_active_object)
+  {
+    r_surface = {};
+    r_active_object = nullptr;
+    if (!BKE_paint_layers_corrections_surface_needed(material, rows)) {
+      return true;
+    }
+    ReportList *reports = CTX_wm_reports(&C);
+    Object *active_object = CTX_data_active_object(&C);
+    if (active_object == nullptr) {
+      BKE_report(reports,
+                 RPT_ERROR,
+                 "A Gradient correction in Object or Generated space needs the object it was "
+                 "drawn in: no object is active");
+      return false;
+    }
+    if (active_object->type != OB_MESH || !object_uses_material(*active_object, material)) {
+      BKE_reportf(reports,
+                  RPT_ERROR,
+                  "A Gradient correction in Object or Generated space needs the object it was "
+                  "drawn in: the active object \"%s\" is not a mesh that uses this material",
+                  active_object->id.name + 2);
+      return false;
+    }
+    const Depsgraph *depsgraph = CTX_data_expect_evaluated_depsgraph(&C);
+    const Object *object_eval =
+        depsgraph != nullptr ? DEG_get_evaluated<Object>(depsgraph, active_object) : nullptr;
+    const Mesh *mesh =
+        object_eval != nullptr ? BKE_object_get_evaluated_mesh(object_eval) : nullptr;
+    if (mesh == nullptr) {
+      BKE_report(reports,
+                 RPT_ERROR,
+                 "The active object's evaluated mesh is not available yet; let the dependency "
+                 "graph update and try again");
+      return false;
+    }
+    if (BKE_paint_layers_gradient_uv_map_name(*mesh).is_empty()) {
+      BKE_reportf(reports,
+                  RPT_ERROR,
+                  "The active object \"%s\" has no UV map a Gradient correction in Object or "
+                  "Generated space could be baked over",
+                  active_object->id.name + 2);
+      return false;
+    }
+    r_active_object = active_object;
+    r_surface.object = object_eval;
+    r_surface.mesh = mesh;
+    return true;
+  }
+
+  /**
+   * Warn that other objects of the file also use the material: each shades its own Object or
+   * Generated line, so the merged map, made over \a surface, may not match them.
+   */
+  static void corrections_bake_report_other_users(bContext &C,
+                                                  Main &bmain,
+                                                  const Material &material,
+                                                  const CorrectionsBakeSurface &surface,
+                                                  const Object *active_object)
+  {
+    if (surface.object == nullptr) {
+      return;
+    }
+    std::string other_users;
+    int other_users_num = 0;
+    for (Object &other : bmain.objects) {
+      if (other.type != OB_MESH || &other == active_object ||
+          !object_uses_material(other, material))
+      {
+        continue;
+      }
+      if (active_object != nullptr && object_same_bake_geometry(other, *active_object)) {
+        continue;
+      }
+      other_users_num++;
+      if (other_users_num <= 3) {
+        if (!other_users.empty()) {
+          other_users += ", ";
+        }
+        other_users += other.id.name + 2;
+      }
+    }
+    if (other_users_num > 3) {
+      other_users += ", ...";
+    }
+    if (other_users_num == 0) {
+      return;
+    }
+    BKE_reportf(CTX_wm_reports(&C),
+                RPT_WARNING,
+                "The material is also used by other objects (%s), whose Object or Generated "
+                "line may differ from \"%s\"",
+                other_users.c_str(),
+                surface.object->id.name + 2);
+  }
+
   int rows_correction_bake_kind(bContext & /*C*/,
                                 const StackFocus & /*focus*/,
                                 ID &owner,
@@ -2317,8 +2462,24 @@ class PaintLayersStackSource final : public StackSource,
         layers_mask_edit_end_if_active(C, material, *row_owner);
       }
     }
+    /* The shape comes first: a set that cannot be baked at all is refused for that, not for the
+     * object a 3D Gradient would need. */
+    if (BKE_paint_layers_corrections_bake_kind(material, rows) == 0) {
+      BKE_paint_layers_corrections_bake_precheck(material, rows, CTX_wm_reports(&C));
+      return -1;
+    }
+    /* An Object or a Generated Gradient reads the surface of a concrete object, which only an
+     * object can name: the active one, resolved the way the Image Editor's 2D preview resolves it
+     * (#ED_space_image_gradient_preview_sync). */
+    CorrectionsBakeSurface surface;
+    Object *active_object = nullptr;
+    if (!corrections_bake_surface_resolve(C, material, rows, surface, active_object)) {
+      return -1;
+    }
     /* The refusals that need no render come first: a render is the expensive part. */
-    if (!BKE_paint_layers_corrections_bake_precheck(material, rows, CTX_wm_reports(&C))) {
+    if (!BKE_paint_layers_corrections_bake_precheck(
+            material, rows, CTX_wm_reports(&C), surface))
+    {
       return -1;
     }
     /* A Material correction shows most of its channels live through the shader graph, which the CPU
@@ -2335,9 +2496,19 @@ class PaintLayersStackSource final : public StackSource,
           *bmain, material, /*force_preview=*/true, render_rows, /*blocking=*/true);
     }
     MaterialPaintLayer *merged = BKE_paint_layers_corrections_bake(
-        *bmain, material, rows, CTX_wm_reports(&C));
+        *bmain, material, rows, CTX_wm_reports(&C), surface);
     if (merged == nullptr) {
       return -1;
+    }
+    if (surface.object != nullptr) {
+      /* The merged map reads one object's geometry: reproducible, and worth saying whose. */
+      BKE_reportf(CTX_wm_reports(&C),
+                  RPT_INFO,
+                  "Merged the corrections over the object \"%s\"",
+                  surface.object->id.name + 2);
+      /* A warning, not a refusal: the merge is reproducible over the object it names, but
+       * another user of the material shades its own Object or Generated line. */
+      corrections_bake_report_other_users(C, *bmain, material, surface, active_object);
     }
     layers_texpaint_slots_refresh(C);
     WM_event_add_notifier(&C, NC_MATERIAL | ND_SHADING, &material.id);

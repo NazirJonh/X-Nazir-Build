@@ -11,6 +11,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -28,8 +29,11 @@
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_string_ref.hh"
+#include "BLI_time.h"
 #include "BLI_vector.hh"
 #include "BLI_virtual_array.hh"
+
+#include "MEM_guardedalloc.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_customdata.hh"
@@ -49,6 +53,14 @@ namespace {
 constexpr int surface_cache_capacity = 2;
 constexpr int surface_size_min = 256;
 constexpr int surface_size_max = 1024;
+
+/**
+ * The one-shot surface of a corrections bake follows the canvas it writes, which a 4K map makes
+ * 4096²: two float3 grids plus the valid mask, 25 bytes a texel, about 400 MiB next to the bake's
+ * own strip buffers. Never cached, so only one is alive at a time.
+ */
+constexpr int bake_surface_size_min = 256;
+constexpr int bake_surface_size_max = 4096;
 
 /**
  * Content revisions are process-global and monotonic: a cache entry may be evicted and rebuilt
@@ -121,15 +133,128 @@ uint64_t surface_key(const Object &object,
   return key;
 }
 
-/**  texspace_location /  texspace_size and  bbox_valid come from the caller's box lookup. */
-std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Object &object,
-                                                             const Mesh &mesh,
+/**
+ * The identity a surface is keyed on, with the texture space that key was hashed with. The
+ * texture space is computed once and shared by the key and the build, so a lookup and the build it
+ * misses cannot disagree about it.
+ */
+struct SurfaceIdentity {
+  uint64_t key = 0;
+  float3 texspace_location = float3(0.0f);
+  float3 texspace_size = float3(1.0f);
+  bool bbox_valid = false;
+};
+
+static SurfaceIdentity surface_identity(const Object &object,
+                                        const Mesh &mesh,
+                                        const char *uv_map_name,
+                                        const int clamped_size)
+{
+  SurfaceIdentity identity;
+  identity.bbox_valid = BKE_paint_layers_gradient_generated_box_get(
+      &object, mesh, identity.texspace_location, identity.texspace_size);
+  identity.key = surface_key(object,
+                             mesh,
+                             uv_map_name,
+                             clamped_size,
+                             identity.texspace_location,
+                             identity.texspace_size);
+  return identity;
+}
+
+/**
+ * Grow every rasterized island outward by \a passes texels, one ring a pass: each empty texel takes
+ * the position of its nearest valid neighbour, and the writes of a pass only become sources in the
+ * next one, so the result does not depend on the traversal order.
+ *
+ * A written map is read with bilinear filtering and mipmaps; an empty texel beside an island would
+ * otherwise blend into it as a dark or transparent seam. Edge neighbours go before diagonal ones,
+ * which keeps a straight island border straight. Each pass is bounded by the current valid box, so
+ * the cost follows the grown area, not the whole canvas.
+ */
+static void surface_pad_islands(MutableSpan<float3> positions,
+                                MutableSpan<float3> generated_positions,
+                                MutableSpan<uint8_t> valid,
+                                const int width,
+                                const int height,
+                                const int passes,
+                                int valid_min_x,
+                                int valid_min_y,
+                                int valid_max_x,
+                                int valid_max_y)
+{
+  /* Four edge neighbours first, then the four diagonals. */
+  constexpr int offsets[8][2] = {
+      {-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+  const bool copy_generated = !generated_positions.is_empty();
+  struct TexelCopy {
+    int dst;
+    int src;
+  };
+  Vector<TexelCopy> copies;
+  for (int pass = 0; pass < passes; pass++) {
+    copies.clear();
+    const int x_min = std::max(0, valid_min_x - 1);
+    const int x_max = std::min(width - 1, valid_max_x + 1);
+    const int y_min = std::max(0, valid_min_y - 1);
+    const int y_max = std::min(height - 1, valid_max_y + 1);
+    for (int y = y_min; y <= y_max; y++) {
+      for (int x = x_min; x <= x_max; x++) {
+        const int index = y * width + x;
+        if (valid[index] != 0) {
+          continue;
+        }
+        for (const auto &offset : offsets) {
+          const int nx = x + offset[0];
+          const int ny = y + offset[1];
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+            continue;
+          }
+          const int neighbour = ny * width + nx;
+          if (valid[neighbour] != 0) {
+            copies.append({index, neighbour});
+            break;
+          }
+        }
+      }
+    }
+    if (copies.is_empty()) {
+      break;
+    }
+    for (const TexelCopy &copy : copies) {
+      positions[copy.dst] = positions[copy.src];
+      if (copy_generated) {
+        generated_positions[copy.dst] = generated_positions[copy.src];
+      }
+      valid[copy.dst] = 1;
+      const int dst_x = copy.dst % width;
+      const int dst_y = copy.dst / width;
+      valid_min_x = std::min(valid_min_x, dst_x);
+      valid_max_x = std::max(valid_max_x, dst_x);
+      valid_min_y = std::min(valid_min_y, dst_y);
+      valid_max_y = std::max(valid_max_y, dst_y);
+    }
+  }
+}
+
+/**
+ * Rasterize \a mesh's render-active UV map into a surface. \a texspace_location, \a texspace_size
+ * and \a bbox_valid come from the caller's box lookup, shared with the key the surface is cached
+ * under.
+ *
+ * \param padding_texels: island growth for a map read with filtering (#surface_pad_islands).
+ * \param store_generated: keep the #CD_ORCO sample per texel, which only a Generated Gradient
+ *                         reads; without it the texture-space box is the generated coordinate.
+ */
+std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
                                                              const char *uv_map_name,
                                                              const int size,
                                                              const uint64_t key,
                                                              const float3 &texspace_location,
                                                              const float3 &texspace_size,
-                                                             const bool bbox_valid)
+                                                             const bool bbox_valid,
+                                                             const int padding_texels,
+                                                             const bool store_generated)
 {
   const bke::AttributeAccessor attributes = mesh.attributes();
   const auto uv_attr = attributes.lookup<float2>(uv_map_name, bke::AttrDomain::Corner);
@@ -150,10 +275,11 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Object &objec
 
   /* CD_ORCO is what EEVEE's `Generated` output reads. It is absent on an undeformed mesh, where
    * the texspace bbox below produces the same coordinate; on a deformed mesh it holds the
-   * pre-deformation position and must not be replaced by the deformed one. */
+   * pre-deformation position and must not be replaced by the deformed one. Only a Generated
+   * Gradient row reads it, so a bake without one skips the third grid. */
   const float3 *orco = static_cast<const float3 *>(
       CustomData_get_layer(&mesh.vert_data, CD_ORCO));
-  if (orco != nullptr && mesh.verts_num > 0) {
+  if (store_generated && orco != nullptr && mesh.verts_num > 0) {
     surface->generated_positions = Vector<float3>(texel_count, float3(0.0f));
   }
 
@@ -175,6 +301,11 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Object &objec
   MutableSpan<float3> dst_generated = surface->generated_positions.as_mutable_span();
   const bool has_orco = !dst_generated.is_empty();
   const float inv_size = 1.0f / float(size);
+  /* The box the islands grew into, so a padding pass walks it instead of the whole canvas. */
+  int valid_min_x = size;
+  int valid_min_y = size;
+  int valid_max_x = -1;
+  int valid_max_y = -1;
 
   for (const int3 &tri : corner_tris) {
     const int c0 = tri.x, c1 = tri.y, c2 = tri.z;
@@ -250,8 +381,25 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Object &objec
           dst_generated[index] = o0 * w0 + o1 * w1 + o2 * w2;
         }
         dst_valid[index] = 1;
+        valid_min_x = std::min(valid_min_x, x);
+        valid_max_x = std::max(valid_max_x, x);
+        valid_min_y = std::min(valid_min_y, y);
+        valid_max_y = std::max(valid_max_y, y);
       }
     }
+  }
+
+  if (padding_texels > 0 && valid_max_x >= valid_min_x) {
+    surface_pad_islands(dst_positions,
+                        dst_generated,
+                        dst_valid,
+                        size,
+                        size,
+                        padding_texels,
+                        valid_min_x,
+                        valid_min_y,
+                        valid_max_x,
+                        valid_max_y);
   }
 
   return surface;
@@ -285,48 +433,87 @@ std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_s
     return nullptr;
   }
   const int clamped_size = std::clamp(size, surface_size_min, surface_size_max);
-
-  /* The texture space is computed once and shared by the key and the build, so the lookup and the
-   * build cannot disagree about it. */
-  float3 texspace_location(0.0f);
-  float3 texspace_size(1.0f);
-  const bool bbox_valid = BKE_paint_layers_gradient_generated_box_get(
-      &object, mesh, texspace_location, texspace_size);
-  const uint64_t key = surface_key(
-      object, mesh, uv_map_name, clamped_size, texspace_location, texspace_size);
+  const SurfaceIdentity identity = surface_identity(object, mesh, uv_map_name, clamped_size);
 
   SurfaceCache &cache = surface_cache();
   {
     std::lock_guard lock(cache.mutex);
-    if (const SurfaceCacheEntry *found = cache.entries.lookup_ptr(key)) {
+    if (const SurfaceCacheEntry *found = cache.entries.lookup_ptr(identity.key)) {
       return found->surface;
     }
   }
 
   /* Rasterizing is O(UV area), so it runs outside the lock: other objects' lookups never wait on
    * it. Two threads missing the same key build twice and the first insert wins. */
-  std::shared_ptr<PaintMaterialCompositeSurface> built = surface_build(object,
-                                                                       mesh,
+  std::shared_ptr<PaintMaterialCompositeSurface> built = surface_build(mesh,
                                                                        uv_map_name,
                                                                        clamped_size,
-                                                                       key,
-                                                                       texspace_location,
-                                                                       texspace_size,
-                                                                       bbox_valid);
+                                                                       identity.key,
+                                                                       identity.texspace_location,
+                                                                       identity.texspace_size,
+                                                                       identity.bbox_valid,
+                                                                       0,
+                                                                       true);
   if (!built) {
     return nullptr;
   }
 
   std::lock_guard lock(cache.mutex);
-  if (const SurfaceCacheEntry *found = cache.entries.lookup_ptr(key)) {
+  if (const SurfaceCacheEntry *found = cache.entries.lookup_ptr(identity.key)) {
     return found->surface;
   }
   if (cache.entries.size() >= surface_cache_capacity && !cache.order.is_empty()) {
     cache.entries.remove(cache.order.first());
     cache.order.remove(0);
   }
-  cache.entries.add(key, SurfaceCacheEntry{object.id.session_uid, built});
-  cache.order.append(key);
+  cache.entries.add(identity.key, SurfaceCacheEntry{object.id.session_uid, built});
+  cache.order.append(identity.key);
+  return built;
+}
+
+std::shared_ptr<const PaintMaterialCompositeSurface> BKE_paint_layers_gradient_surface_build(
+    const Object &object,
+    const Mesh &mesh,
+    const char *uv_map_name,
+    const int size,
+    const int padding_texels,
+    const bool need_generated)
+{
+  if (uv_map_name == nullptr || uv_map_name[0] == '\0') {
+    return nullptr;
+  }
+  /* Built for the one caller that holds it, for as long as the bake runs: the canvas it follows
+   * may be larger than any preview surface, so nothing of it enters the cache. */
+  const int clamped_size = std::clamp(size, bake_surface_size_min, bake_surface_size_max);
+  const SurfaceIdentity identity = surface_identity(object, mesh, uv_map_name, clamped_size);
+  const double time_start = BLI_time_now_seconds();
+  std::shared_ptr<PaintMaterialCompositeSurface> built = surface_build(mesh,
+                                                                       uv_map_name,
+                                                                       clamped_size,
+                                                                       identity.key,
+                                                                       identity.texspace_location,
+                                                                       identity.texspace_size,
+                                                                       identity.bbox_valid,
+                                                                       padding_texels,
+                                                                       need_generated);
+  /* A diagnostic for the sizes that make a Merge stall: the rasterization is single-threaded and
+   * a 4096 surface is hundreds of MiB next to the bake's own strips. Kept on by default like the
+   * other `[paint-layers ...]` traces, and only for the sizes worth measuring. */
+  if (built && clamped_size >= 2048) {
+    const double seconds = BLI_time_now_seconds() - time_start;
+    const double surface_mib = double(built->positions.size()) * double(sizeof(float3)) /
+                               (1024.0 * 1024.0);
+    const double generated_mib = double(built->generated_positions.size()) *
+                                 double(sizeof(float3)) / (1024.0 * 1024.0);
+    printf("[paint-layers bake surface] size=%d padding=%d time=%.3fs surface=%.1fMiB "
+           "generated=%.1fMiB peak=%.1fMiB\n",
+           clamped_size,
+           padding_texels,
+           seconds,
+           surface_mib,
+           generated_mib,
+           double(MEM_get_peak_memory()) / (1024.0 * 1024.0));
+  }
   return built;
 }
 

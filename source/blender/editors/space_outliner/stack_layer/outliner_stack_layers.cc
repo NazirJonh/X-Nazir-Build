@@ -809,8 +809,8 @@ wmOperatorStatus stack_corrections_merge_invoke(bContext *C,
       op,
       IFACE_("Merge Corrections"),
       IFACE_("The selected corrections will be baked into one Paint correction, stacked as they "
-             "look now. Fill and Material corrections among them become textures. This cannot be "
-             "undone: the whole undo history of this file is cleared."),
+             "look now. Fill, Material and Gradient corrections among them become textures. This "
+             "cannot be undone: the whole undo history of this file is cleared."),
       IFACE_("Merge"),
       ui::AlertIcon::Warning,
       true);
@@ -825,8 +825,8 @@ wmOperatorStatus stack_correction_texture_invoke(bContext *C,
       op,
       IFACE_("Convert to Texture"),
       IFACE_("The correction will be baked into a Paint correction texture and stop being a "
-             "flat colour or a material. This cannot be undone: the whole undo history of this "
-             "file is cleared."),
+             "flat colour, a material or a gradient. This cannot be undone: the whole undo "
+             "history of this file is cleared."),
       IFACE_("Convert"),
       ui::AlertIcon::Warning,
       true);

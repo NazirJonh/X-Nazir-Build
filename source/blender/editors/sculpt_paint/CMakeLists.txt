@@ -62,6 +62,7 @@ set(SRC
   paint_gradient_core.cc
   paint_gradient_curve.cc
   paint_gradient_gizmo.cc
+  paint_gradient_tool_ops.cc
   paint_layers_gradient.cc
   paint_layers_gradient_gizmo.cc
   paint_ops.cc
@@ -194,6 +195,7 @@ set(SRC
   mesh/sculpt_automasking.cc
   mesh/sculpt_boundary.cc
   mesh/sculpt_cloth.cc
+  mesh/sculpt_color_gradient.cc
   mesh/sculpt_cursor.cc
   mesh/sculpt_detail.cc
   mesh/sculpt_dyntopo.cc

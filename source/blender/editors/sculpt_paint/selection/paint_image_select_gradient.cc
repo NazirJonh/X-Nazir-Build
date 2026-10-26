@@ -16,6 +16,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "BLI_array.hh"
+#include "BLI_hash.hh"
 #include "BLI_listbase.h"
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_math_color.h"
@@ -76,6 +77,7 @@
 
 #include "../../space_image/image_runtime.hh"
 #include "../paint_gradient_curve.hh"
+#include "../paint_gradient_gizmo.hh"
 #include "../mesh/paint_material_source.hh"
 #include "../paint_intern.hh"
 #include "paint_image_select_gradient.hh"
@@ -85,6 +87,8 @@ namespace blender {
 
 /* Short alias for the curve-polyline namespace nested under sculpt_paint. */
 namespace gradient_curve = ed::sculpt_paint::gradient_curve;
+/* Short alias for the shared gradient line/handles namespace, like the tools above. */
+namespace gradient_gizmo = ed::sculpt_paint::gradient_gizmo;
 
 static uint64_t image_paint_gradient_settings_revision = 0;
 
@@ -513,6 +517,11 @@ struct GradientRowTaskData {
    * expensive per-pixel colorband / sRGB / color-space evaluation out of the rasterization
    * loop. */
   Array<float4> color_lut;
+  /**
+   * Precomputed t -> value table of the channel's value ramp (#ImagePaintGradientTarget::
+   * value_ramp), grey in the map's 0..1 space. Empty when the target has no value ramp.
+   */
+  Array<float> value_lut;
   rcti work_region;
 };
 
@@ -561,6 +570,30 @@ static void image_paint_gradient_build_color_lut(const ImagePaintGradientParams 
   }
 }
 
+/**
+ * Fill the per-pixel lookup tables once per rasterization pass: the color table (with the value
+ * ramp's grey table next to it) is what keeps the pixel loop to a table lookup. The value table
+ * stays empty for a target without a value ramp.
+ */
+static void image_paint_gradient_build_luts(GradientRowTaskData &task_data)
+{
+  task_data.color_lut.reinitialize(GRADIENT_COLOR_LUT_SIZE);
+  image_paint_gradient_build_color_lut(
+      task_data.params, task_data.byte_colorspace, task_data.color_lut);
+
+  const ColorBand *value_ramp = task_data.target.value_ramp;
+  if (value_ramp == nullptr) {
+    return;
+  }
+  task_data.value_lut.reinitialize(GRADIENT_COLOR_LUT_SIZE);
+  const float inv = 1.0f / float(GRADIENT_COLOR_LUT_SIZE - 1);
+  for (const int i : IndexRange(GRADIENT_COLOR_LUT_SIZE)) {
+    float rgba[4];
+    BKE_colorband_evaluate(value_ramp, float(i) * inv, rgba);
+    task_data.value_lut[i] = rgba[0];
+  }
+}
+
 static const float4 &image_paint_gradient_lut_sample(const GradientRowTaskData &data,
                                                      const float t)
 {
@@ -569,6 +602,16 @@ static const float4 &image_paint_gradient_lut_sample(const GradientRowTaskData &
   int idx = int(t * float(n - 1) + 0.5f);
   idx = std::clamp(idx, 0, n - 1);
   return data.color_lut[idx];
+}
+
+/** The value ramp's grey at \a t (see #GradientRowTaskData::value_lut). */
+static float image_paint_gradient_value_lut_sample(const GradientRowTaskData &data, const float t)
+{
+  const int n = int(data.value_lut.size());
+  BLI_assert(n > 0);
+  int idx = int(t * float(n - 1) + 0.5f);
+  idx = std::clamp(idx, 0, n - 1);
+  return data.value_lut[idx];
 }
 
 static float image_paint_gradient_row_eval_t(const GradientRowTaskData &data,
@@ -617,6 +660,14 @@ static void image_paint_gradient_composite_pixel_float(const GradientRowTaskData
   }
 
   if (data.target.kind == ImagePaintGradientTargetKind::MapValue) {
+    if (!data.value_lut.is_empty()) {
+      /* The channel paints through its value ramp: the ramp's grey replaces the channel's single
+       * value, composited the same way a color ramp would be. */
+      const float v = image_paint_gradient_value_lut_sample(data, t);
+      gradient_blend_value_over(
+          dst_px, v, data.params.opacity * sel_w, data.params.blend_mode);
+      return;
+    }
     /* Same fade as the sculpt gradient: the channel value at the start, the original at the end. */
     const float weight = (1.0f - t) * data.params.opacity * sel_w;
     for (int i = 0; i < 3; i++) {
@@ -665,6 +716,16 @@ static void image_paint_gradient_composite_pixel_byte(const GradientRowTaskData 
   }
 
   if (data.target.kind == ImagePaintGradientTargetKind::MapValue) {
+    if (!data.value_lut.is_empty()) {
+      /* Scalar and normal maps are Non-Color, so the ramp value is written as is. */
+      const float v = image_paint_gradient_value_lut_sample(data, t);
+      float dst_f[4];
+      rgba_uchar_to_float(dst_f, dst_px);
+      gradient_blend_value_over(
+          dst_f, v, data.params.opacity * sel_w, data.params.blend_mode);
+      rgba_float_to_uchar(dst_px, dst_f);
+      return;
+    }
     /* Scalar and normal maps are Non-Color, so the packed value is written as is. */
     const float weight = (1.0f - t) * data.params.opacity * sel_w;
     float dst_f[4];
@@ -733,10 +794,9 @@ static void image_paint_gradient_rasterize(GradientRowTaskData &task_data)
     return;
   }
 
-  /* Build the t -> color table once; the rasterization loop only does a table lookup per pixel. */
-  task_data.color_lut.reinitialize(GRADIENT_COLOR_LUT_SIZE);
-  image_paint_gradient_build_color_lut(
-      task_data.params, task_data.byte_colorspace, task_data.color_lut);
+  /* Build the t -> color and t -> value tables once; the rasterization loop only does a table
+   * lookup per pixel. */
+  image_paint_gradient_build_luts(task_data);
 
   TaskParallelSettings settings;
   BLI_parallel_range_settings_defaults(&settings);
@@ -1005,6 +1065,13 @@ struct ImageSelectGradientState : public PaintSelectFloatingSession {
   uint64_t applied_settings_revision = 0;
   /** #image_select_gradient_canvases_key of the last preview pass. */
   uint64_t applied_canvases_key = 0;
+  /**
+   * The ramps this session's stop drags edited, each with the stop positions it had before the
+   * first of them: a cancel puts them back. Recorded per drag rather than once per session,
+   * because the gizmo channel can be switched mid-session and the next drag then edits another
+   * ramp; a ramp is snapshotted once, at the first drag that touches it.
+   */
+  Vector<gradient_gizmo::GradientStopSnapshot> stops_restore;
 
   /** #bToolRef.idname of the tool that owned the session at start (empty if it could not be
    * resolved). The modal commits and tears down once the active tool no longer matches this, so
@@ -1504,6 +1571,11 @@ static Vector<GradientCanvasSpec> image_select_gradient_canvases_get(bContext *C
       }
       else {
         spec.target.value = float4(target.value, target.value, target.value, 1.0f);
+        /* The channel paints through its own value ramp when it has one. The getter also rules
+         * out the channels that cannot have one: a colour channel reads the tool's colour ramp,
+         * and a Normal is a packed tangent no ramp can drive. */
+        spec.target.value_ramp = BKE_paint_gradient_value_ramp_get(
+            scene->toolsettings->paint_mode, target.channel);
       }
     }
     specs.append(spec);
@@ -1562,8 +1634,8 @@ static bool image_select_gradient_canvases_prepare(bContext *C,
  */
 static uint64_t image_select_gradient_canvases_key(bContext *C, const SpaceImage *sima)
 {
-  uint64_t key = 1469598103934665603ull;
-  const auto mix = [&key](const uint64_t value) { key = (key ^ value) * 1099511628211ull; };
+  uint64_t key = fnv1a_offset_basis;
+  const auto mix = [&key](const uint64_t value) { key = fnv1a_mix(key, value); };
   for (const GradientCanvasSpec &spec : image_select_gradient_canvases_get(C, sima)) {
     mix(uint64_t(reinterpret_cast<uintptr_t>(spec.image)));
     mix(uint64_t(spec.target.kind));
@@ -1572,6 +1644,9 @@ static uint64_t image_select_gradient_canvases_key(bContext *C, const SpaceImage
       std::memcpy(&bits, &spec.target.value[i], sizeof(bits));
       mix(bits);
     }
+    /* The pointer identifies the ramp (its own contents are tracked by the settings revision the
+     * RNA update bumps); the pointer changes when a ramp is created, replaced or dropped. */
+    mix(uint64_t(reinterpret_cast<uintptr_t>(spec.target.value_ramp)));
   }
   return key;
 }
@@ -1867,6 +1942,175 @@ static void draw_gradient_diamond(const uint pos, const float center[2], const f
   immEnd();
 }
 
+/* -------------------------------------------------------------------- */
+/** \name Ramp display (the gizmo shows what the paint reads)
+ * \{ */
+
+/**
+ * The ramp the gradient's gizmo shows and drags: the selected scalar channel's value ramp (grey),
+ * else the tool's colour ramp. Null when neither exists (the tool was never initialized): the
+ * overlay keeps its neutral colors.
+ */
+static ColorBand *image_select_gradient_display_ramp(Scene *scene, bool &r_use_grey)
+{
+  return gradient_gizmo::display_ramp_for_channel(scene->toolsettings->paint_mode,
+                                                 &scene->toolsettings->imapaint.gradient_colorband,
+                                                 r_use_grey);
+}
+
+/**
+ * Fill the shared gizmo styling from the display ramp: ramp colors on the line and handles, and
+ * (when the stops are draggable) one marker per stop. \a midpoint bends the stop markers the way
+ * the paint does. False when there is no ramp: the caller draws neutrally.
+ */
+static bool image_select_gradient_gizmo_options(Scene *scene,
+                                                const float midpoint,
+                                                gradient_gizmo::DrawOptions &r_options)
+{
+  bool use_grey = false;
+  ColorBand *ramp = image_select_gradient_display_ramp(scene, use_grey);
+  if (ramp == nullptr) {
+    return false;
+  }
+  /* Same look as the Gradient Layer's gizmo: the larger origin disc and the direction arrow. */
+  r_options.start_radius_scale = 0.9f;
+  r_options.direction_arrow = true;
+  gradient_gizmo::apply_ramp(r_options, *ramp, use_grey, /*stop_handles=*/true, midpoint);
+  return true;
+}
+
+/** The display ramp's color at \a t, in display space, the way brush colors are. */
+static void image_select_gradient_ramp_color_at(const ColorBand *ramp,
+                                                const float t,
+                                                const bool use_grey,
+                                                float r_rgb[3])
+{
+  const float4 color = (ramp != nullptr) ? gradient_gizmo::ramp_display_color(*ramp, t, use_grey) :
+                                           float4(1.0f);
+  r_rgb[0] = color.x;
+  r_rgb[1] = color.y;
+  r_rgb[2] = color.z;
+}
+
+/**
+ * The curve's core in the display ramp's colors: one sample per point, at the point's arc-length
+ * position. Owns its shader and vertex format, so the caller keeps its own program bound.
+ */
+static void draw_gradient_ramp_polyline(const ColorBand &ramp,
+                                        const bool use_grey,
+                                        const ImagePaintGradientRepeat repeat,
+                                        const float midpoint,
+                                        const gradient_curve::GradientCurve2D &curve,
+                                        const Span<float2> &region_pts)
+{
+  const Span<float> arc = curve.arc_lengths();
+  const float curve_length = curve.length();
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  const uint color = GPU_vertformat_attr_add(
+      format, "color", gpu::VertAttrType::SFLOAT_32_32_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_SMOOTH_COLOR);
+  GPU_line_width(1.3f);
+  immBegin(GPU_PRIM_LINE_STRIP, region_pts.size());
+  for (const int i : region_pts.index_range()) {
+    const float t = image_paint_gradient_finish_t(
+        (curve_length > 0.0f) ? arc[i] / curve_length : 0.0f, repeat, midpoint);
+    const float4 color_at = gradient_gizmo::ramp_display_color(ramp, t, use_grey);
+    immAttr4f(color, color_at.x, color_at.y, color_at.z, 0.95f);
+    immVertex2f(pos, region_pts[i].x, region_pts[i].y);
+  }
+  immEnd();
+  immUnbindProgram();
+}
+
+/**
+ * The curve's start / end / midpoint markers and its editable control points. Owns its shader and
+ * vertex format, so it can follow a pass that drew with another program.
+ */
+static void draw_gradient_curve_markers(const ARegion &region,
+                                        const ImageSelectGradientState &state,
+                                        const ImagePaintGradientRepeat repeat,
+                                        const ColorBand *ramp,
+                                        const bool use_grey,
+                                        const Span<float2> &region_pts)
+{
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+  const float2 mid_px = state.curve->position_at_s(state.midpoint * state.curve->length());
+  const float2 mid_uv = image_select_gradient_curve_uv_from_px(&state, mid_px);
+  const float p0[2] = {region_pts.first().x, region_pts.first().y};
+  const float p1[2] = {region_pts.last().x, region_pts.last().y};
+  float pm[2];
+  ui::view2d_view_to_region_fl(&region.v2d, mid_uv.x, mid_uv.y, &pm[0], &pm[1]);
+
+  /* The markers take the ramp's own colors, like the Gradient Layer's handles. */
+  float start_rgb[3];
+  float end_rgb[3];
+  float mid_rgb[3];
+  if (ramp != nullptr) {
+    image_select_gradient_ramp_color_at(
+        ramp, image_paint_gradient_finish_t(0.0f, repeat, state.midpoint), use_grey, start_rgb);
+    image_select_gradient_ramp_color_at(
+        ramp, image_paint_gradient_finish_t(1.0f, repeat, state.midpoint), use_grey, end_rgb);
+    image_select_gradient_ramp_color_at(ramp,
+                                        image_paint_gradient_finish_t(
+                                            state.midpoint, repeat, state.midpoint),
+                                        use_grey,
+                                        mid_rgb);
+  }
+  else {
+    copy_v3_fl(start_rgb, 1.0f);
+    copy_v3_fl(end_rgb, 1.0f);
+    copy_v3_fl(mid_rgb, 1.0f);
+  }
+
+  GPU_line_width(3.0f);
+  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
+  draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
+  draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
+  draw_gradient_diamond(pos, pm, 6.0f);
+
+  GPU_line_width(1.5f);
+  immUniformColor4f(start_rgb[0], start_rgb[1], start_rgb[2], 0.95f);
+  draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
+  immUniformColor4f(end_rgb[0], end_rgb[1], end_rgb[2], 0.95f);
+  draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
+  immUniformColor4f(mid_rgb[0], mid_rgb[1], mid_rgb[2], 0.95f);
+  draw_gradient_diamond(pos, pm, 6.0f);
+
+  /* Control points of the raw polyline (editable): hollow circles, filled when selected and
+   * enlarged when hovered. Endpoints keep their bigger start / end markers above and still get
+   * their selection fill here. Hidden while a new stroke is being drawn: the raw points are still
+   * hundreds of unsimplified samples that would bury the curve. */
+  if (!state.curve_is_drawing) {
+    for (const int i : state.curve_points_uv.index_range()) {
+      const bool selected = state.curve_selected_points.contains(i);
+      const bool hovered = (state.curve_hover_point == i);
+      const float radius = hovered ? GRADIENT_CURVE_POINT_HOVER_RADIUS_PX :
+                                     GRADIENT_CURVE_POINT_RADIUS_PX;
+      float cx, cy;
+      ui::view2d_view_to_region_fl(
+          &region.v2d, state.curve_points_uv[i].x, state.curve_points_uv[i].y, &cx, &cy);
+      if (selected) {
+        immUniformColor4f(0.2f, 0.9f, 1.0f, 0.55f);
+        imm_draw_circle_fill_2d(pos, cx, cy, radius + 1.0f, 16);
+      }
+      GPU_line_width(3.0f);
+      immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
+      imm_draw_circle_wire_2d(pos, cx, cy, radius, 16);
+      GPU_line_width(1.5f);
+      immUniformColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+      imm_draw_circle_wire_2d(pos, cx, cy, radius, 16);
+    }
+  }
+
+  immUnbindProgram();
+}
+
+/** \} */
+
 static void draw_gradient_vector_overlay(const bContext *C, ARegion *region, void *arg)
 {
   ImageSelectGradientState *state = static_cast<ImageSelectGradientState *>(arg);
@@ -1880,15 +2124,11 @@ static void draw_gradient_vector_overlay(const bContext *C, ARegion *region, voi
 
   GPU_line_smooth(true);
   GPU_blend(GPU_BLEND_ALPHA);
-  GPUVertFormat *format = immVertexFormat();
-  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
-  immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
   if (is_curve) {
     /* The drawn polyline replaces the straight gradient vector; the start / end markers sit at
      * its ends and the midpoint diamond at its arc-length position. */
     if (state->curve == nullptr) {
-      immUnbindProgram();
       GPU_blend(GPU_BLEND_NONE);
       GPU_line_smooth(false);
       return;
@@ -1903,6 +2143,9 @@ static void draw_gradient_vector_overlay(const bContext *C, ARegion *region, voi
       region_pts.append(float2(rx, ry));
     }
 
+    GPUVertFormat *format = immVertexFormat();
+    const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32);
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
     for (const int pass : IndexRange(2)) {
       GPU_line_width((pass == 0) ? 3.0f : 1.5f);
       if (pass == 0) {
@@ -1917,105 +2160,70 @@ static void draw_gradient_vector_overlay(const bContext *C, ARegion *region, voi
       }
       immEnd();
     }
-
-    const float2 mid_px = state->curve->position_at_s(state->midpoint * state->curve->length());
-    const float2 mid_uv = image_select_gradient_curve_uv_from_px(state, mid_px);
-
-    const float p0[2] = {region_pts.first().x, region_pts.first().y};
-    const float p1[2] = {region_pts.last().x, region_pts.last().y};
-    float pm[2];
-    ui::view2d_view_to_region_fl(&region->v2d, mid_uv.x, mid_uv.y, &pm[0], &pm[1]);
-
-    GPU_line_width(3.0f);
-    immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-    draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
-    draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
-    draw_gradient_diamond(pos, pm, 6.0f);
-
-    GPU_line_width(1.5f);
-    immUniformColor4f(1.0f, 1.0f, 1.0f, 0.95f);
-    draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
-    immUniformColor4f(1.0f, 0.85f, 0.0f, 0.95f);
-    draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
-    immUniformColor4f(0.2f, 0.9f, 1.0f, 0.95f);
-    draw_gradient_diamond(pos, pm, 6.0f);
-
-    /* Control points of the raw polyline (editable): hollow circles, filled when selected and
-     * enlarged when hovered. Endpoints keep their bigger start / end markers above and still
-     * get their selection fill here. Hidden while a new stroke is being drawn: the raw points are
-     * still hundreds of unsimplified samples that would bury the curve. */
-    if (!state->curve_is_drawing) {
-      for (const int i : state->curve_points_uv.index_range()) {
-        const bool selected = state->curve_selected_points.contains(i);
-        const bool hovered = (state->curve_hover_point == i);
-        const float radius = hovered ? GRADIENT_CURVE_POINT_HOVER_RADIUS_PX :
-                                       GRADIENT_CURVE_POINT_RADIUS_PX;
-        float cx, cy;
-        ui::view2d_view_to_region_fl(
-            &region->v2d, state->curve_points_uv[i].x, state->curve_points_uv[i].y, &cx, &cy);
-        if (selected) {
-          immUniformColor4f(0.2f, 0.9f, 1.0f, 0.55f);
-          imm_draw_circle_fill_2d(pos, cx, cy, radius + 1.0f, 16);
-        }
-        GPU_line_width(3.0f);
-        immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-        imm_draw_circle_wire_2d(pos, cx, cy, radius, 16);
-        GPU_line_width(1.5f);
-        immUniformColor4f(1.0f, 1.0f, 1.0f, 0.95f);
-        imm_draw_circle_wire_2d(pos, cx, cy, radius, 16);
-      }
-    }
-
     immUnbindProgram();
+
+    /* The core reads as the ramp: the color the paint gives at every point's arc-length position.
+     * Each pass owns its shader, so the two below can swap the program without touching the one
+     * above. */
+    bool use_grey = false;
+    const ColorBand *display_ramp = (scene != nullptr) ?
+                                        image_select_gradient_display_ramp(
+                                            const_cast<Scene *>(scene), use_grey) :
+                                        nullptr;
+    /* "is_curve" already dereferences the tool settings, but the overlay guards on the scene as a
+     * whole; a missing one simply leaves the parameter unwrapped. */
+    const ImagePaintGradientRepeat repeat =
+        (scene != nullptr) ?
+            ImagePaintGradientRepeat(scene->toolsettings->imapaint.gradient_repeat) :
+            ImagePaintGradientRepeat::None;
+    if (display_ramp != nullptr) {
+      draw_gradient_ramp_polyline(
+          *display_ramp, use_grey, repeat, state->midpoint, *state->curve, region_pts);
+    }
+    draw_gradient_curve_markers(
+        *region, *state, repeat, display_ramp, use_grey, region_pts);
+
     GPU_blend(GPU_BLEND_NONE);
     GPU_line_smooth(false);
     return;
   }
 
-  /* Draw handles even when tiles is empty (degenerate/zero-length gradient at drag start). */
+  /* The vector gradient is drawn and picked through the same shared shapes as the Gradient
+   * Layer's gizmo and the sculpt Color Gradient's interactive session: the line, the handles and
+   * the ramp stops take the display ramp's colors (the selected channel's value ramp, else the
+   * tool's color ramp). Without a ramp the shared draw keeps its neutral look. */
+  gradient_gizmo::DrawOptions options;
+  if (scene != nullptr) {
+    image_select_gradient_gizmo_options(const_cast<Scene *>(scene), state->midpoint, options);
+  }
 
-  const float2 mid_uv = image_select_gradient_mid_uv(state);
+  float2 p0;
+  float2 p1;
+  ui::view2d_view_to_region_fl(&region->v2d, state->start_uv.x, state->start_uv.y, &p0.x, &p0.y);
+  ui::view2d_view_to_region_fl(&region->v2d, state->end_uv.x, state->end_uv.y, &p1.x, &p1.y);
 
-  float p0[2], p1[2], pm[2];
-  ui::view2d_view_to_region_fl(&region->v2d, state->start_uv.x, state->start_uv.y, &p0[0], &p0[1]);
-  ui::view2d_view_to_region_fl(&region->v2d, state->end_uv.x, state->end_uv.y, &p1[0], &p1[1]);
-  ui::view2d_view_to_region_fl(&region->v2d, mid_uv.x, mid_uv.y, &pm[0], &pm[1]);
+  gradient_gizmo::draw(p0, p1, state->midpoint, options);
 
-  GPU_line_width(3.0f);
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.55f);
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2f(pos, p0[0], p0[1]);
-  immVertex2f(pos, p1[0], p1[1]);
-  immEnd();
-
-  GPU_line_width(1.5f);
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.9f);
-  immBegin(GPU_PRIM_LINES, 2);
-  immVertex2f(pos, p0[0], p0[1]);
-  immVertex2f(pos, p1[0], p1[1]);
-  immEnd();
-
-  GPU_line_width(3.0f);
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-  draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
-  draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
-
-  GPU_line_width(1.5f);
-  immUniformColor4f(1.0f, 1.0f, 1.0f, 0.95f);
-  draw_gradient_polyline_circle(pos, p0, 7.0f, 24);
-  immUniformColor4f(1.0f, 0.85f, 0.0f, 0.95f);
-  draw_gradient_polyline_circle(pos, p1, 9.0f, 24);
-
-  GPU_line_width(3.0f);
-  immUniformColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-  draw_gradient_diamond(pos, pm, 6.0f);
-  GPU_line_width(1.5f);
-  immUniformColor4f(0.2f, 0.9f, 1.0f, 0.95f);
-  draw_gradient_diamond(pos, pm, 6.0f);
-
-  immUnbindProgram();
   GPU_blend(GPU_BLEND_NONE);
   GPU_line_smooth(false);
+}
+
+/**
+ * Record the stop positions of the ramp a stop drag is about to edit, so a cancel can put them
+ * back. Called at the start of the drag, not at the start of the session: the gizmo channel can be
+ * switched mid-session, and the next drag then edits another ramp.
+ */
+static void image_select_gradient_stops_capture(bContext *C, ImageSelectGradientState &state)
+{
+  Scene *scene = CTX_data_scene(C);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return;
+  }
+  bool use_grey = false;
+  ColorBand *ramp = image_select_gradient_display_ramp(scene, use_grey);
+  if (ramp != nullptr) {
+    gradient_gizmo::capture_stop_positions(state.stops_restore, *ramp);
+  }
 }
 
 static void image_select_gradient_begin_session(bContext *C,
@@ -2093,6 +2301,9 @@ static void image_select_gradient_restore_session_backup(bContext *C,
   for (const ImageSelectGradientTileData &tile : state->tiles) {
     image_select_gradient_restore_tile_backup(C, tile.image, tile);
   }
+  /* The ramps are tool settings: the pixel backups cannot roll them back, so the stop positions
+   * of every ramp this session's drags touched are restored explicitly. */
+  gradient_gizmo::restore_stop_positions(state->stops_restore);
 }
 
 void image_select_gradient_session_end_for_takeover(bContext *C, SpaceImage *sima)
@@ -2183,6 +2394,9 @@ enum class GradientDragMode {
   Mid,
   /** Curve: dragging the selected control point(s) of an already drawn curve. */
   PointDrag,
+  /** A ramp stop marker slides along the gradient vector (see #GradientDragData::drag_stop_index).
+   */
+  StopDrag,
 };
 
 struct GradientDragData {
@@ -2195,6 +2409,8 @@ struct GradientDragData {
   Vector<float2> drag_orig_points;
   float2 drag_press_uv = float2(0.0f);
   float2 last_collect_px = float2(0.0f);
+  /** #GradientDragMode::StopDrag: index into the display ramp's sorted stops. */
+  int drag_stop_index = -1;
 };
 
 static constexpr float GRADIENT_HANDLE_HIT_RADIUS_PX = 15.0f;
@@ -2203,6 +2419,10 @@ static constexpr float GRADIENT_CURVE_COLLECT_DIST_PX = 4.0f;
 /** Clamp range of the gradient's halfway point, keeping both gradient stops visible. */
 static constexpr float GRADIENT_MIDPOINT_MIN = 0.05f;
 static constexpr float GRADIENT_MIDPOINT_MAX = 0.95f;
+
+/** Squared length of the shortest gradient line, in UV units, a ramp stop can be dragged on (UV
+ * spans 0..1 per tile, so this is a far smaller line than the viewport's one pixel). */
+static constexpr float GRADIENT_STOP_DRAG_MIN_LEN_SQ = 1e-12f;
 
 /**
  * Resolve a Curve-mode press over the floating session: grab the midpoint handle, select and drag
@@ -2660,6 +2880,43 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
       ED_region_tag_redraw(region);
       return OPERATOR_RUNNING_MODAL;
     }
+    if (!is_curve && region != nullptr) {
+      /* The ramp stops first (the smaller markers, through the shared hit test the other gradient
+       * gizmos use), then the start / end / mid handles through their own test below. */
+      gradient_gizmo::DrawOptions options;
+      Scene *scene_mod = CTX_data_scene(C);
+      if (scene_mod != nullptr &&
+          image_select_gradient_gizmo_options(scene_mod, state->midpoint, options) &&
+          options.stop_handles)
+      {
+        float2 start_px;
+        float2 end_px;
+        ui::view2d_view_to_region_fl(
+            &region->v2d, state->start_uv.x, state->start_uv.y, &start_px.x, &start_px.y);
+        ui::view2d_view_to_region_fl(
+            &region->v2d, state->end_uv.x, state->end_uv.y, &end_px.x, &end_px.y);
+        const float2 mval_px(float(event->xy[0] - region->winrct.xmin),
+                             float(event->xy[1] - region->winrct.ymin));
+        const int hit = gradient_gizmo::hit_test(start_px,
+                                                 end_px,
+                                                 state->midpoint,
+                                                 mval_px,
+                                                 GRADIENT_HANDLE_HIT_RADIUS_PX,
+                                                 /*midpoint_handle=*/true,
+                                                 options.stop_positions,
+                                                 options.stop_count);
+        if (gradient_gizmo::is_stop_handle(hit)) {
+          data->drag_mode = GradientDragMode::StopDrag;
+          data->drag_stop_index = hit - gradient_gizmo::STOP_FIRST;
+          /* Snapshot the ramp this drag edits, not the one the session started with: the gizmo
+           * channel may have been switched since, and a cancel restores exactly the stops the
+           * drags of this session moved. */
+          image_select_gradient_stops_capture(C, *state);
+          ED_region_tag_redraw(region);
+          return OPERATOR_RUNNING_MODAL;
+        }
+      }
+    }
     if (image_select_gradient_hit_test_handle(region, event, state->start_uv)) {
       data->drag_mode = GradientDragMode::Start;
     }
@@ -2723,6 +2980,23 @@ static wmOperatorStatus image_select_gradient_modal(bContext *C,
               }
             }
             image_select_gradient_curve_rebuild(state, CTX_data_scene(C)->toolsettings->imapaint);
+            break;
+          }
+          case GradientDragMode::StopDrag: {
+            /* The ramp is tool settings, not pixels: the pixel previews roll back from their own
+             * backups, and a cancel restores the stop positions explicitly (see
+             * #ImageSelectGradientState::stops_restore). A stop drag opens no undo step of its
+             * own, on purpose -- the ramp is a tool setting, not an image edit. */
+            bool use_grey = false;
+            ColorBand *ramp = image_select_gradient_display_ramp(CTX_data_scene(C), use_grey);
+            if (ramp != nullptr) {
+              gradient_gizmo::stop_drag_apply(*ramp,
+                                              data->drag_stop_index,
+                                              state->start_uv,
+                                              state->end_uv,
+                                              uv,
+                                              GRADIENT_STOP_DRAG_MIN_LEN_SQ);
+            }
             break;
           }
           case GradientDragMode::New:

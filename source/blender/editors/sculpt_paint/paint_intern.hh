@@ -990,6 +990,11 @@ void PAINT_OT_vertex_color_invert(wmOperatorType *ot);
 void PAINT_OT_vertex_color_levels(wmOperatorType *ot);
 void PAINT_OT_vertex_color_gradient(wmOperatorType *ot);
 
+/* `paint_gradient_tool_ops.cc` */
+
+void PAINT_OT_gradient_tool_gizmo_channel_set(wmOperatorType *ot);
+void PAINT_OT_gradient_tool_value_ramp_add(wmOperatorType *ot);
+
 /* `paint_vertex_weight_ops.cc` */
 
 void PAINT_OT_weight_from_bones(wmOperatorType *ot);

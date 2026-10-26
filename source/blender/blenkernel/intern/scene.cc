@@ -1547,6 +1547,11 @@ static void scene_blend_write(BlendWriter *writer, ID *id, const void *id_addres
   if (ts->imapaint.shape.stroke_ramp) {
     writer->write_struct(ts->imapaint.shape.stroke_ramp);
   }
+  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    if (ts->paint_mode.gradient_value_ramps[i].ramp) {
+      writer->write_struct(ts->paint_mode.gradient_value_ramps[i].ramp);
+    }
+  }
 
   Editing *ed = sce->ed;
   if (ed) {
@@ -1714,6 +1719,11 @@ static void scene_blend_read_data(BlendDataReader *reader, ID *id)
       BKE_curvemapping_init(sce->toolsettings->imapaint.shape.fill_profile);
     }
     BLO_read_struct(reader, ColorBand, &sce->toolsettings->imapaint.shape.stroke_ramp);
+
+    /* Relink the gradient tools' per-channel value ramps. */
+    for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+      BLO_read_struct(reader, ColorBand, &sce->toolsettings->paint_mode.gradient_value_ramps[i].ramp);
+    }
 
     BLO_read_struct_list(
         reader, ColorPickerPalette, &sce->toolsettings->color_picker_palettes);
@@ -2173,6 +2183,13 @@ ToolSettings *BKE_toolsettings_copy(ToolSettings *toolsettings, const int flag)
     BLI_addtail(&ts->paint_mode.material_paint_brush_presets, dst_preset);
   }
 
+  for (int i = 0; i < PAINT_MATERIAL_CHANNEL_NUM; i++) {
+    if (toolsettings->paint_mode.gradient_value_ramps[i].ramp) {
+      ts->paint_mode.gradient_value_ramps[i].ramp = MEM_dupalloc(
+          toolsettings->paint_mode.gradient_value_ramps[i].ramp);
+    }
+  }
+
   return ts;
 }
 
@@ -2233,6 +2250,8 @@ void BKE_toolsettings_free(ToolSettings *toolsettings)
   if (toolsettings->imapaint.shape.stroke_ramp) {
     MEM_delete(toolsettings->imapaint.shape.stroke_ramp);
   }
+
+  BKE_paint_gradient_value_ramp_free(toolsettings->paint_mode);
 
   /* Color jitter curves in unified paint settings. */
   if (toolsettings->unified_paint_settings.curve_rand_hue) {

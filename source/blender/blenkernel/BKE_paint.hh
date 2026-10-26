@@ -1637,6 +1637,44 @@ float BKE_paint_material_t_from_value(float value_min, float value_max, float va
 /** value' = clamp(min+max-value, min, max) after computing mirror. */
 float BKE_paint_material_value_invert(float value_min, float value_max, float value);
 
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Gradient tools' value ramps (per-channel)
+ *
+ * The Sculpt Color Gradient and the Image Editor selection gradient paint a material's channel
+ * maps through one colour ramp; their scalar channels can additionally paint through a per-channel
+ * grey value ramp, stored scene-wide on #PaintModeSettings and shared by both tools (they paint
+ * the same maps). Mirrors the Gradient Layer's per-channel value ramps.
+ * \{ */
+
+struct PaintModeSettings;
+struct ColorBand;
+
+/**
+ * The value ramp \a channel's map is painted through, or null when it has none (the channel then
+ * keeps the tools' single-value fade) or cannot have one (a colour channel reads the tools' colour
+ * ramp; a Normal cannot be driven by a ramp).
+ */
+ColorBand *BKE_paint_gradient_value_ramp_get(PaintModeSettings &paint_mode,
+                                             eMaterialPaintChannel channel);
+
+/** Read-only variant, for the callers that only draw with or read the ramp. */
+const ColorBand *BKE_paint_gradient_value_ramp_get(const PaintModeSettings &paint_mode,
+                                                   eMaterialPaintChannel channel);
+
+/**
+ * Create the channel's value ramp when missing, seeded with the channel's own range like the
+ * Gradient Layer does, and return it. Null for a channel that cannot have one.
+ */
+ColorBand *BKE_paint_gradient_value_ramp_ensure(PaintModeSettings &paint_mode,
+                                                eMaterialPaintChannel channel);
+
+/** Free every gradient value ramp of the scene's paint mode settings. */
+void BKE_paint_gradient_value_ramp_free(PaintModeSettings &paint_mode);
+
+/** \} */
+
 /**
  * Returns the mesh attribute name for \a channel via
  * #PaintModeSettings.channel_layer_bindings: an add-on-managed layer override (falling back to

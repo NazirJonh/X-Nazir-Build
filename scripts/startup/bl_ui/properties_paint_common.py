@@ -1894,6 +1894,113 @@ def draw_material_paint_channel_toggles(layout, brush, paint, *, show_custom):
     )
 
 
+# The channels the tools' colour ramp drives; every other scalar channel can paint through its
+# own value ramp instead. Normal is neither: a ramp cannot drive a packed tangent.
+_GRADIENT_TOOL_COLOUR_CHANNEL_IDS = frozenset({'BASE_COLOR', 'EMISSION'})
+# Width the gizmo-ramp eye adds to a channel toggle's cell (Blender UI units): the eye sits right
+# before the toggle inside the same cell.
+_GRADIENT_TOOL_CHANNEL_EYE_UI_UNITS_X = 1.3
+
+
+def _gradient_tool_channel_rows(layout, channels, toggle_ids, ramps, paint_mode):
+    """Draw one row per visible channel: the gizmo-ramp eye, then the enable toggle."""
+    flow = layout.grid_flow(
+        row_major=True, columns=0, even_columns=False, even_rows=False, align=False)
+    flow.use_property_split = False
+    flow.use_property_decorate = False
+    for channel_id in toggle_ids:
+        channel = channels.get(channel_id)
+        if channel is None:
+            continue
+        record = ramps.get(channel_id)
+        has_ramp = channel_id in _GRADIENT_TOOL_COLOUR_CHANNEL_IDS or (
+            channel_id != 'NORMAL' and record is not None and record.ramp is not None)
+        col = flow.column(align=False)
+        col.ui_units_x = (_MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X +
+                          _GRADIENT_TOOL_CHANNEL_EYE_UI_UNITS_X)
+        row = col.row(align=True)
+        if channel_id != 'NORMAL':
+            # The eye is always in the layout, even before a channel has a value ramp: it is
+            # disabled while there is no ramp to show (the Gradient Layer's list does the same).
+            gizmo_shown = has_ramp and paint_mode.gradient_gizmo_channel == channel_id
+            eye_row = row.row(align=True)
+            eye_row.enabled = has_ramp
+            eye = eye_row.operator(
+                "paint.gradient_tool_gizmo_channel_set",
+                text="",
+                icon='HIDE_OFF' if gizmo_shown else 'HIDE_ON',
+            )
+            eye.channel = channel_id
+        else:
+            # Normal has no ramp at all; keep its switch in line with the rest.
+            row.label(text="", icon='BLANK1')
+        row.prop(channel, "use", text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id], toggle=True)
+
+
+def _gradient_tool_channel_panels(layout, channels, toggle_ids, ramps,
+                                  color_ramp_owner, color_ramp_prop):
+    """Draw a subpanel per enabled channel: its colour ramp or its own value ramp."""
+    channel_col = layout.column(align=False)
+    first = True
+    for channel_id in toggle_ids:
+        channel = channels.get(channel_id)
+        if channel is None or not channel.use:
+            continue
+        if not first:
+            channel_col.separator()
+        first = False
+        header, panel = channel_col.panel(
+            "gradient_tool_{:s}".format(channel_id.lower()),
+            default_closed=False,
+        )
+        header.label(text=_MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS[channel_id])
+        if not panel:
+            continue
+        if channel_id in _GRADIENT_TOOL_COLOUR_CHANNEL_IDS:
+            panel.template_color_ramp(color_ramp_owner, color_ramp_prop, expand=True)
+            continue
+        record = ramps.get(channel_id)
+        if record is not None and record.ramp is not None:
+            # Value mode keeps Interpolation and the tools menu (Flip, Distribute, Eyedropper,
+            # Reset) and only swaps the active stop's colour picker for the value slider.
+            panel.template_color_ramp(record, "ramp", expand=True, value=True)
+        elif channel_id == 'NORMAL':
+            # No ramp can drive a packed tangent (the Gradient Layer hides Normal from its
+            # generator list for the same reason); the map is painted as the brush paints it.
+            panel.label(text="Normal cannot be driven by a ramp", icon='INFO')
+        else:
+            panel.operator(
+                "paint.gradient_tool_value_ramp_add",
+                icon='ADD',
+                text="Add Value Ramp",
+            ).channel = channel_id
+    if first:
+        layout.label(text="No enabled channels", icon='INFO')
+
+
+def draw_gradient_tool_channels(layout, context, brush, paint, *, show_custom,
+                                color_ramp_owner, color_ramp_prop):
+    """The gradient tools' channel selector, in the Gradient Layer's channel list look.
+
+    One row per visible channel: the gizmo-ramp eye sits right before the enable toggle, so the
+    row reads "what the gizmos show" and "what the tool paints" side by side. The eye is disabled
+    while the channel has no ramp to show (a scalar channel gets one through the Add button in its
+    subpanel); Normal has no ramp at all. Every enabled channel then gets its own subpanel: a
+    colour channel shows the tools' colour ramp, a scalar channel its own grey value ramp.
+    """
+    paint_mode = context.tool_settings.paint_mode
+    material_paint = brush.material_paint if brush is not None else None
+    if material_paint is None:
+        return
+    channels = {channel.channel: channel for channel in material_paint.channels}
+    _visible, toggle_ids = _material_paint_toggle_ids(paint, show_custom)
+    ramps = {record.channel: record for record in paint_mode.gradient_value_ramps}
+
+    _gradient_tool_channel_rows(layout, channels, toggle_ids, ramps, paint_mode)
+    _gradient_tool_channel_panels(
+        layout, channels, toggle_ids, ramps, color_ramp_owner, color_ramp_prop)
+
+
 def _material_paint_channel_socket_color(channel_id):
     """Socket color matching Principled BSDF socket colors."""
     if channel_id in ('BASE_COLOR', 'EMISSION'):

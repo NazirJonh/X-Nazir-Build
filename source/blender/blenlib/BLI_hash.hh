@@ -181,6 +181,20 @@ constexpr uint64_t hash_string(StringRef str)
   return hash;
 }
 
+/**
+ * Offset basis of the 64-bit FNV-1a hash, for folding a handful of fields into one fingerprint
+ * with #fnv1a_mix. Such a fingerprint is only ever compared within a session (it is not stored and
+ * crosses no version), so its exact value is free.
+ */
+constexpr uint64_t fnv1a_offset_basis = 1469598103934665603ull;
+
+/** Fold \a value into the running FNV-1a \a hash. */
+constexpr uint64_t fnv1a_mix(const uint64_t hash, const uint64_t value)
+{
+  constexpr uint64_t prime = 1099511628211ull;
+  return (hash ^ value) * prime;
+}
+
 template<> struct DefaultHash<std::string> {
   /**
    * Take a #StringRef as parameter to support heterogeneous lookups in hash table implementations

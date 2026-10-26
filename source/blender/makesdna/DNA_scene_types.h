@@ -2253,6 +2253,21 @@ enum ePaintGradientToolMode : int8_t {
   PAINT_GRADIENT_TOOL_STROKE = 1,
 };
 
+/**
+ * One material channel's value ramp of the gradient tools (the Sculpt Color Gradient and the Image
+ * Editor selection gradient), mirroring the Gradient Layer's per-channel value ramps. A struct per
+ * channel rather than an array of pointers, because makesdna does not support pointer arrays.
+ */
+struct PaintGradientValueRamp {
+  /**
+   * The grey ramp a scalar channel is painted through, red being the value in the channel map's
+   * 0..1 space (the same convention the Gradient Layer's channel records use). Null until created
+   * (the channel then keeps the single-value fade of the pre-ramp tools); null for the colour
+   * channels, which read the tool's colour ramp, and for Normal, which no ramp can drive.
+   */
+  struct ColorBand *ramp = nullptr;
+};
+
 struct PaintModeSettings {
   /** Source to select canvas from to paint on. */
   ePaintCanvasSource canvas_source = PAINT_CANVAS_SOURCE_MATERIAL;
@@ -2273,7 +2288,20 @@ struct PaintModeSettings {
   char gradient_free = 1;
   /** #ePaintGradientToolMode: Move keeps an accidental stroke from rebuilding the line. */
   int8_t gradient_tool_mode = PAINT_GRADIENT_TOOL_MOVE;
-  char _pad[4] = {};
+  /**
+   * The channel whose ramp the gradient tools' gizmos draw, like the Gradient Layer's
+   * #MaterialPaintLayerGradient.gizmo_channel: a colour channel shows the tool's colour ramp, a
+   * scalar channel its value ramp (reading as grey). A viewport aid; no graph rebuild.
+   */
+  int8_t gradient_gizmo_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  char _pad[3] = {};
+
+  /**
+   * The value ramps of the gradient tools' scalar material channels, indexed by
+   * #eMaterialPaintChannel (see #PaintGradientValueRamp). Shared by both gradient tools, which
+   * paint the same channel maps of the same material.
+   */
+  PaintGradientValueRamp gradient_value_ramps[/*PAINT_MATERIAL_CHANNEL_NUM*/ 10] = {};
 
   /** Selected image when canvas_source=PAINT_CANVAS_SOURCE_IMAGE. */
   Image *canvas_image = nullptr;

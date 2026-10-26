@@ -114,6 +114,7 @@ DEF_ENUM(rna_enum_operator_property_tag_items)
 
 DEF_ENUM(rna_enum_shared_automasking_flag_items)
 DEF_ENUM(rna_enum_material_paint_channel_items)
+DEF_ENUM(rna_enum_gradient_tool_gizmo_channel_items)
 DEF_ENUM(rna_enum_material_paint_channel_flag_items)
 DEF_ENUM(rna_enum_material_paint_layer_color_items)
 DEF_ENUM(rna_enum_material_paint_layers_image_size_items)

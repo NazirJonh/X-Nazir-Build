@@ -10,7 +10,12 @@
 
 #include "BLI_index_range.hh"
 #include "BLI_math_base.hh"
+#include "BLI_math_gradient.hh"
 #include "BLI_math_vector.hh"
+
+#include "BKE_colorband.hh"
+#include "BKE_paint.hh"
+#include "IMB_colormanagement.hh"
 
 #include "GPU_immediate.hh"
 #include "GPU_immediate_util.hh"
@@ -314,6 +319,125 @@ void draw(const float2 &start_px,
   GPU_depth_test(depth_prev);
   GPU_blend(GPU_BLEND_NONE);
   GPU_line_smooth(false);
+}
+
+void apply_ramp(DrawOptions &options,
+                const ColorBand &ramp,
+                const bool use_grey,
+                const bool stop_handles,
+                const float midpoint)
+{
+  options.ramp_colors = true;
+  options.color_start = ramp_display_color(ramp, 0.0f, use_grey);
+  options.color_mid = ramp_display_color(ramp, 0.5f, use_grey);
+  options.color_end = ramp_display_color(ramp, 1.0f, use_grey);
+
+  options.stop_handles = stop_handles;
+  options.stop_count = 0;
+  if (stop_handles) {
+    const int count = math::min(int(ramp.tot), MAX_STOP_HANDLES);
+    for (const int i : IndexRange(count)) {
+      const CBData &stop = ramp.data[i];
+      float linear[3] = {stop.r, stop.g, stop.b};
+      if (use_grey) {
+        linear[0] = linear[1] = linear[2] = stop.r;
+      }
+      float display[3];
+      IMB_colormanagement_scene_linear_to_srgb_v3(display, linear);
+      options.stop_positions[i] = stop_line_position(ramp, i, midpoint);
+      options.stop_colors[i] = float4(display[0], display[1], display[2], stop.a);
+    }
+    options.stop_count = count;
+  }
+}
+
+float4 ramp_display_color(const ColorBand &ramp, const float t, const bool use_grey)
+{
+  float rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  if (ramp.tot > 0) {
+    BKE_colorband_evaluate(&ramp, t, rgba);
+  }
+  float linear[3] = {rgba[0], rgba[1], rgba[2]};
+  if (use_grey) {
+    linear[0] = linear[1] = linear[2] = rgba[0];
+  }
+  float display[3];
+  IMB_colormanagement_scene_linear_to_srgb_v3(display, linear);
+  /* A value ramp is a scalar the shaders read from the red channel; it has no alpha of its own. */
+  return float4(display[0], display[1], display[2], use_grey ? 1.0f : rgba[3]);
+}
+
+ColorBand *display_ramp_for_channel(PaintModeSettings &paint_mode,
+                                    ColorBand *tool_colour_ramp,
+                                    bool &r_use_grey)
+{
+  r_use_grey = false;
+  /* The getter also rejects an out-of-range channel index, a colour channel (which reads the
+   * tool's colour ramp) and Normal (a packed tangent no ramp can drive). */
+  ColorBand *value_ramp = BKE_paint_gradient_value_ramp_get(
+      paint_mode, eMaterialPaintChannel(paint_mode.gradient_gizmo_channel));
+  if (value_ramp != nullptr && value_ramp->tot > 0) {
+    r_use_grey = true;
+    return value_ramp;
+  }
+  if (tool_colour_ramp != nullptr && tool_colour_ramp->tot > 0) {
+    return tool_colour_ramp;
+  }
+  return nullptr;
+}
+
+bool stop_drag_apply(ColorBand &ramp,
+                     const int stop,
+                     const float2 &start,
+                     const float2 &end,
+                     const float2 &mval,
+                     const float min_len_sq)
+{
+  const float2 axis = end - start;
+  const float len_sq = math::length_squared(axis);
+  if (stop < 0 || stop >= ramp.tot || len_sq <= min_len_sq) {
+    return false;
+  }
+  const float t = math::clamp(math::dot(mval - start, axis) / len_sq, 0.0f, 1.0f);
+  const float lo = (stop > 0) ? ramp.data[stop - 1].pos : 0.0f;
+  const float hi = (stop + 1 < ramp.tot) ? ramp.data[stop + 1].pos : 1.0f;
+  ramp.data[stop].pos = math::clamp(t, lo, hi);
+  return true;
+}
+
+void capture_stop_positions(Vector<GradientStopSnapshot> &snapshots, ColorBand &ramp)
+{
+  for (const GradientStopSnapshot &snapshot : snapshots) {
+    if (snapshot.ramp == &ramp) {
+      /* The first drag of a ramp is the one whose "before" a cancel has to restore. */
+      return;
+    }
+  }
+  snapshots.append(GradientStopSnapshot{});
+  GradientStopSnapshot &snapshot = snapshots.last();
+  snapshot.ramp = &ramp;
+  snapshot.count = math::min(int(ramp.tot), MAX_STOP_HANDLES);
+  for (const int i : IndexRange(snapshot.count)) {
+    snapshot.positions[i] = ramp.data[i].pos;
+  }
+}
+
+void restore_stop_positions(const Span<GradientStopSnapshot> &snapshots)
+{
+  for (const GradientStopSnapshot &snapshot : snapshots) {
+    const int count = math::min(snapshot.count, int(snapshot.ramp->tot));
+    for (const int i : IndexRange(count)) {
+      snapshot.ramp->data[i].pos = snapshot.positions[i];
+    }
+  }
+}
+
+float stop_line_position(const ColorBand &ramp, const int index, const float midpoint)
+{
+  if (index < 0 || index >= ramp.tot) {
+    return 0.0f;
+  }
+  return math::gradient_remap_midpoint_inverse(ramp.data[index].pos, midpoint);
 }
 
 }  // namespace blender::ed::sculpt_paint::gradient_gizmo

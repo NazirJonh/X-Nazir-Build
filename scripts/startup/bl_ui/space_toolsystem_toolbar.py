@@ -2354,19 +2354,22 @@ class _defs_sculpt:
                 layout.prop(props, "interactive")
             if (not is_mask_target and
                     context.tool_settings.paint_mode.canvas_source in {'MATERIAL', 'MATERIAL_PAINT'}):
+                show_custom = (
+                    context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT')
                 if region_is_header:
-                    # The header has no room for the toggle strip; the popover keeps the
+                    # The header has no room for the channel list; the popover keeps the
                     # channel choice (the only selector this tool has) one click away.
                     brush = settings.brush
                     if brush is not None and brush.material_paint is not None:
                         layout.popover(
                             "VIEW3D_PT_sculpt_color_gradient_channels", text="Channels")
                 else:
-                    from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
-                    draw_material_paint_channel_toggles(
-                        layout, settings.brush, settings,
-                        show_custom=(
-                            context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT'),
+                    from bl_ui.properties_paint_common import draw_gradient_tool_channels
+                    draw_gradient_tool_channels(
+                        layout, context, settings.brush, settings,
+                        show_custom=show_custom,
+                        color_ramp_owner=settings,
+                        color_ramp_prop="gradient_color_ramp",
                     )
 
         return dict(
@@ -2727,9 +2730,13 @@ class _defs_texture_paint:
                 if context.region.type == 'TOOL_HEADER':
                     layout.popover("IMAGE_PT_paint_select_gradient_channels", text="Channels")
                 else:
-                    from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
-                    draw_material_paint_channel_toggles(
-                        layout, imapaint.brush, imapaint, show_custom=False)
+                    from bl_ui.properties_paint_common import draw_gradient_tool_channels
+                    draw_gradient_tool_channels(
+                        layout, context, imapaint.brush, imapaint,
+                        show_custom=False,
+                        color_ramp_owner=imapaint,
+                        color_ramp_prop="color_ramp",
+                    )
 
         return dict(
             idname="builtin.select_gradient",

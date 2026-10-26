@@ -445,10 +445,15 @@ class VIEW3D_PT_sculpt_color_gradient_channels(Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.tool_settings.sculpt
-        from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
-        draw_material_paint_channel_toggles(
-            layout, settings.brush, settings,
-            show_custom=(context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT'),
+        from bl_ui.properties_paint_common import draw_gradient_tool_channels
+        show_custom = (context.tool_settings.paint_mode.canvas_source == 'MATERIAL_PAINT')
+        # The Gradient Layer's channel list look: the gizmo-ramp eye before each enable toggle,
+        # then a subpanel per enabled channel with the ramp it paints (and shows) through.
+        draw_gradient_tool_channels(
+            layout, context, settings.brush, settings,
+            show_custom=show_custom,
+            color_ramp_owner=settings,
+            color_ramp_prop="gradient_color_ramp",
         )
 
 

@@ -70,4 +70,33 @@ inline float gradient_remap_midpoint(const float t, const float midpoint)
          (-2.0f * u3 + 3.0f * u2) + (u3 - u2) * 0.5f;
 }
 
+/**
+ * Invert #gradient_remap_midpoint: the line parameter a ramp stop at \a position lands on. The
+ * remap is monotone, so a bisection over `[0, 1]` is exact to any practical precision; the cubic
+ * has no closed-form inverse worth the algebra. Used to place ramp stop markers on a gradient
+ * gizmo's line, where the displayed position is the line parameter and the stop position is the
+ * ramp parameter.
+ */
+inline float gradient_remap_midpoint_inverse(const float position, const float midpoint)
+{
+  if (position <= 0.0f) {
+    return 0.0f;
+  }
+  if (position >= 1.0f) {
+    return 1.0f;
+  }
+  float lo = 0.0f;
+  float hi = 1.0f;
+  for (int i = 0; i < 24; i++) {
+    const float mid = 0.5f * (lo + hi);
+    if (gradient_remap_midpoint(mid, midpoint) < position) {
+      lo = mid;
+    }
+    else {
+      hi = mid;
+    }
+  }
+  return 0.5f * (lo + hi);
+}
+
 }  // namespace blender::math

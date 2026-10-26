@@ -3608,6 +3608,8 @@ void ED_operatortypes_paint()
   WM_operatortype_append(PAINT_OT_paint_layer_gradient_space_set);
   WM_operatortype_append(PAINT_OT_paint_layer_gradient_sync_channel);
   WM_operatortype_append(PAINT_OT_paint_layer_gradient_set_gizmo_channel);
+  WM_operatortype_append(PAINT_OT_gradient_tool_gizmo_channel_set);
+  WM_operatortype_append(PAINT_OT_gradient_tool_value_ramp_add);
   WM_operatortype_append(PAINT_OT_add_texture_paint_slot);
   WM_operatortype_append(PAINT_OT_add_simple_uvs);
 

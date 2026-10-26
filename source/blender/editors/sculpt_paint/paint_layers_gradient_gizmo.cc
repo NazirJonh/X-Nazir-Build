@@ -329,51 +329,16 @@ bool points_update(const bContext &C, LayerGradientGizmoGroup &ggd)
     /* The selected channel lost its ramp (disabled or removed): the colour ramp is what is left. */
     ramp = &gradient.ramp;
   }
-  /* The ramp is scene linear and the overlay is drawn in display space, so the colors are converted
-   * the way brush colors are before they are drawn. */
-  const auto overlay_color = [&](const float t) {
-    float rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    if (ramp->tot > 0) {
-      BKE_colorband_evaluate(ramp, t, rgba);
-    }
-    float linear[3] = {rgba[0], rgba[1], rgba[2]};
-    if (use_grey) {
-      linear[0] = linear[1] = linear[2] = rgba[0];
-      rgba[3] = 1.0f;
-    }
-    float display[3];
-    IMB_colormanagement_scene_linear_to_srgb_v3(display, linear);
-    return float4(display[0], display[1], display[2], rgba[3]);
-  };
-  ggd.draw_options.ramp_colors = true;
-  ggd.draw_options.color_start = overlay_color(0.0f);
-  ggd.draw_options.color_mid = overlay_color(0.5f);
-  ggd.draw_options.color_end = overlay_color(1.0f);
-
-  ggd.midpoint = gradient.midpoint;
   const bool midpoint_distribution = gradient.distribution ==
                                      MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT;
-  ggd.draw_options.midpoint_handle = midpoint_distribution;
+  gradient_gizmo::apply_ramp(ggd.draw_options,
+                             *ramp,
+                             use_grey,
+                             /*stop_handles=*/!midpoint_distribution,
+                             BKE_paint_layers_gradient_midpoint_effective(gradient));
 
-  /* In the Ramp distribution the ramp's own stops place the colours, so each stop is drawn on the
-   * line at the position the ramp gives it. The midpoint distribution has no stop markers. */
-  ggd.draw_options.stop_handles = !midpoint_distribution && ramp != nullptr;
-  ggd.draw_options.stop_count = 0;
-  if (ggd.draw_options.stop_handles) {
-    const int count = math::min(int(ramp->tot), gradient_gizmo::MAX_STOP_HANDLES);
-    for (const int i : IndexRange(count)) {
-      const CBData &stop = ramp->data[i];
-      float display[3];
-      float linear[3] = {stop.r, stop.g, stop.b};
-      if (use_grey) {
-        linear[0] = linear[1] = linear[2] = stop.r;
-      }
-      IMB_colormanagement_scene_linear_to_srgb_v3(display, linear);
-      ggd.draw_options.stop_positions[i] = stop.pos;
-      ggd.draw_options.stop_colors[i] = float4(display[0], display[1], display[2], stop.a);
-    }
-    ggd.draw_options.stop_count = count;
-  }
+  ggd.midpoint = gradient.midpoint;
+  ggd.draw_options.midpoint_handle = midpoint_distribution;
   return true;
 }
 

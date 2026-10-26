@@ -36,6 +36,9 @@ const EnumPropertyItem rna_enum_color_space_convert_default_items[] = {
 
 #ifdef RNA_RUNTIME
 
+#  include <algorithm>
+#  include <cstdint>
+
 #  include <fmt/format.h>
 
 #  include "RNA_access.hh"
@@ -379,15 +382,35 @@ static void rna_ColorRamp_update(Main *bmain, Scene * /*scene*/, PointerRNA *ptr
       case ID_SCE: {
         /* The Image Editor's gradient tool keeps its ramp in the tool settings. The ramp's own
          * properties (interpolation, color mode, stops) are not properties of the tool settings,
-         * so the live preview's revision has to be bumped from here. */
+         * so the live preview's revision has to be bumped from here. The gradient tools' scalar
+         * value ramps (#PaintModeSettings::gradient_value_ramps) live the same way.
+         *
+         * The callback receives the ColorBand for the ramp's own properties and a CBData for one
+         * of its stops, so a stop is recognized by its address lying inside the band -- the same
+         * test #BKE_paint_layers_gradient_ramp_row_from_data makes for the Gradient Layer. */
         const Scene *scene = id_cast<Scene *>(id);
-        if (scene->toolsettings != nullptr &&
-            ptr->data == &scene->toolsettings->imapaint.gradient_colorband)
-        {
-          ED_image_paint_select_gradient_settings_revision_bump();
-          /* Only the Image Editor's area listener redraws the window region that shows the
-           * preview (see #rna_ImagePaintSettings_warp_update). */
-          WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
+        if (scene->toolsettings != nullptr) {
+          const PaintModeSettings &paint_mode = scene->toolsettings->paint_mode;
+          const auto is_ramp_data = [ptr](const ColorBand *band) {
+            if (band == nullptr) {
+              return false;
+            }
+            const uintptr_t address = uintptr_t(ptr->data);
+            const uintptr_t begin = uintptr_t(band);
+            return address >= begin && address < begin + sizeof(*band);
+          };
+          if (is_ramp_data(&scene->toolsettings->imapaint.gradient_colorband) ||
+              std::any_of(std::begin(paint_mode.gradient_value_ramps),
+                          std::end(paint_mode.gradient_value_ramps),
+                          [&is_ramp_data](const PaintGradientValueRamp &record) {
+                            return is_ramp_data(record.ramp);
+                          }))
+          {
+            ED_image_paint_select_gradient_settings_revision_bump();
+            /* Only the Image Editor's area listener redraws the window region that shows the
+             * preview (see #rna_ImagePaintSettings_warp_update). */
+            WM_main_add_notifier(NC_SPACE | ND_SPACE_IMAGE, nullptr);
+          }
         }
         break;
       }

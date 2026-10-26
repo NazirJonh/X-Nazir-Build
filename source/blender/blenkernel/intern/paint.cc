@@ -4201,6 +4201,71 @@ float BKE_paint_material_value_invert(const float value_min,
   return math::clamp(value_min + value_max - value, value_min, value_max);
 }
 
+/**
+ * The per-channel value ramps are a fixed DNA array whose size is spelled as a literal for
+ * makesdna; every access is indexed by #eMaterialPaintChannel, so the two must not drift apart.
+ */
+static_assert(sizeof(PaintModeSettings::gradient_value_ramps) / sizeof(PaintGradientValueRamp) ==
+                  PAINT_MATERIAL_CHANNEL_NUM,
+              "PaintModeSettings::gradient_value_ramps size out of sync");
+
+ColorBand *BKE_paint_gradient_value_ramp_get(PaintModeSettings &paint_mode,
+                                             const eMaterialPaintChannel channel)
+{
+  /* Only the reference is stripped: the non-const entry point hands out the DNA member for
+   * writing, which this one can read but not return as writable. */
+  return const_cast<ColorBand *>(
+      BKE_paint_gradient_value_ramp_get(static_cast<const PaintModeSettings &>(paint_mode),
+                                       channel));
+}
+
+const ColorBand *BKE_paint_gradient_value_ramp_get(const PaintModeSettings &paint_mode,
+                                                   const eMaterialPaintChannel channel)
+{
+  /* The channel reaches this from RNA and from files saved by other versions, so an index out of
+   * the table's range is a runtime case, not a programmer error. */
+  if (channel < 0 || channel >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return nullptr;
+  }
+  if (BKE_paint_material_channel_info(channel).is_color ||
+      channel == PAINT_MATERIAL_CHANNEL_NORMAL)
+  {
+    return nullptr;
+  }
+  return paint_mode.gradient_value_ramps[channel].ramp;
+}
+
+ColorBand *BKE_paint_gradient_value_ramp_ensure(PaintModeSettings &paint_mode,
+                                                const eMaterialPaintChannel channel)
+{
+  ColorBand *ramp = BKE_paint_gradient_value_ramp_get(paint_mode, channel);
+  if (ramp != nullptr) {
+    return ramp;
+  }
+  const MaterialPaintChannelInfo &info = BKE_paint_material_channel_info(channel);
+  if (info.is_color || channel == PAINT_MATERIAL_CHANNEL_NORMAL) {
+    return nullptr;
+  }
+  ramp = MEM_new<ColorBand>(__func__);
+  BKE_colorband_init(ramp, true);
+  /* Seed the ramp's outer stops with the channel's own range, like the Gradient Layer does: a
+   * fresh value ramp spans the channel's whole range, so enabling it changes nothing until the
+   * user edits the stops. */
+  const float first = BKE_paint_material_t_from_value(info.value_min, info.value_max, info.value_min);
+  const float last = BKE_paint_material_t_from_value(info.value_min, info.value_max, info.value_max);
+  ramp->data[0].r = ramp->data[0].g = ramp->data[0].b = first;
+  ramp->data[ramp->tot - 1].r = ramp->data[ramp->tot - 1].g = ramp->data[ramp->tot - 1].b = last;
+  paint_mode.gradient_value_ramps[channel].ramp = ramp;
+  return ramp;
+}
+
+void BKE_paint_gradient_value_ramp_free(PaintModeSettings &paint_mode)
+{
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    MEM_SAFE_DELETE(paint_mode.gradient_value_ramps[i].ramp);
+  }
+}
+
 float BKE_paint_material_channel_value(const BrushMaterialPaint &brush_paint,
                                        const PaintModeSettings &mode_settings,
                                        const eMaterialPaintChannel channel)

@@ -16,11 +16,11 @@
 #pragma once
 
 #include "BLI_math_vector_types.hh"
+#include "DNA_colorband_types.h"
 #include "DNA_scene_types.h"
 
 #include "IMB_imbuf.hh"
 
-struct ColorBand;
 struct Image;
 struct ImagePaintSettings;
 struct Paint;
@@ -98,7 +98,37 @@ struct ImagePaintGradientTarget {
   ImagePaintGradientTargetKind kind = ImagePaintGradientTargetKind::Image;
   /** #ImagePaintGradientTargetKind::MapValue only: the value written (packed, Non-Color). */
   float4 value = float4(1.0f);
+  /**
+   * #ImagePaintGradientTargetKind::MapValue only: the scalar channel's value ramp the gradient
+   * paints through (#PaintModeSettings::gradient_value_ramps), mirroring the Gradient Layer's
+   * channel ramps. Null keeps the pre-ramp fade between #value and the original.
+   */
+  const ColorBand *value_ramp = nullptr;
 };
+
+/**
+ * Composite a straight-alpha grey over a straight-alpha destination pixel, the way a scalar
+ * channel's value ramp writes into a map: the blend mode acts on the premultiplied grey, an empty
+ * texel takes the grey itself (a fresh Paint row's map is fully transparent, so every mode but Mix
+ * would read that zero backdrop as black), and the alpha is the straight-alpha "over".
+ *
+ * \param dst: straight-alpha RGBA of the destination pixel, written in place.
+ * \param value: the grey to write, in the map's 0..1 space.
+ * \param alpha: coverage of the write: the tool's opacity, times any selection weight.
+ */
+inline void gradient_blend_value_over(float dst[4],
+                                      const float value,
+                                      const float alpha,
+                                      const IMB_BlendMode blend_mode)
+{
+  const float premul[4] = {value * alpha, value * alpha, value * alpha, alpha};
+  const float dst_alpha = dst[3];
+  IMB_blend_color_float(dst, dst, premul, blend_mode);
+  if (dst_alpha <= 0.0f) {
+    dst[0] = dst[1] = dst[2] = value;
+  }
+  dst[3] = dst_alpha + alpha * (1.0f - dst_alpha);
+}
 
 /** Evaluate gradient parameter t at pixel (tile-local coordinates). */
 float image_paint_gradient_eval_t(const ImagePaintGradientParams &params,

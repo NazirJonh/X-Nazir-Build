@@ -98,6 +98,23 @@ static const EnumPropertyItem rna_enum_visible_material_paint_channel_items[] = 
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* The channels whose ramp a gradient tool's gizmo can show, shared by the Gradient tools' Channel
+ * popover property and by the operators that select or create that ramp: a colour channel shows
+ * the tool's colour ramp, a scalar channel its value ramp. The values match
+ * #eMaterialPaintChannel. Normal is absent because a ramp cannot drive a packed tangent. */
+const EnumPropertyItem rna_enum_gradient_tool_gizmo_channel_items[] = {
+    {PAINT_MATERIAL_CHANNEL_BASE_COLOR, "BASE_COLOR", 0, "Base Color", "Colour ramp"},
+    {PAINT_MATERIAL_CHANNEL_METALLIC, "METALLIC", 0, "Metal", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_ROUGHNESS, "ROUGHNESS", 0, "Rough", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_SPECULAR, "SPECULAR", 0, "Spec", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_ALPHA, "ALPHA", 0, "Alpha", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_AO, "AO", 0, "AO", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_HEIGHT, "HEIGHT", 0, "Height", "Value ramp"},
+    {PAINT_MATERIAL_CHANNEL_EMISSION, "EMISSION", 0, "Emit", "Colour ramp"},
+    {PAINT_MATERIAL_CHANNEL_CUSTOM, "CUSTOM", 0, "Custom", "Value ramp"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 static const EnumPropertyItem gradient_curve_mode_items[] = {
     {GRADIENT_CURVE_MODE_ALONG,
      "ALONG",
@@ -869,6 +886,74 @@ static int rna_PaintModeSettings_channel_layer_bindings_length(PointerRNA * /*pt
 {
   return PAINT_MATERIAL_CHANNEL_NUM;
 }
+
+/* -------------------------------------------------------------------- */
+/** \name Gradient tools' value ramps (per-channel)
+ *
+ * The ramps are a fixed DNA array on #PaintModeSettings (reached via Scene -> ToolSettings), so a
+ * record's channel index is recovered from where \a ptr points inside that array, exactly like
+ * #rna_MaterialPaintChannelLayerBinding_channel_get above.
+ * \{ */
+
+static int rna_PaintGradientValueRamp_channel_get_rna(PointerRNA *ptr)
+{
+  const Scene *scene = reinterpret_cast<const Scene *>(ptr->owner_id);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  }
+  const PaintGradientValueRamp *ramps = scene->toolsettings->paint_mode.gradient_value_ramps;
+  const int index = int(static_cast<const PaintGradientValueRamp *>(ptr->data) - ramps);
+  if (index < 0 || index >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return PAINT_MATERIAL_CHANNEL_BASE_COLOR;
+  }
+  return index;
+}
+
+/** Explicit path func for the same reason #rna_MaterialPaintChannelLayerBinding_path exists. */
+static std::optional<std::string> rna_PaintGradientValueRamp_path(const PointerRNA *ptr)
+{
+  const Scene *scene = reinterpret_cast<const Scene *>(ptr->owner_id);
+  if (scene == nullptr || scene->toolsettings == nullptr) {
+    return std::nullopt;
+  }
+  const PaintGradientValueRamp *ramps = scene->toolsettings->paint_mode.gradient_value_ramps;
+  const int index = int(static_cast<const PaintGradientValueRamp *>(ptr->data) - ramps);
+  if (index < 0 || index >= PAINT_MATERIAL_CHANNEL_NUM) {
+    return std::nullopt;
+  }
+  return fmt::format("tool_settings.paint_mode.gradient_value_ramps[{}]", index);
+}
+
+static PointerRNA rna_PaintGradientValueRamp_ramp_get(PointerRNA *ptr)
+{
+  auto *record = static_cast<PaintGradientValueRamp *>(ptr->data);
+  /* A getter only reads: a ramp is created through the gradient tools' UI, so a null one means
+   * the channel has none yet (see #BKE_paint_gradient_value_ramp_ensure). */
+  if (record == nullptr || record->ramp == nullptr) {
+    return PointerRNA_NULL;
+  }
+  return RNA_pointer_create_with_parent(*ptr, RNA_ColorRamp, record->ramp);
+}
+
+static void rna_PaintModeSettings_gradient_value_ramps_begin(CollectionPropertyIterator *iter,
+                                                             PointerRNA *ptr)
+{
+  PaintModeSettings *settings = static_cast<PaintModeSettings *>(ptr->data);
+  rna_iterator_array_begin(iter,
+                           ptr,
+                           settings->gradient_value_ramps,
+                           sizeof(PaintGradientValueRamp),
+                           ARRAY_SIZE(settings->gradient_value_ramps),
+                           0,
+                           nullptr);
+}
+
+static int rna_PaintModeSettings_gradient_value_ramps_length(PointerRNA * /*ptr*/)
+{
+  return PAINT_MATERIAL_CHANNEL_NUM;
+}
+
+/** \} */
 
 /**
  * The bindings are a fixed DNA array on #PaintModeSettings (reached via Scene -> ToolSettings),
@@ -3377,6 +3462,38 @@ static void rna_def_paint_mode(BlenderRNA *brna)
   StructRNA *srna;
   PropertyRNA *prop;
 
+  {
+    /* The gradient tools' (Sculpt Color Gradient, Image Editor selection gradient) per-channel
+     * value ramps, one record per material paint channel like the layer binding records below. */
+    srna = RNA_def_struct(brna, "PaintGradientValueRamp", nullptr);
+    RNA_def_struct_sdna(srna, "PaintGradientValueRamp");
+    RNA_def_struct_path_func(srna, "rna_PaintGradientValueRamp_path");
+    RNA_def_struct_ui_text(srna,
+                           "Gradient Value Ramp",
+                           "The grey value ramp one scalar material paint channel of the gradient "
+                           "tools paints through");
+    /* Same reason #PaintModeSettings clears it: tool settings are not undo-tracked. */
+    RNA_def_struct_clear_flag(srna, STRUCT_UNDO);
+
+    /* Read-only, so Python keys a record by channel instead of hard-coding indices. */
+    prop = RNA_def_property(srna, "channel", PROP_ENUM, PROP_NONE);
+    RNA_def_property_enum_items(prop, rna_enum_material_paint_channel_items);
+    RNA_def_property_enum_funcs(
+        prop, "rna_PaintGradientValueRamp_channel_get_rna", nullptr, nullptr);
+    RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+    RNA_def_property_ui_text(prop, "Channel", "Which material paint channel this ramp belongs to");
+
+    prop = RNA_def_property(srna, "ramp", PROP_POINTER, PROP_NONE);
+    RNA_def_property_struct_type(prop, "ColorRamp");
+    RNA_def_property_pointer_funcs(
+        prop, "rna_PaintGradientValueRamp_ramp_get", nullptr, nullptr, nullptr);
+    RNA_def_property_ui_text(
+        prop,
+        "Value Ramp",
+        "The grey value ramp the channel is painted through: null until created, so the channel "
+        "keeps fading between its two single values");
+  }
+
   srna = RNA_def_struct(brna, "MaterialPaintChannelLayerBinding", nullptr);
   RNA_def_struct_sdna(srna, "MaterialPaintChannelLayerBinding");
   RNA_def_struct_path_func(srna, "rna_MaterialPaintChannelLayerBinding_path");
@@ -3474,6 +3591,38 @@ static void rna_def_paint_mode(BlenderRNA *brna)
       "position, and a UV handle moves on the plane of the triangle it sits on, so the line can "
       "leave the island and the mesh");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  /* The channel whose ramp the gradient tools' gizmos draw, like the Gradient Layer's
+   * #MaterialPaintLayerGradient.gizmo_channel. A colour channel shows the tools' colour ramp, a
+   * scalar channel its value ramp (reading as grey). Normal has no ramp to show, so it is absent. */
+  prop = RNA_def_property(srna, "gradient_gizmo_channel", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "gradient_gizmo_channel");
+  RNA_def_property_enum_items(prop, rna_enum_gradient_tool_gizmo_channel_items);
+  RNA_def_property_enum_default(prop, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  RNA_def_property_ui_text(
+      prop,
+      "Gizmo Channel",
+      "Which channel's ramp the gradient tools' gizmos draw: the colour ramp, or the selected "
+      "scalar channel's value ramp");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
+  prop = RNA_def_property(srna, "gradient_value_ramps", PROP_COLLECTION, PROP_NONE);
+  /* Empty length name: fixed DNA array (same pattern as channel_layer_bindings). */
+  RNA_def_property_collection_sdna(prop, nullptr, "gradient_value_ramps", "");
+  RNA_def_property_struct_type(prop, "PaintGradientValueRamp");
+  RNA_def_property_collection_funcs(prop,
+                                    "rna_PaintModeSettings_gradient_value_ramps_begin",
+                                    "rna_iterator_array_next",
+                                    "rna_iterator_array_end",
+                                    "rna_iterator_array_get",
+                                    "rna_PaintModeSettings_gradient_value_ramps_length",
+                                    nullptr,
+                                    nullptr,
+                                    nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Gradient Value Ramps",
+      "Per-channel value ramps of the gradient tools, indexed by material paint channel");
 
   prop = RNA_def_property(srna, "canvas_image", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_funcs(

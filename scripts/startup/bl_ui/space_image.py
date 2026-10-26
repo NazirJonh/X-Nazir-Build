@@ -1615,9 +1615,16 @@ class IMAGE_PT_paint_select_gradient_channels(Panel):
         return imapaint is not None and imapaint.brush is not None and imapaint.brush.material_paint is not None
 
     def draw(self, context):
-        from bl_ui.properties_paint_common import draw_material_paint_channel_toggles
+        from bl_ui.properties_paint_common import draw_gradient_tool_channels
         imapaint = context.tool_settings.image_paint
-        draw_material_paint_channel_toggles(self.layout, imapaint.brush, imapaint, show_custom=False)
+        # The Gradient Layer's channel list look, shared with the Sculpt Color Gradient tool (see
+        # VIEW3D_PT_sculpt_color_gradient_channels).
+        draw_gradient_tool_channels(
+            self.layout, context, imapaint.brush, imapaint,
+            show_custom=False,
+            color_ramp_owner=imapaint,
+            color_ramp_prop="color_ramp",
+        )
 
 
 class IMAGE_PT_material_paint_channel_visibility(Panel):

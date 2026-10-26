@@ -106,6 +106,7 @@
 #include "UI_interface.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
 #include "WM_types.hh"
 
 #include "../shapes/paint_shape_space.hh"
@@ -260,6 +261,12 @@ bool image_paint_selection_view3d_floating_poll(bContext *C)
     return false;
   }
   return session->owner_v3d == CTX_wm_view3d(C);
+}
+
+bool image_select_view3d_select_tool_active(const bContext *C)
+{
+  const bToolRef *tref = WM_toolsystem_ref_from_context(C);
+  return tref != nullptr && STRPREFIX(tref->idname, "builtin.image_paint_select_");
 }
 
 /** \} */
@@ -471,14 +478,23 @@ void image_select_view3d_fragments_write_final(bContext *C,
               if (rotate_normals) {
                 image_select_normal_color_rotate(frag_color, normal_rotation);
               }
-              const float frag_alpha = (channels >= 4) ? frag_color[3] : 1.0f;
-              const float blend = m * frag_alpha;
-              if (blend <= 0.001f) {
+              float *dst_px = dst_data + (py * int(dst_w) + px) * channels;
+              if (channels >= 4) {
+                /* The map carries its own alpha, so the fragment composites "over" it: a layer map
+                 * is transparent outside what was painted, and a lerp would darken the RGB and
+                 * square the alpha there. */
+                const float4 dst_color(dst_px[0], dst_px[1], dst_px[2], dst_px[3]);
+                const float4 out = image_select_composite_over(dst_color, frag_color, m);
+                for (int c = 0; c < 4; c++) {
+                  dst_px[c] = out[c];
+                }
                 continue;
               }
-              float *dst_px = dst_data + (py * int(dst_w) + px) * channels;
+              if (m <= 0.001f) {
+                continue;
+              }
               for (int c = 0; c < channels; c++) {
-                dst_px[c] = (1.0f - blend) * dst_px[c] + blend * frag_color[c];
+                dst_px[c] = (1.0f - m) * dst_px[c] + m * frag_color[c];
               }
             }
           }
@@ -521,20 +537,17 @@ void image_select_view3d_fragments_write_final(bContext *C,
               if (rotate_normals) {
                 image_select_normal_color_rotate(frag_color, normal_rotation);
               }
-              const float frag_alpha = frag_color[3];
-              const float blend = m * frag_alpha;
-              if (blend <= 0.001f) {
-                continue;
-              }
               uint8_t *dst_px = dst_data + (py * int(dst_w) + px) * 4;
+              /* "Over" like the float path (see #image_select_composite_over). */
+              const float4 dst_color(float(dst_px[0]) / 255.0f,
+                                     float(dst_px[1]) / 255.0f,
+                                     float(dst_px[2]) / 255.0f,
+                                     float(dst_px[3]) / 255.0f);
+              const float4 out = image_select_composite_over(dst_color, frag_color, m);
               for (int c = 0; c < 4; c++) {
                 /* Round rather than truncate (truncation biases the feathered rim down and
                  * compounds across repeated edits; matches the 2D write-back). */
-                dst_px[c] = uint8_t(
-                    std::clamp((1.0f - blend) * float(dst_px[c]) +
-                                   blend * frag_color[c] * 255.0f + 0.5f,
-                               0.0f,
-                               255.0f));
+                dst_px[c] = uint8_t(std::clamp(out[c] * 255.0f + 0.5f, 0.0f, 255.0f));
               }
             }
           }
@@ -1474,6 +1487,11 @@ static void view3d_apply_deselect(bContext *C, Object &ob)
   }
   image_paint_selection_targets_update(C, targets);
   ED_image_undo_push_end();
+}
+
+void image_select_view3d_deselect(bContext *C, Object &ob)
+{
+  view3d_apply_deselect(C, ob);
 }
 
 /** \} */
@@ -2975,6 +2993,370 @@ void image_select_view3d_draw_uv_texture(const Object &ob,
       ob, surface_map, texture, uv_min, uv_min + uv_size, [&](const float2 &dest_uv) {
         return (dest_uv - uv_min) / uv_size;
       });
+}
+
+void image_select_view3d_pbr_program_bind(
+    gpu::Texture *channel_textures[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_scale[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_offset[PBR_PREVIEW_CHANNEL_NUM],
+    const float3 &light_direction,
+    const float3 &view_direction)
+{
+  immBindBuiltinProgram(GPU_SHADER_IMAGE_SELECT_PBR);
+
+  static const char *texture_names[PBR_PREVIEW_CHANNEL_NUM] = {
+      "base_color_tex",
+      "roughness_tex",
+      "metallic_tex",
+      "normal_tex",
+  };
+  static const char *scale_names[PBR_PREVIEW_CHANNEL_NUM] = {
+      "texco_scale_base_color",
+      "texco_scale_roughness",
+      "texco_scale_metallic",
+      "texco_scale_normal",
+  };
+  static const char *offset_names[PBR_PREVIEW_CHANNEL_NUM] = {
+      "texco_offset_base_color",
+      "texco_offset_roughness",
+      "texco_offset_metallic",
+      "texco_offset_normal",
+  };
+  for (const int slot : IndexRange(PBR_PREVIEW_CHANNEL_NUM)) {
+    /* Clamp to the (transparent) border, like the flat draw: triangles that only partly overlap
+     * the rect sample outside [0, 1] and must stay invisible there. */
+    immBindTextureSampler(texture_names[slot],
+                          channel_textures[slot],
+                          {GPU_SAMPLER_FILTERING_LINEAR,
+                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER,
+                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER});
+    immUniform2f(scale_names[slot], channel_scale[slot].x, channel_scale[slot].y);
+    immUniform2f(offset_names[slot], channel_offset[slot].x, channel_offset[slot].y);
+  }
+  immUniform3f("light_direction", light_direction.x, light_direction.y, light_direction.z);
+  immUniform3f("view_direction", view_direction.x, view_direction.y, view_direction.z);
+}
+
+void image_select_view3d_pbr_light_get(const ARegion *region,
+                                       float3 &r_view_direction,
+                                       float3 &r_light_direction)
+{
+  r_view_direction = float3(0.0f, 0.0f, 1.0f);
+  r_light_direction = float3(0.0f, 0.0f, 1.0f);
+  if (region == nullptr || region->regiondata == nullptr) {
+    return;
+  }
+  const RegionView3D *rv3d = static_cast<const RegionView3D *>(region->regiondata);
+  const float3 view_z(rv3d->viewinv[2]);
+  const float3 view_y(rv3d->viewinv[1]);
+  const float3 view_x(rv3d->viewinv[0]);
+  r_view_direction = math::normalize(view_z);
+  r_light_direction = math::normalize(view_z + view_y * 0.8f + view_x * 0.6f);
+}
+
+void image_select_view3d_pbr_texco(const SelectionTileFragment &frag,
+                                   const float2 &uv_offset,
+                                   float2 &r_scale,
+                                   float2 &r_offset)
+{
+  const float2 tile_size = float2(frag.geom.tile_size_px);
+  const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
+  const float2 rect_min = tile_uv + float2(frag.geom.origin_px) / tile_size + uv_offset;
+  const float2 rect_size_uv = math::max(float2(frag.geom.size_px) / tile_size, float2(1e-12f));
+  r_scale = float2(1.0f) / rect_size_uv;
+  r_offset = -rect_min * r_scale;
+}
+
+gpu::Texture *image_select_view3d_pbr_default_texture_create(const char *name, const int slot)
+{
+  /* Base color white, roughness mid, metallic 0, flat tangent-space normal. */
+  static const float defaults[PBR_PREVIEW_CHANNEL_NUM][4] = {
+      {1.0f, 1.0f, 1.0f, 1.0f},
+      {0.5f, 0.5f, 0.5f, 1.0f},
+      {0.0f, 0.0f, 0.0f, 1.0f},
+      {0.5f, 0.5f, 1.0f, 1.0f},
+  };
+  BLI_assert(slot >= 0 && slot < PBR_PREVIEW_CHANNEL_NUM);
+  return GPU_texture_create_2d(name,
+                               1,
+                               1,
+                               1,
+                               gpu::TextureFormat::SFLOAT_16_16_16_16,
+                               GPU_TEXTURE_USAGE_SHADER_READ,
+                               defaults[slot]);
+}
+
+void image_select_view3d_draw_uv_texture_pbr(
+    const Object &ob,
+    const ImageSelectView3DSurfaceMap &surface_map,
+    const float2 &dest_rect_min,
+    const float2 &dest_rect_max,
+    gpu::Texture *channel_textures[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_scale[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_offset[PBR_PREVIEW_CHANNEL_NUM],
+    const FunctionRef<float2(const float2 &)> dest_to_src,
+    const float3 &light_direction,
+    const float3 &view_direction)
+{
+  const Mesh *mesh = id_cast<const Mesh *>(ob.data);
+  if (mesh == nullptr || surface_map.uv_map.is_empty() || dest_rect_min.x >= dest_rect_max.x ||
+      dest_rect_min.y >= dest_rect_max.y)
+  {
+    return;
+  }
+  for (const int slot : IndexRange(PBR_PREVIEW_CHANNEL_NUM)) {
+    if (channel_textures[slot] == nullptr) {
+      return;
+    }
+  }
+
+  /* The same triangle walk as #image_select_view3d_draw_uv_texture_ext, plus the vertex normals
+   * the PBR shader shades with. The texture coordinate passed per vertex is the destination UV
+   * itself; the per-channel scale/offset uniforms map it into each channel's own fragment rect
+   * (the channels may live at different tile resolutions). */
+  const Span<int> corner_verts = mesh->corner_verts();
+  const Span<float3> vert_positions = mesh->vert_positions();
+  const Span<float3> vert_normals = mesh->vert_normals();
+  const float4x4 object_to_world(ob.object_to_world());
+
+  Vector<float3> positions;
+  Vector<float3> normals;
+  Vector<float2> dest_uvs;
+  for (const int3 &tri : surface_map.corner_tris) {
+    const float2 uv0 = surface_map.uv_map[tri.x];
+    const float2 uv1 = surface_map.uv_map[tri.y];
+    const float2 uv2 = surface_map.uv_map[tri.z];
+    const float2 tri_min = math::min(uv0, math::min(uv1, uv2));
+    const float2 tri_max = math::max(uv0, math::max(uv1, uv2));
+    if (tri_max.x < dest_rect_min.x || tri_min.x > dest_rect_max.x ||
+        tri_max.y < dest_rect_min.y || tri_min.y > dest_rect_max.y)
+    {
+      continue;
+    }
+    for (const int c : IndexRange(3)) {
+      const int corner = tri[c];
+      positions.append(math::transform_point(object_to_world, vert_positions[corner_verts[corner]]));
+      normals.append(math::transform_direction(object_to_world, vert_normals[corner_verts[corner]]));
+      dest_uvs.append(dest_to_src(surface_map.uv_map[corner]));
+    }
+  }
+  if (positions.is_empty()) {
+    return;
+  }
+
+  GPU_blend(GPU_BLEND_ALPHA);
+  GPU_depth_test(GPU_DEPTH_LESS_EQUAL);
+  GPUVertFormat *format = immVertexFormat();
+  const uint pos = GPU_vertformat_attr_add(format, "pos", gpu::VertAttrType::SFLOAT_32_32_32);
+  const uint src_uv = GPU_vertformat_attr_add(format, "src_uv", gpu::VertAttrType::SFLOAT_32_32);
+  const uint nor = GPU_vertformat_attr_add(format, "nor", gpu::VertAttrType::SFLOAT_32_32_32);
+  image_select_view3d_pbr_program_bind(
+      channel_textures, channel_scale, channel_offset, light_direction, view_direction);
+
+  immBegin(GPU_PRIM_TRIS, uint(positions.size()));
+  for (const int64_t i : positions.index_range()) {
+    immAttr3f(nor, normals[i].x, normals[i].y, normals[i].z);
+    immAttr2f(src_uv, dest_uvs[i].x, dest_uvs[i].y);
+    immVertex3f(pos, positions[i].x, positions[i].y, positions[i].z);
+  }
+  immEnd();
+  immUnbindProgram();
+  GPU_blend(GPU_BLEND_NONE);
+}
+
+bool image_select_pbr_composite_possible(const Span<ImagePaintSelectionTarget> targets)
+{
+  for (const ImagePaintSelectionTarget &target : targets) {
+    if (image_select_pbr_channel_slot(target.channel) >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int image_select_preview_target_resolve(const Span<ImagePaintSelectionTarget> targets,
+                                        const int preview_target)
+{
+  if (preview_target >= 0 && preview_target < targets.size()) {
+    return preview_target;
+  }
+  if (image_select_pbr_composite_possible(targets)) {
+    return -1;
+  }
+  for (const int target_i : targets.index_range()) {
+    if (targets[target_i].is_color_channel) {
+      return target_i;
+    }
+  }
+  return 0;
+}
+
+int image_select_preview_target_cycle(const Span<ImagePaintSelectionTarget> targets,
+                                      const int preview_target)
+{
+  if (targets.is_empty()) {
+    return preview_target;
+  }
+  /* A canvas of PBR maps alone keeps the composite; a single-target canvas keeps its one flat
+   * view. */
+  Vector<int> choices;
+  if (image_select_pbr_composite_possible(targets)) {
+    choices.append(-1);
+  }
+  for (const int target_i : targets.index_range()) {
+    if (image_select_pbr_channel_slot(targets[target_i].channel) < 0) {
+      choices.append(target_i);
+    }
+  }
+  if (choices.is_empty()) {
+    return -1;
+  }
+  int current = int(std::find(choices.begin(), choices.end(), preview_target) - choices.begin());
+  if (current == choices.size()) {
+    /* An index that is no longer a choice (or the initial -1 without a composite) starts from
+     * the beginning. */
+    current = -1;
+  }
+  return choices[(current + 1) % int(choices.size())];
+}
+
+gpu::Texture *image_select_view3d_fragment_texture(Vector<Vector<gpu::Texture *>> &textures,
+                                                   const Span<Vector<SelectionTileFragment>> fragments,
+                                                   const int target_i,
+                                                   const int frag_i)
+{
+  if (textures.size() != fragments.size()) {
+    textures.resize(fragments.size());
+  }
+  Vector<gpu::Texture *> &per_target = textures[target_i];
+  if (per_target.size() != fragments[target_i].size()) {
+    per_target.resize(fragments[target_i].size(), nullptr);
+  }
+  const SelectionTileFragment &frag = fragments[target_i][frag_i];
+  if (per_target[frag_i] == nullptr && frag.preview.fragment_display_ibuf != nullptr) {
+    per_target[frag_i] = IMB_create_gpu_texture(
+        "SelectionFragment", frag.preview.fragment_display_ibuf, true, false, false);
+    if (per_target[frag_i] != nullptr) {
+      /* Linear, not nearest: the fragment is usually minified heavily on the surface, and
+       * nearest sampling drops whole texel rows there (the preview showed through only in
+       * patches). No mipmaps in this texture path, so the minified rim stays a bit sharp. */
+      GPU_texture_filter_mode(per_target[frag_i], true);
+    }
+  }
+  return per_target[frag_i];
+}
+
+void image_select_view3d_draw_pbr_composite(
+    const Object &ob,
+    const ImageSelectView3DSurfaceMap &surface_map,
+    const ARegion *region,
+    const Span<ImagePaintSelectionTarget> targets,
+    const Span<Vector<SelectionTileFragment>> fragments,
+    Vector<Vector<gpu::Texture *>> &textures,
+    gpu::Texture *default_textures[PBR_PREVIEW_CHANNEL_NUM],
+    const FunctionRef<float2(const float2 &)> forward,
+    const FunctionRef<float2(const float2 &)> inverse)
+{
+  /* The target that feeds a slot: the lowest one wins (a clipboard cannot carry a channel twice,
+   * this is the single place that guarantees it). */
+  const auto slot_target_index = [&](const int slot) {
+    for (const int target_i : targets.index_range()) {
+      if (image_select_pbr_channel_slot(targets[target_i].channel) == slot) {
+        return target_i;
+      }
+    }
+    return -1;
+  };
+  int driver_slot = -1;
+  int driver_target = -1;
+  for (const int slot : IndexRange(PBR_PREVIEW_CHANNEL_NUM)) {
+    driver_target = slot_target_index(slot);
+    if (driver_target >= 0) {
+      driver_slot = slot;
+      break;
+    }
+  }
+  if (driver_target < 0) {
+    return;
+  }
+
+  float3 view_direction;
+  float3 light_direction;
+  image_select_view3d_pbr_light_get(region, view_direction, light_direction);
+
+  const Span<SelectionTileFragment> driver_fragments = fragments[driver_target];
+  for (const int frag_i : driver_fragments.index_range()) {
+    const SelectionTileFragment &driver_frag = driver_fragments[frag_i];
+    if (driver_frag.preview.fragment_display_ibuf == nullptr) {
+      continue;
+    }
+
+    gpu::Texture *channel_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
+    float2 channel_scale[PBR_PREVIEW_CHANNEL_NUM];
+    float2 channel_offset[PBR_PREVIEW_CHANNEL_NUM];
+    for (const int slot : IndexRange(PBR_PREVIEW_CHANNEL_NUM)) {
+      const SelectionTileFragment *slot_frag = nullptr;
+      int slot_target = -1;
+      int slot_frag_i = -1;
+      if (slot == driver_slot) {
+        slot_frag = &driver_frag;
+        slot_target = driver_target;
+        slot_frag_i = frag_i;
+      }
+      else if (const int target_i = slot_target_index(slot); target_i >= 0) {
+        /* One fragment per tile by construction (#image_select_extract_per_tile). */
+        for (const int other_i : fragments[target_i].index_range()) {
+          if (fragments[target_i][other_i].geom.tile_number == driver_frag.geom.tile_number) {
+            slot_frag = &fragments[target_i][other_i];
+            slot_target = target_i;
+            slot_frag_i = other_i;
+            break;
+          }
+        }
+      }
+      if (slot_frag != nullptr) {
+        channel_textures[slot] = image_select_view3d_fragment_texture(
+            textures, fragments, slot_target, slot_frag_i);
+      }
+      if (channel_textures[slot] == nullptr) {
+        if (default_textures[slot] == nullptr) {
+          default_textures[slot] = image_select_view3d_pbr_default_texture_create(
+              "SelectionPBRDefault", slot);
+        }
+        channel_textures[slot] = default_textures[slot];
+      }
+      /* A stand-in takes the driver's rect, so its border clamp keeps it from covering the whole
+       * triangle outside the fragment. The vertices carry the source UV, so no offset here. */
+      image_select_view3d_pbr_texco(slot_frag != nullptr ? *slot_frag : driver_frag,
+                                    float2(0.0f),
+                                    channel_scale[slot],
+                                    channel_offset[slot]);
+    }
+
+    /* The destination rect: the four source corners through the forward transform. */
+    const float2 tile_uv = image_select_udim_tile_uv_origin(driver_frag.geom.tile_number);
+    const float2 tile_size = float2(driver_frag.geom.tile_size_px);
+    const float2 src_origin = tile_uv + float2(driver_frag.geom.origin_px) / tile_size;
+    const float2 src_size = float2(driver_frag.geom.size_px) / tile_size;
+    float2 dest_min(FLT_MAX, FLT_MAX);
+    float2 dest_max(-FLT_MAX, -FLT_MAX);
+    for (const int i : IndexRange(4)) {
+      const float2 corner = forward(src_origin + float2((i & 1) ? src_size.x : 0.0f,
+                                                         (i & 2) ? src_size.y : 0.0f));
+      dest_min = math::min(dest_min, corner);
+      dest_max = math::max(dest_max, corner);
+    }
+    image_select_view3d_draw_uv_texture_pbr(ob,
+                                            surface_map,
+                                            dest_min,
+                                            dest_max,
+                                            channel_textures,
+                                            channel_scale,
+                                            channel_offset,
+                                            inverse,
+                                            light_direction,
+                                            view_direction);
+  }
 }
 
 void image_select_view3d_preview_textures_free(Vector<Vector<gpu::Texture *>> &textures)

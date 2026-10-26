@@ -210,41 +210,6 @@ using image_select_v3d::warp_grid_eval;
 /** \} */
 
 /* -------------------------------------------------------------------- */
-/** \name PBR preview channels
- *
- * The on-surface preview composites the four maps a PBR material is painted through (the paint
- * system's default visible channels). Other lifted channels are warped on commit but cannot be
- * meaningfully shaded into the patch, so they are not previewed.
- * \{ */
-
-enum Warp3DPreviewChannel {
-  WARP3D_PREVIEW_BASE_COLOR = 0,
-  WARP3D_PREVIEW_ROUGHNESS = 1,
-  WARP3D_PREVIEW_METALLIC = 2,
-  WARP3D_PREVIEW_NORMAL = 3,
-  WARP3D_PREVIEW_CHANNEL_NUM = 4,
-};
-
-/** Preview slot of a material paint channel, or -1 when the channel is not previewed. */
-inline int warp3d_channel_slot(const eMaterialPaintChannel channel)
-{
-  switch (channel) {
-    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
-      return WARP3D_PREVIEW_BASE_COLOR;
-    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
-      return WARP3D_PREVIEW_ROUGHNESS;
-    case PAINT_MATERIAL_CHANNEL_METALLIC:
-      return WARP3D_PREVIEW_METALLIC;
-    case PAINT_MATERIAL_CHANNEL_NORMAL:
-      return WARP3D_PREVIEW_NORMAL;
-    default:
-      return -1;
-  }
-}
-
-/** \} */
-
-/* -------------------------------------------------------------------- */
 /** \name State
  * \{ */
 
@@ -281,12 +246,12 @@ struct ImageSelectWarp3DState : PaintSelectView3DFloatingSession {
   Vector<float2> screen_pts;
   bool screen_valid = false;
   /** GPU copies of the channel fragments' display buffers for the on-surface preview, one slot
-   * per previewed PBR channel (see #Warp3DPreviewChannel), created lazily by the texture draw
+   * per previewed PBR channel (see #PBRPreviewChannel), created lazily by the texture draw
    * callback (a GPU context is current there). A Material canvas lifts one fragment per PBR map:
    * the preview composites the maps it finds into a shaded PBR patch, and binds a neutral 1x1
    * stand-in per missing channel. */
-  gpu::Texture *preview_textures[WARP3D_PREVIEW_CHANNEL_NUM] = {nullptr};
-  gpu::Texture *preview_default_textures[WARP3D_PREVIEW_CHANNEL_NUM] = {nullptr};
+  gpu::Texture *preview_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
+  gpu::Texture *preview_default_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
   /** Flat-path texture of the single-target session (a channel-slot-independent copy of the
    * primary fragment's display buffer; the channel slots are the PBR composite's). */
   gpu::Texture *preview_texture_flat = nullptr;
@@ -327,14 +292,14 @@ struct ImageSelectWarp3DState : PaintSelectView3DFloatingSession {
   /** Fragment of \a slot's preview channel, or null when the material does not lift it. */
   SelectionTileFragment *preview_fragment_of_slot(int slot)
   {
-    if (slot < 0 || slot >= WARP3D_PREVIEW_CHANNEL_NUM) {
+    if (slot < 0 || slot >= PBR_PREVIEW_CHANNEL_NUM) {
       return nullptr;
     }
-    if (warp3d_channel_slot(this->primary_channel) == slot) {
+    if (image_select_pbr_channel_slot(this->primary_channel) == slot) {
       return this->has_fragment ? &this->fragment : nullptr;
     }
     for (WarpExtraTarget &target : this->extra_targets) {
-      if (warp3d_channel_slot(target.channel) == slot) {
+      if (image_select_pbr_channel_slot(target.channel) == slot) {
         return target.has_fragment ? &target.fragment : nullptr;
       }
     }
@@ -516,36 +481,9 @@ static gpu::Texture *warp3d_channel_default_texture(ImageSelectWarp3DState &stat
 {
   gpu::Texture *&texture = state.preview_default_textures[slot];
   if (texture == nullptr) {
-    static const float defaults[WARP3D_PREVIEW_CHANNEL_NUM][4] = {
-        /* Base color white, roughness mid, metallic 0, flat tangent-space normal. */
-        {1.0f, 1.0f, 1.0f, 1.0f},
-        {0.5f, 0.5f, 0.5f, 1.0f},
-        {0.0f, 0.0f, 0.0f, 1.0f},
-        {0.5f, 0.5f, 1.0f, 1.0f},
-    };
-    texture = GPU_texture_create_2d("Warp3DFragmentDefault",
-                                    1,
-                                    1,
-                                    1,
-                                    gpu::TextureFormat::SFLOAT_16_16_16_16,
-                                    GPU_TEXTURE_USAGE_SHADER_READ,
-                                    defaults[slot]);
+    texture = image_select_view3d_pbr_default_texture_create("Warp3DFragmentDefault", slot);
   }
   return texture;
-}
-
-/**
- * Texture-coordinate affine of one channel's fragment: maps a global source UV onto the fragment's
- * normalized capture rect. Channels lift the same selection at their own tile resolution (and
- * their own feather padding), so each needs its own transform.
- */
-static void warp3d_texco_xform(const SelectionTileFragment &frag, float2 &r_scale, float2 &r_offset)
-{
-  const float2 frag_size = math::max(float2(frag.geom.size_px), float2(1.0f));
-  const float2 tile_size = float2(frag.geom.tile_size_px);
-  const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
-  r_scale = tile_size / frag_size;
-  r_offset = (-tile_uv * tile_size - float2(frag.geom.origin_px)) / frag_size;
 }
 
 /**
@@ -650,82 +588,30 @@ static void warp3d_draw_texture(const bContext * /*C*/, ARegion *region, void *a
     const uint texco = GPU_vertformat_attr_add(
         format, "src_uv", gpu::VertAttrType::SFLOAT_32_32);
     const uint nor = GPU_vertformat_attr_add(format, "nor", gpu::VertAttrType::SFLOAT_32_32_32);
-    immBindBuiltinProgram(GPU_SHADER_IMAGE_SELECT_PBR);
 
-    gpu::Texture *channel_textures[WARP3D_PREVIEW_CHANNEL_NUM] = {nullptr};
-    for (const int slot : IndexRange(WARP3D_PREVIEW_CHANNEL_NUM)) {
-      if (SelectionTileFragment *frag = state->preview_fragment_of_slot(slot)) {
+    gpu::Texture *channel_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
+    float2 channel_scale[PBR_PREVIEW_CHANNEL_NUM];
+    float2 channel_offset[PBR_PREVIEW_CHANNEL_NUM];
+    for (const int slot : IndexRange(PBR_PREVIEW_CHANNEL_NUM)) {
+      SelectionTileFragment *frag = state->preview_fragment_of_slot(slot);
+      if (frag != nullptr) {
         channel_textures[slot] = warp3d_channel_texture(*state, slot, *frag);
       }
       if (channel_textures[slot] == nullptr) {
         channel_textures[slot] = warp3d_channel_default_texture(*state, slot);
       }
-    }
-    immBindTextureSampler("base_color_tex",
-                          channel_textures[WARP3D_PREVIEW_BASE_COLOR],
-                          {GPU_SAMPLER_FILTERING_LINEAR,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER});
-    immBindTextureSampler("roughness_tex",
-                          channel_textures[WARP3D_PREVIEW_ROUGHNESS],
-                          {GPU_SAMPLER_FILTERING_LINEAR,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER});
-    immBindTextureSampler("metallic_tex",
-                          channel_textures[WARP3D_PREVIEW_METALLIC],
-                          {GPU_SAMPLER_FILTERING_LINEAR,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER});
-    immBindTextureSampler("normal_tex",
-                          channel_textures[WARP3D_PREVIEW_NORMAL],
-                          {GPU_SAMPLER_FILTERING_LINEAR,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER,
-                           GPU_SAMPLER_EXTEND_MODE_CLAMP_TO_BORDER});
-
-    static const char *texco_scale_names[WARP3D_PREVIEW_CHANNEL_NUM] = {
-        "texco_scale_base_color",
-        "texco_scale_roughness",
-        "texco_scale_metallic",
-        "texco_scale_normal",
-    };
-    static const char *texco_offset_names[WARP3D_PREVIEW_CHANNEL_NUM] = {
-        "texco_offset_base_color",
-        "texco_offset_roughness",
-        "texco_offset_metallic",
-        "texco_offset_normal",
-    };
-    for (const int slot : IndexRange(WARP3D_PREVIEW_CHANNEL_NUM)) {
-      float2 scale(1.0f, 1.0f);
-      float2 offset(0.0f, 0.0f);
-      if (SelectionTileFragment *frag = state->preview_fragment_of_slot(slot)) {
-        warp3d_texco_xform(*frag, scale, offset);
-      }
-      immUniform2f(texco_scale_names[slot], scale.x, scale.y);
-      immUniform2f(texco_offset_names[slot], offset.x, offset.y);
+      /* A stand-in takes the primary fragment's rect, so its border clamp keeps it from covering
+       * the whole triangle outside the selection. */
+      image_select_view3d_pbr_texco(
+          frag != nullptr ? *frag : state->fragment, float2(0.0f), channel_scale[slot],
+          channel_offset[slot]);
     }
 
-    /* Headlight with a slight studio offset: the patch shades with the view like the viewport's
-     * default studio light, so it reads as the material while the user orbits. */
-    float3 view_direction(0.0f, 0.0f, 1.0f);
-    float3 light_direction(0.0f, 0.0f, 1.0f);
-    if (rv3d != nullptr) {
-      view_direction = math::normalize(float3(rv3d->viewinv[2][0],
-                                              rv3d->viewinv[2][1],
-                                              rv3d->viewinv[2][2]));
-      light_direction = math::normalize(float3(rv3d->viewinv[2][0],
-                                               rv3d->viewinv[2][1],
-                                               rv3d->viewinv[2][2]) +
-                                        float3(rv3d->viewinv[1][0],
-                                               rv3d->viewinv[1][1],
-                                               rv3d->viewinv[1][2]) *
-                                            0.4f +
-                                        float3(rv3d->viewinv[0][0],
-                                               rv3d->viewinv[0][1],
-                                               rv3d->viewinv[0][2]) *
-                                            0.3f);
-    }
-    immUniform3f("light_direction", light_direction.x, light_direction.y, light_direction.z);
-    immUniform3f("view_direction", view_direction.x, view_direction.y, view_direction.z);
+    float3 view_direction;
+    float3 light_direction;
+    image_select_view3d_pbr_light_get(region, view_direction, light_direction);
+    image_select_view3d_pbr_program_bind(
+        channel_textures, channel_scale, channel_offset, light_direction, view_direction);
 
     immBegin(GPU_PRIM_TRIS, uint(tris.size()));
     for (const int idx : tris) {

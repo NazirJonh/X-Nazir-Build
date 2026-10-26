@@ -5539,6 +5539,11 @@ def km_sculpt(params):
 
     items.extend([
         # Brush strokes
+        # Selection-fragment copy/paste (the select tools' clipboard). Ahead of the stack layer
+        # clipboard on purpose: the operators poll false without a select tool active (and paste
+        # without a copied selection), so the stack layer keys keep working for every other tool.
+        ("paint.image_select_view3d_copy", {"type": 'C', "value": 'PRESS', "ctrl": True}, None),
+        ("paint.image_select_view3d_paste", {"type": 'V', "value": 'PRESS', "ctrl": True}, None),
         # Stack layer copy/paste. While a material paint brush is active the keys act on the stack
         # layer being worked on; the operators poll false otherwise, so the viewport's own
         # object copy/paste keeps the keys for every other brush.

@@ -4845,6 +4845,29 @@ static void rna_def_image_paint(BlenderRNA *brna)
       prop, "Selection Space", "Space the 3D Viewport Select Box and Circle shapes are drawn in");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  static const EnumPropertyItem selection_paste_mode_items[] = {
+      {IMAGE_PAINT_SELECTION_PASTE_NEW_LAYER,
+       "NEW_LAYER",
+       ICON_IMAGE,
+       "New Layer",
+       "Paste the fragment as a new Paint layer above the active layer of the stack (a Material "
+       "canvas; every other canvas falls back to the floating selection)"},
+      {IMAGE_PAINT_SELECTION_PASTE_INSIDE_LAYER,
+       "INSIDE_LAYER",
+       ICON_X,
+       "Inside Layer",
+       "Paste the fragment into the current layer as a floating selection that is moved and "
+       "confirmed"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  prop = RNA_def_property(srna, "selection_paste_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "selection_paste_mode");
+  RNA_def_property_enum_items(prop, selection_paste_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Selection Paste", "Where a Paste Selection puts the copied fragment");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   prop = RNA_def_property(srna, "warp_grid_size", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "warp_grid_size");
   RNA_def_property_range(prop, 2, 10);

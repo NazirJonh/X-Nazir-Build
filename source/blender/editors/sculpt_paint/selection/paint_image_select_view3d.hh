@@ -202,8 +202,33 @@ bool image_paint_selection_view3d_poll(bContext *C);
  * new gesture is decided in the invoke callbacks.
  */
 bool image_paint_selection_view3d_tool_poll(bContext *C);
+/**
+ * Start a floating Transform session from pasted clipboard fragments (marked
+ * #SelectionTileFragment::is_pasted), centered on the surface under the view center. The session
+ * takes ownership of \a fragments; \a targets[i] is the canvas map \a fragments[i] is written to
+ * on commit. The user moves, rotates and scales it with the Transform tool's handles.
+ *
+ * \return false when no surface lies under the view center; the fragments are freed then too.
+ */
+bool image_select_transform3d_begin_paste(bContext *C,
+                                          ReportList *reports,
+                                          Vector<ImagePaintSelectionTarget> targets,
+                                          Vector<Vector<SelectionTileFragment>> fragments);
+
+/** Clear the selection masks of \a ob's canvas targets, as a click on empty space does (its own
+ * "Deselect" undo step; nothing happens while no target holds a selection). */
+void image_select_view3d_deselect(bContext *C, Object &ob);
+
 /** True while a floating selection session of this Viewport is live. */
 bool image_paint_selection_view3d_floating_poll(bContext *C);
+
+/**
+ * True when the active tool is one of the toolbar's image-paint selection tools (the
+ * `builtin.image_paint_select_*` family). The Ctrl+C / Ctrl+V clipboard bindings key on this, so
+ * the selection fragment wins the keys over the stack layer clipboard exactly while a select
+ * tool is the tool the user works with.
+ */
+bool image_select_view3d_select_tool_active(const bContext *C);
 
 /** \} */
 
@@ -509,6 +534,145 @@ void image_select_view3d_draw_uv_texture(const Object &ob,
                                          gpu::Texture *texture,
                                          const float2 &uv_min,
                                          const float2 &uv_size);
+
+/* -------------------------------------------------------------------- */
+/** \name PBR preview composite
+ * \{ */
+
+/** The four PBR maps a floating-selection preview composites into one shaded patch, in the
+ * #GPU_SHADER_IMAGE_SELECT_PBR sampler order. */
+enum PBRPreviewChannel {
+  PBR_PREVIEW_BASE_COLOR = 0,
+  PBR_PREVIEW_ROUGHNESS = 1,
+  PBR_PREVIEW_METALLIC = 2,
+  PBR_PREVIEW_NORMAL = 3,
+  PBR_PREVIEW_CHANNEL_NUM = 4,
+};
+
+/** Preview slot of a material paint channel, or -1 when the channel takes no part in the
+ * composite (AO, emission and the rest cannot be meaningfully shaded, only flat-drawn). */
+inline int image_select_pbr_channel_slot(const eMaterialPaintChannel channel)
+{
+  switch (channel) {
+    case PAINT_MATERIAL_CHANNEL_BASE_COLOR:
+      return PBR_PREVIEW_BASE_COLOR;
+    case PAINT_MATERIAL_CHANNEL_ROUGHNESS:
+      return PBR_PREVIEW_ROUGHNESS;
+    case PAINT_MATERIAL_CHANNEL_METALLIC:
+      return PBR_PREVIEW_METALLIC;
+    case PAINT_MATERIAL_CHANNEL_NORMAL:
+      return PBR_PREVIEW_NORMAL;
+    default:
+      return -1;
+  }
+}
+
+/**
+ * Bind #GPU_SHADER_IMAGE_SELECT_PBR with the four channel textures, their texture-coordinate
+ * affines and the lighting, ready for the caller's immBegin / immEnd (the caller sets the vertex
+ * format first: `pos`, `src_uv`, `nor`, and unbinds the program afterwards). Shared by every
+ * floating-selection preview that shades a Material canvas (Move, Warp).
+ *
+ * \param channel_textures: every slot non-null (see #image_select_view3d_pbr_default_texture_create).
+ */
+void image_select_view3d_pbr_program_bind(
+    gpu::Texture *channel_textures[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_scale[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_offset[PBR_PREVIEW_CHANNEL_NUM],
+    const float3 &light_direction,
+    const float3 &view_direction);
+
+/** The preview lighting: a headlight with a slight studio offset, so the patch shades like the
+ * viewport's default studio light while the user orbits. Falls back to looking down -Z without a
+ * 3D region. */
+void image_select_view3d_pbr_light_get(const ARegion *region,
+                                       float3 &r_view_direction,
+                                       float3 &r_light_direction);
+
+/**
+ * Texture-coordinate affine `texco = uv * scale + offset` that maps a global UV onto \a frag's
+ * normalized capture rect, with the rect translated by \a uv_offset (the drag of a floating
+ * selection; zero for the undeformed source UVs). Every channel lifts the same selection at its own
+ * tile resolution, so each needs its own affine.
+ */
+void image_select_view3d_pbr_texco(const SelectionTileFragment &frag,
+                                   const float2 &uv_offset,
+                                   float2 &r_scale,
+                                   float2 &r_offset);
+
+/** A neutral 1x1 stand-in for the PBR channel \a slot (white color, mid roughness, zero metallic,
+ * flat normal), bound where the canvas does not lift that channel. The caller owns the texture
+ * (free it with a GPU context current). */
+gpu::Texture *image_select_view3d_pbr_default_texture_create(const char *name, int slot);
+
+/**
+ * The PBR-composite form of #image_select_view3d_draw_uv_texture: the triangles overlapping
+ * \a dest_rect are drawn through #GPU_SHADER_IMAGE_SELECT_PBR with one texture per preview
+ * channel, so a Material canvas's floating fragment reads like the shaded material instead of a
+ * single flat map.
+ *
+ * \param channel_textures: one texture per #PBRPreviewChannel; every slot must be non-null (bind
+ * a neutral 1x1 stand-in for a channel the canvas does not carry, like the Warp preview does).
+ * \param channel_scale / \a channel_offset: per-channel affine `texco = uv * scale + offset`
+ * mapping the destination UV into that channel's own fragment rect (the channels may live at
+ * different tile resolutions).
+ * \param dest_to_src: maps a triangle corner's destination UV to the source-space UV the
+ * \a channel_scale / \a channel_offset affines expect (the inverse of the fragment's drag or
+ * transform).
+ */
+void image_select_view3d_draw_uv_texture_pbr(
+    const Object &ob,
+    const ImageSelectView3DSurfaceMap &surface_map,
+    const float2 &dest_rect_min,
+    const float2 &dest_rect_max,
+    gpu::Texture *channel_textures[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_scale[PBR_PREVIEW_CHANNEL_NUM],
+    const float2 channel_offset[PBR_PREVIEW_CHANNEL_NUM],
+    FunctionRef<float2(const float2 &)> dest_to_src,
+    const float3 &light_direction,
+    const float3 &view_direction);
+
+/** True when any target's channel takes a #PBRPreviewChannel slot, so the PBR composite can shade. */
+bool image_select_pbr_composite_possible(Span<ImagePaintSelectionTarget> targets);
+
+/** Resolve a floating session's preview target: \a preview_target while it stays a valid index,
+ * else -1 (the PBR composite) when one is possible, else the base-color map, else the first. */
+int image_select_preview_target_resolve(Span<ImagePaintSelectionTarget> targets,
+                                        int preview_target);
+
+/** The next preview target of the Q cycle: between the composite (-1) and the flat targets it
+ * cannot shade. */
+int image_select_preview_target_cycle(Span<ImagePaintSelectionTarget> targets, int preview_target);
+
+/** Lazy GPU copy of fragment \a frag_i of target \a target_i (display buffer, linear filter),
+ * cached in \a textures (parallel to \a fragments). Null when the fragment has no preview. */
+gpu::Texture *image_select_view3d_fragment_texture(
+    Vector<Vector<gpu::Texture *>> &textures,
+    Span<Vector<SelectionTileFragment>> fragments,
+    int target_i,
+    int frag_i);
+
+/**
+ * The shaded PBR preview of a floating Material fragment: one pass per fragment of the lowest PBR
+ * slot the canvas lifts, shading its rect with every channel the other targets carry on the same
+ * tile (a neutral stand-in, cached in \a default_textures, for a missing one).
+ *
+ * \param forward: source UV -> destination UV (the drag or transform), for the rect the triangle
+ * walk is limited to.
+ * \param inverse: destination UV -> source UV, for the per-vertex texture coordinates.
+ */
+void image_select_view3d_draw_pbr_composite(
+    const Object &ob,
+    const ImageSelectView3DSurfaceMap &surface_map,
+    const ARegion *region,
+    Span<ImagePaintSelectionTarget> targets,
+    Span<Vector<SelectionTileFragment>> fragments,
+    Vector<Vector<gpu::Texture *>> &textures,
+    gpu::Texture *default_textures[PBR_PREVIEW_CHANNEL_NUM],
+    FunctionRef<float2(const float2 &)> forward,
+    FunctionRef<float2(const float2 &)> inverse);
+
+/** \} */
 
 /**
  * The general form of #image_select_view3d_draw_uv_texture for a *transformed* fragment: the

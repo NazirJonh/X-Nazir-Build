@@ -126,16 +126,35 @@ float3 perturb_normal(const float3 world_position,
   float3 v = normalize(srt.view_direction);
   float3 h = normalize(l + v);
   float ndl = max(dot(n, l), 0.0f);
+  float ndv = max(dot(n, v), 1e-3f);
   float ndh = max(dot(n, h), 0.0f);
 
-  /* Preview-grade PBR response (diffuse + Blinn-Phong specular), not the render engine's shading:
-   * enough for the floating patch to read as the material next to the viewport's own lighting.
-   * Metals drop the diffuse and tint the reflection with the base color. */
-  float shininess = exp2(11.0f * (1.0f - roughness));
+  /* TODO: The floating-selection PBR preview (Move / Transform / Warp) was worked on up to this
+   * variant and left here on purpose: a key light, a sky / ground gradient reflection and a
+   * normalized Blinn-Phong highlight. Known gaps: the normal-map tangent frame follows `uv_interp`
+   * (the source UV), so a rotated Transform fragment lights its relief against the unrotated
+   * frame; the constants are tuned by eye, not matched to the viewport's lighting. */
+  /* Preview-grade PBR response, not the render engine's shading: enough for the floating patch to
+   * read as the material (roughness, metallic and the normal map all visible) next to the
+   * viewport's own lighting. A key light alone shows nothing on a dielectric (the headlight keeps
+   * the diffuse and the 4% specular flat), so the surface also reflects a sky / ground gradient:
+   * metals show it tinted by the base color, the normal map bends it, and roughness blurs it
+   * toward its average. */
   float3 f0 = mix(float3(0.04f), base_color.rgb, metallic);
-  float3 diffuse = base_color.rgb * (0.35f + 0.65f * ndl) * (1.0f - metallic);
-  float spec_strength = pow(ndh, shininess) * (1.0f - roughness) * ndl;
-  float3 rgb = diffuse + f0 * spec_strength;
+  float3 diffuse = base_color.rgb * (1.0f - metallic) * (0.25f + 0.75f * ndl);
+
+  float shininess = exp2(11.0f * (1.0f - roughness));
+  float spec_norm = (shininess + 8.0f) / (8.0f * 3.14159265f);
+  float3 spec_light = f0 * (spec_norm * pow(ndh, shininess) * ndl);
+
+  float3 refl = reflect(-v, n);
+  float sky = clamp(refl.z * 0.5f + 0.5f, 0.0f, 1.0f);
+  float3 env = mix(float3(0.16f, 0.15f, 0.14f), float3(0.78f, 0.84f, 0.95f), sky);
+  env = mix(env, float3(0.45f), roughness * roughness);
+  float3 fresnel = f0 + (max(float3(1.0f - roughness), f0) - f0) * pow(1.0f - ndv, 5.0f);
+  float3 spec_env = env * fresnel;
+
+  float3 rgb = diffuse + spec_light + spec_env;
 
   frag_out.fragColor = float4(rgb, base_color.a);
 }

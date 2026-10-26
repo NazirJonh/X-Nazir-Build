@@ -1983,6 +1983,18 @@ enum eImagePaint_QuickSelectFlag : char {
   IMAGE_PAINT_QUICK_SELECT_AUTO_ENHANCE = (1 << 0),
 };
 
+/**
+ * #ImagePaintSettings::selection_paste_mode: where a Paste Selection puts the clipboard fragment.
+ * Only a Material canvas can take the New Layer mode; every other canvas keeps the floating
+ * selection regardless of the setting.
+ */
+enum eImagePaint_SelectionPasteMode : char {
+  /** A floating selection inside the current canvas (the Move Selection flow). */
+  IMAGE_PAINT_SELECTION_PASTE_INSIDE_LAYER = 0,
+  /** A new Paint row above the active layer of the stack, one map per pasted channel. */
+  IMAGE_PAINT_SELECTION_PASTE_NEW_LAYER = 1,
+};
+
 /** #ImagePaintSettings::select_source_channel: values above the material channels are pseudo
  * channels (a char holds them both). */
 #define IMAGE_PAINT_SELECT_SOURCE_ACTIVE_PASS 100
@@ -2161,7 +2173,10 @@ struct ImagePaintSettings {
   char quick_select_mode = IMAGE_PAINT_QUICK_SELECT_ADD;
   /** #eImagePaint_QuickSelectFlag */
   char quick_select_flag = IMAGE_PAINT_QUICK_SELECT_AUTO_ENHANCE;
-  char _pad_qs[2] = {};
+  /** #eImagePaint_SelectionPasteMode (appended last so existing files keep their field offsets;
+   * #blo_do_versions_520 brings old files to the New Layer default). */
+  char selection_paste_mode = IMAGE_PAINT_SELECTION_PASTE_NEW_LAYER;
+  char _pad_qs[1] = {};
 };
 
 /** \} */

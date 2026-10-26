@@ -171,6 +171,8 @@ set(SRC
   selection/paint_image_select_view3d.cc
   selection/paint_image_select_view3d.hh
   selection/paint_image_select_move_view3d.cc
+  selection/paint_image_select_paste_layer.cc
+  selection/paint_image_select_paste_layer.hh
   selection/paint_image_select_transform_view3d.cc
   selection/paint_image_select_warp_view3d.cc
   mesh/paint_image_canvas_symmetry.cc

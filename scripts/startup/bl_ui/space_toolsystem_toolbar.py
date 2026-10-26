@@ -2791,6 +2791,9 @@ class _defs_image_paint_select_view3d:
             row = layout.row(align=True)
             row.use_property_split = False
             row.prop(imapaint, "selection_space", expand=True)
+        layout.separator()
+        # Where Ctrl+V puts the copied fragment: the whole select family shares one clipboard.
+        layout.prop(imapaint, "selection_paste_mode", text="Paste")
 
     @ToolDef.from_fn
     def box():
@@ -5622,11 +5625,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt_paint_shape.curve,
         ),
         None,
-        _defs_transform.translate,
-        _defs_transform.rotate,
-        _defs_transform.scale,
-        _defs_transform.transform,
-        None,
+        # No object Move / Rotate / Scale / Transform here: painting never moves the object.
         *_tools_image_paint_select_view3d,
         None,
         _defs_sculpt.sculpt_cursor,

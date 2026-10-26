@@ -15,6 +15,7 @@
 #include "BKE_image.hh"
 #include "BKE_image_paint_selection.hh"
 
+#include "BLI_array.hh"
 #include "BLI_function_ref.hh"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector_types.hh"
@@ -122,6 +123,9 @@ void image_select_fragment_free(SelectionTileFragment &frag);
  * - #fragment_display_ibuf: 4ch straight RGB, binary alpha (GPU pass 1, nearest, ALPHA).
  * - #fragment_feather_display_ibuf: 4ch premultiplied RGB, alpha only outside binary mask
  *   (GPU pass 2, linear, ALPHA_PREMULT); omitted when edge_policy is hard.
+ *
+ * The display alphas are the *total* alpha: the mask coverage times the source pixel's own
+ * alpha, so transparent regions of a layer map stay transparent in the preview.
  */
 void image_select_fragment_update_preview_buffers(SelectionTileFragment &frag);
 
@@ -148,6 +152,9 @@ float image_select_sample_mask_bilinear(const ImBuf *mask, float fx, float fy);
  * channel when the buffer has fewer than 4 (an alpha derived from a repeated channel is
  * meaningless — callers compute alpha from the channel count themselves).
  *
+ * With an alpha channel the RGB is interpolated weighted by alpha (and un-weighted after), so a
+ * transparent texel's RGB never bleeds into its opaque neighbors; the result is straight alpha.
+ *
  * \param channels: component count of the fragment's float buffer (ignored for byte buffers,
  * which are always 4). Pass the destination's channel count so the strides match.
  * \return False when the fragment carries no readable color buffer.
@@ -156,6 +163,32 @@ bool image_select_fragment_sample_bilinear(const SelectionTileFragment &frag,
                                            const float2 &f,
                                            const int channels,
                                            float4 &r_color);
+
+/**
+ * Per-pixel content of \a frag: 1 where the selection mask covers the pixel AND the pixel carries
+ * data, else 0 (`frag.geom.size_px`, row-major). The data test is the pixel's alpha, never its
+ * value: a black Metallic or a flat Normal is real data, while the RGB of a pixel with zero alpha
+ * is meaningless (the layer map is empty there). A buffer without an alpha channel counts as
+ * opaque, and a fragment without a mask as fully selected.
+ *
+ * \param r_any: set to whether any pixel has content.
+ */
+Array<float> image_select_fragment_content_mask(const SelectionTileFragment &frag, bool &r_any);
+
+/** Whether any fragment of any target has content (see #image_select_fragment_content_mask). */
+bool image_select_fragments_have_content(Span<Vector<SelectionTileFragment>> fragments);
+
+/**
+ * Straight-alpha "over" of the fragment texel \a src onto the destination texel \a dst. The
+ * coverage is \a mask_weight (the selection / feather weight) times the texel's own alpha; the
+ * result alpha is `dst + coverage * (1 - dst)`, and the colors mix by `coverage / result alpha`, so
+ * a texel on a transparent destination is copied as is and an opaque destination stays opaque.
+ * The same compositing the Clone stamp's Over mode uses (#clone_blend_texel); a plain lerp of all
+ * four channels would darken the RGB and square the alpha on a transparent destination.
+ *
+ * \return \a dst unchanged when the coverage is zero.
+ */
+float4 image_select_composite_over(const float4 &dst, const float4 &src, float mask_weight);
 
 /* -------------------------------------------------------------------- */
 /** \name Tangent-space normal maps

@@ -2281,6 +2281,20 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
+  /* The selection paste mode is new: a file written before it zero-fills the field, which reads as
+   * the old floating-only behavior. Bring old scenes to the same New Layer default a fresh scene
+   * starts from, so the paste works the same everywhere.
+   *
+   * NOTE: Keyed on the member existence, like the symmetry settings above. */
+  if (!DNA_struct_member_exists_with_alias(
+          fd->filesdna, "ImagePaintSettings", "char", "selection_paste_mode"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      scene.toolsettings->imapaint.selection_paste_mode =
+          IMAGE_PAINT_SELECTION_PASTE_NEW_LAYER;
+    }
+  }
+
   /* The shape settings are new: a file written before them has the embedded struct
    * zero-filled, so the owned profiles and color ramps need to be allocated and the scalar fields
    * set to their defaults.

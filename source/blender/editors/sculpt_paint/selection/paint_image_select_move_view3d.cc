@@ -71,6 +71,7 @@
 #include "paint_image_select_fragment.hh"
 #include "paint_image_select_intern.hh"
 #include "paint_image_select_move_intern.hh"
+#include "paint_image_select_paste_layer.hh"
 #include "paint_image_select_view3d.hh"
 #include "../mesh/sculpt_intern.hh"
 
@@ -111,38 +112,31 @@ struct ImageSelectMove3DState : PaintSelectView3DFloatingSession {
   /** GPU copies of the fragments' display buffers for the on-surface preview, created lazily by
    * the draw callback (a GPU context is current there), parallel to #fragments. */
   Vector<Vector<gpu::Texture *>> preview_textures;
-  /** Which target the on-surface preview shows; -1 = auto (the base-color map, else the first).
-   * Cycled by #preview_channel_cycle (a Material canvas lifts one fragment set per PBR map, and
-   * stacking roughness / normal maps on top of each other reads as nothing). */
+  /**
+   * Which target the on-surface preview shows; -1 = the PBR composite (a Material canvas's maps
+   * shaded together through #GPU_SHADER_IMAGE_SELECT_PBR), or the auto target when no composite
+   * is possible. Cycled by #preview_channel_cycle between the composite and the channels it
+   * cannot shade (a Material canvas lifts one fragment set per PBR map; stacking them flat reads
+   * as nothing, which is why the composite is the default now).
+   */
   int preview_target = -1;
+  /** Neutral 1x1 stand-ins of the PBR composite, one per #PBRPreviewChannel. */
+  gpu::Texture *pbr_default_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
 
   explicit ImageSelectMove3DState()
       : PaintSelectView3DFloatingSession(PaintSelectView3DTool::Move)
   {
   }
 
-  /** Resolve #preview_target: an explicit index while it stays valid, else the base-color map,
-   * else the first target. */
+  /** See #image_select_preview_target_resolve. */
   int preview_target_resolved() const
   {
-    if (this->preview_target >= 0 && this->preview_target < this->targets.size()) {
-      return this->preview_target;
-    }
-    for (const int target_i : this->targets.index_range()) {
-      if (this->targets[target_i].is_color_channel) {
-        return target_i;
-      }
-    }
-    return 0;
+    return image_select_preview_target_resolve(this->targets, this->preview_target);
   }
 
   void preview_channel_cycle() override
   {
-    if (this->targets.is_empty()) {
-      return;
-    }
-    const int current = std::max(this->preview_target_resolved(), 0);
-    this->preview_target = (current + 1) % int(this->targets.size());
+    this->preview_target = image_select_preview_target_cycle(this->targets, this->preview_target);
   }
 
   /** Free the preview textures; makes the GPU context current when the caller has none (a
@@ -150,6 +144,9 @@ struct ImageSelectMove3DState : PaintSelectView3DFloatingSession {
   void preview_textures_free()
   {
     image_select_view3d_preview_textures_free(this->preview_textures);
+    for (gpu::Texture *&tex : this->pbr_default_textures) {
+      image_select_view3d_preview_texture_free(tex);
+    }
   }
 
   ~ImageSelectMove3DState() override
@@ -208,21 +205,31 @@ static void move3d_draw(const bContext * /*C*/, ARegion *region, void *arg)
   if (state->preview_textures.size() != state->fragments.size()) {
     state->preview_textures.resize(state->fragments.size());
   }
-  /* A Material canvas lifts one fragment set per PBR map, all covering the same UV rect: drawing
-   * them all would just stack the maps, leaving the last one (roughness, normal, ...) visible.
-   * Show the user-cycled target, else the base-color map (what the surface looks like). */
+  /* A Material canvas lifts one fragment set per PBR map, all covering the same UV rect: the
+   * composite shades them together into one material patch. The channels it cannot shade (AO and
+   * the rest) stay flat single maps, cycled by Q. */
   const int preview_target = state->preview_target_resolved();
   /* The preview triangles lie exactly on the mesh surface: without a depth offset the shared
    * pixels z-fight and the texture shows through only in patches. */
   if (region != nullptr && region->regiondata != nullptr) {
     ED_view3d_polygon_offset(static_cast<const RegionView3D *>(region->regiondata), 1.0f);
   }
-  for (const int target_i : state->fragments.index_range()) {
-    if (target_i != preview_target) {
-      continue;
-    }
-    const Vector<SelectionTileFragment> &per_target = state->fragments[target_i];
-    Vector<gpu::Texture *> &textures = state->preview_textures[target_i];
+  if (preview_target < 0) {
+    const float2 drag = state->uv_drag_offset;
+    image_select_view3d_draw_pbr_composite(
+        *state->anchor.object,
+        state->surface_map,
+        region,
+        state->targets,
+        state->fragments,
+        state->preview_textures,
+        state->pbr_default_textures,
+        [&](const float2 &src_uv) { return src_uv + drag; },
+        [&](const float2 &dest_uv) { return dest_uv - drag; });
+  }
+  else if (preview_target < state->fragments.size()) {
+    const Vector<SelectionTileFragment> &per_target = state->fragments[preview_target];
+    Vector<gpu::Texture *> &textures = state->preview_textures[preview_target];
     if (textures.size() != per_target.size()) {
       textures.resize(per_target.size(), nullptr);
     }
@@ -231,22 +238,17 @@ static void move3d_draw(const bContext * /*C*/, ARegion *region, void *arg)
       if (frag.preview.fragment_display_ibuf == nullptr) {
         continue;
       }
-      if (textures[frag_i] == nullptr) {
-        textures[frag_i] = IMB_create_gpu_texture(
-            "Move3DFragment", frag.preview.fragment_display_ibuf, true, false, false);
-        if (textures[frag_i] != nullptr) {
-          /* Linear, not nearest: the fragment is usually minified heavily on the surface, and
-           * nearest sampling drops whole texel rows there (the preview showed through only in
-           * patches). No mipmaps in this texture path, so the minified rim stays a bit sharp. */
-          GPU_texture_filter_mode(textures[frag_i], true);
-        }
+      gpu::Texture *texture = image_select_view3d_fragment_texture(
+          state->preview_textures, state->fragments, preview_target, frag_i);
+      if (texture == nullptr) {
+        continue;
       }
       const float2 tile_size = float2(frag.geom.tile_size_px);
       const float2 uv_min = image_select_udim_tile_uv_origin(frag.geom.tile_number) +
                             float2(frag.geom.origin_px) / tile_size + state->uv_drag_offset;
       image_select_view3d_draw_uv_texture(*state->anchor.object,
                                           state->surface_map,
-                                          textures[frag_i],
+                                          texture,
                                           uv_min,
                                           float2(frag.geom.size_px) / tile_size);
     }
@@ -572,6 +574,11 @@ void PAINT_OT_image_select_view3d_move(wmOperatorType *ot)
 
 static bool move3d_copy_poll(bContext *C)
 {
+  /* The keymap binds Ctrl+C ahead of the stack layer clipboard: the selection fragment wins the
+   * key exactly while a select tool is active, and the stack layer copy keeps it otherwise. */
+  if (!image_select_view3d_select_tool_active(C)) {
+    return false;
+  }
   if (!image_paint_selection_view3d_poll(C)) {
     return false;
   }
@@ -589,14 +596,28 @@ static bool move3d_copy_poll(bContext *C)
   return false;
 }
 
+/** Paste needs a copied selection: the keymap binding sits ahead of the stack layer paste, so an
+ * empty clipboard must fall through to it rather than swallow the key. */
+static bool move3d_paste_poll(bContext *C)
+{
+  if (!image_select_view3d_select_tool_active(C)) {
+    return false;
+  }
+  const ImageSelectClipboard *clipboard = image_select_clipboard_get();
+  if (clipboard == nullptr || clipboard->groups.is_empty()) {
+    return false;
+  }
+  return image_paint_selection_view3d_tool_poll(C);
+}
+
 static wmOperatorStatus move3d_copy_exec(bContext *C, wmOperator *op)
 {
   Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) {
     return OPERATOR_CANCELLED;
   }
-  ImageSelectClipboard *clipboard = image_select_clipboard_get();
-  image_select_clipboard_clear();
+  Vector<ImageSelectClipboardGroup> groups;
+  bool has_content = false;
   for (const ImagePaintSelectionTarget &target :
        image_paint_selection_view3d_targets_get(C, *ob))
   {
@@ -604,13 +625,33 @@ static wmOperatorStatus move3d_copy_exec(bContext *C, wmOperator *op)
     if (!image_select_extract_per_tile(op, target.image, target.iuser, &fragments)) {
       continue;
     }
+    for (const SelectionTileFragment &frag : fragments) {
+      bool any = false;
+      image_select_fragment_content_mask(frag, any);
+      has_content = has_content || any;
+    }
     ImageSelectClipboardGroup group;
     group.image_uid = uint32_t(target.image->id.session_uid);
     group.fragments = std::move(fragments);
-    clipboard->groups.append(std::move(group));
+    groups.append(std::move(group));
   }
-  clipboard->has_mask = !clipboard->groups.is_empty();
-  return clipboard->groups.is_empty() ? OPERATOR_CANCELLED : OPERATOR_FINISHED;
+  if (!has_content) {
+    /* A selection over empty (transparent) pixels has nothing to paste: keep the previous
+     * clipboard instead of replacing it with a fragment that would place nothing. */
+    for (ImageSelectClipboardGroup &group : groups) {
+      selection_tile_fragments_free(group.fragments);
+    }
+    BKE_report(op->reports,
+               RPT_WARNING,
+               groups.is_empty() ? "Selection is empty" :
+                                   "Selection contains only transparent pixels");
+    return OPERATOR_CANCELLED;
+  }
+  ImageSelectClipboard *clipboard = image_select_clipboard_get();
+  image_select_clipboard_clear();
+  clipboard->groups = std::move(groups);
+  clipboard->has_mask = true;
+  return OPERATOR_FINISHED;
 }
 
 static wmOperatorStatus move3d_paste_exec(bContext *C, wmOperator *op)
@@ -624,117 +665,9 @@ static wmOperatorStatus move3d_paste_exec(bContext *C, wmOperator *op)
     BKE_report(op->reports, RPT_WARNING, "Clipboard is empty");
     return OPERATOR_CANCELLED;
   }
-  const ARegion *region = CTX_wm_region(C);
-  if (region == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-  /* The paste is an exec (no event): anchor at the view center. */
-  const int2 center(region->winx / 2, region->winy / 2);
-  ImageSelectView3DAnchor anchor;
-  if (!image_select_view3d_anchor_from_mval(C, center, anchor)) {
-    BKE_report(op->reports, RPT_WARNING, "Selection: no surface under the view center");
-    return OPERATOR_CANCELLED;
-  }
-  if (!anchor.jacobian_valid) {
-    BKE_report(op->reports, RPT_WARNING, "Selection: cannot resolve the paste position");
-    return OPERATOR_CANCELLED;
-  }
-
-  /* Commit any live session first: pasting while floating would mix fragments. */
-  image_select_view3d_session_end(C, true);
-
-  auto *state = MEM_new<ImageSelectMove3DState>(__func__);
-  state->anchor = anchor;
-  /* Resolved into a local list: #state->targets grows below in lockstep with #state->fragments,
-   * so a pointer into #state->targets itself would dangle on reallocation, and pre-filling it
-   * would desynchronize the fragment indices. */
-  const Vector<ImagePaintSelectionTarget> candidates = image_paint_selection_view3d_targets_get(
-      C, *ob);
-  for (const ImageSelectClipboardGroup &group : clipboard->groups) {
-    /* Match clipboard groups to the writable targets by session UID. */
-    const ImagePaintSelectionTarget *target_ptr = nullptr;
-    for (const ImagePaintSelectionTarget &target : candidates) {
-      if (target.image != nullptr && uint32_t(target.image->id.session_uid) == group.image_uid) {
-        target_ptr = &target;
-        break;
-      }
-    }
-    if (target_ptr == nullptr) {
-      continue;
-    }
-    /* One fragment list per target: a duplicated clipboard group must not add the same image
-     * twice (the parallel vectors pair by index). */
-    if (std::any_of(state->targets.begin(),
-                    state->targets.end(),
-                    [&](const ImagePaintSelectionTarget &target) {
-                      return target.image == target_ptr->image;
-                    }))
-    {
-      continue;
-    }
-    Vector<SelectionTileFragment> fragments;
-    for (const SelectionTileFragment &src : group.fragments) {
-      SelectionTileFragment copy = {};
-      copy.pixels.fragment_ibuf = IMB_dupImBuf(src.pixels.fragment_ibuf);
-      if (src.pixels.fragment_mask_ibuf != nullptr) {
-        copy.pixels.fragment_mask_ibuf = IMB_dupImBuf(src.pixels.fragment_mask_ibuf);
-        copy.preview.fragment_blend_mask_ibuf = IMB_dupImBuf(
-            src.preview.fragment_blend_mask_ibuf);
-        copy.preview.fragment_display_ibuf = IMB_dupImBuf(src.preview.fragment_display_ibuf);
-        if (src.preview.fragment_feather_display_ibuf != nullptr) {
-          copy.preview.fragment_feather_display_ibuf = IMB_dupImBuf(
-              src.preview.fragment_feather_display_ibuf);
-        }
-      }
-      copy.geom = src.geom;
-      copy.edge_policy = src.edge_policy;
-      copy.is_pasted = true;
-      fragments.append(std::move(copy));
-    }
-    if (fragments.is_empty()) {
-      continue;
-    }
-    state->fragments.append(std::move(fragments));
-    /* A copy of the value: \a target_ptr points into the local #candidates, but the appended
-     * element must own its data after the loop. */
-    state->targets.append(*target_ptr);
-  }
-  if (state->fragments.is_empty()) {
-    MEM_delete(state);
-    BKE_report(op->reports, RPT_WARNING, "Clipboard images are not on the current canvas");
-    return OPERATOR_CANCELLED;
-  }
-
-  /* Center the pasted fragments on the anchor: offset = anchor_uv - first fragment center. */
-  {
-    const SelectionTileFragment &first = state->fragments[0].first();
-    const float2 tile_uv = image_select_udim_tile_uv_origin(first.geom.tile_number);
-    const float2 center_px = float2(first.geom.origin_px) +
-                             float2(first.geom.size_px) * 0.5f;
-    const float2 frag_center_uv = tile_uv + center_px / float2(first.geom.tile_size_px);
-    state->uv_drag_offset = anchor.anchor_uv - frag_center_uv;
-  }
-
-  for (const Vector<SelectionTileFragment> &per_target : state->fragments) {
-    for (const SelectionTileFragment &frag : per_target) {
-      state->outline_uv.append(move3d_fragment_outlines_uv(frag));
-    }
-  }
-  if (anchor.object != nullptr) {
-    state->surface_map.ensure(*anchor.object, anchor.uv_map_name());
-  }
-  for (const ImagePaintSelectionTarget &target : state->targets) {
-    state->borrowed_images.append(target.image);
-  }
-  if (ARegion *region_for_cb = CTX_wm_region(C)) {
-    state->owner_region_type = region_for_cb->runtime->type;
-    state->draw_handle = ED_region_draw_cb_activate(
-        state->owner_region_type, move3d_draw, state, REGION_DRAW_POST_VIEW);
-  }
-  image_select_view3d_session_set(C, CTX_wm_view3d(C), state);
-  WM_event_add_notifier(C, NC_WINDOW, nullptr);
-  ED_region_tag_redraw(CTX_wm_region(C));
-  return OPERATOR_FINISHED;
+  /* Both Selection Paste settings open a floating Transform session to place the fragment. */
+  return image_select_paste_clipboard(C, op->reports, *ob, *clipboard) ? OPERATOR_FINISHED :
+                                                                         OPERATOR_CANCELLED;
 }
 
 void PAINT_OT_image_select_view3d_copy(wmOperatorType *ot)
@@ -751,9 +684,12 @@ void PAINT_OT_image_select_view3d_paste(wmOperatorType *ot)
 {
   ot->name = "Paste Selection";
   ot->idname = "PAINT_OT_image_select_view3d_paste";
-  ot->description = "Paste the clipboard selection centered on the surface under the view";
+  ot->description =
+      "Paste the clipboard selection as a floating selection centered on the surface under the "
+      "view, placed with the Transform tool; the Selection Paste setting puts it in a new layer of "
+      "the stack (a Material canvas) or in the current layer";
   ot->exec = move3d_paste_exec;
-  ot->poll = image_paint_selection_view3d_tool_poll;
+  ot->poll = move3d_paste_poll;
   ot->flag = OPTYPE_REGISTER;
 }
 

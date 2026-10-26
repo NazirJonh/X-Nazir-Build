@@ -81,11 +81,15 @@ ImBuf *image_select_make_display_ibuf_binary(const ImBuf *src, const ImBuf *bina
   float *dst = disp->float_data_for_write();
   const float *fmask = binary_mask->float_data();
 
+  /* The display alpha is the *total* alpha: the selection mask's binary coverage times the
+   * source pixel's own alpha. A layer map can be partially transparent (the layers below show
+   * through it), and a preview that ignores that paints those regions solid. */
   if (src->float_buffer.data) {
     const int ch = src->channels ? src->channels : 4;
     const float *src_f = src->float_buffer.data;
     for (int i = 0; i < pixel_count; i++) {
-      const float alpha = fmask[i] > SELECTION_MASK_THRESHOLD ? 1.0f : 0.0f;
+      const float src_alpha = (ch >= 4) ? src_f[i * ch + 3] : 1.0f;
+      const float alpha = (fmask[i] > SELECTION_MASK_THRESHOLD ? 1.0f : 0.0f) * src_alpha;
       dst[i * 4 + 0] = (ch > 0) ? src_f[i * ch + 0] : 0.0f;
       dst[i * 4 + 1] = (ch > 1) ? src_f[i * ch + 1] : 0.0f;
       dst[i * 4 + 2] = (ch > 2) ? src_f[i * ch + 2] : 0.0f;
@@ -95,7 +99,8 @@ ImBuf *image_select_make_display_ibuf_binary(const ImBuf *src, const ImBuf *bina
   else if (src->byte_buffer.data) {
     const uint8_t *src_b = src->byte_buffer.data;
     for (int i = 0; i < pixel_count; i++) {
-      const float alpha = fmask[i] > SELECTION_MASK_THRESHOLD ? 1.0f : 0.0f;
+      const float src_alpha = src_b[i * 4 + 3] / 255.0f;
+      const float alpha = (fmask[i] > SELECTION_MASK_THRESHOLD ? 1.0f : 0.0f) * src_alpha;
       dst[i * 4 + 0] = src_b[i * 4 + 0] / 255.0f;
       dst[i * 4 + 1] = src_b[i * 4 + 1] / 255.0f;
       dst[i * 4 + 2] = src_b[i * 4 + 2] / 255.0f;
@@ -119,11 +124,15 @@ ImBuf *image_select_make_display_ibuf_feather(const ImBuf *src,
   const float *binary = binary_mask->float_data();
   const float *blend = blend_mask->float_data();
 
+  /* Premultiplied output, the total alpha = feather weight times the source pixel's own alpha
+   * (see #image_select_make_display_ibuf_binary). */
   if (src->float_buffer.data) {
     const int ch = src->channels ? src->channels : 4;
     const float *src_f = src->float_buffer.data;
     for (int i = 0; i < pixel_count; i++) {
-      const float alpha = binary[i] > SELECTION_MASK_THRESHOLD ? 0.0f : blend[i];
+      const float src_alpha = (ch >= 4) ? src_f[i * ch + 3] : 1.0f;
+      const float alpha =
+          (binary[i] > SELECTION_MASK_THRESHOLD ? 0.0f : blend[i]) * src_alpha;
       dst[i * 4 + 0] = ((ch > 0) ? src_f[i * ch + 0] : 0.0f) * alpha;
       dst[i * 4 + 1] = ((ch > 1) ? src_f[i * ch + 1] : 0.0f) * alpha;
       dst[i * 4 + 2] = ((ch > 2) ? src_f[i * ch + 2] : 0.0f) * alpha;
@@ -133,7 +142,9 @@ ImBuf *image_select_make_display_ibuf_feather(const ImBuf *src,
   else if (src->byte_buffer.data) {
     const uint8_t *src_b = src->byte_buffer.data;
     for (int i = 0; i < pixel_count; i++) {
-      const float alpha = binary[i] > SELECTION_MASK_THRESHOLD ? 0.0f : blend[i];
+      const float src_alpha = src_b[i * 4 + 3] / 255.0f;
+      const float alpha =
+          (binary[i] > SELECTION_MASK_THRESHOLD ? 0.0f : blend[i]) * src_alpha;
       dst[i * 4 + 0] = (src_b[i * 4 + 0] / 255.0f) * alpha;
       dst[i * 4 + 1] = (src_b[i * 4 + 1] / 255.0f) * alpha;
       dst[i * 4 + 2] = (src_b[i * 4 + 2] / 255.0f) * alpha;
@@ -173,29 +184,123 @@ bool image_select_fragment_sample_bilinear(const SelectionTileFragment &frag,
   const float wy1 = bly - float(by0);
   const float wy0 = 1.0f - wy1;
 
+  const int64_t texel_offset[4] = {int64_t(by0) * fw + bx0,
+                                   int64_t(by0) * fw + bx1,
+                                   int64_t(by1) * fw + bx0,
+                                   int64_t(by1) * fw + bx1};
+  const float weights[4] = {wx0 * wy0, wx1 * wy0, wx0 * wy1, wx1 * wy1};
+
+  float4 texels[4];
+  bool has_alpha = true;
   if (frag.pixels.fragment_ibuf->float_data() != nullptr) {
     const float *src = frag.pixels.fragment_ibuf->float_data();
+    for (const int i : IndexRange(4)) {
+      for (const int c : IndexRange(4)) {
+        texels[i][c] = src[texel_offset[i] * channels + std::min(c, channels - 1)];
+      }
+    }
+    has_alpha = channels >= 4;
+  }
+  else if (frag.pixels.fragment_ibuf->byte_data() != nullptr) {
+    const uint8_t *src = frag.pixels.fragment_ibuf->byte_data();
+    for (const int i : IndexRange(4)) {
+      for (const int c : IndexRange(4)) {
+        texels[i][c] = float(src[texel_offset[i] * 4 + c]) / 255.0f;
+      }
+    }
+  }
+  else {
+    return false;
+  }
+
+  if (!has_alpha) {
     for (const int c : IndexRange(4)) {
-      const int cc = std::min(c, channels - 1);
-      r_color[c] = src[(by0 * fw + bx0) * channels + cc] * wx0 * wy0 +
-                   src[(by0 * fw + bx1) * channels + cc] * wx1 * wy0 +
-                   src[(by1 * fw + bx0) * channels + cc] * wx0 * wy1 +
-                   src[(by1 * fw + bx1) * channels + cc] * wx1 * wy1;
+      r_color[c] = 0.0f;
+      for (const int i : IndexRange(4)) {
+        r_color[c] += texels[i][c] * weights[i];
+      }
     }
     return true;
   }
-  if (frag.pixels.fragment_ibuf->byte_data() != nullptr) {
-    const uint8_t *src = frag.pixels.fragment_ibuf->byte_data();
-    for (const int c : IndexRange(4)) {
-      r_color[c] = (float(src[(by0 * fw + bx0) * 4 + c]) * wx0 * wy0 +
-                    float(src[(by0 * fw + bx1) * 4 + c]) * wx1 * wy0 +
-                    float(src[(by1 * fw + bx0) * 4 + c]) * wx0 * wy1 +
-                    float(src[(by1 * fw + bx1) * 4 + c]) * wx1 * wy1) /
-                   255.0f;
+
+  /* Alpha-weighted, like the Clone sampler (#sample_channel_at_uv_cpu): the RGB of a transparent
+   * texel (usually black) must not leak into the opaque neighbors it is mixed with, or the edge of
+   * a layer's painted area lands as a dark fringe. */
+  float3 rgb_weighted(0.0f);
+  float alpha = 0.0f;
+  for (const int i : IndexRange(4)) {
+    rgb_weighted += float3(texels[i].x, texels[i].y, texels[i].z) * (texels[i].w * weights[i]);
+    alpha += texels[i].w * weights[i];
+  }
+  const float3 rgb = alpha > 1e-6f ? rgb_weighted / alpha : float3(0.0f);
+  r_color = float4(rgb.x, rgb.y, rgb.z, alpha);
+  return true;
+}
+
+Array<float> image_select_fragment_content_mask(const SelectionTileFragment &frag, bool &r_any)
+{
+  r_any = false;
+  const int w = frag.geom.size_px.x;
+  const int h = frag.geom.size_px.y;
+  if (w <= 0 || h <= 0) {
+    return {};
+  }
+  Array<float> content(int64_t(w) * h, 0.0f);
+  const float *mask = frag.pixels.fragment_mask_ibuf ? frag.pixels.fragment_mask_ibuf->float_data() :
+                                                       nullptr;
+  const ImBuf *pixels = frag.pixels.fragment_ibuf;
+  const float *pixels_f = pixels ? pixels->float_data() : nullptr;
+  const uint8_t *pixels_b = pixels ? pixels->byte_data() : nullptr;
+  const int channels = (pixels && pixels->channels) ? pixels->channels : 4;
+  /* No alpha channel: every selected pixel is data. */
+  const bool has_alpha = pixels_b != nullptr || (pixels_f != nullptr && channels >= 4);
+  constexpr float alpha_epsilon = 1e-4f;
+
+  for (const int64_t i : content.index_range()) {
+    if (mask != nullptr && mask[i] <= SELECTION_MASK_THRESHOLD) {
+      continue;
     }
-    return true;
+    if (has_alpha) {
+      const float alpha = pixels_f ? pixels_f[i * channels + 3] : float(pixels_b[i * 4 + 3]) / 255.0f;
+      if (alpha <= alpha_epsilon) {
+        continue;
+      }
+    }
+    content[i] = 1.0f;
+    r_any = true;
+  }
+  return content;
+}
+
+bool image_select_fragments_have_content(const Span<Vector<SelectionTileFragment>> fragments)
+{
+  for (const Vector<SelectionTileFragment> &per_target : fragments) {
+    for (const SelectionTileFragment &frag : per_target) {
+      bool any = false;
+      image_select_fragment_content_mask(frag, any);
+      if (any) {
+        return true;
+      }
+    }
   }
   return false;
+}
+
+float4 image_select_composite_over(const float4 &dst, const float4 &src, const float mask_weight)
+{
+  const float coverage = std::clamp(mask_weight, 0.0f, 1.0f) * std::clamp(src.w, 0.0f, 1.0f);
+  if (coverage <= 0.0f) {
+    return dst;
+  }
+  const float dst_alpha = std::clamp(dst.w, 0.0f, 1.0f);
+  const float alpha_out = dst_alpha + coverage * (1.0f - dst_alpha);
+  /* Straight-alpha "over" (the weight #clone_blend_texel gives the Clone stamp): a texel written
+   * onto an empty target is copied as is, whatever RGB the target stored there. */
+  const float weight = coverage / alpha_out;
+  return float4(dst.x + (src.x - dst.x) * weight,
+                dst.y + (src.y - dst.y) * weight,
+                dst.z + (src.z - dst.z) * weight,
+                alpha_out);
 }
 
 float2x2 image_select_normal_rotation(const float2x2 &linear)

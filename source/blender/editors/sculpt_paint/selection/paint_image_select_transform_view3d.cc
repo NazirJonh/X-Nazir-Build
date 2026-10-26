@@ -117,13 +117,23 @@ inline float2 transform_uv(const float2x2 &linear,
   return pivot_uv + linear * (uv - pivot_uv) + translation_uv;
 }
 
-/** The plane-space linear map (rotate then scale) of the current transform. */
-inline float2x2 transform_plane_linear(const float rotation, const float2 &scale)
+/** Rotation by \a angle in the plane (columns, like the rest of the plane math). */
+inline float2x2 plane_rotation(const float angle)
 {
-  const float s = std::sin(rotation);
-  const float c = std::cos(rotation);
-  /* R * S: scale along the plane axes, then rotate. */
-  return float2x2({c * scale.x, s * scale.x}, {-s * scale.y, c * scale.y});
+  const float s = std::sin(angle);
+  const float c = std::cos(angle);
+  return float2x2({c, s}, {-s, c});
+}
+
+/**
+ * The plane-space linear map (scale, then rotate) of the current transform. The scale acts along
+ * the axes of the fragment frame (\a frame, the orientation of the selection's own edges), not
+ * the plane axes: `R(rotation) * F * S * F^-1`.
+ */
+inline float2x2 transform_plane_linear(const float rotation, const float2 &scale, const float frame)
+{
+  const float2x2 scale_matrix({scale.x, 0.0f}, {0.0f, scale.y});
+  return plane_rotation(rotation) * plane_rotation(frame) * scale_matrix * plane_rotation(-frame);
 }
 
 }  // namespace image_select_v3d
@@ -137,6 +147,12 @@ struct ImageSelectTransform3DState : PaintSelectView3DFloatingSession {
   float rotation = 0.0f;
   float2 scale = float2(1.0f);
   float2 plane_pivot = float2(0.0f);
+  /**
+   * Orientation of the fragment frame on the anchor plane: the minimal oriented rectangle of the
+   * selection content (a box select gives its own edges), so the cage and the scale axes follow
+   * the selection instead of the screen or the canvas. #plane_min / #plane_max are in this frame.
+   */
+  float frame_angle = 0.0f;
   Vector<image_select_v3d::Transform3DSnapshot> drag_history;
   ImageSelectView3DSurfaceMap surface_map;
   /** Fragment outlines in source UV space (segment pairs). */
@@ -144,10 +160,16 @@ struct ImageSelectTransform3DState : PaintSelectView3DFloatingSession {
   /** GPU copies of the fragments' display buffers for the on-surface preview, created lazily by
    * the texture draw callback (a GPU context is current there), parallel to #fragments. */
   Vector<Vector<gpu::Texture *>> preview_textures;
-  /** Which target the on-surface preview shows; -1 = auto (the base-color map, else the first),
-   * cycled by #preview_channel_cycle (a Material canvas lifts one fragment set per PBR map, and
-   * stacking roughness / normal maps on top of each other reads as nothing). */
+  /** Which target the on-surface preview shows; -1 = the PBR composite (a Material canvas's maps
+   * shaded together), or the auto target when none is possible. Cycled by #preview_channel_cycle
+   * between the composite and the channels it cannot shade (stacking roughness / normal maps flat
+   * on top of each other reads as nothing). */
   int preview_target = -1;
+  /** Neutral 1x1 stand-ins of the PBR composite, one per #PBRPreviewChannel. */
+  gpu::Texture *pbr_default_textures[PBR_PREVIEW_CHANNEL_NUM] = {nullptr};
+  /** Pasted content has no selection of its own on the canvas: the yellow selection outline is not
+   * drawn for it, only the cage handles. */
+  bool hide_outline = false;
   /** POST_VIEW draw handle of the texture preview. Two callbacks because the handles / outline
    * draw in region px (#draw_handle, POST_PIXEL) while the fragment pixels draw through the
    * view-projection matrix (this one, POST_VIEW). */
@@ -185,29 +207,20 @@ struct ImageSelectTransform3DState : PaintSelectView3DFloatingSession {
    * else the first target. */
   int preview_target_resolved() const
   {
-    if (this->preview_target >= 0 && this->preview_target < this->targets.size()) {
-      return this->preview_target;
-    }
-    for (const int target_i : this->targets.index_range()) {
-      if (this->targets[target_i].is_color_channel) {
-        return target_i;
-      }
-    }
-    return 0;
+    return image_select_preview_target_resolve(this->targets, this->preview_target);
   }
 
   void preview_channel_cycle() override
   {
-    if (this->targets.is_empty()) {
-      return;
-    }
-    const int current = std::max(this->preview_target_resolved(), 0);
-    this->preview_target = (current + 1) % int(this->targets.size());
+    this->preview_target = image_select_preview_target_cycle(this->targets, this->preview_target);
   }
 
   ~ImageSelectTransform3DState() override
   {
     image_select_view3d_preview_textures_free(this->preview_textures);
+    for (gpu::Texture *&tex : this->pbr_default_textures) {
+      image_select_view3d_preview_texture_free(tex);
+    }
     for (Vector<SelectionTileFragment> &per_target : this->fragments) {
       selection_tile_fragments_free(per_target);
     }
@@ -238,8 +251,8 @@ float2x2 ImageSelectTransform3DState::linear_uv() const
   if (!this->anchor.jacobian_valid) {
     return float2x2::identity();
   }
-  const float2x2 plane_linear = image_select_v3d::transform_plane_linear(this->rotation,
-                                                                         this->scale);
+  const float2x2 plane_linear = image_select_v3d::transform_plane_linear(
+      this->rotation, this->scale, this->frame_angle);
   bool invert_ok = false;
   const float2x2 jacobian_inv = math::invert(this->anchor.plane_uv_jacobian, invert_ok);
   if (!invert_ok) {
@@ -339,6 +352,101 @@ static Bounds<float2> transform3d_source_bounds(
   return bounds;
 }
 
+/**
+ * The minimal-area oriented rectangle of \a points (rotating calipers over the convex hull): the
+ * frame the selection's own edges define. \a r_angle is the frame orientation folded into
+ * (-45, 45] degrees (the rectangle is symmetric under quarter turns, so the smallest turn from the
+ * plane axes is the one that keeps the cage upright); \a r_lo / \a r_hi are the rectangle bounds in
+ * that frame. Near-ties (a square, a circle) keep the frame closest to the plane axes, so the cage
+ * does not jitter between equivalent orientations.
+ */
+static void transform3d_min_area_frame(const Span<float2> points,
+                                       float &r_angle,
+                                       float2 &r_lo,
+                                       float2 &r_hi)
+{
+  Vector<float2> sorted(points);
+  std::sort(sorted.begin(), sorted.end(), [](const float2 &a, const float2 &b) {
+    return a.x < b.x || (a.x == b.x && a.y < b.y);
+  });
+  Vector<float2> unique_points;
+  for (const float2 &p : sorted) {
+    if (unique_points.is_empty() || unique_points.last() != p) {
+      unique_points.append(p);
+    }
+  }
+
+  const auto bounds_in_frame = [&](const Span<float2> pts, const float phi, float2 &lo, float2 &hi) {
+    const float c = std::cos(phi);
+    const float s = std::sin(phi);
+    lo = float2(FLT_MAX, FLT_MAX);
+    hi = float2(-FLT_MAX, -FLT_MAX);
+    for (const float2 &p : pts) {
+      const float2 q(c * p.x + s * p.y, -s * p.x + c * p.y);
+      lo = math::min(lo, q);
+      hi = math::max(hi, q);
+    }
+  };
+
+  r_angle = 0.0f;
+  bounds_in_frame(unique_points, 0.0f, r_lo, r_hi);
+  if (unique_points.size() < 3) {
+    return;
+  }
+
+  /* Convex hull (monotone chain). */
+  const auto cross = [](const float2 &o, const float2 &a, const float2 &b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  };
+  Vector<float2> hull;
+  for (const float2 &p : unique_points) {
+    while (hull.size() >= 2 && cross(hull[hull.size() - 2], hull.last(), p) <= 0.0f) {
+      hull.remove_last();
+    }
+    hull.append(p);
+  }
+  const int64_t lower_size = hull.size() + 1;
+  for (int64_t i = unique_points.size() - 2; i >= 0; i--) {
+    const float2 &p = unique_points[i];
+    while (hull.size() >= lower_size && cross(hull[hull.size() - 2], hull.last(), p) <= 0.0f) {
+      hull.remove_last();
+    }
+    hull.append(p);
+  }
+  hull.remove_last();
+  if (hull.size() < 3) {
+    return;
+  }
+
+  const float half_pi = float(M_PI_2);
+  const float quarter_pi = float(M_PI_4);
+  float best_area = (r_hi.x - r_lo.x) * (r_hi.y - r_lo.y);
+  for (const int64_t i : hull.index_range()) {
+    const float2 edge = hull[(i + 1) % hull.size()] - hull[i];
+    if (math::length_squared(edge) < 1e-20f) {
+      continue;
+    }
+    float phi = std::fmod(std::atan2(edge.y, edge.x), half_pi);
+    if (phi > quarter_pi) {
+      phi -= half_pi;
+    }
+    else if (phi <= -quarter_pi) {
+      phi += half_pi;
+    }
+    float2 lo, hi;
+    bounds_in_frame(hull, phi, lo, hi);
+    const float area = (hi.x - lo.x) * (hi.y - lo.y);
+    const bool smaller = area < best_area * (1.0f - 1e-4f);
+    const bool tie = area <= best_area * (1.0f + 1e-4f) && std::abs(phi) < std::abs(r_angle);
+    if (smaller || tie) {
+      best_area = std::min(area, best_area);
+      r_angle = phi;
+      r_lo = lo;
+      r_hi = hi;
+    }
+  }
+}
+
 static void transform3d_lift_fragments(bContext *C, ImageSelectTransform3DState &state)
 {
   for (const int target_i : state.fragments.index_range()) {
@@ -351,41 +459,72 @@ static void transform3d_lift_fragments(bContext *C, ImageSelectTransform3DState 
     state.surface_map.ensure(*state.anchor.object, state.anchor.uv_map_name());
   }
   state.outline_uv = transform3d_build_outline_uv(state.fragments);
-  /* The cage is the fragment's bounds on the anchor plane, taken from the outline so it hugs the
-   * selection however the UV island is oriented on screen (the four UV corners would map to a
-   * parallelogram). The pivot starts at its center. */
+  /* The cage is the minimal oriented rectangle of the fragment *content* on the anchor plane (see
+   * #transform3d_min_area_frame): a box select gives back its own edges, and empty (transparent)
+   * pixels of the selection do not stretch it. It is taken on the plane, not in UV, so it stays a
+   * rectangle however the UV island is oriented on screen. The pivot starts at its center. */
   state.plane_bounds_valid = false;
+  state.frame_angle = 0.0f;
   bool invert_ok = false;
   const float2x2 jacobian_inv = math::invert(state.anchor.plane_uv_jacobian, invert_ok);
-  if (state.anchor.jacobian_valid && invert_ok) {
-    float2 plane_lo(FLT_MAX, FLT_MAX);
-    float2 plane_hi(-FLT_MAX, -FLT_MAX);
-    const auto include_uv = [&](const float2 &uv) {
-      const float2 p = jacobian_inv * (uv - state.anchor.anchor_uv);
-      plane_lo = math::min(plane_lo, p);
-      plane_hi = math::max(plane_hi, p);
-    };
+  if (!state.anchor.jacobian_valid || !invert_ok) {
+    return;
+  }
+  Vector<float2> plane_points;
+  const auto include_uv = [&](const float2 &uv) {
+    plane_points.append(jacobian_inv * (uv - state.anchor.anchor_uv));
+  };
+  for (const Vector<SelectionTileFragment> &per_target : state.fragments) {
+    for (const SelectionTileFragment &frag : per_target) {
+      bool any = false;
+      const Array<float> content = image_select_fragment_content_mask(frag, any);
+      if (!any) {
+        continue;
+      }
+      const float2 tile_uv = image_select_udim_tile_uv_origin(frag.geom.tile_number);
+      const float2 origin = float2(frag.geom.origin_px);
+      const float2 tile_size = float2(frag.geom.tile_size_px);
+      const auto uv_cell = [&](const int2 &px) {
+        return tile_uv + (origin + float2(px)) / tile_size;
+      };
+      Vector<float2> segments;
+      image_select_mask_boundary_segments(content.data(),
+                                          frag.geom.size_px,
+                                          int2(0, 0),
+                                          frag.geom.size_px,
+                                          uv_cell,
+                                          1,
+                                          segments);
+      for (const float2 &uv : segments) {
+        include_uv(uv);
+      }
+    }
+  }
+  if (plane_points.is_empty()) {
+    /* No content (or no mask): the selection outline, then the tight rect corners. */
     for (const Vector<float2> &segments : state.outline_uv) {
       for (const float2 &uv : segments) {
         include_uv(uv);
       }
     }
-    if (plane_lo.x > plane_hi.x) {
-      const Bounds<float2> bounds = transform3d_source_bounds(state.fragments);
-      if (bounds.min.x <= bounds.max.x) {
-        include_uv(bounds.min);
-        include_uv(bounds.max);
-        include_uv(float2(bounds.min.x, bounds.max.y));
-        include_uv(float2(bounds.max.x, bounds.min.y));
-      }
-    }
-    if (plane_lo.x <= plane_hi.x) {
-      state.plane_min = plane_lo;
-      state.plane_max = plane_hi;
-      state.plane_bounds_valid = true;
-      state.plane_pivot = (plane_lo + plane_hi) * 0.5f;
+  }
+  if (plane_points.is_empty()) {
+    const Bounds<float2> bounds = transform3d_source_bounds(state.fragments);
+    if (bounds.min.x <= bounds.max.x) {
+      include_uv(bounds.min);
+      include_uv(bounds.max);
+      include_uv(float2(bounds.min.x, bounds.max.y));
+      include_uv(float2(bounds.max.x, bounds.min.y));
     }
   }
+  if (plane_points.is_empty()) {
+    return;
+  }
+  transform3d_min_area_frame(
+      plane_points, state.frame_angle, state.plane_min, state.plane_max);
+  state.plane_bounds_valid = true;
+  state.plane_pivot = image_select_v3d::plane_rotation(state.frame_angle) *
+                      ((state.plane_min + state.plane_max) * 0.5f);
 }
 
 /** \} */
@@ -440,7 +579,8 @@ static bool transform3d_uv_to_screen(ImageSelectTransform3DState &state,
 /** The forward plane transform of the current rotation / scale / translation about the pivot. */
 static float2 transform3d_plane_forward(const ImageSelectTransform3DState &state, const float2 &p)
 {
-  const float2x2 linear = image_select_v3d::transform_plane_linear(state.rotation, state.scale);
+  const float2x2 linear = image_select_v3d::transform_plane_linear(
+      state.rotation, state.scale, state.frame_angle);
   return state.plane_pivot + linear * (p - state.plane_pivot) + state.plane_translation;
 }
 
@@ -481,9 +621,12 @@ static void transform3d_refresh_screen(ImageSelectTransform3DState &state, const
   if (!state.plane_bounds_valid || state.fragments.is_empty()) {
     return;
   }
+  /* The cage lives in the fragment frame: its corners are turned onto the plane here. */
+  const float2x2 frame = image_select_v3d::plane_rotation(state.frame_angle);
   const float2 lo = state.plane_min;
   const float2 hi = state.plane_max;
-  const float2 corners_src[4] = {lo, float2(hi.x, lo.y), hi, float2(lo.x, hi.y)};
+  const float2 corners_src[4] = {
+      frame * lo, frame * float2(hi.x, lo.y), frame * hi, frame * float2(lo.x, hi.y)};
   bool all = true;
   for (const int i : IndexRange(4)) {
     all = all && transform3d_plane_to_screen(
@@ -498,7 +641,7 @@ static void transform3d_refresh_screen(ImageSelectTransform3DState &state, const
    * center, so it keeps a constant distance whatever the rotation, scale or view perspective. */
   float2 center_screen;
   all = all && transform3d_plane_to_screen(
-                   state, region, transform3d_plane_forward(state, (lo + hi) * 0.5f),
+                   state, region, transform3d_plane_forward(state, frame * ((lo + hi) * 0.5f)),
                    center_screen);
   if (all) {
     float2 dir = state.screen_edges[2] - center_screen;
@@ -576,16 +719,12 @@ static void transform3d_draw_texture(const bContext * /*C*/, ARegion *region, vo
   if (state->preview_textures.size() != state->fragments.size()) {
     state->preview_textures.resize(state->fragments.size());
   }
-  /* A Material canvas lifts one fragment set per PBR map: drawing them all would stack the maps.
-   * Show the user-cycled target, else the base-color map (what the surface looks like). */
+  /* A Material canvas lifts one fragment set per PBR map: drawing them all flat would stack the
+   * maps. The composite shades them together; the channels it cannot shade are shown one at a
+   * time (the user-cycled target). */
   const int target_i = state->preview_target_resolved();
-  if (target_i < 0 || target_i >= state->fragments.size()) {
+  if (target_i >= state->fragments.size()) {
     return;
-  }
-  /* The preview triangles lie exactly on the mesh surface: without a depth offset the shared
-   * pixels z-fight and the texture shows through only in patches. */
-  if (region != nullptr && region->regiondata != nullptr) {
-    ED_view3d_polygon_offset(static_cast<const RegionView3D *>(region->regiondata), 1.0f);
   }
   const float2x2 linear = state->linear_uv();
   const float2 pivot = state->pivot_uv();
@@ -598,6 +737,29 @@ static void transform3d_draw_texture(const bContext * /*C*/, ARegion *region, vo
   const auto src_uv_of = [&](const float2 &dest_uv) {
     return pivot + linear_inv * (dest_uv - pivot - translation);
   };
+  /* The preview triangles lie exactly on the mesh surface: without a depth offset the shared
+   * pixels z-fight and the texture shows through only in patches. */
+  if (region != nullptr && region->regiondata != nullptr) {
+    ED_view3d_polygon_offset(static_cast<const RegionView3D *>(region->regiondata), 1.0f);
+  }
+  if (target_i < 0) {
+    image_select_view3d_draw_pbr_composite(
+        *state->anchor.object,
+        state->surface_map_ref(),
+        region,
+        state->targets,
+        state->fragments,
+        state->preview_textures,
+        state->pbr_default_textures,
+        [&](const float2 &src_uv) {
+          return image_select_v3d::transform_uv(linear, pivot, translation, src_uv);
+        },
+        src_uv_of);
+    if (region != nullptr && region->regiondata != nullptr) {
+      ED_view3d_polygon_offset(static_cast<const RegionView3D *>(region->regiondata), 0.0f);
+    }
+    return;
+  }
   const Vector<SelectionTileFragment> &per_target = state->fragments[target_i];
   Vector<gpu::Texture *> &textures = state->preview_textures[target_i];
   if (textures.size() != per_target.size()) {
@@ -669,7 +831,7 @@ static void transform3d_draw(const bContext * /*C*/, ARegion *region, void *arg)
 
   /* Fragment outline (transformed), drawn in region px with the dashed shader. */
   Vector<Vector<float2>> screen_polylines;
-  if (state->surface_map_ref().sampler) {
+  if (state->surface_map_ref().sampler && !state->hide_outline) {
     const float2x2 linear = state->linear_uv();
     const float2 pivot = state->pivot_uv();
     const float2 translation = state->translation_uv();
@@ -886,8 +1048,8 @@ static void transform3d_apply_handle(ImageSelectTransform3DState &state,
        *   P' = P + L^-1 * (plane_now - (P + T)).
        * (The Image Editor reaches the same end state by moving its independent anchor marker and
        * syncing the baked pivot via #image_select_transform_set_pivot_preserve_visual.) */
-      const float2x2 plane_linear = image_select_v3d::transform_plane_linear(state.rotation,
-                                                                            state.scale);
+      const float2x2 plane_linear = image_select_v3d::transform_plane_linear(
+          state.rotation, state.scale, state.frame_angle);
       bool invert_ok = false;
       const float2x2 plane_linear_inv = math::invert(plane_linear, invert_ok);
       if (!invert_ok) {
@@ -905,8 +1067,8 @@ static void transform3d_apply_handle(ImageSelectTransform3DState &state,
     }
     default: {
       /* Per-axis scale along the *start* rotation's axes, in plane space. */
-      const float s0 = std::sin(state.drag_start.rotation);
-      const float c0 = std::cos(state.drag_start.rotation);
+      const float s0 = std::sin(state.drag_start.rotation + state.frame_angle);
+      const float c0 = std::cos(state.drag_start.rotation + state.frame_angle);
       const float2 ex0(c0, s0);
       const float2 ey0(-s0, c0);
       const float2 q0 = state.press_plane - state.plane_pivot;
@@ -1065,6 +1227,58 @@ static ImageSelectTransform3DState *transform3d_state_get()
                                          PaintSelectView3DTool::Transform>();
 }
 
+bool image_select_transform3d_begin_paste(bContext *C,
+                                          ReportList *reports,
+                                          Vector<ImagePaintSelectionTarget> targets,
+                                          Vector<Vector<SelectionTileFragment>> fragments)
+{
+  BLI_assert(targets.size() == fragments.size());
+  ARegion *region = CTX_wm_region(C);
+  /* The state owns the fragments from here on: its destructor frees them on every failure path. */
+  auto *state = MEM_new<ImageSelectTransform3DState>(__func__);
+  state->targets = std::move(targets);
+  state->fragments = std::move(fragments);
+  if (region == nullptr || CTX_wm_view3d(C) == nullptr || state->fragments.is_empty()) {
+    MEM_delete(state);
+    return false;
+  }
+  /* A live session of any tool settles first: the session slot must be empty. */
+  image_select_view3d_session_end(C, true);
+
+  /* The paste is an exec (no event): anchor at the view center. */
+  if (!image_select_view3d_anchor_from_mval(
+          C, int2(region->winx / 2, region->winy / 2), state->anchor) ||
+      !state->anchor.jacobian_valid)
+  {
+    MEM_delete(state);
+    BKE_report(reports, RPT_WARNING, "Selection: no surface under the view center");
+    return false;
+  }
+  /* The fragments are #SelectionTileFragment::is_pasted: the lift only builds the outline, the
+   * bounds and the pivot, it never clears canvas pixels. */
+  transform3d_lift_fragments(C, *state);
+  if (!state->plane_bounds_valid) {
+    MEM_delete(state);
+    BKE_report(reports, RPT_WARNING, "Selection: cannot resolve the paste position");
+    return false;
+  }
+  state->hide_outline = true;
+  /* The fragment sits where it was copied from; move its center onto the anchor. */
+  state->plane_translation = -state->plane_pivot;
+  for (const ImagePaintSelectionTarget &target : state->targets) {
+    state->borrowed_images.append(target.image);
+  }
+  state->owner_region_type = region->runtime->type;
+  state->draw_handle_texture = ED_region_draw_cb_activate(
+      state->owner_region_type, transform3d_draw_texture, state, REGION_DRAW_POST_VIEW);
+  state->draw_handle = ED_region_draw_cb_activate(
+      state->owner_region_type, transform3d_draw, state, REGION_DRAW_POST_PIXEL);
+  image_select_view3d_session_set(C, CTX_wm_view3d(C), state);
+  state->drag_history.append(transform3d_snapshot(*state));
+  ED_region_tag_redraw(region);
+  return true;
+}
+
 static wmOperatorStatus transform3d_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
   Object *ob = CTX_data_active_object(C);
@@ -1120,6 +1334,12 @@ static wmOperatorStatus transform3d_invoke(bContext *C, wmOperator *op, const wm
   if (!any) {
     MEM_delete(state);
     BKE_report(op->reports, RPT_WARNING, "Selection is empty");
+    return OPERATOR_CANCELLED;
+  }
+  if (!image_select_fragments_have_content(state->fragments)) {
+    /* Nothing to lift: the lift would clear no pixels and leave a cage around empty space. */
+    MEM_delete(state);
+    BKE_report(op->reports, RPT_WARNING, "Selection contains only transparent pixels");
     return OPERATOR_CANCELLED;
   }
   transform3d_lift_fragments(C, *state);

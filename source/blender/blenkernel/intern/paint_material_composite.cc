@@ -1564,7 +1564,6 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
   if (!composite_stack_validate_linear(stack)) {
     return false;
   }
-
   rcti area;
   if (!BKE_paint_material_composite_area_get(stack.width, stack.height, region, area)) {
     /* Nothing of the tagged region is inside the buffer; the composite is already correct. */
@@ -1898,8 +1897,11 @@ static ImBuf *composite_resample_mapped(const ImBuf *src,
     else {
       const float *pixel = src->float_buffer.data + (int64_t(ty) * src->x + tx) * src_channels;
       r_tap[0] = pixel[0];
-      r_tap[1] = src_channels > 1 ? pixel[1] : 0.0f;
-      r_tap[2] = src_channels > 2 ? pixel[2] : 0.0f;
+      /* A one-channel float buffer is a grey, the convention the tile decode reads it by: the
+       * resample has to keep that, or a mask resampled onto another grid would read a third of
+       * its value. */
+      r_tap[1] = src_channels == 1 ? pixel[0] : (src_channels > 1 ? pixel[1] : 0.0f);
+      r_tap[2] = src_channels == 1 ? pixel[0] : (src_channels > 2 ? pixel[2] : 0.0f);
       r_tap[3] = src_channels == 4 ? pixel[3] : 1.0f;
       if (r_tap[3] > 0.0f) {
         const float inv = 1.0f / r_tap[3];
@@ -2145,6 +2147,36 @@ static void composite_clip_coverage_fold(PaintMaterialCompositeLayer &r_layer,
 }
 
 /**
+ * Bring an acquired buffer onto the evaluation grid.
+ *
+ * A full evaluation reads every map at the stack's own size, so this only ever moves something for
+ * a reduced one (#BKE_paint_material_composite_eval_images_linear's eval dims): the resample is
+ * bilinear in the map's own UV, which at a power-of-two octave is the preview-grade twin of what
+ * the full evaluation reads texel by texel. A borrowed buffer -- an Anchor Point slice owned by
+ * the description -- is never written to; the owned resample replaces it for this evaluation alone.
+ * A resample that cannot be made keeps the original, which the size validation refuses, exactly as
+ * it refuses a stack of disagreeing sizes.
+ */
+static ImBuf *composite_buffer_to_eval_grid(ImBuf *ibuf,
+                                            const int eval_width,
+                                            const int eval_height,
+                                            Vector<CompositeImageLock> &r_locks)
+{
+  if (ibuf == nullptr || eval_width <= 0 || eval_height <= 0 ||
+      (ibuf->x == eval_width && ibuf->y == eval_height))
+  {
+    return ibuf;
+  }
+  const PaintMaterialCompositeMapping identity;
+  ImBuf *resampled = composite_resample_mapped(ibuf, eval_width, eval_height, identity);
+  if (resampled == nullptr) {
+    return ibuf;
+  }
+  composite_image_own(resampled, r_locks);
+  return resampled;
+}
+
+/**
  * Acquire the buffers of \a image_layers into \a r_layers for the linear evaluator, which takes
  * float buffers and constant layers. A folder is acquired through its children, and left out when
  * nothing it holds paints.
@@ -2190,6 +2222,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         return false;
       }
       composite_mapped_remap(layer.color_ibuf, image_layer.mapping, ref_width, ref_height, r_locks);
+      layer.color_ibuf = composite_buffer_to_eval_grid(
+          layer.color_ibuf, ref_width, ref_height, r_locks);
       /* The buffer's own colorspace, not the Image setting: the two can disagree, and the
        * evaluator has to decode what it is actually handed. */
       layer.color_colorspace_name = composite_buffer_colorspace_name(layer.color_ibuf);
@@ -2197,9 +2231,11 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
     else if (image_layer.anchor_point_color != nullptr) {
       /* A slice is already in canvas space and scene linear: read it as it is, with no mapping and
        * no colorspace conversion. The image-layer description owns the buffer; the evaluator's
-       * layer only borrows it for this call. */
-      layer.color_ibuf = image_layer.anchor_point_color.get();
-      layer.color_colorspace_name = nullptr;
+       * layer only borrows it for this call. A reduced grid reads an owned resample of it instead,
+       * the slice itself staying untouched. */
+      layer.color_ibuf = composite_buffer_to_eval_grid(
+          image_layer.anchor_point_color.get(), ref_width, ref_height, r_locks);
+      layer.color_colorspace_name = composite_buffer_colorspace_name(layer.color_ibuf);
     }
     if (image_layer.mask_image != nullptr) {
       layer.mask_ibuf = composite_image_acquire(
@@ -2217,6 +2253,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         composite_mapped_remap(
             layer.mask_ibuf, coverage_mapping, ref_width, ref_height, r_locks);
       }
+      layer.mask_ibuf = composite_buffer_to_eval_grid(
+          layer.mask_ibuf, ref_width, ref_height, r_locks);
       layer.mask_colorspace_name = composite_buffer_colorspace_name(layer.mask_ibuf);
     }
     for (const PaintMaterialCompositeMaskItem &item : image_layer.mask_items) {
@@ -2236,12 +2274,15 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         }
         /* Resampled before the grey is reduced, so the grey is read after the mapping. */
         composite_mapped_remap(buffer.ibuf, item.mapping, ref_width, ref_height, r_locks);
+        buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
       else if (item.anchor_point_slice != nullptr) {
-        /* A slice is already in canvas space and scene linear; the description owns the buffer. */
-        buffer.ibuf = item.anchor_point_slice.get();
-        buffer.colorspace_name = nullptr;
+        /* A slice is already in canvas space and scene linear; the description owns the buffer. A
+         * reduced grid reads an owned resample of it, the slice itself staying untouched. */
+        buffer.ibuf = composite_buffer_to_eval_grid(
+            item.anchor_point_slice.get(), ref_width, ref_height, r_locks);
+        buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
       buffer.map_coverage = item.map_coverage;
       buffer.coverage_tolerance = item.coverage_tolerance;
@@ -2254,6 +2295,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         if (buffer.coverage_ibuf != nullptr) {
           composite_mapped_remap(
               buffer.coverage_ibuf, item.coverage_mapping, ref_width, ref_height, r_locks);
+          buffer.coverage_ibuf = composite_buffer_to_eval_grid(
+              buffer.coverage_ibuf, ref_width, ref_height, r_locks);
           buffer.coverage_colorspace_name = composite_buffer_colorspace_name(
               buffer.coverage_ibuf);
         }
@@ -2282,9 +2325,12 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
       buffer.blend = correction.blend;
       buffer.opacity = correction.opacity;
       if (correction.anchor_point_slice != nullptr) {
-        /* A slice is already in canvas space and scene linear; the description owns both buffers. */
-        buffer.anchor_point_slice = correction.anchor_point_slice.get();
-        buffer.anchor_point_coverage = correction.anchor_point_coverage.get();
+        /* A slice is already in canvas space and scene linear; the description owns both buffers.
+         * A reduced grid reads owned resamples of them, the slices staying untouched. */
+        buffer.anchor_point_slice = composite_buffer_to_eval_grid(
+            correction.anchor_point_slice.get(), ref_width, ref_height, r_locks);
+        buffer.anchor_point_coverage = composite_buffer_to_eval_grid(
+            correction.anchor_point_coverage.get(), ref_width, ref_height, r_locks);
       }
       else if (correction.image != nullptr) {
         buffer.ibuf = composite_image_acquire(correction.image, correction.iuser, r_locks);
@@ -2293,6 +2339,7 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
         }
         composite_mapped_remap(
             buffer.ibuf, correction.mapping, ref_width, ref_height, r_locks);
+        buffer.ibuf = composite_buffer_to_eval_grid(buffer.ibuf, ref_width, ref_height, r_locks);
         buffer.colorspace_name = composite_buffer_colorspace_name(buffer.ibuf);
       }
       if (correction.anchor_point_coverage_image != nullptr) {
@@ -2301,6 +2348,8 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
             correction.anchor_point_coverage_iuser,
             r_locks);
         if (buffer.anchor_point_coverage_ibuf != nullptr) {
+          buffer.anchor_point_coverage_ibuf = composite_buffer_to_eval_grid(
+              buffer.anchor_point_coverage_ibuf, ref_width, ref_height, r_locks);
           buffer.anchor_point_coverage_colorspace_name = composite_buffer_colorspace_name(
               buffer.anchor_point_coverage_ibuf);
         }
@@ -2342,11 +2391,19 @@ static bool composite_layers_acquire(Span<PaintMaterialCompositeImageLayer> imag
 
 static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> image_layers,
                                          Vector<CompositeImageLock> &r_locks,
-                                         PaintMaterialCompositeStack &r_stack)
+                                         PaintMaterialCompositeStack &r_stack,
+                                         const int eval_width,
+                                         const int eval_height)
 {
   if (!BKE_paint_material_composite_stack_dimensions(image_layers, r_stack.width, r_stack.height))
   {
     return false;
+  }
+  /* A reduced grid replaces the stack's own dimensions: every buffer is brought onto it by
+   * #composite_layers_acquire, and a Gradient reads the grid's own UVs. */
+  if (eval_width > 0 && eval_height > 0) {
+    r_stack.width = eval_width;
+    r_stack.height = eval_height;
   }
   if (!composite_layers_acquire(
           image_layers, r_stack.width, r_stack.height, r_locks, r_stack.layers))
@@ -2356,16 +2413,52 @@ static bool composite_stack_build_linear(Span<PaintMaterialCompositeImageLayer> 
   return !r_stack.layers.is_empty();
 }
 
+/** How many Gradient payloads \a image_layers lays: a row, a correction and a mask item each
+ * sample its line and ramp per texel, so their count is the part of an evaluation a UV-line drag
+ * pays for again on every step. */
+static int composite_stack_gradient_count(Span<PaintMaterialCompositeImageLayer> image_layers)
+{
+  int count = 0;
+  for (const PaintMaterialCompositeImageLayer &layer : image_layers) {
+    if (layer.gradient.enabled) {
+      count++;
+    }
+    for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+      if (correction.gradient.enabled) {
+        count++;
+      }
+    }
+    for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+      if (item.gradient.enabled) {
+        count++;
+      }
+    }
+    if (layer.is_folder) {
+      count += composite_stack_gradient_count(
+          Span<PaintMaterialCompositeImageLayer>(layer.children.data(),
+                                                 int64_t(layer.children.size())));
+    }
+  }
+  return count;
+}
+
 bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLayer> image_layers,
                                               ImBuf *composite_ibuf,
                                               const rcti *region,
                                               PaintMaterialCompositeEvalStats *r_stats,
-                                              const float bottom_color[4])
+                                              const float bottom_color[4],
+                                              const int eval_width,
+                                              const int eval_height)
 {
   Vector<CompositeImageLock> locks;
   PaintMaterialCompositeStack stack;
-  bool ok = composite_stack_build_linear(image_layers, locks, stack) &&
+  bool ok = composite_stack_build_linear(image_layers, locks, stack, eval_width, eval_height) &&
             composite_ibuf_is_byte_rgba(composite_ibuf, stack.width, stack.height);
+  /* The target is the caller's buffer and its size is part of the contract; a mismatch is caught
+   * by the check above, so this only states which of the two the evaluation writes. */
+  BLI_assert(!ok || (composite_ibuf != nullptr && composite_ibuf->x == stack.width &&
+                     composite_ibuf->y == stack.height));
+  int64_t area_texels = 0;
   if (ok) {
     if (bottom_color != nullptr) {
       copy_v4_v4(stack.bottom_color, bottom_color);
@@ -2379,14 +2472,19 @@ bool BKE_paint_material_composite_eval_images(Span<PaintMaterialCompositeImageLa
       }
     }
     else {
+      area_texels = int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
       /* Scratch the size of the area, never of the frame: a small refresh costs the same on any
        * canvas. */
-      Vector<float> linear(int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area) * 4);
+      Vector<float> linear(area_texels * 4);
       ok = BKE_paint_material_composite_eval_linear(
           stack, PaintMaterialCompositeLinearTarget::packed(linear, area), region, r_stats);
       if (ok) {
         BKE_paint_material_composite_linear_to_byte(linear, area, *composite_ibuf);
       }
+    }
+    if (r_stats != nullptr) {
+      r_stats->gradient_items = composite_stack_gradient_count(image_layers);
+      r_stats->gradient_samples = int64_t(r_stats->gradient_items) * area_texels;
     }
   }
   composite_images_release(locks);
@@ -2398,17 +2496,29 @@ bool BKE_paint_material_composite_eval_images_linear(
     const PaintMaterialCompositeLinearTarget &target,
     const rcti *region,
     PaintMaterialCompositeEvalStats *r_stats,
-    const float bottom_color[4])
+    const float bottom_color[4],
+    const int eval_width,
+    const int eval_height)
 {
   Vector<CompositeImageLock> locks;
   PaintMaterialCompositeStack stack;
-  bool ok = composite_stack_build_linear(image_layers, locks, stack);
+  bool ok = composite_stack_build_linear(image_layers, locks, stack, eval_width, eval_height);
   if (ok && bottom_color != nullptr) {
     copy_v4_v4(stack.bottom_color, bottom_color);
     stack.has_bottom_color = true;
   }
   if (ok) {
     ok = BKE_paint_material_composite_eval_linear(stack, target, region, r_stats);
+  }
+  if (r_stats != nullptr) {
+    r_stats->gradient_items = composite_stack_gradient_count(image_layers);
+    if (ok) {
+      rcti area;
+      if (BKE_paint_material_composite_area_get(stack.width, stack.height, region, area)) {
+        r_stats->gradient_samples = int64_t(r_stats->gradient_items) *
+                                    int64_t(BLI_rcti_size_x(&area)) * BLI_rcti_size_y(&area);
+      }
+    }
   }
   composite_images_release(locks);
   return ok;
@@ -2425,8 +2535,9 @@ bool BKE_paint_material_composite_eval_row_content(const PaintMaterialCompositeI
   }
   Vector<CompositeImageLock> locks;
   PaintMaterialCompositeStack stack;
+  /* Always the stack's own size: a bake renders at the canvas, never at a preview octave. */
   const bool built = composite_stack_build_linear(
-      Span<PaintMaterialCompositeImageLayer>(&row, 1), locks, stack);
+      Span<PaintMaterialCompositeImageLayer>(&row, 1), locks, stack, 0, 0);
   bool ok = false;
   rcti area;
   if (built && stack.layers.size() == 1 && composite_stack_validate_linear(stack) &&
@@ -2769,6 +2880,13 @@ struct CompositeCacheEntry {
   ImBufPtr ibuf;
   int width = 0;
   int height = 0;
+  /**
+   * The canvas #width and #height are a fraction of: an interactive Gradient drag keeps the
+   * composite at a power-of-two octave of it, the same scheme the Combined preview shades at.
+   * Zero only before the first evaluation; a change of the canvas itself is a size change.
+   */
+  int canvas_width = 0;
+  int canvas_height = 0;
   uint64_t stack_hash = 0;
   /** The whole buffer has to be recomputed. Set on creation, and whenever a region is unknown. */
   bool dirty_full = true;
@@ -2895,6 +3013,39 @@ static void composite_stack_images_gather(Span<PaintMaterialCompositeImageLayer>
   }
 }
 
+/**
+ * The output size to evaluate at: \a output_size when the caller decided one, the canvas otherwise.
+ *
+ * Nothing is derived here. The octave of an interactive preview is decided once, by the gather that
+ * fills every channel's composite, because the preview reads them together: an octave this cache
+ * settled on per entry would differ from the next channel's whenever their histories did, and the
+ * preview would drop the channel that disagreed.
+ *
+ * A size that is not a power-of-two fraction of the canvas is not an octave of it and is refused:
+ * the buffer covers the whole canvas, and texels that do not land on that grid would sit somewhere
+ * the UV mapping does not expect them. Refusing rather than resampling keeps the size mismatch
+ * visible instead of silently blurring it away.
+ */
+static void composite_output_size_for(const int canvas_width,
+                                      const int canvas_height,
+                                      const int2 &output_size,
+                                      int &r_width,
+                                      int &r_height)
+{
+  r_width = canvas_width;
+  r_height = canvas_height;
+  if (output_size.x <= 0 || output_size.y <= 0 || output_size.x > canvas_width ||
+      output_size.y > canvas_height || canvas_width % output_size.x != 0 ||
+      canvas_height % output_size.y != 0 ||
+      !is_power_of_2_i(canvas_width / output_size.x) ||
+      !is_power_of_2_i(canvas_height / output_size.y))
+  {
+    return;
+  }
+  r_width = output_size.x;
+  r_height = output_size.y;
+}
+
 ImBuf *BKE_paint_material_composite_cache_ensure(
     const Material &ma,
     const int channel,
@@ -2903,7 +3054,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     uint64_t *r_revision,
     PaintMaterialCompositeEvalStats *r_stats,
     rcti *r_changed_region,
-    FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers)
+    FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers,
+    const int2 &output_size)
 {
   bke::paint_perf::ScopedTimer perf_timer("composite_cache_ensure");
   if (r_changed_region != nullptr) {
@@ -2926,6 +3078,11 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
         is_color ? COLOR_ROLE_DEFAULT_BYTE : COLOR_ROLE_DATA);
   }
 
+  /* The output size: the canvas, or the octave the caller asked for. The canvas is recorded
+   * separately because the buffer may be a fraction of it. */
+  int out_width = width;
+  int out_height = height;
+
   CompositeCacheKey key;
   key.material_session_uid = ma.id.session_uid;
   key.channel = channel;
@@ -2933,18 +3090,26 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
   CompositeCacheEntry &entry = g_cache.entries.lookup_or_add_default(key);
   entry.last_use = ++g_cache.use_counter;
 
-  const bool size_changed = entry.ibuf == nullptr || entry.width != width ||
-                            entry.height != height;
+  composite_output_size_for(width, height, output_size, out_width, out_height);
+
+  const bool size_changed = entry.ibuf == nullptr || entry.width != out_width ||
+                            entry.height != out_height || entry.canvas_width != width ||
+                            entry.canvas_height != height;
+  /* Recorded unconditionally, like the Combined cache records its canvas: an octave that absorbs
+   * a canvas resize -- 4096 to 2048 while the display keeps the output at 1024 -- would otherwise
+   * go on reporting the old one. */
+  entry.canvas_width = width;
+  entry.canvas_height = height;
   if (size_changed) {
     composite_entry_reset(entry);
-    entry.ibuf.reset(IMB_allocImBuf(uint(width), uint(height), ImBufFlags::ByteData));
+    entry.ibuf.reset(IMB_allocImBuf(uint(out_width), uint(out_height), ImBufFlags::ByteData));
     if (entry.ibuf == nullptr) {
       g_cache.entries.remove(key);
       return nullptr;
     }
     entry.ibuf->channels = 4;
-    entry.width = width;
-    entry.height = height;
+    entry.width = out_width;
+    entry.height = out_height;
   }
 
   /* What the source images say changed since the last call.
@@ -2956,10 +3121,19 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
    * poll asks for the full rebuild a resize needs anyway. */
   Vector<Image *> source_images;
   composite_stack_images_gather(image_layers, source_images);
-  /* The composite is stored in the canvas's own texels, so a reported rectangle needs no mapping.
-   */
-  const bke::paint_material_cache::PollResult poll =
-      bke::paint_material_cache::subscriptions_poll(entry.partial_update_users, source_images);
+  /* A reported rectangle arrives in the image's own texels, which are the canvas's. The composite
+   * stores those texels when it is at the canvas, and a fraction of them at an octave: rounded
+   * outwards, so a dab never loses its edge and leaves a stale fringe. */
+  const bool entry_scaled = entry.width != width || entry.height != height;
+  const auto poll_region_to_entry = [&](const rcti &region) {
+    return bke::paint_material_cache::rect_scale(
+        region, int2(width, height), int2(entry.width, entry.height));
+  };
+  const bke::paint_material_cache::PollResult poll = bke::paint_material_cache::subscriptions_poll(
+      entry.partial_update_users,
+      source_images,
+      entry_scaled ? FunctionRef<rcti(const rcti &)>(poll_region_to_entry) :
+                     FunctionRef<rcti(const rcti &)>());
   if (poll.needs_full_update) {
     entry.dirty_full = true;
   }
@@ -2974,10 +3148,12 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
 
   const bool rebuild_all = size_changed || entry.stack_hash != stack_hash || entry.dirty_full;
   const bool rebuild_region = !rebuild_all && !BLI_rcti_is_empty(&entry.dirty_region);
-  perf_timer.note("channel=%d %dx%d layers=%d rebuild=%s (size=%d hash=%d dirty_full=%d) region=%dx%d",
+  perf_timer.note("channel=%d %dx%d out=%dx%d layers=%d rebuild=%s (size=%d hash=%d dirty_full=%d) region=%dx%d",
                   channel,
                   width,
                   height,
+                  out_width,
+                  out_height,
                   int(image_layers.size()),
                   rebuild_all ? "ALL" : (rebuild_region ? "region" : "none"),
                   int(size_changed),
@@ -3019,9 +3195,18 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     bool eval_ok;
     {
       bke::paint_perf::ScopedTimer perf_eval("composite_eval_images");
-      eval_ok = BKE_paint_material_composite_eval_images(
-          eval_layers, entry.ibuf.get(), region, r_stats, has_bottom ? bottom_color : nullptr);
-      perf_eval.note("channel=%d region=%s", channel, region != nullptr ? "partial" : "full");
+      eval_ok = BKE_paint_material_composite_eval_images(eval_layers,
+                                                         entry.ibuf.get(),
+                                                         region,
+                                                         r_stats,
+                                                         has_bottom ? bottom_color : nullptr,
+                                                         out_width,
+                                                         out_height);
+      perf_eval.note("channel=%d region=%s gradient_items=%d gradient_samples=%lld",
+                     channel,
+                     region != nullptr ? "partial" : "full",
+                     r_stats != nullptr ? r_stats->gradient_items : 0,
+                     r_stats != nullptr ? static_cast<long long>(r_stats->gradient_samples) : 0LL);
     }
     if (!eval_ok) {
       g_cache.entries.remove(key);
@@ -3099,6 +3284,43 @@ bool BKE_paint_material_composite_cache_contains(const Material &ma, const int c
   key.material_session_uid = ma.id.session_uid;
   key.channel = channel;
   return g_cache.entries.contains(key);
+}
+
+ImBuf *BKE_paint_material_composite_cache_peek(const Material &ma,
+                                               const int channel,
+                                               uint64_t *r_revision)
+{
+  CompositeCacheKey key;
+  key.material_session_uid = ma.id.session_uid;
+  key.channel = channel;
+  CompositeCacheEntry *entry = g_cache.entries.lookup_ptr(key);
+  if (entry == nullptr || entry->ibuf == nullptr) {
+    return nullptr;
+  }
+  /* As #BKE_paint_material_combined_cache_peek: a displayed buffer is a use, but not a recompute. */
+  entry->last_use = ++g_cache.use_counter;
+  if (r_revision != nullptr) {
+    *r_revision = entry->revision;
+  }
+  return entry->ibuf.get();
+}
+
+bool BKE_paint_material_composite_cache_sizes_get(const Material &ma,
+                                                 const int channel,
+                                                 int2 &r_canvas,
+                                                 int2 &r_output)
+{
+  CompositeCacheKey key;
+  key.material_session_uid = ma.id.session_uid;
+  key.channel = channel;
+  const CompositeCacheEntry *entry = g_cache.entries.lookup_ptr(key);
+  if (entry == nullptr || entry->ibuf == nullptr) {
+    return false;
+  }
+  /* Deliberately not a use: a size query must not keep an entry alive against the budget. */
+  r_canvas = int2(entry->canvas_width, entry->canvas_height);
+  r_output = int2(entry->width, entry->height);
+  return true;
 }
 
 /** \} */

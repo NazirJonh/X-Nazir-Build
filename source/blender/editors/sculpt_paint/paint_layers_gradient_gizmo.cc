@@ -48,6 +48,7 @@
 
 #include "ED_gizmo_library.hh"
 #include "ED_image.hh"
+#include "ED_material_combined.hh"
 #include "ED_paint.hh"
 #include "ED_screen.hh"
 #include "ED_undo.hh"
@@ -163,6 +164,14 @@ struct LayerGradientGizmoGroup {
 
   /** The row the drag started on; a row or material switch cancels the drag. */
   Material *session_material = nullptr;
+  /**
+   * The same material by #ID.session_uid, which is what the drag's mark is cleared by.
+   *
+   * The pointer above can be freed under a running drag -- a row deleted, an object's material
+   * unassigned, a file closed -- and a clear that dereferenced it would be a use after free on the
+   * one path whose whole purpose is to run after the state has already moved.
+   */
+  uint32_t session_material_uid = 0;
   bUUID session_marker = {};
 
   /** UV-to-surface triangle cache per end, reset when the object, mesh, row or space changes. */
@@ -381,6 +390,11 @@ void drag_finish(bContext &C, wmGizmo *gz, const bool commit)
     return;
   }
 
+  /* The drag is over, committed or cancelled alike: the next frame refines the previews to the
+   * canvas. By uid rather than through #session_material, so a material the drag outlived still
+   * clears its own mark instead of being dereferenced. */
+  ed::material_combined::gradient_interactive_end(ggd.session_material_uid);
+
   MaterialPaintLayer *layer = nullptr;
   Material *material = paint_layer_gradient_target(&C, &layer);
   if (material != nullptr && layer != nullptr && layer->gradient != nullptr &&
@@ -426,8 +440,17 @@ void drag_finish(bContext &C, wmGizmo *gz, const bool commit)
     }
     notify_changed(C, *material);
   }
+  else if (ARegion *region = CTX_wm_region(&C)) {
+    /* The row, its material or the object is gone, so there is nothing to notify with -- but the
+     * preview shaded under the mark is still on screen at an octave, and it refines only when
+     * something draws again. A drag ending under a still mouse must not leave it there. */
+    ED_region_tag_redraw(region);
+  }
 
   ggd.drag_handle = gradient_gizmo::NONE;
+  /* The mark is cleared; the uid goes with it, so a teardown after this drag cannot clear a mark the
+   * next one raised. */
+  ggd.session_material_uid = 0;
   ggd.stop_index = -1;
   ggd.drag_channel = PAINT_MATERIAL_CHANNEL_BASE_COLOR;
   ggd.stop_count_before = 0;
@@ -450,10 +473,15 @@ void drag_begin(bContext &C, wmGizmo *gz, const wmEvent &event)
   ggd.end_before = float3(gradient.end);
   ggd.midpoint_before = gradient.midpoint;
   ggd.session_material = target.material;
+  ggd.session_material_uid = target.material->id.session_uid;
   ggd.session_marker = target.layer->marker;
   ggd.has_plane_hit = false;
   ggd.has_drag_plane = false;
   ggd.drag_tri = -1;
+  /* The material's composite previews shade at an octave for as long as the drag lasts, and refine
+   * to the canvas when it ends -- the Gradient is laid per texel, so a full-resolution channel
+   * rebuild on every mouse move is what makes a 4K line lag. */
+  ed::material_combined::gradient_interactive_begin(*target.material);
 
   /* A Ramp stop drag only moves that stop along the line: remember the ramp so a cancel can put
    * every stop back. */
@@ -516,6 +544,9 @@ void drag_apply(bContext &C, wmGizmo *gz, const wmEvent &event)
     return;
   }
   const MaterialPaintLayerGradient &gradient = *layer->gradient;
+  /* Re-armed on every step: the mark expires on its own, and a drag held still for longer than that
+   * must not quietly lose the octave it is dragging at. */
+  ed::material_combined::gradient_interactive_begin(*material);
   const float2 mval(float(event.mval[0]), float(event.mval[1]));
 
   if (ggd.stop_index >= 0) {
@@ -765,7 +796,12 @@ void group_setup(const bContext *C, wmGizmoGroup *gzgroup, const bool image_edit
   ggd->draw_options.direction_arrow = true;
   gzgroup->customdata = ggd;
   gzgroup->customdata_free = [](void *customdata) {
-    MEM_delete(static_cast<LayerGradientGizmoGroup *>(customdata));
+    LayerGradientGizmoGroup *group = static_cast<LayerGradientGizmoGroup *>(customdata);
+    /* A drag this group never got to finish -- the editor closed, the file reloaded, the region
+     * rebuilt mid-drag -- leaves a mark no other code will clear, since the clear lives in the
+     * drag's own end. Dropped here, by the uid the mark was raised with. */
+    ed::material_combined::gradient_interactive_end(group->session_material_uid);
+    MEM_delete(group);
   };
 
   const wmGizmoType *gzt = WM_gizmotype_find("PAINT_GT_layer_gradient", true);

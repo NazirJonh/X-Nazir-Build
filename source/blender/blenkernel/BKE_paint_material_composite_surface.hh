@@ -60,6 +60,26 @@ struct PaintMaterialCompositeSurface {
   Vector<float3> generated_positions;
   /** 1 when the texel lies inside a UV island, 0 outside. Shared by both position arrays. */
   Vector<uint8_t> valid;
+  /**
+   * How many texels #valid marks, or -1 when nobody has counted them (a surface assembled by hand,
+   * as in a test). The rasterizer fills it, padding included, so a per-redraw reader can ask
+   * whether the surface covers anything without walking a mask of a million bytes.
+   */
+  int64_t valid_texel_count = -1;
+
+  /** Whether any texel lies inside a UV island. Counts #valid only when it was not counted yet. */
+  bool has_valid_texels() const
+  {
+    if (valid_texel_count >= 0) {
+      return valid_texel_count > 0;
+    }
+    for (const uint8_t texel : valid) {
+      if (texel != 0) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /**
    * Generated-coordinate bounding box, the fallback when #generated_positions is empty. Also the

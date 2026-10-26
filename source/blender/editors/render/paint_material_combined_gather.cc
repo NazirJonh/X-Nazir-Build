@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -31,6 +32,7 @@
 
 #include "BLI_hash.hh"
 #include "BLI_index_range.hh"
+#include "BLI_map.hh"
 #include "BLI_math_base.h"
 #include "BLI_math_color.h"
 #include "BLI_math_matrix.hh"
@@ -40,6 +42,8 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_memory_utils.hh"
 #include "BLI_rect.h"
+#include "BLI_time.h"
+#include "BLI_timer.h"
 #include "BLI_uuid.h"
 #include "BLI_vector.hh"
 
@@ -62,7 +66,131 @@
 
 #include "ED_material_bake.hh"
 
+#include "WM_api.hh"
+
 namespace blender::ed::material_combined {
+
+/* -------------------------------------------------------------------- */
+/** \name Interactive Gradient Drag
+ * \{ */
+
+/**
+ * The materials whose Gradient handles are being dragged, with the moment each drag was last seen
+ * alive.
+ *
+ * A timestamp rather than a bare mark, because nothing in this file can observe a drag ending: the
+ * gizmo is destroyed, the operator is cancelled, the file is closed, and the clear that should have
+ * come with it never runs. Expiry turns that from a permanent loss of resolution into a delay.
+ */
+static Map<uint32_t, double> &gradient_interactive_marks()
+{
+  static Map<uint32_t, double> marks;
+  return marks;
+}
+
+/** How long a mark survives without a fresh #gradient_interactive_begin. Longer than any drag a
+ * user completes; short enough that a stuck one is not left to be noticed as a bug. */
+static constexpr double GRADIENT_INTERACTIVE_TIMEOUT_SECONDS = 60.0;
+
+/** The times the Gradient preview was last rebuilt, declared here for the release path below. */
+static Map<uint32_t, double> &gradient_preview_last_refresh();
+
+void gradient_interactive_begin(const Material &ma)
+{
+  /* Insert or move the mark forward: a drag re-arms its own stamp on every step. */
+  gradient_interactive_marks().add_overwrite(ma.id.session_uid, BLI_time_now_seconds());
+}
+
+void gradient_interactive_end(const uint32_t material_session_uid)
+{
+  gradient_interactive_marks().remove(material_session_uid);
+  /* Release always refines to the canvas, and the next drag starts with an immediate first frame. */
+  gradient_preview_last_refresh().remove(material_session_uid);
+}
+
+bool gradient_interactive_is(const Material &ma)
+{
+  const double *started = gradient_interactive_marks().lookup_ptr(ma.id.session_uid);
+  if (started == nullptr) {
+    return false;
+  }
+  if (BLI_time_now_seconds() - *started > GRADIENT_INTERACTIVE_TIMEOUT_SECONDS) {
+    gradient_interactive_marks().remove(ma.id.session_uid);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * When each material's Gradient preview last rebuilt, by #ID.session_uid.
+ *
+ * Kept beside the drag mark rather than on the material: it is display state, it must not survive a
+ * file load, and the mark it belongs to is cleared on release here as well.
+ */
+static Map<uint32_t, double> &gradient_preview_last_refresh()
+{
+  static Map<uint32_t, double> times;
+  return times;
+}
+
+bool gradient_preview_refresh_due(const double now,
+                                  const double last_refresh,
+                                  const bool dragging)
+{
+  if (!dragging) {
+    /* Released: the next frame is the one that refines the octave to the canvas. */
+    return true;
+  }
+  if (last_refresh <= 0.0) {
+    return true;
+  }
+  return now - last_refresh >= GRADIENT_PREVIEW_REFRESH_SECONDS;
+}
+
+static uintptr_t gradient_preview_trailing_timer_uuid()
+{
+  static const char id = 0;
+  return uintptr_t(&id);
+}
+
+bool gradient_preview_refresh_allow(const Material &ma, const double now)
+{
+  if (!gradient_interactive_is(ma)) {
+    return true;
+  }
+  const double *last = gradient_preview_last_refresh().lookup_ptr(ma.id.session_uid);
+  const double last_refresh = (last != nullptr) ? *last : 0.0;
+  if (gradient_preview_refresh_due(now, last_refresh, true)) {
+    return true;
+  }
+  /* The mouse has stopped and no event will arrive to ask for the frame the drag still owes: arm
+   * the trailing edge of the throttle here, where the decision to skip was made. A timer already
+   * running is due no earlier than this one would be, since the last refresh time has not moved. */
+  if (!BLI_timer_is_registered(gradient_preview_trailing_timer_uuid())) {
+    const double delay = std::max(last_refresh + GRADIENT_PREVIEW_REFRESH_SECONDS - now, 0.0);
+    BLI_timer_register(
+        gradient_preview_trailing_timer_uuid(),
+        [](uintptr_t /*uuid*/, void * /*user_data*/) -> double {
+          /* The material is deliberately not resolved: the notifier is the same generic one every
+           * stack edit sends, and each Image Editor decides from its own shown material whether the
+           * preview is still due. A material freed since the arm cannot be reached this way. */
+          WM_main_add_notifier(NC_MATERIAL | ND_SHADING, nullptr);
+          return -1.0;
+        },
+        nullptr,
+        nullptr,
+        delay,
+        false);
+  }
+  return false;
+}
+
+void gradient_preview_refresh_note(const Material &ma, const double now)
+{
+  gradient_preview_last_refresh().add_overwrite(ma.id.session_uid, now);
+}
+
+/** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Channel Set
@@ -247,10 +375,12 @@ class GatherScope {
 /**
  * Nearest-sample \a src into a newly allocated buffer of \a width x \a height.
  *
- * Only ever applied to a bake. A bake is produced at its own square resolution, is always rebuilt
- * whole, and never reports a dirty rectangle, so sampling it costs nothing in correctness --
- * whereas resampling a layer stack or a directly linked image would mean transforming every dirty
- * rectangle between two coordinate systems, which is how stale pixels get left on screen.
+ * Applied to a bake and to a directly linked image. A bake is produced at its own square
+ * resolution, is always rebuilt whole, and never reports a dirty rectangle. A directly linked image
+ * does report them, but the cache polls it in canvas texels and maps them to its own buffer, so
+ * resampling the input here does not touch that path. Resampling a layer stack is different: its
+ * dirty rectangles arrive in the composites' own texels, which is how stale pixels get left on
+ * screen when two coordinate systems are mixed up.
  *
  * The caller owns the result.
  */
@@ -419,64 +549,43 @@ ImBuf *combined_preview_ensure(Main &bmain,
     return nullptr;
   }
 
-  /* The output resolution: the largest power-of-two fraction of the canvas that still covers what
-   * the caller can display.
-   *
-   * Quantised to octaves rather than fitted exactly, because a changed output size is a full
-   * rebuild -- an exact fit would rebuild the whole preview on every pixel of zoom, which costs
-   * more than the shading it saves. Powers of two also keep the box filter's footprint whole. */
-  int output_width = width;
-  int output_height = height;
+  /* An interactive Gradient drag of this material shades its channel composites at a display
+   * octave, and the preview follows them at the same resolution; without a drag every composite is
+   * read and fed on at the canvas. */
+  const bool gradient_interactive = BKE_paint_layers_is_layered(ma) && gradient_interactive_is(ma);
 
-  /* The octave already in use, when it is still a power-of-two fraction of this canvas.
+  /* The resolution the channels are gathered at, and the one the preview is shaded at.
    *
-   * Every caller starts from it, not only the one that can say how much it will display. The
-   * resolution belongs to whoever is *drawing* the preview; a caller that only reads pixels -- the
-   * scopes, the eyedropper, a save -- passes no cap, and deriving one from the canvas there would
-   * reset the viewport's octave on every panel redraw. That is a full rebuild per frame, for a
-   * reader that is served correctly either way: the buffer covers the whole canvas at any octave.
-   */
-  int previous_width = 0;
-  int previous_height = 0;
-  const bool previous_is_usable = BKE_paint_material_combined_cache_output_size_get(
-                                      ma, previous_width, previous_height) &&
-                                  previous_width > 0 && previous_height > 0 &&
-                                  width % previous_width == 0 && height % previous_height == 0 &&
-                                  is_power_of_2_i(width / previous_width) &&
-                                  is_power_of_2_i(height / previous_height);
-  if (previous_is_usable) {
-    output_width = previous_width;
-    output_height = previous_height;
-  }
-
-  if (request.max_output.x > 0 && request.max_output.y > 0) {
-    /* An octave that no longer covers what has to be shown is not a starting point: climb back to
-     * the canvas and let the halving below settle on the right one. */
-    if (previous_is_usable &&
-        (previous_width < request.max_output.x || previous_height < request.max_output.y))
-    {
-      output_width = width;
-      output_height = height;
-    }
-    /* Halve only while the result would still cover the display with room to spare. That margin is
-     * the hysteresis: the octave drops at 1.4x the display and only climbs back when it no longer
-     * covers at all, so it takes a real change of zoom rather than a pixel of jitter to move it.
-     */
-    constexpr float octave_margin = 1.4f;
-    while (output_width % 2 == 0 && output_height % 2 == 0 &&
-           float(output_width / 2) >= float(request.max_output.x) * octave_margin &&
-           float(output_height / 2) >= float(request.max_output.y) * octave_margin)
-    {
-      output_width /= 2;
-      output_height /= 2;
-    }
-  }
+   * Both are the canvas unless something reduces them, and both are asked of
+   * #BKE_paint_material_preview_octave_size_for, so that the rule -- powers of two, a margin, and
+   * the hysteresis of the size already in use -- lives in one place and every consumer of the same
+   * preview arrives at the same answer. A drag reduces the inputs: the Gradient is what is expensive
+   * and every channel composite is laid again on each mouse move, so the octave has to reach the
+   * composites themselves. The output is then that octave one texel to one, since reducing it
+   * further would compound two reductions for a display that is already satisfied. Without a drag
+   * the inputs are the canvas and only the output may be a fraction of it.
+   *
+   * The previous sizes come from the cache entry, which is the one place they are remembered: a
+   * choice derived from the zoom alone makes the step down and the step up share a threshold, so a
+   * zoom resting on it alternates between two octaves and rebuilds everything every frame. */
+  const int2 canvas_size(width, height);
+  int2 previous_input = int2(0);
+  int2 previous_output = int2(0);
+  BKE_paint_material_combined_cache_sizes_get(ma, previous_input, previous_output);
+  const int2 input_size = gradient_interactive ?
+                              BKE_paint_material_preview_octave_size_for(
+                                  canvas_size, request.max_output, previous_input) :
+                              canvas_size;
+  const int2 output_size = gradient_interactive ?
+                               input_size :
+                               BKE_paint_material_preview_octave_size_for(
+                                   canvas_size, request.max_output, previous_output);
 
   CombinedInputs inputs;
-  inputs.width = width;
-  inputs.height = height;
-  inputs.output_width = output_width == width ? 0 : output_width;
-  inputs.output_height = output_height == height ? 0 : output_height;
+  inputs.width = input_size.x;
+  inputs.height = input_size.y;
+  inputs.output_width = output_size.x == input_size.x ? 0 : output_size.x;
+  inputs.output_height = output_size.y == input_size.y ? 0 : output_size.y;
   inputs.emission_strength = combined_emission_strength(ma);
   for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
     inputs.channels[i].constant = BKE_paint_material_combined_default_value(
@@ -507,8 +616,18 @@ ImBuf *combined_preview_ensure(Main &bmain,
       {
         bke::paint_perf::ScopedTimer perf_channel("gather.channel_composite");
         const auto describe_full = [&](Vector<PaintMaterialCompositeImageLayer> &r_full) {
-          return BKE_paint_layers_composite_image_layers(ma, channel, r_full);
+          /* The same surface the description for the hash was made with. Without it the layers the
+           * cache evaluates are the approximate Object/Generated ones -- `(u, v, 0)` instead of the
+           * texel's object-space point -- while the hash that decided they were current carried
+           * the exact one: approximate pixels behind an exact identity, and no edit of the surface
+           * would ever invalidate them. */
+          return BKE_paint_layers_composite_image_layers(
+              ma, channel, r_full, /*describe_only=*/false, surface);
         };
+        /* The octave the gather decided for every channel, or zero for the canvas. Passed as a size
+         * rather than as a display cap: the hysteresis is the preview's, not each channel's, or two
+         * channels of one material could settle on two octaves. */
+        const int2 stack_output_size = gradient_interactive ? input_size : int2(0);
         composite = BKE_paint_material_composite_cache_ensure(
             ma,
             channel,
@@ -519,14 +638,20 @@ ImBuf *combined_preview_ensure(Main &bmain,
             &channel_changed,
             BKE_paint_layers_is_layered(ma) ?
                 FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(describe_full) :
-                FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>());
-        perf_channel.note("channel=%d layers=%d changed=%dx%d",
+                FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(),
+            stack_output_size);
+        perf_channel.note("channel=%d layers=%d changed=%dx%d out=%dx%d",
                           int(channel),
                           int(layers.size()),
                           BLI_rcti_size_x(&channel_changed),
-                          BLI_rcti_size_y(&channel_changed));
+                          BLI_rcti_size_y(&channel_changed),
+                          composite != nullptr ? composite->x : 0,
+                          composite != nullptr ? composite->y : 0);
       }
-      if (composite != nullptr && composite->x == width && composite->y == height) {
+      /* One size for every channel, decided above: a composite that disagrees is one whose own
+       * canvas is not this one, and it falls to its constant exactly as it does when its size
+       * disagrees at full resolution. */
+      if (composite != nullptr && composite->x == input_size.x && composite->y == input_size.y) {
         /* Referenced, not merely pointed at: the next channel's `cache_ensure` may evict this very
          * entry to stay inside the composite cache's budget. */
         input.ibuf = scope.hold_ref(composite);
@@ -550,25 +675,36 @@ ImBuf *combined_preview_ensure(Main &bmain,
     {
       Image &image = *resolve.images[int(channel)].image;
       if (ImBuf *ibuf = scope.acquire(image, resolve.images[int(channel)].iuser)) {
-        if (ibuf->x == width && ibuf->y == height) {
-          input.ibuf = ibuf;
-          input.is_srgb = combined_channel_is_color(channel) && combined_ibuf_is_srgb(*ibuf);
-          source = CombinedChannelSource::DirectImage;
-          source_detail = image.id.session_uid;
-          dependency_images.append_non_duplicates(&image);
+        /* Accepted at the canvas size as well as the gathered size: during a Gradient drag the
+         * gathered size is an octave, and a canvas-size image must not fall to a constant just
+         * because the stack is smaller. */
+        const bool matches_canvas = ibuf->x == canvas_size.x && ibuf->y == canvas_size.y;
+        const bool matches_input = ibuf->x == input_size.x && ibuf->y == input_size.y;
+        if (matches_canvas || matches_input) {
+          const ImBuf *usable = ibuf;
+          if (!matches_input) {
+            usable = scope.own(combined_resample_nearest(*ibuf, input_size.x, input_size.y));
+          }
+          if (usable != nullptr) {
+            input.ibuf = usable;
+            input.is_srgb = combined_channel_is_color(channel) && combined_ibuf_is_srgb(*ibuf);
+            source = CombinedChannelSource::DirectImage;
+            source_detail = image.id.session_uid;
+            dependency_images.append_non_duplicates(&image);
+          }
         }
       }
     }
 
-    /* 3. Cached bake, nearest-sampled to the canonical size. */
+    /* 3. Cached bake, nearest-sampled to the gathered size. */
     const material_bake::MaterialSourceBake *bake = scope.bake();
     if (source == CombinedChannelSource::Default && bake != nullptr &&
         bake->resolution(channel) == ChannelResolution::Baked)
     {
       if (const ImBuf *baked = bake->channel_image(channel)) {
         const ImBuf *usable = baked;
-        if (baked->x != width || baked->y != height) {
-          usable = scope.own(combined_resample_nearest(*baked, width, height));
+        if (baked->x != input_size.x || baked->y != input_size.y) {
+          usable = scope.own(combined_resample_nearest(*baked, input_size.x, input_size.y));
         }
         if (usable != nullptr) {
           input.ibuf = usable;
@@ -615,29 +751,27 @@ ImBuf *combined_preview_ensure(Main &bmain,
 
   }
 
-  /* Both rectangles arrive in canvas texels and the cache works in output pixels. Rounded
-   * outwards, because a dab that lost its edge to rounding would leave a stale fringe. */
+  /* The canvas the stack pixels belong to, for the cache's own canvas report: on every
+   * non-octave path it *is* the inputs, but a report must never answer the octave. */
+  inputs.canvas_width = width;
+  inputs.canvas_height = height;
+
+  /* Two origins, two scalings, both rounded outwards so a dab that lost its edge to rounding does
+   * not leave a stale fringe.
+   *
+   * The clip arrives in canvas texels, so it takes two scalings: canvas -> input, then input ->
+   * output. The changed region arrives from the composites already in input texels (the octave
+   * while a drag lasts), so it takes only the input -> output scaling. Both are identities on a
+   * frame that reduces nothing, which is what every caller but the viewport is. */
   CombinedCacheRequest cache_request;
   cache_request.inputs_hash = inputs_hash;
   cache_request.dependency_images = dependency_images;
-  cache_request.changed_region = changed_region;
-  cache_request.clip = request.clip;
-  if (inputs.output_width > 0) {
-    const float scale_x = float(output_width) / float(width);
-    const float scale_y = float(output_height) / float(height);
-    const auto scale_rect = [&](rcti &rect) {
-      if (BLI_rcti_is_empty(&rect)) {
-        return;
-      }
-      BLI_rcti_init(&rect,
-                    int(floorf(float(rect.xmin) * scale_x)),
-                    int(ceilf(float(rect.xmax) * scale_x)),
-                    int(floorf(float(rect.ymin) * scale_y)),
-                    int(ceilf(float(rect.ymax) * scale_y)));
-    };
-    scale_rect(cache_request.changed_region);
-    scale_rect(cache_request.clip);
-  }
+  cache_request.changed_region = BKE_paint_material_preview_rect_scale(
+      changed_region, input_size, output_size);
+  cache_request.clip = BKE_paint_material_preview_rect_scale(
+      request.clip, canvas_size, input_size);
+  cache_request.clip = BKE_paint_material_preview_rect_scale(
+      cache_request.clip, input_size, output_size);
 
   /* Collected unconditionally, because the perf harness reports the evaluator separately from
    * everything else and the caller usually has no interest in the numbers. */
@@ -649,15 +783,23 @@ ImBuf *combined_preview_ensure(Main &bmain,
   bke::paint_perf::ScopedTimer perf_shade("gather.combined_cache_ensure");
   ImBuf *result = BKE_paint_material_combined_cache_ensure(
       ma, inputs, lighting, cache_request, r_revision, r_changed_region, &stats);
-  perf_shade.note("canvas=%dx%d out=%dx%d eval=%.3f ms pixels=%lld dep_images=%d",
-                  width,
-                  height,
-                  output_width,
-                  output_height,
+  perf_shade.note("canvas=%dx%d in=%dx%d out=%dx%d eval=%.3f ms pixels=%lld dep_images=%d",
+                  canvas_size.x,
+                  canvas_size.y,
+                  input_size.x,
+                  input_size.y,
+                  output_size.x,
+                  output_size.y,
                   stats.elapsed_seconds * 1000.0,
                   static_cast<long long>(stats.pixels_processed),
                   int(dependency_images.size()));
-  perf_total.note("canvas=%dx%d out=%dx%d", width, height, output_width, output_height);
+  perf_total.note("canvas=%dx%d in=%dx%d out=%dx%d",
+                  canvas_size.x,
+                  canvas_size.y,
+                  input_size.x,
+                  input_size.y,
+                  output_size.x,
+                  output_size.y);
   /* The output resolution, not the canvas: it is what the numbers have to be read against. */
   if (r_stats != nullptr) {
     *r_stats = stats;

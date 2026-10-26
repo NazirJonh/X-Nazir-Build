@@ -70,6 +70,18 @@ struct CombinedInputs {
   int width = 0;
   int height = 0;
   /**
+   * The canvas #width and #height are a fraction of, when the inputs themselves were gathered at a
+   * reduced resolution: an interactive Gradient drag shades the channel composites at a
+   * power-of-two octave of the canvas, and this preview is shaded at that octave with them.
+   *
+   * Zero means the inputs are the canvas. Only the cache's canvas report reads this
+   * (#BKE_paint_material_combined_cache_size_get answers the canvas, never the octave, because
+   * #ED_space_image_get_size builds the editor's view from it); the shading and every rectangle
+   * work in #width and #height.
+   */
+  int canvas_width = 0;
+  int canvas_height = 0;
+  /**
    * Principled's Emission Strength, which the Emission channel is multiplied by.
    *
    * A field rather than a channel because it is not one: the channel table maps
@@ -93,6 +105,16 @@ struct CombinedInputs {
    */
   int output_width = 0;
   int output_height = 0;
+
+  /** The canvas, when the inputs were gathered at a fraction of it; #width otherwise. */
+  int in_width() const
+  {
+    return this->canvas_width > 0 ? this->canvas_width : this->width;
+  }
+  int in_height() const
+  {
+    return this->canvas_height > 0 ? this->canvas_height : this->height;
+  }
 
   int out_width() const
   {
@@ -292,6 +314,19 @@ void BKE_paint_material_combined_cache_free_all();
 bool BKE_paint_material_combined_cache_contains(const Material &ma);
 
 /**
+ * The cached preview of \a ma without recomputing anything, or null when nothing is cached.
+ *
+ * For a caller that draws the preview but has decided this frame must not pay for an evaluation --
+ * the Gradient drag's throttle. Like #BKE_paint_material_combined_cache_ensure, the returned buffer
+ * is owned by the cache: do not free it, and reference it if it outlives the next cache call.
+ *
+ * \param r_revision: the revision of the cached pixels, so a consumer can tell whether its own copy
+ *                    is current, exactly as for #BKE_paint_material_combined_cache_ensure.
+ */
+ImBuf *BKE_paint_material_combined_cache_peek(const Material &ma,
+                                              uint64_t *r_revision = nullptr);
+
+/**
  * The dimensions of the *canvas* a cached preview of \a ma stands for, without producing one.
  *
  * Exists because a size query is on the redraw path several times a frame --
@@ -321,6 +356,47 @@ bool BKE_paint_material_combined_cache_size_get(const Material &ma, int &r_width
 bool BKE_paint_material_combined_cache_output_size_get(const Material &ma,
                                                        int &r_width,
                                                        int &r_height);
+
+/**
+ * The resolution the *inputs* of a cached preview of \a ma were gathered at, and the one its output
+ * was shaded at.
+ *
+ * Two sizes from one call because the gather's octave choice needs both and the two are one entry:
+ * an interactive Gradient drag gathers the channel composites at a power-of-two octave of the canvas
+ * (\a r_input), and the preview is then shaded at that octave one texel to one, while without a
+ * drag the inputs are the canvas and the output may be a further fraction of it (\a r_output).
+ *
+ * The entry is where the octave is remembered, and this is the only place that remembers it: a rule
+ * derived per channel would let two channels of the same material settle on two different octaves.
+ *
+ * \return false when nothing is cached, leaving both pairs untouched.
+ */
+bool BKE_paint_material_combined_cache_sizes_get(const Material &ma,
+                                                int2 &r_input,
+                                                int2 &r_output);
+
+/**
+ * The size a preview of \a canvas is stored or shaded at, for the most the caller can display.
+ *
+ * The one rule behind the octave of every preview: the largest power-of-two fraction of \a canvas
+ * that still covers \a max_output, quantised rather than fitted, because a changed size is a full
+ * rebuild. \a previous is the size in use last time and is kept while it still covers, which is the
+ * hysteresis that stops a zoom resting on a threshold from flipping between two sizes every frame.
+ *
+ * Declared here for the gather, which is in `editors` and decides the octave once for every channel
+ * of a preview; the implementation sits with the two caches it serves
+ * (`bke::paint_material_cache::octave_size_for`), so that the composite cache, the Combined cache
+ * and the gather cannot drift apart.
+ */
+int2 BKE_paint_material_preview_octave_size_for(int2 canvas, int2 max_output, int2 previous);
+
+/**
+ * \a rect, read in \a from's texels, expressed in \a to's -- rounded outwards, so a dab or a clip
+ * that lands between two texels of the coarser grid covers both of them and leaves no stale fringe.
+ *
+ * Declared here for the same reason as #BKE_paint_material_preview_octave_size_for.
+ */
+rcti BKE_paint_material_preview_rect_scale(const rcti &rect, int2 from, int2 to);
 
 /** \} */
 

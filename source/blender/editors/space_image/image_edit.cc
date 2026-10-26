@@ -20,6 +20,7 @@
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_string_ref.hh"
+#include "BLI_time.h"
 #include "BLI_uuid.h"
 
 #include "BKE_colortools.hh"
@@ -540,57 +541,62 @@ void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
   runtime->gradient_surface.reset();
   runtime->gradient_preview_state = GradientPreviewState::None;
 
+  /* One exit point per branch. The reason of each branch is named at its call site. */
+  const auto report = [&](const GradientPreviewState state, const char * /*reason*/) {
+    runtime->gradient_preview_state = state;
+  };
+
   if (!ED_space_image_has_composite(&sima) || sima.image == nullptr) {
+    report(GradientPreviewState::None, "not a composite view");
     return;
   }
   Main *bmain = CTX_data_main(&C);
   if (bmain == nullptr) {
+    report(GradientPreviewState::None, "no main");
     return;
   }
   Material *ma = space_image_composite_material_find(*bmain, *sima.image);
   if (ma == nullptr || !BKE_paint_layers_is_layered(*ma)) {
+    report(GradientPreviewState::None, "no layered material for this image");
     return;
   }
   /* A material with no 3D Gradient row has nothing to resolve, and must not build a surface. */
   GradientSpaces spaces;
   paint_layers_collect_gradient_spaces(ma->paint_layers, spaces);
   if (!spaces.any()) {
+    report(GradientPreviewState::None, "no 3D Gradient row");
     return;
   }
 
-  /* While the user is editing the 3D Gradient row, the row's own line is live and must not be
-   * sampled through a surface that would lag behind the drag: the texel's UV is the coordinate. */
-  MaterialPaintLayer *active = BKE_paint_layers_active_layer_get(*ma);
-  if (active != nullptr && active->gradient != nullptr &&
-      active->gradient->space != MA_PAINT_LAYER_GRADIENT_SPACE_UV)
-  {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
-    return;
-  }
-
+  /* The surface is *not* withheld while the active row is a 3D Gradient.
+   *
+   * It is keyed on the object, the UV map, the resolution, the geometry stamp and the texture space
+   * (see #surface_key), and a handle drag moves only the line, which the composite's own hash
+   * covers. So there is nothing for it to lag behind: withholding it made every frame of an edit
+   * read `(u, v, 0)`, which is the approximate view, not a faster exact one. */
   Object *object = CTX_data_active_object(&C);
   if (object == nullptr || object->type != OB_MESH || !object_uses_material(*object, *ma)) {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    report(GradientPreviewState::Approximate, "the active object does not use the material");
     return;
   }
   const Depsgraph *depsgraph = CTX_data_expect_evaluated_depsgraph(&C);
   if (depsgraph == nullptr) {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    report(GradientPreviewState::Approximate, "no evaluated depsgraph");
     return;
   }
   const Object *object_eval = DEG_get_evaluated<Object>(depsgraph, object);
   if (object_eval == nullptr) {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    report(GradientPreviewState::Approximate, "no evaluated object");
     return;
   }
   const Mesh *mesh = BKE_object_get_evaluated_mesh(object_eval);
   if (mesh == nullptr) {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    report(GradientPreviewState::Approximate, "no evaluated mesh");
     return;
   }
   const StringRefNull uv_name = BKE_paint_layers_gradient_uv_map_name(*mesh);
   if (uv_name.is_empty()) {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    report(GradientPreviewState::Approximate, "the mesh has no UV map");
     return;
   }
 
@@ -618,7 +624,7 @@ void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
   std::shared_ptr<const PaintMaterialCompositeSurface> surface =
       BKE_paint_layers_gradient_surface_get(*object_eval, *mesh, uv_name.c_str(), size);
   if (!surface) {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    report(GradientPreviewState::Approximate, "the UV surface could not be built");
     return;
   }
   /* Object space only reads the sampled positions. Generated rows need either a stored CD_ORCO
@@ -627,12 +633,20 @@ void ED_space_image_gradient_preview_sync(const bContext &C, SpaceImage &sima)
   if (spaces.generated && surface->generated_positions.is_empty() &&
       !surface->generated_bbox_valid)
   {
-    runtime->gradient_preview_state = GradientPreviewState::Approximate;
+    report(GradientPreviewState::Approximate, "no Generated coordinate (no orco, no bbox)");
+    return;
+  }
+  /* A surface no texel of which lies inside a UV island has nothing to give: every sample would
+   * miss, every Gradient texel would lay nothing, and the preview would look empty while claiming
+   * to be exact. That is the state to report as approximate, since the fallback at least shows
+   * something. The builder counted the island texels once, so this asks rather than scans. */
+  if (!surface->has_valid_texels()) {
+    report(GradientPreviewState::Approximate, "the UV surface covers no texel");
     return;
   }
 
   runtime->gradient_surface = surface;
-  runtime->gradient_preview_state = GradientPreviewState::Exact;
+  report(GradientPreviewState::Exact, "resolved");
 }
 
 int ED_space_image_gradient_preview_state(const SpaceImage *sima)
@@ -762,8 +776,24 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   }
 
   const int pass = sima->material_paint_pass;
+  const bool layered = BKE_paint_layers_is_layered(*ma);
 
   if (pass == PAINT_LAYER_PASS_COMBINED) {
+    /* The interactive Gradient throttle: while handles are dragged, keep the last preview on screen
+     * between refreshes instead of rebuilding it for every mouse step. The octave is already coarse;
+     * this removes the per-step rebuilds that remain. */
+    const double preview_now = BLI_time_now_seconds();
+    const bool gradient_drag = layered && ed::material_combined::gradient_interactive_is(*ma);
+    if (gradient_drag &&
+        !ed::material_combined::gradient_preview_refresh_allow(*ma, preview_now))
+    {
+      if (ImBuf *cached = BKE_paint_material_combined_cache_peek(*ma, r_revision)) {
+        /* A skipped step still draws: the previous octave stays valid until the trailing tick. */
+        IMB_refImBuf(cached);
+        return cached;
+      }
+    }
+
     CombinedPreviewLighting lighting = BKE_paint_material_combined_lighting_default();
     BKE_paint_material_combined_lighting_rotate_z(lighting, sima->material_paint_light_rot_z);
     /* Default-constructed unless the main region armed it, which is the whole of the narrowing
@@ -781,6 +811,11 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
         sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
     ImBuf *combined = ed::material_combined::combined_preview_ensure(
         *bmain, *ma, lighting, request, r_revision, r_changed_region, nullptr, surface);
+    if (gradient_drag) {
+      /* Recorded whether or not this frame resolved: a stack that resolves to nothing must not turn
+       * every following mouse step into an evaluation attempt either. */
+      ed::material_combined::gradient_preview_refresh_note(*ma, preview_now);
+    }
     if (r_changed_region != nullptr) {
       perf_total.note("call=%lld combined armed=%d clip=%dx%d changed=%dx%d out=%dx%d",
                       static_cast<long long>(perf_call_count),
@@ -824,7 +859,14 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
   /* A layered stack is described without the pixels of its Anchor Point slices: this runs every
    * frame, and a composite served from the cache needs only the hash. The cache asks for the full
    * stack when it has to evaluate. */
-  const bool layered = BKE_paint_layers_is_layered(*ma);
+  const double preview_now = BLI_time_now_seconds();
+  const bool gradient_drag = layered && ed::material_combined::gradient_interactive_is(*ma);
+  if (gradient_drag && !ed::material_combined::gradient_preview_refresh_allow(*ma, preview_now)) {
+    if (ImBuf *cached = BKE_paint_material_composite_cache_peek(*ma, pass, r_revision)) {
+      IMB_refImBuf(cached);
+      return cached;
+    }
+  }
   Vector<PaintMaterialCompositeImageLayer> layers;
   const std::shared_ptr<const PaintMaterialCompositeSurface> surface =
       sima->runtime != nullptr ? sima->runtime->gradient_surface : nullptr;
@@ -837,9 +879,40 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
     return nullptr;
   }
   const uint64_t stack_hash = BKE_paint_material_composite_stack_hash(layers);
+  /* The same surface the description above was made with. Without it the layers the cache actually
+   * evaluates would be the approximate Object/Generated ones -- `(u, v, 0)` instead of the texel's
+   * object-space point -- while the hash that decided they were up to date was made with the exact
+   * description: the entry would hold approximate pixels under an exact identity, and nothing would
+   * ever notice. See #composite_gradient_describe. */
   const auto describe_full = [&](Vector<PaintMaterialCompositeImageLayer> &r_full) {
-    return BKE_paint_layers_composite_image_layers(*ma, pass, r_full);
+    return BKE_paint_layers_composite_image_layers(
+        *ma, pass, r_full, /*describe_only=*/false, surface);
   };
+  /* A channel pass is only ever stored below the canvas while the material's own Gradient handles
+   * are dragged: the pass is then shown at an octave of what the editor can display, and refines to
+   * the canvas on release. Every other call asks for the canvas. */
+  int2 stack_output_size = int2(0);
+  if (gradient_drag && sima->runtime != nullptr &&
+      sima->runtime->combined_preview_draw.is_armed())
+  {
+    int stack_width = 0;
+    int stack_height = 0;
+    int2 previous_output = int2(0);
+    int2 previous_canvas = int2(0);
+    if (BKE_paint_material_composite_stack_dimensions(layers, stack_width, stack_height) &&
+        stack_width > 0 && stack_height > 0)
+    {
+      /* The octave of the canvas this channel is laid on, so its own previous output is the
+       * hysteresis. The cache is told the resulting size rather than a display cap: deciding it per
+       * entry would let this channel settle somewhere the preview that reads it does not. */
+      BKE_paint_material_composite_cache_sizes_get(
+          *ma, pass, previous_canvas, previous_output);
+      stack_output_size = BKE_paint_material_preview_octave_size_for(
+          int2(stack_width, stack_height),
+          sima->runtime->combined_preview_draw.display_size,
+          previous_output);
+    }
+  }
   ImBuf *ibuf = BKE_paint_material_composite_cache_ensure(
       *ma,
       pass,
@@ -849,9 +922,13 @@ ImBuf *ED_space_image_acquire_composite_buffer(Main *bmain,
       nullptr,
       nullptr,
       layered ? FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(describe_full) :
-                FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>());
+                FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)>(),
+      stack_output_size);
   if (ibuf == nullptr) {
     return nullptr;
+  }
+  if (gradient_drag) {
+    ed::material_combined::gradient_preview_refresh_note(*ma, preview_now);
   }
   /* Handed out with a reference of its own so that #ED_space_image_release_buffer can release it
    * exactly like any other buffer. That is what keeps the two paths symmetrical: a caller never
@@ -1049,6 +1126,31 @@ void ED_space_image_get_size(SpaceImage *sima, int *r_width, int *r_height)
      */
     BKE_image_get_size(sima->image, &sima->iuser, r_width, r_height);
     return;
+  }
+
+  /* A channel pass answers from the composite cache's own canvas, for the same reason. The cached
+   * buffer is a power-of-two fraction of the canvas while a Gradient handle is dragged, and the
+   * acquisition below would hand back that fraction: the view would then be rebuilt from it on
+   * every frame of the drag, which is the image shrinking and the UV under the cursor moving. */
+  if (ED_space_image_has_composite(sima) && sima->image != nullptr) {
+    if (Material *ma = ED_space_image_composite_material_get(G_MAIN, sima->image)) {
+      int2 canvas = int2(0);
+      int2 output = int2(0);
+      if (BKE_paint_material_composite_cache_sizes_get(
+              *ma, sima->material_paint_pass, canvas, output))
+      {
+        *r_width = canvas.x;
+        *r_height = canvas.y;
+        return;
+      }
+      /* First evaluation of a stack with no maps: the stand-in image is not the canvas size. */
+      if (ma->paint_layers_canvas_image == sima->image) {
+        const int side = (ma->paint_layers_image_size > 0) ? ma->paint_layers_image_size : 4096;
+        *r_width = side;
+        *r_height = side;
+        return;
+      }
+    }
   }
 
   /* TODO(lukas): Support tiled images with different sizes */

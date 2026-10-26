@@ -17,6 +17,7 @@
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
 #include "BKE_paint_layers_gradient.hh"
+#include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 
 #include "BLI_math_vector.h"
@@ -24,6 +25,7 @@
 #include "BLI_uuid.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -598,6 +600,60 @@ TEST_F(PaintMaterialCompositeEvalTest, region_refresh_matches_the_full_evaluatio
   EXPECT_FLOAT_EQ(partial[0], sentinel);
 }
 
+/**
+ * An Anchor Point slice is owned by the description and read by other consumers too, so a reduced
+ * evaluation may only ever read a resample of it.
+ */
+TEST_F(PaintMaterialCompositeEvalTest, an_anchor_point_slice_is_resampled_without_being_written_to)
+{
+  constexpr int slice_size = 8;
+  ImBuf *slice = IMB_allocImBuf(uint(slice_size), uint(slice_size), ImBufFlags::FloatData);
+  ASSERT_NE(slice, nullptr);
+  ASSERT_TRUE(IMB_alloc_float_pixels(slice, 4, false));
+  float *slice_pixels = slice->float_data_for_write();
+  for (const int y : IndexRange(slice_size)) {
+    for (const int x : IndexRange(slice_size)) {
+      float *p = slice_pixels + (int64_t(y) * slice_size + x) * 4;
+      p[0] = p[1] = p[2] = (float(x) + 0.5f) / float(slice_size);
+      p[3] = 1.0f;
+    }
+  }
+  IMB_colormanagement_assign_float_colorspace(
+      slice, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
+  Vector<float> before(slice_pixels, slice_pixels + int64_t(slice_size) * slice_size * 4);
+  const std::shared_ptr<ImBuf> owned(slice, [](ImBuf *ibuf) { IMB_freeImBuf(ibuf); });
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  PaintMaterialCompositeImageLayer layer;
+  layer.anchor_point_color = owned;
+  layers.append(layer);
+
+  /* Half the slice's grid: a resample the description must not see. */
+  constexpr int grid = slice_size / 2;
+  Vector<float> linear(int64_t(grid) * grid * 4);
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images_linear(
+      layers,
+      PaintMaterialCompositeLinearTarget::frame(linear, grid),
+      nullptr,
+      nullptr,
+      nullptr,
+      grid,
+      grid));
+
+  for (const int y : IndexRange(grid)) {
+    for (const int x : IndexRange(grid)) {
+      const float *p = linear.data() + (int64_t(y) * grid + x) * 4;
+      /* The slice is analytic in U, so the same ramp read at the coarser grid's own UVs. */
+      EXPECT_NEAR(p[0], (float(x) + 0.5f) / float(grid), 1e-4f);
+      EXPECT_NEAR(p[3], 1.0f, 1e-4f);
+    }
+  }
+  /* The borrowed buffer is exactly as it was: the evaluation resampled a copy. */
+  for (const int64_t i : IndexRange(int64_t(slice_size) * slice_size * 4)) {
+    EXPECT_FLOAT_EQ(slice_pixels[i], before[i]) << i;
+  }
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
@@ -1144,6 +1200,65 @@ TEST_F(PaintMaterialCompositeStackTest, edited_chunk_is_the_only_part_recomputed
   EXPECT_EQ(pixel(*composite, 300, 300)[0], 10);
 }
 
+TEST_F(PaintMaterialCompositeStackTest, a_dab_reaches_the_octave_through_the_scaled_rectangle)
+{
+  /* 512 square so the image's partial-update log has more than one chunk: the dab then reports a
+   * rectangle rather than "everything", which is the case the scaling exists for. */
+  constexpr int image_size = 512;
+  Material *ma = add_material_with_principled("Mat");
+  bNode *tex = add_image_texture(*ma, "Base", image_size);
+  link_to_base_color(*ma, *tex);
+  Image *base = id_cast<Image *>(tex->id);
+  fill_image(*base, 10);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_material_composite_stack_from_material(
+      *bmain, *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  const uint64_t hash = BKE_paint_material_composite_stack_hash(layers);
+
+  const int2 octave_size(256, 256);
+  ImBuf *octave = BKE_paint_material_composite_cache_ensure(*ma,
+                                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                            layers,
+                                                            hash,
+                                                            nullptr,
+                                                            nullptr,
+                                                            nullptr,
+                                                            {},
+                                                            octave_size);
+  ASSERT_NE(octave, nullptr);
+  ASSERT_EQ(octave->x, 256);
+  ASSERT_EQ(pixel(*octave, 0, 0)[0], 10);
+
+  /* A four-texel dab in the corner of the canvas. */
+  rcti dab;
+  BLI_rcti_init(&dab, 0, 4, 0, 4);
+  paint_region(*base, dab, 200);
+
+  rcti changed;
+  BLI_rcti_init(&changed, 0, 0, 0, 0);
+  ImBuf *refreshed = BKE_paint_material_composite_cache_ensure(*ma,
+                                                              PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                              layers,
+                                                              hash,
+                                                              nullptr,
+                                                              nullptr,
+                                                              &changed,
+                                                              {},
+                                                              octave_size);
+  ASSERT_EQ(refreshed, octave);
+  /* Reported in the octave's own texels, and rounded outwards: the dab's corner is a texel there and
+   * its four pixels span two. Never the canvas's coordinates, and never the whole buffer. */
+  EXPECT_FALSE(BLI_rcti_is_empty(&changed));
+  EXPECT_EQ(changed.xmin, 0);
+  EXPECT_EQ(changed.ymin, 0);
+  EXPECT_GE(BLI_rcti_size_x(&changed), 2);
+  EXPECT_LE(BLI_rcti_size_x(&changed), 128);
+  EXPECT_EQ(pixel(*octave, 0, 0)[0], 200);
+  /* Far outside the chunk the edit was recorded in, the octave keeps what it had. */
+  EXPECT_EQ(pixel(*octave, 200, 200)[0], 10);
+}
+
 TEST_F(PaintMaterialCompositeStackTest, edits_are_detected_without_a_tag)
 {
   Material *ma = add_material_with_principled("Mat");
@@ -1524,6 +1639,31 @@ class PaintLayersCompositeTest : public bke::BlenderGTestBase {
       pixels[i * 4 + 2] = b;
       pixels[i * 4 + 3] = a;
     }
+    BKE_image_release_ibuf(image, ibuf, lock);
+    return image;
+  }
+
+  /**
+   * A float map holding a single channel per texel, the shape a mask reduced to a scalar takes.
+   *
+   * A grey in the decoder's reading, which is what makes it a test: the value has to survive being
+   * resampled onto another grid, and a resample that left the other two channels at zero would turn
+   * a full grey into a third of one.
+   */
+  Image *add_one_channel_float_image(const char *name, const int size, const float value)
+  {
+    const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    Image *image = BKE_image_add_generated(
+        bmain, size, size, name, 32, true, IMA_GENTYPE_BLANK, color, false, true, false);
+    void *lock = nullptr;
+    ImBuf *ibuf = BKE_image_acquire_ibuf(image, nullptr, &lock);
+    EXPECT_TRUE(IMB_alloc_float_pixels(ibuf, 1, false));
+    float *pixels = ibuf->float_data_for_write();
+    for (const int64_t i : IndexRange(int64_t(size) * size)) {
+      pixels[i] = value;
+    }
+    IMB_colormanagement_assign_float_colorspace(
+        ibuf, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_SCENE_LINEAR));
     BKE_image_release_ibuf(image, ibuf, lock);
     return image;
   }
@@ -2600,7 +2740,7 @@ static std::shared_ptr<PaintMaterialCompositeSurface> gradient_test_surface(cons
   return surface;
 }
 
-TEST_F(PaintLayersCompositeTest, a_gradient_surface_is_approximate_on_the_active_row_and_exact_below_it)
+TEST_F(PaintLayersCompositeTest, a_gradient_surface_makes_the_object_row_exact_whether_it_is_active_or_not)
 {
   ma->paint_layers_image_size = 4;
   MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
@@ -2626,36 +2766,133 @@ TEST_F(PaintLayersCompositeTest, a_gradient_surface_is_approximate_on_the_active
     return std::array<float, 4>{p[0], p[1], p[2], p[3]};
   };
 
-  /* The active row reads the texel's own UV: the surface is not used. */
+  /* The surface is used while the row is being edited too: it is keyed on the object and its
+   * geometry, not on the line the handles move, so there is nothing for it to lag behind. */
   ma->active_layer_marker = gradient->marker;
-  Vector<PaintMaterialCompositeImageLayer> approximate_layers;
-  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, approximate_layers, surface));
-  ASSERT_EQ(approximate_layers.size(), 1);
-  EXPECT_TRUE(approximate_layers[0].gradient.approximate);
-  EXPECT_EQ(approximate_layers[0].gradient.surface_key, key);
-  EXPECT_NEAR(eval(approximate_layers, 0, 0)[0], 0.125f, 1e-4f);
-  EXPECT_NEAR(eval(approximate_layers, 3, 0)[0], 0.875f, 1e-4f);
+  Vector<PaintMaterialCompositeImageLayer> active_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma,
+                                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                     active_layers,
+                                                     /*describe_only=*/false,
+                                                     surface));
+  ASSERT_EQ(active_layers.size(), 1);
+  EXPECT_FALSE(active_layers[0].gradient.approximate);
+  EXPECT_EQ(active_layers[0].gradient.surface.get(), surface.get());
+  EXPECT_NEAR(eval(active_layers, 0, 0)[0], 0.25f, 1e-4f);
+  EXPECT_NEAR(eval(active_layers, 3, 0)[0], 0.25f, 1e-4f);
 
-  /* Leaving the row switches to the per-object exact preview. */
+  /* The same answer once the row is left, which is the state the preview spends most of its time
+   * in. */
   ma->active_layer_marker = {};
   Vector<PaintMaterialCompositeImageLayer> exact_layers;
-  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, exact_layers, surface));
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma,
+                                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                     exact_layers,
+                                                     /*describe_only=*/false,
+                                                     surface));
   ASSERT_EQ(exact_layers.size(), 1);
   EXPECT_FALSE(exact_layers[0].gradient.approximate);
-  EXPECT_EQ(exact_layers[0].gradient.surface.get(), surface.get());
   EXPECT_NEAR(eval(exact_layers, 0, 0)[0], 0.25f, 1e-4f);
   EXPECT_NEAR(eval(exact_layers, 3, 0)[0], 0.25f, 1e-4f);
 
-  /* No surface at all is the approximate fallback. */
+  /* No surface at all is the approximate fallback: the texel's own UV, so the ramp rises along
+   * it. */
   Vector<PaintMaterialCompositeImageLayer> fallback_layers;
-  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, fallback_layers, nullptr));
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(*ma,
+                                                     PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                     fallback_layers,
+                                                     /*describe_only=*/false,
+                                                     nullptr));
   ASSERT_EQ(fallback_layers.size(), 1);
   EXPECT_TRUE(fallback_layers[0].gradient.approximate);
   EXPECT_EQ(fallback_layers[0].gradient.surface, nullptr);
   EXPECT_NEAR(eval(fallback_layers, 0, 0)[0], 0.125f, 1e-4f);
+  EXPECT_NEAR(eval(fallback_layers, 3, 0)[0], 0.875f, 1e-4f);
+}
+
+/**
+ * The cache evaluates from `full_layers`, and the hash it trusts was made from the description.
+ * Both have to be made with the same surface, or the entry holds approximate pixels under an exact
+ * identity and no edit of the surface can ever invalidate them.
+ */
+TEST_F(PaintLayersCompositeTest, the_cached_composite_of_a_surface_gradient_matches_the_direct_one)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+  const float start[3] = {0.0f, 0.0f, 0.0f};
+  const float end[3] = {1.0f, 0.0f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_line(*ma, *gradient, start, end));
+
+  /* A surface whose object-space X runs against the texel's U, so the exact preview and the
+   * approximate one cannot be confused for each other. */
+  auto surface = std::make_shared<PaintMaterialCompositeSurface>();
+  surface->width = 8;
+  surface->height = 8;
+  surface->key = 0x5678;
+  surface->revision = 3;
+  surface->positions.resize(64);
+  surface->valid.resize(64, uint8_t(1));
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      surface->positions[y * 8 + x] = float3(float(7 - x) / 8.0f, 0.0f, 0.0f);
+    }
+  }
+
+  const auto describe = [&](const bool describe_only) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, describe_only, surface));
+    return layers;
+  };
+
+  /* The cache path, exactly as the Image Editor asks for it: a description for the hash, and a
+   * full description of the same surface for the evaluation. */
+  Vector<PaintMaterialCompositeImageLayer> description = describe(/*describe_only=*/true);
+  const uint64_t hash = BKE_paint_material_composite_stack_hash(description);
+  const auto full_layers = [&](Vector<PaintMaterialCompositeImageLayer> &r_full) {
+    return BKE_paint_layers_composite_image_layers(*ma,
+                                                   PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                   r_full,
+                                                   /*describe_only=*/false,
+                                                   surface);
+  };
+  ImBuf *cached = BKE_paint_material_composite_cache_ensure(*ma,
+                                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                            description,
+                                                            hash,
+                                                            nullptr,
+                                                            nullptr,
+                                                            nullptr,
+                                                            full_layers);
+  ASSERT_NE(cached, nullptr);
+
+  /* The reference: the same full description, evaluated straight into a buffer of the same kind. */
+  Vector<PaintMaterialCompositeImageLayer> direct_layers = describe(/*describe_only=*/false);
+  ASSERT_EQ(direct_layers.size(), 1);
+  ImBuf *reference = IMB_allocImBuf(uint(8), uint(8), ImBufFlags::ByteData);
+  ASSERT_NE(reference, nullptr);
+  reference->channels = 4;
+  /* The cache encodes a Gradient-only stack in the channel's display role, so the comparison has
+   * to use the same encoding. */
+  IMB_colormanagement_assign_byte_colorspace(
+      reference, IMB_colormanagement_role_colorspace_name_get(COLOR_ROLE_DEFAULT_BYTE));
+  ASSERT_TRUE(BKE_paint_material_composite_eval_images(direct_layers, reference));
+
+  const uchar *cached_pixels = cached->byte_data();
+  const uchar *reference_pixels = reference->byte_data();
+  ASSERT_NE(cached_pixels, nullptr);
+  ASSERT_NE(reference_pixels, nullptr);
+  for (const int64_t i : IndexRange(int64_t(8) * 8 * 4)) {
+    EXPECT_EQ(cached_pixels[i], reference_pixels[i]) << i;
+  }
+  /* The surface really is what the pixels come from: the exact ramp runs against U. */
+  EXPECT_LT(reference_pixels[(0 * 8 + 0) * 4], reference_pixels[(0 * 8 + 7) * 4])
+      << "the object-space X of texel 0 is the far end of the line";
+  IMB_freeImBuf(reference);
 }
 
 TEST_F(PaintLayersCompositeTest, an_invalid_gradient_surface_texel_lays_nothing)
@@ -2961,6 +3198,609 @@ TEST_F(PaintLayersCompositeTest, stack_hash_tracks_the_gradient_surface_and_appr
   const uint64_t exact_b = hash_with(surface_b);
   EXPECT_NE(approximate, exact_a);
   EXPECT_NE(exact_a, exact_b);
+}
+
+TEST_F(PaintLayersCompositeTest, a_gradient_stack_evaluates_exactly_at_a_reduced_grid)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+
+  /* The gradient is analytic in the texel's UV, so a reduced grid is the same formula sampled at
+   * its own texel centres, not a resample of the full evaluation: every texel of either grid reads
+   * the ramp at `(x + 0.5) / grid`, and the two agree wherever their centres do. */
+  const auto eval_at = [&](const int grid) {
+    Vector<float> linear(int64_t(grid) * grid * 4);
+    PaintMaterialCompositeEvalStats stats;
+    EXPECT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers,
+        PaintMaterialCompositeLinearTarget::frame(linear, grid),
+        nullptr,
+        &stats,
+        nullptr,
+        grid,
+        grid));
+    EXPECT_EQ(stats.gradient_items, 1);
+    EXPECT_EQ(stats.gradient_samples, int64_t(grid) * grid);
+    return linear;
+  };
+  const Vector<float> full = eval_at(8);
+  const Vector<float> reduced = eval_at(4);
+
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      const float u = (float(x) + 0.5f) / 8.0f;
+      const float *p = full.data() + (int64_t(y) * 8 + x) * 4;
+      EXPECT_NEAR(p[0], u, 1e-4f);
+      EXPECT_NEAR(p[3], 1.0f, 1e-4f);
+    }
+  }
+  for (const int y : IndexRange(4)) {
+    for (const int x : IndexRange(4)) {
+      const float u = (float(x) + 0.5f) / 4.0f;
+      const float *p = reduced.data() + (int64_t(y) * 4 + x) * 4;
+      EXPECT_NEAR(p[0], u, 1e-4f);
+      EXPECT_NEAR(p[3], 1.0f, 1e-4f);
+    }
+  }
+}
+
+TEST_F(PaintLayersCompositeTest, a_map_row_is_resampled_onto_a_reduced_grid)
+{
+  ma->paint_layers_image_size = 8;
+  const uchar black[4] = {0, 0, 0, 255};
+  const uchar white[4] = {255, 255, 255, 255};
+  Image *map = add_quad_image("quad", black, white, white, black);
+  MaterialPaintLayer *fill = add_fill_layer("Fill", map);
+  ASSERT_NE(fill, nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 1);
+
+  /* What the resample reads at a texel: the quad map bilinearly, at the grid's own UV. The map is
+   * opaque everywhere, so premultiplied and straight agree and the red channel is the bilinear mix
+   * of the corners' black and white. */
+  const auto expected_red = [&](const int grid, const int x, const int y) {
+    const float su = ((float(x) + 0.5f) / float(grid)) * 2.0f - 0.5f;
+    const float sv = ((float(y) + 0.5f) / float(grid)) * 2.0f - 0.5f;
+    const int x0 = int(std::floor(su));
+    const int y0 = int(std::floor(sv));
+    const float fx = su - float(x0);
+    const float fy = sv - float(y0);
+    const auto corner = [](const int tx, const int ty) {
+      return (tx == 1) == (ty == 1) ? 0.0f : 1.0f;
+    };
+    const auto wrapped = [](const int i) { return (i % 2 + 2) % 2; };
+    const float v00 = corner(wrapped(x0), wrapped(y0));
+    const float v10 = corner(wrapped(x0 + 1), wrapped(y0));
+    const float v01 = corner(wrapped(x0), wrapped(y0 + 1));
+    const float v11 = corner(wrapped(x0 + 1), wrapped(y0 + 1));
+    return (1.0f - fx) * (1.0f - fy) * v00 + fx * (1.0f - fy) * v10 +
+           (1.0f - fx) * fy * v01 + fx * fy * v11;
+  };
+  const auto eval_at = [&](const int grid) {
+    Vector<float> linear(int64_t(grid) * grid * 4);
+    EXPECT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers,
+        PaintMaterialCompositeLinearTarget::frame(linear, grid),
+        nullptr,
+        nullptr,
+        nullptr,
+        grid,
+        grid));
+    return linear;
+  };
+  const Vector<float> full = eval_at(8);
+  const Vector<float> reduced = eval_at(4);
+
+  for (const int y : IndexRange(8)) {
+    for (const int x : IndexRange(8)) {
+      const float *p = full.data() + (int64_t(y) * 8 + x) * 4;
+      EXPECT_NEAR(p[0], expected_red(8, x, y), 1e-4f);
+      EXPECT_NEAR(p[3], 1.0f, 1e-4f);
+    }
+  }
+  for (const int y : IndexRange(4)) {
+    for (const int x : IndexRange(4)) {
+      const float *p = reduced.data() + (int64_t(y) * 4 + x) * 4;
+      EXPECT_NEAR(p[0], expected_red(4, x, y), 1e-4f);
+      EXPECT_NEAR(p[3], 1.0f, 1e-4f);
+    }
+  }
+}
+
+TEST_F(PaintLayersCompositeTest, the_composite_cache_serves_an_octave_and_refines_to_the_canvas)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  const auto describe = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    return layers;
+  };
+
+  Vector<PaintMaterialCompositeImageLayer> layers = describe();
+  const uint64_t hash = BKE_paint_material_composite_stack_hash(layers);
+
+  uint64_t revision = 0;
+  rcti region;
+  BLI_rcti_init(&region, 0, 0, 0, 0);
+  ImBuf *low = BKE_paint_material_composite_cache_ensure(*ma,
+                                                         PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                         layers,
+                                                         hash,
+                                                         &revision,
+                                                         nullptr,
+                                                         &region,
+                                                         {},
+                                                         int2(4, 4));
+  ASSERT_NE(low, nullptr);
+  EXPECT_EQ(low->x, 4);
+  EXPECT_EQ(low->y, 4);
+  /* A rebuild is reported as the whole buffer, in the buffer's own texels. */
+  EXPECT_EQ(BLI_rcti_size_x(&region), 4);
+  EXPECT_EQ(BLI_rcti_size_y(&region), 4);
+  const uchar *bytes = low->byte_data();
+  for (const int x : IndexRange(3)) {
+    EXPECT_LT(bytes[(0 * 4 + x) * 4], bytes[(0 * 4 + x + 1) * 4])
+        << "the ramp must rise along the line at the octave's own UVs";
+  }
+
+  /* The same octave again is served, not rebuilt. */
+  uint64_t served_revision = 0;
+  ImBuf *served = BKE_paint_material_composite_cache_ensure(*ma,
+                                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                            layers,
+                                                            hash,
+                                                            &served_revision,
+                                                            nullptr,
+                                                            nullptr,
+                                                            {},
+                                                            int2(4, 4));
+  ASSERT_NE(served, nullptr);
+  EXPECT_EQ(served->x, 4);
+  EXPECT_EQ(served_revision, revision);
+
+  /* No cap is the full resolution again, reported as a whole-buffer rebuild. */
+  uint64_t full_revision = 0;
+  ImBuf *full = BKE_paint_material_composite_cache_ensure(*ma,
+                                                          PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                          layers,
+                                                          hash,
+                                                          &full_revision,
+                                                          nullptr,
+                                                          &region,
+                                                          {});
+  ASSERT_NE(full, nullptr);
+  EXPECT_EQ(full->x, 8);
+  EXPECT_GT(full_revision, revision);
+  EXPECT_EQ(BLI_rcti_size_x(&region), 8);
+  EXPECT_EQ(BLI_rcti_size_y(&region), 8);
+  bytes = full->byte_data();
+  for (const int x : IndexRange(7)) {
+    EXPECT_LT(bytes[(0 * 8 + x) * 4], bytes[(0 * 8 + x + 1) * 4]);
+  }
+
+  /* A cap the canvas already covers invents no octave and rebuilds nothing. */
+  uint64_t capped_revision = 0;
+  ImBuf *capped = BKE_paint_material_composite_cache_ensure(*ma,
+                                                            PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                            layers,
+                                                            hash,
+                                                            &capped_revision,
+                                                            nullptr,
+                                                            nullptr,
+                                                            {},
+                                                            int2(16, 16));
+  ASSERT_NE(capped, nullptr);
+  EXPECT_EQ(capped->x, 8);
+  EXPECT_EQ(capped_revision, full_revision);
+}
+
+TEST_F(PaintLayersCompositeTest, a_gradient_edit_rebuilds_its_channel_and_not_the_other_channels)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  Image *rough_map = add_solid_image("rough", 4, 128, 128, 128, 255, true);
+  ASSERT_NE(add_fill_layer("RoughFill", rough_map, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+
+  const auto ensure_channel = [&](const int channel, uint64_t &r_revision, rcti &r_region) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+    const uint64_t hash = BKE_paint_material_composite_stack_hash(layers);
+    ImBuf *ibuf = BKE_paint_material_composite_cache_ensure(
+        *ma, channel, layers, hash, &r_revision, nullptr, &r_region, {});
+    EXPECT_NE(ibuf, nullptr);
+  };
+
+  uint64_t base_revision = 0;
+  uint64_t rough_revision = 0;
+  rcti base_region;
+  rcti rough_region;
+  BLI_rcti_init(&base_region, 0, 0, 0, 0);
+  BLI_rcti_init(&rough_region, 0, 0, 0, 0);
+  ensure_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_revision, base_region);
+  ensure_channel(PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough_revision, rough_region);
+
+  const float start[3] = {0.25f, 0.5f, 0.0f};
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_start(*ma, *gradient, start));
+
+  uint64_t base_moved = 0;
+  uint64_t rough_moved = 0;
+  ensure_channel(PAINT_MATERIAL_CHANNEL_BASE_COLOR, base_moved, base_region);
+  ensure_channel(PAINT_MATERIAL_CHANNEL_ROUGHNESS, rough_moved, rough_region);
+  /* The gradient's channel rebuilt whole; the revisions count from one shared counter, so an
+   * unchanged revision is exactly "this channel was not recomputed". */
+  EXPECT_GT(base_moved, base_revision);
+  EXPECT_EQ(BLI_rcti_size_x(&base_region), 8);
+  EXPECT_EQ(BLI_rcti_size_y(&base_region), 8);
+  EXPECT_EQ(rough_moved, rough_revision);
+  EXPECT_TRUE(BLI_rcti_is_empty(&rough_region));
+}
+
+TEST_F(PaintLayersCompositeTest, the_distribution_moves_the_hash_only_when_the_midpoint_shows)
+{
+  ma->paint_layers_image_size = 4;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+
+  const auto stack_hash = [&]() {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    return BKE_paint_material_composite_stack_hash(layers);
+  };
+
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_midpoint(*ma, *gradient, 0.3f));
+  const uint64_t midpoint_hash = stack_hash();
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_distribution(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_RAMP));
+  /* The effective midpoint jumps 0.3 to 0.5: the pixels move, so the hash moves. */
+  const uint64_t ramp_hash = stack_hash();
+  EXPECT_NE(ramp_hash, midpoint_hash);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_distribution(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT));
+  EXPECT_EQ(stack_hash(), midpoint_hash);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_midpoint(*ma, *gradient, 0.5f));
+  const uint64_t half_hash = stack_hash();
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_distribution(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_RAMP));
+  /* The effective midpoint is 0.5 in both distributions: the pixels cannot differ, and neither
+   * does the cache entry they share. */
+  EXPECT_EQ(stack_hash(), half_hash);
+
+  /* The cache follows: a switch that moves the effective midpoint rebuilds whole. */
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_distribution(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_MIDPOINT));
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_midpoint(*ma, *gradient, 0.3f));
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  const uint64_t hash = BKE_paint_material_composite_stack_hash(layers);
+  uint64_t revision = 0;
+  rcti region;
+  BLI_rcti_init(&region, 0, 0, 0, 0);
+  ASSERT_NE(BKE_paint_material_composite_cache_ensure(
+                *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, hash, &revision, nullptr, &region, {}),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_distribution(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_DISTRIBUTION_RAMP));
+  Vector<PaintMaterialCompositeImageLayer> moved_layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, moved_layers));
+  const uint64_t moved_hash = BKE_paint_material_composite_stack_hash(moved_layers);
+  EXPECT_NE(moved_hash, hash);
+  uint64_t moved_revision = 0;
+  ASSERT_NE(BKE_paint_material_composite_cache_ensure(*ma,
+                                                      PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                      moved_layers,
+                                                      moved_hash,
+                                                      &moved_revision,
+                                                      nullptr,
+                                                      &region,
+                                                      {}),
+            nullptr);
+  EXPECT_GT(moved_revision, revision);
+  EXPECT_EQ(BLI_rcti_size_x(&region), 4);
+  EXPECT_EQ(BLI_rcti_size_y(&region), 4);
+}
+
+/**
+ * The octave of a preview is decided once, by whoever fills it, so the same canvas and the same
+ * display always answer the same size -- whatever a channel's own entry remembers.
+ */
+TEST(PaintMaterialPreviewOctave, one_rule_answers_the_size_of_a_preview)
+{
+  const int2 canvas(4096, 4096);
+  const auto at = [&](const int2 max_output, const int2 previous) {
+    return BKE_paint_material_preview_octave_size_for(canvas, max_output, previous);
+  };
+
+  /* A 4K canvas in a 500-pixel editor: the nearest power of two that covers the display with the
+   * 1.4x margin, not the display itself. */
+  EXPECT_EQ(at(int2(500, 500), int2(0)), int2(1024, 1024));
+
+  /* The same canvas at 900 answers 2048 from nothing -- and 1024 when that is what the previous
+   * frame used, because halving further would no longer cover. That difference is precisely the
+   * hysteresis, and it only stays harmless while one caller decides for every channel: asked per
+   * channel, two entries would answer 1024 and 2048 and the preview could only keep one of them. */
+  EXPECT_EQ(at(int2(900, 900), int2(0)), int2(2048, 2048));
+  EXPECT_EQ(at(int2(900, 900), int2(1024, 1024)), int2(1024, 1024));
+
+  /* A caller that passes no cap is a reader -- the eyedropper, a scope -- and must not reset the
+   * octave the view chose. */
+  EXPECT_EQ(at(int2(0), int2(1024, 1024)), int2(1024, 1024));
+
+  /* An octave that no longer covers the display is abandoned rather than kept: 1024 cannot show
+   * 1500 pixels, and 2048 would not leave the margin, so the canvas is the answer. */
+  EXPECT_EQ(at(int2(1500, 1500), int2(1024, 1024)), canvas);
+
+  /* A previous size the canvas no longer divides says nothing about this canvas. */
+  EXPECT_EQ(at(int2(500, 500), int2(1000, 1000)), int2(1024, 1024));
+
+  /* Both axes have to halve together, and a canvas that is not square keeps its aspect. */
+  EXPECT_EQ(BKE_paint_material_preview_octave_size_for(
+                int2(1000, 800), int2(100, 100), int2(0)),
+            int2(250, 200));
+}
+
+TEST(PaintMaterialPreviewOctave, a_rectangle_scales_outwards_between_two_grids)
+{
+  rcti rect;
+  BLI_rcti_init(&rect, 0, 4, 0, 4);
+  rcti scaled = BKE_paint_material_preview_rect_scale(rect, int2(512, 512), int2(256, 256));
+  EXPECT_EQ(scaled.xmin, 0);
+  EXPECT_EQ(scaled.xmax, 2);
+  EXPECT_EQ(scaled.ymin, 0);
+  EXPECT_EQ(scaled.ymax, 2);
+
+  /* A texel that lands between two of the coarser grid covers both of them. */
+  BLI_rcti_init(&rect, 1, 2, 1, 2);
+  scaled = BKE_paint_material_preview_rect_scale(rect, int2(8, 8), int2(4, 4));
+  EXPECT_EQ(scaled.xmin, 0);
+  EXPECT_EQ(scaled.xmax, 1);
+  EXPECT_EQ(scaled.ymin, 0);
+  EXPECT_EQ(scaled.ymax, 1);
+
+  /* The identity, which is what every caller but the viewport passes. */
+  BLI_rcti_init(&rect, 3, 7, 5, 9);
+  scaled = BKE_paint_material_preview_rect_scale(rect, int2(16, 16), int2(16, 16));
+  EXPECT_TRUE(BLI_rcti_compare(&scaled, &rect));
+
+  /* An empty rectangle stays empty, and is never turned into a corner one. */
+  BLI_rcti_init(&rect, 0, 0, 0, 0);
+  scaled = BKE_paint_material_preview_rect_scale(rect, int2(512, 512), int2(128, 128));
+  EXPECT_TRUE(BLI_rcti_is_empty(&scaled));
+}
+
+/**
+ * A channel whose entry starts at the canvas and one that starts at an octave have to end up at the
+ * same size once they are asked for it: the size is the caller's, never the entry's.
+ */
+TEST_F(PaintLayersCompositeTest,
+       a_channel_primed_at_another_size_is_still_built_at_the_size_it_is_asked_for)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  /* The size of the material's canvas, so that both channels resolve to the same one and the only
+   * thing that differs between them is what their own entry holds. */
+  Image *rough_map = add_solid_image("rough", 8, 128, 128, 128, 255, true);
+  ASSERT_NE(add_fill_layer("RoughFill", rough_map, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+
+  const auto ensure = [&](const int channel, const int2 output_size, uint64_t &r_revision) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+    const uint64_t hash = BKE_paint_material_composite_stack_hash(layers);
+    return BKE_paint_material_composite_cache_ensure(
+        *ma, channel, layers, hash, &r_revision, nullptr, nullptr, {}, output_size);
+  };
+
+  /* The two entries are primed differently -- one at the canvas, one at half of it -- which is the
+   * state two channels are in when one of them has been displayed at an octave and the other not. */
+  uint64_t base_canvas_revision = 0;
+  uint64_t rough_octave_revision = 0;
+  ASSERT_NE(ensure(PAINT_MATERIAL_CHANNEL_BASE_COLOR, int2(0), base_canvas_revision), nullptr);
+  ASSERT_NE(ensure(PAINT_MATERIAL_CHANNEL_ROUGHNESS, int2(4, 4), rough_octave_revision), nullptr);
+
+  /* Asked for the same octave, the primed-at-canvas one moves to it rather than answering its own
+   * history, and the other is served exactly where it already is. */
+  uint64_t base_octave_revision = 0;
+  uint64_t rough_again_revision = 0;
+  ImBuf *base = ensure(PAINT_MATERIAL_CHANNEL_BASE_COLOR, int2(4, 4), base_octave_revision);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->x, 4);
+  EXPECT_EQ(base->y, 4);
+  EXPECT_GT(base_octave_revision, base_canvas_revision);
+  ImBuf *rough = ensure(PAINT_MATERIAL_CHANNEL_ROUGHNESS, int2(4, 4), rough_again_revision);
+  ASSERT_NE(rough, nullptr);
+  EXPECT_EQ(rough->x, 4);
+  EXPECT_EQ(rough->y, 4);
+  EXPECT_EQ(rough_again_revision, rough_octave_revision)
+      << "an entry already at the asked size is served, not rebuilt";
+}
+
+/**
+ * Refining to the canvas is a whole-buffer rebuild of the channel it is asked for, and of nothing
+ * else: a channel nobody asks keeps the octave it has until it is.
+ */
+TEST_F(PaintLayersCompositeTest, refining_to_the_canvas_rebuilds_only_the_channel_that_is_asked)
+{
+  ma->paint_layers_image_size = 8;
+  MaterialPaintLayer *gradient = BKE_paint_layers_gradient_add(
+      *ma, "Gradient", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(gradient, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_gradient_set_space(
+      *ma, *gradient, MA_PAINT_LAYER_GRADIENT_SPACE_UV));
+  /* Both channels on the material's own canvas, so refining either one is a real change of size. */
+  Image *rough_map = add_solid_image("rough", 8, 128, 128, 128, 255, true);
+  ASSERT_NE(add_fill_layer("RoughFill", rough_map, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+
+  const auto ensure = [&](const int channel,
+                          const int2 output_size,
+                          uint64_t &r_revision,
+                          rcti &r_changed) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(*ma, channel, layers));
+    const uint64_t hash = BKE_paint_material_composite_stack_hash(layers);
+    return BKE_paint_material_composite_cache_ensure(
+        *ma, channel, layers, hash, &r_revision, nullptr, &r_changed, {}, output_size);
+  };
+
+  uint64_t base_octave_revision = 0;
+  uint64_t rough_octave_revision = 0;
+  rcti region;
+  BLI_rcti_init(&region, 0, 0, 0, 0);
+  ASSERT_NE(ensure(PAINT_MATERIAL_CHANNEL_BASE_COLOR, int2(4, 4), base_octave_revision, region),
+            nullptr);
+  ASSERT_NE(ensure(PAINT_MATERIAL_CHANNEL_ROUGHNESS, int2(4, 4), rough_octave_revision, region),
+            nullptr);
+
+  /* The drag ended: the preview asks for the canvas, and the round trip is reported as a rebuild of
+   * the whole buffer in its own new texels. */
+  uint64_t base_canvas_revision = 0;
+  ImBuf *base = ensure(PAINT_MATERIAL_CHANNEL_BASE_COLOR, int2(0), base_canvas_revision, region);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(base->x, 8);
+  EXPECT_EQ(base->y, 8);
+  EXPECT_GT(base_canvas_revision, base_octave_revision);
+  EXPECT_EQ(BLI_rcti_size_x(&region), 8);
+  EXPECT_EQ(BLI_rcti_size_y(&region), 8);
+
+  /* The other channel was not asked, so it was not recomputed: its entry is still the octave. */
+  int2 canvas = int2(0);
+  int2 output = int2(0);
+  ASSERT_TRUE(BKE_paint_material_composite_cache_sizes_get(
+      *ma, PAINT_MATERIAL_CHANNEL_ROUGHNESS, canvas, output));
+  EXPECT_EQ(canvas, int2(8, 8));
+  EXPECT_EQ(output, int2(4, 4));
+  BLI_rcti_init(&region, 0, 0, 0, 0);
+  uint64_t rough_again_revision = 0;
+  ASSERT_NE(ensure(PAINT_MATERIAL_CHANNEL_ROUGHNESS, int2(0), rough_again_revision, region),
+            nullptr);
+  EXPECT_EQ(BLI_rcti_size_x(&region), 8) << "asked for the canvas, it rebuilds at the canvas";
+}
+
+/**
+ * A mask stored as one float per texel has to keep its grey when it is resampled onto an octave: it
+ * is read as a grey everywhere else, so a resample that left two channels at zero would show a
+ * third of the coverage the stroke painted.
+ */
+TEST_F(PaintLayersCompositeTest, a_one_channel_mask_keeps_its_grey_when_resampled_onto_an_octave)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 8, 0, 0, 0, 255));
+  MaterialPaintLayer *top = add_paint_layer("Top", add_solid_image("Top", 8, 255, 255, 255, 255));
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, top, 1.0f), nullptr);
+  MaterialPaintLayer *item = BKE_paint_layers_mask_item_add(
+      *ma, top, MA_PAINT_LAYER_SOURCE_CONSTANT, "F", 1.0f);
+  ASSERT_NE(item, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(*ma,
+                                                item,
+                                                PAINT_MATERIAL_CHANNEL_BASE_COLOR,
+                                                add_one_channel_float_image("Mask", 8, 0.5f)));
+
+  /* Half the row's coverage, on the canvas and on its octave alike: a reduced grid resamples the
+   * mask, and the grey has to survive that. */
+  const auto eval_at = [&](const int grid) {
+    Vector<PaintMaterialCompositeImageLayer> layers;
+    EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+    Vector<float> linear(int64_t(grid) * grid * 4);
+    EXPECT_TRUE(BKE_paint_material_composite_eval_images_linear(
+        layers,
+        PaintMaterialCompositeLinearTarget::frame(linear, grid),
+        nullptr,
+        nullptr,
+        nullptr,
+        grid,
+        grid));
+    return linear;
+  };
+  for (const int grid : {8, 4}) {
+    const Vector<float> linear = eval_at(grid);
+    const float *p = linear.data() + (int64_t(grid / 2) * grid + grid / 2) * 4;
+    EXPECT_NEAR(p[0], 0.5f, 1e-3f) << "grid " << grid;
+  }
+}
+
+/**
+ * A Gradient correction and a Gradient mask item have no map and no flat colour, so the GPU gather
+ * cannot even see them: without a refusal the row is shaded without them and the preview loses what
+ * the CPU composite lays. This is a `need the CPU path` rule, not an approximation notice.
+ */
+TEST_F(PaintLayersCompositeTest, the_gpu_path_refuses_gradient_corrections_and_mask_items)
+{
+  add_paint_layer("Bottom", add_solid_image("Bottom", 4, 255, 0, 0, 255));
+  MaterialPaintLayer *corrected = add_paint_layer(
+      "Corrected", add_solid_image("Corrected", 4, 0, 255, 0, 255));
+  MaterialPaintLayer *masked = add_paint_layer("Masked", add_solid_image("Masked", 4, 0, 0, 255, 255));
+
+  ASSERT_NE(BKE_paint_layers_correction_add(
+                *ma, corrected, "Gradient Correction", MA_PAINT_LAYER_SOURCE_GENERATOR),
+            nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_add(*ma, masked, 1.0f), nullptr);
+  ASSERT_NE(BKE_paint_layers_mask_item_add(
+                *ma, masked, MA_PAINT_LAYER_SOURCE_GENERATOR, "Mask Gradient", 1.0f),
+            nullptr);
+
+  Vector<PaintMaterialCompositeImageLayer> layers;
+  ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
+  ASSERT_EQ(layers.size(), 3);
+
+  /* The plain row is shadable: the refusal below is about the Gradient elements, not the stack. */
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[0]), nullptr);
+
+  const char *correction_reason = BKE_paint_layers_gpu_unsupported_reason(layers[1]);
+  ASSERT_NE(correction_reason, nullptr);
+  EXPECT_STREQ(correction_reason, "a Gradient correction is not laid by the GPU path");
+
+  const char *mask_reason = BKE_paint_layers_gpu_unsupported_reason(layers[2]);
+  ASSERT_NE(mask_reason, nullptr);
+  EXPECT_STREQ(mask_reason, "a Gradient mask item is not laid by the GPU path");
+
+  /* Both are still described for the CPU evaluator, which is what the fallback shades. */
+  ASSERT_EQ(layers[1].content_corrections.size(), 1);
+  EXPECT_TRUE(layers[1].content_corrections[0].gradient.enabled);
+  int gradient_items = 0;
+  for (const PaintMaterialCompositeMaskItem &item : layers[2].mask_items) {
+    gradient_items += item.gradient.enabled ? 1 : 0;
+  }
+  EXPECT_EQ(gradient_items, 1);
+
+  /* A Gradient element with no opacity lays nothing on either path, so it costs no refusal. */
+  layers[1].content_corrections[0].opacity = 0.0f;
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[1]), nullptr);
+  for (PaintMaterialCompositeMaskItem &item : layers[2].mask_items) {
+    item.opacity = 0.0f;
+  }
+  EXPECT_EQ(BKE_paint_layers_gpu_unsupported_reason(layers[2]), nullptr);
 }
 
 /** \} */

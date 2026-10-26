@@ -15,6 +15,7 @@
 #include "BKE_paint_layers.hh"
 
 #include "ED_material_bake.hh"
+#include "ED_material_combined.hh"
 #include "ED_paint_layers_bake.hh"
 
 #include "BLI_index_range.hh"
@@ -312,6 +313,21 @@ TEST_F(MaterialBakeTest, a_mark_settles_only_once_nothing_is_left_running)
   EXPECT_FALSE(paint_layers_bake_job_is_excluded(&owner, job_type, &other, job_type));
   EXPECT_FALSE(paint_layers_bake_job_is_excluded(&owner, job_type, &owner, job_type + 1));
   EXPECT_FALSE(paint_layers_bake_job_is_excluded(&owner, job_type, nullptr, 0));
+}
+
+TEST_F(MaterialBakeTest, gradient_preview_throttle_has_a_trailing_edge)
+{
+  using namespace blender::ed::material_combined;
+
+  /* The first frame of a drag is never delayed: there is nothing on screen to keep. */
+  EXPECT_TRUE(gradient_preview_refresh_due(10.0, 0.0, true));
+
+  /* During a drag, steps closer together than the interval keep the previous preview. */
+  EXPECT_FALSE(gradient_preview_refresh_due(10.05, 10.0, true));
+  EXPECT_TRUE(gradient_preview_refresh_due(10.0 + GRADIENT_PREVIEW_REFRESH_SECONDS + 0.001, 10.0, true));
+
+  /* Release always rebuilds, even one millisecond after the last interactive frame. */
+  EXPECT_TRUE(gradient_preview_refresh_due(10.001, 10.0, false));
 }
 
 }  // namespace blender::ed::material_bake::tests

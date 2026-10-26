@@ -533,6 +533,16 @@ struct CombinedCacheEntry {
    */
   int canvas_width = 0;
   int canvas_height = 0;
+  /**
+   * The resolution the inputs were gathered at, which is #canvas_width and #canvas_height unless an
+   * interactive Gradient drag shaded the channel composites at an octave of it.
+   *
+   * Kept because the octave is the gather's hysteresis: #CombinedInputs.canvas_width makes the two
+   * distinguishable, and the gather asks for this on the next frame so that a display size resting
+   * on a threshold does not alternate between two octaves.
+   */
+  int inputs_width = 0;
+  int inputs_height = 0;
   uint64_t inputs_hash = 0;
   uint64_t lighting_hash = 0;
   /** The whole buffer has to be recomputed. Set on creation, and whenever a region is unknown. */
@@ -609,21 +619,10 @@ static void combined_cache_enforce_budget(const uint32_t keep)
 static void combined_entry_poll_dependencies(CombinedCacheEntry &entry, Span<Image *> images)
 {
   BLI_assert(entry.canvas_width > 0 && entry.canvas_height > 0);
-  const bool is_scaled = entry.width != entry.canvas_width || entry.height != entry.canvas_height;
   /* Rounded outwards, so a dab never loses its edge and leaves a stale fringe. */
   const auto to_output = [&](const rcti &region) {
-    if (!is_scaled) {
-      return region;
-    }
-    const float scale_x = float(entry.width) / float(entry.canvas_width);
-    const float scale_y = float(entry.height) / float(entry.canvas_height);
-    rcti scaled;
-    BLI_rcti_init(&scaled,
-                  int(floorf(float(region.xmin) * scale_x)),
-                  int(ceilf(float(region.xmax) * scale_x)),
-                  int(floorf(float(region.ymin) * scale_y)),
-                  int(ceilf(float(region.ymax) * scale_y)));
-    return scaled;
+    return bke::paint_material_cache::rect_scale(
+        region, int2(entry.canvas_width, entry.canvas_height), int2(entry.width, entry.height));
   };
 
   const bke::paint_material_cache::PollResult poll = bke::paint_material_cache::subscriptions_poll(
@@ -680,11 +679,23 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
   const int out_height = inputs.out_height();
   const bool size_changed = entry.ibuf == nullptr || entry.width != out_width ||
                             entry.height != out_height;
+  /* The inputs were gathered at another resolution, so every output pixel has other pixels under
+   * it. Separate from #size_changed because the two move independently: a drag ending refines the
+   * channels from an octave to the canvas while a display cap keeps the buffer's own size -- and
+   * without this the preview would keep the coarse pixels forever. */
+  const bool inputs_resized = entry.ibuf != nullptr &&
+                              (entry.inputs_width != inputs.width ||
+                               entry.inputs_height != inputs.height);
   /* Recorded unconditionally rather than inside the branch below: a canvas resize the octave
    * absorbs -- 4096 to 2048 while the display cap keeps the output at 1024 -- leaves the buffer
-   * the same size, and the entry would go on reporting the old canvas. */
-  entry.canvas_width = inputs.width;
-  entry.canvas_height = inputs.height;
+   * the same size, and the entry would go on reporting the old canvas. The canvas, not the inputs:
+   * an interactive Gradient drag gathers the inputs themselves at a fraction of it. */
+  entry.canvas_width = inputs.in_width();
+  entry.canvas_height = inputs.in_height();
+  /* Recorded beside the canvas because the two differ exactly while an interactive drag gathers the
+   * inputs at an octave, and the next frame's octave choice starts from what this one used. */
+  entry.inputs_width = inputs.width;
+  entry.inputs_height = inputs.height;
 
   if (size_changed) {
     entry.ibuf.reset(IMB_allocImBuf(uint(out_width), uint(out_height), ImBufFlags::FloatData));
@@ -710,7 +721,8 @@ ImBuf *BKE_paint_material_combined_cache_ensure(const Material &ma,
   combined_entry_poll_dependencies(entry, request.dependency_images);
 
   const uint64_t lighting_hash = lighting.hash();
-  const bool rebuild_all = size_changed || entry.inputs_hash != request.inputs_hash ||
+  const bool rebuild_all = size_changed || inputs_resized ||
+                           entry.inputs_hash != request.inputs_hash ||
                            entry.lighting_hash != lighting_hash || entry.dirty_full;
 
   if (size_changed) {
@@ -863,6 +875,21 @@ bool BKE_paint_material_combined_cache_contains(const Material &ma)
   return g_cache.entries.contains(ma.id.session_uid);
 }
 
+ImBuf *BKE_paint_material_combined_cache_peek(const Material &ma, uint64_t *r_revision)
+{
+  CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma.id.session_uid);
+  if (entry == nullptr || entry->ibuf == nullptr) {
+    return nullptr;
+  }
+  /* A peek is a display use: keep the entry from being evicted under a preview that is still on
+   * screen, without making it look newly recomputed. */
+  entry->last_use = ++g_cache.use_counter;
+  if (r_revision != nullptr) {
+    *r_revision = entry->revision;
+  }
+  return entry->ibuf.get();
+}
+
 bool BKE_paint_material_combined_cache_size_get(const Material &ma, int &r_width, int &r_height)
 {
   const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma.id.session_uid);
@@ -890,6 +917,43 @@ bool BKE_paint_material_combined_cache_output_size_get(const Material &ma,
   r_width = entry->width;
   r_height = entry->height;
   return true;
+}
+
+bool BKE_paint_material_combined_cache_sizes_get(const Material &ma,
+                                                int2 &r_input,
+                                                int2 &r_output)
+{
+  const CombinedCacheEntry *entry = g_cache.entries.lookup_ptr(ma.id.session_uid);
+  if (entry == nullptr || entry->ibuf == nullptr) {
+    return false;
+  }
+  /* Like #BKE_paint_material_combined_cache_size_get, deliberately not a use. */
+  r_input = int2(entry->inputs_width, entry->inputs_height);
+  r_output = int2(entry->width, entry->height);
+  return true;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Preview Resolution
+ *
+ * The octave rule and the rectangle scaler the two caches share, forwarded from
+ * `paint_material_cache_common.cc`: the gather lives in `editors` and cannot include an internal
+ * header, and reimplementing either rule there is exactly how two previews of the same material
+ * came to disagree about their resolution.
+ * \{ */
+
+int2 BKE_paint_material_preview_octave_size_for(const int2 canvas,
+                                                const int2 max_output,
+                                                const int2 previous)
+{
+  return bke::paint_material_cache::octave_size_for(canvas, max_output, previous);
+}
+
+rcti BKE_paint_material_preview_rect_scale(const rcti &rect, const int2 from, const int2 to)
+{
+  return bke::paint_material_cache::rect_scale(rect, from, to);
 }
 
 /** \} */

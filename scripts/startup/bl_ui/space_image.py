@@ -1114,8 +1114,8 @@ class IMAGE_HT_header(Header):
                     emboss=False,
                 )
 
-        # A 3D Gradient shown while its row is active (or without a usable object/UV) samples the
-        # texel's UV, not the object surface; say so rather than letting it look exact.
+        # A 3D Gradient shown without a usable object, UV map or surface samples the texel's UV,
+        # not the object surface; say so rather than letting it look exact.
         if sima.gradient_preview_state == 'APPROXIMATE':
             layout.label(text="Approximate 3D preview", icon='INFO')
 

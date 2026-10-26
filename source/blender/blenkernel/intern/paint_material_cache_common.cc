@@ -8,6 +8,9 @@
 
 #include "paint_material_cache_common.hh"
 
+#include <cmath>
+
+#include "BLI_math_base.h"
 #include "BLI_set.hh"
 
 #include "DNA_ID.h"
@@ -16,6 +19,53 @@
 namespace blender::bke::paint_material_cache {
 
 using namespace image::partial_update;
+
+int2 octave_size_for(const int2 canvas, const int2 max_output, const int2 previous)
+{
+  BLI_assert(canvas.x > 0 && canvas.y > 0);
+  int2 size = canvas;
+  const bool previous_usable = previous.x > 0 && previous.y > 0 &&
+                               canvas.x % previous.x == 0 && canvas.y % previous.y == 0 &&
+                               is_power_of_2_i(canvas.x / previous.x) &&
+                               is_power_of_2_i(canvas.y / previous.y);
+  if (previous_usable) {
+    size = previous;
+  }
+  if (max_output.x <= 0 || max_output.y <= 0) {
+    return size;
+  }
+  /* An octave that no longer covers what has to be shown is not a starting point: climb back to the
+   * canvas and let the halving below settle on the right one. */
+  if (previous_usable && (size.x < max_output.x || size.y < max_output.y)) {
+    size = canvas;
+  }
+  constexpr float octave_margin = 1.4f;
+  while (size.x % 2 == 0 && size.y % 2 == 0 &&
+         float(size.x / 2) >= float(max_output.x) * octave_margin &&
+         float(size.y / 2) >= float(max_output.y) * octave_margin)
+  {
+    size.x /= 2;
+    size.y /= 2;
+  }
+  return size;
+}
+
+rcti rect_scale(const rcti &rect, const int2 from, const int2 to)
+{
+  if (from == to || BLI_rcti_is_empty(&rect)) {
+    return rect;
+  }
+  BLI_assert(from.x > 0 && from.y > 0);
+  const float scale_x = float(to.x) / float(from.x);
+  const float scale_y = float(to.y) / float(from.y);
+  rcti scaled;
+  BLI_rcti_init(&scaled,
+                int(floorf(float(rect.xmin) * scale_x)),
+                int(ceilf(float(rect.xmax) * scale_x)),
+                int(floorf(float(rect.ymin) * scale_y)),
+                int(ceilf(float(rect.ymax) * scale_y)));
+  return scaled;
+}
 
 PollResult subscriptions_poll(SubscriptionMap &subscriptions,
                               const Span<Image *> images,

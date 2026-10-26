@@ -171,17 +171,20 @@ static SurfaceIdentity surface_identity(const Object &object,
  * otherwise blend into it as a dark or transparent seam. Edge neighbours go before diagonal ones,
  * which keeps a straight island border straight. Each pass is bounded by the current valid box, so
  * the cost follows the grown area, not the whole canvas.
+ *
+ * \return how many texels the padding filled, so the caller can keep the surface's island count
+ *         without a second pass over the mask.
  */
-static void surface_pad_islands(MutableSpan<float3> positions,
-                                MutableSpan<float3> generated_positions,
-                                MutableSpan<uint8_t> valid,
-                                const int width,
-                                const int height,
-                                const int passes,
-                                int valid_min_x,
-                                int valid_min_y,
-                                int valid_max_x,
-                                int valid_max_y)
+static int64_t surface_pad_islands(MutableSpan<float3> positions,
+                                   MutableSpan<float3> generated_positions,
+                                   MutableSpan<uint8_t> valid,
+                                   const int width,
+                                   const int height,
+                                   const int passes,
+                                   int valid_min_x,
+                                   int valid_min_y,
+                                   int valid_max_x,
+                                   int valid_max_y)
 {
   /* Four edge neighbours first, then the four diagonals. */
   constexpr int offsets[8][2] = {
@@ -192,6 +195,7 @@ static void surface_pad_islands(MutableSpan<float3> positions,
     int src;
   };
   Vector<TexelCopy> copies;
+  int64_t filled = 0;
   for (int pass = 0; pass < passes; pass++) {
     copies.clear();
     const int x_min = std::max(0, valid_min_x - 1);
@@ -221,6 +225,7 @@ static void surface_pad_islands(MutableSpan<float3> positions,
     if (copies.is_empty()) {
       break;
     }
+    filled += int64_t(copies.size());
     for (const TexelCopy &copy : copies) {
       positions[copy.dst] = positions[copy.src];
       if (copy_generated) {
@@ -235,6 +240,7 @@ static void surface_pad_islands(MutableSpan<float3> positions,
       valid_max_y = std::max(valid_max_y, dst_y);
     }
   }
+  return filled;
 }
 
 /**
@@ -293,6 +299,9 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
   const Span<int> corner_verts = mesh.corner_verts();
   const Span<int3> corner_tris = mesh.corner_tris();
   if (positions.is_empty() || corner_verts.is_empty() || corner_tris.is_empty()) {
+    /* No geometry to rasterize: the surface covers nothing, which is a counted zero and not an
+     * unknown. */
+    surface->valid_texel_count = 0;
     return surface;
   }
 
@@ -306,6 +315,9 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
   int valid_min_y = size;
   int valid_max_x = -1;
   int valid_max_y = -1;
+  /* Counted as the texels are marked, so no reader has to walk the mask: the largest surfaces are
+   * built for a bake, and the 2D preview asks this of every redraw. */
+  int64_t valid_count = 0;
 
   for (const int3 &tri : corner_tris) {
     const int c0 = tri.x, c1 = tri.y, c2 = tri.z;
@@ -381,6 +393,7 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
           dst_generated[index] = o0 * w0 + o1 * w1 + o2 * w2;
         }
         dst_valid[index] = 1;
+        valid_count++;
         valid_min_x = std::min(valid_min_x, x);
         valid_max_x = std::max(valid_max_x, x);
         valid_min_y = std::min(valid_min_y, y);
@@ -390,17 +403,20 @@ std::shared_ptr<PaintMaterialCompositeSurface> surface_build(const Mesh &mesh,
   }
 
   if (padding_texels > 0 && valid_max_x >= valid_min_x) {
-    surface_pad_islands(dst_positions,
-                        dst_generated,
-                        dst_valid,
-                        size,
-                        size,
-                        padding_texels,
-                        valid_min_x,
-                        valid_min_y,
-                        valid_max_x,
-                        valid_max_y);
+    /* The padding marks texels valid too: they carry a position, and a sampler that reads them gets
+     * the island edge instead of nothing. They are part of the count for the same reason. */
+    valid_count += surface_pad_islands(dst_positions,
+                                       dst_generated,
+                                       dst_valid,
+                                       size,
+                                       size,
+                                       padding_texels,
+                                       valid_min_x,
+                                       valid_min_y,
+                                       valid_max_x,
+                                       valid_max_y);
   }
+  surface->valid_texel_count = valid_count;
 
   return surface;
 }

@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <iterator>
@@ -2068,6 +2067,21 @@ const char *BKE_paint_layers_gpu_unsupported_reason(const PaintMaterialComposite
       !mask_only_slice)
   {
     return "a row has neither a map, a flat colour nor an Anchor Point slice";
+  }
+  /* Corrections and mask items first, because a Gradient one is not merely unsupported by a pass
+   * that would otherwise lay its map: there is no map, so the gather's own "a correction that
+   * changes something" check does not even count it and the row would be shaded without it. The
+   * refusal has to come from here for the CPU preview to take over. Gated on the opacity that
+   * decides the CPU lays it too, so a zero-opacity Gradient element does not cost the GPU path. */
+  for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
+    if (correction.opacity > 0.0f && correction.gradient.enabled) {
+      return "a Gradient correction is not laid by the GPU path";
+    }
+  }
+  for (const PaintMaterialCompositeMaskItem &item : layer.mask_items) {
+    if (item.opacity > 0.0f && item.gradient.enabled) {
+      return "a Gradient mask item is not laid by the GPU path";
+    }
   }
   for (const PaintMaterialCompositeCorrection &correction : layer.content_corrections) {
     /* A sliced correction reads a captured slot. A baked one has no slice buffer but covers by a

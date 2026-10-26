@@ -466,6 +466,82 @@ TEST_F(PaintLayersGradientSurface, switching_space_without_a_mesh_keeps_the_numb
   }
 }
 
+TEST_F(PaintLayersGradientSurface, the_builder_counts_the_island_texels_once)
+{
+  auto surface = BKE_paint_layers_gradient_surface_get(*object, *mesh, "UVMap", 256);
+  ASSERT_NE(surface, nullptr);
+  ASSERT_GE(surface->valid_texel_count, 0) << "the rasterizer fills the count";
+  EXPECT_TRUE(surface->has_valid_texels());
+
+  /* The count is what the mask says, so a reader of either agrees. */
+  int64_t marked = 0;
+  for (const uint8_t valid : surface->valid) {
+    marked += valid != 0 ? 1 : 0;
+  }
+  EXPECT_EQ(surface->valid_texel_count, marked);
+}
+
+/**
+ * The padding of a bake surface marks texels valid, and the count has to include them: the preview
+ * asks whether the surface covers anything, and a padded surface carries a position outside the
+ * islands on purpose.
+ */
+TEST_F(PaintLayersGradientSurface, the_padding_of_a_bake_surface_is_part_of_the_count)
+{
+  auto plain = BKE_paint_layers_gradient_surface_build(*object, *mesh, "UVMap", 256, 0, false);
+  auto padded = BKE_paint_layers_gradient_surface_build(*object, *mesh, "UVMap", 256, 4, false);
+  ASSERT_NE(plain, nullptr);
+  ASSERT_NE(padded, nullptr);
+  EXPECT_GT(padded->valid_texel_count, plain->valid_texel_count);
+
+  int64_t marked = 0;
+  for (const uint8_t valid : padded->valid) {
+    marked += valid != 0 ? 1 : 0;
+  }
+  EXPECT_EQ(padded->valid_texel_count, marked);
+}
+
+/** A surface with no UV island has a counted zero: the preview must not rescan it. */
+TEST_F(PaintLayersGradientSurface, a_surface_covering_no_texel_counts_zero)
+{
+  const float2 uvs[3] = {
+      float2(0.25f, 0.25f), float2(0.25f, 0.25f), float2(0.25f, 0.25f)};
+  Mesh *triangle_mesh = nullptr;
+  Object *triangle = create_triangle("EmptyTriangle", "EmptyTriangleMesh", uvs, &triangle_mesh);
+  ASSERT_NE(triangle, nullptr);
+
+  auto surface = BKE_paint_layers_gradient_surface_get(*triangle, *triangle_mesh, "UVMap", 256);
+  ASSERT_NE(surface, nullptr);
+  EXPECT_EQ(surface->valid_texel_count, 0);
+  EXPECT_FALSE(surface->has_valid_texels());
+}
+
+/** A surface assembled by hand carries no count; the predicate then falls back to the mask. */
+TEST(PaintMaterialCompositeSurface, has_valid_texels_scans_a_surface_built_by_hand)
+{
+  PaintMaterialCompositeSurface surface;
+  surface.width = 2;
+  surface.height = 2;
+  surface.valid.resize(4, uint8_t(0));
+  EXPECT_EQ(surface.valid_texel_count, -1) << "nobody counted this one";
+  EXPECT_FALSE(surface.has_valid_texels());
+
+  surface.valid[2] = 1;
+  EXPECT_TRUE(surface.has_valid_texels());
+}
+
+TEST(PaintMaterialCompositeSurface, has_valid_texels_prefers_the_count_over_the_mask)
+{
+  PaintMaterialCompositeSurface surface;
+  surface.width = 2;
+  surface.height = 2;
+  surface.valid.resize(4, uint8_t(0));
+  /* A count of zero is an answer, not an invitation to look at the mask. */
+  surface.valid_texel_count = 0;
+  surface.valid[0] = 1;
+  EXPECT_FALSE(surface.has_valid_texels());
+}
+
 TEST(PaintMaterialCompositeSurface, sample_generated_prefers_stored_orco)
 {
   PaintMaterialCompositeSurface surface;

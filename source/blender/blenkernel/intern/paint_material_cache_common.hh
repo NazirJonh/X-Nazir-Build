@@ -25,6 +25,7 @@
 
 #include "BLI_function_ref.hh"
 #include "BLI_map.hh"
+#include "BLI_math_vector_types.hh"
 #include "BLI_rect.h"
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -96,6 +97,32 @@ struct PollResult {
 PollResult subscriptions_poll(SubscriptionMap &subscriptions,
                               Span<Image *> images,
                               FunctionRef<rcti(const rcti &)> to_cache_space = {});
+
+/**
+ * The size to store or shade a preview at: the largest power-of-two fraction of \a canvas that still
+ * covers \a max_output, or \a canvas itself when nothing caps it.
+ *
+ * Quantised to octaves rather than fitted exactly, because a changed size is a full rebuild -- an
+ * exact fit would rebuild the whole buffer on every pixel of zoom, which costs more than the texels
+ * it saves. \a previous is the fraction used last time: it is kept while it is still a fraction of
+ * this canvas and still covers the display, and the halving only continues while the half covers it
+ * with a margin. That pair of rules is the hysteresis that keeps a pixel of zoom jitter from
+ * flipping between two sizes.
+ *
+ * Both caches and the gather that fills them ask this one function, so that every consumer of the
+ * same preview arrives at the same octave: two callers deriving it from their own last entry would
+ * disagree whenever their histories did.
+ */
+int2 octave_size_for(int2 canvas, int2 max_output, int2 previous);
+
+/**
+ * \a rect, read in \a from's texels, expressed in \a to's.
+ *
+ * Rounded outwards, so a dab or a clip that lands between two texels of the coarser grid covers
+ * both of them: a rectangle that lost its edge to rounding leaves a stale fringe nothing later
+ * repairs. An identical pair of sizes returns \a rect untouched, which is the common case.
+ */
+rcti rect_scale(const rcti &rect, int2 from, int2 to);
 
 /**
  * Evict least recently used entries until the cache fits \a budget_bytes, never the one at \a keep.

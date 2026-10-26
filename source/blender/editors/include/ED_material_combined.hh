@@ -58,6 +58,58 @@ struct CombinedPreviewRequest {
 };
 
 /**
+ * Mark a Gradient handle of one of \a ma's rows as being dragged: the state that decides, for as
+ * long as it lasts, that the preview is shaded at an octave rather than at the canvas.
+ *
+ * Called on press and again on every step of the drag. The mark is a heartbeat as much as a flag:
+ * each call restarts the timestamp the expiry reads, so a drag held still does not fall out of its
+ * octave under the user's hand.
+ *
+ * Here rather than in BKE because it is editor state and nothing else: the gizmo writes it, the
+ * Image Editor's buffer acquisition and this file's gather read it, and all three are editors. BKE
+ * receives the resulting size as a plain argument (see #CombinedInputs and
+ * #BKE_paint_material_composite_cache_ensure), so a core cache never has to know what a drag is.
+ *
+ * Main thread only, like the caches it steers. The mark carries a timestamp and expires on its own
+ * (see #gradient_interactive_begin), so a drag whose end never arrives -- a gizmo freed mid-drag, a
+ * cancelled operator with no finish -- cannot pin every preview of that material to a coarse
+ * octave for the rest of the session.
+ */
+void gradient_interactive_begin(const Material &ma);
+
+/** Clear the mark of \a ma; a preview built under it refines to the canvas on the next redraw. */
+void gradient_interactive_end(uint32_t material_session_uid);
+
+/** Whether \a ma's Gradient handles are being dragged right now. */
+bool gradient_interactive_is(const Material &ma);
+
+/**
+ * How long the interactive Gradient preview may go without a rebuild while the handles are
+ * dragged: the composite then keeps the previous octave on screen and catches up on the next tick
+ * instead of being rebuilt for every mouse step.
+ */
+constexpr double GRADIENT_PREVIEW_REFRESH_SECONDS = 3.0;
+
+/**
+ * Whether a Gradient preview whose last rebuild was at \a last_refresh (seconds, zero when it was
+ * never built) should be rebuilt at \a now. Outside a drag it always should: the final frame has to
+ * refine the octave to the canvas.
+ *
+ * Pure, so the throttle and its trailing edge can be checked without a timer.
+ */
+bool gradient_preview_refresh_due(double now, double last_refresh, bool dragging);
+
+/**
+ * Whether the Image Editor may rebuild \a ma's Gradient preview at \a now. During a drag this is
+ * #gradient_preview_refresh_due; when it answers false a one-shot timer is armed so the preview
+ * catches up after the handles pause, even though no further event arrives.
+ */
+bool gradient_preview_refresh_allow(const Material &ma, double now);
+
+/** Record that \a ma's Gradient preview was rebuilt at \a now. */
+void gradient_preview_refresh_note(const Material &ma, double now);
+
+/**
  * Gather every channel of \a ma, shade it, and return the cached preview.
  *
  * Synchronous and non-blocking: a region refresh is sub-millisecond and a full rebuild is tens of

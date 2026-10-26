@@ -693,6 +693,20 @@ struct PaintMaterialCompositeEvalStats {
   double elapsed_seconds = 0.0;
   int layers_evaluated = 0;
   int64_t pixels_processed = 0;
+  /**
+   * How many Gradient payloads (rows, corrections and mask items) the evaluation laid, and an upper
+   * bound on the texels that cost: each one samples its line and ramp per texel rather than reading
+   * a map, so this is the part of `pixels_processed` a UV-line drag pays for again on every step.
+   *
+   * An upper bound because every Gradient is counted as covering the whole evaluated area, while a
+   * row clipping it, a zero opacity or an island the Gradient has no surface for lays less of it.
+   *
+   * The exact figure is what a drag costs, but telling the two apart would mean walking the stack
+   * again per texel; the number is read against the timer to say whether the Gradient is the cost at
+   * all, and for that an upper bound that never underestimates it is the honest answer.
+   */
+  int gradient_items = 0;
+  int64_t gradient_samples = 0;
 };
 
 /**
@@ -759,13 +773,22 @@ bool BKE_paint_material_composite_eval_linear(const PaintMaterialCompositeStack 
  * the shader's own linear space).
  *
  * \param bottom_color: the value the stack starts from, or null to start transparent.
+ * \param eval_width, eval_height: evaluate at this grid rather than at the stack's own dimensions.
+ *                                   Zero keeps the stack's. A Gradient is analytic in the texel's
+ *                                   UV, so a reduced grid samples the same line directly instead of
+ *                                   resampling a result; maps are read through a resample onto the
+ *                                   grid. The low-resolution twin of a full evaluation for an
+ *                                   interactive preview -- see
+ *                                   #BKE_paint_material_composite_cache_ensure.
  */
 bool BKE_paint_material_composite_eval_images_linear(
     Span<PaintMaterialCompositeImageLayer> image_layers,
     const PaintMaterialCompositeLinearTarget &target,
     const rcti *region = nullptr,
     PaintMaterialCompositeEvalStats *r_stats = nullptr,
-    const float bottom_color[4] = nullptr);
+    const float bottom_color[4] = nullptr,
+    int eval_width = 0,
+    int eval_height = 0);
 
 /**
  * Render one row to straight scene-linear colour and the coverage it lays by, both before the
@@ -813,13 +836,21 @@ void BKE_paint_material_composite_linear_to_byte(MutableSpan<float> linear,
  * to them, so a caller holding no lock of its own is safe here.
  *
  * \param bottom_color: the value the stack starts from, or null to start transparent.
+ * \param eval_width, eval_height: evaluate at this grid rather than at the stack's own dimensions,
+ *                                 exactly as #BKE_paint_material_composite_eval_images_linear does.
+ *                                 \a composite_ibuf has to be of this size then.
+ *
+ * \return false when the stack cannot be evaluated, which includes a \a composite_ibuf that is not
+ *         a byte RGBA of the evaluated dimensions.
  */
 bool BKE_paint_material_composite_eval_images(
     Span<PaintMaterialCompositeImageLayer> image_layers,
     ImBuf *composite_ibuf,
     const rcti *region = nullptr,
     PaintMaterialCompositeEvalStats *r_stats = nullptr,
-    const float bottom_color[4] = nullptr);
+    const float bottom_color[4] = nullptr,
+    int eval_width = 0,
+    int eval_height = 0);
 
 /**
  * Dimensions of the composite, taken from the bottom-most enabled layer.
@@ -1000,6 +1031,15 @@ uint64_t BKE_paint_material_composite_stack_hash(
  *                     and fills the same stack with the slices rendered. Rendering them on every
  *                     call would cost a canvas-sized evaluation per frame for a composite that is
  *                     served from the cache.
+ * \param output_size: the size to store the composite at, when the caller has already decided one
+ *                     -- the gather's octave, picked once for every channel of a preview that is
+ *                     being dragged. The cache keeps no hysteresis of its own: a per-entry one would
+ *                     let two channels of the same material settle on two different octaves, and the
+ *                     preview that reads them both would then have to drop one. A power-of-two
+ *                     fraction of the canvas is taken as an octave of it and anything else -- zero,
+ *                     a size the canvas no longer divides -- as the canvas itself. A Gradient
+ *                     samples its line directly at the octave's own UVs, so a reduced composite is
+ *                     the same formula at fewer texels, not a resample of one.
  * \return null when the stack cannot be composited, which is the caller's cue to fall back.
  */
 ImBuf *BKE_paint_material_composite_cache_ensure(
@@ -1010,7 +1050,8 @@ ImBuf *BKE_paint_material_composite_cache_ensure(
     uint64_t *r_revision = nullptr,
     PaintMaterialCompositeEvalStats *r_stats = nullptr,
     rcti *r_changed_region = nullptr,
-    FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers = {});
+    FunctionRef<bool(Vector<PaintMaterialCompositeImageLayer> &)> full_layers = {},
+    const int2 &output_size = int2(0));
 
 /**
  * Mark the whole composite of \a ma out of date, or of every material when \a ma is null.
@@ -1039,5 +1080,37 @@ void BKE_paint_material_composite_cache_free_all();
 
 /** Whether a composite of \a channel of \a ma is currently cached. Exists for tests. */
 bool BKE_paint_material_composite_cache_contains(const Material &ma, int channel);
+
+/**
+ * The cached composite of \a channel of \a ma without recomputing anything, or null when nothing is
+ * cached. The throttle of the interactive Gradient preview is the caller: it keeps the previous
+ * pixels on screen between refreshes instead of rebuilding them for every mouse step.
+ *
+ * The returned buffer is owned by the cache; do not free it, and reference it if it outlives the
+ * next cache call, exactly as for #BKE_paint_material_composite_cache_ensure.
+ */
+ImBuf *BKE_paint_material_composite_cache_peek(const Material &ma,
+                                               int channel,
+                                               uint64_t *r_revision = nullptr);
+
+/**
+ * The canvas of \a channel of \a ma and the size its cached buffer is stored at, which is a
+ * power-of-two fraction of that canvas.
+ *
+ * Answering the canvas separately from the buffer is what keeps the Image Editor's view still: a
+ * channel pass shown while a Gradient handle is dragged is cached at an octave, and every caller of
+ * #ED_space_image_get_size -- the view setup, the zoom, the UV under the cursor -- would otherwise
+ * measure the octave and shrink the image out from under the drag.
+ *
+ * The output size comes with it because the drag's own octave is chosen from what the previous frame
+ * used, and this entry is where that is remembered.
+ *
+ * \return false when nothing of that channel is cached, which is the caller's cue to measure
+ *         whatever it would have measured anyway.
+ */
+bool BKE_paint_material_composite_cache_sizes_get(const Material &ma,
+                                                 int channel,
+                                                 int2 &r_canvas,
+                                                 int2 &r_output);
 
 }  // namespace blender

@@ -56,10 +56,12 @@ struct rcti;
  *        not populated in this mode.
  * \param surface: a Gradient row in Object or Generated space needs the per-object surface to
  *        turn a texel into the coordinate the shader reads. \a surface supplies it for the exact
- *        preview; when it is empty, or the row is the active one, the layer keeps
- *        `approximate = true` and the evaluator uses the texel's own UV. A UV Gradient never uses
- *        a surface. The layer holds the shared pointer, so its lifetime is extended even if the
- *        caller's cache replaces its own entry.
+ *        preview; when it is empty -- or, for a Generated row, carries neither an orco grid nor a
+ *        texture-space box -- the layer keeps `approximate = true` and the evaluator uses the
+ *        texel's own UV. Editing the row makes no difference: the surface is keyed on the object
+ *        and its geometry, not on the line, so a drag cannot make it stale. A UV Gradient never
+ *        uses a surface. The layer holds the shared pointer, so its lifetime is extended even if
+ *        the caller's cache replaces its own entry.
  * \return false when the channel has no participating row at all.
  */
 bool BKE_paint_layers_composite_image_layers(

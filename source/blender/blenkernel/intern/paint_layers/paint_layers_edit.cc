@@ -69,6 +69,26 @@ std::string BKE_paint_layers_unique_default_name(const Material &ma, const Strin
 /** \name Add
  * \{ */
 
+/**
+ * Give \a layer exactly the channels \a mask names, skipping any outside the material's set: an
+ * empty Fill starts with the channels the Add asked for and nothing else, and a channel the set
+ * does not contain would be an inert record.
+ */
+static void paint_layer_channels_from_mask(Material &ma,
+                                           MaterialPaintLayer &layer,
+                                           const uint16_t mask)
+{
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if ((mask & (uint16_t(1) << channel)) == 0) {
+      continue;
+    }
+    const eMaterialPaintChannel paint_channel = eMaterialPaintChannel(channel);
+    if (BKE_paint_layers_channel_in_set(ma, paint_channel)) {
+      BKE_paint_layers_channel_add(ma, &layer, paint_channel);
+    }
+  }
+}
+
 static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
                                                              const PaintLayerAddParams &params)
 {
@@ -501,11 +521,18 @@ static MaterialPaintLayer *paint_layers_add_with_policy_impl(Material &ma,
   if (params.kind == PaintLayerAddKind::Fill) {
     created->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
   }
-  /* The default channel set is a policy of its own (see the BKE helper); the Add only places
-   * the row. */
-  BKE_paint_layers_default_channels_apply(ma, *created);
-  if (params.kind == PaintLayerAddKind::Fill && params.fill_color != nullptr) {
-    BKE_paint_layers_set_fill_color(ma, created, params.fill_color);
+  if (params.kind == PaintLayerAddKind::Fill && params.empty) {
+    /* An empty Fill is a row to assign channels to: it starts with exactly the channels the Add
+     * asked for, and there is no colour record to set. */
+    paint_layer_channels_from_mask(ma, *created, params.channels);
+  }
+  else {
+    /* The default channel set is a policy of its own (see the BKE helper); the Add only places
+     * the row. */
+    BKE_paint_layers_default_channels_apply(ma, *created);
+    if (params.kind == PaintLayerAddKind::Fill && params.fill_color != nullptr) {
+      BKE_paint_layers_set_fill_color(ma, created, params.fill_color);
+    }
   }
   return created;
 }

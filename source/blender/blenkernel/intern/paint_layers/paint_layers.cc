@@ -1283,6 +1283,29 @@ MaterialPaintLayer *BKE_paint_layers_curve_patch_effect_add(Material &ma,
   return effect;
 }
 
+/**
+ * The channel a content filter should start in. An owner with exactly one live channel in the
+ * material's set has no choice to make: a Fill created for a dropped Roughness map, or a Paint row
+ * the user narrowed to one channel, must not get a filter that silently works in Base Color too.
+ * Returns -1 for no owner channel or several, where the caller keeps its first-of-the-set rule.
+ */
+static int paint_layer_filter_owner_channel(const Material &ma, const MaterialPaintLayer &owner)
+{
+  int found = -1;
+  int count = 0;
+  for (int i = 0; i < owner.channels_num; i++) {
+    const MaterialPaintLayerChannel &record = owner.channels[i];
+    if (!paint_layer_channel_live(&record) ||
+        !BKE_paint_layers_channel_in_set(ma, eMaterialPaintChannel(record.channel)))
+    {
+      continue;
+    }
+    found = record.channel;
+    count++;
+  }
+  return (count == 1) ? found : -1;
+}
+
 MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
                                                 MaterialPaintLayer *owner,
                                                 const eMaterialPaintLayerFilter filter,
@@ -1302,14 +1325,21 @@ MaterialPaintLayer *BKE_paint_layers_filter_add(Material &ma,
   effect->kind_subtype = filter;
   paint_layer_kind_params_init(*effect);
   BLI_addtail(&owner->effects, effect);
-  /* Linked first, as the record is added through the ownership check. The filter starts working in
-   * the first channel of the material's set (Base Color unless the user removed it); the others are
-   * switched on like a layer's. */
-  const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
-  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
-    if ((set & (uint16_t(1) << channel)) != 0) {
-      BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(channel));
-      break;
+  /* Linked first, as the record is added through the ownership check. An owner narrowed to one
+   * channel gives the filter that channel; otherwise it starts working in the first channel of the
+   * material's set (Base Color unless the user removed it), and the others are switched on like a
+   * layer's. */
+  const int owner_channel = paint_layer_filter_owner_channel(ma, *owner);
+  if (owner_channel >= 0) {
+    BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(owner_channel));
+  }
+  else {
+    const uint16_t set = BKE_paint_layers_channel_set_mask_get(ma);
+    for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+      if ((set & (uint16_t(1) << channel)) != 0) {
+        BKE_paint_layers_channel_add(ma, effect, eMaterialPaintChannel(channel));
+        break;
+      }
     }
   }
   BKE_paint_layers_tag_edited(ma);

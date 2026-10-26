@@ -138,8 +138,15 @@ wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
   RNA_float_get_array(op->ptr, "fill_color", gamma_color);
   /* The operator's colour is a picker colour (gamma); the description stores scene linear. */
   srgb_to_linearrgb_v4(linear_color, gamma_color);
-  if (kind_info.takes_color) {
+  const bool empty = kind_info.color_optional &&
+                     RNA_enum_get(op->ptr, "fill_mode") == STACK_FILL_MODE_EMPTY;
+  if (kind_info.takes_color && !empty) {
     args.color = linear_color;
+  }
+  args.empty = empty;
+  if (empty) {
+    /* The Empty buttons ask which channels the new row should start with; none is the default. */
+    args.channel_mask = uint16_t(RNA_enum_get(op->ptr, "fill_channels"));
   }
   const int added = outliner_stack_row_add(C, *space_outliner, kind, anchor_ordinal, args);
   return added >= 0 ? OPERATOR_FINISHED : OPERATOR_CANCELLED;
@@ -196,6 +203,19 @@ wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent
   if (!kind_known || (!kind_info.takes_color && !needs_source)) {
     return stack_row_add_exec(C, op);
   }
+  if (kind_info.color_optional) {
+    /* The Add button opens on Fill, whatever the last Add did: Empty is the exception, chosen for
+     * this row. A script that named fill_mode or fill_channels itself keeps what it named, so a
+     * repeat and the redo panel can still reproduce the last choice. */
+    PropertyRNA *fill_mode_prop = RNA_struct_find_property(op->ptr, "fill_mode");
+    if (fill_mode_prop != nullptr && !RNA_property_is_set(op->ptr, fill_mode_prop)) {
+      RNA_enum_set(op->ptr, "fill_mode", STACK_FILL_MODE_FILL);
+    }
+    PropertyRNA *fill_channels_prop = RNA_struct_find_property(op->ptr, "fill_channels");
+    if (fill_channels_prop != nullptr && !RNA_property_is_set(op->ptr, fill_channels_prop)) {
+      RNA_enum_set(op->ptr, "fill_channels", 0);
+    }
+  }
   if (needs_source && kind_info.source_browse_prop != nullptr) {
     /* The popover's assignment does the Add: nothing is created until a data-block is picked. */
     const StackReadContext ctx = outliner_stack_read_context(*C);
@@ -209,9 +229,35 @@ wmOperatorStatus stack_row_add_invoke(bContext *C, wmOperator *op, const wmEvent
 }
 
 /**
+ * The Fill's colour, all in one place: the button showing what is assigned, the inline picker and
+ * the RGBA sliders. Every control edits the operator's `fill_color`, so they all follow each other
+ * through #stack_add_props_update. A source with a palette of its own adds it through
+ * #StackSource::add_kind_draw_extra.
+ */
+static void stack_add_fill_color_draw(wmOperator &op)
+{
+  PropertyRNA *prop = RNA_struct_find_property(op.ptr, "fill_color");
+  if (prop == nullptr) {
+    return;
+  }
+  op.layout->prop(op.ptr, prop, RNA_NO_INDEX, 0, UI_ITEM_NONE, IFACE_("Fill Color"), ICON_NONE);
+  /* A visible row between the label/colour button and the picker below it. The explicit line type
+   * is what guarantees a separator row outside a menu block, where the default is only a spacer. */
+  op.layout->separator(1.0f, ui::LayoutSeparatorType::Line);
+  ui::template_color_picker(op.layout, op.ptr, "fill_color", true, false, false, true);
+  ui::Layout &sliders = op.layout->column(true);
+  sliders.prop(op.ptr, prop, 0, 0, ui::ITEM_R_SLIDER, IFACE_("Red"), ICON_NONE);
+  sliders.prop(op.ptr, prop, 1, 0, ui::ITEM_R_SLIDER, IFACE_("Green"), ICON_NONE);
+  sliders.prop(op.ptr, prop, 2, 0, ui::ITEM_R_SLIDER, IFACE_("Blue"), ICON_NONE);
+  sliders.prop(op.ptr, prop, 3, 0, ui::ITEM_R_SLIDER, IFACE_("Alpha"), ICON_NONE);
+}
+
+/**
  * Only the choices the kind asks for are the user's here: a colour for a kind that takes one, the
  * source data-block for a kind made from one. The anchor, the kind and the marker are what the
- * button that placed the call already decided.
+ * button that placed the call already decided. Anything more specific -- an empty row's channels,
+ * a palette beside the colour -- is the source's, drawn through
+ * #StackSource::add_kind_draw_extra.
  */
 void stack_row_add_ui(bContext *C, wmOperator *op)
 {
@@ -222,8 +268,20 @@ void stack_row_add_ui(bContext *C, wmOperator *op)
   {
     return;
   }
-  if (kind_info.takes_color) {
-    op->layout->prop(op->ptr, "fill_color", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  bool empty = false;
+  if (kind_info.color_optional) {
+    /* Fill or empty, in that order; the colour below belongs to Fill only. */
+    op->layout->prop(op->ptr, "fill_mode", ui::ITEM_R_EXPAND, std::nullopt, ICON_NONE);
+    op->layout->separator();
+    empty = RNA_enum_get(op->ptr, "fill_mode") != STACK_FILL_MODE_FILL;
+  }
+  if (kind_info.takes_color && !empty) {
+    if (kind_info.color_optional) {
+      stack_add_fill_color_draw(*op);
+    }
+    else {
+      op->layout->prop(op->ptr, "fill_color", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    }
   }
   if (kind_info.source_id_type != 0) {
     const char *collection_name = stack_add_source_collection_name(kind_info.source_id_type);
@@ -236,6 +294,8 @@ void stack_row_add_ui(bContext *C, wmOperator *op)
       op->layout->prop(op->ptr, "source", UI_ITEM_NONE, std::nullopt, ICON_NONE);
     }
   }
+  stack_source_for_space(*space_outliner)->add_kind_draw_extra(
+      *C, kind_info, *op, *op->layout, empty);
 }
 
 bool stack_row_add_poll(bContext *C)

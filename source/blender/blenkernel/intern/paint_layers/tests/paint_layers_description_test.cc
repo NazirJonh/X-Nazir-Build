@@ -1174,6 +1174,56 @@ TEST_F(PaintLayersDescription, add_fill_layer_lays_its_colour)
   EXPECT_FLOAT_EQ(read[3], 0.0f);
 }
 
+TEST_F(PaintLayersDescription, add_empty_fill_layer_starts_with_no_channels)
+{
+  Material *ma = BKE_material_add(bmain, "EmptyFillMat");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.empty = true;
+  /* Ignored by an empty Fill: there are no channel records to write a colour into. */
+  const float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  params.fill_color = color;
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(fill->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_STREQ(fill->name, "Fill 1");
+  EXPECT_EQ(fill->channels_num, 0);
+  EXPECT_FALSE(BKE_paint_layers_base_color_active(*fill));
+}
+
+TEST_F(PaintLayersDescription, add_empty_fill_layer_starts_with_the_chosen_channels)
+{
+  Material *ma = BKE_material_add(bmain, "EmptyFillChannelsMat");
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.empty = true;
+  params.channels = (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                    (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(fill->channels_num, 2);
+  EXPECT_NE(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  EXPECT_NE(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+}
+
+TEST_F(PaintLayersDescription, add_empty_fill_layer_skips_a_channel_outside_the_set)
+{
+  Material *ma = BKE_material_add(bmain, "EmptyFillOutsideSetMat");
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
+
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Fill;
+  params.empty = true;
+  params.channels = uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS;
+  MaterialPaintLayer *fill = BKE_paint_layers_add_with_policy(*ma, params);
+  ASSERT_NE(fill, nullptr);
+  /* The channel is outside the material's set, so the row gets no inert record for it. */
+  EXPECT_EQ(fill->channels_num, 0);
+  EXPECT_EQ(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+}
+
 TEST_F(PaintLayersDescription, set_source_flips_between_paint_and_fill)
 {
   Material *ma = BKE_material_add(bmain, "SrcMat");
@@ -1348,6 +1398,66 @@ TEST_F(PaintLayersDescription, filter_starts_in_the_first_channel_of_the_set)
   ASSERT_NE(adjustment, nullptr);
   EXPECT_NE(paint_layer_channel_find(*adjustment, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
   EXPECT_EQ(paint_layer_channel_find(*adjustment, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+}
+
+TEST_F(PaintLayersDescription, filter_starts_in_the_owners_only_active_channel)
+{
+  Material *ma = BKE_material_add(bmain, "FilterOwnerChannel");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(*ma, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  fill->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+
+  /* The material's set has Base Color too, so the old first-of-the-set rule would pick it. The
+   * Fill carries only Roughness, and the filter has to work there and nowhere else. */
+  MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+      *ma, fill, MA_PAINT_LAYER_FILTER_INVERT);
+  ASSERT_NE(filter, nullptr);
+  EXPECT_NE(paint_layer_channel_find(*filter, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*filter, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+}
+
+TEST_F(PaintLayersDescription, filter_falls_back_when_the_owners_only_channel_is_outside_the_set)
+{
+  Material *ma = BKE_material_add(bmain, "FilterOwnerOutsideSet");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(*ma, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  fill->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  /* The owner's one live channel no longer takes part, so it has no channel to give the filter:
+   * the first channel of the set answers instead. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma, uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)));
+
+  MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+      *ma, fill, MA_PAINT_LAYER_FILTER_INVERT);
+  ASSERT_NE(filter, nullptr);
+  EXPECT_NE(paint_layer_channel_find(*filter, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*filter, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+}
+
+TEST_F(PaintLayersDescription, filter_with_two_live_owner_channels_uses_the_first_of_the_set)
+{
+  Material *ma = BKE_material_add(bmain, "FilterOwnerTwoChannels");
+  MaterialPaintLayer *fill = BKE_paint_layers_add(*ma, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  fill->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
+  /* Two live channels are a choice the filter cannot make; the material's set decides, and its
+   * first channel is neither of the owner's. */
+  ASSERT_TRUE(BKE_paint_layers_channel_set_mask_set(
+      *ma,
+      (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_METALLIC)) |
+          (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_ROUGHNESS)) |
+          (uint16_t(1) << int(PAINT_MATERIAL_CHANNEL_SPECULAR))));
+
+  MaterialPaintLayer *filter = BKE_paint_layers_filter_add(
+      *ma, fill, MA_PAINT_LAYER_FILTER_INVERT);
+  ASSERT_NE(filter, nullptr);
+  EXPECT_NE(paint_layer_channel_find(*filter, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*filter, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*filter, PAINT_MATERIAL_CHANNEL_SPECULAR), nullptr);
 }
 
 TEST_F(PaintLayersDescription, default_channels_apply_follows_the_set)

@@ -24,16 +24,9 @@
 #include "DNA_windowmanager_types.h"
 
 #include "BKE_context.hh"
-#include "BKE_paint.hh"
-#include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 
-#include "DNA_material_types.h"
-
-#include "ED_curve_patch.hh"
-
 #include "BLI_string.h"
-#include "BLI_uuid.h"
 
 #include "ED_screen.hh"
 
@@ -46,8 +39,6 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 
-#include "../../sculpt_paint/paint_curve_patch_layer.hh"
-
 #include "../outliner_intern.hh"
 #include "outliner_stack_layers_intern.hh"
 #include "outliner_stack_source.hh"
@@ -59,7 +50,7 @@ namespace blender::ed::outliner {
  * which survives the renumbering an edit puts the position through. Read through
  * #stack_operator_ordinal_get, so a caller names a row either way.
  */
-static void rna_def_stack_row_marker(wmOperatorType *ot)
+void rna_def_stack_row_marker(wmOperatorType *ot)
 {
   RNA_def_string(ot->srna,
                  "marker",
@@ -71,7 +62,7 @@ static void rna_def_stack_row_marker(wmOperatorType *ot)
 }
 
 /** The `ordinal` property of a row operator; \a description says what -1 means for it. */
-static void rna_def_stack_row_ordinal(wmOperatorType *ot, const char *description)
+void rna_def_stack_row_ordinal(wmOperatorType *ot, const char *description)
 {
   RNA_def_int(ot->srna, "ordinal", -1, -1, SHRT_MAX, "Ordinal", description, -1, SHRT_MAX);
 }
@@ -147,80 +138,6 @@ void OUTLINER_OT_stack_layer_activate(wmOperatorType *ot)
   rna_def_stack_row_marker(ot);
 }
 
-/** The active row must be a Curve Patch effect with a payload, for the tool to enter. The caller
- * activates the row first when the click aimed at another one (see the double-click handler). */
-static bool stack_layer_curve_patch_edit_poll(bContext *C)
-{
-  if (!stack_mode_poll(C)) {
-    return false;
-  }
-  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr) {
-    return false;
-  }
-  const StackReadContext ctx = outliner_stack_read_context(*C);
-  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
-  if (owner == nullptr || GS(owner->name) != ID_MA) {
-    return false;
-  }
-  Material &material = id_cast<Material &>(*owner);
-  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(material);
-  return row != nullptr && row->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
-         row->curve_patch != nullptr;
-}
-
-static wmOperatorStatus stack_layer_curve_patch_edit_exec(bContext *C, wmOperator *op)
-{
-  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
-  if (ordinal < 0) {
-    return OPERATOR_CANCELLED;
-  }
-  const StackReadContext ctx = outliner_stack_read_context(*C);
-  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
-  const StackRow *row = (owner != nullptr) ? outliner_stack_row_find(*space_outliner, ordinal) :
-                                             nullptr;
-  if (owner == nullptr || row == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-  Material &material = id_cast<Material &>(*owner);
-  MaterialPaintLayer *layer = BKE_paint_layers_find(material, row->stable_id);
-  if (layer == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
-      layer->curve_patch == nullptr)
-  {
-    BKE_report(op->reports, RPT_WARNING, "The selected row is not a Curve Patch effect");
-    return OPERATOR_CANCELLED;
-  }
-  /* The tool runs on the active row: activate it when the edit was aimed elsewhere. A refused
-   * switch (the live-session confirm) must not start a second session on top. */
-  if (!BLI_uuid_equal(material.active_layer_marker, row->stable_id)) {
-    if (!outliner_stack_row_activate(C, *space_outliner, ordinal)) {
-      return OPERATOR_CANCELLED;
-    }
-  }
-  if (!blender::ed::sculpt_paint::curve_patch_layer_activate(*C, material, *layer)) {
-    return OPERATOR_CANCELLED;
-  }
-  ED_region_tag_redraw(CTX_wm_region(C));
-  return OPERATOR_FINISHED;
-}
-
-/** Double-click on a Curve Patch effect row: the explicit entrance into the row's curve tool. */
-void OUTLINER_OT_stack_layer_curve_patch_edit(wmOperatorType *ot)
-{
-  ot->name = "Edit Curve Patch Effect";
-  ot->idname = "OUTLINER_OT_stack_layer_curve_patch_edit";
-  ot->description =
-      "Enter the Curve Patch tool of the layer: its brush snapshot becomes the active brush and "
-      "its curves open in the modal editor";
-  ot->exec = stack_layer_curve_patch_edit_exec;
-  ot->poll = stack_layer_curve_patch_edit_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-
-  rna_def_stack_row_ordinal(ot, "Curve Patch effect to edit; -1 uses the active one");
-  rna_def_stack_row_marker(ot);
-}
-
 void OUTLINER_OT_stack_layer_move(wmOperatorType *ot)
 {
   static const EnumPropertyItem direction_items[] = {
@@ -287,80 +204,6 @@ void OUTLINER_OT_stack_row_action(wmOperatorType *ot)
   /* No undo: the action is UI state, not data. */
   ot->flag = OPTYPE_INTERNAL;
   RNA_def_int(ot->srna, "ordinal", -1, -1, SHRT_MAX, "Ordinal", "", -1, SHRT_MAX);
-  rna_def_stack_row_marker(ot);
-}
-
-/**
- * "Use as Brush Source": hand the row under the menu to the paint operator that owns brush
- * selection. The outliner knows the material and the row's stable marker; it does not touch the
- * brush itself.
- */
-static wmOperatorStatus stack_row_use_as_brush_source_exec(bContext *C, wmOperator *op)
-{
-  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
-  if (ordinal < 0) {
-    return OPERATOR_CANCELLED;
-  }
-  const StackReadContext ctx = outliner_stack_read_context(*C);
-  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
-  const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
-  if (owner == nullptr || row == nullptr || BLI_uuid_is_nil(row->stable_id)) {
-    return OPERATOR_CANCELLED;
-  }
-  if (GS(owner->name) != ID_MA) {
-    BKE_report(op->reports, RPT_ERROR, "The stack row is not part of a material");
-    return OPERATOR_CANCELLED;
-  }
-
-  wmOperatorType *ot = WM_operatortype_find("PAINT_OT_brush_layer_source_assign_from_stack",
-                                            false);
-  if (ot == nullptr) {
-    return OPERATOR_CANCELLED;
-  }
-  PointerRNA props = WM_operator_properties_create_ptr(ot);
-  WM_operator_properties_id_lookup_set_from_id(&props, owner);
-  char marker_str[UUID_STRING_SIZE];
-  BLI_uuid_format(marker_str, row->stable_id);
-  RNA_string_set(&props, "marker", marker_str);
-  const wmOperatorStatus ret = WM_operator_name_call_ptr(
-      C, ot, wm::OpCallContext::ExecDefault, &props, nullptr);
-  WM_operator_properties_free(&props);
-  return ret;
-}
-
-static bool stack_row_use_as_brush_source_poll(bContext *C)
-{
-  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr) {
-    return false;
-  }
-  const StackReadContext ctx = outliner_stack_read_context(*C);
-  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
-  if (owner == nullptr || GS(owner->name) != ID_MA ||
-      !BKE_paint_layers_is_layered(*reinterpret_cast<Material *>(owner)))
-  {
-    return false;
-  }
-  Paint *paint = BKE_paint_get_active_from_context(C);
-  return paint != nullptr && BKE_paint_brush(paint) != nullptr;
-}
-
-void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot)
-{
-  ot->name = "Use as Brush Source";
-  ot->idname = "OUTLINER_OT_stack_layer_use_as_brush_source";
-  ot->description =
-      "Use the stack row as the active PBR Paint brush's Layer source";
-  ot->exec = stack_row_use_as_brush_source_exec;
-  ot->poll = stack_row_use_as_brush_source_poll;
-  /* No undo of its own: the paint operator owns the brush/preset change and its undo push. */
-  ot->flag = OPTYPE_INTERNAL;
-
-  rna_def_stack_row_ordinal(ot, "Row to use as the source; -1 uses the active one");
   rna_def_stack_row_marker(ot);
 }
 
@@ -512,6 +355,57 @@ void OUTLINER_OT_stack_layer_lock_toggle(wmOperatorType *ot)
 }
 
 /**
+ * The Add dialog's own choices change what it shows: a palette swatch writes `fill_color` and the
+ * inline picker beside it has to follow, and switching from Fill to Empty takes the colour controls
+ * away. Redraw the popup on either.
+ */
+static void stack_add_props_update(bContext *C,
+                                   PointerRNA * /*ptr*/,
+                                   PropertyRNA * /*prop*/)
+{
+  if (C == nullptr) {
+    return;
+  }
+  if (ARegion *region = CTX_wm_region(C)) {
+    ED_region_tag_redraw(region);
+  }
+}
+
+/* Fill first: it is what the Add button means, and the default the dialog starts on. */
+static const EnumPropertyItem stack_fill_mode_items[] = {
+    {STACK_FILL_MODE_FILL, "FILL", 0, "Fill", "Start the layer with a flat colour"},
+    {STACK_FILL_MODE_EMPTY, "EMPTY", 0, "Empty", "Start the layer with the channels chosen below"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
+/**
+ * The channel flag items the space's source offers for an empty row.
+ *
+ * The choices are the source's own vocabulary -- for a paint stack, the channels of the material's
+ * set -- so the operator only asks the source and copies what it answers, and a source with no
+ * channel choices leaves the property with none.
+ */
+static const EnumPropertyItem *stack_add_fill_channels_itemf(bContext *C,
+                                                            PointerRNA * /*ptr*/,
+                                                            PropertyRNA * /*prop*/,
+                                                            bool *r_free)
+{
+  EnumPropertyItem *items = nullptr;
+  int items_num = 0;
+  SpaceOutliner *space_outliner = (C == nullptr) ? nullptr : CTX_wm_space_outliner(C);
+  if (space_outliner != nullptr && space_outliner->runtime != nullptr) {
+    Vector<EnumPropertyItem> channel_items;
+    stack_source_for_space(*space_outliner)->add_kind_channel_items(*C, channel_items);
+    for (const EnumPropertyItem &item : channel_items) {
+      RNA_enum_item_add(&items, &items_num, &item);
+    }
+  }
+  RNA_enum_item_end(&items, &items_num);
+  *r_free = true;
+  return items;
+}
+
+/**
  * The name a button for one kind shows: the kinds are the source's own vocabulary, so the operator
  * cannot name them itself, and two icon buttons that both read "Add Stack Layer" cannot be told
  * apart. The caller that knows the kind passes its name in `label`.
@@ -571,6 +465,28 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
                                                0.0f,
                                                1.0f);
   RNA_def_property_subtype(fill_prop, PROP_COLOR_GAMMA);
+  RNA_def_property_update_runtime_with_context_and_property(fill_prop, stack_add_props_update);
+  /* Only read by a kind with #StackAddKindInfo::color_optional: start the Fill with that colour,
+   * or with no channels at all. The Add's UI draws it as the two buttons, Fill first. */
+  PropertyRNA *fill_mode_prop = RNA_def_enum(
+      ot->srna,
+      "fill_mode",
+      stack_fill_mode_items,
+      STACK_FILL_MODE_FILL,
+      "Start With",
+      "Whether the new Fill layer starts with a colour, or with no channels at all");
+  RNA_def_property_update_runtime_with_context_and_property(fill_mode_prop, stack_add_props_update);
+  /* The channels an empty Fill starts with, as a flag mask over the source's own channel bits.
+   * Zero is Empty until the user picks the channels its image set needs; the items come from the
+   * source, so the generic operator carries no channel vocabulary. */
+  PropertyRNA *fill_channels_prop = RNA_def_enum(ot->srna,
+                                                 "fill_channels",
+                                                 rna_enum_dummy_NULL_items,
+                                                 0,
+                                                 "Fill Channels",
+                                                 "Channels an Empty Fill layer starts with");
+  RNA_def_enum_funcs(fill_channels_prop, stack_add_fill_channels_itemf);
+  RNA_def_property_flag(fill_channels_prop, PROP_ENUM_FLAG);
   /* The data-block a kind with #StackAddKindInfo::source_id_type is made from, by name: what a UI
    * picked, and what a repeat or a script names again. */
   PropertyRNA *source_prop = RNA_def_string(ot->srna,

@@ -133,11 +133,13 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_FALSE(kinds[0].takes_color);
   EXPECT_EQ(kinds[1].identifier, "FILL");
   EXPECT_TRUE(kinds[1].takes_color);
+  EXPECT_TRUE(kinds[1].color_optional) << "a Fill starts with a colour or empty";
   EXPECT_EQ(kinds[2].identifier, "FOLDER");
   EXPECT_EQ(kinds[3].identifier, "CORRECTION");
   EXPECT_FALSE(kinds[3].takes_color);
   EXPECT_EQ(kinds[4].identifier, "CORRECTION_FILL");
   EXPECT_TRUE(kinds[4].takes_color);
+  EXPECT_FALSE(kinds[4].color_optional) << "only a Fill layer itself has the Empty variant";
   EXPECT_EQ(kinds[5].identifier, "MASK_CORRECTION");
   EXPECT_FALSE(kinds[5].takes_color);
   EXPECT_EQ(kinds[6].identifier, "MASK_CORRECTION_FILL");
@@ -196,6 +198,49 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   /* Then the Curve Patch, only ever an effect of a layer. */
   EXPECT_EQ(kinds[28].identifier, "CURVE_PATCH_CORRECTION");
   EXPECT_TRUE(kinds[28].is_effect);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, an_empty_fill_add_makes_a_fill_with_no_channels)
+{
+  /* Kind 1 is FILL; Empty is what the Add passes for the second button. */
+  StackAddArgs args;
+  args.empty = true;
+  const int ordinal = row_add(1, -1, args);
+  ASSERT_GE(ordinal, 0);
+  MaterialPaintLayer *fill = paint_description_row_for_ordinal(*material, ordinal);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(fill->source, MA_PAINT_LAYER_SOURCE_CONSTANT);
+  EXPECT_STREQ(fill->name, "Fill 1");
+  EXPECT_EQ(fill->channels_num, 0) << "an empty Fill has no channel records to take part in";
+
+  /* The colour variant still starts with the material's channels. */
+  const float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+  StackAddArgs color_args;
+  color_args.color = color;
+  const int coloured_ordinal = row_add(1, -1, color_args);
+  ASSERT_GE(coloured_ordinal, 0);
+  MaterialPaintLayer *coloured = paint_description_row_for_ordinal(*material,
+                                                                  coloured_ordinal);
+  ASSERT_NE(coloured, nullptr);
+  EXPECT_STREQ(coloured->name, "Fill 2");
+  EXPECT_NE(coloured->channels_num, 0);
+  EXPECT_TRUE(BKE_paint_layers_base_color_active(*coloured));
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, an_empty_fill_add_starts_with_the_chosen_channels)
+{
+  StackAddArgs args;
+  args.empty = true;
+  args.channel_mask = (uint16_t(1) << PAINT_MATERIAL_CHANNEL_METALLIC) |
+                      (uint16_t(1) << PAINT_MATERIAL_CHANNEL_ROUGHNESS);
+  const int ordinal = row_add(1, -1, args);
+  ASSERT_GE(ordinal, 0);
+  MaterialPaintLayer *fill = paint_description_row_for_ordinal(*material, ordinal);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(fill->channels_num, 2);
+  EXPECT_NE(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_METALLIC), nullptr);
+  EXPECT_NE(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS), nullptr);
+  EXPECT_EQ(paint_layer_channel_find(*fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, mask_corrections_are_rows_under_the_mask_section)
@@ -674,6 +719,42 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_adds_a_slot_a_section_and_its_sw
       EXPECT_EQ(slot.icon, int(ICON_CLIPUV_HLT));
     }
   }
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_colourless_fill_previews_a_sphere_beside_the_mask)
+{
+  /* An image dropped into a channel other than Base Color makes a Fill with no colour record, as
+   * the Outliner's own drop does. Its channel still shades a material, so the content slot is the
+   * rendered sphere -- with the map on its roughness -- not the map drawn as the row's colour. */
+  MaterialPaintLayer *fill = BKE_paint_layers_add(
+      *material, "Roughness Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  fill->source = MA_PAINT_LAYER_SOURCE_CONSTANT;
+  const float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  Image *map = BKE_image_add_generated(
+      bmain, 8, 8, "RoughnessMap", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_NE(map, nullptr);
+  ASSERT_NE(BKE_paint_layers_channel_add(*material, fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS),
+            nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *material, fill, PAINT_MATERIAL_CHANNEL_ROUGHNESS, map));
+  ASSERT_NE(BKE_paint_layers_mask_add(*material, fill, 0.5f), nullptr);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_ROUGHNESS, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  const StackRow &row = rows[0];
+  ASSERT_EQ(row.preview_slots.size(), 2u);
+  const StackRowPreview &content_slot = row.preview_slots[0];
+  EXPECT_EQ(content_slot.section_id, "CHANNELS");
+  EXPECT_FALSE(content_slot.is_color_swatch) << "the Fill has no colour to show";
+  EXPECT_EQ(content_slot.render_kind, StackRowPreviewRender::Sphere)
+      << "the slot is the rendered material, not the map drawn as a colour";
+  EXPECT_EQ(content_slot.id_uid, 0u) << "the sphere shades with the map, not as its thumbnail";
+  /* Base Color, Metallic, Roughness. */
+  EXPECT_EQ(content_slot.sphere_map_uid[2], map->id.session_uid);
+  EXPECT_EQ(row.preview_slots[1].section_id, "MASK");
+  EXPECT_EQ(row.preview_slots[1].icon, int(ICON_MOD_MASK));
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, mask_slot_keeps_the_mask_icon_once_it_has_a_map)

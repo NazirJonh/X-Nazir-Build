@@ -258,6 +258,29 @@ bool paint_image_is_blank(const Image &image)
 }
 
 /**
+ * Point \a r_slot at the first map of \a layer's channel records, drawn as that image's own
+ * preview. A generated map nobody has painted yet stays blank and keeps the empty placeholder;
+ * any other map -- a dropped file, an image painted out -- shows what it holds, so the slot reads
+ * as the texture the row lays rather than as a generic texture icon.
+ */
+static void paint_slot_first_map_set(const MaterialPaintLayer &layer, StackRowPreview &r_slot)
+{
+  for (int c = 0; c < layer.channels_num; c++) {
+    const Image *image = layer.channels[c].image;
+    if (image == nullptr) {
+      continue;
+    }
+    r_slot.id_uid = image->id.session_uid;
+    r_slot.id_type = ID_IM;
+    r_slot.is_blank = paint_image_is_blank(*image);
+    if (!r_slot.is_blank) {
+      r_slot.render_kind = StackRowPreviewRender::IdPreview;
+    }
+    return;
+  }
+}
+
+/**
  * The mask slot of a row: always the Mask icon (the "clip" icon while the mask is switched off),
  * never a preview of its map. Whether the mask began white or black is unreadable once it has been
  * painted over, and a thumbnail of the map would stop saying that the slot is the mask.
@@ -494,15 +517,8 @@ StackRow paint_correction_row_build(const Material &material,
     BKE_paint_layers_base_color_get(effect, slot.color);
     slot.label = IFACE_("Fill Color");
   }
-  for (int c = 0; c < effect.channels_num && !slot.is_color_swatch; c++) {
-    const Image *image = effect.channels[c].image;
-    if (image == nullptr) {
-      continue;
-    }
-    slot.id_uid = image->id.session_uid;
-    slot.id_type = ID_IM;
-    slot.is_blank = paint_image_is_blank(*image);
-    break;
+  if (!slot.is_color_swatch) {
+    paint_slot_first_map_set(effect, slot);
   }
   row.preview_slots.append(std::move(slot));
   StackContentSection channels;
@@ -674,6 +690,49 @@ static uint64_t paint_fill_sphere_hash(const MaterialPaintLayer &layer)
     mix(record.image != nullptr ? record.image->id.session_uid : 0);
   }
   return hash;
+}
+
+/**
+ * The neutral base a colourless Fill's sphere preview shades with: the row lays no Base Color of
+ * its own, but its other channels still shade the material the sphere stands for.
+ */
+constexpr float PAINT_FILL_NEUTRAL_COLOR = 0.8f;
+
+/**
+ * The content slot of a Fill row: its own colour as a swatch where it lays one, otherwise the
+ * sphere its remaining channels shade. Null when the Fill lays neither -- no colour and no channel
+ * records -- so the row shows its plain icon and nothing to open.
+ */
+static std::optional<StackRowPreview> paint_fill_slot_build(const Material &material,
+                                                            const MaterialPaintLayer &layer)
+{
+  const bool lays_color = BKE_paint_layers_base_color_active(layer) &&
+                          BKE_paint_layers_channel_in_set(
+                              material, PAINT_MATERIAL_CHANNEL_BASE_COLOR);
+  if (!lays_color && layer.channels_num == 0) {
+    return std::nullopt;
+  }
+  StackRowPreview fill_slot;
+  fill_slot.section_id = "CHANNELS";
+  if (lays_color) {
+    fill_slot.is_color_swatch = true;
+    fill_slot.icon = ICON_GP_DRAW_FILL;
+    BKE_paint_layers_base_color_get(layer, fill_slot.color);
+    fill_slot.label = IFACE_("Fill Color");
+  }
+  else {
+    fill_slot.color[0] = fill_slot.color[1] = fill_slot.color[2] = PAINT_FILL_NEUTRAL_COLOR;
+    fill_slot.color[3] = 1.0f;
+    fill_slot.label = IFACE_("Fill Preview");
+  }
+  /* The sphere is the constants shaded -- metallic and roughness included, from the flat values or
+   * their maps -- arriving from the preview render. A swatch underneath it is the fill's instant
+   * answer; a Fill with no colour has none and shows the render alone. */
+  paint_fill_sphere_read(
+      layer, fill_slot.sphere_metallic, fill_slot.sphere_roughness, fill_slot.sphere_map_uid);
+  fill_slot.render_kind = StackRowPreviewRender::Sphere;
+  fill_slot.render_hash = paint_fill_sphere_hash(layer);
+  return fill_slot;
 }
 
 /**
@@ -893,44 +952,20 @@ void paint_stack_rows_append(const Material &material,
       }
     }
     else if (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT) {
-      /* A Fill is its colour: one swatch with the bucket drawn over it, and no channel-texture
-       * placeholder. With the Base Color record removed, switched off, or outside the material's
-       * channel set the row lays no colour, so no swatch is drawn. */
-      if (BKE_paint_layers_base_color_active(layer) &&
-          BKE_paint_layers_channel_in_set(material, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
-      {
-        StackRowPreview fill_swatch;
-        fill_swatch.is_color_swatch = true;
-        fill_swatch.icon = ICON_GP_DRAW_FILL;
-        fill_swatch.section_id = "CHANNELS";
-        BKE_paint_layers_base_color_get(layer, fill_swatch.color);
-        fill_swatch.label = IFACE_("Fill Color");
-        /* The swatch is the fill's own flat colour, arriving with the row itself. The sphere over
-         * it is the same constants shaded -- metallic and roughness read too -- arriving from the
-         * preview render and keeping the swatch underneath as its instant answer. */
-        paint_fill_sphere_read(layer,
-                               fill_swatch.sphere_metallic,
-                               fill_swatch.sphere_roughness,
-                               fill_swatch.sphere_map_uid);
-        fill_swatch.render_kind = StackRowPreviewRender::Sphere;
-        fill_swatch.render_hash = paint_fill_sphere_hash(layer);
-        row.preview_slots.append(std::move(fill_swatch));
+      /* A Fill with a colour of its own is that colour: one swatch with the bucket drawn over it.
+       * With the Base Color record removed, switched off, or outside the material's channel set
+       * the row lays no colour, but its other channels may still carry values and maps -- an image
+       * dropped into Roughness, say. Those shade a material, so the sphere is what previews them:
+       * drawing the map itself as the row's colour would say it lays a colour it does not. */
+      if (std::optional<StackRowPreview> fill_slot = paint_fill_slot_build(material, layer)) {
+        row.preview_slots.append(std::move(*fill_slot));
       }
     }
     else {
       /* The content slot shows the row's first channel map, blank or not. */
       StackRowPreview channels_slot;
       channels_slot.section_id = "CHANNELS";
-      for (int c = 0; c < layer.channels_num; c++) {
-        const Image *image = layer.channels[c].image;
-        if (image == nullptr) {
-          continue;
-        }
-        channels_slot.id_uid = image->id.session_uid;
-        channels_slot.id_type = ID_IM;
-        channels_slot.is_blank = paint_image_is_blank(*image);
-        break;
-      }
+      paint_slot_first_map_set(layer, channels_slot);
       row.preview_slots.append(std::move(channels_slot));
     }
 
@@ -1169,6 +1204,12 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
       info.takes_color = true;
       return info;
     };
+    /* A Fill may also start empty: a row with no channels, to assign them to. */
+    const auto with_optional_color = [](StackAddKindInfo info) {
+      info.takes_color = true;
+      info.color_optional = true;
+      return info;
+    };
     /* A kind made from another material, picked from the ID Browser popover with the Material
      * asset libraries. */
     const auto from_material = [](StackAddKindInfo info, const char *browse_prop) {
@@ -1182,7 +1223,8 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
          "A layer that shows nothing until it is painted on",
          ICON_BRUSH_DATA},
         PaintLayerAddKind::Paint);
-    add(with_color({"FILL", N_("Fill Layer"), "A layer of one flat colour", ICON_GP_DRAW_FILL}),
+    add(with_optional_color(
+            {"FILL", N_("Fill Layer"), "A layer of one flat colour", ICON_GP_DRAW_FILL}),
         PaintLayerAddKind::Fill);
     add({"FOLDER",
          N_("Folder"),
@@ -1328,6 +1370,252 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
     return table;
   }();
   return entries.as_span();
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Add UI
+ *
+ * What the paint source adds to the generic Add dialog: the channels an empty Fill starts with,
+ * and the palette a Fill colour can be picked from. The dialog itself, its kinds and its colour
+ * belong to the Outliner; only the paint vocabulary lives here.
+ * \{ */
+
+/** The layered material this Add writes to, or null when the space has no material owner. */
+static Material *paint_add_material_owner(bContext &C)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(&C);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return nullptr;
+  }
+  ID *owner = outliner_stack_owner_get(outliner_stack_read_context(C), *space_outliner);
+  /* The source's own owner resolution: for this source it is the layered material, so the type is
+   * known here and the generic layer never needs the material's name prefix. */
+  return owner != nullptr ? id_cast<Material *>(owner) : nullptr;
+}
+
+/** The channel a flag item's bit names; -1 for the sentinel or a value that is not one bit. */
+static int paint_add_channel_from_item(const EnumPropertyItem &item)
+{
+  for (const int channel : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    if ((1 << channel) == item.value) {
+      return channel;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The channel records an empty Fill may start with: the channels of the material's set, as the
+ * same short toggle buttons the layer widgets use. None is selected by default; the row stays
+ * inert until the user picks the channels its image set needs.
+ */
+static void paint_add_empty_channels_draw(bContext &C, wmOperator &op, ui::Layout &layout)
+{
+  Material *material = paint_add_material_owner(C);
+  PropertyRNA *channels_prop = RNA_struct_find_property(op.ptr, "fill_channels");
+  if (material == nullptr || channels_prop == nullptr) {
+    return;
+  }
+  layout.label(IFACE_("Channels to Start With"), ICON_NONE);
+  ui::Layout &col = layout.column(false);
+  /* The shared table is declared with an open bound, so it cannot be range-for'd; walk to its
+   * sentinel instead. */
+  for (const EnumPropertyItem *item = rna_enum_material_paint_channel_flag_items;
+       item->identifier != nullptr;
+       item++)
+  {
+    const int channel = paint_add_channel_from_item(*item);
+    if (channel < 0 ||
+        !BKE_paint_layers_channel_in_set(*material, eMaterialPaintChannel(channel)))
+    {
+      continue;
+    }
+    /* The same flag checkbox the Active Channel panel draws. */
+    col.row(true).prop_enum(op.ptr, channels_prop, item->identifier, std::nullopt, ICON_NONE);
+  }
+}
+
+/**
+ * The palette of the active paint mode, with its selector, writing a swatch click into the Add's
+ * own `fill_color`: a Fill is picked from the palette the user already paints with. Nothing is
+ * drawn outside a paint context, where there is no palette to show.
+ */
+static void paint_add_palette_draw(bContext &C, wmOperator &op, ui::Layout &layout)
+{
+  Paint *paint = BKE_paint_get_active_from_context(&C);
+  Scene *scene = CTX_data_scene(&C);
+  if (paint == nullptr || scene == nullptr) {
+    return;
+  }
+  PointerRNA paint_ptr = RNA_pointer_create_discrete(
+      &scene->id, RNA_struct_find("Paint"), paint);
+  layout.separator();
+  layout.label(IFACE_("Color Palette"), ICON_COLOR);
+  /* The same selector the standard color picker's palette panel shows, so a stack with no
+   * palette assigned can still pick or create one. */
+  ui::template_id(&layout, &C, &paint_ptr, "palette", "palette.new", nullptr, nullptr);
+  if (BKE_paint_palette(paint) != nullptr) {
+    ui::template_palette(&layout, &paint_ptr, "palette", true, false, op.ptr, "fill_color");
+  }
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Paint-specific operators
+ *
+ * Operators whose subject is a paint layer rather than a row: entering a Curve Patch effect's
+ * tool, and handing a row to the paint operator that owns brush selection. They live here, with
+ * the rest of the paint vocabulary, so the generic operator file names no material.
+ * \{ */
+
+/** The active row must be a Curve Patch effect with a payload, for the tool to enter. The caller
+ * activates the row first when the click aimed at another one (see the double-click handler). */
+static bool stack_layer_curve_patch_edit_poll(bContext *C)
+{
+  if (!stack_mode_poll(C)) {
+    return false;
+  }
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr || GS(owner->name) != ID_MA) {
+    return false;
+  }
+  Material &material = id_cast<Material &>(*owner);
+  const MaterialPaintLayer *row = BKE_paint_layers_active_layer_get(material);
+  return row != nullptr && row->source == MA_PAINT_LAYER_SOURCE_CURVE_PATCH &&
+         row->curve_patch != nullptr;
+}
+
+static wmOperatorStatus stack_layer_curve_patch_edit_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  const StackRow *row = (owner != nullptr) ? outliner_stack_row_find(*space_outliner, ordinal) :
+                                             nullptr;
+  if (owner == nullptr || row == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  Material &material = id_cast<Material &>(*owner);
+  MaterialPaintLayer *layer = BKE_paint_layers_find(material, row->stable_id);
+  if (layer == nullptr || layer->source != MA_PAINT_LAYER_SOURCE_CURVE_PATCH ||
+      layer->curve_patch == nullptr)
+  {
+    BKE_report(op->reports, RPT_WARNING, "The selected row is not a Curve Patch effect");
+    return OPERATOR_CANCELLED;
+  }
+  /* The tool runs on the active row: activate it when the edit was aimed elsewhere. A refused
+   * switch (the live-session confirm) must not start a second session on top. */
+  if (!BLI_uuid_equal(material.active_layer_marker, row->stable_id)) {
+    if (!outliner_stack_row_activate(C, *space_outliner, ordinal)) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+  if (!blender::ed::sculpt_paint::curve_patch_layer_activate(*C, material, *layer)) {
+    return OPERATOR_CANCELLED;
+  }
+  ED_region_tag_redraw(CTX_wm_region(C));
+  return OPERATOR_FINISHED;
+}
+
+/** Double-click on a Curve Patch effect row: the explicit entrance into the row's curve tool. */
+void OUTLINER_OT_stack_layer_curve_patch_edit(wmOperatorType *ot)
+{
+  ot->name = "Edit Curve Patch Effect";
+  ot->idname = "OUTLINER_OT_stack_layer_curve_patch_edit";
+  ot->description =
+      "Enter the Curve Patch tool of the layer: its brush snapshot becomes the active brush and "
+      "its curves open in the modal editor";
+  ot->exec = stack_layer_curve_patch_edit_exec;
+  ot->poll = stack_layer_curve_patch_edit_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+
+  rna_def_stack_row_ordinal(ot, "Curve Patch effect to edit; -1 uses the active one");
+  rna_def_stack_row_marker(ot);
+}
+
+/**
+ * "Use as Brush Source": hand the row under the menu to the paint operator that owns brush
+ * selection. The outliner knows the material and the row's stable marker; it does not touch the
+ * brush itself.
+ */
+static wmOperatorStatus stack_row_use_as_brush_source_exec(bContext *C, wmOperator *op)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  const int ordinal = stack_operator_ordinal_get(*C, *space_outliner, *op);
+  if (ordinal < 0) {
+    return OPERATOR_CANCELLED;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  const StackRow *row = outliner_stack_row_find(*space_outliner, ordinal);
+  if (owner == nullptr || row == nullptr || BLI_uuid_is_nil(row->stable_id)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (GS(owner->name) != ID_MA) {
+    BKE_report(op->reports, RPT_ERROR, "The stack row is not part of a material");
+    return OPERATOR_CANCELLED;
+  }
+
+  wmOperatorType *ot = WM_operatortype_find("PAINT_OT_brush_layer_source_assign_from_stack",
+                                            false);
+  if (ot == nullptr) {
+    return OPERATOR_CANCELLED;
+  }
+  PointerRNA props = WM_operator_properties_create_ptr(ot);
+  WM_operator_properties_id_lookup_set_from_id(&props, owner);
+  char marker_str[UUID_STRING_SIZE];
+  BLI_uuid_format(marker_str, row->stable_id);
+  RNA_string_set(&props, "marker", marker_str);
+  const wmOperatorStatus ret = WM_operator_name_call_ptr(
+      C, ot, wm::OpCallContext::ExecDefault, &props, nullptr);
+  WM_operator_properties_free(&props);
+  return ret;
+}
+
+static bool stack_row_use_as_brush_source_poll(bContext *C)
+{
+  SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  if (space_outliner == nullptr) {
+    return false;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(*C);
+  ID *owner = outliner_stack_owner_get(ctx, *space_outliner);
+  if (owner == nullptr || GS(owner->name) != ID_MA ||
+      !BKE_paint_layers_is_layered(*reinterpret_cast<Material *>(owner)))
+  {
+    return false;
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  return paint != nullptr && BKE_paint_brush(paint) != nullptr;
+}
+
+void OUTLINER_OT_stack_layer_use_as_brush_source(wmOperatorType *ot)
+{
+  ot->name = "Use as Brush Source";
+  ot->idname = "OUTLINER_OT_stack_layer_use_as_brush_source";
+  ot->description = "Use the stack row as the active PBR Paint brush's Layer source";
+  ot->exec = stack_row_use_as_brush_source_exec;
+  ot->poll = stack_row_use_as_brush_source_poll;
+  /* No undo of its own: the paint operator owns the brush/preset change and its undo push. */
+  ot->flag = OPTYPE_INTERNAL;
+
+  rna_def_stack_row_ordinal(ot, "Row to use as the source; -1 uses the active one");
+  rna_def_stack_row_marker(ot);
 }
 
 /** \} */
@@ -1717,6 +2005,44 @@ class PaintLayersStackSource final : public StackSource,
     }
   }
 
+  void add_kind_channel_items(bContext &C, Vector<EnumPropertyItem> &r_items) const override
+  {
+    const Material *material = paint_add_material_owner(C);
+    if (material == nullptr) {
+      return;
+    }
+    /* The shared table has an open bound; walk it to its sentinel. */
+    for (const EnumPropertyItem *item = rna_enum_material_paint_channel_flag_items;
+         item->identifier != nullptr;
+         item++)
+    {
+      const int channel = paint_add_channel_from_item(*item);
+      if (channel < 0 ||
+          !BKE_paint_layers_channel_in_set(*material, eMaterialPaintChannel(channel)))
+      {
+        continue;
+      }
+      r_items.append(*item);
+    }
+  }
+
+  void add_kind_draw_extra(bContext &C,
+                           const StackAddKindInfo &kind,
+                           wmOperator &op,
+                           ui::Layout &layout,
+                           const bool empty) const override
+  {
+    if (!kind.color_optional) {
+      return;
+    }
+    if (empty) {
+      paint_add_empty_channels_draw(C, op, layout);
+    }
+    else {
+      paint_add_palette_draw(C, op, layout);
+    }
+  }
+
   const StackEditor *editor() const override
   {
     return this;
@@ -2010,6 +2336,8 @@ class PaintLayersStackSource final : public StackSource,
     params.place = (args.place == StackMovePlace::Below) ? PaintLayerPlace::Below :
                                                            PaintLayerPlace::Above;
     params.fill_folder = args.fill_folder;
+    params.empty = args.empty;
+    params.channels = args.channel_mask;
     if (ELEM(params.kind,
              PaintLayerAddKind::Fill,
              PaintLayerAddKind::CorrectionFill,

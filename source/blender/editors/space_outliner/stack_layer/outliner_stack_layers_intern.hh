@@ -22,8 +22,26 @@ namespace blender::ed::outliner {
 /** The marker resolved to no row; see #stack_operator_marker_ordinal_get. */
 constexpr int STACK_MARKER_UNRESOLVED = -2;
 
+/**
+ * What a #StackAddKindInfo::color_optional Add creates: a row that lays a colour, or one with no
+ * channels at all. Fill first, because it is what the Add button means by "Fill".
+ */
+enum StackFillMode {
+  STACK_FILL_MODE_FILL = 0,
+  STACK_FILL_MODE_EMPTY,
+};
+
 bool stack_mode_poll(bContext *C);
 int stack_operator_marker_ordinal_get(bContext &C, SpaceOutliner &space_outliner, wmOperator &op);
+
+/**
+ * The identity property every operator that addresses an existing row shares: the row's marker.
+ * Shared with a source's own row operators, which live outside this file.
+ */
+void rna_def_stack_row_marker(wmOperatorType *ot);
+/** The `ordinal` property of a row operator; \a description says what -1 means for it. */
+void rna_def_stack_row_ordinal(wmOperatorType *ot, const char *description);
+
 void stack_row_ui_state_edit_select(const StackReadContext &ctx,
                                     SpaceOutliner &space_outliner,
                                     ID &owner,

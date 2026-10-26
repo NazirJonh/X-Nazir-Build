@@ -141,6 +141,18 @@ struct PaintLayerAddParams {
   const char *name = nullptr;
   /** The initial colour for a Fill, a Fill correction or a Fill mask correction; null keeps the default. */
   const float *fill_color = nullptr;
+  /**
+   * A Fill with no colour and no default channels: a row to assign channels to, rather than a
+   * colour or a map. \a fill_color is ignored. Only meaningful for a #PaintLayerAddKind::Fill;
+   * other kinds are unaffected.
+   */
+  bool empty = false;
+  /**
+   * The channel records an \a empty Fill starts with, as a bitmask over #eMaterialPaintChannel:
+   * the channels the user asked its Add popup to make active. Zero leaves the row inert. Only
+   * channels in the material's set are taken; other kinds are unaffected.
+   */
+  uint16_t channels = 0;
   /** The filter of a #PaintLayerAddKind::Filter Add, an #eMaterialPaintLayerFilter. */
   int16_t filter = 0;
   /** The material a #PaintLayerAddKind::Material, ::CorrectionMaterial or ::MaskCorrectionMaterial
@@ -170,8 +182,9 @@ struct PaintLayerAddParams {
 
 /**
  * Add a Paint row with the shared authoring policy: the unique default name and the default
- * channels a fresh Paint takes part in. Returns the new row, or null when the Add is refused (an
- * anchor that is not part of \a ma's stack).
+ * channels a fresh Paint takes part in. A #PaintLayerAddParams::empty Fill is the exception: it
+ * gets no channel records at all. Returns the new row, or null when the Add is refused (an anchor
+ * that is not part of \a ma's stack).
  */
 MaterialPaintLayer *BKE_paint_layers_add_with_policy(Material &ma,
                                                      const PaintLayerAddParams &params);

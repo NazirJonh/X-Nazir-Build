@@ -61,6 +61,10 @@ struct wmEvent;
 struct wmNotifier;
 struct wmRegionMessageSubscribeParams;
 
+namespace ui {
+struct Layout;
+}
+
 namespace blender::ed::outliner {
 
 /** Number of group colors a #StackRow::color_tag can name; the theme's collection palette size. */
@@ -98,7 +102,7 @@ enum class StackRowPreviewRender : int8_t {
   /** No rendered preview: the icon, the swatch or the placeholder answers for the slot. */
   None = 0,
   /** The preview image of the data-block #StackRowPreview::id_uid names, drawn like an ID
-   * picker's thumbnail (a Material layer's source). */
+   * picker's thumbnail: a channel's map, or a Material layer's source. */
   IdPreview,
   /** A lit sphere shaded with the slot's own constants -- #StackRowPreview::color, metallic and
    * roughness -- so a flat Fill reads as the material it lays down. */
@@ -420,6 +424,11 @@ struct StackAddKindInfo {
   /** A kind whose creation takes a colour: the Add UI asks for one before calling #row_add. */
   bool takes_color = false;
   /**
+   * A kind that may also be added empty: the Add asks whether to lay a colour or start with none.
+   * Only meaningful together with #takes_color.
+   */
+  bool color_optional = false;
+  /**
    * The ID type of the existing data-block a row of this kind is made from, or 0 for a kind made
    * from nothing.
    *
@@ -470,6 +479,17 @@ enum class StackMovePlace : int8_t {
 struct StackAddArgs {
   /** RGBA, for a kind with #StackAddKindInfo::takes_color; null otherwise. */
   const float *color = nullptr;
+  /**
+   * For a kind with #StackAddKindInfo::color_optional: make a row with no colour, rather than one
+   * that lays \a color. Ignored by every other kind.
+   */
+  bool empty = false;
+  /**
+   * A source-defined bitmask for the choices its Add UI offered beside \a empty. The paint source
+   * reads it as the #eMaterialPaintChannel records an empty Fill should start with; zero means
+   * none.
+   */
+  uint16_t channel_mask = 0;
   /** The data-block a kind with #StackAddKindInfo::source_id_type is made from; null otherwise. */
   ID *source = nullptr;
   /**
@@ -1552,6 +1572,42 @@ class StackSource {
   virtual const StackEditor *editor() const
   {
     return nullptr;
+  }
+
+  /**
+   * Draw whatever this source adds to the Add dialog's own controls, after the generic ones --
+   * a colour, a source data-block -- are laid out.
+   *
+   * The seam owns the two things every Add means: a colour for a kind that takes one, and whether
+   * a kind that may start empty does. What \a empty means beyond that is the source's: the paint
+   * source lists the channels such a row starts with, and offers its palette beside the colour.
+   * A source with nothing to add leaves the no-op default; it still gets the generic Add.
+   *
+   * \param kind: the kind being added.
+   * \param op: the running operator, whose properties are the controls' storage.
+   * \param layout: where to lay the extra controls out.
+   * \param empty: the user chose the optional colour kind's empty variant.
+   */
+  virtual void add_kind_draw_extra(bContext & /*C*/,
+                                   const StackAddKindInfo & /*kind*/,
+                                   wmOperator & /*op*/,
+                                   ui::Layout & /*layout*/,
+                                   bool /*empty*/) const
+  {
+  }
+
+  /**
+   * Append the options the Add dialog's `fill_channels` property offers, as enum flag items whose
+   * values are bits of #StackAddArgs::channel_mask.
+   *
+   * Built here rather than in the operator file so the generic Add carries no source's channel
+   * vocabulary: the operator only asks the space's source, and a source with none leaves the
+   * property with no options. May filter against the owner's data, which is why it receives the
+   * context rather than being a static table.
+   */
+  virtual void add_kind_channel_items(bContext & /*C*/,
+                                      Vector<EnumPropertyItem> & /*r_items*/) const
+  {
   }
 
   /**

@@ -1769,6 +1769,13 @@ void perceptual_to_scene_linear_space(Button *but, float rgb[3]);
 Block *block_func_COLOR(bContext *C, PopupBlockHandle *handle, void *arg_but);
 ColorPicker *block_colorpicker_create(Block *block);
 
+/**
+ * Initialize a #ColorPicker from the RNA color property its button edits, the same seeding the
+ * popup picker gets. Used by inline pickers (#template_color_picker), which have no popup build
+ * path to do it for them.
+ */
+void colorpicker_init_from_but(ColorPicker *cpicker, Button *but);
+
 /* `interface_region_search.cc` */
 
 /**

@@ -2135,7 +2135,7 @@ class MaterialPaintChannelView:
         color=None,
         scalar=None,
         scalar_index=None,
-        value_color=None,
+        value_panel=None,
         image=None,
         blend=None,
         socket_menu=None,
@@ -2160,15 +2160,16 @@ class MaterialPaintChannelView:
         self.scalar = scalar
         #: Array index for the scalar value (brush `value`), or None for a plain float.
         self.scalar_index = scalar_index
-        #: (data, propname) of a scalar channel's gradient swatch, else None.
-        self.value_color = value_color
+        #: Popover panel idname the scalar channel's value swatch opens, else None.
+        self.value_panel = value_panel
         #: (data, propname) of the source image, else None.
         self.image = image
         #: (data, propname) of the channel's own blend, else None.
         self.blend = blend
         #: Popup menu idname for the socket button, or None.
         self.socket_menu = socket_menu
-        #: Extra (name, value) pointers the socket menu needs beyond the channel itself.
+        #: Extra (name, value) pointers the socket menu needs beyond the channel itself. The value
+        #: swatch publishes the same ones, so its popover edits the record the panel drew.
         self.socket_context_set = socket_context_set
         #: callable(panel, context, enabled) drawing the source row, or None.
         self.source_draw = source_draw
@@ -2200,8 +2201,10 @@ def _draw_channel_subpanel_header(
 ):
     """Panel header: label | socket button | optional value/color field (Principled-style split).
 
-    Once a source image or texture drives the channel, the value/color field is replaced by that
-    source's preview and name: the field itself is unusable in that state.
+    A scalar channel shows its value as a gradient swatch opening the value popover (the slider and
+    the palette) followed by the numeric slider. Once a source image or texture drives the channel,
+    the value/color field is replaced by that source's preview and name: the field itself is
+    unusable in that state.
     """
     header.use_property_split = True
     header.use_property_decorate = False
@@ -2238,9 +2241,20 @@ def _draw_channel_subpanel_header(
         if view.scalar is not None:
             controls = value_row.row(align=True)
             controls.active = value_active
-            if view.value_color is not None:
-                data, prop = view.value_color
-                controls.prop(data, prop, text="")
+            if view.value_panel is not None:
+                # The swatch shows the value's gradient color (derived from the scalar itself by
+                # #widget_value_swatch) and opens the value popover; editing stays in the popover
+                # and the slider beside it.
+                data, prop = view.scalar
+                # The popover cannot see the swatch it was opened from, and an owner that is not
+                # the active one (a pinned material, a layer that is not the active row) would be
+                # resolved to the wrong record. Publish the row identity the socket menu already
+                # gets from \a view (#MaterialPaintChannelView.socket_context_set); the popover
+                # inherits it through the button's context (see #_layer_value_record_resolve).
+                for name, value in view.socket_context_set:
+                    controls.context_pointer_set(name, value)
+                controls.template_material_paint_value_swatch(
+                    data, prop, index=view.scalar_index or 0, panel=view.value_panel)
             data, prop = view.scalar
             kwargs = {"text": "", "slider": True}
             if view.scalar_index is not None:
@@ -2313,12 +2327,58 @@ def _draw_channel_panel(layout, context, view, *, source_enabled=True):
     panel.separator()
 
 
+# Value-swatch popover panels per scalar channel (#PAINT_PT_material_value_*, generated below).
+#
+# One table is the single source of truth: which record owner a popover edits, the channel it picks
+# the record by, its title and the record's scalar property. The panel classes (see
+# #_material_value_popover_class) and the per-owner lookups the channel views read are both built
+# from it, so an idname cannot be spelled one way by a panel and another way by the map pointing at
+# it -- a typo there only disabled the swatch, silently. A channel outside the table keeps a plain
+# slider: Height has no UI row yet, so it never needs one.
+_MATERIAL_VALUE_POPOVER_TABLE = (
+    # owner, channel id, label, value property
+    ('brush', 'METALLIC', "Metallic Value", 'value'),
+    ('brush', 'ROUGHNESS', "Roughness Value", 'value'),
+    ('brush', 'ALPHA', "Alpha Value", 'value'),
+    ('brush', 'AO', "AO Value", 'value'),
+    ('brush', 'SPECULAR', "Specular Value", 'value'),
+    ('brush', 'CUSTOM', "Custom Value", 'value'),
+    ('layer', 'METALLIC', "Metallic Value", 'value_scalar'),
+    ('layer', 'ROUGHNESS', "Roughness Value", 'value_scalar'),
+    ('layer', 'ALPHA', "Alpha Value", 'value_scalar'),
+    ('layer', 'AO', "AO Value", 'value_scalar'),
+    ('layer', 'SPECULAR', "Specular Value", 'value_scalar'),
+)
+
+
+def _material_value_popover_idname(owner, channel_id):
+    """Idname of a value popover: ``PAINT_PT_material_value_<owner>_<channel>``.
+
+    Built here rather than read back from the registered class, because keymaps and presets may
+    refer to these panels: the shape of the name is part of the UI contract.
+    """
+    return "PAINT_PT_material_value_{:s}_{:s}".format(owner, channel_id.lower())
+
+
+def _value_panel_map(owner):
+    """Channel id -> value popover idname, for the channels \a owner draws."""
+    return {
+        channel_id: _material_value_popover_idname(owner, channel_id)
+        for row_owner, channel_id, _label, _value_prop in _MATERIAL_VALUE_POPOVER_TABLE
+        if row_owner == owner
+    }
+
+
+_BRUSH_VALUE_PANEL_BY_CHANNEL = _value_panel_map('brush')
+_LAYER_VALUE_PANEL_BY_CHANNEL = _value_panel_map('layer')
+
+
 def _brush_channel_view(channel, channel_id, material_paint):
     """A #BrushMaterialPaintChannel under the shared widget's contract."""
     color = None
     scalar = None
     scalar_index = None
-    value_color = None
+    value_panel = None
     blend = None
     if channel_id == 'BASE_COLOR':
         # Base Color's color is the brush paint's own, not the channel's.
@@ -2331,7 +2391,7 @@ def _brush_channel_view(channel, channel_id, material_paint):
     else:
         scalar = (channel, "value")
         scalar_index = 0
-        value_color = (channel, "value_color")
+        value_panel = _BRUSH_VALUE_PANEL_BY_CHANNEL.get(channel_id)
     return MaterialPaintChannelView(
         channel,
         channel_id,
@@ -2340,7 +2400,7 @@ def _brush_channel_view(channel, channel_id, material_paint):
         color=color,
         scalar=scalar,
         scalar_index=scalar_index,
-        value_color=value_color,
+        value_panel=value_panel,
         image=(channel, "source_image"),
         blend=blend,
         socket_menu="PAINT_MT_material_paint_channel_socket",
@@ -3173,7 +3233,8 @@ def draw_material_paint_channels(
             _material_paint_channel_socket_icon_draw(
                 row, 'CUSTOM', channel, menu="PAINT_MT_material_paint_channel_socket")
             controls = row.row(align=True)
-            controls.prop(channel, "value_color", text="")
+            controls.template_material_paint_value_swatch(
+                channel, "value", index=0, panel=_BRUSH_VALUE_PANEL_BY_CHANNEL['CUSTOM'])
             controls.prop(channel, "value", index=0, text=channel.name, slider=True)
 
             # The bindings are a fixed array indexed by channel, so key them by their own
@@ -4674,42 +4735,191 @@ class PAINT_PT_material_paint_channel_visibility(bpy.types.Panel):
         )
 
 
+def _paint_brush_resolve(context):
+    """The paint settings a value popover draws from, and the brush whose channels it edits.
+
+    Either member can be None. #UnifiedPaintPanel.paint_settings can miss inside a popover (its
+    paint-mode resolution is lost through the tool header, and a Properties-editor layer popover
+    has no paint mode at all), so the paint modes' own settings are the fallback. The paint is
+    returned even without a brush: it still owns the palette the value popovers show.
+    """
+    paint = UnifiedPaintPanel.paint_settings(context)
+    brush = getattr(paint, "brush", None) if paint is not None else None
+    if brush is not None:
+        return paint, brush
+    for attr in ("sculpt", "image_paint", "vertex_paint", "weight_paint"):
+        fallback = getattr(context.tool_settings, attr, None)
+        fallback_brush = getattr(fallback, "brush", None) if fallback is not None else None
+        if fallback_brush is not None:
+            return fallback, fallback_brush
+        if paint is None and fallback is not None:
+            # Keep looking for a brush, but remember the first available paint for the palette.
+            paint = fallback
+    return paint, None
+
+
+def _value_palette_section_draw(layout, context, record, target_prop):
+    """Collapsible Color Palette section writing a swatch click into ``record``'s ``target_prop``.
+
+    The palette below the scalar value sliders of the value popovers: a swatch writes its color
+    into the target color property (a channel's gray ``value_color`` turns back into the channel
+    value through its RNA setter). Collapsed by default, as in the paint context menus. The tool
+    palette is shown, like #ColorPalettePanel: a Python popover cannot reach the per-picker palette
+    of a C color picker.
+    """
+    # The palette hangs off the Paint, so the brush half is not needed here.
+    paint, _brush = _paint_brush_resolve(context)
+    if paint is None:
+        return
+    header, body = layout.panel("color_palette", default_closed=True)
+    header.label(text="Color Palette", icon='COLOR')
+    if not body:
+        return
+    body.template_ID(paint, "palette", new="palette.new")
+    if paint.palette:
+        body.template_palette(
+            paint, "palette",
+            show_empty_message=True,
+            show_sort_buttons=False,
+            target_data=record,
+            target_property=target_prop,
+        )
+
+
+def _layer_value_record_resolve(context, channel_id):
+    """The stack layer's record for \a channel_id that a layer value popover edits, or None.
+
+    The swatch publishes its record on the layout context (#_draw_channel_subpanel_header), which
+    the popover inherits through the button; that is the only way to reach a layer which is not the
+    active one, or a material other than the active slot's (a pinned Properties editor). Without
+    the pointer, the record is looked up the way the Layer Material tab finds its owner.
+    """
+    record = getattr(context, "material_paint_layer_channel", None)
+    if record is not None and record.channel == channel_id:
+        return record
+    material = context.material
+    if material is None:
+        ob = context.object
+        material = ob.active_material if ob is not None else None
+    if material is None or not material.is_layered:
+        return None
+    layer = material.paint_layers.active
+    if layer is None:
+        return None
+    for record in layer.channels:
+        if record.channel == channel_id:
+            return record
+    return None
+
+
+class _MaterialChannelValuePopover:
+    # Not a registered type itself: subclassing a registered Panel would unregister its `draw`
+    # (see #_MaterialMaskValuePopover). TOPBAR/HEADER is the space popover-only panels use so they
+    # resolve from every editor's header.
+    bl_space_type = 'TOPBAR'
+    bl_region_type = 'HEADER'
+    bl_ui_units_x = 10
+
+    # 'brush' resolves the record from the active brush's #BrushMaterialPaint, 'layer' from the
+    # record the channel view published, falling back to the active material's active stack layer
+    # (see #_layer_value_record_resolve).
+    _owner = 'brush'
+    # The channel the record is picked by; one panel per channel so the palette sub-panel's
+    # expanded/collapsed state is remembered per channel (panels are keyed by idname).
+    _channel_id = 'METALLIC'
+    # The record's scalar property ('value' is an array for a brush, 'value_scalar' a plain float
+    # for a layer) and the gray color property a palette swatch writes.
+    _value_prop = 'value'
+    _color_prop = 'value_color'
+
+    def _record_resolve(self, context):
+        """The channel record this popover edits, or None when there is nothing to edit.
+
+        The popover cannot see the swatch button that opened it, so the record comes from the
+        context: a layer publishes its own record there, a brush is the active paint mode's.
+        """
+        if self._owner == 'layer':
+            return _layer_value_record_resolve(context, self._channel_id)
+        _paint, brush = _paint_brush_resolve(context)
+        material_paint = brush.material_paint if brush is not None else None
+        if material_paint is None:
+            return None
+        for record in material_paint.channels:
+            if record.channel == self._channel_id:
+                return record
+        return None
+
+    def draw(self, context):
+        record = self._record_resolve(context)
+        if record is None:
+            return
+        layout = self.layout
+        # Index 0 for a plain float as well: #template_material_paint_value_slider takes only 0
+        # for a non-array property, and a brush's `value` is an array whose value sits at 0.
+        layout.template_material_paint_value_slider(record, self._value_prop, index=0)
+        layout.separator()
+        _value_palette_section_draw(layout, context, record, self._color_prop)
+
+
 class _MaterialMaskValuePopover:
     # Not a registered type itself: subclassing a registered Panel would unregister its `draw`.
     # TOPBAR/HEADER is the space popover-only panels use so they resolve from every editor's
     # header: with a concrete space type the panel's poll fails elsewhere and `Layout::popover`
     # then draws the swatch button disabled (see #Layout::popover's !ok branch).
+    #
+    # Each panel names the gray color property a palette swatch writes -- 'value_color' for the
+    # primary one, 'value_secondary_color' for the secondary one, so the two never target the
+    # pair's same value. Like `_prop_name` there is no default: a new panel cannot silently write
+    # the primary value.
     bl_space_type = 'TOPBAR'
     bl_region_type = 'HEADER'
     bl_ui_units_x = 10
 
     def draw(self, context):
-        paint = UnifiedPaintPanel.paint_settings(context)
-        brush = paint.brush if paint is not None else None
-        if brush is None:
-            # A popover opened from the tool header can lose the paint-mode resolution that
-            # #UnifiedPaintPanel.paint_settings relies on. Fall back to the active paint mode's
-            # brush instead of dereferencing None.
-            tool_settings = context.tool_settings
-            for attr in ("sculpt", "image_paint", "vertex_paint", "weight_paint"):
-                paint = getattr(tool_settings, attr, None)
-                brush = getattr(paint, "brush", None) if paint is not None else None
-                if brush is not None:
-                    break
+        _paint, brush = _paint_brush_resolve(context)
         channel = _mask_alpha_channel(context, brush)
         if channel is None:
             return
-        self.layout.template_material_paint_value_slider(channel, self._prop_name, index=0)
+        layout = self.layout
+        layout.template_material_paint_value_slider(channel, self._prop_name, index=0)
+        layout.separator()
+        _value_palette_section_draw(layout, context, channel, self._color_prop)
 
 
 class PAINT_PT_material_mask_value_primary(_MaterialMaskValuePopover, bpy.types.Panel):
     bl_label = "Mask Value"
     _prop_name = "value"
+    _color_prop = "value_color"
 
 
 class PAINT_PT_material_mask_value_secondary(_MaterialMaskValuePopover, bpy.types.Panel):
     bl_label = "Mask Secondary Value"
     _prop_name = "value_secondary"
+    _color_prop = "value_secondary_color"
+
+
+def _material_value_popover_class(owner, channel_id, label, value_prop):
+    """Build one value popover panel from a #_MATERIAL_VALUE_POPOVER_TABLE row.
+
+    The class name is the panel idname: a Python panel type without an explicit `bl_idname` is
+    registered under its `__name__` (see the `bl_idname` -> `__name__` fallback in
+    `pyrna_register_class`). One factory for all of them means the title, the record lookup and the
+    idname the channel views point at are written once, in the table.
+    """
+    return type(
+        _material_value_popover_idname(owner, channel_id),
+        (_MaterialChannelValuePopover, bpy.types.Panel),
+        {
+            "bl_label": label,
+            "_owner": owner,
+            "_channel_id": channel_id,
+            "_value_prop": value_prop,
+        },
+    )
+
+
+_MATERIAL_VALUE_POPOVER_CLASSES = tuple(
+    _material_value_popover_class(*row) for row in _MATERIAL_VALUE_POPOVER_TABLE)
 
 
 class PAINT_PT_shape_texture_preview(bpy.types.Panel):
@@ -4917,6 +5127,8 @@ classes = (
     PAINT_GT_mp_source,
     PAINT_PT_material_mask_value_primary,
     PAINT_PT_material_mask_value_secondary,
+    # The eleven value popovers, generated from #_MATERIAL_VALUE_POPOVER_TABLE.
+    *_MATERIAL_VALUE_POPOVER_CLASSES,
     PAINT_PT_shape_texture_preview,
     PAINT_MT_material_paint_channel_socket,
     PAINT_MT_material_paint_mask_socket,

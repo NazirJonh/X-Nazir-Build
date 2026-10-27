@@ -241,6 +241,29 @@ static void color_picker_update_from_rgb_linear(ColorPicker *cpicker,
   cpicker->is_init = true;
 }
 
+/* Seed a freshly created picker from the color property its button edits: whether the property is
+ * gamma (i.e. already sRGB encoded), whether it has an alpha channel, and the RGB the wheel and
+ * the number sliders start from. Both picker paths use it -- the popup (#block_colorpicker) and
+ * the inline template picker -- so the two cannot end up showing different values for one
+ * property. \a block is the block the picker is drawn into: the popup builds its own, so it is not
+ * the button's block. \a r_rgba is the scene-linear RGBA read from the property, which the popup
+ * picker also needs for its own widgets. */
+static void color_picker_seed_from_but(ColorPicker *cpicker,
+                                      Block *block,
+                                      Button *but,
+                                      float r_rgba[4])
+{
+  /* The gamma flag lives on the block, not on the picker, and is only ever set: it is what
+   * #button_is_color_gamma then reports for every button of that block. */
+  if (button_is_color_gamma(but)) {
+    block->is_color_gamma_picker = true;
+  }
+  cpicker->has_alpha = button_color_has_alpha(but);
+
+  RNA_property_float_get_array_at_most(&but->rnapoin, but->rnaprop, r_rgba, 4);
+  color_picker_update_from_rgb_linear(cpicker, block->is_color_gamma_picker, false, r_rgba);
+}
+
 void button_hsv_set(Button *but)
 {
   float rgb_perceptual_slider[3];
@@ -780,11 +803,7 @@ static void block_colorpicker(
 
   RNA_property_float_ui_range(ptr, prop, &softmin, &softmax, &step, &precision);
   RNA_property_float_range(ptr, prop, &hardmin, &hardmax);
-  RNA_property_float_get_array_at_most(ptr, prop, rgba_scene_linear, 4);
-
-  color_picker_update_from_rgb_linear(
-      cpicker, block->is_color_gamma_picker, false, rgba_scene_linear);
-  cpicker->has_alpha = button_color_has_alpha(from_but);
+  color_picker_seed_from_but(cpicker, block, from_but, rgba_scene_linear);
 
   /* when the softmax isn't defined in the RNA,
    * using very large numbers causes sRGB/linear round trip to fail. */
@@ -1374,6 +1393,16 @@ ColorPicker *block_colorpicker_create(Block *block)
   return cpicker;
 }
 
+void colorpicker_init_from_but(ColorPicker *cpicker, Button *but)
+{
+  /* The inline picker is created for a color property's own button (see #template_color_picker,
+   * which resolves the property before it builds any button), so the property is always there:
+   * returning silently instead would leave the picker un-initialized and editing a stale HSV. */
+  BLI_assert(but != nullptr && but->rnaprop != nullptr);
+  float rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  color_picker_seed_from_but(cpicker, but->block, but, rgba);
+}
+
 static bool colorpicker_rgb_get_from_region(const ARegion *region, float r_rgb[3])
 {
   for (const Block &block : region->runtime->uiblocks) {
@@ -1382,6 +1411,11 @@ static bool colorpicker_rgb_get_from_region(const ARegion *region, float r_rgb[3
         float rgb[3];
         color_picker_hsv_to_rgb(cpicker.hsv_perceptual, rgb);
         perceptual_to_scene_linear_space(block.is_color_gamma_picker, rgb);
+        if (block.is_color_gamma_picker) {
+          /* A gamma picker holds sRGB values (no conversion built the HSV), while the contract
+           * here is scene-linear (#colorpicker_active_rgb_get). */
+          IMB_colormanagement_srgb_to_scene_linear_v3(rgb, rgb);
+        }
         copy_v3_v3(r_rgb, rgb);
         return true;
       }

@@ -16,6 +16,7 @@
 #include "BLI_span.hh"
 
 #include <cstdint>
+#include <string>
 
 namespace blender {
 
@@ -532,6 +533,8 @@ void ED_image_paint_layer_mapping_gizmo_setup(wmGizmoGroupType *gzgt);
  * switch is ignored: every caller treats the tool as a convenience, never as a requirement.
  */
 void ED_paint_view3d_tool_id_set(bContext *C, const char *tool_id);
+/** Idname of the 3D View's active tool, empty when it cannot be read. */
+std::string ED_paint_view3d_tool_id_get(bContext *C);
 
 /* `paint_layers_gradient_gizmo.cc` */
 

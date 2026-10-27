@@ -1319,7 +1319,6 @@ void PAINT_OT_image_from_view(wmOperatorType *ot);
 void PAINT_OT_add_texture_paint_slot(wmOperatorType *ot);
 void PAINT_OT_image_paint(wmOperatorType *ot);
 void PAINT_OT_texture_fill(wmOperatorType *ot);
-void PAINT_OT_texture_fill_mode_set(wmOperatorType *ot);
 void PAINT_OT_add_simple_uvs(wmOperatorType *ot);
 void PAINT_OT_brush_group_override_toggle(wmOperatorType *ot);
 

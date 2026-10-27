@@ -2856,18 +2856,10 @@ def km_image_paint(params):
         ("paint.image_select_lasso", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True, "ctrl": True},
          {"properties": [("mode", 'SUB')]}),
         # Brush strokes
-        # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
-        # reads Ctrl itself for the secondary color, so one binding covers both.
-        ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},
-         {"properties": [("mode", 'FACE')]}),
-        ("paint.texture_fill_mode_set", {"type": 'TWO', "value": 'PRESS'},
-         {"properties": [("mode", 'ISLAND')]}),
-        ("paint.texture_fill_mode_set", {"type": 'THREE', "value": 'PRESS'},
-         {"properties": [("mode", 'MESH')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FOUR', "value": 'PRESS'},
-         {"properties": [("mode", 'PIXELS')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FIVE', "value": 'PRESS'},
-         {"properties": [("mode", 'LOOP')]}),
+        # Paint, Erase and Fill of the toolbar Paint group; the operator polls false elsewhere.
+        ("paint.toolbar_tool_pick", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("tool", 'PAINT')]}),
+        ("paint.toolbar_tool_pick", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("tool", 'ERASE')]}),
+        ("paint.toolbar_tool_pick", {"type": 'THREE', "value": 'PRESS'}, {"properties": [("tool", 'FILL')]}),
         ("paint.texture_fill", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'NORMAL')]}),
@@ -2899,8 +2891,6 @@ def km_image_paint(params):
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True, "alt": True},
          {"properties": [("mode", 'ROTATION'), ("texmode", 'SECONDARY')]}),
         # Mask Modes
-        ("wm.context_toggle", {"type": 'ONE', "value": 'PRESS'},
-         {"properties": [("data_path", "image_paint_object.data.use_paint_mask")]}),
         # Stabilize Strokes
         ("wm.context_toggle", {"type": 'L', "value": 'PRESS'},
          {"properties": [("data_path", "tool_settings.image_paint.brush.use_smooth_stroke")]}),
@@ -3051,18 +3041,10 @@ def km_sculpt(params):
         ("sculpt.set_pivot_position", {"type": 'RIGHTMOUSE', "value": 'PRESS', "shift": True},
          {"properties": [("mode", 'SURFACE')]}),
         # Brush strokes
-        # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
-        # reads Ctrl itself for the secondary color, so one binding covers both.
-        ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},
-         {"properties": [("mode", 'FACE')]}),
-        ("paint.texture_fill_mode_set", {"type": 'TWO', "value": 'PRESS'},
-         {"properties": [("mode", 'ISLAND')]}),
-        ("paint.texture_fill_mode_set", {"type": 'THREE', "value": 'PRESS'},
-         {"properties": [("mode", 'MESH')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FOUR', "value": 'PRESS'},
-         {"properties": [("mode", 'PIXELS')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FIVE', "value": 'PRESS'},
-         {"properties": [("mode", 'LOOP')]}),
+        # Paint, Erase and Fill of the toolbar Paint group; the operator polls false elsewhere.
+        ("paint.toolbar_tool_pick", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("tool", 'PAINT')]}),
+        ("paint.toolbar_tool_pick", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("tool", 'ERASE')]}),
+        ("paint.toolbar_tool_pick", {"type": 'THREE', "value": 'PRESS'}, {"properties": [("tool", 'FILL')]}),
         ("paint.texture_fill", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("sculpt.brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS'},
          {"properties": [("mode", 'NORMAL')]}),

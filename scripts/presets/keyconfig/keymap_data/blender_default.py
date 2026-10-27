@@ -5240,18 +5240,10 @@ def km_image_paint(params):
     items.extend([
         # Temporary lasso selection mask (does not switch the active tool).
         *_template_items_image_paint_select_lasso_gesture(params),
-        # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
-        # reads Ctrl itself for the secondary color, so one binding covers both.
-        ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},
-         {"properties": [("mode", 'FACE')]}),
-        ("paint.texture_fill_mode_set", {"type": 'TWO', "value": 'PRESS'},
-         {"properties": [("mode", 'ISLAND')]}),
-        ("paint.texture_fill_mode_set", {"type": 'THREE', "value": 'PRESS'},
-         {"properties": [("mode", 'MESH')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FOUR', "value": 'PRESS'},
-         {"properties": [("mode", 'PIXELS')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FIVE', "value": 'PRESS'},
-         {"properties": [("mode", 'LOOP')]}),
+        # Paint, Erase and Fill of the Image Editor Paint group; the operator polls false elsewhere.
+        ("paint.toolbar_tool_pick", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("tool", 'PAINT')]}),
+        ("paint.toolbar_tool_pick", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("tool", 'ERASE')]}),
+        ("paint.toolbar_tool_pick", {"type": 'THREE', "value": 'PRESS'}, {"properties": [("tool", 'FILL')]}),
         ("paint.texture_fill", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("paint.image_paint", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
@@ -5287,8 +5279,6 @@ def km_image_paint(params):
          {"properties": [("mode", 'SCALE'), ("texmode", 'SECONDARY')]}),
         ("brush.stencil_control", {"type": 'RIGHTMOUSE', "value": 'PRESS', "ctrl": True, "alt": True},
          {"properties": [("mode", 'ROTATION'), ("texmode", 'SECONDARY')]}),
-        ("wm.context_toggle", {"type": 'ONE', "value": 'PRESS'},
-         {"properties": [("data_path", "image_paint_object.data.use_paint_mask")]}),
         ("wm.context_toggle", {"type": 'S', "value": 'PRESS', "shift": True},
          {"properties": [("data_path", "tool_settings.image_paint.brush.use_smooth_stroke")]}),
         ("wm.context_menu_enum", {"type": 'E', "value": 'PRESS', "alt": True},
@@ -5556,18 +5546,10 @@ def km_sculpt(params):
          {"properties": [("reverse", False)]}),
         ("paint.material_view_pass_cycle", {"type": 'C', "value": 'PRESS', "shift": True},
          {"properties": [("reverse", True)]}),
-        # Texture Fill. 1-4 switch the active Fill brush's expansion mode; the operator
-        # reads Ctrl itself for the secondary color, so one binding covers both.
-        ("paint.texture_fill_mode_set", {"type": 'ONE', "value": 'PRESS'},
-         {"properties": [("mode", 'FACE')]}),
-        ("paint.texture_fill_mode_set", {"type": 'TWO', "value": 'PRESS'},
-         {"properties": [("mode", 'ISLAND')]}),
-        ("paint.texture_fill_mode_set", {"type": 'THREE', "value": 'PRESS'},
-         {"properties": [("mode", 'MESH')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FOUR', "value": 'PRESS'},
-         {"properties": [("mode", 'PIXELS')]}),
-        ("paint.texture_fill_mode_set", {"type": 'FIVE', "value": 'PRESS'},
-         {"properties": [("mode", 'LOOP')]}),
+        # Paint, Erase and Fill of the Paint toolbar group; the operator polls false elsewhere.
+        ("paint.toolbar_tool_pick", {"type": 'ONE', "value": 'PRESS'}, {"properties": [("tool", 'PAINT')]}),
+        ("paint.toolbar_tool_pick", {"type": 'TWO', "value": 'PRESS'}, {"properties": [("tool", 'ERASE')]}),
+        ("paint.toolbar_tool_pick", {"type": 'THREE', "value": 'PRESS'}, {"properties": [("tool", 'FILL')]}),
         ("paint.texture_fill", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("sculpt.brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
         ("sculpt.brush_stroke", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True},
@@ -7944,6 +7926,9 @@ def km_image_editor_tool_paint_select_gradient(params, *, fallback):
         {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
         {"items": [
             *([] if (fallback and not params.use_fallback_tool) else [
+                # Ahead of the selection gradient: the operator polls false unless an active Gradient
+                # layer is shown, so the tool edits that layer's line and otherwise paints the selection.
+                ("paint.paint_layer_gradient", params.tool_maybe_tweak_event, None),
                 ("paint.image_select_gradient",
                  {"type": params.tool_mouse, "value": 'PRESS'},
                  None),
@@ -7956,18 +7941,6 @@ def km_image_editor_tool_paint_select_gradient(params, *, fallback):
                 ("paint.image_select_gradient_cancel",
                  {"type": 'ESC', "value": 'PRESS'},
                  None),
-            ]),
-        ]},
-    )
-
-
-def km_image_editor_tool_paint_layer_gradient(params, *, fallback):
-    return (
-        _fallback_id("Image Editor Tool: Paint, Layer Gradient", fallback),
-        {"space_type": 'IMAGE_EDITOR', "region_type": 'WINDOW'},
-        {"items": [
-            *([] if (fallback and not params.use_fallback_tool) else [
-                ("paint.paint_layer_gradient", params.tool_maybe_tweak_event, None),
             ]),
         ]},
     )
@@ -10120,7 +10093,6 @@ def generate_keymaps(params=None):
         *(km_image_editor_tool_paint_select_transform(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_warp(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_select_gradient(params, fallback=fallback) for fallback in (False, True)),
-        *(km_image_editor_tool_paint_layer_gradient(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_line(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_polyline(params, fallback=fallback) for fallback in (False, True)),
         *(km_image_editor_tool_paint_shape_rect(params, fallback=fallback) for fallback in (False, True)),

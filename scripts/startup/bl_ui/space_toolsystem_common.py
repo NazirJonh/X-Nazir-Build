@@ -33,6 +33,8 @@ if "_icon_cache" in locals():
 
 # (icon_name -> icon_value) map
 _icon_cache = {}
+# Tool icon names with this prefix name a Material Symbols glyph instead of a built-in or file icon.
+_ICON_GLYPH_PREFIX = "glyph:"
 
 
 def _keymap_fn_from_seq(keymap_data):
@@ -260,7 +262,11 @@ class ToolSelectPanelHelper:
         if icon_name is not None:
             assert type(icon_name) is str
             icon_value = _icon_cache.get(icon_name)
-            if icon_value is None:
+            if icon_value is None and icon_name.startswith(_ICON_GLYPH_PREFIX):
+                # A Material Symbols glyph, named by its hexadecimal code point, e.g. "glyph:f0c1".
+                icon_value = bpy.app.icons.glyph(int(icon_name[len(_ICON_GLYPH_PREFIX):], 16))
+                _icon_cache[icon_name] = icon_value
+            elif icon_value is None:
                 # Tool icons normally use triangle geometry files, but built-in UI icons are also
                 # valid tool icons and do not have a corresponding file in `datafiles/icons`.
                 icon_item = bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items_static.get(

@@ -197,17 +197,36 @@ void layers_texpaint_slots_refresh(bContext &C)
  * A Gradient layer, correction or mask item is edited with the Color Gradient tool, so making one
  * active switches to it. Only in Sculpt Mode, where that tool lives; anywhere else the tool is not
  * on offer and the row is still edited through its panel and gizmo.
+ *
+ * The tool the user had is remembered on the way in and put back when a row that is not a Gradient
+ * becomes active. Moving between Gradient rows keeps the Gradient tool and the remembered tool.
  */
 void gradient_tool_activate(bContext &C, const MaterialPaintLayer *layer)
 {
-  if (layer == nullptr || !BKE_paint_layers_gradient_supported(*layer)) {
+  Object *object = CTX_data_active_object(&C);
+  if (object == nullptr || (object->mode & OB_MODE_SCULPT) == 0 ||
+      object->runtime->sculpt_session == nullptr)
+  {
     return;
   }
-  const Object *object = CTX_data_active_object(&C);
-  if (object == nullptr || (object->mode & OB_MODE_SCULPT) == 0) {
+  std::string &saved_tool_id = object->runtime->sculpt_session->layers.gradient_saved_tool_id;
+  constexpr const char *gradient_tool_id = "builtin.color_gradient";
+
+  if (layer != nullptr && BKE_paint_layers_gradient_supported(*layer)) {
+    const std::string current_tool_id = ED_paint_view3d_tool_id_get(&C);
+    if (current_tool_id != gradient_tool_id) {
+      saved_tool_id = current_tool_id;
+    }
+    ED_paint_view3d_tool_id_set(&C, gradient_tool_id);
     return;
   }
-  ED_paint_view3d_tool_id_set(&C, "builtin.color_gradient");
+
+  /* Only restored while the Gradient tool is still active: a tool the user picked during the Gradient
+   * row is a choice that the row change should not overrule. */
+  if (!saved_tool_id.empty() && ED_paint_view3d_tool_id_get(&C) == gradient_tool_id) {
+    ED_paint_view3d_tool_id_set(&C, saved_tool_id.c_str());
+  }
+  saved_tool_id.clear();
 }
 
 /** Set the target a layered material's stroke paints; true when it changed. */

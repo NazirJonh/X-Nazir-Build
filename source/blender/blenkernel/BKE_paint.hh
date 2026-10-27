@@ -988,6 +988,9 @@ struct SculptSession : NonCopyable, NonMovable {
     Array<Bounds<float3>> base_view_node_offset_bounds;
     /* Open weight-mask editing session, if any. See #SculptLayerMaskEdit. */
     SculptLayerMaskEdit mask_edit;
+    /* Tool the Color Gradient tool replaced when a Gradient layer became active. Restored when a row
+     * that is not a Gradient is picked, so the tool the user had comes back. Empty when none. */
+    std::string gradient_saved_tool_id;
   } layers;
 
   /* Contains information used by tools and brushes that require different logic based on boundary

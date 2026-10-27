@@ -231,12 +231,6 @@ static bool texture_fill_poll(bContext *C)
   return texture_fill_context_get(C, true, &paint, &brush);
 }
 
-static bool texture_fill_mode_set_poll(bContext *C)
-{
-  Brush *brush;
-  return texture_fill_context_get(C, false, nullptr, &brush);
-}
-
 static PaintMode texture_fill_paint_mode_get(const bContext *C)
 {
   if (CTX_wm_space_image(C) != nullptr) {
@@ -995,57 +989,6 @@ void PAINT_OT_texture_fill(wmOperatorType *ot)
   prop = RNA_def_boolean(
       ot->srna, "loop_mode", false, "", "Internal: the modal loop-fill path is active");
   RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
-}
-
-static wmOperatorStatus texture_fill_mode_set_exec(bContext *C, wmOperator *op)
-{
-  Brush *brush;
-  if (!texture_fill_context_get(C, false, nullptr, &brush)) {
-    /* Defensive: #texture_fill_mode_set_poll should have caught this. */
-    return OPERATOR_CANCELLED;
-  }
-
-  brush->fill_expand = RNA_enum_get(op->ptr, "mode");
-  BKE_brush_tag_unsaved_changes(brush);
-  WM_main_add_notifier(NC_BRUSH | NA_EDITED, brush);
-  return OPERATOR_FINISHED;
-}
-
-void PAINT_OT_texture_fill_mode_set(wmOperatorType *ot)
-{
-  static const EnumPropertyItem mode_items[] = {
-      {IMAGE_PAINT_SELECT_EXPAND_FACE, "FACE", 0, "Face", "Fill the clicked faces"},
-      {IMAGE_PAINT_SELECT_EXPAND_ISLAND,
-       "ISLAND",
-       0,
-       "Island",
-       "Fill connected UV islands"},
-      {IMAGE_PAINT_SELECT_EXPAND_MESH, "MESH", 0, "Mesh", "Fill all visible faces"},
-      {IMAGE_PAINT_SELECT_EXPAND_PIXELS,
-       "PIXELS",
-       0,
-       "Pixels",
-       "Flood fill connected pixels"},
-      {IMAGE_PAINT_SELECT_EXPAND_LOOP,
-       "LOOP",
-       0,
-       "Loop",
-       "Click an edge to fill the face loop across it; drag to add the loops of parallel edges"},
-      {0, nullptr, 0, nullptr, nullptr},
-  };
-
-  ot->name = "Set Texture Fill Mode";
-  ot->idname = "PAINT_OT_texture_fill_mode_set";
-  ot->description = "Set the expansion mode for the active Texture Fill brush";
-
-  ot->exec = texture_fill_mode_set_exec;
-  ot->poll = texture_fill_mode_set_poll;
-  /* Brush data changes must be undoable like other brush edits. */
-  ot->flag = OPTYPE_UNDO;
-
-  ot->prop = RNA_def_enum(
-      ot->srna, "mode", mode_items, IMAGE_PAINT_SELECT_EXPAND_FACE, "Mode", "Fill expansion mode");
-  RNA_def_property_flag(ot->prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 }
 
 /**

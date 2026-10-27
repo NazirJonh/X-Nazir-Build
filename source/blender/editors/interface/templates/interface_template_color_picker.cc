@@ -34,7 +34,6 @@ void template_color_picker(Layout *layout,
 {
   PropertyRNA *prop = RNA_struct_find_property(ptr, propname.c_str());
   Block *block = layout->block();
-  ColorPicker *cpicker = block_colorpicker_create(block);
 
   if (!prop) {
     RNA_warning("property not found: %s.%s", RNA_struct_identifier(ptr->type), propname.c_str());
@@ -47,6 +46,7 @@ void template_color_picker(Layout *layout,
   Layout &col = layout->column(true);
   Layout &row = col.row(true);
 
+  ColorPicker *cpicker = block_colorpicker_create(block);
   Button *but = nullptr;
   ButtonHSVCube *hsv_but;
   switch (U.color_picker_type) {
@@ -104,6 +104,9 @@ void template_color_picker(Layout *layout,
   }
 
   but->custom_data = cpicker;
+  /* Inline pickers have no popup build path, so the picker state (notably the HSV the wheel and
+   * sliders edit, and the palette "Add" button's source) is seeded from the property here. */
+  colorpicker_init_from_but(cpicker, but);
 
   cpicker->use_color_lock = lock;
   cpicker->use_color_cubic = cubic;

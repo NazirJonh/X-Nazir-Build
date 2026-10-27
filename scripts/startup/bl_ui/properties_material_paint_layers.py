@@ -11,6 +11,7 @@ the Layer Material tab context), so this module only supplies functions.
 """
 
 from bl_ui.properties_paint_common import (
+    _LAYER_VALUE_PANEL_BY_CHANNEL,
     _MATERIAL_PAINT_CHANNEL_TOGGLE_LABELS,
     _MATERIAL_PAINT_CHANNEL_TOGGLE_UI_UNITS_X,
     _MATERIAL_PAINT_CHANNEL_UI_ORDER,
@@ -165,12 +166,12 @@ def _layer_channel_view(layer, record, channel_id, name):
     """
     color = None
     scalar = None
-    value_color = None
+    value_panel = None
     if channel_id in ('BASE_COLOR', 'NORMAL', 'EMISSION'):
         color = (record, "color")
     else:
         scalar = (record, "value_scalar")
-        value_color = (record, "value_color")
+        value_panel = _LAYER_VALUE_PANEL_BY_CHANNEL.get(channel_id)
     return MaterialPaintChannelView(
         record,
         channel_id,
@@ -178,7 +179,7 @@ def _layer_channel_view(layer, record, channel_id, name):
         use=(record, "use"),
         color=color,
         scalar=scalar,
-        value_color=value_color,
+        value_panel=value_panel,
         image=(record, "image"),
         socket_menu="PAINT_MT_material_layer_channel_socket",
         socket_context_set=(("material_paint_layer_channel", record),

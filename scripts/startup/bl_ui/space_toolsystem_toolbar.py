@@ -2409,7 +2409,7 @@ class _defs_sculpt:
         return dict(
             idname="builtin.mask_by_topology_island",
             label="Mask Topology Island",
-            icon="EYEDROPPER",
+            icon="glyph:e762",
             widget=None,
             cursor='EYEDROPPER',
             keymap=(),
@@ -2502,7 +2502,7 @@ class _defs_sculpt:
         return dict(
             idname="builtin.curves_edit",
             label="Curve Edit",
-            icon="FORCE_CURVE",
+            icon="glyph:f0c1",
             widget=None,
             cursor='CROSSHAIR',
             keymap="3D View Tool: Sculpt, Curves Edit",
@@ -2705,6 +2705,13 @@ class _defs_texture_paint:
     @ToolDef.from_fn
     def selection_gradient():
         def draw_settings(context, layout, _tool):
+            # An active Gradient layer makes this tool edit its line, the same as the 3D Viewport's
+            # Color Gradient tool, so the layer settings replace the selection gradient ones.
+            layer = _active_gradient_layer(context)
+            if layer is not None:
+                _draw_layer_gradient_tool_settings(layout, context, layer, context.region.type == 'TOOL_HEADER')
+                return
+
             imapaint = context.tool_settings.image_paint
             layout.prop(imapaint, "gradient_type", text="Type")
             if imapaint.gradient_type == 'CURVE':
@@ -2744,26 +2751,6 @@ class _defs_texture_paint:
             icon="ops.paint.weight_gradient",
             widget=None,
             keymap="Image Editor Tool: Paint, Gradient",
-            draw_settings=draw_settings,
-        )
-
-    @ToolDef.from_fn
-    def paint_layer_gradient():
-        def draw_settings(_context, layout, _tool):
-            layout.label(
-                text="Drag the active Gradient layer's UV line; 3D spaces are edited in the 3D View",
-                icon='INFO',
-            )
-
-        return dict(
-            idname="builtin.image_paint_layer_gradient",
-            label="Layer Gradient",
-            # A tool button takes a built-in icon, not the Material Symbols glyph the rows and the
-            # Add menu draw. This Color Theme icon -- the ramp the tool edits -- is the built-in
-            # stand-in, the same `PAINT_GRADIENT_ICON` the C++ rows fall back to.
-            icon='COLORSET_13_VEC',
-            widget=None,
-            keymap="Image Editor Tool: Paint, Layer Gradient",
             draw_settings=draw_settings,
         )
 
@@ -2919,8 +2906,8 @@ _tools_image_paint_select_view3d = (
     ),
     None,
     (
-        _defs_image_paint_select_view3d.move,
         _defs_image_paint_select_view3d.transform,
+        _defs_image_paint_select_view3d.move,
         _defs_image_paint_select_view3d.warp,
     ),
 )
@@ -4899,8 +4886,8 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ),
         None,
         (
-            _defs_image_paint_select.move,
             _defs_image_paint_select.transform,
+            _defs_image_paint_select.move,
             _defs_image_paint_select.warp,
         ),
     )
@@ -4943,14 +4930,15 @@ class IMAGE_PT_tools_active(ToolSelectPanelHelper, Panel):
         ],
         'PAINT': [
             _brush_tool,
+            None,
             _defs_texture_paint.erase,
+            None,
+            _defs_texture_paint.fill,
+            None,
             _defs_texture_paint.blur,
             _defs_texture_paint.smear,
-            _defs_texture_paint.clone,
             _defs_texture_paint.texture_clone,
-            _defs_texture_paint.fill,
             _defs_texture_paint.selection_gradient,
-            _defs_texture_paint.paint_layer_gradient,
             _defs_texture_paint.mask,
             None,
             (
@@ -5568,6 +5556,12 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.mask_polyline,
         ),
         (
+            _defs_sculpt.hide_border,
+            _defs_sculpt.hide_lasso,
+            _defs_sculpt.hide_line,
+            _defs_sculpt.hide_polyline,
+        ),
+        (
             _defs_sculpt.face_set_box,
             _defs_sculpt.face_set_lasso,
             _defs_sculpt.face_set_line,
@@ -5606,9 +5600,14 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
 
     _tools_paint_display = [
         _defs_sculpt.paint,
-        _defs_sculpt.texture_fill,
         None,
         _defs_sculpt.erase,
+        None,
+        _defs_sculpt.texture_fill,
+        None,
+        # Kept as a pair so they share a row in the multi-column toolbar layout.
+        _defs_sculpt.curves_edit,
+        _defs_sculpt.mask_by_topology_island,
         None,
         (
             _defs_sculpt.hide_border,
@@ -5616,10 +5615,6 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
             _defs_sculpt.hide_line,
             _defs_sculpt.hide_polyline,
         ),
-        None,
-        # Kept as a pair so they share a row in the multi-column toolbar layout.
-        _defs_sculpt.curves_edit,
-        _defs_sculpt.mask_by_topology_island,
         None,
         _defs_sculpt.clone,
         None,
@@ -5869,6 +5864,52 @@ class VIEW3D_OT_sculpt_paint_select_tool_cycle(Operator):
         return bpy.ops.wm.tool_set_by_id(name="builtin.image_paint_select_box", cycle=True)
 
 
+class PAINT_OT_toolbar_tool_pick(Operator):
+    """Switch between Paint, Erase and Fill while the Paint toolbar group or Image Editor Paint is shown"""
+    bl_idname = "paint.toolbar_tool_pick"
+    bl_label = "Pick Paint Tool"
+    bl_options = {'INTERNAL'}
+
+    tool: EnumProperty(
+        name="Tool",
+        items=(
+            ('PAINT', "Paint", ""),
+            ('ERASE', "Erase", ""),
+            ('FILL', "Fill", ""),
+        ),
+    )
+
+    # The tool ids of each space, the same tools the Paint toolbar group lists.
+    _tool_ids = {
+        'VIEW_3D': {
+            'PAINT': "builtin_brush.paint",
+            'ERASE': "builtin_brush.erase",
+            'FILL': "builtin_brush.texture_fill",
+        },
+        'IMAGE_EDITOR': {
+            'PAINT': "builtin.brush",
+            'ERASE': "builtin_brush.erase",
+            'FILL': "builtin_brush.fill",
+        },
+    }
+
+    @classmethod
+    def poll(cls, context):
+        space = context.space_data
+        if space is None:
+            return False
+        if space.type == 'VIEW_3D':
+            return context.mode == 'SCULPT' and VIEW3D_PT_tools_active._tool_display_from_context(context) == 'PAINT'
+        if space.type == 'IMAGE_EDITOR':
+            return space.mode == 'PAINT'
+        return False
+
+    def execute(self, context):
+        import bpy
+        tool_id = self._tool_ids[context.space_data.type][self.tool]
+        return bpy.ops.wm.tool_set_by_id(name=tool_id)
+
+
 class SEQUENCER_PT_tools_active(ToolSelectPanelHelper, Panel):
     bl_space_type = 'SEQUENCE_EDITOR'
     bl_region_type = 'TOOLS'
@@ -5954,6 +5995,7 @@ classes = (
     VIEW3D_PT_tools_active,
     VIEW3D_OT_sculpt_paint_display_set,
     VIEW3D_OT_sculpt_paint_select_tool_cycle,
+    PAINT_OT_toolbar_tool_pick,
     SEQUENCER_PT_tools_active,
     SCULPT_PT_insert_asset_correction,
     SCULPT_PT_insert_asset_extra,

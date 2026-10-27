@@ -2620,4 +2620,9 @@ void ED_paint_view3d_tool_id_set(bContext *C, const char *tool_id)
   ed::sculpt_paint::layers::view3d_tool_id_set(C, tool_id);
 }
 
+std::string ED_paint_view3d_tool_id_get(bContext *C)
+{
+  return ed::sculpt_paint::layers::view3d_tool_id_get(C);
+}
+
 }  // namespace blender

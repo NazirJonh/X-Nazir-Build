@@ -13,6 +13,8 @@
 
 #include "paint_layers_graph_eval_test_fixture.hh"
 
+#include "BLI_listbase.h"
+
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 

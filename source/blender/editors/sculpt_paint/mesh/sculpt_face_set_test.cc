@@ -57,17 +57,17 @@ TEST_F(FindSharedNextAvailableIdTest, MaxAcrossMeshes)
   EXPECT_EQ(find_next_available_id(*mesh_b), 8);
 
   const Mesh *meshes[2] = {mesh_a, mesh_b};
-  EXPECT_EQ(find_shared_next_available_id(Span(meshes)), 8);
+  EXPECT_EQ(find_shared_next_available_id(Span<const Mesh *>(meshes, 2)), 8);
 
   const Mesh *meshes_swapped[2] = {mesh_b, mesh_a};
-  EXPECT_EQ(find_shared_next_available_id(Span(meshes_swapped)), 8);
+  EXPECT_EQ(find_shared_next_available_id(Span<const Mesh *>(meshes_swapped, 2)), 8);
 }
 
 TEST_F(FindSharedNextAvailableIdTest, SingleMeshMatchesFindNextAvailableId)
 {
   set_first_face_set_id(*mesh_a, 5);
   const Mesh *meshes[1] = {mesh_a};
-  EXPECT_EQ(find_shared_next_available_id(Span(meshes)), find_next_available_id(*mesh_a));
+  EXPECT_EQ(find_shared_next_available_id(Span<const Mesh *>(meshes, 1)), find_next_available_id(*mesh_a));
 }
 
 TEST_F(FindSharedNextAvailableIdTest, EmptySpanReturnsZero)

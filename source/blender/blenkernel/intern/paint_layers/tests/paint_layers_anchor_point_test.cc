@@ -603,8 +603,10 @@ TEST_F(PaintLayersAnchorPointTest, duplicate_branch_remaps_internal_reference)
   MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, row);
   ASSERT_NE(copy, nullptr);
   ASSERT_NE(copy->effects.first, nullptr);
-  const MaterialPaintLayer *copy_point = copy->effects.first;
-  const MaterialPaintLayer *copy_reader = copy->effects.last;
+  const MaterialPaintLayer *copy_point =
+      static_cast<const MaterialPaintLayer *>(copy->effects.first);
+  const MaterialPaintLayer *copy_reader =
+      static_cast<const MaterialPaintLayer *>(copy->effects.last);
   ASSERT_TRUE(BLI_uuid_equal(copy_reader->anchor_point_source, copy_point->marker));
   EXPECT_FALSE(BLI_uuid_equal(copy_reader->anchor_point_source, point->marker));
 }
@@ -620,7 +622,9 @@ TEST_F(PaintLayersAnchorPointTest, duplicate_branch_keeps_external_reference)
   MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, row);
   ASSERT_NE(copy, nullptr);
   ASSERT_NE(copy->effects.first, nullptr);
-  EXPECT_TRUE(BLI_uuid_equal(copy->effects.first->anchor_point_source, point->marker));
+  const MaterialPaintLayer *copy_first =
+      static_cast<const MaterialPaintLayer *>(copy->effects.first);
+  EXPECT_TRUE(BLI_uuid_equal(copy_first->anchor_point_source, point->marker));
 }
 
 /* -------------------------------------------------------------------- */
@@ -757,9 +761,10 @@ TEST_F(PaintLayersAnchorPointTest, slice_cache_renders_again_only_the_edited_reg
   const float other_before = texel_red(*before_color, 6, 6);
 
   /* A 2x2 dab of red, marked as the rectangle it is. */
+  uchar *pixels = ibuf->byte_data_for_write();
   for (int y = 2; y < 4; y++) {
     for (int x = 2; x < 4; x++) {
-      uchar *texel = ibuf->byte_buffer.data + (int64_t(y) * ibuf->x + x) * 4;
+      uchar *texel = pixels + (int64_t(y) * ibuf->x + x) * 4;
       texel[0] = 255;
     }
   }

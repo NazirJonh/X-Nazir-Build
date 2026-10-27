@@ -4,6 +4,7 @@
 
 #include "testing/testing.h"
 
+#include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_image.hh"
 #include "BKE_lib_id.hh"
@@ -18,13 +19,18 @@ namespace blender::bke::tests {
 class ImageMaterialSourceTest : public BlenderGTestBase {
  public:
   Main *bmain = nullptr;
+  Main *prev_bmain = nullptr;
 
   void SetUp() override
   {
     bmain = BKE_main_new();
+    /* Required by usage of #ID_BLEND_PATH_FROM_GLOBAL in #add_ibuf_for_tile. */
+    prev_bmain = G_MAIN;
+    G_MAIN = bmain;
   }
   void TearDown() override
   {
+    G_MAIN = prev_bmain;
     BKE_main_free(bmain);
   }
 

@@ -34,6 +34,18 @@ class PaintLayersFilterTest : public PaintLayersGraphEvalTest {
     EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, filter, opacity));
     return filter;
   }
+
+  /**
+   * The weight the row's mask gives the row, read from the stack: the result is linear in it,
+   * `bottom + (row - bottom) * M`, so two readings of the same stack with the row hidden and shown
+   * give `M` relative to a reading at a known one.
+   */
+  float row_weight(MaterialPaintLayer &row, const RGBA &bottom, const RGBA &row_alone)
+  {
+    EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, &row, true));
+    const RGBA shown = cpu_pixel(kColor);
+    return (shown.r - bottom.r) / (row_alone.r - bottom.r);
+  }
 };
 
 class PaintLayersLevelsTest : public PaintLayersFilterTest {
@@ -344,18 +356,6 @@ class PaintLayersMaskFilterTest : public PaintLayersFilterTest {
       EXPECT_TRUE(BKE_paint_layers_set_opacity(*ma, item, opacity));
     }
     return item;
-  }
-
-  /**
-   * The weight the row's mask gives the row, read from the stack: the result is linear in it,
-   * `bottom + (row - bottom) * M`, so two readings of the same stack with the row hidden and shown
-   * give `M` relative to a reading at a known one.
-   */
-  float row_weight(MaterialPaintLayer &row, const RGBA &bottom, const RGBA &row_alone)
-  {
-    EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, &row, true));
-    const RGBA shown = cpu_pixel(kColor);
-    return (shown.r - bottom.r) / (row_alone.r - bottom.r);
   }
 };
 

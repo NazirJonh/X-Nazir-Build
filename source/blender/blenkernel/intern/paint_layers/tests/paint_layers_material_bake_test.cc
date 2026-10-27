@@ -144,7 +144,7 @@ class PaintLayersMaterialBakeTest : public PaintLayersGenerateTest {
 
   /** What the editor does before a render starts: the side, the state it starts from, the maps. */
   void start_render(MaterialPaintLayer &row,
-                    const Span<int> channels,
+                    const Span<const int> channels,
                     uint32_t r_hash[2],
                     uint32_t r_source_hash[2],
                     const int size = 64)
@@ -155,7 +155,8 @@ class PaintLayersMaterialBakeTest : public PaintLayersGenerateTest {
     for (const int channel : channels) {
       images.append(add_image(channel == PAINT_MATERIAL_CHANNEL_ALPHA ? "Alpha" : "Map"));
     }
-    BKE_paint_layers_material_bake_apply(*bmain, *ma, row, size, channels, images);
+    Vector<int> channel_values(channels.begin(), channels.end());
+    BKE_paint_layers_material_bake_apply(*bmain, *ma, row, size, channel_values, images);
   }
 
   /** A Metallic value edit of the source, as the node tree update would report it. */
@@ -263,7 +264,7 @@ TEST_F(PaintLayersMaterialBakeTest, the_maps_handed_over_are_what_the_row_takes_
   MaterialPaintLayer *row = add_material_row(*source);
   ASSERT_NE(row, nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
 
   EXPECT_TRUE(paint_layer_row_participates(*ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR));
   EXPECT_TRUE(paint_layer_row_participates(*ma, *row, PAINT_MATERIAL_CHANNEL_ROUGHNESS));
@@ -303,7 +304,7 @@ TEST_F(PaintLayersMaterialBakeTest, a_rendered_alpha_map_becomes_the_coverage_of
       << "the row waits for its coverage";
   const int channels[] = {PAINT_MATERIAL_CHANNEL_BASE_COLOR, PAINT_MATERIAL_CHANNEL_ALPHA};
   uint32_t hash[2], source_hash[2];
-  start_render(*row, channels, hash, source_hash);
+  start_render(*row, Span<const int>(channels, 2), hash, source_hash);
   EXPECT_EQ(paint_layer_material_coverage_source(*ma, *row).kind,
             PaintLayerMaterialCoverageKind::Baked);
   EXPECT_TRUE(paint_layer_row_participates(*ma, *row, PAINT_MATERIAL_CHANNEL_METALLIC));
@@ -324,7 +325,7 @@ TEST_F(PaintLayersMaterialBakeTest, the_generator_reads_the_maps_and_keeps_the_r
   ASSERT_NE(BKE_paint_layers_correction_add(*ma, row, "Fix", MA_PAINT_LAYER_SOURCE_CONSTANT),
             nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -353,7 +354,7 @@ TEST_F(PaintLayersMaterialBakeTest, the_cpu_composite_lays_the_maps_with_the_cov
   ASSERT_NE(BKE_paint_layers_correction_add(*ma, row, "Fix", MA_PAINT_LAYER_SOURCE_CONSTANT),
             nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
 
   Vector<PaintMaterialCompositeImageLayer> layers;
@@ -379,7 +380,7 @@ TEST_F(PaintLayersMaterialBakeTest, the_row_is_current_only_for_the_state_its_re
   MaterialPaintLayer *row = add_material_row(*source);
   ASSERT_NE(row, nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
 
   /* Handed over but not landed: the maps show, and the row still owes its render. */
   EXPECT_TRUE(paint_layer_row_material_map(*ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr));
@@ -408,7 +409,7 @@ TEST_F(PaintLayersMaterialBakeTest, a_resized_or_repointed_row_does_not_keep_its
   MaterialPaintLayer *row = add_material_row(*source);
   ASSERT_NE(row, nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
 
   Material *other = BKE_material_add(bmain, "Other");
@@ -426,7 +427,7 @@ TEST_F(PaintLayersMaterialBakeTest, a_render_that_did_not_land_is_not_started_ag
   MaterialPaintLayer *row = add_material_row(*source);
   ASSERT_NE(row, nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_row_due(*ma, *row));
 
   EXPECT_FALSE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, false));
@@ -482,7 +483,7 @@ TEST_F(PaintLayersMaterialBakeTest, a_texture_of_the_source_painted_on_makes_the
   MaterialPaintLayer *row = add_material_row(*source);
   ASSERT_NE(row, nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
   ASSERT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
 
@@ -505,7 +506,7 @@ TEST_F(PaintLayersMaterialBakeTest, a_stroke_on_the_mask_of_the_row_does_not_mak
       *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_image));
 
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
   ASSERT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
 
@@ -521,12 +522,13 @@ TEST_F(PaintLayersMaterialBakeTest, a_copy_of_the_owner_starts_without_the_maps_
   MaterialPaintLayer *row = add_material_row(*source);
   ASSERT_NE(row, nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
 
   Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
   ASSERT_NE(copy, nullptr);
-  const MaterialPaintLayer *copied = copy->paint_layers.first;
+  const MaterialPaintLayer *copied =
+      static_cast<const MaterialPaintLayer *>(copy->paint_layers.first);
   ASSERT_NE(copied, nullptr);
   EXPECT_EQ(copied->material, source);
   EXPECT_FALSE(paint_layer_row_material_map(*copy, *copied, PAINT_MATERIAL_CHANNEL_BASE_COLOR, nullptr))
@@ -663,7 +665,7 @@ TEST_F(PaintLayersMaterialBakeTest,
   MaterialPaintLayer *row = add_material_row(*source);
   ASSERT_NE(row, nullptr);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   BKE_paint_layers_active_set(*ma, BLI_uuid_nil());
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
   ASSERT_TRUE(BKE_paint_layers_values_sync(*ma));
@@ -702,7 +704,7 @@ TEST_F(PaintLayersMaterialBakeTest, a_graph_the_row_cannot_show_alone_is_the_gra
   /* The maps are still rendered for what reads maps. */
   EXPECT_TRUE(BKE_paint_layers_material_row_due(*ma, *row));
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   EXPECT_EQ(paint_layer_material_channel_source(
                 *ma, *row, PAINT_MATERIAL_CHANNEL_BASE_COLOR, PaintLayerMaterialUse::Composite)
                 .kind,
@@ -825,7 +827,7 @@ TEST_F(PaintLayersMaterialBakeTest, a_render_nobody_started_makes_the_result_sta
   EXPECT_TRUE(BKE_paint_layers_is_stale(*ma)) << "the maps of the graph are due";
 
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness, 2), hash, source_hash);
   EXPECT_TRUE(BKE_paint_layers_is_stale(*ma)) << "handed over, not landed";
 
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
@@ -1027,7 +1029,7 @@ TEST_F(PaintLayersMaterialBakeTest, an_edit_the_normal_does_not_read_renders_not
   ASSERT_NE(row, nullptr);
   ASSERT_TRUE(paint_layer_material_row_needs_map(*ma, *row));
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness_normal, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness_normal, 3), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
   ASSERT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
 
@@ -1050,7 +1052,7 @@ TEST_F(PaintLayersMaterialBakeTest, an_image_editor_closing_does_not_make_the_ro
   /* A render made while an Image Editor reads the maps, which then closes. */
   BKE_paint_layers_preview_wanted_set(*ma, true);
   uint32_t hash[2], source_hash[2];
-  start_render(*row, base_color_roughness_normal, hash, source_hash);
+  start_render(*row, Span<const int>(base_color_roughness_normal, 3), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
   EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
 
@@ -1082,7 +1084,7 @@ TEST_F(PaintLayersMaterialBakeTest, only_the_normal_is_rendered_until_something_
 
   const int normal_only[] = {PAINT_MATERIAL_CHANNEL_NORMAL};
   uint32_t hash[2], source_hash[2];
-  start_render(*row, normal_only, hash, source_hash);
+  start_render(*row, Span<const int>(normal_only, 1), hash, source_hash);
   ASSERT_TRUE(BKE_paint_layers_material_bake_land(*ma, row->marker, hash, source_hash, true));
   EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));
 
@@ -1094,7 +1096,7 @@ TEST_F(PaintLayersMaterialBakeTest, only_the_normal_is_rendered_until_something_
 
   /* The full render that follows is current for the editor and for it closing again. */
   uint32_t full_hash[2], full_source_hash[2];
-  start_render(*row, base_color_roughness_normal, full_hash, full_source_hash);
+  start_render(*row, Span<const int>(base_color_roughness_normal, 3), full_hash, full_source_hash);
   ASSERT_TRUE(
       BKE_paint_layers_material_bake_land(*ma, row->marker, full_hash, full_source_hash, true));
   EXPECT_FALSE(BKE_paint_layers_material_row_stale(*ma, *row));

@@ -641,7 +641,7 @@ TEST_F(PaintLayersBakeTest, a_hidden_row_and_a_never_row_are_not_baked)
   MaterialPaintLayer *hidden = add_baked_row("Hidden");
   MaterialPaintLayer *never = add_baked_row("Never");
   EXPECT_TRUE(BKE_paint_layers_set_enabled(*ma, hidden, false));
-  EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, never, MA_PAINT_LAYER_BAKE_NEVER));
+  EXPECT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *never, MA_PAINT_LAYER_BAKE_NEVER));
   clear_active();
 
   EXPECT_FALSE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
@@ -670,7 +670,7 @@ TEST_F(PaintLayersBakeTest, a_pixel_edit_of_a_source_map_makes_the_row_live)
 {
   Image *source = add_image("Row");
   MaterialPaintLayer *layer = add_paint_layer("Row", source);
-  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
   clear_active();
   ASSERT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma));
   ASSERT_TRUE(paint_layer_row_substituted(*ma, *layer));
@@ -714,7 +714,7 @@ TEST_F(PaintLayersBakeTest, the_generator_reads_the_bake_instead_of_the_row)
 {
   Image *source = add_image("Row");
   MaterialPaintLayer *layer = add_paint_layer("Row", source);
-  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, layer, MA_PAINT_LAYER_BAKE_ALWAYS));
+  ASSERT_TRUE(BKE_paint_layers_bake_mode_set(*ma, *layer, MA_PAINT_LAYER_BAKE_ALWAYS));
   clear_active();
 
   ASSERT_TRUE(BKE_paint_layers_regenerate(*bmain, *ma));
@@ -820,7 +820,8 @@ TEST_F(PaintLayersBakeTest, a_copied_material_starts_without_a_cache_of_its_own)
 
   Material *copy = id_cast<Material *>(BKE_id_copy(bmain, &ma->id));
   ASSERT_NE(copy, nullptr);
-  const MaterialPaintLayer *copied = copy->paint_layers.first;
+  const MaterialPaintLayer *copied = static_cast<const MaterialPaintLayer *>(
+      copy->paint_layers.first);
   ASSERT_NE(copied, nullptr);
   ASSERT_NE(copied->bake, nullptr);
   EXPECT_EQ(copied->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR], nullptr)
@@ -980,7 +981,7 @@ TEST_F(PaintLayersBakeTest, a_mask_gradient_item_invalidates_the_parent_bake_and
 
   /* A 3D mask item has no shared pixels at all: the parent's bake is released, not re-made. */
   EXPECT_TRUE(BKE_paint_layers_gradient_set_space(
-      *ma, item, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
+      *ma, *item, MA_PAINT_LAYER_GRADIENT_SPACE_OBJECT));
   changed = false;
   EXPECT_TRUE(BKE_paint_layers_bake_plan_run(*bmain, *ma, &changed));
   EXPECT_EQ(row->bake, nullptr) << "a 3D gradient item keeps the parent live";

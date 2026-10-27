@@ -121,7 +121,7 @@ TEST_F(PaintMaterialResolveTest, reroute_between_principled_and_output_is_follow
   bNodeSocket &surface = *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr);
   /* Drop the direct link and route it through a Reroute instead. */
   bke::node_remove_socket_links(ntree, surface);
-  bNode *reroute = bke::node_add_static_node(nullptr, ntree, SH_NODE_REROUTE);
+  bNode *reroute = bke::node_add_static_node(nullptr, ntree, NODE_REROUTE);
   bke::node_add_link(ntree,
                      *principled,
                      *bke::node_find_socket(*principled, SOCK_OUT, "BSDF"_ustr),
@@ -317,7 +317,7 @@ TEST_F(PaintMaterialResolveTest, reroute_on_channel_input_without_source_is_cons
   Material *ma = this->add_material_with_principled("DanglingReroute");
   bNodeTree &ntree = *ma->nodetree;
   bNode *principled = this->find_node(*ma, SH_NODE_BSDF_PRINCIPLED);
-  bNode *reroute = bke::node_add_static_node(nullptr, ntree, SH_NODE_REROUTE);
+  bNode *reroute = bke::node_add_static_node(nullptr, ntree, NODE_REROUTE);
   bke::node_add_link(ntree,
                      *reroute,
                      *static_cast<bNodeSocket *>(reroute->outputs.first),

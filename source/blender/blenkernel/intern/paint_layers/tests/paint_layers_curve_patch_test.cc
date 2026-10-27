@@ -96,10 +96,11 @@ TEST_F(PaintLayersCurvePatch, AddCreatesOwnedPayload)
   EXPECT_EQ(vectors->items_num, 0);
 
   /* The removal lets both IDs go: no user left. */
-  MaterialPaintLayerCurvePatch payload = *effect->curve_patch;
+  PaintVector *payload_vectors = effect->curve_patch->vectors;
+  Brush *payload_brush = effect->curve_patch->brush;
   ASSERT_TRUE(BKE_paint_layers_correction_remove(*ma, effect));
-  EXPECT_EQ(payload.vectors->id.us, 0);
-  EXPECT_EQ(payload.brush->id.us, 0);
+  EXPECT_EQ(payload_vectors->id.us, 0);
+  EXPECT_EQ(payload_brush->id.us, 0);
 }
 
 TEST_F(PaintLayersCurvePatch, AddWithoutDatabaseIsRefused)

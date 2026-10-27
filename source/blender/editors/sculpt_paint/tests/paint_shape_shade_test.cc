@@ -282,7 +282,7 @@ TEST(ShapeShade, TextureScalarInvertAndOpacity)
   ShapeStyle style = texture_style(PAINT_MATERIAL_CHANNEL_ROUGHNESS, float4(0.8f, 0.8f, 0.8f, 1.0f));
   style.fill_tex_map.invert = true;
   style.fill_tex_map.opacity = 0.5f;
-  const ShapeSample sample{.fill = 1.0f, .stroke = 0.0f};
+  ShapeSample sample{.fill = 1.0f, .stroke = 0.0f};
   sample.shape_uv = float2(0.5f, 0.5f);
 
   const ChannelWrite write = shade_channel(

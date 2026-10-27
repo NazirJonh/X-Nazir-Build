@@ -270,8 +270,8 @@ struct PaintLayersGpuCaptureJob {
  */
 bool BKE_paint_layers_gpu_capture_plan(
     const Material &ma,
-    Span<const Span<const PaintMaterialCompositeImageLayer>> stacks,
-    Span<const int> channels,
+    Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
+    Span<int> channels,
     Vector<PaintLayersGpuCaptureJob> &r_jobs,
     const char **r_reason = nullptr);
 
@@ -285,7 +285,7 @@ bool BKE_paint_layers_gpu_slot_key_equal(const PaintLayersGpuSlotKey &a,
                                          const PaintLayersGpuSlotKey &b);
 
 /** The index of the slot for \a point in \a channel, or -1. */
-int BKE_paint_layers_gpu_slot_find(Span<const PaintLayersGpuSlotKey> slots,
+int BKE_paint_layers_gpu_slot_find(Span<PaintLayersGpuSlotKey> slots,
                                    const bUUID &point,
                                    int channel);
 

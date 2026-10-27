@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <iterator>
 
 #include "paint_layers_graph_eval_test_fixture.hh"
 
@@ -485,7 +486,7 @@ class PaintLayersMappingEvalTest : public PaintLayersGraphEvalTest {
   };
 
   /** The values the cases walk through; each is an edit of values only. */
-  static Span<Case> cases()
+  static Span<const Case> cases()
   {
     static const Case all[] = {
         {{0.0f, 0.0f}, {1.0f, 1.0f}, 0.0f},
@@ -495,7 +496,7 @@ class PaintLayersMappingEvalTest : public PaintLayersGraphEvalTest {
         {{0.0f, 0.0f}, {-1.0f, 1.0f}, 0.0f},
         {{0.25f, 0.0f}, {0.5f, -2.0f}, 2.4f},
     };
-    return all;
+    return Span<const Case>(all, int64_t(std::size(all)));
   }
 
   /** A 2x2 byte map of four distinct colours. */
@@ -624,7 +625,7 @@ class PaintLayersWrapEvalTest : public PaintLayersMappingEvalTest {
  public:
   /** Values for the pixel (1, 1), whose UV is (0.375, 0.375): some read inside the square on both
    * axes, some outside on one, some on both. */
-  static Span<Case> wrap_cases()
+  static Span<const Case> wrap_cases()
   {
     static const Case all[] = {
         {{0.0f, 0.0f}, {1.0f, 1.0f}, 0.0f},
@@ -634,16 +635,16 @@ class PaintLayersWrapEvalTest : public PaintLayersMappingEvalTest {
         {{-0.2f, 0.7f}, {0.5f, 0.5f}, 1.0f},
         {{0.9f, 0.9f}, {1.0f, 1.0f}, 0.0f},
     };
-    return all;
+    return Span<const Case>(all, int64_t(std::size(all)));
   }
 
-  static Span<int16_t> wraps()
+  static Span<const int16_t> wraps()
   {
     static const int16_t all[] = {MA_PAINT_LAYER_MAPPING_WRAP_REPEAT,
                                   MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_X,
                                   MA_PAINT_LAYER_MAPPING_WRAP_REPEAT_Y,
                                   MA_PAINT_LAYER_MAPPING_WRAP_CLIP};
-    return all;
+    return Span<const int16_t>(all, int64_t(std::size(all)));
   }
 };
 

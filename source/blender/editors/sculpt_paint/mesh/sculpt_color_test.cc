@@ -56,7 +56,7 @@ TEST_F(EnsureSharedColorAttributesTest, CreatesMissingChannel)
       *mesh_a, "PaintColor", bke::AttrDomain::Point, bke::AttrType::ColorFloat, true);
 
   Mesh *others[1] = {mesh_b};
-  ensure_shared_color_attributes(*mesh_a, Span(others));
+  ensure_shared_color_attributes(*mesh_a, Span<Mesh *>(others, 1));
 
   const std::optional<bke::AttributeMetaData> meta = mesh_b->attributes().lookup_meta_data(
       "PaintColor");
@@ -78,7 +78,7 @@ TEST_F(EnsureSharedColorAttributesTest, ActivatesExistingChannelWithoutConversio
       *mesh_b, "SkinTone", bke::AttrDomain::Point, bke::AttrType::ColorFloat, true);
 
   Mesh *others[1] = {mesh_b};
-  ensure_shared_color_attributes(*mesh_a, Span(others));
+  ensure_shared_color_attributes(*mesh_a, Span<Mesh *>(others, 1));
 
   /* Active switched to the shared name; existing structure untouched ("paint as is"). */
   EXPECT_STREQ(mesh_b->active_color_attribute, "PaintColor");
@@ -98,7 +98,7 @@ TEST_F(EnsureSharedColorAttributesTest, SkipsNameCollisionWithNonColorAttribute)
       "PaintColor", bke::AttrDomain::Point, bke::AttrType::Float, bke::AttributeInitDefaultValue()));
 
   Mesh *others[1] = {mesh_b};
-  ensure_shared_color_attributes(*mesh_a, Span(others));
+  ensure_shared_color_attributes(*mesh_a, Span<Mesh *>(others, 1));
 
   /* Untouched: no conversion, no rename, active color not set to the colliding name. */
   const std::optional<bke::AttributeMetaData> meta = mesh_b->attributes().lookup_meta_data(
@@ -112,7 +112,7 @@ TEST_F(EnsureSharedColorAttributesTest, SkipsNameCollisionWithNonColorAttribute)
 TEST_F(EnsureSharedColorAttributesTest, NoActiveChannelOnReferenceIsNoOp)
 {
   Mesh *others[1] = {mesh_b};
-  ensure_shared_color_attributes(*mesh_a, Span(others));
+  ensure_shared_color_attributes(*mesh_a, Span<Mesh *>(others, 1));
   EXPECT_FALSE(mesh_b->attributes().lookup_meta_data("PaintColor").has_value());
   EXPECT_EQ(mesh_b->active_color_attribute, nullptr);
 }

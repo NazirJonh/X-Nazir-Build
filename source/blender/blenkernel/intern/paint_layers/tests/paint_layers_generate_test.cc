@@ -901,7 +901,7 @@ TEST_F(PaintLayersGenerateTest, height_regenerate_does_not_link_bump_to_itself)
     }
   }
   ASSERT_NE(bump, nullptr);
-  bNodeSocket *bump_normal = bke::node_find_socket(*bump, SOCK_IN, "Normal");
+  bNodeSocket *bump_normal = bke::node_find_socket(*bump, SOCK_IN, "Normal"_ustr);
   ASSERT_NE(bump_normal, nullptr);
   ma->nodetree->ensure_topology_cache();
   for (bNodeLink *link : bump_normal->directly_linked_links()) {
@@ -963,14 +963,14 @@ TEST_F(PaintLayersGenerateTest, channel_out_of_the_set_is_not_wired)
       "Paint", add_image("Map"), PAINT_MATERIAL_CHANNEL_METALLIC);
 
   EXPECT_TRUE(paint_layers::leaf_participates(*ma, *layer, PAINT_MATERIAL_CHANNEL_METALLIC));
-  Vector<int> wired = paint_layers_wired_channels(*ma);
+  Vector<int> wired = paint_layers::paint_layers_wired_channels(*ma);
   EXPECT_TRUE(std::find(wired.begin(), wired.end(), PAINT_MATERIAL_CHANNEL_METALLIC) !=
               wired.end());
 
   /* Dropping the channel from the set filters the row out without touching its record or map. */
   ASSERT_TRUE(BKE_paint_layers_channel_set_enable(*ma, PAINT_MATERIAL_CHANNEL_METALLIC, false));
   EXPECT_FALSE(paint_layers::leaf_participates(*ma, *layer, PAINT_MATERIAL_CHANNEL_METALLIC));
-  wired = paint_layers_wired_channels(*ma);
+  wired = ::blender::bke::paint_layers::paint_layers_wired_channels(*ma);
   EXPECT_TRUE(std::find(wired.begin(), wired.end(), PAINT_MATERIAL_CHANNEL_METALLIC) ==
               wired.end());
   ASSERT_EQ(layer->channels_num, 1);

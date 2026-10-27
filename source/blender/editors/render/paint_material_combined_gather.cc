@@ -1894,9 +1894,9 @@ bool combined_preview_gpu_update(const Material &ma,
   }
   Vector<GpuCaptureJob> capture_jobs;
   const char *capture_reason = nullptr;
-  const Span<const Span<const PaintMaterialCompositeImageLayer>> stack_view(
+  const Span<Span<const PaintMaterialCompositeImageLayer>> stack_view(
       stack_spans.data(), int64_t(stack_spans.size()));
-  const Span<const int> channel_view(channel_enums.data(), int64_t(channel_enums.size()));
+  const Span<int> channel_view(channel_enums.data(), int64_t(channel_enums.size()));
   if (!BKE_paint_layers_gpu_capture_plan(
           ma, stack_view, channel_view, capture_jobs, &capture_reason))
   {

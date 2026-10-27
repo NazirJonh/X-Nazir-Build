@@ -14,6 +14,7 @@
 
 #include "BLI_math_base.h"
 #include "BLI_listbase.h"
+#include "BLI_string.h"
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
 #include "BLI_utildefines.h"
@@ -228,9 +229,9 @@ class PaintLayersAnchorPointCompositeTest : public PaintLayersTestBase {
         Span<const PaintMaterialCompositeImageLayer>(stack.data(), int64_t(stack.size()))};
     std::array<int, 1> channels = {channel};
     const char *reason = nullptr;
-    const Span<const Span<const PaintMaterialCompositeImageLayer>> stack_view(
+    const Span<Span<const PaintMaterialCompositeImageLayer>> stack_view(
         stacks.data(), int64_t(stacks.size()));
-    const Span<const int> channel_view(channels.data(), int64_t(channels.size()));
+    const Span<int> channel_view(channels.data(), int64_t(channels.size()));
     const bool ok = BKE_paint_layers_gpu_capture_plan(
         *ma, stack_view, channel_view, r_jobs, &reason);
     EXPECT_TRUE(ok) << (reason != nullptr ? reason : "the plan failed without a reason");
@@ -435,7 +436,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, baked_and_live_reader_layer_match)
       *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers));
   const PaintMaterialCompositeImageLayer *described = find_layer_reader(layers, reader->marker);
   ASSERT_NE(described, nullptr);
-  EXPECT_EQ(described->anchor_point_slice, nullptr) << "the description reads the baked map";
+  EXPECT_EQ(described->anchor_point_color, nullptr) << "the description reads the baked map";
   EXPECT_EQ(described->color_image, reader->bake->images[PAINT_MATERIAL_CHANNEL_BASE_COLOR]);
   EXPECT_EQ(described->mask_image, reader->bake->coverage);
 
@@ -2170,7 +2171,7 @@ TEST_F(PaintLayersAnchorPointCompositeTest, gpu_slot_key_uses_channel_enum_not_i
       PaintLayersGpuSlotKey{point, PAINT_MATERIAL_CHANNEL_EMISSION},
   };
   /* A reader on Emission finds the Emission slot (index 7), not the Alpha slot (index 6). */
-  const Span<const PaintLayersGpuSlotKey> slot_view(slots.data(), int64_t(slots.size()));
+  const Span<PaintLayersGpuSlotKey> slot_view(slots.data(), int64_t(slots.size()));
   EXPECT_EQ(BKE_paint_layers_gpu_slot_find(slot_view, point, PAINT_MATERIAL_CHANNEL_EMISSION), 7);
   EXPECT_EQ(slots[7].channel, int(PAINT_MATERIAL_CHANNEL_EMISSION));
   EXPECT_EQ(slots[6].channel, int(PAINT_MATERIAL_CHANNEL_ALPHA));

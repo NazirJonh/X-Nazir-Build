@@ -9,7 +9,9 @@
 #include "BKE_appdir.hh"
 #include "BKE_attribute.h"
 #include "BKE_attribute.hh"
+#include "BKE_blender.hh"
 #include "BKE_brush.hh"
+#include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idtype.hh"
 #include "BKE_image.hh"
@@ -71,11 +73,15 @@ class PaintMaterialChannelTest : public bke::BlenderGTestBase {
   void SetUp() override
   {
     bmain = BKE_main_new();
+    BKE_blender_globals_main_replace(bmain);
+    BKE_tempdir_init(nullptr);
   }
 
   void TearDown() override
   {
+    G_MAIN = nullptr;
     BKE_main_free(bmain);
+    BKE_tempdir_session_purge();
   }
 
   Object *add_mesh_object(const char *name)

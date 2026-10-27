@@ -12,6 +12,7 @@
 
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
+#include "BLI_string.h"
 
 #include "testing/testing.h"
 
@@ -115,9 +116,11 @@ TEST(PaintVectorSerialize, RoundTripTextureSettings)
                                 PAINT_SHAPE_CURVE_PATTERN_USE_SDF_RELIEF;
 
   VectorDocument doc;
-  doc.items.append(make_spline_item());
+  VectorItem item = make_spline_item();
+  item.style = vector_item_style_make(settings);
+  doc.items.append(std::move(item));
   PaintVector pv = {};
-  paint_vector_from_document(pv, doc, settings);
+  paint_vector_from_document(pv, doc);
   ASSERT_EQ(pv.items_num, 1);
 
   const PaintShapeSettings &style = pv.items[0].style;

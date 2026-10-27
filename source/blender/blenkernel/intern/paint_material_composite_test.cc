@@ -16,10 +16,12 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_gradient.hh"
 #include "BKE_paint_material_combined.hh"
 #include "BKE_paint_material_composite.hh"
 
+#include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector.h"
 #include "BLI_rect.h"
 #include "BLI_uuid.h"
@@ -2913,7 +2915,7 @@ TEST_F(PaintLayersCompositeTest, an_invalid_gradient_surface_texel_lays_nothing)
 
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, surface));
   ASSERT_EQ(layers.size(), 1);
   int width = 0, height = 0;
   ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
@@ -2942,7 +2944,7 @@ TEST_F(PaintLayersCompositeTest, a_uv_gradient_never_takes_a_surface)
   auto surface = gradient_test_surface(float3(0.75f), 0x7777);
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, surface));
   ASSERT_EQ(layers.size(), 1);
   EXPECT_EQ(layers[0].gradient.surface, nullptr);
   EXPECT_EQ(layers[0].gradient.surface_key, 0);
@@ -2985,7 +2987,7 @@ TEST_F(PaintLayersCompositeTest, a_generated_gradient_normalizes_the_exact_bbox)
 
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, surface));
   ASSERT_EQ(layers.size(), 1);
   int width = 0, height = 0;
   ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
@@ -3015,7 +3017,7 @@ TEST_F(PaintLayersCompositeTest, a_generated_gradient_without_a_bbox_stays_appro
 
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, surface));
   ASSERT_EQ(layers.size(), 1);
   EXPECT_TRUE(layers[0].gradient.approximate)
       << "a generated row without a bbox cannot normalize and must not go empty";
@@ -3048,7 +3050,7 @@ TEST_F(PaintLayersCompositeTest, a_generated_gradient_with_orco_needs_no_bbox)
 
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, surface));
   ASSERT_EQ(layers.size(), 1);
   EXPECT_FALSE(layers[0].gradient.approximate)
       << "stored orco samples make a generated row exact without a bbox";
@@ -3082,7 +3084,7 @@ TEST_F(PaintLayersCompositeTest, an_object_gradient_without_a_bbox_stays_exact)
 
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, surface));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, surface));
   ASSERT_EQ(layers.size(), 1);
   EXPECT_FALSE(layers[0].gradient.approximate)
       << "an Object row needs no generated bbox and must stay exact";
@@ -3114,7 +3116,7 @@ TEST_F(PaintLayersCompositeTest, a_scalar_gradient_invalid_texel_has_zero_alpha)
 
   Vector<PaintMaterialCompositeImageLayer> layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_METALLIC, layers, surface));
+      *ma, PAINT_MATERIAL_CHANNEL_METALLIC, layers, false, surface));
   ASSERT_EQ(layers.size(), 1);
   int width = 0, height = 0;
   ASSERT_TRUE(BKE_paint_material_composite_stack_dimensions(layers, width, height));
@@ -3184,7 +3186,7 @@ TEST_F(PaintLayersCompositeTest, stack_hash_tracks_the_gradient_surface_and_appr
   auto hash_with = [&](std::shared_ptr<const PaintMaterialCompositeSurface> surface) {
     Vector<PaintMaterialCompositeImageLayer> layers;
     EXPECT_TRUE(BKE_paint_layers_composite_image_layers(
-        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, std::move(surface)));
+        *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, layers, false, std::move(surface)));
     return BKE_paint_material_composite_stack_hash(layers);
   };
 

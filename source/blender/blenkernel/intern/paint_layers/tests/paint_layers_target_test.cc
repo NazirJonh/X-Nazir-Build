@@ -20,6 +20,7 @@
 #include "BKE_paint.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_composite.hh"
+#include "BKE_paint_layers_edit.hh"
 #include "BKE_paint_layers_target.hh"
 
 #include "BLI_index_range.hh"
@@ -1306,7 +1307,7 @@ TEST_F(PaintLayersTargetTest, composite_canvas_image_is_created_once_for_a_stack
   EXPECT_EQ(ma->paint_layers_canvas_image, canvas);
   EXPECT_EQ(canvas->id.us, 1);
   EXPECT_TRUE(BKE_paint_material_composite_canvas_image_is(*bmain, *canvas));
-  EXPECT_FALSE(canvas->id.flag & LIB_FAKEUSER);
+  EXPECT_FALSE(canvas->id.flag & ID_FLAG_FAKEUSER);
 
   /* The lookup key is reused: a second click must not mint another data-block. */
   EXPECT_EQ(BKE_paint_material_composite_canvas_image_ensure(*bmain, *ma), canvas);

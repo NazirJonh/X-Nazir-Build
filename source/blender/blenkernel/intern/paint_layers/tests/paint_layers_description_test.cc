@@ -7,6 +7,8 @@
 #include "MEM_guardedalloc.h"
 
 #include "BKE_appdir.hh"
+#include "BKE_blender.hh"
+#include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_idprop.hh"
@@ -58,15 +60,17 @@ class PaintLayersDescription : public bke::BlenderGTestBase {
     paint_layer_anchor_point_slice_cache_clear();
     slice_cache_budget_before_ = paint_layer_anchor_point_slice_cache_budget();
     bmain = BKE_main_new();
-    G_MAIN = bmain;
+    BKE_blender_globals_main_replace(bmain);
+    BKE_tempdir_init(nullptr);
   }
 
   void TearDown() override
   {
     paint_layer_anchor_point_slice_cache_clear();
     paint_layer_anchor_point_slice_cache_set_budget(slice_cache_budget_before_);
-    BKE_main_free(bmain);
     G_MAIN = nullptr;
+    BKE_main_free(bmain);
+    BKE_tempdir_session_purge();
   }
 
   /** A row linked straight into the list, the way a file read leaves it: no BKE call involved. */
@@ -884,7 +888,10 @@ static MaterialPaintLayer *rna_paint_layers_new(PointerRNA &coll_ptr, const char
 
   ReportList reports;
   BKE_reports_init(&reports, RPT_STORE);
-  RNA_function_call(nullptr, &reports, &coll_ptr, func, &parms);
+  bContext *C = CTX_create();
+  CTX_data_main_set(C, G_MAIN);
+  RNA_function_call(C, &reports, &coll_ptr, func, &parms);
+  CTX_free(C);
   BKE_reports_free(&reports);
 
   void *ret = nullptr;
@@ -905,7 +912,10 @@ static MaterialPaintLayer *rna_paint_layers_find(PointerRNA &coll_ptr, const cha
 
   ReportList reports;
   BKE_reports_init(&reports, RPT_STORE);
-  RNA_function_call(nullptr, &reports, &coll_ptr, func, &parms);
+  bContext *C = CTX_create();
+  CTX_data_main_set(C, G_MAIN);
+  RNA_function_call(C, &reports, &coll_ptr, func, &parms);
+  CTX_free(C);
   BKE_reports_free(&reports);
 
   void *ret = nullptr;
@@ -929,7 +939,10 @@ static void rna_paint_layers_remove(PointerRNA &coll_ptr, MaterialPaintLayer &la
 
   ReportList reports;
   BKE_reports_init(&reports, RPT_STORE);
-  RNA_function_call(nullptr, &reports, &coll_ptr, func, &parms);
+  bContext *C = CTX_create();
+  CTX_data_main_set(C, G_MAIN);
+  RNA_function_call(C, &reports, &coll_ptr, func, &parms);
+  CTX_free(C);
   BKE_reports_free(&reports);
   RNA_parameter_list_free(&parms);
 }
@@ -3251,7 +3264,7 @@ TEST_F(PaintLayersDescription, rna_valid_points_lists_only_earlier_points)
         << "a point above the reader is never offered";
   }
   if (free) {
-    MEM_freeN(const_cast<EnumPropertyItem *>(items));
+    MEM_delete_void(static_cast<void *>(const_cast<EnumPropertyItem *>(items)));
   }
 }
 
@@ -3310,7 +3323,7 @@ TEST_F(PaintLayersDescription, rna_enum_items_outlive_callback)
   EXPECT_EQ(first_identifier, "ANCHOR_1");
   EXPECT_EQ(first_name, "Point (Lower, Content)");
   if (first_free) {
-    MEM_freeN(const_cast<EnumPropertyItem *>(first));
+    MEM_delete_void(static_cast<void *>(const_cast<EnumPropertyItem *>(first)));
   }
 
   const EnumPropertyItem *second = nullptr;
@@ -3322,7 +3335,7 @@ TEST_F(PaintLayersDescription, rna_enum_items_outlive_callback)
       << "the item strings live in a persistent pool, not in the callback's return value";
   EXPECT_EQ(std::string(second[1].identifier), first_identifier);
   if (second_free) {
-    MEM_freeN(const_cast<EnumPropertyItem *>(second));
+    MEM_delete_void(static_cast<void *>(const_cast<EnumPropertyItem *>(second)));
   }
 }
 

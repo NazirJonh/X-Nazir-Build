@@ -15,6 +15,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_types.hh"
 #include "BKE_paint_layers.hh"
 #include "BKE_paint_layers_edit.hh"
 #include "BKE_report.hh"
@@ -31,8 +32,8 @@
 
 #include "../../../../blenkernel/intern/paint_layers/paint_layers_intern.hh"
 
-#include "outliner_stack_source.hh"
-#include "outliner_stack_source_paint_layers_intern.hh"
+#include "../outliner_stack_source.hh"
+#include "../outliner_stack_source_paint_layers_intern.hh"
 
 namespace blender::ed::outliner {
 namespace tests {
@@ -68,7 +69,6 @@ class OutlinerStackPaintLayersSourceTest : public bke::BlenderGTestBase {
     CTX_data_scene_set(C, scene);
     /* Only attached while a call has to report: the entry points report through it, and the
      * positive paths must not queue window notifiers their checks do not read. */
-    BKE_reports_init(&wm_runtime.reports, RPT_STORE);
     wm.runtime = &wm_runtime;
   }
 
@@ -76,7 +76,7 @@ class OutlinerStackPaintLayersSourceTest : public bke::BlenderGTestBase {
   {
     paint_layer_anchor_point_slice_cache_clear();
     paint_layer_anchor_point_slice_cache_set_budget(slice_cache_budget_before_);
-    BKE_reports_free(&wm_runtime.reports);
+    /* The runtime owns and frees its report list. */
     CTX_free(C);
     BKE_main_free(bmain);
     G_MAIN = nullptr;

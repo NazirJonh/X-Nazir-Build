@@ -2138,8 +2138,8 @@ PaintLayersGpuCaptureKind gpu_content_capture_kind(const int8_t target)
 
 bool BKE_paint_layers_gpu_capture_plan(
     const Material &ma,
-    const Span<const Span<const PaintMaterialCompositeImageLayer>> stacks,
-    const Span<const int> channels,
+    const Span<Span<const PaintMaterialCompositeImageLayer>> stacks,
+    const Span<int> channels,
     Vector<PaintLayersGpuCaptureJob> &r_jobs,
     const char **r_reason)
 {
@@ -2376,7 +2376,7 @@ bool BKE_paint_layers_gpu_slot_key_equal(const PaintLayersGpuSlotKey &a,
   return a.channel == b.channel && BLI_uuid_equal(a.point, b.point);
 }
 
-int BKE_paint_layers_gpu_slot_find(const Span<const PaintLayersGpuSlotKey> slots,
+int BKE_paint_layers_gpu_slot_find(const Span<PaintLayersGpuSlotKey> slots,
                                    const bUUID &point,
                                    const int channel)
 {

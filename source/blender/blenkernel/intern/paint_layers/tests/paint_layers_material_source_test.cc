@@ -29,7 +29,6 @@
 #include "BLO_writefile.hh"
 
 #include "DNA_ID.h"
-#include "DNA_library_types.h"
 #include "DNA_material_types.h"
 
 namespace blender::bke::tests {
@@ -121,7 +120,7 @@ TEST_F(PaintLayersMaterialSource, a_linked_source_can_be_made_local_and_the_row_
   Material *local = BKE_paint_layers_material_source_make_local(*bmain, *owner, row);
   ASSERT_NE(local, nullptr);
   EXPECT_FALSE(ID_IS_LINKED(&local->id));
-  EXPECT_EQ(local->lib, nullptr);
+  EXPECT_EQ(local->id.lib, nullptr);
   /* Localizing may strip the library in place or copy and remap; either way the row reads the
    * local material, never the linked one. */
   EXPECT_EQ(row->material, local);

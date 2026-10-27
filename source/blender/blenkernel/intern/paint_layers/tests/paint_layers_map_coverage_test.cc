@@ -13,6 +13,8 @@
 
 #include "testing/testing.h"
 
+#include <array>
+
 #include "MEM_guardedalloc.h"
 
 #include "BKE_appdir.hh"
@@ -31,6 +33,7 @@
 #include "../paint_layers_intern.hh"
 #include "../paint_layers_kind.hh"
 
+#include "BLI_fileops.h"
 #include "BLI_index_range.hh"
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
@@ -403,7 +406,7 @@ TEST_F(PaintLayersMapCoverage, duplicate_copies_colors_and_parameters_independen
   ASSERT_TRUE(paint_layer_kind_param_set(*item, PAINT_LAYER_COVERAGE_TOLERANCE, 0.125f));
   ASSERT_TRUE(BKE_paint_layers_id_color_set_tolerance(*ma, item, color, 0.3f));
 
-  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(bmain, *ma, item);
+  MaterialPaintLayer *copy = BKE_paint_layers_duplicate(*bmain, *ma, item);
   ASSERT_NE(copy, nullptr);
   EXPECT_EQ(copy->kind_subtype, MA_PAINT_LAYER_FILTER_COLOR_ID);
   ASSERT_EQ(copy->id_colors.count(), 1);
@@ -455,7 +458,7 @@ TEST_F(PaintLayersMapCoverage, paste_copies_colors_onto_another_layer)
   MaterialPaintLayer *target_layer = add_masked_layer("Target");
   ASSERT_TRUE(BKE_paint_layers_correction_can_paste(*item, *target_layer));
   MaterialPaintLayer *pasted = BKE_paint_layers_correction_paste(
-      bmain, *ma, *item, target_layer);
+      *bmain, *ma, *item, target_layer);
   ASSERT_NE(pasted, nullptr);
   ASSERT_EQ(pasted->id_colors.count(), 1);
   MaterialPaintLayerIdColor *pasted_color = static_cast<MaterialPaintLayerIdColor *>(
@@ -675,8 +678,8 @@ TEST(PaintMaterialMaskFactor, map_coverage_item_restricts_inverts_and_fades_with
   item.map_coverage = MA_PAINT_LAYER_FILTER_UV_ISLAND;
   /* Two texels: inside the island (red 1) and outside it (red 0). */
   const float texels[8] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-  const float *no_samples[1] = {nullptr};
-  const float *coverage[1] = {texels};
+  const std::array<const float *, 1> no_samples = {nullptr};
+  const std::array<const float *, 1> coverage = {texels};
   const Span<PaintMaterialCompositeMaskBuffer> items(&item, 1);
 
   EXPECT_FLOAT_EQ(BKE_paint_material_mask_factor_eval(items, no_samples, coverage, 0), 1.0f);
@@ -702,8 +705,8 @@ TEST(PaintMaterialMaskFactor, color_id_item_restricts_inverts_and_fades_with_opa
   item.coverage_colors.append(colors[0]);
   /* Two texels: the stored colour (match 1) and black (match 0). */
   const float texels[8] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-  const float *no_samples[1] = {nullptr};
-  const float *coverage[1] = {texels};
+  const std::array<const float *, 1> no_samples = {nullptr};
+  const std::array<const float *, 1> coverage = {texels};
   const Span<PaintMaterialCompositeMaskBuffer> items(&item, 1);
 
   EXPECT_FLOAT_EQ(BKE_paint_material_mask_factor_eval(items, no_samples, coverage, 0), 1.0f);
@@ -727,8 +730,8 @@ TEST(PaintMaterialMaskFactor, map_coverage_gradient_scales_the_match)
   const PaintMaterialCompositeIdColor colors[] = {id_color_make(1.0f, 0.0f, 0.0f)};
   item.coverage_colors.append(colors[0]);
   const float texels[8] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-  const float *no_samples[1] = {nullptr};
-  const float *coverage[1] = {texels};
+  const std::array<const float *, 1> no_samples = {nullptr};
+  const std::array<const float *, 1> coverage = {texels};
   const Span<PaintMaterialCompositeMaskBuffer> items(&item, 1);
 
   /* A gradient value of 0.25 keeps a quarter of the matched coverage and nothing of the rest. */
@@ -745,8 +748,8 @@ TEST(PaintMaterialMaskFactor, map_coverage_item_without_a_map_matches_nothing)
 {
   PaintMaterialCompositeMaskBuffer item;
   item.map_coverage = MA_PAINT_LAYER_FILTER_COLOR_ID;
-  const float *no_samples[1] = {nullptr};
-  const float *no_coverage[1] = {nullptr};
+  const std::array<const float *, 1> no_samples = {nullptr};
+  const std::array<const float *, 1> no_coverage = {nullptr};
   const Span<PaintMaterialCompositeMaskBuffer> items(&item, 1);
   /* Not a pass-through: a missing map restricts everything. */
   EXPECT_FLOAT_EQ(BKE_paint_material_mask_factor_eval(items, no_samples, no_coverage, 0), 0.0f);

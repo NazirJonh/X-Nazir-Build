@@ -268,7 +268,7 @@ TEST_F(PaintLayersGradientSurface, a_rebuilt_surface_changes_the_composite_stack
 
   Vector<PaintMaterialCompositeImageLayer> first_layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, first_layers, first));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, first_layers, false, first));
   const uint64_t first_hash = BKE_paint_material_composite_stack_hash(first_layers);
 
   /* A repeated get is a cache hit and must not move the stack hash. */
@@ -284,7 +284,7 @@ TEST_F(PaintLayersGradientSurface, a_rebuilt_surface_changes_the_composite_stack
 
   Vector<PaintMaterialCompositeImageLayer> rebuilt_layers;
   ASSERT_TRUE(BKE_paint_layers_composite_image_layers(
-      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rebuilt_layers, rebuilt));
+      *ma, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rebuilt_layers, false, rebuilt));
   const uint64_t rebuilt_hash = BKE_paint_material_composite_stack_hash(rebuilt_layers);
   EXPECT_NE(first_hash, rebuilt_hash);
 }

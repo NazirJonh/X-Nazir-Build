@@ -9,12 +9,14 @@
 #include "BKE_main.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_object.hh"
 #include "BKE_scene.hh"
 
 #include "BLI_listbase.h"
 
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 
 namespace blender::bke::tests {
 

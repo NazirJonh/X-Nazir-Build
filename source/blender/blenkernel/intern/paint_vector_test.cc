@@ -6,10 +6,14 @@
 
 #include <cstring>
 
+#include "BLI_listbase_iterator.hh"
+
 #include "BKE_appdir.hh"
 #include "BKE_attribute.hh"
+#include "BKE_blender.hh"
 #include "BKE_curve_patch.hh"
 #include "BKE_curves.hh"
+#include "BKE_global.hh"
 #include "BKE_gtest_base.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_main.hh"
@@ -69,10 +73,14 @@ class PaintVectorTest : public bke::BlenderGTestBase {
   void SetUp() override
   {
     bmain = BKE_main_new();
+    BKE_blender_globals_main_replace(bmain);
+    BKE_tempdir_init(nullptr);
   }
   void TearDown() override
   {
+    G_MAIN = nullptr;
     BKE_main_free(bmain);
+    BKE_tempdir_session_purge();
   }
 };
 

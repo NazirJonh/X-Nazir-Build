@@ -53,7 +53,7 @@ TEST(ShapeTextureCoord, MaskIdentity)
 
 TEST(ShapeTextureCoord, MaskTilingAndMirror)
 {
-  const ShapeTextureMapping map = mapping_with_size(float2(10.0f, 10.0f));
+  ShapeTextureMapping map = mapping_with_size(float2(10.0f, 10.0f));
   const ShapeTexFrame frame;
   /* Ten pixels to the right with a 10 px tile: u == 1.0 tiles back to 0 (the same texel). */
   ShapeTexCoord coord = shape_texture_coord_mask(map, float2(10.0f, 0.0f), frame);
@@ -67,7 +67,7 @@ TEST(ShapeTextureCoord, MaskTilingAndMirror)
 
 TEST(ShapeTextureCoord, MaskUntiledStamp)
 {
-  const ShapeTextureMapping map = mapping_with_size(float2(10.0f, 10.0f));
+  ShapeTextureMapping map = mapping_with_size(float2(10.0f, 10.0f));
   map.tile_x = false;
   map.tile_y = false;
   const ShapeTexFrame frame;
@@ -80,7 +80,7 @@ TEST(ShapeTextureCoord, MaskUntiledStamp)
 TEST(ShapeTextureCoord, MaskRotation)
 {
   /* A rotation by 90 degrees sends the +X offset onto +Y. */
-  const ShapeTextureMapping map = mapping_with_size(float2(10.0f, 10.0f));
+  ShapeTextureMapping map = mapping_with_size(float2(10.0f, 10.0f));
   map.angle = float(M_PI_2);
   const ShapeTexFrame frame;
   const ShapeTexCoord coord = shape_texture_coord_mask(map, float2(10.0f, 0.0f), frame);

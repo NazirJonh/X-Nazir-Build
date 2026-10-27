@@ -152,7 +152,7 @@ TEST_F(MaterialBakeTest, constant_channel_is_filled_without_a_render)
   expect_image_is_solid_color(*result.created[0], blue);
 }
 
- * A freshly created color target, reloaded from its own colorspace (what the texture cache does
+/* A freshly created color target, reloaded from its own colorspace (what the texture cache does
  * between the bake job starting and its completion callback) and then written with a scene-linear
  * render, must hold those scene-linear values.
  *
@@ -270,7 +270,7 @@ TEST_F(MaterialBakeTest, the_debounce_finds_the_materials_still_there_and_drops_
 
   const uint32_t pending[] = {material->id.session_uid, gone_uid};
   Vector<Material *> found;
-  paint_layers_bake_debounce_resolve(*bmain, pending, found);
+  paint_layers_bake_debounce_resolve(*bmain, Span<uint32_t>(pending, 2), found);
   ASSERT_EQ(found.size(), 1);
   EXPECT_EQ(found[0], material);
   EXPECT_NE(found[0], other);

@@ -12,6 +12,7 @@
 #include "paint_layers_test_util.hh"
 
 #include "DNA_material_types.h"
+#include "DNA_scene_types.h"
 
 #include "BLI_index_range.hh"
 #include "BLI_string.h"

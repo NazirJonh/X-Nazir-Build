@@ -15,6 +15,7 @@
 #include "BKE_sculpt_layers.hh"
 
 #include "BLI_array.hh"
+#include "BLI_listbase_iterator.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_set.hh"
 #include "BLI_string_ref.hh"
@@ -236,7 +237,7 @@ TEST_F(sculpt_layers_tree, is_descendant_of_spans_depth_and_rejects_self)
    * some other node first. Drop-onto-root is a real UI path, so every depth below it must still
    * read as a descendant of the root. */
   EXPECT_TRUE(node_is_descendant_of(*outer, root));
-  EXPECT_TRUE(node_is_descendant_of(*folder, root));
+  EXPECT_TRUE(node_is_descendant_of(folder->base, root));
   EXPECT_TRUE(node_is_descendant_of(*nested, root));
   EXPECT_TRUE(node_is_descendant_of(inner->base, root));
   EXPECT_TRUE(node_is_descendant_of(deep->base, root));

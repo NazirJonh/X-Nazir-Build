@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 
 #include "BLI_math_base.h"
+#include "BLI_uuid.h"
 
 #include "BLT_translation.hh"
 
@@ -28,6 +29,7 @@
 #include "BKE_attribute.h"
 #include "BKE_colorband.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_paint_material_sync.hh"
 
 #include "ED_asset_shelf.hh"
@@ -1549,6 +1551,65 @@ static void rna_PaintShapeSettings_update(Main *bmain, Scene *scene, PointerRNA 
   /* Route by the block the setter wrote: a live Vector session's own copy refreshes only that
    * session, while a change to the shared global block is ignored by live sessions. */
   ED_paint_shape_settings_update(bmain, scene, static_cast<PaintShapeSettings *>(ptr->data));
+}
+
+/* Mirrors #rna_BrushMaterialPaint_source_layer_owner_poll: only a layered material has a stack or
+ * rows to read, a plain material stays a Default-kind source. Kept local because the brush's
+ * helper lives in another RNA file and is static. */
+static bool rna_PaintShapeTexture_layer_owner_poll(PointerRNA * /*ptr*/, PointerRNA value)
+{
+  const Material *ma = static_cast<const Material *>(value.data);
+  return ma == nullptr || BKE_paint_layers_is_layered(*ma);
+}
+
+/* Mirrors #rna_BrushMaterialPaint_source_layer_owner_update: changing the owner either drops the
+ * row with it, or keeps a marker that still resolves in the new owner (an isolated row belongs to
+ * exactly one stack). */
+static void rna_PaintShapeTexture_layer_owner_update(Main *bmain,
+                                                     Scene *scene,
+                                                     PointerRNA *ptr)
+{
+  PaintShapeTexture *texture = static_cast<PaintShapeTexture *>(ptr->data);
+  if (texture->layer_owner == nullptr ||
+      (!BLI_uuid_is_nil(texture->layer_marker) &&
+       BKE_paint_layers_find(*texture->layer_owner, texture->layer_marker) == nullptr))
+  {
+    texture->layer_marker = {};
+  }
+  rna_PaintShapeSettings_update(bmain, scene, ptr);
+}
+
+/* Mirrors #rna_BrushMaterialPaint_source_layer_marker_get/_length/_set: the string property is a
+ * UUID in DNA, so the UI can show and compare it without an extra integer array. */
+static void rna_PaintShapeTexture_layer_marker_get(PointerRNA *ptr, char *value)
+{
+  const PaintShapeTexture *texture = static_cast<const PaintShapeTexture *>(ptr->data);
+  if (BLI_uuid_is_nil(texture->layer_marker)) {
+    value[0] = '\0';
+    return;
+  }
+  BLI_uuid_format(value, texture->layer_marker);
+}
+
+static int rna_PaintShapeTexture_layer_marker_length(PointerRNA *ptr)
+{
+  const PaintShapeTexture *texture = static_cast<const PaintShapeTexture *>(ptr->data);
+  return BLI_uuid_is_nil(texture->layer_marker) ? 0 : UUID_STRING_SIZE - 1;
+}
+
+static void rna_PaintShapeTexture_layer_marker_set(PointerRNA *ptr, const char *value)
+{
+  PaintShapeTexture *texture = static_cast<PaintShapeTexture *>(ptr->data);
+  if (value == nullptr || value[0] == '\0') {
+    texture->layer_marker = {};
+    return;
+  }
+  bUUID marker;
+  /* Malformed text keeps the current marker rather than silently clearing it; an empty string is
+   * the explicit way to clear. */
+  if (BLI_uuid_parse_string(&marker, value)) {
+    texture->layer_marker = marker;
+  }
 }
 
 static std::optional<std::string> rna_PaintShapeSettings_path(const PointerRNA *ptr)
@@ -3875,6 +3936,37 @@ static void rna_def_paint_shape_texture(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  /* Compact copies of `prop_material_source_kind_items` / `prop_layer_source_scope_items` in
+   * `rna_brush.cc`: those live inside the brush definition function, and sharing them would add a
+   * cross-file RNA dependency for two four-item tables. Values and labels are identical. */
+  static const EnumPropertyItem shape_material_source_kind_items[] = {
+      {BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_DEFAULT,
+       "DEFAULT",
+       0,
+       "Default",
+       "Read every channel from the source material as a whole"},
+      {BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER,
+       "LAYER",
+       0,
+       "Layer",
+       "Read a layered material's stack, either in full or one isolated row of it"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
+  static const EnumPropertyItem shape_layer_source_scope_items[] = {
+      {BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW,
+       "ROW",
+       0,
+       "Row",
+       "Bake the isolated result of the selected stack row"},
+      {BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_FULL,
+       "FULL",
+       0,
+       "Full Material",
+       "Bake the layered material's complete stack output"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "PaintShapeTexture", nullptr);
   RNA_def_struct_sdna(srna, "PaintShapeTexture");
   RNA_def_struct_ui_text(srna,
@@ -4043,6 +4135,45 @@ static void rna_def_paint_shape_texture(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Material", "Material whose Principled maps feed the texture");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
 
+  prop = RNA_def_property(srna, "material_source_kind", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "material_source_kind");
+  RNA_def_property_enum_items(prop, shape_material_source_kind_items);
+  RNA_def_property_ui_text(prop,
+                           "Material Source",
+                           "Whether the Material source is a whole material or a layered "
+                           "material's stack or row");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "layer_source_scope", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "layer_source_scope");
+  RNA_def_property_enum_items(prop, shape_layer_source_scope_items);
+  RNA_def_property_ui_text(prop,
+                           "Layer Scope",
+                           "Whether the Layer source bakes one isolated stack row or the whole "
+                           "layered material");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  prop = RNA_def_property(srna, "layer_owner", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "layer_owner");
+  RNA_def_property_struct_type(prop, "Material");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, nullptr, nullptr, "rna_PaintShapeTexture_layer_owner_poll");
+  RNA_def_property_ui_text(
+      prop, "Layer Material", "Layered material whose stack the shape reads from");
+  RNA_def_property_update(
+      prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeTexture_layer_owner_update");
+
+  prop = RNA_def_property(srna, "layer_marker", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_PaintShapeTexture_layer_marker_get",
+                                "rna_PaintShapeTexture_layer_marker_length",
+                                "rna_PaintShapeTexture_layer_marker_set");
+  RNA_def_property_ui_text(prop,
+                           "Layer Row",
+                           "Marker of the isolated stack row; empty means no row is selected");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
   prop = RNA_def_property(srna, "texture", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "tex");
   RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_REFCOUNT);
@@ -4180,6 +4311,16 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem shape_material_tab_part_items[] = {
+      {PAINT_SHAPE_MATERIAL_TAB_FILL, "FILL", 0, "Fill", "Material of the shape's fill part"},
+      {PAINT_SHAPE_MATERIAL_TAB_STROKE,
+       "STROKE",
+       0,
+       "Stroke",
+       "Material of the shape's stroke part"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   static const EnumPropertyItem shape_stroke_align_items[] = {
       {PAINT_SHAPE_STROKE_ALIGN_CENTER, "CENTER", 0, "Center", "Stroke centered on the outline"},
       {PAINT_SHAPE_STROKE_ALIGN_INSIDE, "INSIDE", 0, "Inside", "Stroke drawn inside the outline"},
@@ -4302,6 +4443,17 @@ static void rna_def_paint_shape_settings(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, shape_draw_mode_items);
   RNA_def_property_ui_text(prop, "Draw Mode", "How a shape is drawn and committed");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, "rna_PaintShapeSettings_update");
+
+  /* UI state of the Brush Material tab, not a drawing setting: only the Properties editor needs
+   * to redraw, and the tab path is recomputed from this field on every draw. */
+  prop = RNA_def_property(srna, "material_tab_part", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "material_tab_part");
+  RNA_def_property_enum_items(prop, shape_material_tab_part_items);
+  RNA_def_property_ui_text(
+      prop,
+      "Shape Part",
+      "Shape part whose Default material the Brush Material tab edits");
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
 
   prop = RNA_def_property(srna, "use_fill", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", PAINT_SHAPE_USE_FILL);

@@ -3040,6 +3040,10 @@ void id_browser_add_popover_button(Layout &row,
     /* The thumbnail is too small to judge the image by, so hovering it shows the same large
      * preview and image info the browser's own items use (see #install_id_preview_tooltip). */
     id_preview_tooltip_set(but, id);
+    /* Default dragging of the assigned data-block's preview, same as #template_ID's browse
+     * button: press on the thumbnail and move. Releasing without moving still opens the browser
+     * popover (the drag only starts past the drag threshold). */
+    button_drag_set_id(but, button_drag_id_for_slot(id));
   }
 }
 
@@ -3070,6 +3074,11 @@ static void id_browser_add_name_popover_button(Layout &row,
   /* The name alone does not tell the user what is assigned, so hovering shows the same large
    * preview the thumbnail beside it does. */
   id_preview_tooltip_set(but, id);
+  /* Draggable by name as well: the whole button is the drag zone (there is no icon part to grab),
+   * and the drag shows the assigned data-block's large preview since the button itself has none. */
+  button_drag_set_id(but, button_drag_id_for_slot(id));
+  button_dragflag_enable(but, BUT_DRAG_FULL_BUT);
+  but->drag_preview_icon_id = id_icon_get(C, id, true);
 }
 
 /** \} */
@@ -3154,6 +3163,10 @@ static void id_browser_add_compact_button(Layout &row,
   }
   button_context_int_set(block, but, "id_browser_drop_target", 1);
   id_preview_tooltip_set(but, id);
+  /* Same drag-out as the full row's thumbnail: press on the preview icon and move; releasing
+   * without moving still opens the browser popover. The drag zone is the icon square at the
+   * button's left edge, like #template_ID's browse button. */
+  button_drag_set_id(but, button_drag_id_for_slot(id));
 }
 
 /**

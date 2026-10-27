@@ -1285,6 +1285,20 @@ void ED_paint_shape_settings_update(Main *bmain, Scene *scene, PaintShapeSetting
     return;
   }
 
+  /* Warm the material/layer source bakes the Shape parts read as soon as a shape setting changes
+   * (assigning a material, switching the part type or Layer row). This is the head start that
+   * makes the first stroke find a bake; the shape entry points still refuse to paint the solid
+   * fallback while it is pending.
+   * Only the shared block warms here: a live session has its own copy and resolves it when it
+   * refreshes. No throttle: with a ready bake the check is just a cache lookup plus `is_pending`,
+   * and a throttle could swallow a discrete assignment that lands right after another change. */
+  if (scene != nullptr && scene->toolsettings != nullptr) {
+    const PaintShapeSettings &shared = BKE_paint_shape_settings_get(*scene->toolsettings);
+    if (shape::shape_settings_contains(shared, changed)) {
+      shape::style_material_bakes_ensure(*bmain, shared, nullptr);
+    }
+  }
+
   /* A live Vector session owns a deep copy of the settings, so a change to the shared
    * global block must NOT refresh it; only a change to a session's own copy refreshes that
    * session. Address containment (not exact equality) also catches the channel-value properties,

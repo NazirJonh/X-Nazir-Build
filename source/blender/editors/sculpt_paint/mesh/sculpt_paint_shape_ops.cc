@@ -574,6 +574,16 @@ static wmOperatorStatus shape_draw_invoke(bContext *C, wmOperator *op, const wmE
     }
   }
 
+  /* A material bake runs as a background job. Starting the shape while it is missing would paint
+   * the part's solid values and commit them; start/wait for the bake instead. */
+  if (!shape::style_material_bakes_ensure(*CTX_data_main(C),
+                                         BKE_paint_shape_settings_get(*scene->toolsettings),
+                                         op->reports))
+  {
+    MEM_delete(state);
+    return OPERATOR_CANCELLED;
+  }
+
   /* Projection ("space" tool property, shown as Projection for Draw Mode = Pixel): 0 = view
    * (ViewProjector, default), 1 = surface (SurfaceAnchored). Vector always uses Surface, so its
    * live session can anchor the cage to the tangent plane. A Surface creation raycasts the surface

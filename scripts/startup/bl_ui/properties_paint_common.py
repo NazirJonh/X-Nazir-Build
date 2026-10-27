@@ -4075,12 +4075,42 @@ def draw_paint_shape_texture_part(layout, shape, texture_prop):
             use_users=False,
         )
     elif tex.source == 'MATERIAL':
-        col.template_ID_browser(
-            tex,
-            "material",
-            text=iface_("Drop material"),
-            use_users=False,
-        )
+        # The Shape keeps its own material source, independent of the brush's Brush Material:
+        # Fill and Stroke each assign and bake their own #PaintShapeTexture material/layer.
+        col.prop(tex, "material_source_kind", expand=True)
+        if tex.material_source_kind == 'DEFAULT':
+            col.template_ID_browser(
+                tex,
+                "material",
+                text=iface_("Drop material"),
+                use_users=False,
+            )
+        else:
+            col.template_ID_browser(
+                tex,
+                "layer_owner",
+                text=iface_("Drop layer material"),
+                filter_type="PAINT_IDF_layer_material",
+                use_users=False,
+            )
+            layer_owner = tex.layer_owner
+            if layer_owner is None:
+                col.label(text="Pick a layered material", icon='INFO')
+            elif not layer_owner.is_layered:
+                # The picker filters these out; this covers a file saved with an owner that has
+                # since lost its stack.
+                col.label(text="Layer Material must be a layered material", icon='ERROR')
+            else:
+                col.prop(tex, "layer_source_scope", expand=True)
+                if tex.layer_source_scope == 'ROW':
+                    row_item = layer_owner.paint_layers.find(tex.layer_marker) \
+                        if tex.layer_marker else None
+                    col.context_pointer_set("shape_texture", tex)
+                    col.operator(
+                        "paint.brush_layer_source_row_search",
+                        text=row_item.name if row_item is not None else iface_("Select Layer Row"),
+                        icon='VIEWZOOM',
+                    )
     elif tex.source == 'BRUSH':
         col.label(text="Uses the brush's channel sources", icon='INFO')
     elif tex.source == 'CURVE_PATTERN':

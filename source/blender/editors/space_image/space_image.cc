@@ -452,7 +452,8 @@ static void image_listener(const wmSpaceTypeListenerParams *params)
       if (wmn->action == NA_EDITED) {
         /* Strength / blend of the active brush feed a live Vector shape preview
          * (#style_brush_values_from_brush); re-composite so the preview matches the commit. The
-         * shape settings stay isolated: only the brush is re-read. */
+         * shape settings stay isolated: only the brush is re-read. A finished source bake sends
+         * the same note (no reference) to re-resolve the cached style textures. */
         ED_paint_shape_brush_update(
             params->bmain, params->scene, static_cast<const Brush *>(wmn->reference));
       }

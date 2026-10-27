@@ -8,6 +8,10 @@
 
 #include "AS_asset_representation.hh"
 
+#include "DNA_ID.h"
+#include "DNA_image_types.h"
+#include "DNA_texture_types.h"
+
 #include "ED_asset.hh"
 
 #include "IMB_imbuf.hh"
@@ -17,6 +21,20 @@
 #include "interface_intern.hh"
 
 namespace blender::ui {
+
+ID *button_drag_id_for_slot(ID *id)
+{
+  /* Slots holding a #Tex (the Mask slot, Curve Patch rows, the texture grid) read as image slots
+   * to the user ("Drop image"), and only image-typed drags are accepted by the image slots
+   * elsewhere. So an IMAGE texture drags its image; anything else drags as itself. */
+  if (id && GS(id->name) == ID_TE) {
+    const Tex *tex = id_cast<const Tex *>(id);
+    if (tex->type == TEX_IMAGE && tex->ima != nullptr) {
+      return &tex->ima->id;
+    }
+  }
+  return id;
+}
 
 void button_drag_set_id(Button *but, ID *id)
 {

@@ -98,6 +98,15 @@ bool shape_apply_3d(bContext *C,
   if (shapes.is_empty() || toolsettings == nullptr || scene == nullptr) {
     return false;
   }
+  /* Never commit the solid fallback while the material bake that should feed the part is still
+   * running: the shape would be baked white instead of textured. The session/operator keeps the
+   * shape, so the user can apply it once the bake lands. */
+  if (!style_material_bakes_ensure(*CTX_data_main(C),
+                                  BKE_paint_shape_settings_get(*toolsettings),
+                                  op != nullptr ? op->reports : nullptr))
+  {
+    return false;
+  }
   /* An open shape draws only through its stroke; force it on so a Line / Polyline / open Curve
    * is never invisible (same rule the 2D compositor applies). */
   style = style_resolve_for_shapes(shapes, style);

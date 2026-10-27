@@ -227,26 +227,6 @@ enum eBrushMaterialPaintSourceLayout : int8_t {
   BRUSH_MATERIAL_PAINT_SOURCE_LAYOUT_TARGET_UV = 1,
 };
 
-/**
- * Which material a #BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL brush reads from.
- * The two choices keep their own owner pointer, so switching back and forth does not lose
- * either selection.
- */
-enum eBrushMaterialPaintMaterialSourceKind : int8_t {
-  /** #BrushMaterialPaint.source_material, the whole material. */
-  BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_DEFAULT = 0,
-  /** #BrushMaterialPaint.source_layer_owner, optionally narrowed to one stack row. */
-  BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER = 1,
-};
-
-/** How much of a layered material a Layer brush source bakes. */
-enum eBrushMaterialPaintLayerSourceScope : int8_t {
-  /** The isolated result of #BrushMaterialPaint.source_layer_marker's row. */
-  BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW = 0,
-  /** The layered material's complete stack output; the marker is ignored. */
-  BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_FULL = 1,
-};
-
 /** When a Layer brush source picks up edits made to its material or row. */
 enum eBrushMaterialPaintSourceRefreshMode : int8_t {
   /** Re-bake automatically, after #BrushMaterialPaint.source_refresh_delay. */

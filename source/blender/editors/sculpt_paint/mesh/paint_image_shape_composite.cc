@@ -56,6 +56,7 @@
 
 #include "DEG_depsgraph.hh"
 
+#include "ED_brush_layer_source.hh"
 #include "ED_image_paint_symmetry.hh"
 #include "ED_material_bake.hh"
 #include "ED_paint.hh"
@@ -397,7 +398,9 @@ uint64_t channel_signature(uint64_t hash, const ShapeTextureChannel &channel)
       hash = signature_mix(hash, buffer_sample_hash(channel.byte_px, pixel_num * 4));
     }
   }
-  return signature_mix(hash, uint64_t(channel.flip_green) | (uint64_t(channel.is_linear) << 1));
+  return signature_mix(hash,
+                       uint64_t(channel.flip_green) | (uint64_t(channel.is_linear) << 1) |
+                           (uint64_t(channel.alpha_weighted) << 2));
 }
 
 /** The #ShapeTexture::signature of \a texture; never 0. */
@@ -527,6 +530,7 @@ std::shared_ptr<const ShapeTexture> texture_from_channel_sources(
       }
     }
     out.flip_green = source.flip_green_channel;
+    out.alpha_weighted = source.alpha_weighted;
     max_size = math::max(max_size, out.size);
   }
   texture->native_size = max_size;
@@ -557,6 +561,12 @@ std::unique_ptr<material::ChannelSourceSet> channel_sources_for_brush(
       *brush->material_paint, mode_settings, int(paint.visible_material_channels));
 }
 
+/** Bake resolution of a Shape part's material and layer sources. It is deliberately independent of
+ * a brush's `source_bake_size`: a Shape style has no brush to inherit it from, and a fixed size
+ * keeps the shape image deterministic. The bake cache is keyed by this size, so a material used by
+ * both a brush and a Shape is baked once per size; that is accepted to keep the two decoupled. */
+static constexpr int SHAPE_MATERIAL_BAKE_SIZE = 1024;
+
 /** A material texture source: a #BrushMaterialPaint double over the shape's own material, so the
  * same channel resolution (Image nodes direct, procedural inputs baked) serves both. */
 std::shared_ptr<const ShapeTexture> texture_from_material(Material &material,
@@ -566,17 +576,82 @@ std::shared_ptr<const ShapeTexture> texture_from_material(Material &material,
   BrushMaterialPaint double_paint{};
   double_paint.source_mode = BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL;
   double_paint.source_material = &material;
-  double_paint.source_bake_size = 1024;
+  double_paint.source_bake_size = SHAPE_MATERIAL_BAKE_SIZE;
   for (BrushMaterialPaintChannel &channel : double_paint.channels) {
     channel.use = true;
   }
-  /* The bake runs in a job when it has a context; without one a Baked channel stays unusable
-   * (the shader falls back to the solid entry) until a later resolve with a context lands. */
+
+  /* The bake runs in a job when it has a context. A context-less resolve (a live-preview style
+   * comparison) does not start one: the bake is already warmed by
+   * #style_material_bakes_ensure at the settings-change and stroke-start points. */
   if (C != nullptr) {
     ed::material_bake::material_source_bake_ensure(*C, material, double_paint.source_bake_size);
   }
-  return texture_from_channel_sources(
-      std::make_unique<material::ChannelSourceSet>(double_paint, mode_settings, -1));
+
+  auto sources = std::make_unique<material::ChannelSourceSet>(double_paint, mode_settings, -1);
+  /* Only the channels that resolved to a Baked source depend on the job result. */
+  int baked_count = 0;
+  for (const int i : IndexRange(PAINT_MATERIAL_CHANNEL_NUM)) {
+    baked_count += int(sources->source(i).kind == material::ChannelSourceKind::Baked);
+  }
+
+  /* A missing bake would leave the Baked channels with no buffer, and the Shape would silently
+   * sample the remaining channels only: a partial material image that looks wrong. Wait for the
+   * job; the bake-completion notifier re-resolves the style. */
+  if (baked_count > 0 &&
+      ed::material_bake::material_source_bake_get(material, double_paint.source_bake_size) ==
+          nullptr)
+  {
+    return nullptr;
+  }
+
+  return texture_from_channel_sources(std::move(sources));
+}
+
+/** Fill the #BrushMaterialPaint double used to resolve a Shape part's Layer source. Kept in one
+ * place so the style resolve and the pre-stroke readiness check construct the exact same key. */
+static void shape_layer_paint_init(const PaintShapeTexture &dna, BrushMaterialPaint &paint)
+{
+  paint.source_mode = BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL;
+  paint.material_source_kind = BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER;
+  paint.source_layer_owner = dna.layer_owner;
+  paint.source_layer_marker = dna.layer_marker;
+  paint.layer_source_scope = dna.layer_source_scope;
+  paint.source_bake_size = SHAPE_MATERIAL_BAKE_SIZE;
+  for (BrushMaterialPaintChannel &channel : paint.channels) {
+    channel.use = true;
+  }
+}
+
+/** A Shape Layer source: a #BrushMaterialPaint double over the part's layered owner, so the same
+ * bake cache (keyed on owner + scope + marker) serves the shape and any brush that bakes the same
+ * material. Returns null until the bake is ready, like a material whose bake has not landed. */
+std::shared_ptr<const ShapeTexture> texture_from_shape_layer(const PaintShapeTexture &dna,
+                                                             const PaintModeSettings &mode_settings,
+                                                             bContext *C)
+{
+  if (dna.layer_owner == nullptr) {
+    return nullptr;
+  }
+  BrushMaterialPaint double_paint{};
+  shape_layer_paint_init(dna, double_paint);
+
+  const bool bake_ready = ed::brush_layer_source::brush_layer_source_bake_ready(double_paint);
+  Main *bmain = C != nullptr ? CTX_data_main(C) : nullptr;
+  if (bmain != nullptr) {
+    /* `&dna` is the part's own texture block: a stable identity for the WM job, unlike this
+     * stack-local double. The bake cache key ignores it, so a brush bake of the same source is
+     * reused. */
+    ed::brush_layer_source::brush_layer_source_bake_ensure(*bmain, double_paint, &dna);
+  }
+  /* A context-less resolve (a live-preview style comparison) only reads the cache; the bake is
+   * warmed by #style_material_bakes_ensure before a stroke starts. */
+  if (!bake_ready) {
+    return nullptr;
+  }
+  auto sources =
+      std::make_unique<material::ChannelSourceSet>(double_paint, mode_settings, -1);
+  return texture_from_channel_sources(std::move(sources));
 }
 
 /** A single-image source: the image's own buffer, pinned in a pool owned by the texture. */
@@ -705,9 +780,16 @@ void style_textures_resolve(bContext *C,
         break;
       }
       case PAINT_SHAPE_TEX_SRC_MATERIAL: {
-        texture = dna.material != nullptr ?
-                      texture_from_material(*dna.material, mode_settings, C) :
-                      nullptr;
+        if (dna.material_source_kind == BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER) {
+          /* Layer kind: a layered owner's stack or one isolated row. A plain material's own node
+           * tree is the generated stack group, not the baked result, hence the separate path. */
+          texture = texture_from_shape_layer(dna, mode_settings, C);
+        }
+        else {
+          texture = dna.material != nullptr ?
+                        texture_from_material(*dna.material, mode_settings, C) :
+                        nullptr;
+        }
         break;
       }
       case PAINT_SHAPE_TEX_SRC_IMAGE: {
@@ -782,6 +864,67 @@ void style_textures_resolve(bContext *C,
       }
     }
   }
+}
+
+bool style_material_bakes_ensure(Main &bmain,
+                                 const PaintShapeSettings &settings,
+                                 ReportList *reports)
+{
+  bool ready = true;
+  const auto check = [&](const PaintShapeTexture &dna) {
+    if (dna.source != PAINT_SHAPE_TEX_SRC_MATERIAL) {
+      return;
+    }
+    if (dna.material_source_kind == BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER) {
+      if (dna.layer_owner == nullptr) {
+        return;
+      }
+      BrushMaterialPaint double_paint{};
+      shape_layer_paint_init(dna, double_paint);
+      if (ed::brush_layer_source::brush_layer_source_bake_ready(double_paint)) {
+        return;
+      }
+      /* Same job-owner identity as #texture_from_shape_layer. The readiness test is repeated
+       * because a Full-scope source can be waiting for the owner's Material rows to bake first;
+       * that is still "not ready" for this shape's first stroke. */
+      ed::brush_layer_source::brush_layer_source_bake_ensure(bmain, double_paint, &dna);
+      if (!ed::brush_layer_source::brush_layer_source_bake_ready(double_paint)) {
+        ready = false;
+      }
+      return;
+    }
+    if (dna.material_source_kind != BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_DEFAULT ||
+        dna.material == nullptr)
+    {
+      return;
+    }
+    if (ed::material_bake::material_source_bake_get(*dna.material, SHAPE_MATERIAL_BAKE_SIZE) !=
+        nullptr)
+    {
+      return;
+    }
+    ed::material_bake::material_source_bake_ensure(bmain, *dna.material, SHAPE_MATERIAL_BAKE_SIZE);
+    if (ed::material_bake::material_source_bake_is_pending(*dna.material,
+                                                          SHAPE_MATERIAL_BAKE_SIZE))
+    {
+      ready = false;
+    }
+  };
+  /* Only the parts whose type actually reads the texture: a Solid fill or stroke never samples
+   * its (possibly assigned) material, so waiting on that bake would block for nothing. */
+  if (settings.fill_type == PAINT_SHAPE_FILL_TEXTURE) {
+    check(settings.fill_texture);
+  }
+  if (settings.stroke_type == PAINT_SHAPE_STROKE_TEXTURE) {
+    check(settings.stroke_texture);
+  }
+  if (!ready && reports != nullptr) {
+    BKE_report(reports,
+               RPT_INFO,
+               "Paint Shape: the material/layer source bake is still running; wait for it to "
+               "finish and draw again");
+  }
+  return ready;
 }
 
 /** Same texture: the same handle, or equal content signatures (a re-resolve of unchanged sources

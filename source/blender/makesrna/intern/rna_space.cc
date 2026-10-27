@@ -647,7 +647,7 @@ const EnumPropertyItem buttons_context_items[] = {
      "Strip Modifier Properties"},
     {BCONTEXT_BRUSH_MATERIAL,
      "BRUSH_MATERIAL",
-     ICON_MATERIAL,
+     ICON_BRUSHES_ALL,
      "Brush Material",
      "Active Brush Source Material Properties"},
     {BCONTEXT_LAYER_MATERIAL,

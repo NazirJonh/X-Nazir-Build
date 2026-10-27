@@ -809,6 +809,18 @@ void build_normal_write_basis(const float3 &tri_tangent,
 /* #remap_decal_normal_to_tangent now lives in paint_material_blend.hh (pure math, shared with
  * the shape blend core). */
 
+/**
+ * Bilinear sample of an RGBA float buffer that weights each texel's color by its alpha, so the
+ * transparent (black) texels of a layer bake do not darken the edges. Shared with the Shape
+ * texel sampler, which reads the same layer buffers.
+ */
+float4 interpolate_bilinear_alpha_weighted_fl(const float *pixels,
+                                              int width,
+                                              int height,
+                                              float px,
+                                              float py,
+                                              bool wrap);
+
 }  // namespace blender::ed::sculpt_paint::material
 
 namespace blender::ed::sculpt_paint::shape {

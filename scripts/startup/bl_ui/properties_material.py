@@ -10,6 +10,10 @@ from bpy_extras.node_utils import find_node_input
 
 from bl_ui.space_properties import PropertiesAnimationMixin
 
+from bl_ui.properties_paint_common import (
+    paint_shape_tool_active,
+)
+
 from bl_ui.properties_material_paint_layers import (
     draw_material_channel_set,
     draw_material_layer_channels,
@@ -473,8 +477,40 @@ class BRUSH_MATERIAL_PT_context_material(BrushMaterialButtonsPanel, Panel):
     bl_label = ""
     bl_options = {'HIDE_HEADER'}
 
+    @classmethod
+    def poll(cls, context):
+        # The tab follows the Shape tool even before the selected part has a material: this panel
+        # creates it. The other panels of the tab stay hidden while `context.material` is None
+        # because they keep the base poll.
+        if paint_shape_tool_active(context):
+            return True
+        return super().poll(context)
+
     def draw(self, context):
         layout = self.layout
+        # A Shape tool does not use the active brush's material: its Default material comes from
+        # the Fill or Stroke part of the shared Shape settings. The Layer source is deliberately
+        # not offered here; the Shape panel's source row edits that one.
+        if paint_shape_tool_active(context):
+            # Always the shared tool-settings block, matching the C++ context path
+            # (`buttons_context_path_brush_material`). A live session may expose a private copy
+            # through `paint_shape_settings`, but this tab edits the shared settings only.
+            shape = context.tool_settings.image_paint.shape
+            is_stroke = shape.material_tab_part == 'STROKE'
+            layout.row().prop(shape, "material_tab_part", expand=True)
+            # A disabled part must not hide the whole tab. Offer the switch that enables it, and
+            # keep the material slot below so a material can be assigned or dropped beforehand.
+            if is_stroke and not shape.use_stroke:
+                layout.row().prop(shape, "use_stroke", text="Enable Stroke", toggle=True)
+            elif not is_stroke and not shape.use_fill:
+                layout.row().prop(shape, "use_fill", text="Enable Fill", toggle=True)
+            tex = shape.stroke_texture if is_stroke else shape.fill_texture
+            # Same drop target as the Shape panel's source row: works with an empty slot, so a
+            # material can be dropped in before the part has one.
+            layout.row().template_ID_browser(
+                tex, "material", text="Drop material", use_users=False)
+            return
+
         # Both the tab's context path and context.brush resolve through the active paint, so a
         # brush with material_paint is expected here. Guarded anyway: a UI script raising is far
         # worse than a degraded row, and the two lookups are not literally the same code path.

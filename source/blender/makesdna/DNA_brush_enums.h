@@ -12,6 +12,27 @@
 
 namespace blender {
 
+/**
+ * Which material a #BRUSH_MATERIAL_PAINT_SOURCE_MATERIAL source reads from.
+ * Also used by #PaintShapeTexture::material_source_kind, hence living in this shared enum header:
+ * #DNA_scene_types.h cannot include #DNA_brush_types.h (it would be a cycle), and the Shape's
+ * source must keep the exact same values as the brush's.
+ */
+enum eBrushMaterialPaintMaterialSourceKind : int8_t {
+  /** #BrushMaterialPaint.source_material, the whole material. */
+  BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_DEFAULT = 0,
+  /** #BrushMaterialPaint.source_layer_owner, optionally narrowed to one stack row. */
+  BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_LAYER = 1,
+};
+
+/** How much of a layered material a Layer source bakes. */
+enum eBrushMaterialPaintLayerSourceScope : int8_t {
+  /** The isolated result of #BrushMaterialPaint.source_layer_marker's row. */
+  BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW = 0,
+  /** The layered material's complete stack output; the marker is ignored. */
+  BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_FULL = 1,
+};
+
 /* BrushGpencilSettings->flag */
 enum eGPDbrush_Flag : int {
   /* brush use pressure */

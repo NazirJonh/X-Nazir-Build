@@ -827,6 +827,15 @@ static void scene_foreach_toolsettings(LibraryForeachIDData *data,
                                                       reader,
                                                       &texture_old->material,
                                                       IDWALK_CB_USER);
+    /* The Layer kind's owner is a second, independent source selection and carries the same
+     * RNA reference count as `material`; it must be remapped and preserved through undo too. */
+    BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
+                                                      &texture->layer_owner,
+                                                      do_undo_restore,
+                                                      SCENE_FOREACH_UNDO_RESTORE,
+                                                      reader,
+                                                      &texture_old->layer_owner,
+                                                      IDWALK_CB_USER);
     BKE_LIB_FOREACHID_UNDO_PRESERVE_PROCESS_IDSUPER_P(data,
                                                       &texture->tex,
                                                       do_undo_restore,

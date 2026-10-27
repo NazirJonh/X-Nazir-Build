@@ -96,11 +96,13 @@ std::unique_ptr<ui::DropTargetInterface> brush_texture_slot_drop_target_get(bCon
                                                                            const wmEvent *event);
 
 /**
- * Return a drop target for the brush material source slot under the cursor, or null if the button
- * under the cursor is not the active brush's source material slot. Used by the generic button drop
- * dispatch #blender::ui::region_but_find_drop_target_at().
+ * Return a drop target for a material source slot under the cursor: a brush's `source_material`, or
+ * a Shape part's `material` / `layer_owner`. Returns null if the button under the cursor is not
+ * one. The target comes from the button's own property pointer, not from the active paint, so a
+ * Shape row writes its own #PaintShapeTexture and never the brush's Brush Material. Used by the
+ * generic button drop dispatch #blender::ui::region_but_find_drop_target_at().
  */
-std::unique_ptr<ui::DropTargetInterface> brush_material_slot_drop_target_get(
+std::unique_ptr<ui::DropTargetInterface> material_slot_drop_target_get(
     bContext *C, const ARegion *region, const wmEvent *event);
 
 /**

@@ -76,6 +76,15 @@ void brush_layer_source_bake_ensure(const bContext &C, const Brush &brush);
 void brush_layer_source_bake_ensure(Main &bmain, const Brush &brush, bool force = false);
 
 /**
+ * The same bake entry for a source that has no #Brush: a Shape part's Layer material. \a job_owner
+ * only identifies the WM job (pass a stable address such as the owning texture block); no refresh
+ * timer is armed, the next resolve picks the bake up. Does nothing for a non-Layer source.
+ */
+void brush_layer_source_bake_ensure(Main &bmain,
+                                    const BrushMaterialPaint &brush_paint,
+                                    const void *job_owner);
+
+/**
  * Whether a stroke with \a brush may start. A Layer source the brush samples must have a current
  * bake before the first dab: painting the brush's own value instead would silently write something
  * the source does not describe. When it is not ready this starts the bake, reports \a reports and

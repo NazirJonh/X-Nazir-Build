@@ -474,7 +474,7 @@ enum class EnsureResult {
 };
 
 EnsureResult ensure_row_bake(Main &bmain,
-                             const Brush &brush,
+                             const void *job_owner,
                              const BrushMaterialPaint &brush_paint,
                              const LayerSourceKey &key)
 {
@@ -546,7 +546,7 @@ EnsureResult ensure_row_bake(Main &bmain,
 
   wmJob *wm_job = WM_jobs_get(wm,
                               static_cast<wmWindow *>(wm->windows.first),
-                              &brush,
+                              job_owner,
                               "Baking brush layer source...",
                               WM_JOB_EXCL_RENDER | WM_JOB_PROGRESS,
                               WM_JOB_TYPE_BRUSH_LAYER_SOURCE);
@@ -557,40 +557,53 @@ EnsureResult ensure_row_bake(Main &bmain,
   return EnsureResult::Done;
 }
 
-EnsureResult ensure_impl(Main &bmain, const Brush &brush, const bool force)
+/** Shared by the brush path and the Shape path: \a job_owner only identifies the WM job, so a
+ * caller with no #Brush (a Shape part) can pass a stable pointer to its own texture block. */
+EnsureResult ensure_impl(Main &bmain,
+                         const BrushMaterialPaint &brush_paint,
+                         const void *job_owner)
 {
-  const BrushMaterialPaint *brush_paint = brush.material_paint;
-  if (brush_paint == nullptr || !is_layer_source(*brush_paint)) {
-    return EnsureResult::Done;
-  }
-  if (brush_paint->source_refresh_mode == BRUSH_MATERIAL_PAINT_SOURCE_REFRESH_MANUAL && !force) {
+  if (!is_layer_source(brush_paint)) {
     return EnsureResult::Done;
   }
 
   LayerSourceKey key;
-  if (!layer_source_key_from_paint(*brush_paint, key)) {
+  if (!layer_source_key_from_paint(brush_paint, key)) {
     return EnsureResult::Done;
   }
 
-  if (brush_paint->layer_source_scope == BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_FULL) {
-    Material &owner = *brush_paint->source_layer_owner;
-    if (full_source_ready(*brush_paint)) {
+  if (brush_paint.layer_source_scope == BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_FULL) {
+    Material &owner = *brush_paint.source_layer_owner;
+    if (full_source_ready(brush_paint)) {
       return EnsureResult::Done;
     }
     /* The owner's rows landing rewrites its generated tree, so a bake that finishes can already be
      * for an older state. Keep asking until the exact one is current. */
-    if (material_bake::material_source_bake_is_pending(owner, brush_paint->source_bake_size)) {
+    if (material_bake::material_source_bake_is_pending(owner, brush_paint.source_bake_size)) {
       return EnsureResult::Retry;
     }
     /* The layered owner's generated tree is the complete stack's output, so the material bake
      * already is the Full Material source. Rows left live by a pending bake are values the graph
      * evaluates directly, not a wrong result. */
     material_bake::material_bake_layered_rows_ensure(bmain, owner);
-    material_bake::material_source_bake_ensure(bmain, owner, brush_paint->source_bake_size);
+    material_bake::material_source_bake_ensure(bmain, owner, brush_paint.source_bake_size);
     return EnsureResult::Retry;
   }
 
-  return ensure_row_bake(bmain, brush, *brush_paint, key);
+  return ensure_row_bake(bmain, job_owner, brush_paint, key);
+}
+
+EnsureResult ensure_impl(Main &bmain, const Brush &brush, const bool force)
+{
+  const BrushMaterialPaint *brush_paint = brush.material_paint;
+  if (brush_paint == nullptr) {
+    return EnsureResult::Done;
+  }
+  if (brush_paint->source_refresh_mode == BRUSH_MATERIAL_PAINT_SOURCE_REFRESH_MANUAL && !force) {
+    return EnsureResult::Done;
+  }
+
+  return ensure_impl(bmain, *brush_paint, &brush);
 }
 
 Brush *brush_from_session_uid(Main &bmain, const uint32_t session_uid)
@@ -892,6 +905,16 @@ void brush_layer_source_bake_ensure(const bContext &C, const Brush &brush)
   if (bmain != nullptr) {
     brush_layer_source_bake_ensure(*bmain, brush, false);
   }
+}
+
+void brush_layer_source_bake_ensure(Main &bmain,
+                                    const BrushMaterialPaint &brush_paint,
+                                    const void *job_owner)
+{
+  /* Redraw-frequency entry for sources with no #Brush (a Shape part's Layer material). It skips
+   * the brush's Manual/debounce refresh modes and arms no refresh timer: the caller resolves again
+   * on the next redraw, and the job's own #NC_BRUSH timer is what makes that redraw happen. */
+  ensure_impl(bmain, brush_paint, job_owner);
 }
 
 bool brush_layer_source_stroke_ready(Main &bmain, const Brush &brush, ReportList *reports)

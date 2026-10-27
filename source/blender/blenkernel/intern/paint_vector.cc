@@ -480,9 +480,11 @@ static void paint_vector_foreach_id(ID *id, LibraryForeachIDData *data)
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.curve_source_object, IDWALK_CB_NOP);
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.fill_texture.image, IDWALK_CB_NOP);
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.fill_texture.material, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.fill_texture.layer_owner, IDWALK_CB_NOP);
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.fill_texture.tex, IDWALK_CB_NOP);
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.stroke_texture.image, IDWALK_CB_NOP);
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.stroke_texture.material, IDWALK_CB_NOP);
+    BKE_LIB_FOREACHID_PROCESS_ID(data, style.stroke_texture.layer_owner, IDWALK_CB_NOP);
     BKE_LIB_FOREACHID_PROCESS_ID(data, style.stroke_texture.tex, IDWALK_CB_NOP);
   }
 }

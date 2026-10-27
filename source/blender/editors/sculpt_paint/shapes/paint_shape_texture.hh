@@ -59,6 +59,12 @@ struct ShapeTextureChannel {
   bool is_linear = true;
   /** The buffer is a normal map in the DirectX convention (its green channel flips on sample). */
   bool flip_green = false;
+  /**
+   * A layered-material bake is transparent where the row has no content, with black in those
+   * texels. Sample it color-weighted by alpha, the same way a brush stroke does, or every
+   * transparent edge gets a dark rim in Base Color and zero in scalar channels.
+   */
+  bool alpha_weighted = false;
 };
 
 /**

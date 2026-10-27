@@ -1343,6 +1343,10 @@ static void add_browse_image_button(Layout &layout,
     button_drawflag_enable(but, BUT_NO_MENU_TRIA);
     /* The thumbnail is too small to judge the texture by, so hovering it shows the large preview. */
     image_grid_slot_tooltip_set(but, id);
+    /* Drag the assigned texture out of the slot: an IMAGE texture drags its image, so every image
+     * slot accepts the drop (see #button_drag_id_for_slot). The drag shows the thumbnail once the
+     * preview has rendered, the plain texture icon until then. */
+    button_drag_set_id(but, button_drag_id_for_slot(id));
 
     /* The name is the widest target in the row -- the part a user naturally clicks to change the
      * assignment -- so it opens the shelf too rather than being a rename field. */

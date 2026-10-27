@@ -25,6 +25,7 @@
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_space_enums.h"
 #include "DNA_sequence_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_world_types.h"
@@ -57,6 +58,8 @@
 #include "UI_resources.hh"
 
 #include "WM_api.hh"
+#include "WM_toolsystem.hh"
+#include "WM_types.hh"
 
 #include "buttons_intern.hh" /* own include */
 
@@ -380,9 +383,72 @@ static bool buttons_context_path_material(ButsContextPath *path)
   return false;
 }
 
+/** A material is only safe to put in the tab's RNA path while it still belongs to #bmain. Brushes
+ * are not part of undo, so a brush's source may point at a data-block that was removed since (see
+ * #BKE_brush_material_paint_stale_ids_clear); Shape materials can be removed the same way. */
+static bool buttons_context_material_in_main(const Main *bmain, const Material *material)
+{
+  if (bmain == nullptr) {
+    return false;
+  }
+  for (const Material &ma : bmain->materials) {
+    if (&ma == material) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether the active tool of this context is one of the Shape tools.
+ *
+ * The Properties editor has no tool list of its own: like
+ * `ToolSelectPanelHelper.tool_active_from_context` in Python, the tab follows the 3D View tool for
+ * the active object mode. #WM_toolsystem_ref_from_context is avoided like in
+ * #paintcurve_tool_ref_from_context: the area's tool runtime can briefly be out of sync (during a
+ * mode switch or undo), and the key-based lookup never asserts. */
+static bool buttons_context_shape_tool_active(const bContext *C)
+{
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  WorkSpace *workspace = CTX_wm_workspace(C);
+  if (!(bmain && scene && view_layer && workspace)) {
+    return false;
+  }
+  const int mode = WM_toolsystem_mode_from_spacetype(
+      *bmain, scene, view_layer, nullptr, SPACE_VIEW3D);
+  if (mode == -1) {
+    return false;
+  }
+  bToolKey tkey{SPACE_VIEW3D, mode};
+  const bToolRef *tool = WM_toolsystem_ref_find(workspace, &tkey);
+  return tool != nullptr && STRPREFIX(tool->idname, "builtin.paint_shape_");
+}
+
 static bool buttons_context_path_brush_material(const bContext *C, ButsContextPath *path)
 {
   /* NOTE: deliberately no early return on pinned RNA_Material -- see D9. */
+  if (C != nullptr && buttons_context_shape_tool_active(C)) {
+    /* A Shape draws with its own material, not the active brush's. Only the Default material of
+     * the selected part belongs in this tab; the Layer owner stays in the Shape panel's source
+     * row. The path ends at the Material, so `context.material` works for every panel of the
+     * tab. */
+    const Scene *scene = CTX_data_scene(C);
+    const PaintShapeSettings &shape = BKE_paint_shape_settings_get(*scene->toolsettings);
+    Material *source = shape.material_tab_part == PAINT_SHAPE_MATERIAL_TAB_STROKE ?
+                           shape.stroke_texture.material :
+                           shape.fill_texture.material;
+    /* The tab stays visible without a material too: its panel offers the Fill/Stroke switch, the
+     * button that enables the selected part and an empty material slot to drop a material onto.
+     * Only add the pointer when it is safe to dereference, so `context.material` is simply absent
+     * in the empty case. */
+    if (source != nullptr && buttons_context_material_in_main(CTX_data_main(C), source)) {
+      path->ptr[path->len] = RNA_id_pointer_create(&source->id);
+      path->len++;
+    }
+    return true;
+  }
+
   Paint *paint = BKE_paint_get_active_from_context(C);
   Brush *brush = paint ? BKE_paint_brush(paint) : nullptr;
   if (!brush || !brush->material_paint) {
@@ -393,18 +459,7 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
     return false;
   }
 
-  /* Brushes are not part of undo, so the source material may point at a data-block that was removed
-   * since (see #BKE_brush_material_paint_stale_ids_clear). Building an RNA pointer from it would
-   * dereference freed memory on every redraw of the tab, so only accept materials still in Main. */
-  const Main *bmain = CTX_data_main(C);
-  bool source_in_main = false;
-  for (const Material &ma : bmain->materials) {
-    if (&ma == source) {
-      source_in_main = true;
-      break;
-    }
-  }
-  if (!source_in_main) {
+  if (!buttons_context_material_in_main(CTX_data_main(C), source)) {
     return false;
   }
 

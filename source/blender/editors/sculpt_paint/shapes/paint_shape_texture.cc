@@ -454,6 +454,12 @@ float4 shape_texture_sample_rgba(const ShapeTextureChannel &channel, const float
   /* Texel centers: u in [0, 1] spans [0.5, w - 0.5] in texel coordinates. */
   const float fx = math::clamp(uv.x, 0.0f, 1.0f) * float(w) - 0.5f;
   const float fy = math::clamp(uv.y, 0.0f, 1.0f) * float(h) - 0.5f;
+  /* Layer bakes are transparent black outside their content; use the brush's alpha-weighted
+   * interpolation so those texels do not darken the color. The Shape frame clamps, so no wrap. */
+  if (channel.alpha_weighted && channel.float_px != nullptr) {
+    return material::interpolate_bilinear_alpha_weighted_fl(
+        channel.float_px, w, h, fx, fy, false);
+  }
   const int x0 = int(math::floor(fx));
   const int y0 = int(math::floor(fy));
   const float tx = fx - float(x0);

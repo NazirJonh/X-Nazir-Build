@@ -685,6 +685,9 @@ class MATERIAL_OT_paint_layers_output_render(Operator):
 _brush_source_row_cache = []
 # (name, library path) of the brush whose Layer source row the open popup assigns.
 _brush_source_row_target = None
+# The Shape row uses the same operator. Only the identity of the part is kept ('FILL' or 'STROKE'):
+# the wrapped DNA address can move (undo, file load, scene change) between #invoke and #execute.
+_shape_source_texture_part = None
 
 
 def _brush_source_row_items(_self, _context):
@@ -698,7 +701,8 @@ def _brush_source_row_collect(rows, depth, items):
 
 
 class PAINT_OT_brush_layer_source_row_search(Operator):
-    """Pick the stack row a PBR Paint brush reads, by searching the Layer material's rows"""
+    """Pick the stack row a PBR Paint brush or a Shape part reads, by searching the Layer
+    material's rows"""
     bl_idname = "paint.brush_layer_source_row_search"
     bl_label = "Select Layer Row"
     bl_options = {'INTERNAL'}
@@ -706,9 +710,23 @@ class PAINT_OT_brush_layer_source_row_search(Operator):
 
     row: bpy.props.EnumProperty(name="Row", items=_brush_source_row_items)
 
-    def execute(self, _context):
+    def execute(self, context):
         # The popup runs outside the button that opened it, so the layout's context pointer is
-        # gone by now: the brush picked at #invoke is looked up again from its identity.
+        # gone by now. A Shape target is only the part's identity, re-resolved here; a brush
+        # target is looked up again from its identity.
+        global _shape_source_texture_part
+        if _shape_source_texture_part is not None:
+            # Imported here rather than at module level: `bl_operators` modules load early, and
+            # this keeps the bl_ui import (and its cost) out of startup.
+            from bl_ui.properties_paint_common import paint_shape_settings
+            part = _shape_source_texture_part
+            _shape_source_texture_part = None
+            if not self.row:
+                return {'CANCELLED'}
+            shape = paint_shape_settings(context)
+            tex = shape.stroke_texture if part == 'STROKE' else shape.fill_texture
+            tex.layer_marker = self.row
+            return {'FINISHED'}
         brush = bpy.data.brushes.get(_brush_source_row_target) if _brush_source_row_target else None
         if brush is None or brush.material_paint is None or not self.row:
             return {'CANCELLED'}
@@ -716,13 +734,33 @@ class PAINT_OT_brush_layer_source_row_search(Operator):
         return {'FINISHED'}
 
     def invoke(self, context, _event):
-        global _brush_source_row_target
-        brush_paint = getattr(context, "brush_material_paint", None)
-        if brush_paint is None:
+        global _brush_source_row_target, _shape_source_texture_part
+        _shape_source_texture_part = None
+        shape_texture = getattr(context, "shape_texture", None)
+        brush_paint = None if shape_texture is not None else \
+            getattr(context, "brush_material_paint", None)
+        owner = None
+        if shape_texture is not None:
+            # Store which part was clicked, not the RNA wrapper: the popup clears the button
+            # context, and DNA can move before #execute.
+            # Imported here rather than at module level to keep the bl_ui import out of startup;
+            # see #execute.
+            from bl_ui.properties_paint_common import paint_shape_settings
+            shape = paint_shape_settings(context)
+            pointer = shape_texture.as_pointer()
+            if shape.fill_texture.as_pointer() == pointer:
+                _shape_source_texture_part = 'FILL'
+            elif shape.stroke_texture.as_pointer() == pointer:
+                _shape_source_texture_part = 'STROKE'
+            else:
+                return {'CANCELLED'}
+            owner = shape_texture.layer_owner
+        elif brush_paint is not None:
+            brush = brush_paint.id_data
+            _brush_source_row_target = (brush.name, brush.library.filepath if brush.library else None)
+            owner = brush_paint.source_layer_owner
+        else:
             return {'CANCELLED'}
-        brush = brush_paint.id_data
-        _brush_source_row_target = (brush.name, brush.library.filepath if brush.library else None)
-        owner = brush_paint.source_layer_owner
         _brush_source_row_cache.clear()
         if owner is not None and owner.is_layered:
             _brush_source_row_collect(owner.paint_layers, 0, _brush_source_row_cache)

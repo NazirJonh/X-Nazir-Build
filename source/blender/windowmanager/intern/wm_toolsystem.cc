@@ -1001,6 +1001,14 @@ void WM_toolsystem_ref_set_from_runtime(bContext *C,
   if (idname_changed && g_tool_change_callback != nullptr) {
     g_tool_change_callback(*C, *tref);
   }
+
+  /* The tool change itself sent no notifier, but the Properties Brush Material tab only re-reads
+   * the active tool on a redraw. Target just that editor instead of the broad
+   * #NC_SCENE | #ND_TOOLSETTINGS signal, which many editors listen to and some use to recompute
+   * their settings. */
+  if (idname_changed) {
+    WM_main_add_notifier(NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  }
 }
 
 void WM_toolsystem_ref_sync_from_context(Main *bmain, WorkSpace *workspace, bToolRef *tref)

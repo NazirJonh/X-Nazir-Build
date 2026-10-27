@@ -1215,6 +1215,16 @@ static void material_bake_startjob(void *customdata, wmJobWorkerStatus *worker_s
   BKE_main_free(bake_main);
 }
 
+/**
+ * Runs on the main thread once the job has finished. A Shape material source re-resolves on the
+ * brush notifier -- the same channel the layer bake uses -- so both editors'
+ * #ED_paint_shape_brush_update hook picks up the finished bake.
+ */
+static void material_bake_end(void * /*customdata*/)
+{
+  WM_main_add_notifier(NC_BRUSH | NA_EDITED, nullptr);
+}
+
 static void material_bake_free(void *customdata)
 {
   MaterialBakeJob *job = static_cast<MaterialBakeJob *>(customdata);
@@ -1272,7 +1282,7 @@ static void material_source_bake_ensure_impl(wmWindowManager &wm,
 
   WM_jobs_customdata_set(wm_job, job, material_bake_free);
   WM_jobs_timer(wm_job, 0.2, NC_MATERIAL, NC_MATERIAL);
-  WM_jobs_callbacks(wm_job, material_bake_startjob, nullptr, nullptr, nullptr);
+  WM_jobs_callbacks(wm_job, material_bake_startjob, nullptr, nullptr, material_bake_end);
   WM_jobs_start(&wm, wm_job);
 }
 

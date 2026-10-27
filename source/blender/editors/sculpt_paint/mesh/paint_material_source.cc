@@ -822,7 +822,7 @@ static void apply_direct_sample_rotation(const DirectSampleLayout &layout, float
  * of the opaque neighbors and leaves the coverage to the alpha. Same texel convention as
  * #math::interpolate_bilinear_fl: no half-texel offset.
  */
-static float4 interpolate_bilinear_alpha_weighted_fl(
+float4 interpolate_bilinear_alpha_weighted_fl(
     const float *pixels, const int width, const int height, const float px, const float py,
     const bool wrap)
 {

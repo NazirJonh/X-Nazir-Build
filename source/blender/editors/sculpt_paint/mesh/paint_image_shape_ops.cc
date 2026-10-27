@@ -494,6 +494,16 @@ static wmOperatorStatus image_shape_draw_invoke(bContext *C,
     }
   }
 
+  /* A material bake runs as a background job. Starting the shape while it is missing would paint
+   * the part's solid values and commit them; start/wait for the bake instead. */
+  if (!shape::style_material_bakes_ensure(*CTX_data_main(C),
+                                         BKE_paint_shape_settings_get(*scene->toolsettings),
+                                         op->reports))
+  {
+    MEM_delete(state);
+    return OPERATOR_CANCELLED;
+  }
+
   /* The tool's type property overrides the settings; -1 means "use the settings' type". */
   int type = RNA_enum_get(op->ptr, "type");
   if (type < 0) {
@@ -822,6 +832,12 @@ static wmOperatorStatus image_shape_draw_exec(bContext *C, wmOperator *op)
   }
   const Vector<shape::PaintShape> shapes = {*shape};
   const shape::CanvasTile tile = shape::canvas_tile_from_op_props(op);
+  if (!shape::style_material_bakes_ensure(*CTX_data_main(C),
+                                         BKE_paint_shape_settings_get(*scene->toolsettings),
+                                         op->reports))
+  {
+    return OPERATOR_CANCELLED;
+  }
   if (shape::shape_bake(C, shapes, tile, style, true, SHAPE_UNDO_NAME)) {
     return OPERATOR_FINISHED;
   }

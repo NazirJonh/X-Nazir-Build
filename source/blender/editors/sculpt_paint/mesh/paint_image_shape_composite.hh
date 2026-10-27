@@ -52,6 +52,7 @@ struct Main;
 struct Object;
 struct Paint;
 struct PaintMaterialImageTarget;
+struct ReportList;
 struct SpaceImage;
 struct ToolSettings;
 
@@ -177,6 +178,21 @@ void style_textures_resolve(bContext *C,
                             const PaintShapeSettings &settings,
                             Span<const Image *> protected_images,
                             ShapeStyle &style);
+
+/**
+ * Ensure the material/layer source bakes that the used Shape parts read are running, and report
+ * whether they are ready.
+ *
+ * Both source kinds bake as background jobs, so the first shape drawn right after a source is
+ * assigned would otherwise resolve to no texture and paint the part's solid values until a later
+ * stroke. Redraw-frequency callers use this to warm the bake; a new-shape entry point uses the
+ * false result to refuse that first shape instead of baking the solid fallback into the image.
+ *
+ * \param reports: optional; receives an info report when a bake is pending.
+ */
+bool style_material_bakes_ensure(Main &bmain,
+                                 const PaintShapeSettings &settings,
+                                 ReportList *reports);
 
 /**
  * Hand the resolved Mask Source of \a previous to the freshly built \a next, before

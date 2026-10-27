@@ -2522,6 +2522,13 @@ int autocomplete_end(AutoComplete *autocpl, char *autoname);
  * Functions to set drag data for buttons. This enables dragging support, whereby the drag data is
  * "dragged", not the button itself. */
 
+/**
+ * Resolve the ID a slot button should drag: an IMAGE texture resolves to its image, so slots
+ * holding a #Tex drag what the user sees ("Drop image") and image slots accept the drop.
+ * Every other ID drags as itself.
+ */
+ID *button_drag_id_for_slot(ID *id);
+
 void button_drag_set_id(Button *but, ID *id);
 /**
  * Set an image to display while dragging. This works for any drag type (`WM_DRAG_XXX`).

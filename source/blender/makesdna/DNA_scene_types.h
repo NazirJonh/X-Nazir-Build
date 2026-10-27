@@ -32,6 +32,7 @@
 #include "DNA_layer_types.h"
 #include "DNA_listBase.h"
 #include "DNA_scene_enums.h"
+#include "DNA_uuid_types.h" /* for bUUID */
 #include "DNA_vec_types.h"
 #include "DNA_view3d_types.h"
 
@@ -1787,6 +1788,23 @@ struct PaintShapeTexture {
   struct Material *material = nullptr;
   /** #PAINT_SHAPE_TEX_SRC_TEXTURE source (later milestone). */
   struct Tex *tex = nullptr;
+  /** #eBrushMaterialPaintMaterialSourceKind. Only read in #PAINT_SHAPE_TEX_SRC_MATERIAL. */
+  char material_source_kind = BRUSH_MATERIAL_PAINT_MATERIAL_SOURCE_DEFAULT;
+  /** #eBrushMaterialPaintLayerSourceScope. Only read for the Layer kind. */
+  char layer_source_scope = BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW;
+  /* #layer_owner below is pointer-aligned; these six bytes keep its offset explicit instead of
+   * letting the compiler insert hidden padding after the two chars. */
+  char _pad[6] = {};
+  /**
+   * Layered material the Layer kind reads from. Separate from #material so the Default and Layer
+   * selections survive switching between them, like #BrushMaterialPaint's two owners.
+   */
+  struct Material *layer_owner = nullptr;
+  /**
+   * Marker of the stack row isolated by #BRUSH_MATERIAL_PAINT_LAYER_SOURCE_SCOPE_ROW. Nil in Full
+   * scope; a marker that no longer resolves makes the source stale.
+   */
+  bUUID layer_marker = {};
 };
 
 /**
@@ -1807,6 +1825,13 @@ struct PaintShapeCurvePattern {
   /** #ePaintShapeCurvePatternFlag */
   char flag = 0;
   char _pad[6] = {};
+};
+
+/** #PaintShapeSettings::material_tab_part: which part's Default material the Brush Material tab
+ * edits. This is UI state; drawing reads the fill/stroke texture settings directly. */
+enum ePaintShapeMaterialTabPart : int8_t {
+  PAINT_SHAPE_MATERIAL_TAB_FILL = 0,
+  PAINT_SHAPE_MATERIAL_TAB_STROKE = 1,
 };
 
 /**
@@ -1924,8 +1949,10 @@ struct PaintShapeSettings {
   char _pad6[7] = {};
   /** Opacity of the Mask Source texture preview drawn inside the Rect/Ellipse gizmo. */
   float texture_preview_opacity = 0.5f;
+  /** #ePaintShapeMaterialTabPart; fills part of the struct-end padding, so old files read Fill. */
+  char material_tab_part = PAINT_SHAPE_MATERIAL_TAB_FILL;
   /* Keep the struct's size a multiple of 8: it holds pointers and is embedded in #ToolSettings. */
-  char _pad7[4] = {};
+  char _pad7[3] = {};
 };
 
 /** #ImagePaintSettings::select_component */

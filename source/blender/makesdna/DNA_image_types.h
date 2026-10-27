@@ -68,7 +68,14 @@ enum eImage_Flag : int {
   /** For image user, but these flags are mixed. */
   // IMA_USER_FRAME_IN_RANGE = (1 << 10),
   IMA_VIEW_AS_RENDER = (1 << 11),
-  IMA_FLAG_UNUSED_12 = (1 << 12), /* cleared */
+  /**
+   * Map generated and owned by the paint layer stack: a layer channel map, a mask or correction
+   * map, a merge or bake-coverage map, a row bake or the composite stand-in canvas. The user
+   * reaches these through the layer UI alone, so they are hidden from the image browsers unless
+   * Developer Extras is on (see #BKE_paint_layers_image_is_internal). A map the user assigned (a
+   * dropped texture, an ID Map) never carries this bit.
+   */
+  IMA_PAINT_LAYER_INTERNAL_MAP = (1 << 12),
   IMA_DEINTERLACE = (1 << 13),
   IMA_USE_VIEWS = (1 << 14),
   IMA_FLAG_UNUSED_15 = (1 << 15), /* cleared */

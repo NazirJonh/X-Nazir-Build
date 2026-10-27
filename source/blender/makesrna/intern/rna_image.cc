@@ -1338,6 +1338,17 @@ static void rna_def_image(BlenderRNA *brna)
                            "Image was auto-created as a writable paint target (material-paint "
                            "canvas or texture-paint slot), not chosen as a source texture");
 
+  prop = RNA_def_property(srna, "is_paint_layer_internal_map", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", IMA_PAINT_LAYER_INTERNAL_MAP);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Paint Layer Internal Map",
+      "Image was generated and is owned by the material's paint layer stack (a channel, mask, "
+      "correction, merge, bake-coverage or bake map, or the composite stand-in canvas); the image "
+      "browsers hide it unless Developer Extras is on. A map the user assigned never "
+      "carries this flag");
+
   prop = RNA_def_property(srna, "paint_layer_id", PROP_STRING, PROP_NONE);
   RNA_def_property_string_maxlength(prop, UUID_STRING_SIZE);
   RNA_def_property_string_funcs(prop,

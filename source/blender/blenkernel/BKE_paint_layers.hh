@@ -1953,4 +1953,37 @@ void BKE_paint_layers_row_result_job_free(PaintLayersRowResultJob &job);
 
 /** \} */
 
+/* -------------------------------------------------------------------- */
+/** \name Internal maps
+ *
+ * The maps the stack mints for a row (its painted channels, a bake, a merge, a mask whose kind
+ * paints its own map) are the stack's own: the user reaches them through the layer UI alone, so
+ * the image browsers hide them unless Developer Extras is on. A map the user assigned -- a dropped
+ * texture, an ID Map a filter samples -- is never internal.
+ * \{ */
+
+/**
+ * Whether \a image carries #IMA_PAINT_LAYER_INTERNAL_MAP: the stack generated and owns it. The flag
+ * is written where the map is created, and #BKE_paint_layers_internal_maps_mark adds it to files
+ * saved before it existed.
+ */
+bool BKE_paint_layers_image_is_internal(const Image &image);
+
+/**
+ * Mark \a image as a map the stack generated and owns. This is the only place the flag is set:
+ * every creation path calls it, so a map the stack mints cannot be forgotten in the browsers.
+ */
+void BKE_paint_layers_image_mark_internal(Image &image);
+
+/**
+ * Mark every map the stack owns in \a bmain as internal. Maps of older files were made before the
+ * flag existed, so loading one needs the walk. A user-assigned map is left alone: the predicate is
+ * the row's kind, not merely the presence of an image in a channel record.
+ *
+ * Idempotent; safe to call on any file, including one that already has every map marked.
+ */
+void BKE_paint_layers_internal_maps_mark(Main &bmain);
+
+/** \} */
+
 }  // namespace blender

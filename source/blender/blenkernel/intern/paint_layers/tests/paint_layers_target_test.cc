@@ -1336,4 +1336,43 @@ TEST_F(PaintLayersTargetTest, composite_canvas_image_is_recreated_for_a_material
   EXPECT_EQ(canvas->id.us, 1);
 }
 
+TEST_F(PaintLayersTargetTest, internal_maps_mark_marks_only_maps_the_stack_owns)
+{
+  Image *painted_map = add_solid_image("Painted");
+  MaterialPaintLayer *painted = add_paint_layer("Painted", painted_map);
+  ASSERT_NE(painted, nullptr);
+
+  /* A Fill owns no map: an image in its channel was assigned by the user. */
+  MaterialPaintLayer *fill = BKE_paint_layers_add(*ma, "Fill", nullptr, PaintLayerPlace::Above);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_set_source(*ma, fill, MA_PAINT_LAYER_SOURCE_CONSTANT));
+  ASSERT_NE(BKE_paint_layers_channel_add(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR), nullptr);
+  Image *user_map = add_solid_image("UserMap");
+  ASSERT_TRUE(
+      BKE_paint_layers_channel_set_image(*ma, fill, PAINT_MATERIAL_CHANNEL_BASE_COLOR, user_map));
+
+  /* Nor does the base mask own the map the user assigns to it. */
+  MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*ma, painted, 1.0f);
+  ASSERT_NE(mask, nullptr);
+  Image *mask_user_map = add_solid_image("MaskUserMap");
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *ma, mask, PAINT_MATERIAL_CHANNEL_BASE_COLOR, mask_user_map));
+
+  Image *canvas = BKE_paint_material_composite_canvas_image_ensure(*bmain, *ma);
+  ASSERT_NE(canvas, nullptr);
+
+  /* A file saved before the flag existed: no map carries it yet. */
+  painted_map->flag &= ~IMA_PAINT_LAYER_INTERNAL_MAP;
+  user_map->flag &= ~IMA_PAINT_LAYER_INTERNAL_MAP;
+  mask_user_map->flag &= ~IMA_PAINT_LAYER_INTERNAL_MAP;
+  canvas->flag &= ~IMA_PAINT_LAYER_INTERNAL_MAP;
+
+  BKE_paint_layers_internal_maps_mark(*bmain);
+
+  EXPECT_TRUE(BKE_paint_layers_image_is_internal(*painted_map));
+  EXPECT_FALSE(BKE_paint_layers_image_is_internal(*user_map));
+  EXPECT_FALSE(BKE_paint_layers_image_is_internal(*mask_user_map));
+  EXPECT_TRUE(BKE_paint_layers_image_is_internal(*canvas));
+}
+
 }  // namespace blender::bke::tests

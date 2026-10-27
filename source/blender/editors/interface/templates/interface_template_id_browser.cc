@@ -32,6 +32,7 @@
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_preferences.h"
 #include "BKE_preview_image.hh"
 #include "BKE_report.hh"
@@ -709,6 +710,8 @@ struct IDBrowserFilter {
   /** Built-in paint-slot filter; only consulted for #ID_IM. */
   ImagePaintFilterParams paint;
   bool exclude_paint_canvas = false;
+  /** Whether Developer Extras reveals the maps the paint layer stack owns. */
+  bool reveal_internal = false;
   /** Optional script-defined filter, resolved from the popover's `filter_type` context. */
   const IDFilterType *custom = nullptr;
 
@@ -716,6 +719,11 @@ struct IDBrowserFilter {
   {
     if (GS(id.name) == ID_IM) {
       const Image &image = reinterpret_cast<const Image &>(id);
+      /* The maps the paint layer stack generated and owns are reached through the layer UI alone:
+       * a browser is a way around that, so they stay hidden until Developer Extras is on. */
+      if (BKE_paint_layers_image_is_internal(image) && !reveal_internal) {
+        return false;
+      }
       if (exclude_paint_canvas && (image.flag & IMA_PAINT_CANVAS)) {
         return false;
       }
@@ -1388,6 +1396,7 @@ static IDBrowserFilter id_browser_filter_resolve(const bContext &C,
                                                  PropertyRNA &target_prop)
 {
   IDBrowserFilter filter;
+  filter.reveal_internal = (U.flag & USER_DEVELOPER_UI) != 0;
   /* The source picker lists every image that is not an engine-owned paint canvas, with none of
    * the space's own paint-slot toggles applied. */
   if (id_browser_image_filter_from_context(C) == IDBrowserImageFilter::PaintSource) {

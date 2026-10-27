@@ -1246,6 +1246,8 @@ static Image *bake_service_image(Main &bmain,
       &bmain, size, size, name, 32, floatbuf, IMA_GENTYPE_BLANK, black, false, !is_color, false);
   if (image != nullptr) {
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    /* A bake is the stack's own read of a row, so the browsers hide it like every other map. */
+    BKE_paint_layers_image_mark_internal(*image);
   }
   *slot = image;
   return image;
@@ -2995,6 +2997,8 @@ bool BKE_paint_layers_row_result_job_commit(PaintLayersRowResultJob &job)
       continue;
     }
     image->alpha_mode = IMA_ALPHA_STRAIGHT;
+    /* A row result is a bake the stack owns, so the browsers hide it like every other map. */
+    BKE_paint_layers_image_mark_internal(*image);
     /* The render is the CPU one the bake planner uses, so the colour's alpha already is the source
      * row's content alpha. Written through unchanged: the target map then means the same thing any
      * other paint-layer map does. */

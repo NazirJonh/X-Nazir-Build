@@ -17,6 +17,7 @@
 #include "BKE_main.hh"
 #include "BKE_main_invariants.hh"
 #include "BKE_packedFile.hh"
+#include "BKE_paint_layers.hh"
 
 #include "BLI_listbase.h"
 #include "BLI_string_search.hh"
@@ -30,6 +31,7 @@
 #include "DNA_image_types.h"
 #include "DNA_material_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_workspace_types.h"
 
 #include "ED_id_management.hh"
@@ -123,6 +125,7 @@ static bool id_search_allows_id(const bContext &C,
                                 Main &bmain,
                                 TemplateID *template_ui,
                                 const int flag,
+                                const bool reveal_internal,
                                 ID *id,
                                 const char *query)
 {
@@ -159,6 +162,15 @@ static bool id_search_allows_id(const bContext &C,
     if (!image_id_passes_paint_filter(bmain, *id_cast<Image *>(id), paint_params)) {
       return false;
     }
+  }
+
+  /* The maps the paint layer stack generated and owns are reached through the layer UI alone: a
+   * template_ID browse menu is a way around that, so they stay hidden until Developer Extras is
+   * on. Unlike the paint-slot filter above, this holds for the unfiltered "All" mode too. */
+  if (template_ui->idcode == ID_IM && !reveal_internal &&
+      BKE_paint_layers_image_is_internal(*id_cast<Image *>(id)))
+  {
+    return false;
   }
 
   /* Script-defined filter (registered #IDFilterType), applied on top of the built-in filters. */
@@ -211,6 +223,8 @@ static void id_search_cb(const bContext *C,
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
   Main &bmain = *CTX_data_main(C);
+  /* Developer Extras reveals the maps the stack owns; read it once per search. */
+  const bool reveal_internal = (U.flag & USER_DEVELOPER_UI) != 0;
 
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
@@ -219,7 +233,7 @@ static void id_search_cb(const bContext *C,
 
   /* ID listbase */
   for (ID &id : *lb) {
-    if (id_search_allows_id(*C, bmain, template_ui, flag, &id, str)) {
+    if (id_search_allows_id(*C, bmain, template_ui, flag, reveal_internal, &id, str)) {
       search.add(id.name + 2, &id);
     }
   }
@@ -243,6 +257,7 @@ static void id_search_cb_tagged(const bContext *C,
 {
   TemplateID *template_ui = static_cast<TemplateID *>(arg_template);
   Main &bmain = *CTX_data_main(C);
+  const bool reveal_internal = (U.flag & USER_DEVELOPER_UI) != 0;
   ListBaseT<ID> *lb = template_ui->idlb;
   const int flag = RNA_property_flag(template_ui->prop);
 
@@ -252,7 +267,7 @@ static void id_search_cb_tagged(const bContext *C,
   /* ID listbase */
   for (ID &id : *lb) {
     if (id.tag & ID_TAG_DOIT) {
-      if (id_search_allows_id(*C, bmain, template_ui, flag, &id, str)) {
+      if (id_search_allows_id(*C, bmain, template_ui, flag, reveal_internal, &id, str)) {
         search.add(id.name + 2, &id);
       }
       id.tag &= ~ID_TAG_DOIT;

@@ -113,6 +113,9 @@ static Image *paint_layers_map_create(Main &bmain,
    * graph's Image Texture alpha is the map's own coverage and the CPU composite reads it unchanged. */
   image->alpha_mode = IMA_ALPHA_STRAIGHT;
   image->flag |= IMA_PAINT_CANVAS;
+  /* The map the stack made is the stack's own: the image browsers hide it unless Developer Extras
+   * is on, so it is reached through the layer UI alone. */
+  BKE_paint_layers_image_mark_internal(*image);
   paint_layers_image_fill(*image, is_color, rgba);
   return image;
 }
@@ -1618,6 +1621,93 @@ MaterialPaintLayer *BKE_paint_layers_corrections_bake(Main &bmain,
   BKE_paint_layers_tag_edited(ma);
   paint_layers_orphan_maps_free(bmain, replaced_maps);
   return merged;
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Internal maps
+ *
+ * What the browsers ask about the maps the stack owns: the predicate that names them and the walk
+ * that marks the maps older files predate the flag for. Developer Extras reveals them.
+ * \{ */
+
+bool BKE_paint_layers_image_is_internal(const Image &image)
+{
+  return (image.flag & IMA_PAINT_LAYER_INTERNAL_MAP) != 0;
+}
+
+void BKE_paint_layers_image_mark_internal(Image &image)
+{
+  image.flag |= IMA_PAINT_LAYER_INTERNAL_MAP;
+}
+
+/**
+ * Whether the channel records of \a row hold maps the stack created.
+ *
+ * A Paint row paints into maps the stack mints (including the "Use Row Result" renders), and a
+ * UV Island mask item captures into one. A Constant/Fill row, a generator or a Material row owns no
+ * channel map: an image in such a record was assigned by the user, so it must stay browsable. A
+ * Color ID item samples the user's ID Map; it does not own it.
+ */
+static bool paint_layer_row_owns_channel_maps(const MaterialPaintLayer &row)
+{
+  switch (row.source) {
+    case MA_PAINT_LAYER_SOURCE_IMAGE:
+      return true;
+    case MA_PAINT_LAYER_SOURCE_FILTER:
+      return BKE_paint_layers_is_map_coverage(row) &&
+             BKE_paint_layers_map_coverage_paintable(row);
+    default:
+      return false;
+  }
+}
+
+static void paint_layer_internal_maps_mark_row(MaterialPaintLayer &row)
+{
+  /* Ownership is the row's kind, not `Image::source`: saving a map packs it, and packing turns a
+   * generated image into a file-backed one. */
+  if (paint_layer_row_owns_channel_maps(row)) {
+    for (int i = 0; i < row.channels_num; i++) {
+      if (Image *image = row.channels[i].image) {
+        BKE_paint_layers_image_mark_internal(*image);
+      }
+    }
+  }
+  /* A bake is the stack's own render of the row whatever its source kind is. */
+  if (row.bake != nullptr) {
+    for (Image *image : row.bake->images) {
+      if (image != nullptr) {
+        BKE_paint_layers_image_mark_internal(*image);
+      }
+    }
+    if (row.bake->coverage != nullptr) {
+      BKE_paint_layers_image_mark_internal(*row.bake->coverage);
+    }
+  }
+}
+
+void BKE_paint_layers_internal_maps_mark(Main &bmain)
+{
+  for (Material &ma : bmain.materials) {
+    if (!BKE_paint_layers_is_layered(ma)) {
+      continue;
+    }
+    if (ma.paint_layers_canvas_image != nullptr) {
+      BKE_paint_layers_image_mark_internal(*ma.paint_layers_canvas_image);
+    }
+    BKE_paint_layers_foreach(
+        ma, [&](MaterialPaintLayer &layer, MaterialPaintLayer * /*parent*/) -> bool {
+          paint_layer_internal_maps_mark_row(layer);
+          for (MaterialPaintLayer &effect : layer.effects) {
+            paint_layer_internal_maps_mark_row(effect);
+          }
+          for (MaterialPaintLayer &item : layer.mask_stack) {
+            paint_layer_internal_maps_mark_row(item);
+          }
+          return true;
+        });
+  }
 }
 
 /** \} */

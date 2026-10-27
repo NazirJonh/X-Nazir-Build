@@ -33,6 +33,7 @@
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_space_types.h"
+#include "DNA_userdef_types.h"
 #include "DNA_uuid_types.h"
 
 #include "BKE_context.hh"
@@ -265,9 +266,14 @@ bool paint_image_is_blank(const Image &image)
  */
 static void paint_slot_first_map_set(const MaterialPaintLayer &layer, StackRowPreview &r_slot)
 {
+  const bool show_internal = (U.flag & USER_DEVELOPER_UI) != 0;
   for (int c = 0; c < layer.channels_num; c++) {
     const Image *image = layer.channels[c].image;
     if (image == nullptr) {
+      continue;
+    }
+    if (!show_internal && BKE_paint_layers_image_is_internal(*image)) {
+      /* A user-assigned map in a later channel is still the row's visible face. */
       continue;
     }
     r_slot.id_uid = image->id.session_uid;

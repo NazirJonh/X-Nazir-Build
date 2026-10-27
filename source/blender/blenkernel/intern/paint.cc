@@ -5002,6 +5002,9 @@ Image *BKE_paint_material_composite_canvas_image_ensure(Main &bmain, Material &m
   if (image == nullptr) {
     return nullptr;
   }
+  /* The stand-in canvas exists to be found through, never to be browsed or edited: the browsers
+   * hide it like every other map the stack owns. */
+  BKE_paint_layers_image_mark_internal(*image);
   ma.paint_layers_canvas_image = image;
   return image;
 }

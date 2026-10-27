@@ -16,6 +16,8 @@
 #include "DNA_brush_types.h"
 #include "DNA_camera_types.h"
 #include "DNA_curve_types.h"
+#include "DNA_image_types.h"
+#include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_tree_interface_types.h"
@@ -61,6 +63,7 @@
 #include "BKE_node_legacy_types.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_paint.hh"
+#include "BKE_paint_layers.hh"
 #include "BKE_report.hh"
 #include "BKE_screen.hh"
 #include "BKE_sculpt_layers.hh"
@@ -1149,6 +1152,16 @@ static void version_material_paint_mask_mapping_defaults(Main &bmain)
       brush.mask_mtex.brush_map_mode = MTEX_MAP_MODE_AREA;
     }
   }
+}
+
+/**
+ * The maps the paint layer stack generated are hidden from the image browsers now. A file saved
+ * before the flag existed has no map marked, so mark the ones the stack owns; a map the user
+ * assigned is left alone. See #BKE_paint_layers_internal_maps_mark.
+ */
+static void version_paint_layers_internal_maps(Main &bmain)
+{
+  BKE_paint_layers_internal_maps_mark(bmain);
 }
 
 static void version_material_paint_layer_source_defaults_one(BrushMaterialPaint *material_paint)
@@ -2414,6 +2427,10 @@ void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
   /* NOTE: Fork-only, so it is not keyed on a file subversion (see above). Idempotent: it only
    * touches PBR brushes whose Mask slot is still empty. */
   version_material_paint_mask_mapping_defaults(*bmain);
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 85)) {
+    version_paint_layers_internal_maps(*bmain);
+  }
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

@@ -1470,6 +1470,9 @@ Image *bake_target_image_create(Main &bmain,
   if (image == nullptr) {
     return nullptr;
   }
+  /* The bake of a source material is the stack's own map, so the browsers hide it like every other
+   * map the stack owns. */
+  BKE_paint_layers_image_mark_internal(*image);
   /* The map is a float buffer holding scene-linear pixels, so its colorspace has to say so: the
    * shader path uploads a float buffer raw and never decodes a display space from it (see the
    * FloatBufferCache assertion that a float buffer be scene linear or data). Declaring a color map

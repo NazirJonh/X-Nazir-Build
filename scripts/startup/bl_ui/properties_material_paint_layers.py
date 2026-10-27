@@ -76,6 +76,38 @@ def _layer_images_locked(layer):
     return layer.source == 'IMAGE'
 
 
+def _developer_ui_enabled(context):
+    """Whether Developer Extras is on; a missing context (a headless draw) counts as off."""
+    return context is not None and context.preferences.view.show_developer_ui
+
+
+def _map_is_internal_hidden(context, record):
+    """Whether the record's map is one the stack generated and hides while Developer Extras is off.
+
+    The maps the system creates for a row (its paint canvases, a correction's map, a bake) are its
+    internals: the user reaches them through painting and the layer UI. While Developer Extras is
+    off a panel may still name one read-only, but must not offer its browser; with it on the
+    browser is shown for debugging. A map the user assigned (a dropped file) is never hidden here.
+    """
+    if record.image is None or not record.image.is_paint_layer_internal_map:
+        return False
+    return not _developer_ui_enabled(context)
+
+
+def _layer_channel_subpanel_hidden(context, layer, record):
+    """Whether a layer channel's whole subpanel is debug-only.
+
+    A Paint row owns the map of every channel it carries, so with Developer Extras off the
+    subpanel is hidden even before that map exists: AO is in the default channel set but has no map
+    until the first stroke, and its subpanel has only the stack's own slot and channel settings to
+    show. A Fill row's map is the user's to assign, so its subpanel stays and only an internal map
+    on it, if one ever lands there, hides it.
+    """
+    if _layer_images_locked(layer):
+        return not _developer_ui_enabled(context)
+    return _map_is_internal_hidden(context, record)
+
+
 def _draw_layer_channel_source_preview(layout, record, locked=False):
     """Compact preview of a layer channel's own image, in the panel header."""
     if record.image is not None:
@@ -176,14 +208,15 @@ def _mask_item_eyedropper_path(item):
     return 'blend_data.materials["{:s}"].{:s}'.format(name, item.path_from_id("mask_color"))
 
 
-def draw_material_mask_item(layout, _context, item):
+def draw_material_mask_item(layout, context, item):
     """The controls of one mask item, the base mask or a mask correction: its own settings and one
     coverage channel drawn like a scalar channel of a layer (panel header with the value, body with
     the map slot and the gradient).
 
     The base mask and a Fill correction lay a flat grey while they have no map and take a map the
-    user assigns; a Paint correction owns its map (the first stroke creates it), so it is shown, not
-    swapped. Invert reads the grey as `1 - value`, the map's or the flat one.
+    user assigns; a Paint correction owns its map (the first stroke creates it), so it is shown
+    read-only -- and only while Developer Extras is on. Invert reads the grey as `1 - value`, the
+    map's or the flat one.
     """
     record = item.channels[0] if len(item.channels) else None
     base = item.is_mask_base
@@ -206,9 +239,13 @@ def draw_material_mask_item(layout, _context, item):
     split.label(text="Mask")
     value_row = split.row(align=True)
     if has_map:
-        sub = value_row.row(align=True)
-        sub.enabled = assignable
-        sub.template_ID_browser(record, "image", compact=True, image_filter='PAINT_SOURCE')
+        # The map the stack generated is not drawn while Developer Extras is off; a map the user
+        # assigned (an assignable item's own) always is.
+        hidden = not assignable and _map_is_internal_hidden(context, record)
+        if not hidden:
+            sub = value_row.row(align=True)
+            sub.enabled = assignable
+            sub.template_ID_browser(record, "image", compact=True, image_filter='PAINT_SOURCE')
     elif assignable:
         controls = value_row.row(align=True)
         controls.prop(item, "mask_color", text="")
@@ -240,10 +277,13 @@ def draw_material_mask_item(layout, _context, item):
             invert.scale_y = 2.0
             invert.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
     elif has_map:
+        # A Paint correction owns its map, so the browser is read-only. The map the stack generated
+        # is not drawn at all while Developer Extras is off; the invert toggle stays either way.
         row = panel.row(align=True)
-        sub = row.row(align=True)
-        sub.enabled = False
-        sub.template_ID_browser(record, "image", compact=True, image_filter='PAINT_SOURCE')
+        if not _map_is_internal_hidden(context, record):
+            sub = row.row(align=True)
+            sub.enabled = False
+            sub.template_ID_browser(record, "image", compact=True, image_filter='PAINT_SOURCE')
         row.prop(record, "invert", text="", icon='ARROW_LEFTRIGHT', toggle=True)
     else:
         panel.label(text="The first stroke creates the map", icon='INFO')
@@ -487,6 +527,11 @@ def draw_material_layer_channels(layout, context, material, layer):
     for channel_id in channel_ids:
         record = records.get(channel_id)
         if record is None or not record.use:
+            continue
+        # The subpanel exists for the channel's own map: its slot and the settings around it. A
+        # row that owns its maps keeps the whole subpanel debug-only, even before a map is minted
+        # (AO starts without one). The channel switch above stays either way.
+        if _layer_channel_subpanel_hidden(context, layer, record):
             continue
         if not first:
             channel_col.separator()

@@ -4637,9 +4637,12 @@ void blo_do_versions_280(FileData *fd, Library * /*lib*/, Main *bmain)
     for (Image &image : bmain->images) {
       /* `IMA_PAINT_CANVAS` (bit 1) was `IMA_FLAG_UNUSED_1` when these files were written; a
        * pre-2.80 file cannot hold a real paint canvas, so clear the bit to sanitize any garbage
-       * value rather than mis-reading it as a canvas marker. */
-      image.flag &= ~(IMA_HIGH_BITDEPTH | IMA_PAINT_CANVAS | IMA_FLAG_UNUSED_4 | IMA_FLAG_UNUSED_6 |
-                      IMA_FLAG_UNUSED_8 | IMA_FLAG_UNUSED_15 | IMA_FLAG_UNUSED_16);
+       * value rather than mis-reading it as a canvas marker. `IMA_PAINT_LAYER_INTERNAL_MAP`
+       * (bit 12) was `IMA_FLAG_UNUSED_12` the same way: a pre-2.80 file cannot hold a paint layer
+       * stack, so garbage there must not hide an unrelated image from the browsers. */
+      image.flag &= ~(IMA_HIGH_BITDEPTH | IMA_PAINT_CANVAS | IMA_PAINT_LAYER_INTERNAL_MAP |
+                      IMA_FLAG_UNUSED_4 | IMA_FLAG_UNUSED_6 | IMA_FLAG_UNUSED_8 |
+                      IMA_FLAG_UNUSED_15 | IMA_FLAG_UNUSED_16);
     }
 
     for (Object &ob : bmain->objects) {

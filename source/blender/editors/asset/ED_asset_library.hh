@@ -58,6 +58,9 @@ struct LibraryEnumFilterOptions {
    * be null to consult the cache only. Stack lifetime: must stay valid until the itemf call
    * returns. */
   const bContext *C = nullptr;
+  /** TEMPORARY: Sculpt/Paint brush-set bits (#ed::asset::shelf::brush_set_temp::Category) the
+   * library must provide, 0 = no filter. See #ED_asset_shelf_brush_set_temp.hh. */
+  int required_brush_set = 0;
 };
 
 /**

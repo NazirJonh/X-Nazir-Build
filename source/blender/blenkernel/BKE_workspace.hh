@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <string>
 
 #include "DNA_listBase.h"
@@ -35,8 +37,27 @@ struct WorkSpaceStatusItem {
   bool inverted = false;
 };
 
+/** Which group of Sculpt Mode tools the toolbar shows, switched by the "Sculpt" / "Paint" buttons
+ * at the top of the toolbar. Session-only state of the workspace: the tools themselves live in
+ * #WorkSpace.tools, so two workspaces or windows can show different groups. Exposed as
+ * #WorkSpace.sculpt_paint_tool_display. */
+enum class eSculptPaintToolDisplay : int8_t {
+  Sculpt = 0,
+  Paint = 1,
+};
+
 struct WorkSpaceRuntime {
   Vector<WorkSpaceStatusItem> status;
+
+  /** Last explicit Sculpt/Paint group the user picked in this workspace. Only a fallback: while the
+   * active tool declares a display group or a brush type, that declaration decides the group. */
+  eSculptPaintToolDisplay sculpt_paint_tool_display = eSculptPaintToolDisplay::Sculpt;
+
+  /** Toolbar: the tool last activated in each Sculpt/Paint display group, re-activated when
+   * switching to that group. Empty selects the group's default tool. Kept next to the group itself
+   * because the tools live in the workspace too, so one workspace cannot decide another one's.
+   * Indexed by #eSculptPaintToolDisplay. */
+  std::array<std::string, 2> sculpt_paint_last_tool = {};
 };
 
 }  // namespace bke

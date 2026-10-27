@@ -40,6 +40,7 @@
 #include "ED_asset.hh"
 #include "ED_asset_menu_utils.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_asset_shelf_brush_set_temp.hh"
 
 #include "UI_grid_view.hh"
 #include "UI_interface.hh"
@@ -59,6 +60,9 @@ namespace blender::ed::asset::shelf {
 class AssetView : public ui::AbstractGridView {
   const AssetLibraryReference library_ref_;
   const AssetShelf &shelf_;
+  /** TEMPORARY: Sculpt/Paint display group to filter for (see
+   * #ED_asset_shelf_brush_set_temp.hh). #Category::Any disables the filtering. */
+  brush_set_temp::Category brush_set_category_ = brush_set_temp::Category::Any;
   std::optional<AssetWeakReference> active_asset_;
   std::optional<asset_system::AssetCatalogFilter> catalog_filter_ = std::nullopt;
   /** Members of the active Recent/Favorites pseudo-catalog, in the list's own order (most recently
@@ -77,7 +81,8 @@ class AssetView : public ui::AbstractGridView {
  public:
   AssetView(const AssetLibraryReference &library_ref,
             const AssetShelf &shelf,
-            const std::optional<AssetWeakReference> &active_asset_override);
+            const std::optional<AssetWeakReference> &active_asset_override,
+            brush_set_temp::Category brush_set_category);
 
   void build_items() override;
   bool begin_filtering(const bContext &C) const override;
@@ -180,8 +185,9 @@ static std::optional<AssetWeakReference> active_asset_for_shelf(const AssetShelf
 
 AssetView::AssetView(const AssetLibraryReference &library_ref,
                      const AssetShelf &shelf,
-                     const std::optional<AssetWeakReference> &active_asset_override)
-    : library_ref_(library_ref), shelf_(shelf)
+                     const std::optional<AssetWeakReference> &active_asset_override,
+                     const brush_set_temp::Category brush_set_category)
+    : library_ref_(library_ref), shelf_(shelf), brush_set_category_(brush_set_category)
 {
   if (active_asset_override) {
     active_asset_ = *active_asset_override;
@@ -272,6 +278,13 @@ void AssetView::build_items()
 
   list::iterate(library_ref_, [&](asset_system::AssetRepresentation &asset) {
     if (!shelf::type_asset_poll(*shelf_.type, asset)) {
+      /* Skip this asset. */
+      return true;
+    }
+
+    /* TEMPORARY: Sculpt/Paint brush-set filtering (see #ED_asset_shelf_brush_set_temp.hh).
+     * Also filters the merged "All" library by the owning library's classification. */
+    if (!brush_set_temp::asset_passes(asset, brush_set_category_)) {
       /* Skip this asset. */
       return true;
     }
@@ -902,7 +915,7 @@ void build_asset_view(ui::Layout &layout,
   const std::optional<AssetWeakReference> active_asset = active_asset_for_shelf(shelf, C);
 
   std::unique_ptr asset_view = std::make_unique<AssetView>(
-      effective_library_ref, shelf, active_asset);
+      effective_library_ref, shelf, active_asset, brush_set_temp::category_from_shelf(C, shelf));
   asset_view->set_catalog_filter(catalog_filter_from_shelf_settings(shelf.settings, *library));
   asset_view->set_pseudo_filter(
       pseudo_filter_from_shelf_settings(shelf.settings, shelf.type->idname));

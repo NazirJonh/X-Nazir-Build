@@ -582,7 +582,7 @@ static void brush_asset_metadata_ensure(void *asset_ptr, AssetMetaData *asset_da
 
   /* Most names copied from brush RNA (not all are available there though). */
   constexpr std::array mode_map{
-      std::tuple{"use_paint_sculpt", OB_MODE_SCULPT, "sculpt_brush_type"},
+      std::tuple{"use_paint_sculpt", OB_MODE_SCULPT, blender::bke::brush::sculpt_brush_type_asset_key},
       std::tuple{"use_paint_vertex", OB_MODE_VERTEX_PAINT, "vertex_brush_type"},
       std::tuple{"use_paint_weight", OB_MODE_WEIGHT_PAINT, "weight_brush_type"},
       std::tuple{"use_paint_image", OB_MODE_TEXTURE_PAINT, "image_brush_type"},

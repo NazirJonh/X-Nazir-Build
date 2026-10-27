@@ -576,6 +576,9 @@ struct wmNotifier {
 #define ND_SPACE_SPREADSHEET (22 << 16)
 /* Not a space itself, but a part of another space. */
 #define ND_REGIONS_ASSET_SHELF (23 << 16)
+/** TEMPORARY: Sculpt/Paint brush-set/display filtering changed; requires a full asset shelf
+ * rebuild, not just a redraw. Remove with #ED_asset_shelf_brush_set_temp.hh. */
+#define ND_ASSET_SHELF_BRUSH_SET (24 << 16)
 
 /* NC_ASSET. */
 /* Denotes that the AssetList is done reading some previews. NOT that the preview generation of

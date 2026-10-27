@@ -91,6 +91,7 @@ const EnumPropertyItem rna_enum_asset_import_method_items[] = {
 #  include "BKE_screen.hh"
 
 #  include "ED_asset_shelf.hh"
+#  include "ED_asset_shelf_brush_set_temp.hh"
 #  include "ED_image_grid.hh"
 
 #  include "RNA_prototypes.hh"
@@ -583,11 +584,12 @@ const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext *C,
   bool exclude_image_libraries = false;
   bool only_image_libraries = false;
   bool exclude_material_libraries = false;
+  const AssetShelf *shelf = nullptr;
   if (ptr && ptr->data && RNA_struct_is_a(ptr->type, RNA_AssetShelf)) {
     /* Material libraries are never a shelf source, independent of the shelf type (which may still
      * be unset while the shelf is being set up). */
     exclude_material_libraries = true;
-    const AssetShelf *shelf = static_cast<const AssetShelf *>(ptr->data);
+    shelf = static_cast<const AssetShelf *>(ptr->data);
     if (shelf->type) {
       exclude_image_libraries = ed::asset::shelf::shelf_idname_is_brush_shelf(shelf->type->idname);
       only_image_libraries = STREQ(shelf->type->idname,
@@ -611,6 +613,10 @@ const EnumPropertyItem *rna_asset_library_ui_reference_itemf(bContext *C,
 
   ed::asset::LibraryEnumFilterOptions options;
   options.exclude_material_libraries = exclude_material_libraries;
+  /* TEMPORARY: Sculpt/Paint brush-set filtering of the library selector. Kept as plain
+   * #ed::asset::shelf::brush_set_temp::Category bits in the options so #ED_asset_library.hh does
+   * not have to include the temporary module. */
+  options.required_brush_set = int(ed::asset::shelf::brush_set_temp::required_for_shelf(C, shelf));
 
   const EnumPropertyItem *items = ed::asset::library_reference_to_rna_enum_itemf(
       /* Include all valid libraries for the user to choose from. */

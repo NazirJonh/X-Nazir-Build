@@ -41,6 +41,15 @@ enum eAssetLibraryType : short {
   ASSET_LIBRARY_CUSTOM = 100,
 };
 
+/** TEMPORARY: Sculpt/Paint brush-set filtering. Remove with
+ * `asset_shelf_brush_set_temp.{hh,cc}` and the related RNA/UI. */
+enum eAssetLibraryBrushSet : short {
+  ASSET_LIBRARY_BRUSH_SET_NONE = 0,
+  ASSET_LIBRARY_BRUSH_SET_SCULPT = 1 << 0,
+  ASSET_LIBRARY_BRUSH_SET_PAINT = 1 << 1,
+  ASSET_LIBRARY_BRUSH_SET_BOTH = (1 << 0) | (1 << 1),
+};
+
 enum eAssetImportMethod : int {
   /** Regular data-block linking. */
   ASSET_IMPORT_LINK = 0,

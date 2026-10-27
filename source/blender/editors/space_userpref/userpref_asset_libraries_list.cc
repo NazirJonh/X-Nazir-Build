@@ -557,6 +557,14 @@ static void draw_active_library_settings(ui::Layout &layout,
              UI_ITEM_NONE,
              IFACE_("Include Online Essentials"),
              ICON_NONE);
+
+    /* TEMPORARY: Sculpt/Paint brush-set classification. Expanded into a row of buttons so all four
+     * states are one click away and the current one stays visible. The label is drawn explicitly:
+     * an expanded enum never draws the name it was given (it only uses it as a flag). */
+    ui::Layout &essentials_brush_set_row = layout.row(true);
+    essentials_brush_set_row.label(IFACE_("Brush Set"), ICON_NONE);
+    essentials_brush_set_row.prop(
+        &prefs_ptr, "essentials_brush_set", ui::ITEM_R_EXPAND, std::nullopt, ICON_NONE);
   }
 
   if (library.user_library) {
@@ -567,6 +575,13 @@ static void draw_active_library_settings(ui::Layout &layout,
 
     PointerRNA library_ptr = RNA_pointer_create_discrete(
         nullptr, RNA_UserAssetLibrary, library.user_library);
+
+    /* TEMPORARY: Sculpt/Paint brush-set classification. Expanded into a row of buttons, matching
+     * the Essentials block above. */
+    ui::Layout &library_brush_set_row = layout.row(true);
+    library_brush_set_row.label(IFACE_("Brush Set"), ICON_NONE);
+    library_brush_set_row.prop(
+        &library_ptr, "brush_set", ui::ITEM_R_EXPAND, std::nullopt, ICON_NONE);
 
     if (library.user_library->flag & ASSET_LIBRARY_USE_REMOTE_URL) {
       if (USER_EXPERIMENTAL_TEST(&U, use_remote_asset_libraries)) {

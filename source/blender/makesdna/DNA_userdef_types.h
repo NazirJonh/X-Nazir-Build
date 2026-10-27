@@ -692,6 +692,10 @@ struct bUserAssetLibrary {
    * (see #BKE_preferences_asset_library_restore_hierarchy). */
   struct bUserAssetLibrary *parent = nullptr;
 
+  /** TEMPORARY: Sculpt/Paint brush-set classification. */
+  short brush_set = ASSET_LIBRARY_BRUSH_SET_BOTH;
+  char _pad_brush_set[6] = {};
+
 #ifdef __cplusplus
   bool is_enabled() const
   {
@@ -1653,6 +1657,10 @@ struct UserDef {
   /** Maximum buttons in one row of the gizmo, further buttons wrap to a new row (0 = single row). */
   int sculpt_cursor_buttons_per_row = 0;
   char _pad_sculpt_cursor[4] = {};
+
+  /** TEMPORARY: Essentials classification for the Sculpt/Paint brush popover. */
+  short essentials_brush_set = ASSET_LIBRARY_BRUSH_SET_BOTH;
+  char _pad_essentials_brush_set[6] = {};
 
   /** Runtime data (keep last). */
   UserDef_Runtime runtime;

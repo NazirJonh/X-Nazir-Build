@@ -42,6 +42,7 @@ static void rna_WorkSpaceTool_setup(ID *id,
                                     const char *keymap,
                                     const char *gizmo_group,
                                     int brush_type,
+                                    int display_group,
                                     const char *data_block,
                                     const char *op_idname,
                                     int index,
@@ -57,6 +58,7 @@ static void rna_WorkSpaceTool_setup(ID *id,
   STRNCPY(tref_rt.data_block, data_block);
   STRNCPY(tref_rt.op, op_idname);
   tref_rt.brush_type = brush_type;
+  tref_rt.display_group = eToolDisplayGroup(display_group);
   tref_rt.index = index;
   tref_rt.flag = ebToolRef_Runtime_Flag(options);
 
@@ -140,6 +142,18 @@ void RNA_api_workspace_tool(StructRNA *srna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem display_group_items[] = {
+      {TOOL_DISPLAY_GROUP_NONE,
+       "NONE",
+       0,
+       "None",
+       "Not declared for a split toolbar; consumers fall back to the brush type"},
+      {TOOL_DISPLAY_GROUP_SCULPT, "SCULPT", 0, "Sculpt", "Shown in the first toolbar group only"},
+      {TOOL_DISPLAY_GROUP_PAINT, "PAINT", 0, "Paint", "Shown in the second toolbar group only"},
+      {TOOL_DISPLAY_GROUP_SHARED, "SHARED", 0, "Shared", "Shown in both toolbar groups"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   func = RNA_def_function(srna, "setup", "rna_WorkSpaceTool_setup");
   RNA_def_function_flag(func, FUNC_USE_SELF_ID | FUNC_USE_CONTEXT);
   RNA_def_function_ui_description(func, "Set the tool settings");
@@ -157,6 +171,13 @@ void RNA_api_workspace_tool(StructRNA *srna)
   RNA_def_property_enum_funcs(parm, nullptr, nullptr, "rna_WorkSpaceTool_brush_type_itemf");
   RNA_def_property_enum_default(parm, -1);
   RNA_def_property_ui_text(parm, "Brush Type", "Limit this tool to a specific type of brush");
+  parm = RNA_def_property(func, "display_group", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(parm, display_group_items);
+  RNA_def_property_enum_default(parm, TOOL_DISPLAY_GROUP_NONE);
+  RNA_def_property_ui_text(parm,
+                           "Display Group",
+                           "Group of a split toolbar this tool belongs to, independent of the "
+                           "brush type it uses");
   RNA_def_string(func, "data_block", nullptr, MAX_NAME, "Data Block", "");
   RNA_def_string(func, "operator", nullptr, MAX_NAME, "Operator", "");
   RNA_def_int(func, "index", 0, INT_MIN, INT_MAX, "Index", "", INT_MIN, INT_MAX);

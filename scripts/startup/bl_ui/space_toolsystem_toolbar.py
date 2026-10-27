@@ -20,7 +20,6 @@ from collections import (
 from bpy.types import (
     Operator,
     Panel,
-    WindowManager,
 )
 from bpy.props import (
     EnumProperty,
@@ -51,28 +50,13 @@ from bl_ui.properties_paint_common import (
     paint_shape_tool_flags,
 )
 
-# Items for the Sculpt Mode toolbar display group, shared by the #WindowManager property
-# (see `register_props`) and the operator that switches between the groups.
-_sculpt_paint_display_items = (
-    ('SCULPT', "Sculpt", "Show the sculpting tools"),
-    ('PAINT', "Paint", "Show the painting tools"),
+# Items for the Sculpt Mode toolbar display group, used by the operator that switches between the
+# groups. The property itself (`WorkSpace.sculpt_paint_tool_display`) is defined in
+# `rna_workspace.cc`, since C++ reads it too; the items are taken from the enum there.
+_sculpt_paint_display_items = tuple(
+    (item.identifier, item.name, item.description)
+    for item in bpy.types.WorkSpace.bl_rna.properties["sculpt_paint_tool_display"].enum_items
 )
-
-
-def register_props():
-    # Which group of Sculpt Mode tools the toolbar shows, switched by the "Sculpt" / "Paint"
-    # buttons at the top of the toolbar (see `VIEW3D_PT_tools_active`).
-    # Session-only: an active tool exclusive to the other group overrides this when drawing.
-    WindowManager.sculpt_paint_tool_display = EnumProperty(
-        name="Tool Display",
-        description="Which group of tools the Sculpt Mode toolbar shows",
-        items=_sculpt_paint_display_items,
-        default='SCULPT',
-    )
-
-
-def unregister_props():
-    del WindowManager.sculpt_paint_tool_display
 
 
 def kmi_to_string_or_none(kmi):
@@ -5523,7 +5507,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
     }
 
     # Sculpt Mode toolbar display groups, switched by the "Sculpt" / "Paint" buttons at the top
-    # of the toolbar (see #WindowManager.sculpt_paint_tool_display).
+    # of the toolbar (see #WorkSpace.sculpt_paint_tool_display).
     # These reference the definitions of the master "SCULPT" list above, which must stay
     # complete since it drives keymap registration and tool lookups (brush type to tool,
     # tooltips, ...). Only the drawing uses these lists, see `tools_from_context_for_display`.
@@ -5661,13 +5645,57 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         'PAINT': "builtin_brush.paint",
     }
 
-    # The last tool activated per display group, activated when switching the display so
-    # toggling returns to the tool last used in that group.
-    _last_tool_id_from_display = dict(_tool_id_display_default)
-
     # Display group of tools registered at runtime (e.g. by add-ons), that are in neither of the
     # display lists. Tools missing here are shown in the "Sculpt" group.
     _tool_display_from_id_extra = {}
+
+    # The last tool activated per display group, activated when switching the display so toggling
+    # returns to the tool last used in that group. Stored on the workspace, next to the group
+    # itself: the tools live in the workspace too, so one workspace must not decide another one's.
+    _last_tool_id_from_display_prop = {
+        'SCULPT': "sculpt_paint_last_sculpt_tool",
+        'PAINT': "sculpt_paint_last_paint_tool",
+    }
+
+    @classmethod
+    def _last_tool_id_from_display_get(cls, context, display):
+        workspace = getattr(context, "workspace", None)
+        if workspace is not None:
+            tool_id = getattr(workspace, cls._last_tool_id_from_display_prop[display])
+            if tool_id:
+                return tool_id
+        return cls._tool_id_display_default[display]
+
+    @classmethod
+    def _last_tool_id_from_display_set(cls, context, display, tool_id):
+        workspace = getattr(context, "workspace", None)
+        if workspace is None:
+            return
+        prop = cls._last_tool_id_from_display_prop[display]
+        if getattr(workspace, prop) != tool_id:
+            setattr(workspace, prop, tool_id)
+
+    @classmethod
+    def tool_display_group_from_id(cls, idname):
+        """
+        Group of the Sculpt Mode toolbar split ('SCULPT', 'PAINT' or 'SHARED') `idname` is shown
+        in, None when the tool is in neither display list and nothing was registered for it.
+
+        Handed to the tool system by `tool.setup()`, so the asset shelf brush filtering reads the
+        same declaration the toolbar draws from instead of keeping its own list of tools.
+        """
+        declared = cls._tool_display_from_id_extra.get(idname)
+        if declared is not None:
+            return declared
+        in_sculpt = idname in cls._tools_sculpt_display_ids
+        in_paint = idname in cls._tools_paint_display_ids
+        if in_sculpt and in_paint:
+            return 'SHARED'
+        if in_paint:
+            return 'PAINT'
+        if in_sculpt:
+            return 'SCULPT'
+        return None
 
     @classmethod
     def tool_display_group_set(cls, idname, display):
@@ -5732,7 +5760,10 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
     @classmethod
     def _tool_display_from_context(cls, context):
         """The display group to show, following the active tool when it's exclusive to one."""
-        display = context.window_manager.sculpt_paint_tool_display
+        # Stored per workspace: the tools it switches between live in the workspace too, and the
+        # asset shelf reads the same value to filter its brushes.
+        workspace = getattr(context, "workspace", None)
+        display = workspace.sculpt_paint_tool_display if workspace is not None else 'SCULPT'
         tool_active = ToolSelectPanelHelper._tool_active_from_context(context, 'VIEW_3D', 'SCULPT')
         tool_active_id = getattr(tool_active, "idname", None)
         if tool_active_id is not None:
@@ -5779,8 +5810,12 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         display = cls._tool_display_exclusive_from_id(item.idname)
         if display is None:
             return
-        context.window_manager.sculpt_paint_tool_display = display
-        cls._last_tool_id_from_display[display] = item.idname
+        workspace = getattr(context, "workspace", None)
+        if workspace is not None and workspace.sculpt_paint_tool_display != display:
+            # Only on an actual change: this notifies the asset shelf, which rebuilds its whole
+            # brush grid for it.
+            workspace.sculpt_paint_tool_display = display
+        cls._last_tool_id_from_display_set(context, display, item.idname)
 
     @classmethod
     def tool_display_set(cls, context, display):
@@ -5789,7 +5824,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         Returns true when the tool could be activated.
         """
         from bl_ui.space_toolsystem_common import activate_by_id
-        tool_id = cls._last_tool_id_from_display[display]
+        tool_id = cls._last_tool_id_from_display_get(context, display)
         if not activate_by_id(context, 'VIEW_3D', tool_id):
             tool_id = cls._tool_id_display_default[display]
             if not activate_by_id(context, 'VIEW_3D', tool_id):

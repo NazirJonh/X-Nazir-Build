@@ -249,6 +249,15 @@ class ToolSelectPanelHelper:
         """Called after `item` has been set as the active tool."""
         pass
 
+    @classmethod
+    def tool_display_group_from_id(cls, idname):
+        """
+        Group of a split toolbar ('SCULPT', 'PAINT' or 'SHARED') `idname` is declared for, None
+        when this toolbar is not split. Declared once here and handed to the tool system, so C++
+        side consumers (the asset shelf brush filtering) read the same value as the toolbar itself.
+        """
+        return None
+
     @staticmethod
     def _tool_class_from_space_type(space_type):
         return next(
@@ -1071,6 +1080,11 @@ def _activate_by_item(context, space_type, item, index, *, as_fallback=False):
     if keymap_fallback:
         keymap_fallback = keymap_fallback + " (fallback)"
 
+    # Group of a split toolbar this tool belongs to. Declared by the toolbar
+    # (`tool_display_group_from_id`), so the tool system, and C++ reading it, sees the same group
+    # the toolbar draws the tool in, including add-on tools.
+    display_group = cls.tool_display_group_from_id(item.idname) or 'NONE'
+
     tool.setup(
         idname=item.idname,
         keymap=item.keymap[0] if item.keymap is not None else "",
@@ -1078,6 +1092,7 @@ def _activate_by_item(context, space_type, item, index, *, as_fallback=False):
         options=item.options or set(),
         gizmo_group=gizmo_group,
         brush_type=item.brush_type or 'ANY',
+        display_group=display_group,
         data_block=item.data_block or "",
         operator=item.operator or "",
         index=index,

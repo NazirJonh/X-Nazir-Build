@@ -15,6 +15,8 @@
 
 #include "rna_internal.hh"
 
+#include "BKE_workspace.hh"
+
 #include "DNA_workspace_types.h"
 
 #ifdef RNA_RUNTIME
@@ -26,7 +28,6 @@
 #  include "BKE_paint.hh"
 #  include "BKE_paint_types.hh"
 #  include "BKE_report.hh"
-#  include "BKE_workspace.hh"
 
 #  include "DNA_screen_types.h"
 #  include "DNA_space_types.h"
@@ -44,6 +45,97 @@ namespace blender {
 static void rna_window_update_all(Main * /*bmain*/, Scene * /*scene*/, PointerRNA * /*ptr*/)
 {
   WM_main_add_notifier(NC_WINDOW, nullptr);
+}
+
+/* TEMPORARY: which group of Sculpt Mode tools the toolbar shows, switched by the "Sculpt" /
+ * "Paint" buttons at the top of the toolbar. Backed by
+ * #bke::WorkSpaceRuntime::sculpt_paint_tool_display, so each workspace (and each window showing
+ * it) keeps its own choice; the tools themselves are per-workspace too (see #WorkSpace.tools). */
+static int rna_workspace_sculpt_paint_tool_display_get(PointerRNA *ptr)
+{
+  const WorkSpace *workspace = static_cast<const WorkSpace *>(ptr->data);
+  if (!workspace->runtime) {
+    return int(bke::eSculptPaintToolDisplay::Sculpt);
+  }
+  return int(workspace->runtime->sculpt_paint_tool_display);
+}
+
+static void rna_workspace_sculpt_paint_tool_display_set(PointerRNA *ptr, int value)
+{
+  WorkSpace *workspace = static_cast<WorkSpace *>(ptr->data);
+  if (!workspace->runtime) {
+    return;
+  }
+  workspace->runtime->sculpt_paint_tool_display = bke::eSculptPaintToolDisplay(value);
+}
+
+/* TEMPORARY: tool last activated in each Sculpt/Paint display group, see
+ * #bke::WorkSpaceRuntime::sculpt_paint_last_tool. Lets the toolbar re-activate the tool the
+ * user used last in a group without a Python-wide dictionary shared by every workspace. */
+static std::string *rna_workspace_sculpt_paint_last_tool(PointerRNA *ptr,
+                                                         const bke::eSculptPaintToolDisplay group)
+{
+  WorkSpace *workspace = static_cast<WorkSpace *>(ptr->data);
+  if (!workspace || !workspace->runtime) {
+    return nullptr;
+  }
+  return &workspace->runtime->sculpt_paint_last_tool[int(group)];
+}
+
+/* The length is clamped like the copy in the getter, so both always agree. */
+static int rna_workspace_sculpt_paint_last_tool_length(PointerRNA *ptr,
+                                                       const bke::eSculptPaintToolDisplay group)
+{
+  const std::string *tool = rna_workspace_sculpt_paint_last_tool(ptr, group);
+  return tool ? std::min(int(tool->size()), MAX_NAME - 1) : 0;
+}
+
+static void rna_workspace_sculpt_paint_last_tool_get(PointerRNA *ptr,
+                                                     const bke::eSculptPaintToolDisplay group,
+                                                     char *value)
+{
+  const std::string *tool = rna_workspace_sculpt_paint_last_tool(ptr, group);
+  BLI_strncpy(value, tool ? tool->c_str() : "", MAX_NAME);
+}
+
+static void rna_workspace_sculpt_paint_last_tool_set(PointerRNA *ptr,
+                                                     const bke::eSculptPaintToolDisplay group,
+                                                     const char *value)
+{
+  if (std::string *tool = rna_workspace_sculpt_paint_last_tool(ptr, group)) {
+    *tool = value;
+  }
+}
+
+/* RNA string callbacks receive no property, so one thin pair per group. */
+static void rna_workspace_sculpt_paint_last_sculpt_tool_get(PointerRNA *ptr, char *value)
+{
+  rna_workspace_sculpt_paint_last_tool_get(ptr, bke::eSculptPaintToolDisplay::Sculpt, value);
+}
+
+static int rna_workspace_sculpt_paint_last_sculpt_tool_length(PointerRNA *ptr)
+{
+  return rna_workspace_sculpt_paint_last_tool_length(ptr, bke::eSculptPaintToolDisplay::Sculpt);
+}
+
+static void rna_workspace_sculpt_paint_last_sculpt_tool_set(PointerRNA *ptr, const char *value)
+{
+  rna_workspace_sculpt_paint_last_tool_set(ptr, bke::eSculptPaintToolDisplay::Sculpt, value);
+}
+
+static void rna_workspace_sculpt_paint_last_paint_tool_get(PointerRNA *ptr, char *value)
+{
+  rna_workspace_sculpt_paint_last_tool_get(ptr, bke::eSculptPaintToolDisplay::Paint, value);
+}
+
+static int rna_workspace_sculpt_paint_last_paint_tool_length(PointerRNA *ptr)
+{
+  return rna_workspace_sculpt_paint_last_tool_length(ptr, bke::eSculptPaintToolDisplay::Paint);
+}
+
+static void rna_workspace_sculpt_paint_last_paint_tool_set(PointerRNA *ptr, const char *value)
+{
+  rna_workspace_sculpt_paint_last_tool_set(ptr, bke::eSculptPaintToolDisplay::Paint, value);
 }
 
 void rna_workspace_screens_begin(CollectionPropertyIterator *iter, PointerRNA *ptr)
@@ -497,6 +589,51 @@ static void rna_def_workspace(BlenderRNA *brna)
   RNA_def_property_struct_type(prop, "WorkSpaceTool");
   RNA_def_property_ui_text(prop, "Tools", "");
   rna_def_workspace_tools(brna, prop);
+
+  /* TEMPORARY: which group of Sculpt Mode tools the toolbar shows, switched by the "Sculpt" /
+   * "Paint" buttons at the top of the toolbar (see VIEW3D_PT_tools_active). The asset shelf reads
+   * it as the fallback for tools that own no brush; a tool that declares a brush type decides the
+   * group on its own. Session-only, not saved. */
+  /* `space_toolsystem_toolbar.py` builds its operator items from this enum. */
+  static const EnumPropertyItem sculpt_paint_tool_display_items[] = {
+      {int(bke::eSculptPaintToolDisplay::Sculpt),
+       "SCULPT",
+       0,
+       "Sculpt",
+       "Show the sculpting tools"},
+      {int(bke::eSculptPaintToolDisplay::Paint), "PAINT", 0, "Paint", "Show the painting tools"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_paint_tool_display", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, sculpt_paint_tool_display_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_workspace_sculpt_paint_tool_display_get",
+                              "rna_workspace_sculpt_paint_tool_display_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Tool Display",
+      "Which group of tools the Sculpt Mode toolbar shows (session-only, not saved)");
+  RNA_def_property_update(prop, NC_SPACE | ND_ASSET_SHELF_BRUSH_SET, nullptr);
+
+  /* TEMPORARY: tool last activated in each Sculpt/Paint display group (session-only). */
+  prop = RNA_def_property(srna, "sculpt_paint_last_sculpt_tool", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_workspace_sculpt_paint_last_sculpt_tool_get",
+                                "rna_workspace_sculpt_paint_last_sculpt_tool_length",
+                                "rna_workspace_sculpt_paint_last_sculpt_tool_set");
+  RNA_def_property_string_maxlength(prop, MAX_NAME);
+  RNA_def_property_ui_text(
+      prop, "Last Sculpt Tool", "Tool to re-activate when switching to the Sculpt tool group");
+
+  prop = RNA_def_property(srna, "sculpt_paint_last_paint_tool", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_funcs(prop,
+                                "rna_workspace_sculpt_paint_last_paint_tool_get",
+                                "rna_workspace_sculpt_paint_last_paint_tool_length",
+                                "rna_workspace_sculpt_paint_last_paint_tool_set");
+  RNA_def_property_string_maxlength(prop, MAX_NAME);
+  RNA_def_property_ui_text(
+      prop, "Last Paint Tool", "Tool to re-activate when switching to the Paint tool group");
 
   prop = RNA_def_property(srna, "object_mode", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, rna_enum_workspace_object_mode_items);

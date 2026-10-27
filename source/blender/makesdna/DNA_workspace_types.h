@@ -33,6 +33,26 @@ enum ebToolRef_Runtime_Flag : int {
 };
 ENUM_OPERATORS(ebToolRef_Runtime_Flag)
 
+/**
+ * #bToolRef_Runtime.display_group — the group of a split toolbar (Sculpt Mode: "Sculpt" /
+ * "Paint") a tool is declared for.
+ *
+ * Independent of #bToolRef_Runtime.brush_type: operator tools own no brush but are still exclusive
+ * to one group, and the group a tool is *shown* in is a toolbar decision, not a property of the
+ * brush it happens to use. Declared by the tool definition and consumed by anything that has to
+ * agree with the toolbar (the asset shelf brushes, for one).
+ */
+enum eToolDisplayGroup : int {
+  /** Not declared; consumers must fall back to another signal. */
+  TOOL_DISPLAY_GROUP_NONE = 0,
+  /** Declared for the first ("Sculpt") group only. */
+  TOOL_DISPLAY_GROUP_SCULPT = 1,
+  /** Declared for the second ("Paint") group only. */
+  TOOL_DISPLAY_GROUP_PAINT = 2,
+  /** Shown in both groups, so the active tool alone cannot decide which one is displayed. */
+  TOOL_DISPLAY_GROUP_SHARED = 3,
+};
+
 #
 #
 struct bToolRef_Runtime {
@@ -61,6 +81,9 @@ struct bToolRef_Runtime {
   int index = 0;
   /** Options: `TOOLREF_FLAG_*`. */
   ebToolRef_Runtime_Flag flag = {};
+
+  /** Group of a split toolbar this tool is declared for, #eToolDisplayGroup. */
+  eToolDisplayGroup display_group = TOOL_DISPLAY_GROUP_NONE;
 };
 
 /**

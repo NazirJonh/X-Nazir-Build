@@ -33,6 +33,7 @@
 
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
+#include "ED_asset_shelf_brush_set_temp.hh"
 
 namespace blender::ed::asset {
 
@@ -241,6 +242,13 @@ static bool custom_leaf_passes_filter(const bUserAssetLibrary &user_library,
   {
     return false;
   }
+  /* TEMPORARY: Sculpt/Paint brush-set classification. Checked before the material-content probe
+   * below, so no background fetch is started for a library this shelf would not offer anyway. */
+  const shelf::brush_set_temp::Category required_brush_set = shelf::brush_set_temp::Category(
+      options->required_brush_set);
+  if (!shelf::brush_set_temp::library_passes(user_library, required_brush_set)) {
+    return false;
+  }
   /* Material browsing: plain, untagged libraries are only offered once they are known to hold at
    * least one material asset; libraries explicitly tagged "Add Material Library" are always
    * listed, even when still empty. Checked last so no background fetch is ever started for a
@@ -388,6 +396,11 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
   EnumPropertyItem *item = nullptr;
   int totitem = 0;
 
+  /* TEMPORARY: Sculpt/Paint brush-set the caller filters for, #Category::Any (no filter) when there
+   * are no options. See #ED_asset_shelf_brush_set_temp.hh. */
+  const shelf::brush_set_temp::Category required_brush_set = shelf::brush_set_temp::Category(
+      options ? options->required_brush_set : 0);
+
   if (include_readonly) {
     BLI_assert(rna_enum_asset_library_type_items[0].value == ASSET_LIBRARY_ALL);
     RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[0]);
@@ -401,12 +414,19 @@ const EnumPropertyItem *library_reference_to_rna_enum_itemf(
    * libraries only (the brush Texture panel's grid and the paint-source grids that share its list)
    * would offer a library that can only ever come up empty. */
   if (include_readonly && !only_image_libraries) {
-    BLI_assert(rna_enum_asset_library_type_items[2].value == ASSET_LIBRARY_ESSENTIALS);
-    RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[2]);
+    /* TEMPORARY: hide the Essentials while its brush-set classification doesn't match what the
+     * shelf currently shows. */
+    if (shelf::brush_set_temp::essentials_passes(U, required_brush_set)) {
+      BLI_assert(rna_enum_asset_library_type_items[2].value == ASSET_LIBRARY_ESSENTIALS);
+      RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[2]);
+    }
   }
   if (include_separate_online_essentials && !only_image_libraries) {
-    BLI_assert(rna_enum_asset_library_type_items[3].value == ASSET_LIBRARY_ONLINE_ESSENTIALS);
-    RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[3]);
+    /* TEMPORARY: same brush-set classification as the regular Essentials item. */
+    if (shelf::brush_set_temp::essentials_passes(U, required_brush_set)) {
+      BLI_assert(rna_enum_asset_library_type_items[3].value == ASSET_LIBRARY_ONLINE_ESSENTIALS);
+      RNA_enum_item_add(&item, &totitem, &rna_enum_asset_library_type_items[3]);
+    }
   }
 
   {

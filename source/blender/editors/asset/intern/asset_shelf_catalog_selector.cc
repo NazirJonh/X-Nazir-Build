@@ -27,6 +27,7 @@
 #include "ED_asset_filter.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_asset_shelf_brush_set_temp.hh"
 
 #include "RNA_access.hh"
 #include "RNA_prototypes.hh"
@@ -45,19 +46,27 @@ namespace blender::ed::asset::shelf {
 class AssetCatalogSelectorTree : public ui::AbstractTreeView {
   AssetShelf &shelf_;
   AssetShelfSettings &shelf_settings_;
+  /** TEMPORARY: Sculpt/Paint display group to filter catalogs for (see
+   * #ED_asset_shelf_brush_set_temp.hh). */
+  brush_set_temp::Category brush_set_category_;
   asset_system::AssetCatalogTree catalog_tree_;
 
  public:
   class Item;
 
-  AssetCatalogSelectorTree(asset_system::AssetLibrary &library, AssetShelf &shelf)
-      : shelf_(shelf), shelf_settings_(shelf_.settings)
+  AssetCatalogSelectorTree(asset_system::AssetLibrary &library,
+                           AssetShelf &shelf,
+                           const brush_set_temp::Category brush_set_category)
+      : shelf_(shelf), shelf_settings_(shelf_.settings), brush_set_category_(brush_set_category)
   {
     catalog_tree_ = build_filtered_catalog_tree(
         library,
         shelf_settings_.asset_library_reference,
         [this](const asset_system::AssetRepresentation &asset) {
-          return type_asset_poll(*shelf_.type, asset);
+          return type_asset_poll(*shelf_.type, asset) &&
+                 /* TEMPORARY: Sculpt/Paint brush-set filtering (also filters the merged "All"
+                  * library by the owning library's classification). */
+                 brush_set_temp::asset_passes(asset, brush_set_category_);
         });
   }
 
@@ -232,7 +241,7 @@ static void catalog_selector_panel_draw(const bContext *C, Panel *panel)
     return;
   }
 
-  settings_ensure_valid_library_ref(shelf->settings);
+  settings_ensure_valid_library_ref(*C, *shelf);
 
   ui::Layout &layout = *panel->layout;
 
@@ -248,7 +257,8 @@ static void catalog_selector_panel_draw(const bContext *C, Panel *panel)
   ui::AbstractTreeView *tree_view = block_add_view(
       *block,
       "asset catalog tree view",
-      std::make_unique<AssetCatalogSelectorTree>(*library, *shelf));
+      std::make_unique<AssetCatalogSelectorTree>(
+          *library, *shelf, brush_set_temp::category_from_shelf(*C, *shelf)));
   tree_view->set_context_menu_title("Catalog");
   ui::TreeViewBuilder::build_tree_view(*C, *tree_view, layout);
 }

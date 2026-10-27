@@ -48,6 +48,7 @@
 #include "ED_asset_list.hh"
 #include "ED_asset_name_matching.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_asset_shelf_brush_set_temp.hh"
 #include "ED_screen.hh"
 #include "ED_image_grid.hh"
 
@@ -224,7 +225,7 @@ void ensure_asset_library_fetched(const bContext &C, const AssetShelfType &shelf
     /* Runs from the popover *button*'s draw, i.e. on every redraw of its host, whereas the popover
      * itself only validates the reference once opened. Without this, removing an asset library in
      * the Preferences leaves the shelf holding a reference #storage_fetch() asserts on. */
-    list::storage_fetch(&settings_ensure_valid_library_ref(shelf->settings), &C);
+    list::storage_fetch(&settings_ensure_valid_library_ref(C, *shelf), &C);
   }
   else {
     AssetLibraryReference library_ref = asset_system::all_library_reference();
@@ -284,17 +285,25 @@ class FavoritesCatalogTreeViewItem : public ui::BasicTreeViewItem {
 
 class AssetCatalogTreeView : public ui::AbstractTreeView {
   AssetShelf &shelf_;
+  /** TEMPORARY: Sculpt/Paint display group to filter catalogs for (see
+   * #ED_asset_shelf_brush_set_temp.hh). */
+  brush_set_temp::Category brush_set_category_;
   asset_system::AssetCatalogTree catalog_tree_;
 
  public:
-  AssetCatalogTreeView(const asset_system::AssetLibrary &library, AssetShelf &shelf)
-      : shelf_(shelf)
+  AssetCatalogTreeView(const asset_system::AssetLibrary &library,
+                       AssetShelf &shelf,
+                       const brush_set_temp::Category brush_set_category)
+      : shelf_(shelf), brush_set_category_(brush_set_category)
   {
     catalog_tree_ = build_filtered_catalog_tree(
         library,
         shelf_.settings.asset_library_reference,
         [this](const asset_system::AssetRepresentation &asset) {
-          return type_asset_poll(*shelf_.type, asset);
+          return type_asset_poll(*shelf_.type, asset) &&
+                 /* TEMPORARY: Sculpt/Paint brush-set filtering (also filters the merged "All"
+                  * library by the owning library's classification). */
+                 brush_set_temp::asset_passes(asset, brush_set_category_);
         });
 
     /* Keep the popup open when clicking to activate a catalog. */
@@ -409,7 +418,8 @@ static void catalog_tree_draw(const bContext &C,
   ui::AbstractTreeView *tree_view = block_add_view(
       *block,
       "asset shelf catalog tree view",
-      std::make_unique<AssetCatalogTreeView>(*library, shelf));
+      std::make_unique<AssetCatalogTreeView>(
+          *library, shelf, brush_set_temp::category_from_shelf(C, shelf)));
 
   /* Bound the catalog tree to the exact pixel height of the asset grid viewport so the popover keeps
    * a stable height with no dead space below either column, and the header stays put even with many
@@ -918,7 +928,7 @@ static void popover_panel_draw(const bContext *C, Panel *panel)
     return;
   }
 
-  settings_ensure_valid_library_ref(shelf->settings);
+  settings_ensure_valid_library_ref(*C, *shelf);
 
   /* The popup shelf is a process-global singleton, not tied to the current file
    * (#StaticPopupShelves), and #popup_shelf_get_or_create returns an existing instance without
@@ -1563,7 +1573,11 @@ static void asset_shelf_popover_listen(const wmRegionListenerParams *params)
        * (#library_reference_to_enum_value counts an index into #UserDef.asset_libraries), so any
        * add/remove/reorder shifts them. A tab left over from the old list would not just dangle --
        * it would silently switch the shelf to a *different* library. Rebuild instead. */
-      if (ELEM(wmn->data, ND_REGIONS_ASSET_SHELF, ND_SPACE_ASSET_PARAMS)) {
+      if (wmn->data == ND_ASSET_SHELF_BRUSH_SET) {
+        /* TEMPORARY: Sculpt/Paint display group or brush-set classification changed. */
+        ED_region_tag_refresh_ui(region);
+      }
+      else if (ELEM(wmn->data, ND_REGIONS_ASSET_SHELF, ND_SPACE_ASSET_PARAMS)) {
         ED_region_tag_refresh_ui(region);
       }
       break;

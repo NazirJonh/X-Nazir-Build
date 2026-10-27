@@ -340,6 +340,13 @@ static void asset_shelf_region_listen(const wmRegionListenerParams *params)
       if (wmn->data == ND_REGIONS_ASSET_SHELF) {
         ED_region_tag_redraw(region);
       }
+      /* TEMPORARY: the Sculpt/Paint display group or a library's brush-set classification
+       * changed; the asset view (and its brush-set filtering) has to rebuild. Kept separate from
+       * #ND_REGIONS_ASSET_SHELF, which also fires for every search-filter keystroke. See
+       * #ED_asset_shelf_brush_set_temp.hh. */
+      else if (wmn->data == ND_ASSET_SHELF_BRUSH_SET) {
+        ED_region_tag_refresh_ui(region);
+      }
       break;
     case NC_SCENE:
       /* Asset shelf polls typically check the mode. */
@@ -612,7 +619,7 @@ void region_layout(const bContext *C, ARegion *region)
     return;
   }
 
-  settings_ensure_valid_library_ref(active_shelf->settings);
+  settings_ensure_valid_library_ref(*C, *active_shelf);
   shelf_ensure_catalog_revalidated(*active_shelf);
 
   ui::Block *block = block_begin(C, region, __func__, ui::EmbossType::Emboss);
@@ -826,7 +833,7 @@ int context(const bContext *C, const char *member, bContextDataResult *result)
     if (!active_shelf) {
       return CTX_RESULT_NO_DATA;
     }
-    AssetLibraryReference &library_ref = settings_ensure_valid_library_ref(active_shelf->settings);
+    AssetLibraryReference &library_ref = settings_ensure_valid_library_ref(*C, *active_shelf);
     CTX_data_pointer_set(result, &screen->id, RNA_AssetLibraryReference, &library_ref);
     return CTX_RESULT_OK;
   }

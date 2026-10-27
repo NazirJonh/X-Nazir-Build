@@ -157,6 +157,12 @@ void popup_size_store(wmWindowManager &wm,
  * \{ */
 
 AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &settings);
+/**
+ * Convenience overload: #settings_ensure_valid_library_ref() plus the TEMPORARY Sculpt/Paint
+ * brush-set rule (falls back to All when the current library doesn't match the display group the
+ * shelf currently shows). See #ED_asset_shelf_brush_set_temp.hh.
+ */
+AssetLibraryReference &settings_ensure_valid_library_ref(const bContext &C, AssetShelf &shelf);
 /** True when the settings reference a custom library that no longer resolves at all (as opposed
  * to one that resolves but is a folder or disabled, which falls back to "All" instead). */
 bool settings_library_is_missing(const AssetShelfSettings &settings);

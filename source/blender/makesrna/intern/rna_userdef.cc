@@ -294,6 +294,17 @@ static const EnumPropertyItem rna_enum_category_tabs_shape_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 
+/* TEMPORARY: items for the Sculpt/Paint brush-set classification RNA properties
+ * (#UserAssetLibrary.brush_set and #PreferencesAssetLibraries.essentials_brush_set), shared by
+ * both RNA compilation passes. */
+static const EnumPropertyItem rna_enum_user_asset_library_brush_set_items[] = {
+    {ASSET_LIBRARY_BRUSH_SET_NONE, "NONE", 0, "None", "Not a Sculpt/Paint brush source"},
+    {ASSET_LIBRARY_BRUSH_SET_SCULPT, "SCULPT", 0, "Sculpt", "Provides sculpt brushes"},
+    {ASSET_LIBRARY_BRUSH_SET_PAINT, "PAINT", 0, "Paint", "Provides paint brushes"},
+    {ASSET_LIBRARY_BRUSH_SET_BOTH, "BOTH", 0, "Both", "Provides sculpt and paint brushes"},
+    {0, nullptr, 0, nullptr, nullptr},
+};
+
 }  // namespace blender
 
 #ifdef RNA_RUNTIME
@@ -576,6 +587,19 @@ static void rna_userdef_asset_libraries_refresh(bContext *C, PointerRNA *ptr)
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_ASSET_PARAMS, nullptr);
 
   rna_userdef_update(CTX_data_main(C), CTX_data_scene(C), ptr);
+}
+
+/* Refresh the brush shelf (library selector, asset grid and catalogs) after a TEMPORARY brush-set
+ * classification change. The asset contents themselves are unchanged, so no asset list needs to be
+ * reloaded; the dedicated notifier only rebuilds the shelf UI. */
+static void rna_userdef_brush_set_update(bContext *C, PointerRNA * /*ptr*/)
+{
+  USERDEF_TAG_DIRTY;
+  if (C) {
+    /* Keep the Preferences window's dirty-state UI in sync, as #rna_userdef_update() does. */
+    WM_event_add_notifier(C, NC_WINDOW, nullptr);
+    WM_event_add_notifier(C, NC_SPACE | ND_ASSET_SHELF_BRUSH_SET, nullptr);
+  }
 }
 
 static void rna_userdef_asset_library_remote_url_set(PointerRNA *ptr, const char *value)
@@ -7746,6 +7770,17 @@ static void rna_def_userdef_filepaths_asset_library(BlenderRNA *brna)
    * #bUserAssetLibrary.parent_name in sync for save/load. A raw pointer set from Python would
    * bypass that and be lost on reload. */
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+
+  /* TEMPORARY: Sculpt/Paint brush-set classification. */
+  prop = RNA_def_property(srna, "brush_set", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_user_asset_library_brush_set_items);
+  RNA_def_property_enum_sdna(prop, nullptr, "brush_set");
+  RNA_def_property_ui_text(prop,
+                           "Brush Set",
+                           "Which brush sets this library provides for the Sculpt/Paint brush "
+                           "popover (temporary feature)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_userdef_brush_set_update");
 }
 
 static void rna_def_userdef_filepaths_extension_repo(BlenderRNA *brna)
@@ -8498,6 +8533,17 @@ static void rna_def_userdef_asset_libraries(BlenderRNA *brna)
       "to be enabled under System > Network in the Preferences");
   RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
   RNA_def_property_update(prop, 0, "rna_userdef_asset_libraries_use_online_essentials_update");
+
+  /* TEMPORARY: Essentials classification for the Sculpt/Paint brush popover. */
+  prop = RNA_def_property(srna, "essentials_brush_set", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, rna_enum_user_asset_library_brush_set_items);
+  RNA_def_property_enum_sdna(prop, nullptr, "essentials_brush_set");
+  RNA_def_property_ui_text(prop,
+                           "Brush Set",
+                           "Which brush sets the Essentials library provides for the "
+                           "Sculpt/Paint brush popover (temporary feature)");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_userdef_brush_set_update");
 }
 
 static void rna_def_userdef_extensions(BlenderRNA *brna)

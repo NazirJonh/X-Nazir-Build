@@ -44,6 +44,7 @@
 #include "ED_asset_library.hh"
 #include "ED_asset_list.hh"
 #include "ED_asset_shelf.hh"
+#include "ED_asset_shelf_brush_set_temp.hh"
 
 #include "asset_shelf.hh"
 
@@ -284,6 +285,17 @@ AssetLibraryReference &settings_ensure_valid_library_ref(AssetShelfSettings &set
     settings.asset_library_reference = asset_system::all_library_reference();
   }
   return settings.asset_library_reference;
+}
+
+AssetLibraryReference &settings_ensure_valid_library_ref(const bContext &C, AssetShelf &shelf)
+{
+  settings_ensure_valid_library_ref(shelf.settings);
+  /* TEMPORARY: on top of the plain validation above, switch away from a library whose Sculpt/Paint
+   * brush-set classification doesn't match what the shelf currently shows (see
+   * #ED_asset_shelf_brush_set_temp.hh). */
+  brush_set_temp::ensure_library_ref(
+      shelf.settings, brush_set_temp::category_from_shelf(C, shelf));
+  return shelf.settings.asset_library_reference;
 }
 
 bool settings_library_is_missing(const AssetShelfSettings &settings)

@@ -33,6 +33,7 @@ set(SRC
   ../include/ED_armature.hh
   ../include/ED_asset.hh
   ../include/ED_asset_menu_utils.hh
+  ../include/ED_asset_shelf_brush_set_temp.hh
   ../include/ED_buttons.hh
   ../include/ED_clip.hh
   ../include/ED_curve.hh

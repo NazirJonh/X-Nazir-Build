@@ -18,6 +18,7 @@
 #include "BLI_array.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_span.hh"
+#include "BLI_utildefines.h"
 
 #include "DNA_brush_enums.h"
 #include "DNA_color_types.h"
@@ -540,6 +541,29 @@ bool BKE_brush_has_cube_tip(const Brush *brush, PaintMode paint_mode);
 
 namespace bke::brush {
 float normal_weight_get(const Brush &brush, bool invert);
+
+/**
+ * Name of the asset metadata property holding #Brush.sculpt_brush_type (see
+ * `brush_asset_metadata_ensure`), for code classifying brush assets without loading them.
+ */
+inline constexpr const char *sculpt_brush_type_asset_key = "sculpt_brush_type";
+
+/**
+ * Whether a sculpt brush type is drawn in the "Paint" group of the Sculpt Mode toolbar (the color
+ * brushes plus Texture Fill and Clone), as opposed to the "Sculpt" group. A toolbar-level
+ * classification: the asset shelf filtering uses it, so it must follow `_tools_paint_display` in
+ * `space_toolsystem_toolbar.py`.
+ */
+inline bool sculpt_brush_type_in_paint_group(const int sculpt_brush_type)
+{
+  return ELEM(sculpt_brush_type,
+              SCULPT_BRUSH_TYPE_PAINT,
+              SCULPT_BRUSH_TYPE_SMEAR,
+              SCULPT_BRUSH_TYPE_BLUR,
+              SCULPT_BRUSH_TYPE_TEXTURE_FILL,
+              SCULPT_BRUSH_TYPE_ERASE,
+              SCULPT_BRUSH_TYPE_CLONE);
+}
 }
 
 /* debugging only */

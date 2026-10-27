@@ -1981,6 +1981,17 @@ void blo_do_versions_userdef(UserDef *userdef)
     CLAMP(userdef->asset_shelf_recent_images_max, 1, 200);
   }
 
+  /* TEMPORARY: Sculpt/Paint brush-set filtering. Preferences written before the fields existed
+   * read them as 0 (#ASSET_LIBRARY_BRUSH_SET_NONE), which would hide every library. Seed BOTH for
+   * all of them. Seeding at 87 (not 86) also re-seeds preferences already written at subversion 86
+   * by intermediate builds, which stored the DNA-zero (NONE) values before this versioning existed.
+   * Remove together with the fields, or keep for one release as a no-op cleanup. */
+  if (!USER_VERSION_ATLEAST(502, 87)) {
+    for (bUserAssetLibrary &lib : userdef->asset_libraries) {
+      lib.brush_set = ASSET_LIBRARY_BRUSH_SET_BOTH;
+    }
+    userdef->essentials_brush_set = ASSET_LIBRARY_BRUSH_SET_BOTH;
+  }
 
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning

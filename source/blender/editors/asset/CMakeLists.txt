@@ -42,6 +42,7 @@ set(SRC
   intern/asset_shelf_asset_lists_ops.cc
   intern/asset_shelf_catalog_selector.cc
   intern/asset_shelf_popover.cc
+  intern/asset_shelf_brush_set_temp.cc
   intern/asset_shelf_regiondata.cc
   intern/asset_shelf_settings.cc
   intern/asset_temp_id_consumer.cc
@@ -100,6 +101,7 @@ if(WITH_GTESTS)
     intern/tests/asset_catalog_test.cc
     intern/tests/asset_catalog_validation_test.cc
     intern/tests/asset_shelf_asset_lists_test.cc
+    intern/tests/asset_shelf_brush_set_temp_test.cc
   )
   set(TEST_INC
     # The test includes "asset_shelf_asset_lists.hh", which lives next to the sources it tests, not

@@ -153,16 +153,9 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
       break;
     case NC_SCENE:
       switch (wmn->data) {
+        /* The focus of an unpinned stack is dropped by the area listener, which runs first and has
+         * the context to normalize it before any region draws. */
         case ND_OB_ACTIVE:
-          if (space_outliner->outlinevis == SO_STACK_LAYERS &&
-              (space_outliner->stack_layers_flag & SO_SL_PINNED) == 0)
-          {
-            space_outliner->runtime->stack_focus = {};
-            outliner_stack_rows_invalidate(*space_outliner);
-            ED_region_tag_redraw(region);
-            break;
-          }
-          ATTR_FALLTHROUGH;
         case ND_OB_SELECT:
           if (outliner_requires_rebuild_on_select_or_active_change(space_outliner)) {
             ED_region_tag_redraw(region);
@@ -373,6 +366,68 @@ static void outliner_main_region_listener(const wmRegionListenerParams *params)
         ED_region_tag_redraw(region);
       }
       break;
+  }
+}
+
+/* ************************ area listener *********************** */
+
+/**
+ * Keep the Stack Layers view on whatever the active object has: its stack while it has one, and the
+ * mode's object list while it has none.
+ *
+ * An area listener rather than a region one: choosing the view needs the view layer the area reads,
+ * which the notifier alone does not carry.
+ */
+static void outliner_space_listener(const wmSpaceTypeListenerParams *params)
+{
+  const wmNotifier *wmn = params->notifier;
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(params->area->spacedata.first);
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
+    return;
+  }
+  /* What can change the answer to "which stack does the active object have": another active
+   * object, another view layer or scene, a file that was read, and a stack that came or went
+   * with the layered material. */
+  bool changes_followed_stack = false;
+  switch (wmn->category) {
+    case NC_SCENE:
+      changes_followed_stack = ELEM(
+          wmn->data, ND_OB_ACTIVE, ND_LAYER, ND_LAYER_CONTENT, ND_SCENEBROWSE);
+      break;
+    case NC_WM:
+      changes_followed_stack = (wmn->data == ND_FILEREAD);
+      break;
+    case NC_MATERIAL:
+      changes_followed_stack = (wmn->data == ND_SHADING);
+      break;
+    default:
+      break;
+  }
+  if (!changes_followed_stack || params->window == nullptr) {
+    return;
+  }
+  /* The view layer this area reads: the window's own, which is what its Outliner shows. */
+  const StackReadContext ctx{const_cast<Main *>(params->bmain),
+                             WM_window_get_active_scene(params->window),
+                             WM_window_get_active_view_layer(params->window)};
+  if (outliner_stack_view_follow_active(*space_outliner, ctx)) {
+    /* The display mode may have changed under the header, and the tool header exists only in
+     * Stack Layers. */
+    outliner_tool_header_visibility_sync(nullptr, params->area, *space_outliner);
+    ED_area_tag_redraw(params->area);
+  }
+  if (wmn->category == NC_SCENE && wmn->data == ND_OB_ACTIVE &&
+      space_outliner->outlinevis == SO_STACK_LAYERS &&
+      (space_outliner->stack_layers_flag & SO_SL_PINNED) == 0)
+  {
+    /* An unpinned stack follows the active object, so the old focus names the wrong slot. It is
+     * dropped and written down again here, ahead of every region's draw: the header's Stack
+     * Material button reads it, and a draw that found it empty would show a blank label until the
+     * next redraw, which only a hover used to cause. */
+    space_outliner->runtime->stack_focus = {};
+    outliner_stack_rows_invalidate(*space_outliner);
+    outliner_stack_focus_normalize(ctx, *space_outliner);
+    ED_area_tag_redraw(params->area);
   }
 }
 
@@ -802,6 +857,7 @@ void ED_spacetype_outliner()
   st->create = outliner_create;
   st->free = outliner_free;
   st->init = outliner_init;
+  st->listener = outliner_space_listener;
   st->duplicate = outliner_duplicate;
   st->operatortypes = outliner_operatortypes;
   st->keymap = outliner_keymap;

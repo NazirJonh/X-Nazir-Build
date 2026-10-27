@@ -241,8 +241,8 @@ Vector<eSpaceButtons_Context> ED_buttons_tabs_list(const SpaceProperties *sbuts,
   /* Grouped with the tool rather than with the object's material: this tab edits the active
    * brush's source material, which belongs to the tool, not to the object being painted on. */
   add_tab(BCONTEXT_BRUSH_MATERIAL);
-  /* Beside it for the same reason: the source of the active paint layer is edited while painting,
-   * whichever object that is on. */
+  /* Beside it for the same reason: the active object's paint-layer material is edited while
+   * painting, and the tab is available only while that object has one. */
   add_tab(BCONTEXT_LAYER_MATERIAL);
 
   add_spacer();

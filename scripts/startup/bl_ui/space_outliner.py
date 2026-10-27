@@ -710,6 +710,11 @@ class OUTLINER_PT_stack_layers_filter(Panel):
         col.prop(space, "show_stack_layer_move_buttons", text="Move Buttons")
 
         layout.prop(space, "use_stack_layer_pin")
+        # Pin Stack keeps a stack the active object does not have, which is the opposite answer to
+        # following the object, so the choice below it only means anything with Pin off.
+        col = layout.column()
+        col.active = not space.use_stack_layer_pin
+        col.prop(space, "use_stack_layer_follow_object")
 
 
 class OUTLINER_PT_options_search(Panel):

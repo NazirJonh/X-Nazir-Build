@@ -882,6 +882,8 @@ static void rna_SpaceOutliner_display_mode_update(bContext *C, PointerRNA *ptr)
     /* The tool header only carries the Stack Layers controls, so it follows the display mode.
      * `RGN_FLAG_HIDDEN_BY_USER` is left alone: a user who collapsed it keeps it collapsed. */
     SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+    /* A mode the user picks is theirs: the follow no longer brings the stack back on its own. */
+    ed::outliner::outliner_stack_follow_release_mode(*space_outliner);
     ed::outliner::outliner_tool_header_visibility_sync(C, area, *space_outliner);
     ED_area_tag_redraw(area);
     ED_area_tag_refresh(area);
@@ -920,6 +922,50 @@ static void rna_SpaceOutliner_stack_focus_sub_index_update(bContext *C,
 {
   SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
   ed::outliner::outliner_stack_focus_sub_index_apply(*C, *space_outliner);
+}
+
+static void rna_SpaceOutliner_follow_object_update(bContext *C, PointerRNA *ptr)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  /* Turning the follow off leaves the display where it is; turning it on puts the Outliner on what
+   * the active object has now, rather than waiting for the next object change to show it. */
+  if (C == nullptr || (space_outliner->stack_layers_flag & SO_SL_NO_FOLLOW_OBJECT) != 0) {
+    return;
+  }
+  if (!ed::outliner::outliner_stack_view_follow_resume(*C, *space_outliner)) {
+    return;
+  }
+  if (ScrArea *area = rna_area_from_space(ptr)) {
+    /* The follow may have changed the display mode, and the tool header exists only in one. */
+    ed::outliner::outliner_tool_header_visibility_sync(C, area, *space_outliner);
+    ED_area_tag_redraw(area);
+  }
+}
+
+static void rna_SpaceOutliner_stack_pin_update(bContext *C, PointerRNA *ptr)
+{
+  SpaceOutliner *space_outliner = static_cast<SpaceOutliner *>(ptr->data);
+  ScrArea *area = rna_area_from_space(ptr);
+  if (area != nullptr) {
+    ED_area_tag_redraw(area);
+  }
+  if (C == nullptr) {
+    return;
+  }
+  if ((space_outliner->stack_layers_flag & SO_SL_PINNED) != 0) {
+    /* Pinning names the object the stack shows now, so the pin keeps it when the active object
+     * changes instead of following it. */
+    ed::outliner::outliner_stack_focus_normalize(*C, *space_outliner);
+    return;
+  }
+  /* Releasing the pin hands the display back to the follow, as turning the follow on does: it
+   * would otherwise keep the old stack until the next object change. */
+  if ((space_outliner->stack_layers_flag & SO_SL_NO_FOLLOW_OBJECT) != 0) {
+    return;
+  }
+  if (ed::outliner::outliner_stack_view_follow_resume(*C, *space_outliner) && area != nullptr) {
+    ed::outliner::outliner_tool_header_visibility_sync(C, area, *space_outliner);
+  }
 }
 
 static const EnumPropertyItem *rna_SpaceOutliner_stack_focus_sub_index_itemf(
@@ -5426,7 +5472,19 @@ static void rna_def_space_outliner(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "stack_layers_flag", SO_SL_PINNED);
   RNA_def_property_ui_text(
       prop, "Pin Stack", "Keep the focused stack when the active object changes");
-  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, nullptr);
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, NC_SPACE | ND_SPACE_OUTLINER, "rna_SpaceOutliner_stack_pin_update");
+
+  prop = RNA_def_property(srna, "use_stack_layer_follow_object", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(
+      prop, nullptr, "stack_layers_flag", SO_SL_NO_FOLLOW_OBJECT);
+  RNA_def_property_ui_text(
+      prop,
+      "Follow Object",
+      "Show the active object's layer stack, and the View Layer while the object has no stack; "
+      "Pin Stack keeps the focused stack regardless");
+  RNA_def_property_flag(prop, PROP_CONTEXT_UPDATE);
+  RNA_def_property_update(prop, 0, "rna_SpaceOutliner_follow_object_update");
 
   prop = RNA_def_property(srna, "stack_focus_name", PROP_STRING, PROP_NONE);
   RNA_def_property_clear_flag(prop, PROP_EDITABLE);

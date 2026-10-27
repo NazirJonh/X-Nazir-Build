@@ -108,6 +108,9 @@ ListBaseT<TreeElement> TreeDisplayStackLayersStack::build_tree(const TreeSourceD
   ListBaseT<TreeElement> tree = {nullptr};
   const StackReadContext ctx = stack_read_context_from_source(source_data);
 
+  /* The build is where a pinned stack gets to name its object: a pin restored from a file has no
+   * focus yet, and the getters below do not write one. */
+  outliner_stack_focus_normalize(ctx, space_outliner_);
   ID *owner = outliner_stack_owner_get(ctx, space_outliner_);
   if (owner == nullptr) {
     outliner_stack_rows_invalidate(space_outliner_);

@@ -1049,7 +1049,7 @@ def drop_batch(settings, placements, cursor_placement, *, keep_source, parent_to
     color_kwargs = {}
     if settings.use_face_sets and settings.use_face_set_color:
         color_kwargs = {"use_face_set_color": True, "face_set_color": tuple(settings.face_set_color)}
-    items = [
+    placement_items = [
         {
             # The element is an RNA `PropertyGroup`, so it also inherits the base `name`
             # property. The batch operator ignores it, but RNA requires it (and every other
@@ -1066,7 +1066,7 @@ def drop_batch(settings, placements, cursor_placement, *, keep_source, parent_to
     try:
         result = bpy.ops.sculpt.mesh_asset_drop_batch(
             **color_kwargs,
-            items=items,
+            placements=placement_items,
             use_face_sets=settings.use_face_sets,
             join_to_active=settings.placement == 'JOIN',
             replace_face_sets=settings.replace_face_sets,

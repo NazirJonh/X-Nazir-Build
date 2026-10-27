@@ -34,7 +34,8 @@ class StackLayersOutlinerTest(unittest.TestCase):
     def redraw_window(self):
         """A full redraw, tree rebuild included: wm.redraw_timer's poll wants a window, which the
         script context has none of, so it runs under the outliner's own override."""
-        self.area.tag_redraw()
+        for area in self.window.screen.areas:
+            area.tag_redraw()
         with self.outliner_override():
             bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
@@ -49,6 +50,80 @@ class StackLayersOutlinerTest(unittest.TestCase):
         object.shape_key_add(name="Key 1")
         object.shape_key_add(name="Key 2")
         return object
+
+    def add_plain_object(self, name):
+        """An object the stack sources have nothing to show: no shape keys, no layered material."""
+        mesh = bpy.data.meshes.new(name + "Mesh")
+        mesh.vertices.add(1)
+        object = bpy.data.objects.new(name, mesh)
+        bpy.context.collection.objects.link(object)
+        return object
+
+    def add_layered_material_object(self, name):
+        """An object whose first material slot holds a paint-layer material, and that material."""
+        object = self.add_plain_object(name)
+        material = bpy.data.materials.new(name + "Material")
+        object.data.materials.append(material)
+        material.paint_layers.new(name="Row")
+        self.assertTrue(material.is_layered)
+        return object, material
+
+    def focus_and_pin_stack(self, object, area=None, stack_source='PAINT_MATERIAL'):
+        """Focus the object's stack in an Outliner area and pin it there."""
+        area = self.area if area is None else area
+        space = area.spaces.active
+        space.display_mode = 'STACK_LAYERS'
+        space.stack_source = stack_source
+        space.use_stack_layer_pin = True
+        region = next(region for region in area.regions if region.type == 'WINDOW')
+        with bpy.context.temp_override(
+                window=self.window, screen=self.window.screen, area=area, region=region):
+            self.assertEqual(
+                bpy.ops.outliner.stack_layer_focus(
+                    object=object.name, sub_index=-1, enter_edit_mode=False),
+                {'FINISHED'})
+        self.redraw_window()
+
+    def split_outliner_area(self):
+        """Split the Outliner area in two and return the new one, which carries a copy of the
+        space."""
+        with self.outliner_override():
+            self.assertEqual(
+                bpy.ops.screen.area_split(direction='VERTICAL', factor=0.5), {'FINISHED'})
+        outliner_areas = [area for area in self.window.screen.areas if area.type == 'OUTLINER']
+        self.assertEqual(len(outliner_areas), 2)
+        # RNA wrappers are not guaranteed to keep a one-to-one Python identity, so the new area is
+        # told from the original by its own address rather than by `is`.
+        original_area_ptr = self.area.as_pointer()
+        return next(area for area in outliner_areas if area.as_pointer() != original_area_ptr)
+
+    def properties_area(self):
+        return next(area for area in self.window.screen.areas if area.type == 'PROPERTIES')
+
+    def layer_material_tab_available(self):
+        """Whether the Properties editor offers the Layer Material tab right now.
+
+        The available tabs are recomputed when the editor is drawn, so the window is redrawn
+        first. Selecting the tab then answers the question: a tab the editor does not offer
+        refuses the selection outright, and one it loses after a redraw falls back to another
+        tab (see buttons_context_compute).
+        """
+        self.redraw_window()
+        space = self.properties_area().spaces.active
+        try:
+            space.context = 'LAYER_MATERIAL'
+        except TypeError:
+            return False
+        self.redraw_window()
+        return space.context == 'LAYER_MATERIAL'
+
+    def properties_context_material(self):
+        """The `material` member of the Properties editor's own context: its current tab's path."""
+        area = self.properties_area()
+        region = next(region for region in area.regions if region.type == 'WINDOW')
+        with bpy.context.temp_override(
+                window=self.window, screen=self.window.screen, area=area, region=region):
+            return bpy.context.material
 
     def focus_and_draw_stack(self, object):
         self.space.display_mode = 'STACK_LAYERS'
@@ -151,6 +226,16 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.space.use_stack_layer_pin = False
         self.assertFalse(self.space.use_stack_layer_pin)
 
+    def test_follow_object_defaults_on_and_flips(self):
+        # The view follows what the active object has by default: its stack while it has one, and the
+        # object list while it has none. The switch is the user's way out of that, and Pin Stack
+        # answers the same question the other way.
+        self.assertTrue(self.space.use_stack_layer_follow_object)
+        self.space.use_stack_layer_follow_object = False
+        self.assertFalse(self.space.use_stack_layer_follow_object)
+        self.space.use_stack_layer_follow_object = True
+        self.assertTrue(self.space.use_stack_layer_follow_object)
+
     def test_stack_layers_flags_defaults_all_shown(self):
         self.assertTrue(self.space.show_stack_layer_value)
         self.assertTrue(self.space.show_stack_layer_blend)
@@ -167,6 +252,7 @@ class StackLayersOutlinerTest(unittest.TestCase):
             "use_stack_layer_big_rows",
             "use_stack_layer_visibility_left",
             "use_stack_layer_pin",
+            "use_stack_layer_follow_object",
             "stack_source",
         ):
             self.assertIn(name, bpy.types.SpaceOutliner.bl_rna.properties)
@@ -213,6 +299,60 @@ class StackLayersOutlinerTest(unittest.TestCase):
         self.assertEqual(result, {'FINISHED'})
         self.assertEqual([key.name for key in object.data.shape_keys.key_blocks],
                          ["Basis", "Key 2", "Key 1"])
+
+    def test_layer_material_tab_follows_the_active_object(self):
+        # The Properties tab is built from the active object's active material slot: available
+        # while that slot holds a paint-layer material, and pointing at that material.
+        object, material = self.add_layered_material_object("Layered")
+        bpy.context.view_layer.objects.active = object
+        self.assertTrue(self.layer_material_tab_available())
+        self.assertEqual(self.properties_context_material(), material)
+
+    def test_layer_material_tab_absent_without_a_layered_material(self):
+        object = self.add_plain_object("Plain")
+        bpy.context.view_layer.objects.active = object
+        self.assertFalse(self.layer_material_tab_available())
+        self.assertIsNone(self.properties_context_material())
+
+    def test_layer_material_tab_ignores_a_pinned_outliner(self):
+        # A pinned Outliner shows another object's stack, but that display is not the Properties
+        # editor's context: with no layered material on the active object the tab is absent, no
+        # matter whose stack is pinned.
+        pinned_object, pinned_material = self.add_layered_material_object("Pinned")
+        self.focus_and_pin_stack(pinned_object)
+        bpy.context.view_layer.objects.active = self.add_plain_object("Active")
+        self.assertFalse(self.layer_material_tab_available())
+        self.assertNotEqual(self.properties_context_material(), pinned_material)
+
+    def test_layer_material_tab_ignores_two_pinned_outliners(self):
+        # Two Outliners pinned to two different objects: whichever of them comes first in the
+        # screen's area list, neither object's material may become the tab's context while the
+        # active object has no layered material.
+        bpy.context.view_layer.objects.active = self.add_plain_object("Active")
+        first_object, first_material = self.add_layered_material_object("First")
+        second_object, second_material = self.add_layered_material_object("Second")
+        second_area = self.split_outliner_area()
+        self.focus_and_pin_stack(first_object)
+        self.focus_and_pin_stack(second_object, second_area)
+        self.assertFalse(self.layer_material_tab_available())
+        self.assertNotIn(self.properties_context_material(), (first_material, second_material))
+        # The same two pins, the other way around: the screen order did not decide the answer.
+        self.focus_and_pin_stack(second_object)
+        self.focus_and_pin_stack(first_object, second_area)
+        self.assertFalse(self.layer_material_tab_available())
+        self.assertNotIn(self.properties_context_material(), (first_material, second_material))
+
+    def test_pinned_outliner_rows_operate_on_the_displayed_object(self):
+        # Row actions of a pinned Outliner still belong to the object whose stack it shows, not to
+        # whatever object is active: the pin's context stays local to the Outliner.
+        pinned_object = self.add_object_with_shape_keys()
+        self.focus_and_pin_stack(pinned_object, stack_source='SHAPE_KEYS')
+        bpy.context.view_layer.objects.active = self.add_plain_object("Active")
+        self.redraw_window()
+        with self.outliner_override():
+            self.assertEqual(bpy.ops.outliner.stack_layer_activate(ordinal=2), {'FINISHED'})
+        self.assertEqual(pinned_object.active_shape_key_index, 2)
+        self.assertEqual(pinned_object.active_shape_key.name, "Key 2")
 
 
 if __name__ == "__main__":

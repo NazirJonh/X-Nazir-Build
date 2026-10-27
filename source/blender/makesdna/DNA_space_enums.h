@@ -292,6 +292,14 @@ enum eSpaceOutliner_StackLayersFlag : short {
    * was the retired sort-by-name flag, and a file saved with it set would show the column.
    */
   SO_SL_SHOW_LOCK = (1 << 8),
+  /**
+   * Do not follow the active object with the view.
+   *
+   * The default is to follow: an object that has a stack of the mode's kind shows it, and one that
+   * has none is shown in the mode's object list. Pin Stack already keeps a stack the active object
+   * does not have, so it answers this question the other way and overrides it.
+   */
+  SO_SL_NO_FOLLOW_OBJECT = (1 << 9),
 };
 ENUM_OPERATORS(eSpaceOutliner_StackLayersFlag)
 

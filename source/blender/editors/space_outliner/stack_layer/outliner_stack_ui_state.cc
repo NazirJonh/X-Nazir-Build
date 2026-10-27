@@ -506,6 +506,11 @@ bool outliner_stack_row_activate(bContext *C, SpaceOutliner &space_outliner, con
   if (ordinal < 0) {
     return false;
   }
+  /* A pinned stack shows an object that is not necessarily the active one; the row is acted on in
+   * that object's context, as a pinned panel's data always is. */
+  if (!outliner_stack_focus_object_carry(*C, space_outliner)) {
+    return false;
+  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   ID *owner = outliner_stack_owner_get(ctx, space_outliner);
   if (owner == nullptr) {
@@ -528,6 +533,10 @@ bool outliner_stack_row_preview_activate(bContext *C,
   if (ordinal < 0) {
     return false;
   }
+  /* The slot a preview click switches is the active object's paint target. */
+  if (!outliner_stack_focus_object_carry(*C, space_outliner)) {
+    return false;
+  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   ID *owner = outliner_stack_owner_get(ctx, space_outliner);
   if (owner == nullptr) {
@@ -543,6 +552,10 @@ bool outliner_stack_row_preview_activate(bContext *C,
 
 bool outliner_stack_sub_row_activate(bContext *C, SpaceOutliner &space_outliner, const int nr)
 {
+  /* A content sub-row opens the image the active object's paint slots hold. */
+  if (!outliner_stack_focus_object_carry(*C, space_outliner)) {
+    return false;
+  }
   const StackReadContext ctx = outliner_stack_read_context(*C);
   ID *owner = outliner_stack_owner_get(ctx, space_outliner);
   if (owner == nullptr) {

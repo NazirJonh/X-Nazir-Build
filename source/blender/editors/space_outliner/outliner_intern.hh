@@ -150,6 +150,25 @@ struct SpaceOutliner_Runtime {
    */
   std::string stack_focus_name;
   /**
+   * Who owns the display mode with regard to following the active object's stack. Runtime only,
+   * and copied with the space, so a duplicated area keeps following the same way.
+   */
+  enum class StackFollowState : char {
+    /** The display is the follow's to switch: Stack Layers while the object has a stack. */
+    Armed = 0,
+    /**
+     * The follow itself left Stack Layers for the View Layer because the active object has no
+     * stack. Only such a visit to the View Layer is left again on its own.
+     */
+    LeftByFollow,
+    /**
+     * The user left the stack view by hand (#OUTLINER_OT_stack_layers_back), or picked another
+     * mode: the follow stays off until a stack is entered explicitly again.
+     */
+    ReleasedByUser,
+  };
+  StackFollowState stack_follow_state = StackFollowState::Armed;
+  /**
    * What the user did with each row, by #StackRow::stable_id: survives any renumbering.
    *
    * Clicks and collapses live in the tree store between builds. Read into this map whenever the
@@ -939,6 +958,38 @@ ID *outliner_stack_owner_get(const ed::outliner::StackReadContext &ctx,
  */
 Object *outliner_stack_focus_object_resolve(const ed::outliner::StackReadContext &ctx,
                                             SpaceOutliner &space_outliner);
+/**
+ * Point the display at what the active object has: the stack while it has one of the source's kind,
+ * and the View Layer while it has none.
+ *
+ * Only the automatic part of choosing the display: Pin Stack, the space's own switch, a mode the
+ * user chose and a view they left by hand all keep it where it is. Returns true when the display
+ * mode changed, which the caller has to follow with a tool-header sync and a redraw.
+ */
+bool outliner_stack_view_follow_active(SpaceOutliner &space_outliner,
+                                       const ed::outliner::StackReadContext &ctx);
+/**
+ * Bring the focus into the shape the readers expect: drop it if its object is gone, name the
+ * object of a pinned stack, and write down the sub-selection an empty one stands for.
+ *
+ * The one place these writes happen, called where the state changes -- the tree build, the active
+ * object changing, the pin being turned on -- so the getters and the enum callbacks stay pure.
+ */
+void outliner_stack_focus_normalize(const ed::outliner::StackReadContext &ctx,
+                                    SpaceOutliner &space_outliner);
+/**
+ * Make the focused object the active one, so the stack's rows are edited in the context they show.
+ *
+ * A pinned stack can point at an object the rest of Blender does not have active, and a row is then
+ * another object's data: the paint target, the texture-paint slots and every mode-bound operator
+ * resolve through the active object. Carrying the object with the row is what Pin ID does for its
+ * panels -- the pinned data-block becomes the context its edits are made in.
+ *
+ * Only a pinned stack is carried: an unpinned one follows the active object already.
+ * Returns false only when the change was refused (a live Paint Shape session defers it to its
+ * dialog), in which case the caller must not act on the row.
+ */
+bool outliner_stack_focus_object_carry(bContext &C, SpaceOutliner &space_outliner);
 bool outliner_stack_focus_set(bContext *C,
                               SpaceOutliner &space_outliner,
                               Object &object,

@@ -478,15 +478,15 @@ void OUTLINER_OT_stack_layer_add(wmOperatorType *ot)
   RNA_def_property_update_runtime_with_context_and_property(fill_mode_prop, stack_add_props_update);
   /* The channels an empty Fill starts with, as a flag mask over the source's own channel bits.
    * Zero is Empty until the user picks the channels its image set needs; the items come from the
-   * source, so the generic operator carries no channel vocabulary. */
-  PropertyRNA *fill_channels_prop = RNA_def_enum(ot->srna,
-                                                 "fill_channels",
-                                                 rna_enum_dummy_NULL_items,
-                                                 0,
-                                                 "Fill Channels",
-                                                 "Channels an Empty Fill layer starts with");
+   * source, so the generic operator carries no channel vocabulary. #RNA_def_enum_flag puts the flag
+   * in place before the items, which is the order makesrna requires of a flag enum. */
+  PropertyRNA *fill_channels_prop = RNA_def_enum_flag(ot->srna,
+                                                      "fill_channels",
+                                                      rna_enum_dummy_NULL_items,
+                                                      0,
+                                                      "Fill Channels",
+                                                      "Channels an Empty Fill layer starts with");
   RNA_def_enum_funcs(fill_channels_prop, stack_add_fill_channels_itemf);
-  RNA_def_property_flag(fill_channels_prop, PROP_ENUM_FLAG);
   /* The data-block a kind with #StackAddKindInfo::source_id_type is made from, by name: what a UI
    * picked, and what a repeat or a script names again. */
   PropertyRNA *source_prop = RNA_def_string(ot->srna,

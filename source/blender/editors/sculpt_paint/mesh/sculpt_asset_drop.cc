@@ -1279,7 +1279,7 @@ void SCULPT_OT_mesh_asset_drop(wmOperatorType *ot)
  * that existed before the batch.
  * \{ */
 
-/** One placement from the operator's `items` collection. */
+/** One placement from the operator's `placements` collection. */
 struct AssetDropPlacement {
   Object *object;
   float4x4 matrix;
@@ -1289,14 +1289,14 @@ static bool asset_drop_placements_get(wmOperator &op,
                                       Main &bmain,
                                       Vector<AssetDropPlacement> &r_placements)
 {
-  PropertyRNA *items_prop = RNA_struct_find_property(op.ptr, "items");
-  if (items_prop == nullptr || RNA_property_type(items_prop) != PROP_COLLECTION) {
+  PropertyRNA *placements_prop = RNA_struct_find_property(op.ptr, "placements");
+  if (placements_prop == nullptr || RNA_property_type(placements_prop) != PROP_COLLECTION) {
     BKE_report(op.reports, RPT_ERROR, "No objects to place");
     return false;
   }
 
   CollectionPropertyIterator iter;
-  RNA_property_collection_begin(op.ptr, items_prop, &iter);
+  RNA_property_collection_begin(op.ptr, placements_prop, &iter);
   for (; iter.valid; RNA_property_collection_next(&iter)) {
     const uint32_t session_uid = uint32_t(RNA_int_get(&iter.ptr, "session_uid"));
     Object *object = (session_uid != 0) ?
@@ -1668,10 +1668,11 @@ void SCULPT_OT_mesh_asset_drop_batch(wmOperatorType *ot)
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
 
   PropertyRNA *prop;
+  /* Not "items": that identifier is reserved by Python (dict.items), and RNA rejects it. */
   prop = RNA_def_collection_runtime(ot->srna,
-                                    "items",
+                                    "placements",
                                     RNA_OperatorObjectPlacementElement,
-                                    "Items",
+                                    "Placements",
                                     "Objects to place, each with the world matrix placing it");
   RNA_def_property_flag(prop, PROP_SKIP_SAVE);
 

@@ -95,9 +95,14 @@ wmOperatorStatus stack_focus_exec(bContext *C, wmOperator *op)
 wmOperatorStatus stack_back_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
-  if (space_outliner == nullptr) {
+  if (space_outliner == nullptr || space_outliner->runtime == nullptr) {
     return OPERATOR_CANCELLED;
   }
+  /* Leaving the stack by hand is the user's own choice of display: the follow that would otherwise
+   * bring a stack back on the next object change is off until one is entered again, and a View
+   * Layer it opened is the user's now. */
+  space_outliner->runtime->stack_follow_state = SpaceOutliner_Runtime::StackFollowState::
+      ReleasedByUser;
   /* Without `keep_view` the mode is left for the regular View Layer browsing; with it the mode
    * stays and only steps back to the objects list. */
   if (!RNA_boolean_get(op->ptr, "keep_view")) {
@@ -168,10 +173,166 @@ Object *outliner_stack_focus_object_resolve(const StackReadContext &ctx,
   return object;
 }
 
+bool outliner_stack_view_follow_active(SpaceOutliner &space_outliner,
+                                       const StackReadContext &ctx)
+{
+  if (space_outliner.runtime == nullptr) {
+    return false;
+  }
+  /* The space's own switch turns the follow off for good, and a display the user left by hand stays
+   * the way they left it. */
+  using FollowState = SpaceOutliner_Runtime::StackFollowState;
+  FollowState &follow_state = space_outliner.runtime->stack_follow_state;
+  if ((space_outliner.stack_layers_flag & SO_SL_NO_FOLLOW_OBJECT) != 0 ||
+      follow_state == FollowState::ReleasedByUser)
+  {
+    return false;
+  }
+  /* Pin Stack is the user having said "keep this stack whatever the active object is", and a pinned
+   * stack is only ever shown inside the mode. */
+  if ((space_outliner.stack_layers_flag & SO_SL_PINNED) != 0) {
+    return false;
+  }
+  /* A caller without a view layer -- a script's context, say -- has no object to follow and must not
+   * be read as one that has none. */
+  if (ctx.bmain == nullptr || ctx.view_layer == nullptr) {
+    return false;
+  }
+  const bool in_mode = space_outliner.outlinevis == SO_STACK_LAYERS;
+  /* Only a View Layer the follow itself opened is left again on its own; a mode the user chose is
+   * theirs, however the active object changes. */
+  const bool on_the_way_back = space_outliner.outlinevis == SO_VIEW_LAYER &&
+                               follow_state == FollowState::LeftByFollow;
+  if (!in_mode && !on_the_way_back) {
+    return false;
+  }
+  Object *object = outliner_stack_focus_object_get(ctx, StackFocus{});
+  const bool has_stack =
+      object != nullptr && stack_source_for_space(space_outliner)->object_has_stack(ctx, *object);
+  if (in_mode) {
+    if (has_stack) {
+      /* The mode is already the one the stack wants: only a leftover object list inside it has to
+       * give way to the stack itself. */
+      if (space_outliner.stack_layers_view == SO_SL_VIEW_STACK) {
+        return false;
+      }
+      space_outliner.stack_layers_view = SO_SL_VIEW_STACK;
+      return true;
+    }
+    /* No stack to show: the ordinary View Layer is what the active object has. */
+    space_outliner.outlinevis = SO_VIEW_LAYER;
+    /* The focus names the stack that is no longer shown, and this space now follows the active
+     * object like the View Layer always has: dropping it is what makes coming back open the stack
+     * of whatever is active then. */
+    space_outliner.runtime->stack_focus = {};
+    outliner_stack_rows_invalidate(space_outliner);
+    follow_state = FollowState::LeftByFollow;
+    return true;
+  }
+  if (!has_stack) {
+    return false;
+  }
+  space_outliner.outlinevis = SO_STACK_LAYERS;
+  space_outliner.stack_layers_view = SO_SL_VIEW_STACK;
+  follow_state = FollowState::Armed;
+  return true;
+}
+
+bool outliner_stack_focus_object_carry(bContext &C, SpaceOutliner &space_outliner)
+{
+  if (space_outliner.runtime == nullptr) {
+    return true;
+  }
+  /* An unpinned stack follows the active object already: there is nothing to carry. */
+  if ((space_outliner.stack_layers_flag & SO_SL_PINNED) == 0) {
+    return true;
+  }
+  const StackReadContext ctx = outliner_stack_read_context(C);
+  ViewLayer *view_layer = ctx.view_layer;
+  Object *object = outliner_stack_focus_object_resolve(ctx, space_outliner);
+  if (object == nullptr || ctx.bmain == nullptr || view_layer == nullptr || ctx.scene == nullptr) {
+    return true;
+  }
+  BKE_view_layer_synced_ensure(*ctx.bmain, ctx.scene, view_layer);
+  if (BKE_view_layer_active_object_get(view_layer) == object) {
+    return true;
+  }
+  Base *base = BKE_view_layer_base_find(view_layer, object);
+  if (base == nullptr) {
+    /* An object that is not in this view layer cannot be made active. */
+    return true;
+  }
+  /* The selection is left alone: carrying the context must not change what the user selected. The
+   * object-mode helper leaves Edit Mode of another object, defers to a live Paint Shape session and
+   * sends the active-object notifier. The focus survives it: a carried stack is a pinned one, and
+   * the listener only drops a focus whose pin is off. */
+  object::base_activate_with_mode_exit_if_needed(&C, base);
+  /* A deferred change leaves the old object active; the caller then must not act on the row. */
+  BKE_view_layer_synced_ensure(*ctx.bmain, ctx.scene, view_layer);
+  return BKE_view_layer_active_object_get(view_layer) == object;
+}
+
+void outliner_stack_follow_release_mode(SpaceOutliner &space_outliner)
+{
+  if (space_outliner.runtime == nullptr) {
+    return;
+  }
+  /* A display the user picks is theirs: the follow owns neither this mode nor an earlier departure,
+   * so picking Stack Layers again is what arms it. */
+  space_outliner.runtime->stack_follow_state = SpaceOutliner_Runtime::StackFollowState::Armed;
+}
+
+bool outliner_stack_view_follow_resume(bContext &C, SpaceOutliner &space_outliner)
+{
+  if (space_outliner.runtime == nullptr) {
+    return false;
+  }
+  /* Asking for the follow again answers the display the user left by hand. */
+  space_outliner.runtime->stack_follow_state = SpaceOutliner_Runtime::StackFollowState::Armed;
+  return outliner_stack_view_follow_active(space_outliner, outliner_stack_read_context(C));
+}
+
 const char *outliner_stack_focus_name_get(const SpaceOutliner &space_outliner)
 {
   return (space_outliner.runtime != nullptr) ? space_outliner.runtime->stack_focus_name.c_str() :
                                                "";
+}
+
+void outliner_stack_focus_normalize(const StackReadContext &ctx, SpaceOutliner &space_outliner)
+{
+  if (space_outliner.runtime == nullptr) {
+    return;
+  }
+  SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
+  /* A focus that names a gone object drops itself first, so what follows works on a live one. */
+  Object *object = outliner_stack_focus_object_resolve(ctx, space_outliner);
+  if (object == nullptr) {
+    return;
+  }
+  /* An empty focus means "the active object", so a stack pinned while the focus was empty -- one
+   * just reset by an object change, or lost with the file, since the focus is runtime-only -- would
+   * keep following the active object while its pin claimed otherwise. Naming the object is what
+   * makes the pin mean what its icon says. */
+  if ((space_outliner.stack_layers_flag & SO_SL_PINNED) != 0 && runtime.stack_focus.object_uid == 0)
+  {
+    runtime.stack_focus.object_uid = object->id.session_uid;
+  }
+  /* A focus without a sub-selection is read by the tree as the object's own current one, but the
+   * header's enum has no "-1" item to say that with and would draw an empty label. Writing the
+   * resolved slot down keeps the two on one value. */
+  if (runtime.stack_focus.sub_index < 0) {
+    const StackSource &source = *stack_source_for_space(space_outliner);
+    Vector<StackSubSelection> selections;
+    source.sub_selections_get(ctx, runtime.stack_focus, selections);
+    if (!selections.is_empty()) {
+      runtime.stack_focus.sub_index = source.default_sub_index(ctx, runtime.stack_focus);
+    }
+  }
+}
+
+void outliner_stack_focus_normalize(bContext &C, SpaceOutliner &space_outliner)
+{
+  outliner_stack_focus_normalize(outliner_stack_read_context(C), space_outliner);
 }
 
 ID *outliner_stack_owner_get(const StackReadContext &ctx, SpaceOutliner &space_outliner)
@@ -224,6 +385,8 @@ bool outliner_stack_focus_set(bContext *C,
   SpaceOutliner_Runtime &runtime = *space_outliner.runtime;
   runtime.stack_focus.object_uid = object.id.session_uid;
   runtime.stack_focus.sub_index = resolved_sub_index;
+  /* Entering a stack by hand is what re-arms the follow a Back turned off. */
+  runtime.stack_follow_state = SpaceOutliner_Runtime::StackFollowState::Armed;
   outliner_stack_rows_invalidate(space_outliner);
   space_outliner.outlinevis = SO_STACK_LAYERS;
   space_outliner.stack_layers_view = SO_SL_VIEW_STACK;
@@ -301,6 +464,8 @@ static const EnumPropertyItem *stack_sub_index_itemf_impl(bContext *C,
   int items_num = 0;
   if (C != nullptr && space_outliner.runtime != nullptr) {
     const StackReadContext ctx = outliner_stack_read_context(*C);
+    /* Read only: the focus is normalized where the state changes (the tree build, the active
+     * object changing, the pin being turned on), never while a menu or a header asks for items. */
     Vector<StackSubSelection> selections;
     stack_source_for_space(space_outliner)
         ->sub_selections_get(ctx, space_outliner.runtime->stack_focus, selections);

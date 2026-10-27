@@ -5,7 +5,8 @@
 /** \file
  * \ingroup editors
  *
- * Access the Stack Layers display mode from outside its module, for RNA.
+ * Access the Stack Layers display mode from outside its module: for RNA, and for the editors that
+ * have to follow the stack the user is working on.
  *
  * Kept apart from #ED_outliner.hh so the module's main public header stays about the editor API:
  * this is the narrow door the Outliner's own RNA properties walk through, nothing more.
@@ -60,6 +61,22 @@ bool outliner_stack_focus_sub_index_apply(bContext &C, SpaceOutliner &space_outl
 const EnumPropertyItem *outliner_stack_focus_sub_index_itemf(bContext *C,
                                                              SpaceOutliner &space_outliner,
                                                              bool *r_free);
+
+/**
+ * Follow the active object with the display again, and put it on the object's stack now.
+ *
+ * Answers a display the user left by hand and the space's own switch, so the option that turns the
+ * follow on reads as what the Outliner does rather than as a promise for the next object change.
+ * Returns true when the display mode changed.
+ */
+bool outliner_stack_view_follow_resume(bContext &C, SpaceOutliner &space_outliner);
+/**
+ * The display mode was chosen by hand, so the follow no longer owns it: a View Layer it opened is
+ * the user's from now on, and it will not bring the Stack Layers mode back on the next change.
+ */
+void outliner_stack_follow_release_mode(SpaceOutliner &space_outliner);
+/** As the display's own normalization of the focus, for the RNA update of Pin Stack. */
+void outliner_stack_focus_normalize(bContext &C, SpaceOutliner &space_outliner);
 
 /**
  * Tell the Stack Layers displays that \a owner gained the row identified by \a row_id outside their

@@ -472,19 +472,28 @@ static bool buttons_context_path_brush_material(const bContext *C, ButsContextPa
 
 static bool buttons_context_path_layer_material(const bContext *C, ButsContextPath *path)
 {
-  /* Pinning is ignored like for #BCONTEXT_BRUSH_MATERIAL: the tab follows the active paint
-   * layer. */
+  /* The tab follows the active object's paint-layer material, never the pinned root ID: the
+   * active material slot owns the stack. An Outliner pinned to another object's stack shows its
+   * own display and does not hand this tab a context of its own. */
   if (C == nullptr) {
     return false;
   }
-  ViewLayer *view_layer = CTX_data_view_layer(C);
-  if (view_layer == nullptr) {
+  /* Taken from the window like #buttons_context_path does, not from #CTX_data_view_layer: that
+   * reads this editor's own context, which a pinned ID answers from the path being computed here
+   * -- a pinned object has no view layer in it, and the tab would vanish while Pin ID is on. */
+  wmWindow *window = CTX_wm_window(C);
+  Scene *scene = (window != nullptr) ? WM_window_get_active_scene(window) : nullptr;
+  ViewLayer *view_layer = (window != nullptr) ? WM_window_get_active_view_layer(window) : nullptr;
+  if (scene == nullptr || view_layer == nullptr) {
     return false;
   }
+  BKE_view_layer_synced_ensure(*CTX_data_main(C), scene, view_layer);
 
   /* A layered material paints through the description: the active object's active material slot
    * owns the stack. The object comes first so the panels reach the owner through
-   * `context.object.active_material`, and `context.material` stays the one Material of the path. */
+   * `context.object.active_material`, and `context.material` stays the one Material of the path.
+   * Without a layered material in the active slot the tab has no context, however many pinned
+   * stacks other editors show. */
   Object *ob = BKE_view_layer_active_object_get(view_layer);
   Material *material = BKE_paint_layers_active_material_get(ob);
   if (material == nullptr) {
@@ -740,8 +749,10 @@ static bool buttons_context_path(
   path->flag = flag;
 
   /* If some ID datablock is pinned, set the root pointer.
-   * NOTE: BCONTEXT_BRUSH_MATERIAL and BCONTEXT_LAYER_MATERIAL always track the active source
-   * material (D9), so ignore pinned root ID which would put pinned material in path->ptr[0]. */
+   * NOTE: BCONTEXT_BRUSH_MATERIAL and BCONTEXT_LAYER_MATERIAL bring their own pointers: the
+   * brush source material belongs to the tool, and the layer material is the active object's
+   * active paint-layer material -- a pinned root ID would only put an unrelated material in
+   * path->ptr[0]. */
   if (sbuts->pinid && !ELEM(mainb, BCONTEXT_BRUSH_MATERIAL, BCONTEXT_LAYER_MATERIAL)) {
     ID *id = sbuts->pinid;
 

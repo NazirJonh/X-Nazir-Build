@@ -108,7 +108,7 @@ def _layer_channel_subpanel_hidden(context, layer, record):
     return _map_is_internal_hidden(context, record)
 
 
-def _draw_layer_channel_source_preview(layout, record, locked=False):
+def _draw_layer_channel_source_preview(layout, _context, record, locked=False):
     """Compact preview of a layer channel's own image, in the panel header."""
     if record.image is not None:
         row = layout.row(align=True)
@@ -118,7 +118,7 @@ def _draw_layer_channel_source_preview(layout, record, locked=False):
         )
 
 
-def _draw_layer_channel_source(panel, record, locked=False):
+def _draw_layer_channel_source(panel, _context, record, locked=False):
     """The layer channel's source row: a "Drop image" picker writing the record's own image.
 
     `locked` draws it read-only, so the map owned by a Paint row can be seen but not swapped.
@@ -184,9 +184,9 @@ def _layer_channel_view(layer, record, channel_id, name):
         socket_context_set=(("material_paint_layer_channel", record),
                             ("material_paint_layer_owner", layer)),
         source_draw=lambda panel, ctx, enabled: _draw_layer_channel_source(
-            panel, record, locked=_layer_images_locked(layer)),
-        source_preview=lambda layout: _draw_layer_channel_source_preview(
-            layout, record, locked=_layer_images_locked(layer)),
+            panel, ctx, record, locked=_layer_images_locked(layer)),
+        source_preview=lambda layout, ctx: _draw_layer_channel_source_preview(
+            layout, ctx, record, locked=_layer_images_locked(layer)),
         source_has=lambda: record.image is not None,
         source_active=lambda enabled: record.image is not None,
         invert_channel=channel_id if scalar is not None else None,

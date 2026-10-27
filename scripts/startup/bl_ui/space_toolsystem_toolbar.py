@@ -2758,7 +2758,10 @@ class _defs_texture_paint:
         return dict(
             idname="builtin.image_paint_layer_gradient",
             label="Layer Gradient",
-            icon="ops.paint.weight_gradient",
+            # A tool button takes a built-in icon, not the Material Symbols glyph the rows and the
+            # Add menu draw. This Color Theme icon -- the ramp the tool edits -- is the built-in
+            # stand-in, the same `PAINT_GRADIENT_ICON` the C++ rows fall back to.
+            icon='COLORSET_13_VEC',
             widget=None,
             keymap="Image Editor Tool: Paint, Layer Gradient",
             draw_settings=draw_settings,

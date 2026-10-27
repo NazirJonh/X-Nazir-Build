@@ -19,6 +19,25 @@ def has_selected_ids_in_context(context):
     return False
 
 
+# Material Symbols codepoints, kept in sync with `paint_glyph` in
+# `outliner_stack_source_paint_layers.cc` (the Add menu and the rows use the same glyphs).
+# `glyph_constants_stay_in_step_with_space_outliner` in that file's test pins the C++ values, so a
+# change there fails the test and sends the reader here.
+_GLYPH_BRUSH = 0xE3AE
+_GLYPH_FILL = 0xE997
+_GLYPH_GRADIENT = 0xE3E9
+
+
+def _stack_add_button(row, glyph, fallback_icon, kind, label):
+    # A glyph icon where the font provides one, the built-in icon otherwise (background mode).
+    if glyph:
+        props = row.operator("outliner.stack_layer_add", text="", icon_value=glyph)
+    else:
+        props = row.operator("outliner.stack_layer_add", text="", icon=fallback_icon)
+    props.type = kind
+    props.label = label
+
+
 class OUTLINER_HT_tool_header(Header):
     bl_space_type = 'OUTLINER'
     bl_region_type = 'TOOL_HEADER'
@@ -57,21 +76,23 @@ class OUTLINER_HT_tool_header(Header):
             # and a Correction, so a quick-access button each stands in for the menu (the source's
             # kind list is not exposed through RNA yet, so the buttons are written out here).
             row = layout.row(align=True)
-            props = row.operator("outliner.stack_layer_add", text="", icon='SCULPTMODE_HLT')
-            props.type = 'PAINT'
-            props.label = "Add Paint Layer"
-            props = row.operator("outliner.stack_layer_add", text="", icon='GP_DRAW_FILL')
-            props.type = 'FILL'
-            props.label = "Add Fill Layer"
+            # The brush glyph, shared with the Paint rows and the Add menu; the built-in fallback is
+            # the same icon those name, so a background-mode button reads as they do.
+            _stack_add_button(row, bpy.app.icons.glyph(_GLYPH_BRUSH), 'BRUSH_DATA',
+                              'PAINT', "Add Paint Layer")
+            # The Fill glyph (Material Symbols "colors"), the one the Fill rows and the Add menu
+            # use; the built-in icon stands in where no glyph icon exists (background mode).
+            _stack_add_button(row, bpy.app.icons.glyph(_GLYPH_FILL), 'GP_DRAW_FILL',
+                              'FILL', "Add Fill Layer")
             # A layer that shows what another material shows; the Add asks which one.
             props = row.operator("outliner.stack_layer_add", text="", icon='MATERIAL')
             props.type = 'MATERIAL'
             props.label = "Add Material Layer"
             # A procedural ramp built from shader nodes: a layer of its own, not an effect of the
-            # selected row, so it sits with the other layer kinds.
-            props = row.operator("outliner.stack_layer_add", text="", icon='COLOR')
-            props.type = 'GRADIENT'
-            props.label = "Add Gradient Layer"
+            # selected row, so it sits with the other layer kinds. Its glyph is also what the row's
+            # preview slot shows.
+            _stack_add_button(row, bpy.app.icons.glyph(_GLYPH_GRADIENT), 'COLORSET_13_VEC',
+                              'GRADIENT', "Add Gradient Layer")
             # Corrections hang on the selected layer or on its mask; one menu holds them all.
             row = layout.row(align=True)
             # An enum menu button: it opens a real menu of the correction kinds and shows the
@@ -113,46 +134,12 @@ class OUTLINER_MT_stack_layer_mask_add(Menu):
         # `add` is set on every button rather than left to the operator's default: the Remove Mask
         # entry stores `add = False` as the operator's last-used value, and an unset property would
         # come back as that, so "Add Mask" would run a remove the next time it was picked.
-        for text, color in (("Add White Mask", 'WHITE'), ("Add Black Mask", 'BLACK')):
-            props = layout.operator("outliner.stack_layer_mask", text=text, icon='MOD_MASK')
+        for text, color, icon in (
+                ("Add Black Mask", 'BLACK', 'MOD_MASK'),
+                ("Add White Mask", 'WHITE', 'CLIPUV_HLT')):
+            props = layout.operator("outliner.stack_layer_mask", text=text, icon=icon)
             props.add = True
             props.initial_color = color
-
-
-def _draw_stack_layer_effect_entries(layout):
-    # A map painted over the selected layer's colour, or one flat colour laid over it; they hang on
-    # the layer, not on the stack.
-    props = layout.operator("outliner.stack_layer_add", text="Add Correction Paint",
-                            icon='BRUSH_DATA')
-    props.type = 'CORRECTION'
-    props.label = "Add Correction Paint"
-    props = layout.operator("outliner.stack_layer_add", text="Add Fill Correction",
-                            icon='GP_DRAW_FILL')
-    props.type = 'CORRECTION_FILL'
-    props.label = "Add Fill Correction"
-    # The same generator in its two correction roles: a procedural ramp over the layer's colour
-    # or its mask, edited through the gradient panel and the Color Gradient tool.
-    layout.operator(
-        "outliner.stack_layer_add", text="Add Gradient Correction", icon='COLOR',
-    ).type = 'CORRECTION_GRADIENT'
-    # A Curve Patch hung on the layer as an effect: 3D control curves stamped through a brush
-    # snapshot of its own, laid over the layer's colour below the layer's own blend.
-    props = layout.operator("outliner.stack_layer_add", text="Add Curve Patch",
-                            icon='CURVE_BEZCURVE')
-    props.type = 'CURVE_PATCH_CORRECTION'
-    props.label = "Add Curve Patch"
-    # Corrections laid over the layer's mask (made white first when there is none): a grey map
-    # painted in Mask mode, or one flat grey.
-    layout.separator()
-    layout.operator(
-        "outliner.stack_layer_add", text="Add Paint Mask Correction", icon='MOD_MASK',
-    ).type = 'MASK_CORRECTION'
-    layout.operator(
-        "outliner.stack_layer_add", text="Add Fill Mask Correction", icon='GP_DRAW_FILL',
-    ).type = 'MASK_CORRECTION_FILL'
-    layout.operator(
-        "outliner.stack_layer_add", text="Add Mask Gradient Correction", icon='COLOR',
-    ).type = 'MASK_CORRECTION_GRADIENT'
 
 
 class OUTLINER_MT_stack_layer_advanced(Menu):
@@ -164,15 +151,6 @@ class OUTLINER_MT_stack_layer_advanced(Menu):
             text="Use as Brush Source",
             icon='BRUSH_DATA',
         )
-
-
-class OUTLINER_MT_stack_layer_effect_add(Menu):
-    bl_label = "Add Correction"
-
-    def draw(self, _context):
-        _draw_stack_layer_effect_entries(self.layout)
-
-
 
 
 class OUTLINER_HT_header(Header):
@@ -319,7 +297,11 @@ class OUTLINER_MT_context_menu(Menu):
             if (space.stack_layers_view == 'STACK' and
                     space.stack_source == 'PAINT_MATERIAL'):
                 layout.menu("OUTLINER_MT_stack_layer_mask_add", icon='MOD_MASK')
-                layout.menu("OUTLINER_MT_stack_layer_effect_add", icon='SHADERFX')
+                # The same contextual enum menu the header draws: one line per thing, resolved
+                # to the active target. Keeping it here as well would be a second vocabulary.
+                layout.operator_menu_enum(
+                    "outliner.stack_layer_effect_add", "type",
+                    text="Add Effect", icon='SHADERFX')
                 if bpy.ops.outliner.stack_layer_use_as_brush_source.poll():
                     layout.menu("OUTLINER_MT_stack_layer_advanced")
                 # Switching the mask off and taking it away act on the mask being worked on: the
@@ -849,7 +831,6 @@ classes = (
     OUTLINER_HT_header,
     OUTLINER_HT_tool_header,
     OUTLINER_MT_stack_layer_mask_add,
-    OUTLINER_MT_stack_layer_effect_add,
     OUTLINER_MT_stack_layer_advanced,
     OUTLINER_MT_editor_menus,
     OUTLINER_MT_edit_datablocks,

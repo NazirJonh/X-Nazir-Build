@@ -2076,7 +2076,7 @@ def brush_color_eyedropper_draw(layout, context):
     eye.prop_data_path = "{:s}.{:s}.color".format(settings.path_from_id(), sub)
 
 
-def _material_paint_channel_source_draw(layout, channel):
+def _material_paint_channel_source_draw(layout, _context, channel):
     """Draw the assigned source as a small preview plus its name.
 
     A channel with a source no longer paints its fixed value, so the header shows what replaced
@@ -2172,7 +2172,7 @@ class MaterialPaintChannelView:
         self.socket_context_set = socket_context_set
         #: callable(panel, context, enabled) drawing the source row, or None.
         self.source_draw = source_draw
-        #: callable(layout) drawing the compact source preview in the header, or None.
+        #: callable(layout, context) drawing the compact source preview in the header, or None.
         self.source_preview = source_preview
         #: callable() -> bool, whether a source is assigned.
         self.source_has = source_has
@@ -2216,7 +2216,7 @@ def _draw_channel_subpanel_header(
                                                  menu=view.socket_menu,
                                                  context_set=view.socket_context_set)
         if view.source_preview is not None and view.source_has is not None and view.source_has():
-            view.source_preview(controls)
+            view.source_preview(controls, context)
             return
         value_controls = controls.row(align=True)
         value_controls.active = value_active
@@ -2233,7 +2233,7 @@ def _draw_channel_subpanel_header(
                                                  menu=view.socket_menu,
                                                  context_set=view.socket_context_set)
         if view.source_preview is not None and view.source_has is not None and view.source_has():
-            view.source_preview(value_row)
+            view.source_preview(value_row, context)
             return
         if view.scalar is not None:
             controls = value_row.row(align=True)
@@ -2346,7 +2346,8 @@ def _brush_channel_view(channel, channel_id, material_paint):
         socket_menu="PAINT_MT_material_paint_channel_socket",
         source_draw=lambda panel, ctx, enabled: _draw_material_paint_source_texture(
             panel, ctx, channel, enabled=enabled),
-        source_preview=lambda layout: _material_paint_channel_source_draw(layout, channel),
+        source_preview=lambda layout, context: _material_paint_channel_source_draw(
+            layout, context, channel),
         source_has=lambda: _material_paint_channel_has_source(channel),
         source_active=lambda enabled: _material_paint_channel_source_active(
             channel, source_enabled=enabled),

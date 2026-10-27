@@ -131,10 +131,62 @@ static PyObject *bpy_app_icons_new_triangles_from_file(PyObject * /*self*/,
 
 PyDoc_STRVAR(
     /* Wrap. */
+    bpy_app_icons_glyph_doc,
+    ".. function:: glyph(glyph)\n"
+    "\n"
+    "   Get the icon of a Material Symbols glyph. The icon is shared and cached, so calling this\n"
+    "   again for the same glyph returns the same value, and it must not be released. It is drawn\n"
+    "   with the theme's icon color like a built-in icon.\n"
+    "\n"
+    "   :param glyph: The Unicode codepoint, or a string holding the single glyph character.\n"
+    "   :type glyph: int | str\n"
+    "   :return: Icon value (pass to interface ``icon_value`` argument), or 0 when the glyph is\n"
+    "      unavailable (background mode); callers then fall back to a built-in ``icon``.\n"
+    "   :rtype: int\n");
+static PyObject *bpy_app_icons_glyph(PyObject * /*self*/, PyObject *args, PyObject *kw)
+{
+  PyObject *py_glyph;
+  static const char *_keywords[] = {"glyph", nullptr};
+  static _PyArg_Parser _parser = {
+      "O" /* `glyph` */
+      ":glyph",
+      _keywords,
+      nullptr,
+  };
+  if (!_PyArg_ParseTupleAndKeywordsFast(args, kw, &_parser, &py_glyph)) {
+    return nullptr;
+  }
+
+  long codepoint = 0;
+  if (PyUnicode_Check(py_glyph)) {
+    if (PyUnicode_GET_LENGTH(py_glyph) != 1) {
+      PyErr_SetString(PyExc_ValueError, "glyph string must hold exactly one character");
+      return nullptr;
+    }
+    codepoint = long(PyUnicode_READ_CHAR(py_glyph, 0));
+  }
+  else {
+    codepoint = PyLong_AsLong(py_glyph);
+    if (codepoint == -1 && PyErr_Occurred()) {
+      return nullptr;
+    }
+  }
+  if (codepoint <= 0 || codepoint > 0x10FFFF) {
+    PyErr_SetString(PyExc_ValueError, "glyph codepoint out of range");
+    return nullptr;
+  }
+  return PyLong_FromLong(BKE_icon_glyph_ensure(uint32_t(codepoint)));
+}
+
+PyDoc_STRVAR(
+    /* Wrap. */
     bpy_app_icons_release_doc,
     ".. function:: release(icon_id)\n"
     "\n"
     "   Release the icon.\n"
+    "\n"
+    "   Managed icons -- the ones :func:`glyph` returns, and the previews Blender owns -- cannot\n"
+    "   be released; passing one raises ``ValueError``.\n"
     "\n"
     "   :param icon_id: The icon id to release.\n"
     "   :type icon_id: int\n");
@@ -178,6 +230,10 @@ static PyMethodDef M_AppIcons_methods[] = {
      reinterpret_cast<PyCFunction>(bpy_app_icons_new_triangles_from_file),
      METH_VARARGS | METH_KEYWORDS,
      bpy_app_icons_new_triangles_from_file_doc},
+    {"glyph",
+     reinterpret_cast<PyCFunction>(bpy_app_icons_glyph),
+     METH_VARARGS | METH_KEYWORDS,
+     bpy_app_icons_glyph_doc},
     {"release",
      reinterpret_cast<PyCFunction>(bpy_app_icons_release),
      METH_VARARGS | METH_KEYWORDS,

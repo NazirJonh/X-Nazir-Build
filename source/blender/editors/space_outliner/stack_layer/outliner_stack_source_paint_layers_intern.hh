@@ -14,6 +14,7 @@
  * the test drive them without an Outliner (or a #bContext at all).
  */
 
+#include <cstdint>
 #include <memory>
 
 #include "BLI_vector.hh"
@@ -58,6 +59,20 @@ bool paint_layers_edit_target_clear(Material &material);
  * plus the FileHandler fallback for files no built-in action takes.
  */
 std::unique_ptr<StackDropHandler> paint_layers_drop_handler_create();
+
+/**
+ * The Material Symbols codepoints `space_outliner.py` repeats by hand for its header buttons.
+ * The test pins these values so the Python constants cannot drift silently from the C++ ones.
+ *
+ * These three have external linkage -- `extern` here, defined in the .cc -- because the test needs
+ * to read them; the rest of `paint_glyph` stays `constexpr` in the .cc, since only the code there
+ * draws those glyphs and nothing outside has to name them.
+ */
+namespace paint_glyph {
+extern const uint32_t BRUSH;
+extern const uint32_t FILL;
+extern const uint32_t GRADIENT;
+}  // namespace paint_glyph
 
 }  // namespace ed::outliner
 }  // namespace blender

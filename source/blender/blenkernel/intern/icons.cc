@@ -57,6 +57,14 @@ static GlobalIconsMap &get_global_icons_map()
   return gIcons;
 }
 
+/** Material Symbols codepoint -> icon id, for #BKE_icon_glyph_ensure. Protected by gIconMutex. */
+using GlyphIconsMap = Map<uint32_t, int>;
+static GlyphIconsMap &get_glyph_icons_map()
+{
+  static GlyphIconsMap gGlyphIcons;
+  return gGlyphIcons;
+}
+
 /* Protected by gIconMutex. */
 static int gNextIconId = 1;
 
@@ -64,6 +72,13 @@ static int gNextIconId = 1;
 static int gFirstIconId = 1;
 
 static Mutex gIconMutex;
+
+/** Forget the codepoint -> id cache; the icons themselves live in the global icons map. */
+static void glyph_icons_clear()
+{
+  std::scoped_lock lock(gIconMutex);
+  get_glyph_icons_map().clear();
+}
 
 /* Queue of icons for deferred deletion. */
 struct DeferredIconDeleteNode {
@@ -124,6 +139,8 @@ static void icon_free_data(int icon_id, Icon *icon)
     case ICON_DATA_GEOM:
       (static_cast<Icon_Geom *>(icon->obj))->icon_id = 0;
       break;
+    case ICON_DATA_GLYPH:
+      break;
     case ICON_DATA_STUDIOLIGHT: {
       StudioLight *sl = static_cast<StudioLight *>(icon->obj);
       if (sl != nullptr) {
@@ -179,6 +196,8 @@ void BKE_icons_init(int first_dyn_id)
   gNextIconId = first_dyn_id;
   gFirstIconId = first_dyn_id;
 
+  glyph_icons_clear();
+
   BLI_linklist_lockfree_init(&g_icon_delete_queue);
 }
 
@@ -191,6 +210,9 @@ void BKE_icons_free()
     icon_free(icon);
   }
   gIcons.clear();
+
+  /* The glyph cache names icons that no longer exist after a free. */
+  glyph_icons_clear();
 
   BLI_linklist_lockfree_free(&g_icon_delete_queue, MEM_delete_void);
 }
@@ -250,6 +272,7 @@ static Icon *icon_create(int icon_id, int obj_type, void *obj)
   new_icon->obj_type = obj_type;
   new_icon->obj = obj;
   new_icon->id_type = 0;
+  new_icon->glyph = 0;
   new_icon->flag = 0;
 
   /* next two lines make sure image gets created */
@@ -390,6 +413,43 @@ int BKE_icon_imbuf_create(ImBuf *ibuf)
 
   Icon *icon = icon_create(icon_id, ICON_DATA_IMBUF, ibuf);
   icon->flag = ICON_FLAG_MANAGED;
+
+  return icon_id;
+}
+
+int BKE_icon_glyph_ensure(const uint32_t codepoint)
+{
+  BLI_assert(BLI_thread_is_main());
+
+  if (codepoint == 0 || G.background) {
+    return 0;
+  }
+
+  int cached_id = 0;
+  {
+    std::scoped_lock lock(gIconMutex);
+    cached_id = get_glyph_icons_map().lookup_default(codepoint, 0);
+  }
+  /* The id can outlive its icon when someone deletes the glyph icon explicitly. */
+  if (cached_id != 0 && BKE_icon_exists(cached_id)) {
+    return cached_id;
+  }
+
+  const int icon_id = get_next_free_id();
+  if (icon_id == 0) {
+    CLOG_ERROR(&LOG, "not enough IDs");
+    return 0;
+  }
+
+  Icon *icon = icon_create(icon_id, ICON_DATA_GLYPH, nullptr);
+  icon->glyph = codepoint;
+  /* Shared and cached: Python must not be able to delete the icon out from under its users. */
+  icon->flag = ICON_FLAG_MANAGED;
+
+  {
+    std::scoped_lock lock(gIconMutex);
+    get_glyph_icons_map().add_overwrite(codepoint, icon_id);
+  }
 
   return icon_id;
 }

@@ -38,6 +38,7 @@
 #include "BKE_deform.hh"
 #include "BKE_gpencil_legacy.h"
 #include "BKE_grease_pencil.hh"
+#include "BKE_icons.hh"
 #include "BKE_idtype.hh"
 #include "BKE_key.hh"
 #include "BKE_layer.hh"
@@ -3180,6 +3181,15 @@ static void outliner_icon_background_colors(float icon_color[4], float icon_bord
   icon_border[3] = 0.2f;
 }
 
+/**
+ * The inset that keeps a row's icon and its highlight off the row's own edges, in UI units.
+ * Shared by the active indicator and the row layout, so the two cannot measure it differently.
+ */
+static float outliner_row_inset()
+{
+  return UI_UNIT_X / 20.0f;
+}
+
 /* Draw a rounded rectangle behind icons of active elements. */
 static void outliner_draw_active_indicator(const float minx,
                                            const float miny,
@@ -3188,7 +3198,7 @@ static void outliner_draw_active_indicator(const float minx,
                                            const float icon_color[4],
                                            const float icon_border[4])
 {
-  const float ufac = UI_UNIT_X / 20.0f;
+  const float ufac = outliner_row_inset();
   const float radius = UI_UNIT_Y / 4.0f;
   rctf rect{};
   BLI_rctf_init(&rect, minx, maxx, miny + ufac, maxy - ufac);
@@ -3517,6 +3527,55 @@ bool element_should_draw_faded(const TreeViewContext &tvc,
   return false;
 }
 
+/**
+ * Resolve a preview slot's icon: its Material Symbols glyph when it names one, else the built-in
+ * icon. The glyph is created lazily so row building, which can run without the icon system, only
+ * carries the codepoint.
+ */
+static int stack_slot_icon_get(const StackRowPreview &slot)
+{
+  if (slot.glyph != 0) {
+    if (const int icon_id = BKE_icon_glyph_ensure(slot.glyph)) {
+      return icon_id;
+    }
+  }
+  return slot.icon;
+}
+
+/** The badge is a corner mark, not a second icon: half a unit of the slot's edge. */
+constexpr float STACK_PREVIEW_BADGE_SIZE_FAC = 0.5f;
+/** 80% opacity: white enough to read, no longer flatly covering the picture under it. */
+constexpr uchar STACK_PREVIEW_BADGE_ALPHA = 204;
+
+/**
+ * Draw the row kind's badge in the bottom-right corner of a preview slot: half a unit across, in
+ * white and slightly transparent, over the swatch or rendered picture the slot shows.
+ *
+ * The badge stays inside #preview_rect, which is what the active indicator frames (itself one
+ * #outliner_row_inset outside the preview), so the corner mark cannot reach or overlap the
+ * highlight around the slot.
+ */
+static void stack_preview_badge_draw(const rctf &preview_rect, const int badge_icon)
+{
+  if (badge_icon == 0) {
+    return;
+  }
+  const float badge_size = UI_UNIT_X * STACK_PREVIEW_BADGE_SIZE_FAC;
+  const float badge_scale = badge_size / (ICON_DEFAULT_HEIGHT * UI_SCALE_FAC);
+  const uchar mono[4] = {255, 255, 255, STACK_PREVIEW_BADGE_ALPHA};
+  ui::icon_draw_ex(preview_rect.xmax - badge_size,
+                   preview_rect.ymin,
+                   badge_icon,
+                   UI_INV_SCALE_FAC,
+                   1.0f,
+                   0.0f,
+                   mono,
+                   false,
+                   nullptr,
+                   false,
+                   badge_scale);
+}
+
 static void outliner_draw_tree_element(ui::Block *block,
                                        const bContext *C,
                                        const uiFontStyle *fstyle,
@@ -3532,7 +3591,7 @@ static void outliner_draw_tree_element(ui::Block *block,
                                        const bool stack_tree_has_active)
 {
   TreeStoreElem *tselem = TREESTORE(te);
-  float ufac = UI_UNIT_X / 20.0f;
+  const float ufac = outliner_row_inset();
   int offsx = 0;
   eOLDrawState active = OL_DRAWSEL_NONE;
   uchar text_color[4];
@@ -3658,12 +3717,39 @@ static void outliner_draw_tree_element(ui::Block *block,
                                      nullptr;
     const int inline_toggle_width = stack_row_has_inline_toggle(toggle_row) ? int(UI_UNIT_X) : 0;
 
+    const bool stack_big_rows = (space_outliner->stack_layers_flag & SO_SL_SMALL_ROWS) == 0;
+    /* A row the source marked compact keeps the unit icon and the usual height even with Large
+     * rows on, and shows no preview slots. */
+    const StackRow *stack_row = (tselem->type == TSE_STACK_LAYER) ?
+                                    outliner_stack_row_find(*space_outliner, tselem->nr) :
+                                    nullptr;
+    const bool stack_row_compact = stack_row != nullptr && stack_row->compact;
+
     /* Active circle. */
     if (active != OL_DRAWSEL_NONE) {
-      outliner_draw_active_indicator(float(startx) + offsx + UI_UNIT_X + inline_toggle_width,
-                                     float(*starty),
-                                     float(startx) + offsx + 2.0f * UI_UNIT_X + inline_toggle_width,
-                                     float(*starty) + UI_UNIT_Y,
+      float indicator_minx = float(startx) + offsx + UI_UNIT_X + inline_toggle_width;
+      float indicator_maxx = indicator_minx + UI_UNIT_X;
+      float indicator_miny = float(*starty);
+      float indicator_maxy = float(*starty) + UI_UNIT_Y;
+      /* A preview stands in for the row's icon and is larger than the unit square the indicator
+       * normally frames. Cover the preview instead, so the highlight matches what it marks. */
+      if (stack_row != nullptr && stack_big_rows && !stack_row_compact &&
+          !stack_row->preview_slots.is_empty() &&
+          !stack_row->preview_slots[0].keeps_row_icon)
+      {
+        const rctf preview_rect = outliner_stack_row_preview_rect(
+            *stack_row, float(startx), float(*starty), 0);
+        /* #outliner_draw_active_indicator insets vertically by one ufac, so add it back. */
+        const float ufac = outliner_row_inset();
+        indicator_minx = preview_rect.xmin;
+        indicator_maxx = preview_rect.xmax;
+        indicator_miny = preview_rect.ymin - ufac;
+        indicator_maxy = preview_rect.ymax + ufac;
+      }
+      outliner_draw_active_indicator(indicator_minx,
+                                     indicator_miny,
+                                     indicator_maxx,
+                                     indicator_maxy,
                                      icon_bgcolor,
                                      icon_border);
 
@@ -3691,13 +3777,6 @@ static void outliner_draw_tree_element(ui::Block *block,
 
     /* Data-type icon. A stack layer row with a preview available shows that instead, filling
      * more of its two-unit-tall row than a unit icon would. */
-    const bool stack_big_rows = (space_outliner->stack_layers_flag & SO_SL_SMALL_ROWS) == 0;
-    /* A row the source marked compact keeps the unit icon and the usual height even with Large
-     * rows on, and shows no preview slots. */
-    const StackRow *stack_row = (tselem->type == TSE_STACK_LAYER) ?
-                                    outliner_stack_row_find(*space_outliner, tselem->nr) :
-                                    nullptr;
-    const bool stack_row_compact = stack_row != nullptr && stack_row->compact;
     /* The placeholder icon of the focused source, for slots with nothing to preview. */
     const int stack_empty_icon = (tselem->type == TSE_STACK_LAYER) ?
                                      stack_source_for_space(*space_outliner)->empty_preview_icon() :
@@ -3747,30 +3826,15 @@ static void outliner_draw_tree_element(ui::Block *block,
            * to its other looks below. */
           const bool slot_rendered = stack_preview_slot_rendered_draw(
               C, block, preview_rect, slot);
+          const int slot_icon = stack_slot_icon_get(slot);
           if (!slot_rendered && slot.is_color_swatch) {
             /* A row that is a colour shows the colour: no thumbnail to fetch, no icon that says
              * more than the swatch does. Drawn opaque whatever the row state or hover, so the
              * swatch reports the fill's actual colour rather than the row's shading. */
             stack_preview_color_draw(preview_rect, slot.color, 1.0f);
-            if (slot.icon != 0) {
-              /* The source also wants a glyph on top of the colour -- a Fill's bucket. Contrast it
-               * against the fill so it reads on any colour: a light fill takes a dark glyph. */
-              const float luma = 0.2126f * slot.color[0] + 0.7152f * slot.color[1] +
-                                 0.0722f * slot.color[2];
-              const uchar glyph_color = (luma > 0.5f) ? 0 : 255;
-              const uchar mono[4] = {glyph_color, glyph_color, glyph_color, 255};
-              ui::icon_draw_ex(preview_rect.xmin,
-                               preview_rect.ymin,
-                               slot.icon,
-                               UI_INV_SCALE_FAC,
-                               1.0f,
-                               0.0f,
-                               mono,
-                               false,
-                               nullptr,
-                               false,
-                               OUTLINER_STACK_PREVIEW_SCALE);
-            }
+            /* The source also wants the kind's badge on the colour -- a Fill's bucket -- in the
+             * slot's corner rather than covering the swatch. */
+            stack_preview_badge_draw(preview_rect, slot_icon);
           }
           else if (!slot_rendered && slot.is_blank) {
             /* The data-block exists, but its thumbnail has nothing to show yet: the source says
@@ -3778,7 +3842,7 @@ static void outliner_draw_tree_element(ui::Block *block,
             stack_preview_empty_draw(preview_rect, stack_empty_icon, alpha);
           }
           else if (!slot_rendered) {
-            const int icon_id = slot.icon;
+            const int icon_id = slot_icon;
             ui::icon_draw_ex(preview_rect.xmin,
                              preview_rect.ymin,
                              icon_id != 0 ? icon_id : stack_empty_icon,
@@ -3790,6 +3854,11 @@ static void outliner_draw_tree_element(ui::Block *block,
                              nullptr,
                              false,
                              OUTLINER_STACK_PREVIEW_SCALE);
+          }
+          /* A rendered picture says what the row lays down; the badge says which kind of row it
+           * is -- a Material's icon over its sphere, a Fill's bucket over its render. */
+          if (slot_rendered) {
+            stack_preview_badge_draw(preview_rect, slot_icon);
           }
           /* A slot that opens no section is never the one showing: an empty section id would
            * otherwise match the empty answer a row without sections gives, and frame every slot
@@ -4220,7 +4289,7 @@ static void outliner_draw_highlights(const ARegion *region,
   tree_iterator::all_open(*space_outliner, [&](const TreeElement *te) {
     const TreeStoreElem *tselem = TREESTORE(te);
 
-    const float ufac = UI_UNIT_X / 20.0f;
+    const float ufac = outliner_row_inset();
     const float radius = UI_UNIT_Y / 8.0f;
     const int padding_x = 3 * UI_SCALE_FAC;
     const int row_height = outliner_tree_element_height(*space_outliner, *te);

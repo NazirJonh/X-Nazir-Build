@@ -200,6 +200,78 @@ TEST_F(OutlinerStackPaintLayersSourceTest, add_kinds_offers_the_rows_and_both_co
   EXPECT_TRUE(kinds[28].is_effect);
 }
 
+TEST_F(OutlinerStackPaintLayersSourceTest, glyph_constants_stay_in_step_with_space_outliner)
+{
+  /* `space_outliner.py` writes these three codepoints out for its header buttons, because a button
+   * needs an icon ID before any row exists. It names this test beside them: a change here fails
+   * before the Python copy can drift unnoticed, and both are updated together. */
+  EXPECT_EQ(paint_glyph::BRUSH, 0xE3AEu);
+  EXPECT_EQ(paint_glyph::FILL, 0xE997u);
+  EXPECT_EQ(paint_glyph::GRADIENT, 0xE3E9u);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, effect_menu_resolves_one_line_to_the_active_target)
+{
+  const auto kinds_for = [&](const ePaintLayerTargetMode mode) {
+    scene->toolsettings->paint_mode.layer_target_mode = mode;
+    Vector<StackEffectMenuKind> kinds;
+    const StackEditor *editor = source().editor();
+    EXPECT_NE(editor, nullptr);
+    if (editor != nullptr) {
+      editor->effect_menu_kinds(*C, kinds);
+    }
+    return kinds;
+  };
+  const auto has_identifier = [](const Vector<StackEffectMenuKind> &kinds,
+                                 const char *identifier) {
+    for (const StackEffectMenuKind &entry : kinds) {
+      if (entry.info.identifier == identifier) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const auto kind_named = [](const Vector<StackEffectMenuKind> &kinds, const char *name) {
+    for (const StackEffectMenuKind &entry : kinds) {
+      if (entry.info.name == name) {
+        return entry.kind;
+      }
+    }
+    return -1;
+  };
+
+  const Vector<StackEffectMenuKind> content = kinds_for(PAINT_LAYER_TARGET_CONTENT);
+  const Vector<StackEffectMenuKind> mask = kinds_for(PAINT_LAYER_TARGET_MASK);
+
+  /* One line per thing: the mask twins are folded into the content entries in either mode. */
+  for (const char *twin : {"MASK_CORRECTION",
+                           "MASK_CORRECTION_FILL",
+                           "MASK_CORRECTION_MATERIAL",
+                           "ANCHOR_POINT_MASK_CORRECTION",
+                           "MASK_CORRECTION_GRADIENT"})
+  {
+    EXPECT_FALSE(has_identifier(content, twin));
+    EXPECT_FALSE(has_identifier(mask, twin));
+  }
+
+  /* The line keeps its short name and resolves to the role of the target: the content kind in one
+   * mode, its mask twin in the other. */
+  EXPECT_NE(kind_named(content, "Paint"), -1);
+  EXPECT_NE(kind_named(mask, "Paint"), kind_named(content, "Paint"));
+  EXPECT_NE(kind_named(mask, "Fill"), kind_named(content, "Fill"));
+
+  /* Kinds that exist only in a mask are offered only while it is the mask that shows. */
+  EXPECT_FALSE(has_identifier(content, "MASK_FILTER_COLOR_ID"));
+  EXPECT_FALSE(has_identifier(content, "MASK_FILTER_UV_ISLAND"));
+  EXPECT_TRUE(has_identifier(mask, "MASK_FILTER_COLOR_ID"));
+  EXPECT_TRUE(has_identifier(mask, "MASK_FILTER_UV_ISLAND"));
+
+  /* A mask filter with a content twin stays in both menus. */
+  EXPECT_TRUE(has_identifier(content, "FILTER_HSL"));
+
+  scene->toolsettings->paint_mode.layer_target_mode = PAINT_LAYER_TARGET_CONTENT;
+}
+
 TEST_F(OutlinerStackPaintLayersSourceTest, an_empty_fill_add_makes_a_fill_with_no_channels)
 {
   /* Kind 1 is FILL; Empty is what the Add passes for the second button. */
@@ -282,7 +354,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_corrections_are_rows_under_the_m
   EXPECT_EQ(painted.name, "Mask Paint 1");
   ASSERT_EQ(painted.preview_slots.size(), 1u);
   EXPECT_FALSE(painted.preview_slots[0].is_color_swatch);
-  EXPECT_EQ(painted.icon, int(ICON_MOD_MASK));
+  /* The row wears the icon its Add Effect entry does. */
+  EXPECT_EQ(painted.icon, int(ICON_GREASEPENCIL));
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, an_issue_is_a_warning_slot_on_the_row_it_is_about)
@@ -399,7 +472,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_fill_correction_row_is_its_colour_s
   EXPECT_FLOAT_EQ(slot.color[0], 0.9f);
   EXPECT_FLOAT_EQ(slot.color[1], 0.4f);
 
-  /* A Paint correction keeps the map slot. */
+  /* A Paint correction keeps the kind slot, as a Paint layer does: painting into it does not turn
+   * the slot into a thumbnail of its map. */
   params.kind = PaintLayerAddKind::Correction;
   params.fill_color = nullptr;
   ASSERT_NE(BKE_paint_layers_add_with_policy(*material, params), nullptr);
@@ -407,7 +481,50 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_fill_correction_row_is_its_colour_s
   paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
   ASSERT_EQ(rows.size(), 3u);
   ASSERT_EQ(rows[1].preview_slots.size(), 1u);
-  EXPECT_FALSE(rows[1].preview_slots[0].is_color_swatch);
+  const StackRowPreview &painted_slot = rows[1].preview_slots[0];
+  EXPECT_FALSE(painted_slot.is_color_swatch);
+  EXPECT_NE(painted_slot.glyph, 0u);
+  EXPECT_EQ(painted_slot.id_uid, 0u);
+  EXPECT_EQ(painted_slot.render_kind, StackRowPreviewRender::None);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_painted_layer_keeps_its_glyph_slot)
+{
+  MaterialPaintLayer *layer = add_layer("A");
+  const float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  Image *image = BKE_image_add_generated(
+      bmain, 8, 8, "Map", 32, false, IMA_GENTYPE_BLANK, color, false, false, false);
+  ASSERT_NE(image, nullptr);
+  ASSERT_TRUE(BKE_paint_layers_channel_set_image(
+      *material, layer, PAINT_MATERIAL_CHANNEL_BASE_COLOR, image));
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  ASSERT_EQ(rows[0].preview_slots.size(), 1u);
+  const StackRowPreview &slot = rows[0].preview_slots[0];
+  /* Painting into the layer does not turn its slot into a thumbnail of the map: the glyph stays. */
+  EXPECT_EQ(slot.section_id, "CHANNELS");
+  EXPECT_NE(slot.glyph, 0u);
+  EXPECT_EQ(slot.id_uid, 0u);
+  EXPECT_EQ(slot.render_kind, StackRowPreviewRender::None);
+}
+
+TEST_F(OutlinerStackPaintLayersSourceTest, a_material_row_badges_its_preview_with_the_material_icon)
+{
+  Material *source_material = BKE_material_add(bmain, "Source");
+  ASSERT_NE(source_material, nullptr);
+  PaintLayerAddParams params;
+  params.kind = PaintLayerAddKind::Material;
+  params.source = source_material;
+  ASSERT_NE(BKE_paint_layers_add_with_policy(*material, params), nullptr);
+
+  Vector<StackRow> rows;
+  paint_stack_rows_from_description(*material, PAINT_MATERIAL_CHANNEL_BASE_COLOR, rows);
+  ASSERT_EQ(rows.size(), 1u);
+  ASSERT_EQ(rows[0].preview_slots.size(), 1u);
+  /* The sphere says what the source shows; the icon the draw badges it with says Material. */
+  EXPECT_EQ(rows[0].preview_slots[0].icon, int(ICON_MATERIAL));
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, value_column_edits_the_selected_channels_opacity)
@@ -716,7 +833,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_adds_a_slot_a_section_and_its_sw
   /* The icon says the same: the mask no longer shapes the coverage. */
   for (const StackRowPreview &slot : rows[0].preview_slots) {
     if (slot.section_id == "MASK") {
-      EXPECT_EQ(slot.icon, int(ICON_CLIPUV_HLT));
+      EXPECT_EQ(slot.icon, int(ICON_MOD_SUBSURF));
     }
   }
 }
@@ -750,6 +867,8 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_colourless_fill_previews_a_sphere_b
   EXPECT_FALSE(content_slot.is_color_swatch) << "the Fill has no colour to show";
   EXPECT_EQ(content_slot.render_kind, StackRowPreviewRender::Sphere)
       << "the slot is the rendered material, not the map drawn as a colour";
+  /* The Fill badge the draw puts in the corner is the glyph, even when the sphere answers. */
+  EXPECT_NE(content_slot.glyph, 0u);
   EXPECT_EQ(content_slot.id_uid, 0u) << "the sphere shades with the map, not as its thumbnail";
   /* Base Color, Metallic, Roughness. */
   EXPECT_EQ(content_slot.sphere_map_uid[2], map->id.session_uid);
@@ -757,7 +876,7 @@ TEST_F(OutlinerStackPaintLayersSourceTest, a_colourless_fill_previews_a_sphere_b
   EXPECT_EQ(row.preview_slots[1].icon, int(ICON_MOD_MASK));
 }
 
-TEST_F(OutlinerStackPaintLayersSourceTest, mask_slot_keeps_the_mask_icon_once_it_has_a_map)
+TEST_F(OutlinerStackPaintLayersSourceTest, white_mask_slot_keeps_the_clip_icon_once_it_has_a_map)
 {
   MaterialPaintLayer *layer = add_layer("A");
   MaterialPaintLayer *mask = BKE_paint_layers_mask_add(*material, layer, 1.0f);
@@ -778,11 +897,11 @@ TEST_F(OutlinerStackPaintLayersSourceTest, mask_slot_keeps_the_mask_icon_once_it
     }
   }
   ASSERT_NE(mask_slot, nullptr);
-  /* A painted mask is still the Mask icon: the slot names what it opens, not what it holds. */
+  /* A white mask keeps the clip icon whatever it holds: the slot names the mask that was added. */
   EXPECT_FALSE(mask_slot->is_color_swatch);
   EXPECT_FALSE(mask_slot->is_blank);
   EXPECT_EQ(mask_slot->id_uid, 0u);
-  EXPECT_EQ(mask_slot->icon, int(ICON_MOD_MASK));
+  EXPECT_EQ(mask_slot->icon, int(ICON_CLIPUV_HLT));
 }
 
 TEST_F(OutlinerStackPaintLayersSourceTest, state_hash_follows_a_channel_blend)

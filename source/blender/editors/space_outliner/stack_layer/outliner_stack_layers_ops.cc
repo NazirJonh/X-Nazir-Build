@@ -530,9 +530,19 @@ static std::string stack_row_mask_get_description(bContext * /*C*/,
 
 void OUTLINER_OT_stack_layer_mask(wmOperatorType *ot)
 {
+  /* Black leads, as in the Add Mask menu. White stays the default value, so the quick-add button
+   * still makes the mask that shows the layer everywhere. */
   static const EnumPropertyItem initial_color_items[] = {
-      {0, "WHITE", 0, "Add White Mask", "Add a mask that shows the layer everywhere"},
-      {1, "BLACK", 0, "Add Black Mask", "Add a mask that hides the layer until it is painted in"},
+      {1,
+       "BLACK",
+       ICON_MOD_MASK,
+       "Add Black Mask",
+       "Add a mask that hides the layer until it is painted in"},
+      {0,
+       "WHITE",
+       ICON_CLIPUV_HLT,
+       "Add White Mask",
+       "Add a mask that shows the layer everywhere"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 

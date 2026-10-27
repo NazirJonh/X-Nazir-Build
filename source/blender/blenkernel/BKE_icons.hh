@@ -40,6 +40,12 @@ enum {
   ICON_DATA_STUDIOLIGHT,
   /** GPencil Layer color preview (annotations): obj is #bGPDlayer */
   ICON_DATA_GPLAYER,
+  /**
+   * A Material Symbols glyph from the bundled glyph library: `obj` is not used (always null), the
+   * codepoint is #Icon::glyph. #icon_free_data leaves it alone, so neither #BKE_icon_delete nor
+   * the deferred free dereference `obj` for this type.
+   */
+  ICON_DATA_GLYPH,
 };
 
 /**
@@ -58,6 +64,8 @@ struct Icon {
   char flag;
   /** #ID_Type or 0 when not used for ID preview. */
   short id_type;
+  /** #ICON_DATA_GLYPH: Unicode codepoint of the Material Symbols glyph. */
+  uint32_t glyph;
   DrawInfoFreeFP drawinfo_free;
 };
 
@@ -107,6 +115,16 @@ ImBuf *BKE_icon_imbuf_get_buffer(int icon_id) ATTR_WARN_UNUSED_RESULT;
 /** The icon identified by \a icon_id is of an image buffer type. It was created from, owns and
  * draws an image buffer (created with #BKE_icon_imbuf_create()). */
 bool BKE_icon_is_imbuf(int icon_id) ATTR_WARN_UNUSED_RESULT;
+
+/**
+ * Return the icon id of the Material Symbols glyph at \a codepoint, creating it once and reusing it
+ * afterwards. The glyph is drawn from the bundled Material Symbols font with the caller's icon
+ * color, so it follows the theme like a built-in icon.
+ *
+ * Returns 0 in background mode (where there is no icon system) or for codepoint 0; callers fall
+ * back to a built-in icon then.
+ */
+int BKE_icon_glyph_ensure(uint32_t codepoint) ATTR_WARN_UNUSED_RESULT;
 
 /**
  * Simple wrapper to reference a drawable pixel buffer (non-owning).

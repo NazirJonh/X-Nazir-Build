@@ -17,6 +17,7 @@
 #include "BLI_math_color.h"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
+#include "BLI_string_utf8.h"
 
 #include "BLT_translation.hh"
 
@@ -83,6 +84,7 @@ using VectorDrawFunc =
 #define ICON_TYPE_EVENT 7 /* draw keymap entries using custom renderer. */
 #define ICON_TYPE_GPLAYER 8
 #define ICON_TYPE_BLANK 9
+#define ICON_TYPE_GLYPH 10
 
 struct DrawInfo {
   int type;
@@ -1136,6 +1138,9 @@ static DrawInfo *icon_create_drawinfo(Icon *icon)
   else if (icon_data_type == ICON_DATA_GPLAYER) {
     di->type = ICON_TYPE_GPLAYER;
   }
+  else if (icon_data_type == ICON_DATA_GLYPH) {
+    di->type = ICON_TYPE_GLYPH;
+  }
   else {
     BLI_assert(0);
   }
@@ -1173,7 +1178,7 @@ bool icon_is_monochrome(int icon_id)
   }
 
   DrawInfo *di = icon_ensure_drawinfo(icon);
-  if (di->type == ICON_TYPE_SVG_MONO) {
+  if (ELEM(di->type, ICON_TYPE_SVG_MONO, ICON_TYPE_GLYPH)) {
     return true;
   }
   
@@ -1715,6 +1720,74 @@ static void icon_source_edit_cb(std::string &svg)
   }
 }
 
+/**
+ * A glyph fills its em box, which reads larger than the built-in icons drawn in the same square, so
+ * it is drawn at this share of the icon height and centered by the font metrics.
+ */
+constexpr float ICON_GLYPH_SIZE = 0.8f;
+
+/**
+ * Draw a Material Symbols glyph centered in the icon's square, at the icon draw size. The bundled
+ * font renders the codepoint; the icon color comes from #mono_rgba or the theme, as for a
+ * monochrome SVG icon.
+ *
+ * The default font's size and color are changed here. That is safe because UI text always sets both
+ * itself: #fontstyle_draw goes through #UI_fontstyle_set before drawing, and the built-in RGB icon
+ * text above (#vicon_rgb_text_draw) relies on the same. Restoring the old values is not possible
+ * through BLF and would cost a query per icon for a state the next text overwrites anyway.
+ *
+ * #desaturate and #mono_border are not taken: a glyph is text in one color, so desaturation cannot
+ * change it, and the border is the SVG outline pass.
+ */
+static void icon_glyph_draw(const Icon &icon,
+                            const float x,
+                            const float y,
+                            const float w,
+                            const float h,
+                            const float alpha,
+                            const uchar mono_rgba[4])
+{
+  const uint32_t codepoint = icon.glyph;
+  if (codepoint == 0) {
+    return;
+  }
+
+  char glyph[8];
+  const int glyph_len = BLI_str_utf8_from_unicode(codepoint, glyph, sizeof(glyph));
+  if (glyph_len <= 0) {
+    return;
+  }
+  glyph[glyph_len] = '\0';
+
+  /* The codepoint lives in the Material Symbols fallback font, so it is drawn through the default
+   * font's fallback chain rather than tested against the default face alone. That font ships in
+   * `datafiles/fonts` and is loaded with the default font stack (#BLF_load_font_stack), so an
+   * explicit #BLF_has_glyph check would only test the wrong face; an incomplete install draws the
+   * font's notdef box, as any other missing character does. */
+  const int fontid = BLF_default();
+
+  float color[4];
+  if (mono_rgba != nullptr) {
+    rgba_uchar_to_float(color, mono_rgba);
+  }
+  else {
+    theme::get_color_4fv(TH_TEXT, color);
+  }
+  color[3] *= alpha;
+
+  BLF_size(fontid, h * ICON_GLYPH_SIZE);
+  BLF_color4fv(fontid, color);
+
+  const float glyph_width = BLF_width(fontid, glyph, glyph_len);
+  const float ascender = float(BLF_ascender(fontid));
+  const float descender = float(BLF_descender(fontid));
+  const float glyph_height = ascender - descender;
+  const float glyph_x = x + (w - glyph_width) * 0.5f;
+  const float glyph_y = y + (h - glyph_height) * 0.5f - descender;
+  BLF_position(fontid, glyph_x, glyph_y, 0.0f);
+  BLF_draw(fontid, glyph, glyph_len);
+}
+
 static void icon_draw_size(float x,
                            float y,
                            int icon_id,
@@ -1774,6 +1847,11 @@ static void icon_draw_size(float x,
      * with untransformed coordinates like the other icons */
     di->data.vector.func(
         x, y, float(draw_size) / aspect, float(draw_size) / aspect, alpha, mono_rgba);
+  }
+  else if (di->type == ICON_TYPE_GLYPH) {
+    /* #w and #h already carry the aspect, as the vector branch above does with
+     * `draw_size / aspect`; drawing the glyph at #draw_size would ignore a non-square aspect. */
+    icon_glyph_draw(*icon, x, y, float(w), float(h), alpha, mono_rgba);
   }
   else if (di->type == ICON_TYPE_GEOM) {
 #ifdef USE_UI_TOOLBAR_HACK

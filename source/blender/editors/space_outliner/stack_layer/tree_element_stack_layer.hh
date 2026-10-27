@@ -17,6 +17,7 @@ namespace blender::ed::outliner {
 /** One layer of the stack. Holds no data of its own: rows live in the space runtime. */
 class TreeElementStackLayer final : public AbstractTreeElement {
   int icon_;
+  uint32_t glyph_;
 
  public:
   TreeElementStackLayer(TreeElement &legacy_te, const StackRow &row);
@@ -34,6 +35,7 @@ class TreeElementStackLayer final : public AbstractTreeElement {
  */
 class TreeElementStackItem final : public AbstractTreeElement {
   int icon_;
+  uint32_t glyph_;
 
  public:
   TreeElementStackItem(TreeElement &legacy_te, const StackSubRow &sub_row);

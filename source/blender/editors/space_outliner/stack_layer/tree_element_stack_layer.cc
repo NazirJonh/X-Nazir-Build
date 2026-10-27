@@ -10,6 +10,8 @@
 
 #include "BLI_string.h"
 
+#include "BKE_icons.hh"
+
 #include "UI_interface_icons.hh"
 
 #include "../outliner_intern.hh"
@@ -17,8 +19,18 @@
 
 namespace blender::ed::outliner {
 
+static BIFIconID stack_glyph_icon_get(const uint32_t glyph, const int fallback)
+{
+  if (glyph != 0) {
+    if (const int icon_id = BKE_icon_glyph_ensure(glyph)) {
+      return BIFIconID(icon_id);
+    }
+  }
+  return BIFIconID(fallback);
+}
+
 TreeElementStackLayer::TreeElementStackLayer(TreeElement &legacy_te, const StackRow &row)
-    : AbstractTreeElement(legacy_te), icon_(row.icon)
+    : AbstractTreeElement(legacy_te), icon_(row.icon), glyph_(row.glyph)
 {
   BLI_assert(legacy_te_.store_elem->type == TSE_STACK_LAYER);
   /* The row's own string lives in the space runtime, which is rebuilt whenever the stack changes;
@@ -30,11 +42,11 @@ TreeElementStackLayer::TreeElementStackLayer(TreeElement &legacy_te, const Stack
 
 std::optional<BIFIconID> TreeElementStackLayer::get_icon() const
 {
-  return BIFIconID(icon_);
+  return stack_glyph_icon_get(glyph_, icon_);
 }
 
 TreeElementStackItem::TreeElementStackItem(TreeElement &legacy_te, const StackSubRow &sub_row)
-    : AbstractTreeElement(legacy_te), icon_(sub_row.icon)
+    : AbstractTreeElement(legacy_te), icon_(sub_row.icon), glyph_(sub_row.glyph)
 {
   BLI_assert(legacy_te_.store_elem->type == TSE_STACK_ITEM);
   legacy_te_.name = BLI_strdup(sub_row.name.c_str());
@@ -46,7 +58,7 @@ TreeElementStackItem::TreeElementStackItem(TreeElement &legacy_te, const StackSu
 
 std::optional<BIFIconID> TreeElementStackItem::get_icon() const
 {
-  return BIFIconID(icon_);
+  return stack_glyph_icon_get(glyph_, icon_);
 }
 
 }  // namespace blender::ed::outliner

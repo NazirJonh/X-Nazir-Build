@@ -82,6 +82,8 @@ struct StackSubRow {
   /** The data-block the sub-row stands for, or null. Only used for display and activation. */
   ID *id = nullptr;
   int icon = 0;
+  /** Material Symbols codepoint drawn instead of #icon, or 0 to use #icon. */
+  uint32_t glyph = 0;
   /**
    * The data-block is kept but switched off: it is still listed, but never made a target when the
    * row is activated.
@@ -133,6 +135,8 @@ struct StackRowPreview {
   short id_type = 0;
   /** Non-zero icon drawn instead of the data-block's image preview. */
   int icon = 0;
+  /** Material Symbols codepoint drawn instead of #icon, or 0 to use #icon. */
+  uint32_t glyph = 0;
   /** Label shown in tooltip, or empty to use the data-block's name. */
   std::string label;
 
@@ -309,6 +313,8 @@ struct StackRow {
     return name_buffer != nullptr;
   }
   int icon = 0;
+  /** Material Symbols codepoint drawn instead of #icon, or 0 to use #icon. */
+  uint32_t glyph = 0;
 
   /**
    * Color tag for folders, drawn with the collection palette. Zero means no tag; 1 to
@@ -421,6 +427,8 @@ struct StackAddKindInfo {
   std::string description;
   /** Icon drawn next to the name. */
   int icon = 0;
+  /** Material Symbols codepoint drawn instead of #icon, or 0 to use #icon. */
+  uint32_t glyph = 0;
   /** A kind whose creation takes a colour: the Add UI asks for one before calling #row_add. */
   bool takes_color = false;
   /**
@@ -451,6 +459,24 @@ struct StackAddKindInfo {
    * only these, so every correction is added from one place.
    */
   bool is_effect = false;
+};
+
+/**
+ * One entry of an Effects menu: the kind to create together with the place it holds in the
+ * editor's full #StackEditor::add_kinds list, which #StackEditor::row_add reads back.
+ *
+ * An editor that folds several kinds into one entry emits the concrete role the current context
+ * asks for -- the content kind or its mask twin -- while #info describes that role. #row_add is
+ * therefore a plain "create the kind you were given" verb, and a script naming a kind is never
+ * reinterpreted by the current target mode.
+ *
+ * Only `stack_layer_add` offers the full, stable list of kinds. `stack_layer_effect_add` is the
+ * UI's menu and its enum identifiers are this folded view, so an identifier for the other role is
+ * absent while a target is active; scripts that name a kind use the full operator.
+ */
+struct StackEffectMenuKind {
+  int kind = 0;
+  StackAddKindInfo info;
 };
 
 /**
@@ -1160,6 +1186,29 @@ class StackEditor {
    * that always refuses -- see #can_edit for how much the rest of the editing vocabulary asks.
    */
   virtual void add_kinds(Vector<StackAddKindInfo> & /*r_kinds*/) const {}
+
+  /**
+   * The kinds an Effects menu offers, one entry per thing it can lay.
+   *
+   * Default: the corrections of #add_kinds, unchanged. An editor whose vocabulary repeats a
+   * correction per target it can hang on overrides this to fold the repeats into one entry,
+   * emitting the concrete role the current context asks for. Only the menu resolves the role;
+   * #row_add creates exactly the kind it is handed.
+   *
+   * This is the vocabulary of `OUTLINER_OT_stack_layer_effect_add` alone -- a UI menu whose
+   * identifiers follow the active target. The full operator, `stack_layer_add`, keeps the stable
+   * list scripts can name.
+   */
+  virtual void effect_menu_kinds(bContext & /*C*/, Vector<StackEffectMenuKind> &r_kinds) const
+  {
+    Vector<StackAddKindInfo> kinds;
+    add_kinds(kinds);
+    for (const int64_t index : kinds.index_range()) {
+      if (kinds[index].is_effect) {
+        r_kinds.append({int(index), std::move(kinds[index])});
+      }
+    }
+  }
 
   /**
    * Create a row of \a kind -- a place in this editor's own #add_kinds list -- placed relative to

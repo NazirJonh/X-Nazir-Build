@@ -103,6 +103,34 @@
 
 namespace blender::ed::outliner {
 
+/**
+ * Material Symbols codepoints the paint stack draws its icons from.
+ *
+ * The codepoints come from `scripts/startup/bl_ui/glyph_library/data/material_symbols.json`; the
+ * font that renders them ships with Blender, so a codepoint is stable for the bundled library
+ * version. Each icon keeps its built-in #ICON_* as the fallback for headless builds and as the
+ * name a user finds in the rest of Blender.
+ *
+ * #BRUSH, #FILL and #GRADIENT are the three `space_outliner.py` repeats for its header buttons.
+ * `outliner_stack_source_paint_layers_test.cc` pins their values, so a change here fails the test
+ * and sends the reader to the Python comment that names the test.
+ */
+namespace paint_glyph {
+const uint32_t BRUSH = 0xE3AE;          /* brush */
+const uint32_t FILL = 0xE997;           /* colors */
+const uint32_t GRADIENT = 0xE3E9;       /* gradient */
+constexpr uint32_t TEXTURE = 0xE421;    /* texture */
+constexpr uint32_t INVERT = 0xE891;     /* invert_colors */
+constexpr uint32_t LEVELS = 0xE429;     /* tune */
+/* Hue/Saturation/Value's own lens, not `colors`: that one is the Fill layer's. */
+constexpr uint32_t HSL = 0xE40A;        /* color_lens */
+constexpr uint32_t ANCHOR = 0xF1CD;     /* anchor */
+constexpr uint32_t CELL_TOWER = 0xEBBA; /* cell_tower: the Anchor Point reader */
+constexpr uint32_t LINE_CURVE = 0xF757; /* line_curve */
+constexpr uint32_t COLORIZE = 0xE3B8;   /* colorize */
+constexpr uint32_t SELECT_ALL = 0xE162; /* select_all */
+}  // namespace paint_glyph
+
 /* -------------------------------------------------------------------- */
 /** \name Description helpers
  * \{ */
@@ -259,44 +287,35 @@ bool paint_image_is_blank(const Image &image)
 }
 
 /**
- * Point \a r_slot at the first map of \a layer's channel records, drawn as that image's own
- * preview. A generated map nobody has painted yet stays blank and keeps the empty placeholder;
- * any other map -- a dropped file, an image painted out -- shows what it holds, so the slot reads
- * as the texture the row lays rather than as a generic texture icon.
+ * The icon a mask slot shows: a switched-off mask says it does not shape the coverage; otherwise
+ * its starting grey says whether it was added white or black. #BKE_paint_layers_mask_add keeps
+ * that grey in the Base Color record's constant and painting writes the map instead, so
+ * `value[0]` stays the starting value -- the one thing a thumbnail could not show. One function
+ * for the base mask's slot and the mask items' slots, so the two cannot read a mask differently.
  */
-static void paint_slot_first_map_set(const MaterialPaintLayer &layer, StackRowPreview &r_slot)
+static int paint_mask_icon(const MaterialPaintLayer &item, const bool enabled)
 {
-  const bool show_internal = (U.flag & USER_DEVELOPER_UI) != 0;
-  for (int c = 0; c < layer.channels_num; c++) {
-    const Image *image = layer.channels[c].image;
-    if (image == nullptr) {
-      continue;
-    }
-    if (!show_internal && BKE_paint_layers_image_is_internal(*image)) {
-      /* A user-assigned map in a later channel is still the row's visible face. */
-      continue;
-    }
-    r_slot.id_uid = image->id.session_uid;
-    r_slot.id_type = ID_IM;
-    r_slot.is_blank = paint_image_is_blank(*image);
-    if (!r_slot.is_blank) {
-      r_slot.render_kind = StackRowPreviewRender::IdPreview;
-    }
-    return;
+  if (!enabled) {
+    return ICON_MOD_SUBSURF;
   }
+  const MaterialPaintLayerChannel *record = paint_mask_record(item);
+  /* A filter owns no Base Color record: it shapes the mask rather than laying a grey over it. */
+  if (record == nullptr) {
+    return ICON_MOD_MASK;
+  }
+  return record->value[0] > 0.5f ? ICON_CLIPUV_HLT : ICON_MOD_MASK;
 }
 
 /**
- * The mask slot of a row: always the Mask icon (the "clip" icon while the mask is switched off),
- * never a preview of its map. Whether the mask began white or black is unreadable once it has been
- * painted over, and a thumbnail of the map would stop saying that the slot is the mask.
+ * The mask slot of a row: always an icon, never a preview of its map, so it keeps saying that the
+ * slot is the mask rather than the map it holds.
  */
 StackRowPreview paint_mask_slot_build(const MaterialPaintLayer &item)
 {
   StackRowPreview slot;
   slot.section_id = "MASK";
   slot.label = IFACE_("Mask");
-  slot.icon = ((item.flag & MA_PAINT_LAYER_ENABLED) != 0) ? ICON_MOD_MASK : ICON_CLIPUV_HLT;
+  slot.icon = paint_mask_icon(item, (item.flag & MA_PAINT_LAYER_ENABLED) != 0);
   return slot;
 }
 
@@ -378,16 +397,109 @@ static bool paint_layer_row_is_adjustment_view(const MaterialPaintLayer &layer)
   return layer.source == MA_PAINT_LAYER_SOURCE_FILTER && layer.role == MA_PAINT_LAYER_ROLE_LAYER;
 }
 
+/** The pair a paint row shows for its kind: the built-in icon and its Material Symbols glyph. */
+struct PaintKindLook {
+  int icon;
+  /** Material Symbols codepoint, or 0 when the kind has no glyph and shows #icon alone. */
+  uint32_t glyph;
+};
+
 /**
- * A filter the Add Effect menu offers. The vocabulary is the editor's (a name, an icon, a tooltip);
- * which filters exist is #eMaterialPaintLayerFilter. #row_add reads the position back, so a new
- * filter is one entry here and one in the kernel's kind table.
+ * The role a row of one source plays. Only a Paint row looks different in the two -- the mask's
+ * Add entry names it by the Grease Pencil icon -- but every row asks through this one function so
+ * a role cannot drift from the Add menu that names it.
+ */
+enum class PaintLookRole {
+  /** A layer's content, or a correction laid over it. */
+  Content,
+  /** A correction laid over the layer's mask. */
+  MaskItem,
+};
+
+/**
+ * The built-in gradient icon: a Color Theme icon used as the nearest stand-in for a ramp, the same
+ * one the Gradient tool wears. Rows draw the `gradient` glyph instead where it exists; this is the
+ * fallback (headless builds, and Python's `icon=`), kept here once for the rows and the Add table.
+ */
+constexpr int PAINT_GRADIENT_ICON = ICON_COLORSET_13_VEC;
+
+/**
+ * The filter's own look: an icon with a glyph for every filter the stack has one for. The default
+ * is the generic adjustment arrow, kept for a filter whose subtype the UI does not know yet.
+ */
+static PaintKindLook paint_filter_look(const int16_t filter)
+{
+  switch (filter) {
+    case MA_PAINT_LAYER_FILTER_INVERT:
+      return {ICON_ARROW_LEFTRIGHT, paint_glyph::INVERT};
+    case MA_PAINT_LAYER_FILTER_LEVELS:
+      return {ICON_IMAGE_ALPHA, paint_glyph::LEVELS};
+    case MA_PAINT_LAYER_FILTER_HSL:
+      return {ICON_COLOR, paint_glyph::HSL};
+    case MA_PAINT_LAYER_FILTER_COLOR_ID:
+      return {ICON_COLOR, paint_glyph::COLORIZE};
+    case MA_PAINT_LAYER_FILTER_UV_ISLAND:
+      return {ICON_UV_ISLANDSEL, paint_glyph::SELECT_ALL};
+  }
+  return {ICON_ARROW_LEFTRIGHT, 0};
+}
+
+/**
+ * The icon and glyph every row and Add entry of \a source shows, in \a role. This is the one place
+ * the pair is written: the rows, the effects and the Add menu all ask here, so a kind cannot read
+ * one way in the menu and another in the stack.
+ */
+static PaintKindLook paint_look_for_source(const eMaterialPaintLayerSource source,
+                                           const PaintLookRole role,
+                                           const int16_t filter_subtype = 0)
+{
+  switch (source) {
+    case MA_PAINT_LAYER_SOURCE_IMAGE:
+      /* The mask's Add entry keeps the Grease Pencil icon the user knows; the glyph keeps it the
+       * same Brush wherever it is drawn. */
+      return {role == PaintLookRole::MaskItem ? ICON_GREASEPENCIL : ICON_BRUSH_DATA,
+              paint_glyph::BRUSH};
+    case MA_PAINT_LAYER_SOURCE_CONSTANT:
+      return {ICON_GP_DRAW_FILL, paint_glyph::FILL};
+    case MA_PAINT_LAYER_SOURCE_MATERIAL:
+      return {ICON_MATERIAL, paint_glyph::TEXTURE};
+    case MA_PAINT_LAYER_SOURCE_GENERATOR:
+      return {PAINT_GRADIENT_ICON, paint_glyph::GRADIENT};
+    case MA_PAINT_LAYER_SOURCE_FILTER:
+      return paint_filter_look(filter_subtype);
+    case MA_PAINT_LAYER_SOURCE_CURVE_PATCH:
+      return {ICON_CURVE_BEZCURVE, paint_glyph::LINE_CURVE};
+    case MA_PAINT_LAYER_SOURCE_ANCHOR_POINT:
+      return {ICON_EMPTY_AXIS, paint_glyph::ANCHOR};
+    case MA_PAINT_LAYER_SOURCE_STACK:
+      return {ICON_FILE_FOLDER, 0};
+  }
+  return {ICON_IMAGE_RGB, 0};
+}
+
+/** The look of an Anchor Point marker, whichever list it sits in. */
+static PaintKindLook paint_look_for_anchor_point()
+{
+  return {ICON_EMPTY_AXIS, paint_glyph::ANCHOR};
+}
+
+/** The look of an Anchor Point reader: what it lays, not the marker it reads. */
+static PaintKindLook paint_look_for_anchor_reader()
+{
+  return {ICON_LINKED, paint_glyph::CELL_TOWER};
+}
+
+/**
+ * A filter the Add Effect menu offers. The vocabulary is the editor's (a name and a tooltip);
+ * which filters exist is #eMaterialPaintLayerFilter. The icon and glyph come from
+ * #paint_look_for_source, the same place a row asks, so the menu and the row cannot disagree.
+ * #row_add reads the position back, so a new filter is one entry here and one in the kernel's kind
+ * table.
  */
 struct PaintFilterAddKind {
   const char *identifier;
   const char *name;
   const char *description;
-  int icon;
   int16_t filter;
 };
 
@@ -395,17 +507,14 @@ static const PaintFilterAddKind paint_filter_add_kinds[] = {
     {"FILTER_INVERT",
      N_("Invert"),
      "Invert the active layer's colour, by the filter's opacity",
-     ICON_ARROW_LEFTRIGHT,
      MA_PAINT_LAYER_FILTER_INVERT},
     {"FILTER_LEVELS",
      N_("Levels"),
      "Remap the active layer's tones: black and white points, gamma and output range",
-     ICON_IMAGE_ALPHA,
      MA_PAINT_LAYER_FILTER_LEVELS},
     {"FILTER_HSL",
      N_("Hue Saturation Value"),
      "Shift the active layer's hue, saturation and value",
-     ICON_COLOR,
      MA_PAINT_LAYER_FILTER_HSL},
 };
 
@@ -417,12 +526,10 @@ static const PaintFilterAddKind paint_coverage_add_kinds[] = {
     {"FILTER_COLOR_ID",
      N_("Color ID"),
      "Keep the active layer's mask only where an ID Map matches the listed colors",
-     ICON_COLOR,
      MA_PAINT_LAYER_FILTER_COLOR_ID},
     {"FILTER_UV_ISLAND",
      N_("UV Island"),
      "Keep the active layer's mask only on the UV islands captured from the Image Editor",
-     ICON_UV_ISLANDSEL,
      MA_PAINT_LAYER_FILTER_UV_ISLAND},
 };
 
@@ -455,11 +562,10 @@ StackRow paint_correction_row_build(const Material &material,
                                                  (fill ? "Correction Fill" : "Correction Paint")));
   row.name_buffer = const_cast<char *>(effect.name);
   const bool filter = effect.source == MA_PAINT_LAYER_SOURCE_FILTER;
-  row.icon = filter        ? ICON_ARROW_LEFTRIGHT :
-             from_material ? ICON_MATERIAL :
-             curve_patch   ? ICON_CURVE_BEZCURVE :
-             fill          ? ICON_GP_DRAW_FILL :
-                             ICON_BRUSH_DATA;
+  const PaintKindLook look = paint_look_for_source(
+      eMaterialPaintLayerSource(effect.source), PaintLookRole::Content, effect.kind_subtype);
+  row.icon = look.icon;
+  row.glyph = look.glyph;
   if (curve_patch) {
     /* The effect's action is its tool entrance, the same one the row's own action icon is. */
     row.action_icon = ICON_CURVE_BEZCURVE;
@@ -469,7 +575,9 @@ StackRow paint_correction_row_build(const Material &material,
     /* A marker is a place, not a correction: it publishes a slice and has no opacity, blend or map
      * of its own, so it is a bare compact row with the icon of its Add entry. */
     row.name = effect.name[0] != '\0' ? effect.name : "Anchor Point";
-    row.icon = ICON_EMPTY_AXIS;
+    const PaintKindLook anchor_look = paint_look_for_anchor_point();
+    row.icon = anchor_look.icon;
+    row.glyph = anchor_look.glyph;
     row.compact = true;
     paint_issue_slots_append(issues, owner_marker, effect.marker, row);
     return row;
@@ -477,7 +585,9 @@ StackRow paint_correction_row_build(const Material &material,
   const bool reads_anchor_point = BKE_paint_layers_reads_anchor_point(effect);
   if (reads_anchor_point) {
     row.name = effect.name[0] != '\0' ? effect.name : "Anchor Point Reader";
-    row.icon = ICON_LINKED;
+    const PaintKindLook reader_look = paint_look_for_anchor_reader();
+    row.icon = reader_look.icon;
+    row.glyph = reader_look.glyph;
   }
   /* A correction reads as a setting of its layer rather than as a member of the stack. */
   row.compact = true;
@@ -504,11 +614,14 @@ StackRow paint_correction_row_build(const Material &material,
     return row;
   }
 
-  /* The slot shows the correction's first map, blank or not, and switches the brush to content. A
-   * Fill correction is its colour while it has no map: the swatch a Fill layer shows, with the same
+  /* The slot names the correction's kind rather than previewing its first map, as a Paint layer's
+   * slot does: a painted correction still reads as the brush, fill or generator it is, not as the
+   * texture it holds. A Fill correction that lays a colour shows its swatch instead, with the same
    * rule when the Base Color record is gone or switched off (the correction then lays no colour). */
   StackRowPreview slot;
   slot.section_id = "CHANNELS";
+  slot.icon = look.icon;
+  slot.glyph = look.glyph;
   const MaterialPaintLayerChannel *base = nullptr;
   for (int c = 0; c < effect.channels_num; c++) {
     if (effect.channels[c].channel == PAINT_MATERIAL_CHANNEL_BASE_COLOR) {
@@ -519,12 +632,8 @@ StackRow paint_correction_row_build(const Material &material,
       BKE_paint_layers_channel_in_set(material, PAINT_MATERIAL_CHANNEL_BASE_COLOR))
   {
     slot.is_color_swatch = true;
-    slot.icon = ICON_GP_DRAW_FILL;
     BKE_paint_layers_base_color_get(effect, slot.color);
     slot.label = IFACE_("Fill Color");
-  }
-  if (!slot.is_color_swatch) {
-    paint_slot_first_map_set(effect, slot);
   }
   row.preview_slots.append(std::move(slot));
   StackContentSection channels;
@@ -563,10 +672,17 @@ StackRow paint_mask_item_row_build(const Material &material,
                  item.name :
                  (from_material ? "Material Mask" : (fill ? "Mask Fill" : "Mask Paint"));
   row.name_buffer = const_cast<char *>(item.name);
-  row.icon = from_material ? ICON_MATERIAL : (fill ? ICON_GP_DRAW_FILL : ICON_MOD_MASK);
+  /* The icons and glyphs the Add Effect menu names these roles by, through the one look: a Mask
+   * Paint Correction is the Grease Pencil paint icon there, so the row it makes reads the same. */
+  const PaintKindLook look = paint_look_for_source(
+      eMaterialPaintLayerSource(item.source), PaintLookRole::MaskItem, item.kind_subtype);
+  row.icon = look.icon;
+  row.glyph = look.glyph;
   if (BKE_paint_layers_is_anchor_point(item)) {
     row.name = item.name[0] != '\0' ? item.name : "Anchor Point";
-    row.icon = ICON_EMPTY_AXIS;
+    const PaintKindLook anchor_look = paint_look_for_anchor_point();
+    row.icon = anchor_look.icon;
+    row.glyph = anchor_look.glyph;
     row.compact = true;
     paint_issue_slots_append(issues, owner_marker, item.marker, row);
     return row;
@@ -574,7 +690,9 @@ StackRow paint_mask_item_row_build(const Material &material,
   const bool reads_anchor_point = BKE_paint_layers_reads_anchor_point(item);
   if (reads_anchor_point) {
     row.name = item.name[0] != '\0' ? item.name : "Anchor Point Reader";
-    row.icon = ICON_LINKED;
+    const PaintKindLook reader_look = paint_look_for_anchor_reader();
+    row.icon = reader_look.icon;
+    row.glyph = reader_look.glyph;
   }
   /* A correction reads as a setting of its mask rather than as a member of the stack. */
   row.compact = true;
@@ -587,15 +705,8 @@ StackRow paint_mask_item_row_build(const Material &material,
   row.value_prop = "opacity";
   row.value_inherited = (item.opacity == 1.0f);
   if (item.source == MA_PAINT_LAYER_SOURCE_FILTER) {
-    /* A filter in the mask changes its coverage: no map to paint, no blend, no channels. */
-    row.icon = ICON_ARROW_LEFTRIGHT;
-    /* The map-driven filters read as what they select by, not as a tone change. */
-    if (item.kind_subtype == MA_PAINT_LAYER_FILTER_COLOR_ID) {
-      row.icon = ICON_COLOR;
-    }
-    else if (item.kind_subtype == MA_PAINT_LAYER_FILTER_UV_ISLAND) {
-      row.icon = ICON_UV_ISLANDSEL;
-    }
+    /* A filter in the mask changes its coverage: no map to paint, no blend, no channels. Its look
+     * already names the filter by the icon and glyph its Add entry uses. */
     paint_issue_slots_append(issues, owner_marker, item.marker, row);
     return row;
   }
@@ -620,11 +731,8 @@ StackRow paint_mask_item_row_build(const Material &material,
     slot.is_color_swatch = true;
     slot.color[0] = slot.color[1] = slot.color[2] = gray;
     slot.color[3] = 1.0f;
-    slot.icon = ICON_MOD_MASK;
   }
-  else {
-    slot.icon = row.enabled ? ICON_MOD_MASK : ICON_CLIPUV_HLT;
-  }
+  slot.icon = paint_mask_icon(item, row.enabled);
   row.preview_slots.append(std::move(slot));
   StackContentSection mask_section;
   mask_section.identifier = "MASK";
@@ -720,9 +828,14 @@ static std::optional<StackRowPreview> paint_fill_slot_build(const Material &mate
   }
   StackRowPreview fill_slot;
   fill_slot.section_id = "CHANNELS";
+  const PaintKindLook look = paint_look_for_source(MA_PAINT_LAYER_SOURCE_CONSTANT,
+                                                   PaintLookRole::Content);
+  /* The badge the draw puts in the slot's corner: a Fill reads as a Fill whichever of its two
+   * looks -- the colour swatch or the sphere -- answers first. */
+  fill_slot.glyph = look.glyph;
   if (lays_color) {
     fill_slot.is_color_swatch = true;
-    fill_slot.icon = ICON_GP_DRAW_FILL;
+    fill_slot.icon = look.icon;
     BKE_paint_layers_base_color_get(layer, fill_slot.color);
     fill_slot.label = IFACE_("Fill Color");
   }
@@ -825,12 +938,18 @@ void paint_stack_rows_append(const Material &material,
     row.color_tag = layer.color_tag;
     /* An adjustment is a filter of the stack below it: no map, no channel slot, only its settings. */
     const bool adjustment = paint_layer_row_is_adjustment_view(layer);
-    row.icon = folder                                          ? ICON_FILE_FOLDER :
-               adjustment                                      ? ICON_ARROW_LEFTRIGHT :
-               (layer.source == MA_PAINT_LAYER_SOURCE_CONSTANT)  ? ICON_GP_DRAW_FILL :
-               (layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL)  ? ICON_MATERIAL :
-               (layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR) ? ICON_COLOR :
-                                                                   ICON_IMAGE_RGB;
+    const PaintKindLook look = paint_look_for_source(
+        eMaterialPaintLayerSource(layer.source), PaintLookRole::Content, layer.kind_subtype);
+    row.icon = folder ? ICON_FILE_FOLDER : look.icon;
+    /* A folder keeps the built-in folder icon; only the layer kinds that draw content use a
+     * glyph. */
+    row.glyph = folder ? 0 : look.glyph;
+    if (BKE_paint_layers_reads_anchor_point(layer)) {
+      /* A reader is not the marker: it lays the slice, so it takes the reader glyph. */
+      const PaintKindLook reader_look = paint_look_for_anchor_reader();
+      row.icon = reader_look.icon;
+      row.glyph = reader_look.glyph;
+    }
     /* Only layers and folders limit where they show; an adjustment acts on what is below it for
      * every object alike, and corrections and mask items are not rows of this list. */
     if (!adjustment && layer.role == MA_PAINT_LAYER_ROLE_LAYER) {
@@ -864,9 +983,10 @@ void paint_stack_rows_append(const Material &material,
     else if (adjustment || layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
              layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
     {
-      /* A Gradient row is procedural and an adjustment has no content, so neither has a slot. Both
-       * take corrections, which are listed under the content section, so they have it with or
-       * without a mask. A Material row's preview is what the row paints, resolved the same way the
+      /* A Gradient row has no map, but its slot shows the generator's glyph so the row reads by
+       * its kind; an adjustment has no content and no slot. Both take corrections, which are
+       * listed under the content section, so they have it with or without a mask. A Material row's
+       * preview is what the row paints, resolved the same way the
        * paint system itself reads the source: a plain constant or a plain texture of the source's
        * own shades a sphere, and so does the bake where the source is a graph. A graph whose bake
        * is missing or no longer describes the source -- Auto leaves it to the live shader -- has no
@@ -877,6 +997,11 @@ void paint_stack_rows_append(const Material &material,
         StackRowPreview material_slot;
         material_slot.section_id = "CHANNELS";
         material_slot.label = layer.material->id.name + 2;
+        /* The badge the draw puts in the sphere's corner names the row's kind, as the Fill's does:
+         * the sphere says what the material shows, the icon says it is a Material layer. */
+        const PaintKindLook material_look = paint_look_for_source(
+            MA_PAINT_LAYER_SOURCE_MATERIAL, PaintLookRole::Content);
+        material_slot.icon = material_look.icon;
         material_slot.is_color_swatch = true;
         /* The remembered answer: the rows are rebuilt on every stack redraw. */
         const std::shared_ptr<const MaterialSourceResolve> resolve_shared =
@@ -947,6 +1072,16 @@ void paint_stack_rows_append(const Material &material,
         }
         row.preview_slots.append(std::move(material_slot));
       }
+      if (layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR) {
+        StackRowPreview gradient_slot;
+        const PaintKindLook gradient_look = paint_look_for_source(
+            MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content);
+        gradient_slot.section_id = "CHANNELS";
+        gradient_slot.glyph = gradient_look.glyph;
+        gradient_slot.icon = gradient_look.icon;
+        gradient_slot.label = IFACE_("Gradient");
+        row.preview_slots.append(std::move(gradient_slot));
+      }
       if (BKE_paint_layers_mask_base(layer) != nullptr ||
           layer.source == MA_PAINT_LAYER_SOURCE_MATERIAL ||
           layer.source == MA_PAINT_LAYER_SOURCE_GENERATOR)
@@ -968,10 +1103,14 @@ void paint_stack_rows_append(const Material &material,
       }
     }
     else {
-      /* The content slot shows the row's first channel map, blank or not. */
+      /* A Paint layer's content slot keeps the row's own glyph -- the brush it paints with -- rather
+       * than turning into a thumbnail of the first map once there is paint in it: the row reads as
+       * the kind of layer it is, not as its texture. The slot still names the content section, so a
+       * click switches the brush to it. */
       StackRowPreview channels_slot;
       channels_slot.section_id = "CHANNELS";
-      paint_slot_first_map_set(layer, channels_slot);
+      channels_slot.glyph = row.glyph;
+      channels_slot.icon = row.icon;
       row.preview_slots.append(std::move(channels_slot));
     }
 
@@ -1186,24 +1325,64 @@ bool paint_layers_edit_target_clear(Material &material)
  *
  * The table is the only place that knows the kinds. A kind's index in it is the number scripts and
  * the Add operator pass to #row_add, so a new kind is appended at the end and nothing above moves.
+ * The Effects menu folds the two roles of one thing into one line, and the fields that say how
+ * -- #mask_twin, #is_mask_twin, #mask_only and #menu_name -- live here, so a new correction is
+ * still one entry and cannot be added to one role only.
  */
 struct PaintAddKindEntry {
   StackAddKindInfo info;
   PaintLayerAddKind kind = PaintLayerAddKind::Paint;
   /** The #eMaterialPaintLayerFilter of a filter, adjustment or mask filter kind; else unused. */
   int16_t filter = 0;
+  /**
+   * Index of the entry that lays this effect over the mask, or -1. Resolved while the table is
+   * built from the mask kind the content entry names; the mask entry gets #is_mask_twin.
+   */
+  int mask_twin = -1;
+  /** Whether this entry is the mask form the Effects menu folds into its content entry. */
+  bool is_mask_twin = false;
+  /** Whether the kind exists only in the mask, so the menu offers it only while a mask slot is
+   * the one showing. */
+  bool mask_only = false;
+  /** The function word the Effects menu uses for this entry; null keeps #info.name. */
+  const char *menu_name = nullptr;
 };
 
 static Span<PaintAddKindEntry> paint_add_kind_entries()
 {
   static const Vector<PaintAddKindEntry> entries = []() {
     Vector<PaintAddKindEntry> table;
-    const auto add =
-        [&](StackAddKindInfo info, const PaintLayerAddKind kind, const int16_t filter = 0) {
-          table.append({std::move(info), kind, filter});
-        };
+    /* The mask kinds named by content entries, and the rows that named them. Resolved to indexes
+     * once every entry exists, so a pair can be written without depending on the order. */
+    Vector<std::optional<PaintLayerAddKind>> twin_kinds;
+    Vector<int> twin_rows;
+    const auto add = [&](StackAddKindInfo info,
+                         const PaintLayerAddKind kind,
+                         const int16_t filter = 0,
+                         const std::optional<PaintLayerAddKind> mask_twin = std::nullopt,
+                         const char *menu_name = nullptr,
+                         const bool mask_only = false) {
+      PaintAddKindEntry entry;
+      entry.info = std::move(info);
+      entry.kind = kind;
+      entry.filter = filter;
+      entry.menu_name = menu_name;
+      entry.mask_only = mask_only;
+      table.append(std::move(entry));
+      if (mask_twin.has_value()) {
+        twin_kinds.append(mask_twin);
+        twin_rows.append(int(table.size()) - 1);
+      }
+    };
     const auto effect = [](StackAddKindInfo info) {
       info.is_effect = true;
+      return info;
+    };
+    /* The icon and the glyph are the look's, never written here: an Add entry and the row it makes
+     * must read the same. */
+    const auto with_look = [](StackAddKindInfo info, const PaintKindLook look) {
+      info.icon = look.icon;
+      info.glyph = look.glyph;
       return info;
     };
     const auto with_color = [](StackAddKindInfo info) {
@@ -1224,158 +1403,213 @@ static Span<PaintAddKindEntry> paint_add_kind_entries()
       return info;
     };
 
-    add({"PAINT",
-         N_("Paint Layer"),
-         "A layer that shows nothing until it is painted on",
-         ICON_BRUSH_DATA},
+    add(with_look({"PAINT",
+                   N_("Paint Layer"),
+                   "A layer that shows nothing until it is painted on"},
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_IMAGE, PaintLookRole::Content)),
         PaintLayerAddKind::Paint);
-    add(with_optional_color(
-            {"FILL", N_("Fill Layer"), "A layer of one flat colour", ICON_GP_DRAW_FILL}),
+    add(with_look(
+            with_optional_color(
+                {"FILL", N_("Fill Layer"), "A layer of one flat colour"}),
+            paint_look_for_source(MA_PAINT_LAYER_SOURCE_CONSTANT, PaintLookRole::Content)),
         PaintLayerAddKind::Fill);
-    add({"FOLDER",
-         N_("Folder"),
-         "A group holding other layers, composited on its own",
-         ICON_FILE_FOLDER},
+    add(with_look(
+            {"FOLDER", N_("Folder"), "A group holding other layers, composited on its own"},
+            paint_look_for_source(MA_PAINT_LAYER_SOURCE_STACK, PaintLookRole::Content)),
         PaintLayerAddKind::Folder);
-    add(effect({"CORRECTION",
-                N_("Correction Paint"),
-                "A map painted over the active layer's colour, below the layer's own blend",
-                ICON_BRUSH_DATA}),
-        PaintLayerAddKind::Correction);
-    add(effect(with_color(
-            {"CORRECTION_FILL",
-             N_("Correction Fill"),
-             "A flat colour laid over the active layer's colour, below the layer's own blend",
-             ICON_GP_DRAW_FILL})),
-        PaintLayerAddKind::CorrectionFill);
-    add(effect({"MASK_CORRECTION",
-                N_("Mask Paint Correction"),
-                "A grey map painted over the active layer's mask, in Mask mode",
-                ICON_MOD_MASK}),
+    add(with_look(effect({"CORRECTION",
+                          N_("Correction Paint"),
+                          "A map painted over the active target: the layer's colour, or its mask "
+                          "while a mask slot is the one showing"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_IMAGE, PaintLookRole::Content)),
+        PaintLayerAddKind::Correction,
+        0,
+        PaintLayerAddKind::MaskCorrection,
+        N_("Paint"));
+    add(with_look(effect(with_color({"CORRECTION_FILL",
+                                     N_("Correction Fill"),
+                                     "A flat colour laid over the active target: the layer's "
+                                     "colour, or its mask while a mask slot is the one showing"})),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_CONSTANT, PaintLookRole::Content)),
+        PaintLayerAddKind::CorrectionFill,
+        0,
+        PaintLayerAddKind::MaskCorrectionFill,
+        N_("Fill"));
+    /* The mask paint correction keeps the built-in Grease Pencil icon its Add entry always had; the
+     * Brush glyph is the look's, so the row it makes reads as the Paint it is. */
+    add(with_look(effect({"MASK_CORRECTION",
+                          N_("Mask Paint Correction"),
+                          "A grey map painted over the active layer's mask, in Mask mode"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_IMAGE, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskCorrection);
-    add(effect(with_color({"MASK_CORRECTION_FILL",
-                           N_("Mask Fill Correction"),
-                           "A flat grey laid over the active layer's mask",
-                           ICON_GP_DRAW_FILL})),
+    add(with_look(effect(with_color({"MASK_CORRECTION_FILL",
+                                     N_("Mask Fill Correction"),
+                                     "A flat grey laid over the active layer's mask"})),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_CONSTANT, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskCorrectionFill);
 
     /* Every filter as a correction of a layer's colour. */
     for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
-      add(effect({filter.identifier, filter.name, filter.description, filter.icon}),
+      add(with_look(effect({filter.identifier, filter.name, filter.description}),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::Content, filter.filter)),
           PaintLayerAddKind::Filter,
-          filter.filter);
+          filter.filter,
+          PaintLayerAddKind::MaskFilter);
     }
     /* Then the same filters as rows of the stack: an adjustment changes the whole stack below it
      * instead of one layer's colour. */
     for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
-      add({std::string("ADJUSTMENT") + (filter.identifier + std::strlen("FILTER")),
-           std::string(filter.name) + " Adjustment",
-           "Apply the filter to everything below this layer, with the layer's own opacity, blend "
-           "and mask",
-           filter.icon},
+      add(with_look({std::string("ADJUSTMENT") + (filter.identifier + std::strlen("FILTER")),
+                     std::string(filter.name) + " Adjustment",
+                     "Apply the filter to everything below this layer, with the layer's own opacity, "
+                     "blend and mask"},
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::Content, filter.filter)),
           PaintLayerAddKind::Adjustment,
           filter.filter);
     }
     /* And once more in the mask: the filter changes the mask's coverage, a single grey, so it has
-     * no channels to choose. They are corrections of the mask, listed with the other effects. */
+     * no channels to choose. They are corrections of the mask, listed with the other effects, and
+     * carry the filter's own icon so a line reads the same whichever target is active. */
     for (const PaintFilterAddKind &filter : paint_filter_add_kinds) {
-      add(effect({std::string("MASK_") + filter.identifier,
-                  std::string("Mask ") + filter.name,
-                  "Apply the filter to the active layer's mask coverage",
-                  ICON_MOD_MASK}),
+      add(with_look(effect({std::string("MASK_") + filter.identifier,
+                            std::string("Mask ") + filter.name,
+                            "Apply the filter to the active layer's mask coverage"}),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::MaskItem, filter.filter)),
           PaintLayerAddKind::MaskFilter,
           filter.filter);
     }
-    /* The map-driven filters of the mask. */
+    /* The map-driven filters of the mask. They have no content form, so the menu keeps them only
+     * while a mask slot is the one showing. */
     for (const PaintFilterAddKind &filter : paint_coverage_add_kinds) {
-      add(effect({std::string("MASK_") + filter.identifier,
-                  std::string("Mask ") + filter.name,
-                  filter.description,
-                  filter.icon}),
+      add(with_look(effect({std::string("MASK_") + filter.identifier,
+                            std::string("Mask ") + filter.name,
+                            filter.description}),
+                    paint_look_for_source(
+                        MA_PAINT_LAYER_SOURCE_FILTER, PaintLookRole::MaskItem, filter.filter)),
           PaintLayerAddKind::MaskFilter,
-          filter.filter);
+          filter.filter,
+          std::nullopt,
+          nullptr,
+          true);
     }
 
     /* A layer that shows what another material shows, and the two places a correction can lay it:
      * the colour and the mask. */
-    add(from_material({"MATERIAL",
-                       N_("Material Layer"),
-                       "A layer that shows what another material shows",
-                       ICON_MATERIAL},
-                      "paint_layer_add_material"),
+    add(with_look(from_material({"MATERIAL",
+                                 N_("Material Layer"),
+                                 "A layer that shows what another material shows"},
+                                "paint_layer_add_material"),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_MATERIAL, PaintLookRole::Content)),
         PaintLayerAddKind::Material);
-    add(effect(from_material(
-            {"CORRECTION_MATERIAL",
-             N_("Material Correction"),
-             "What another material shows, laid over the active layer's colour, below the layer's "
-             "own blend",
-             ICON_MATERIAL},
-            "paint_layer_add_material_correction")),
-        PaintLayerAddKind::CorrectionMaterial);
-    add(effect(from_material(
-            {"MASK_CORRECTION_MATERIAL",
-             N_("Mask Material Correction"),
-             "The grey of another material's Base Color, laid over the active layer's mask",
-             ICON_MATERIAL},
-            "paint_layer_add_material_mask_correction")),
+    add(with_look(effect(from_material(
+                      {"CORRECTION_MATERIAL",
+                       N_("Material Correction"),
+                       "What another material shows, laid over the active target: the layer's "
+                       "colour, or its mask while a mask slot is the one showing"},
+                      "paint_layer_add_material_correction")),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_MATERIAL, PaintLookRole::Content)),
+        PaintLayerAddKind::CorrectionMaterial,
+        0,
+        PaintLayerAddKind::MaskCorrectionMaterial,
+        N_("Material"));
+    add(with_look(effect(from_material(
+                      {"MASK_CORRECTION_MATERIAL",
+                       N_("Mask Material Correction"),
+                       "The grey of another material's Base Color, laid over the active layer's "
+                       "mask"},
+                      "paint_layer_add_material_mask_correction")),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_MATERIAL, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskCorrectionMaterial);
 
     /* Anchor Points: the marker and the three places a reader can land. A marker picks its list
      * from the active row; a reader's item decides the list, the way the three Material items do.
      */
-    add(effect({"ANCHOR_POINT",
-                N_("Anchor Point"),
-                "Publish the active layer's content in its Effects up to this place; select a mask "
-                "item first to put the point in the mask instead",
-                ICON_EMPTY_AXIS}),
+    add(with_look(effect({"ANCHOR_POINT",
+                          N_("Anchor Point"),
+                          "Publish the active layer's content in its Effects up to this place; "
+                          "select a mask item first to put the point in the mask instead"}),
+                  paint_look_for_anchor_point()),
         PaintLayerAddKind::AnchorPoint);
-    add({"ANCHOR_POINT_LAYER",
-         N_("Anchor Point Layer"),
-         "A layer that shows the slice an Anchor Point of this material publishes",
-         ICON_LINKED},
+    add(with_look({"ANCHOR_POINT_LAYER",
+                   N_("Anchor Point Layer"),
+                   "A layer that shows the slice an Anchor Point of this material publishes"},
+                  paint_look_for_anchor_reader()),
         PaintLayerAddKind::AnchorPointLayer);
-    add(effect({"ANCHOR_POINT_CORRECTION",
-                N_("Anchor Point Correction"),
-                "The slice an Anchor Point publishes, laid over the active layer's colour, below "
-                "the layer's own blend",
-                ICON_LINKED}),
-        PaintLayerAddKind::AnchorPointCorrection);
-    add(effect({"ANCHOR_POINT_MASK_CORRECTION",
-                N_("Anchor Point Mask Correction"),
-                "The slice an Anchor Point publishes, laid over the active layer's mask",
-                ICON_LINKED}),
+    add(with_look(effect({"ANCHOR_POINT_CORRECTION",
+                          N_("Anchor Point Correction"),
+                          "The slice an Anchor Point publishes, laid over the active target: the "
+                          "layer's colour, or its mask while a mask slot is the one showing"}),
+                  paint_look_for_anchor_reader()),
+        PaintLayerAddKind::AnchorPointCorrection,
+        0,
+        PaintLayerAddKind::AnchorPointMaskCorrection,
+        N_("Anchor Point Reader"));
+    add(with_look(effect({"ANCHOR_POINT_MASK_CORRECTION",
+                          N_("Anchor Point Mask Correction"),
+                          "The slice an Anchor Point publishes, laid over the active layer's mask"}),
+                  paint_look_for_anchor_reader()),
         PaintLayerAddKind::AnchorPointMaskCorrection);
 
     /* A procedural ramp built from Shader Editor nodes: as a layer, and in the two correction
-     * roles. */
-    add({"GRADIENT",
-         N_("Gradient Layer"),
-         "A procedural colour and coverage ramp reading the UV, built from shader nodes",
-         ICON_COLOR},
+     * roles. The one Gradient glyph marks the ramp wherever it appears. */
+    add(with_look({"GRADIENT",
+                   N_("Gradient Layer"),
+                   "A procedural colour and coverage ramp reading the UV, built from shader nodes"},
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content)),
         PaintLayerAddKind::Gradient);
-    add(effect({"CORRECTION_GRADIENT",
-                N_("Gradient Correction"),
-                "A procedural ramp laid over the active layer's colour, below the layer's own "
-                "blend",
-                ICON_COLOR}),
-        PaintLayerAddKind::GradientCorrection);
-    add(effect({"MASK_CORRECTION_GRADIENT",
-                N_("Mask Gradient Correction"),
-                "A procedural ramp's grey laid over the active layer's mask",
-                ICON_MOD_MASK}),
+    add(with_look(effect({"CORRECTION_GRADIENT",
+                          N_("Gradient Correction"),
+                          "A procedural ramp laid over the active target: the layer's colour, or "
+                          "its mask while a mask slot is the one showing"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::Content)),
+        PaintLayerAddKind::GradientCorrection,
+        0,
+        PaintLayerAddKind::MaskGradient,
+        N_("Gradient"));
+    add(with_look(effect({"MASK_CORRECTION_GRADIENT",
+                          N_("Mask Gradient Correction"),
+                          "A procedural ramp's grey laid over the active layer's mask"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_GENERATOR, PaintLookRole::MaskItem)),
         PaintLayerAddKind::MaskGradient);
 
     /* 3D control curves stamped through a brush snapshot of the effect's own. Only an effect: there
      * is no Curve Patch layer. */
-    add(effect({"CURVE_PATCH_CORRECTION",
-                N_("Curve Patch"),
-                "3D control curves stamped through the effect's own brush snapshot, laid over the "
-                "active layer's colour, below the layer's own blend",
-                ICON_CURVE_BEZCURVE}),
+    add(with_look(effect({"CURVE_PATCH_CORRECTION",
+                          N_("Curve Patch"),
+                          "3D control curves stamped through the effect's own brush snapshot, laid "
+                          "over the active layer's colour, below the layer's own blend"}),
+                  paint_look_for_source(MA_PAINT_LAYER_SOURCE_CURVE_PATCH, PaintLookRole::Content)),
         PaintLayerAddKind::CurvePatchEffect);
+
+    /* Resolve the mask roles the content entries named. The mask entry is flagged so the Effects
+     * menu folds it into the content line; the content entry keeps its place in the table. */
+    for (const int64_t twin : twin_rows.index_range()) {
+      const PaintAddKindEntry &content = table[twin_rows[twin]];
+      for (const int64_t index : table.index_range()) {
+        if (table[index].kind == *twin_kinds[twin] && table[index].filter == content.filter) {
+          table[twin_rows[twin]].mask_twin = int(index);
+          table[index].is_mask_twin = true;
+          break;
+        }
+      }
+    }
     return table;
   }();
   return entries.as_span();
+}
+
+/**
+ * What the Effects menu's corrections lay over right now: the row's mask while a mask slot is the
+ * one showing, its colour otherwise. This is the question the folded entries answer.
+ */
+static bool paint_effect_menu_target_is_mask(bContext &C)
+{
+  const Scene *scene = CTX_data_scene(&C);
+  return scene != nullptr && scene->toolsettings != nullptr &&
+         scene->toolsettings->paint_mode.layer_target_mode == PAINT_LAYER_TARGET_MASK;
 }
 
 /** \} */
@@ -2158,6 +2392,48 @@ class PaintLayersStackSource final : public StackSource,
     }
   }
 
+  /**
+   * One line per thing: the corrections that exist over the colour and over the mask are listed
+   * once, and the line resolves to the role the active slot asks for. The emitted #kind is already
+   * that role's entry, so #row_add stays a plain "create the kind you were given" verb and a
+   * script that names a kind is never reinterpreted by the current target mode.
+   */
+  void effect_menu_kinds(bContext &C, Vector<StackEffectMenuKind> &r_kinds) const override
+  {
+    const Span<PaintAddKindEntry> entries = paint_add_kind_entries();
+    const bool target_is_mask = paint_effect_menu_target_is_mask(C);
+    for (const int64_t index : entries.index_range()) {
+      const PaintAddKindEntry &entry = entries[index];
+      if (!entry.info.is_effect || entry.is_mask_twin) {
+        continue;
+      }
+      /* A mask-only kind has no content form, so it only makes sense while a mask slot is the one
+       * showing. */
+      if (!target_is_mask && entry.mask_only) {
+        continue;
+      }
+      StackEffectMenuKind menu;
+      menu.kind = int(index);
+      menu.info = entry.info;
+      if (entry.menu_name != nullptr) {
+        /* Untranslated, like every name in the table: the itemf translates it. */
+        menu.info.name = entry.menu_name;
+      }
+      if (target_is_mask && entry.mask_twin >= 0) {
+        /* A mask slot is the one showing: create the mask role of the line, and say what it lays
+         * there with the icon that says mask. The short name stays, so the menu reads the same
+         * whichever slot is active. */
+        const PaintAddKindEntry &twin = entries[entry.mask_twin];
+        menu.kind = entry.mask_twin;
+        menu.info.identifier = twin.info.identifier;
+        menu.info.description = twin.info.description;
+        menu.info.icon = twin.info.icon;
+        menu.info.glyph = twin.info.glyph;
+      }
+      r_kinds.append(std::move(menu));
+    }
+  }
+
   int row_add(bContext &C,
               const StackFocus & /*focus*/,
               ID &owner,
@@ -2170,6 +2446,8 @@ class PaintLayersStackSource final : public StackSource,
       return -1;
     }
     const PaintAddKindEntry &entry = entries[kind];
+    /* The kind is created as given: the Effects menu already resolved the role the active slot
+     * asks for, so a script that names a kind is not reinterpreted by the current target mode. */
     const PaintLayerAddKind add_kind = entry.kind;
     const bool is_anchor_point = add_kind == PaintLayerAddKind::AnchorPoint;
     const bool is_anchor_point_layer = add_kind == PaintLayerAddKind::AnchorPointLayer;
@@ -2211,7 +2489,7 @@ class PaintLayersStackSource final : public StackSource,
       /* Each Material row reads a material of its own, so its settings are its own. */
       params.bmain = CTX_data_main(&C);
     }
-    params.kind = entry.kind;
+    params.kind = add_kind;
     if (params.kind == PaintLayerAddKind::CurvePatchEffect) {
       /* The payload is created with the effect: a database for its two IDs, and the active brush as
        * the snapshot source (a fresh default stands in when none is active). */

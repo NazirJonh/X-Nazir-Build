@@ -97,9 +97,16 @@ static bool stack_add_kind_info_get(const bContext &C, const int kind, StackAddK
 wmOperatorStatus stack_row_add_exec(bContext *C, wmOperator *op)
 {
   SpaceOutliner *space_outliner = CTX_wm_space_outliner(C);
+  /* The value is the kind's place in the source's full list, which is what a repeat or the redo
+   * panel stores. It is not the Effects menu's identifier: that one is resolved per target when
+   * the menu is built, so a value left over from another target mode still names a real kind here
+   * rather than being looked up by name. A value that names none is stale (the source changed
+   * under a repeat) and says so instead of silently adding nothing. */
   const int kind = RNA_enum_get(op->ptr, "type");
   StackAddKindInfo kind_info;
   if (!stack_add_kind_info_get(*C, kind, kind_info)) {
+    BKE_report(
+        op->reports, RPT_ERROR, "That Add kind is no longer part of this stack's vocabulary");
     return OPERATOR_CANCELLED;
   }
 
@@ -326,12 +333,35 @@ bool stack_add_poll(bContext *C)
   return !kinds.is_empty();
 }
 
+/** Add one enum item for the row kind \a kind, named and described as \a info says. */
+static void stack_add_kind_item_add(EnumPropertyItem *&items,
+                                    int &items_num,
+                                    const int kind,
+                                    const StackAddKindInfo &info)
+{
+  EnumPropertyItem item = {};
+  item.value = kind;
+  item.identifier = stack_enum_string_intern(info.identifier);
+  item.name = stack_enum_string_intern(IFACE_(info.name.c_str()));
+  item.description = stack_enum_string_intern(TIP_(info.description.c_str()));
+  item.icon = (info.glyph != 0) ? BKE_icon_glyph_ensure(info.glyph) : info.icon;
+  if (item.icon == 0) {
+    item.icon = info.icon;
+  }
+  RNA_enum_item_add(&items, &items_num, &item);
+}
+
 /**
  * The kinds of rows the source can add, as enum items.
  *
  * Built from the editor's own list, so the Add UI offers the domain's vocabulary without the
  * Outliner knowing it: the item's value is the kind's place in that list, which is what
  * #StackEditor::row_add reads back, and the identifier is the stable name scripts see.
+ *
+ * The Effects menu asks the editor for its own folded view (#StackEditor::effect_menu_kinds), so
+ * an editor whose vocabulary repeats a correction per target can offer one line per thing. Its
+ * identifiers are that view's resolved role, not the stable name of the full list: the Effects
+ * menu is UI, and scripts name a kind through `stack_layer_add`.
  */
 static const EnumPropertyItem *stack_add_kinds_itemf(bContext *C,
                                                      const bool effects_only,
@@ -342,27 +372,25 @@ static const EnumPropertyItem *stack_add_kinds_itemf(bContext *C,
   SpaceOutliner *space_outliner = (C == nullptr) ? nullptr : CTX_wm_space_outliner(C);
   if (space_outliner != nullptr) {
     const StackSource &source = *stack_source_for_space(*space_outliner);
-    Vector<StackAddKindInfo> kinds;
     /* The kinds are the source's vocabulary and do not depend on whether an owner can be edited
      * right now: gating the items on the owner would empty them while the header still drew a
      * button, and assigning `type` from Python then fails on every redraw. The operator's own poll
      * is what refuses to run without an editable owner. */
     if (const StackEditor *editor = source.editor()) {
-      editor->add_kinds(kinds);
-    }
-    for (const int64_t index : kinds.index_range()) {
-      if (effects_only && !kinds[index].is_effect) {
-        continue;
+      if (effects_only) {
+        Vector<StackEffectMenuKind> effect_kinds;
+        editor->effect_menu_kinds(*C, effect_kinds);
+        for (const StackEffectMenuKind &entry : effect_kinds) {
+          stack_add_kind_item_add(items, items_num, entry.kind, entry.info);
+        }
       }
-      /* The value stays the kind's place in the full list, which is what #StackEditor::row_add
-       * reads back, so a filtered list leaves gaps. */
-      EnumPropertyItem item = {};
-      item.value = int(index);
-      item.identifier = stack_enum_string_intern(kinds[index].identifier);
-      item.name = stack_enum_string_intern(IFACE_(kinds[index].name.c_str()));
-      item.description = stack_enum_string_intern(TIP_(kinds[index].description.c_str()));
-      item.icon = kinds[index].icon;
-      RNA_enum_item_add(&items, &items_num, &item);
+      else {
+        Vector<StackAddKindInfo> kinds;
+        editor->add_kinds(kinds);
+        for (const int64_t index : kinds.index_range()) {
+          stack_add_kind_item_add(items, items_num, int(index), kinds[index]);
+        }
+      }
     }
   }
   RNA_enum_item_end(&items, &items_num);
